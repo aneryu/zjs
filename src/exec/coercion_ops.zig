@@ -42,7 +42,7 @@ pub inline fn toPrimitiveForAddition(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    return toPrimitiveForAdditionFree(ctx, output, global, value.dup());
+    return toPrimitiveForAdditionFree(ctx, output, global, value);
 }
 
 fn toPrimitiveForAdditionObject(
@@ -51,20 +51,16 @@ fn toPrimitiveForAdditionObject(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    defer value.free(ctx.runtime); // consume: JS_ToPrimitiveFree frees the input object
     const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    defer method.free(ctx.runtime);
     if (!method.isUndefined() and !method.isNull()) {
         // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
         // object return value throws "toPrimitive" (quickjs.c:11104).
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "default");
-        defer hint.free(ctx.runtime);
         const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
         if (primitive.isObject()) {
-            primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
         }
         return primitive;
@@ -79,20 +75,17 @@ pub fn toPrimitiveForNumber(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    if (!value.isObject()) return value.dup();
+    if (!value.isObject()) return value;
     const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitiveNumber(ctx, output, global, value);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    defer method.free(ctx.runtime);
     if (!method.isUndefined() and !method.isNull()) {
         // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
         // object return value throws "toPrimitive" (quickjs.c:11104).
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "number");
-        defer hint.free(ctx.runtime);
         const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
         if (primitive.isObject()) {
-            primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
         }
         return primitive;
@@ -107,8 +100,8 @@ pub fn toOrdinaryPrimitive(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "valueOf", null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
     // JS_ToPrimitiveInternal (quickjs.c:11131): no primitive from valueOf/toString.
     return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
@@ -119,8 +112,8 @@ pub fn toOrdinaryPrimitiveNumber(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "valueOf", null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
     // JS_ToPrimitiveInternal (quickjs.c:11131): no primitive from valueOf/toString.
     return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
@@ -167,14 +160,12 @@ pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
 
 pub fn toLengthNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     // JS_ToNumber on a bigint throws "cannot convert bigint to number" (quickjs.c:12959).
     if (primitive.isBigInt()) {
         _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
         return error.TypeError;
     }
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    defer number_value.free(ctx.runtime);
     const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
     if (std.math.isNan(number) or number <= 0) return 0;
     const max_length = 9007199254740991.0;
@@ -219,7 +210,6 @@ pub fn coerceOptionalNumberMethodArgument(
     if (args.len == 0) return null;
     if (preserve_undefined and args[0].isUndefined()) return null;
     const primitive = try toPrimitiveForNumber(ctx, output, global, args[0]);
-    defer primitive.free(ctx.runtime);
     // JS_ToNumber on a bigint throws "cannot convert bigint to number" (quickjs.c:12959).
     if (primitive.isBigInt()) {
         _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
@@ -237,7 +227,7 @@ pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?co
         core.class.ids.boolean,
         core.class.ids.big_int,
         core.class.ids.symbol,
-        => if (object.objectData()) |stored| return stored.dup() else return null,
+        => if (object.objectData()) |stored| return stored else return null,
         else => return null,
     }
 }
@@ -252,7 +242,6 @@ pub fn toNumberForDateMethod(
 ) !core.JSValue {
     if (value.isObject()) {
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-        defer primitive.free(ctx.runtime);
         // JS_ToFloat64 on a bigint primitive throws "cannot convert bigint to
         // number" (quickjs.c:12959); qjs date argument coercion never accepts bigints.
         if (primitive.isBigInt()) {

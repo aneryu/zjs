@@ -25,11 +25,6 @@ pub const CollectionEntry = struct {
     active: bool = true,
     hash: u64 = 0,
     hash_next: usize = collection_no_entry,
-
-    pub fn destroy(self: CollectionEntry, rt: *JSRuntime) void {
-        self.key.free(rt);
-        self.value.free(rt);
-    }
 };
 
 pub const WeakCollectionEntry = struct {
@@ -40,7 +35,6 @@ pub const WeakCollectionEntry = struct {
 
     pub fn destroy(self: WeakCollectionEntry, rt: *JSRuntime) void {
         rt.releaseWeakIdentity(self.key_identity);
-        self.value.free(rt);
     }
 };
 
@@ -71,7 +65,6 @@ pub const FinalizationRegistryCell = struct {
     pub fn destroy(self: FinalizationRegistryCell, rt: *JSRuntime) void {
         if (self.target_identity) |identity| rt.releaseWeakIdentity(identity);
         if (self.unregister_token_identity) |identity| rt.releaseWeakIdentity(identity);
-        self.held_value.free(rt);
         // Active/pending cells still own the job-queue reservation taken at
         // register. Queued cells already consumed it via enqueueReserved.
         // Runtime teardown destroys the queue before leftover objects.
@@ -166,45 +159,26 @@ pub inline fn callVisitFinalizationCell(vis: anytype, entry: anytype) !void {
     }
 }
 
-pub fn destroyOptionalValue(rt: *JSRuntime, slot: *?JSValue) void {
-    const old_value = slot.*;
+pub fn destroyOptionalValue(_: *JSRuntime, slot: *?JSValue) void {
     slot.* = null;
-    if (old_value) |stored| stored.free(rt);
 }
 
-pub fn destroyOwnedValue(rt: *JSRuntime, slot: *JSValue) void {
-    const old_value = slot.*;
+pub fn destroyOwnedValue(_: *JSRuntime, slot: *JSValue) void {
     slot.* = JSValue.undefinedValue();
-    old_value.free(rt);
 }
 
-pub fn replaceOwnedValue(rt: *JSRuntime, slot: *JSValue, next_value: JSValue) void {
-    const old_value = slot.*;
+pub fn replaceOwnedValue(_: *JSRuntime, slot: *JSValue, next_value: JSValue) void {
     slot.* = next_value;
-    old_value.free(rt);
-}
-
-pub fn destroyOptionalObjectRef(rt: *JSRuntime, slot: *?*Object) void {
-    const old_object = slot.*;
-    slot.* = null;
-    if (old_object) |stored| stored.value().free(rt);
-}
-
-pub fn destroyOptionalValueSlots(rt: *JSRuntime, slots: []?JSValue) void {
-    for (slots) |*slot| destroyOptionalValue(rt, slot);
 }
 
 pub fn destroyValueSlice(rt: *JSRuntime, slot: *[]JSValue) void {
     const values = slot.*;
     slot.* = &.{};
-    for (values) |stored| stored.free(rt);
     if (values.len != 0) rt.memory.free(JSValue, values);
 }
 
-pub fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
-    const values = slot.*;
+pub fn destroyValueSliceValuesOnly(_: *JSRuntime, slot: *[]JSValue) void {
     slot.* = &.{};
-    for (values) |stored| stored.free(rt);
 }
 
 /// Release the nullable module/ordinary closure slots and their single backing
@@ -217,16 +191,12 @@ pub fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
 pub fn destroyOptionalVarRefCellSlice(rt: *JSRuntime, slot: *[]?*var_ref_mod.VarRef) void {
     const cells = slot.*;
     slot.* = &.{};
-    for (cells) |cell| var_ref_mod.VarRef.freeVarRef(rt, cell);
     if (cells.len != 0) rt.memory.free(?*var_ref_mod.VarRef, cells);
 }
 
-/// Cell releases only — for a var-ref window whose backing memory belongs to
-/// a surrounding storage slab.
-pub fn destroyVarRefCellSliceValuesOnly(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
-    const cells = slot.*;
+/// Clear a var-ref window whose backing memory belongs to another slab.
+pub fn clearVarRefCellSlice(slot: *[]*var_ref_mod.VarRef) void {
     slot.* = &.{};
-    for (cells) |cell| cell.freeCell(rt);
 }
 
 /// Close and release the frame-owned references in an open-var-ref window.
@@ -236,7 +206,6 @@ pub fn closeOpenVarRefCellSlots(rt: *JSRuntime, slots: []?*var_ref_mod.VarRef) v
         const cell = slot.* orelse continue;
         slot.* = null;
         cell.close(rt);
-        cell.freeCell(rt);
     }
 }
 
@@ -245,19 +214,11 @@ pub fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity:
     const old_capacity = capacity.*;
     slot.* = &.{};
     capacity.* = 0;
-    for (values) |stored| stored.free(rt);
     if (old_capacity != 0) {
         rt.memory.free(JSValue, values.ptr[0..old_capacity]);
     } else if (values.len != 0) {
         rt.memory.free(JSValue, values);
     }
-}
-
-pub fn destroyAtomSlice(rt: *JSRuntime, slot: *[]atom.Atom) void {
-    const atoms = slot.*;
-    slot.* = &.{};
-    for (atoms) |atom_id| rt.atoms.free(atom_id);
-    if (atoms.len != 0) rt.memory.free(atom.Atom, atoms);
 }
 
 pub const DataPropertyLookup = struct {
@@ -358,7 +319,10 @@ pub const IteratorPayload = struct {
         destroyOptionalValue(rt, &self.zip_nexts);
         destroyOptionalValue(rt, &self.zip_pads);
         destroyOptionalValue(rt, &self.zip_keys);
-        destroyAtomSlice(rt, &self.atom_keys);
+        const atom_keys = self.atom_keys;
+        self.atom_keys = &.{};
+        for (atom_keys) |atom_id| rt.atoms.free(atom_id);
+        if (atom_keys.len != 0) rt.memory.free(atom.Atom, atom_keys);
     }
 
     pub fn traceChildEdges(self: *IteratorPayload, visitor: anytype) !void {
@@ -370,7 +334,10 @@ pub const IteratorPayload = struct {
         try traceOptValue(visitor, &self.zip_nexts);
         try traceOptValue(visitor, &self.zip_pads);
         try traceOptValue(visitor, &self.zip_keys);
-        // atom_keys live on the atom RC table, not the cycle graph.
+        // TGC S3 §2.2 edge F: `atom_keys` is a real holder of atom ids (a
+        // for-in / ownKeys snapshot parked on the iterator), so the tracer
+        // needs the edge even though the cycle graph has nothing to see.
+        for (self.atom_keys) |atom_id| try atom.callVisitAtom(visitor, atom_id);
     }
 };
 
@@ -420,24 +387,15 @@ pub const CollectionPayload = struct {
         self.weak_entries = &.{};
         self.weak_entries_capacity = 0;
 
-        for (old_entries) |entry| entry.destroy(rt);
         if (old_entries_capacity != 0) {
             rt.memory.free(CollectionEntry, old_entries.ptr[0..old_entries_capacity]);
         } else if (old_entries.len != 0) {
             rt.memory.free(CollectionEntry, old_entries);
         }
         if (old_bucket_heads.len != 0) rt.memory.free(usize, old_bucket_heads);
-        const started_borrowed_cleanup = old_weak_entries.len != 0 and !rt.borrowedWeakCleanupActive();
-        if (started_borrowed_cleanup) rt.beginBorrowedWeakCleanup();
-        defer if (started_borrowed_cleanup) rt.endBorrowedWeakCleanup();
         for (old_weak_entries) |entry| {
             rt.releaseWeakIdentity(entry.key_identity);
-            const prepared_identity = rt.prepareBorrowedWeakCleanupForLastRefValue(entry.value);
-            rt.enqueueDeferredWeakValueFreeWithPreparedIdentity(entry.value, prepared_identity) catch |err| switch (err) {
-                error.OutOfMemory => entry.value.free(rt),
-            };
         }
-        if (started_borrowed_cleanup) Object.drainBorrowedWeakCleanup(rt);
         if (old_weak_entries_capacity != 0) {
             rt.memory.free(WeakCollectionEntry, old_weak_entries.ptr[0..old_weak_entries_capacity]);
         } else if (old_weak_entries.len != 0) {
@@ -718,19 +676,12 @@ pub const RegExpPayload = extern struct {
     source: ?*string.String = null, // gc-slot: immutable
     compiled_bytecode: ?*string.String = null, // gc-slot: immutable
 
-    pub fn destroy(self: *RegExpPayload, rt: *JSRuntime) void {
-        const old_source = self.source;
-        const old_bytecode = self.compiled_bytecode;
+    pub fn destroy(self: *RegExpPayload, _: *JSRuntime) void {
         self.* = .{};
-        if (old_source) |stored_string| stored_string.value().free(rt);
-        if (old_bytecode) |stored_string| stored_string.value().free(rt);
     }
 
     pub fn traceChildEdges(self: *const RegExpPayload, visitor: anytype) !void {
-        // Until TGC S2 flips, source / compiled_bytecode are refcounted
-        // JSString leaves excluded from cycleMarkHeader (JS_MarkValue drops
-        // strings). Tracer-owned strings are real child edges.
-        if (comptime !gc.string_tracer_owned) return;
+        // Source and compiled bytecode are tracer-owned string child edges.
         if (self.source) |body| {
             var slot = body.value();
             try callVisitValue(visitor, &slot);
@@ -909,11 +860,6 @@ pub const DisposableResource = struct {
     kind: DisposableResourceKind = .defer_,
     hint: DisposalHint = .sync,
     method_kind: DisposableMethodKind = .direct,
-
-    pub fn destroy(self: DisposableResource, rt: *JSRuntime) void {
-        self.value.free(rt);
-        self.method.free(rt);
-    }
 };
 
 pub const DisposableStackPayload = struct {
@@ -929,7 +875,6 @@ pub const DisposableStackPayload = struct {
         const old_capacity = self.resource_capacity;
         self.resources = &.{};
         self.resource_capacity = 0;
-        for (old_resources) |resource| resource.destroy(rt);
         if (old_capacity != 0) {
             rt.memory.free(DisposableResource, old_resources.ptr[0..old_capacity]);
         } else if (old_resources.len != 0) {
@@ -963,12 +908,7 @@ pub const GlobalPayload = struct {
     // (js_global_object_find_uninitialized_var, 17098-17123) so every earlier
     // capture aliases the new binding.
     uninitialized_vars: ?*Object = null,
-    pub fn destroy(self: *GlobalPayload, rt: *JSRuntime) void {
-        const uninitialized_vars = self.uninitialized_vars;
-        self.uninitialized_vars = null;
-        if (uninitialized_vars) |env| {
-            if (rt.gc.phase != .deinit) env.value().free(rt);
-        }
+    pub fn destroy(self: *GlobalPayload, _: *JSRuntime) void {
         self.* = .{};
     }
 
@@ -1050,7 +990,7 @@ pub const RegExpLegacyStatics = struct {
         destroyOptionalValue(rt, &self.last_paren);
         destroyOptionalValue(rt, &self.left_context);
         destroyOptionalValue(rt, &self.right_context);
-        destroyOptionalValueSlots(rt, &self.captures);
+        for (&self.captures) |*slot| destroyOptionalValue(rt, slot);
         self.* = .{};
     }
 };
@@ -1161,10 +1101,6 @@ pub const FunctionPayload = struct {
     borrowed_holder_index_mid: u8 = 0,
     borrowed_holder_index_hi: u8 = 0,
 
-    pub fn initNative() FunctionPayload {
-        return .{};
-    }
-
     fn destroyRare(self: *FunctionPayload, rt: *JSRuntime) void {
         if (self.rare) |rare| {
             self.rare = null;
@@ -1184,6 +1120,9 @@ pub const FunctionPayload = struct {
 
     pub fn traceNativeRealm(self: *FunctionPayload, visitor: anytype) !void {
         try callVisitRealm(visitor, &self.native.realm.ptr);
+        // TGC S3 §2.2 edge F: the dispatch name is an owned atom id
+        // (`destroyNative` frees it).
+        try atom.callVisitAtom(visitor, self.native.native_dispatch_name);
     }
 
     comptime {
@@ -1201,7 +1140,7 @@ pub const BytecodeFunctionAux = struct {
     rare: FunctionRarePayload = .{},
 
     pub fn destroy(self: *BytecodeFunctionAux, rt: *JSRuntime) void {
-        destroyOptionalObjectRef(rt, &self.home_object);
+        self.home_object = null;
         self.rare.destroy(rt);
     }
 };

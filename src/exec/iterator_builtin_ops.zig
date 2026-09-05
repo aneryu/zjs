@@ -9,7 +9,6 @@ const std = @import("std");
 const iterator_ops = @import("iterator_ops.zig");
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const call_runtime = @import("call_runtime.zig");
 const exceptions = @import("exceptions.zig");
 
 const HostError = exceptions.HostError;

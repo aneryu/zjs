@@ -23,10 +23,16 @@ pub const PropNameID = extern struct {
     value: u32 = 0,
 
     pub fn internStatic(rt: *core.JSRuntime, name: []const u8) !PropNameID {
-        return .{ .value = try rt.internAtom(name) };
+        const id = try rt.internAtom(name);
+        // TGC S3 §2.5: an embedder handle is a root the tracer cannot see, so
+        // it is counted explicitly. Runs beside the `ref_count` the same call
+        // still takes; `host_pins` becomes the only count in S3-c.
+        rt.atoms.pinForHost(id);
+        return .{ .value = id };
     }
 
     pub fn release(self: PropNameID, rt: *core.JSRuntime) void {
+        rt.atoms.unpinForHost(raw(self));
         rt.atoms.free(raw(self));
     }
 

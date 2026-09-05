@@ -54,7 +54,6 @@ test "embedding cookbook basic script eval example compiles and runs" {
     defer ctx.destroy();
 
     const result = try ctx.eval("let x = 1 + 2; x;", .{});
-    defer result.free(rt);
 
     try std.testing.expectEqual(@as(?i32, 3), result.asInt32());
 }
@@ -73,7 +72,6 @@ test "embedding cookbook eval with output example compiles and runs" {
     const result = try ctx.eval("print('ok');", .{
         .output = &output,
     });
-    defer result.free(rt);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("ok\n", output.buffered());
@@ -93,7 +91,6 @@ test "embedding cookbook host-held values example compiles and roots correctly" 
     defer scope.deinit();
 
     const local: zjs.JSValue.Local = try scope.localDup(object);
-    object.free(rt);
 
     var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
@@ -101,7 +98,6 @@ test "embedding cookbook host-held values example compiles and roots correctly" 
     scope.deinit();
 
     const answer = try ctx.getProperty(persistent.get(), "answer");
-    defer answer.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
 }
 
@@ -117,7 +113,6 @@ test "embedding cookbook host function example compiles and runs" {
     try ctx.defineGlobalFunction("hostValue", 0, &state, HostState.call, null);
 
     const result = try ctx.eval("hostValue()", .{});
-    defer result.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
@@ -172,17 +167,14 @@ test "embedding external host function contract covers args, this, errors, and f
             "typeof hostCombine === 'function' && hostCombine.name === 'hostCombine' && hostCombine.length === 2",
             .{},
         );
-        defer shape.free(rt);
         try std.testing.expectEqual(true, shape.asBool().?);
 
         // Arguments flow host-ward; the return value flows back into JS expressions.
         const sum = try ctx.eval("hostCombine(19, 23) + 16", .{});
-        defer sum.free(rt);
         try std.testing.expectEqual(@as(?i32, 100), sum.asInt32());
 
         // Method-style invocation hands the receiver to the host as `this_value`.
         const method_sum = try ctx.eval("({ combine: hostCombine }).combine(1, 2)", .{});
-        defer method_sum.free(rt);
         try std.testing.expectEqual(@as(?i32, 6), method_sum.asInt32());
         try std.testing.expect(state.saw_object_this);
 
@@ -194,7 +186,6 @@ test "embedding external host function contract covers args, this, errors, and f
             \\}
             \\caught;
         , .{});
-        defer caught.free(rt);
         const caught_text = try ctx.toOwnedUtf8(caught, allocator);
         defer allocator.free(caught_text);
         try std.testing.expectEqualStrings("RangeError", caught_text);
@@ -221,7 +212,6 @@ test "embedding cookbook strings and bytes examples compile and run" {
     defer ctx.destroy();
 
     const value = try ctx.eval("({ toString() { return 'path'; } })", .{});
-    defer value.free(rt);
 
     const text = try ctx.toOwnedUtf8(value, allocator);
     defer allocator.free(text);
@@ -238,8 +228,6 @@ test "embedding cookbook strings and bytes examples compile and run" {
     errdefer store.release();
 
     const array_buffer = try ctx.arrayBuffer(&store);
-    var array_buffer_live = true;
-    defer if (array_buffer_live) array_buffer.free(rt);
 
     const bytes = try array_buffer.asBytes(ctx);
     const writable = try bytes.sliceMut();
@@ -247,8 +235,6 @@ test "embedding cookbook strings and bytes examples compile and run" {
     try std.testing.expectEqualSlices(u8, &.{ 9, 2, 3, 4 }, bytes.slice());
     try std.testing.expectEqual(@as(usize, 0), bytes_state.calls);
 
-    array_buffer.free(rt);
-    array_buffer_live = false;
     // This is a public-embedding compile target: exercise the public explicit
     // collection seam instead of importing test helpers whose `zjs.core`
     // dependency is intentionally absent from `src/root.zig`.
@@ -293,11 +279,10 @@ test "embedding cookbook module eval example compiles and runs" {
     const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
-    const result = try ctx.eval(
+    _ = try ctx.eval(
         \\const value = await Promise.resolve(42);
         \\export { value };
     , .{ .mode = .module });
-    defer result.free(rt);
 }
 
 test "embedding public NativeBinding failed realm install leaves binding absent" {
@@ -341,13 +326,11 @@ test "embedding public NativeBinding failed realm install leaves binding absent"
     try std.testing.expectError(error.NotInstalled, ObjectType.binding(ctx_b.core));
 
     const value_a = try binding_a.new(.{ .value = 7 });
-    defer value_a.free(rt);
     try std.testing.expectEqual(@as(i32, 7), binding_a.payload(value_a).?.value);
 
     try ObjectType.install(ctx_b.core);
     const binding_b = try ObjectType.binding(ctx_b.core);
     const value_b = try binding_b.new(.{ .value = 11 });
-    defer value_b.free(rt);
     try std.testing.expectEqual(@as(i32, 11), binding_b.payload(value_b).?.value);
     try std.testing.expect(binding_a.payload(value_b) == null);
 }
@@ -366,7 +349,6 @@ test "embedding public runtime Plugin failed install preserves target properties
     defer ctx.destroy();
 
     const target = try ctx.createObject();
-    defer target.free(rt);
     try ctx.defineDataProperty(target, "add", zjs.JSValue.int32(1), .{});
 
     try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(ctx.core, target, .{}));
@@ -375,7 +357,6 @@ test "embedding public runtime Plugin failed install preserves target properties
     try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx.core, target, .{ .overwrite = true }));
 
     const add = try ctx.getProperty(target, "add");
-    defer add.free(rt);
     try std.testing.expectEqual(@as(?i32, 1), add.asInt32());
 }
 
@@ -423,9 +404,7 @@ fn liveRealmCount(rt: *zjs.JSRuntime) usize {
 
 fn stealArrayPrototype(ctx_from: *zjs.JSContext, ctx_into: *zjs.JSContext) !zjs.JSValue {
     const proto = try ctx_from.eval("Array.prototype", .{});
-    errdefer proto.free(ctx_from.core.runtime);
     const global = try ctx_into.eval("globalThis", .{});
-    defer global.free(ctx_into.core.runtime);
     try ctx_into.defineDataProperty(global, "stolenProto", proto, .{});
     return proto;
 }
@@ -438,8 +417,7 @@ test "embedding destroy of one context keeps auto_init-bearing objects from that
     defer ctx_a.destroy();
     const ctx_b = try zjs.JSContext.create(rt);
 
-    const proto = try stealArrayPrototype(ctx_b, ctx_a);
-    defer proto.free(rt);
+    _ = try stealArrayPrototype(ctx_b, ctx_a);
     const b_global = try ctx_b.globalObject();
 
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
@@ -459,8 +437,7 @@ test "embedding newest-first context destroy with cross-realm Array.prototype st
     const ctx_b = try zjs.JSContext.create(rt);
     errdefer ctx_b.destroy();
 
-    const proto = try stealArrayPrototype(ctx_b, ctx_a);
-    proto.free(rt);
+    _ = try stealArrayPrototype(ctx_b, ctx_a);
 
     ctx_b.destroy();
     ctx_a.destroy();
@@ -476,8 +453,7 @@ test "embedding oldest-first context destroy with cross-realm Array.prototype st
     const ctx_b = try zjs.JSContext.create(rt);
     errdefer ctx_b.destroy();
 
-    const proto = try stealArrayPrototype(ctx_b, ctx_a);
-    proto.free(rt);
+    _ = try stealArrayPrototype(ctx_b, ctx_a);
 
     ctx_a.destroy();
     ctx_b.destroy();
@@ -495,13 +471,8 @@ test "embedding createRealm leftover is collected without JSContext.destroy on t
     const realm_global = try ctx.realmGlobal(realm);
     const array = try ctx.getProperty(realm_global, "Array");
     const proto = try ctx.getProperty(array, "prototype");
-    array.free(rt);
     const global = try ctx.eval("globalThis", .{});
     try ctx.defineDataProperty(global, "stolenProto", proto, .{});
-    global.free(rt);
-    proto.free(rt);
-    realm_global.free(rt);
-    realm.free(rt);
 
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
     _ = rt.runObjectCycleRemoval();
@@ -833,5 +804,8 @@ test "public API surface snapshot matches the checked-in name lists" {
     // `createWithTrace` removed: a zero-caller wrapper over
     // `createWithOptions(.{ .trace_writer = w })`, which stays public and is
     // what the `--trace-memory` CLI path uses. No example or doc named it.
-    try std.testing.expectEqual(@as(usize, 177), jsruntime_decl_count);
+    // The tracing-only cleanup removed the deferred-value queue, then seven
+    // write-only borrowed-cleanup state methods. The prior pin was already one
+    // below reflection's actual count; the measured surface is now 164.
+    try std.testing.expectEqual(@as(usize, 164), jsruntime_decl_count);
 }

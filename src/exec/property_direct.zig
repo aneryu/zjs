@@ -9,15 +9,8 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const value_ops = @import("value_ops.zig");
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
-
-const FastOwnDataResult = union(enum) {
-    value: core.JSValue,
-    missing,
-    slow,
-};
 
 const FastOwnDataLookup = union(enum) {
     value: BorrowedOwnDataLookup,
@@ -60,26 +53,16 @@ pub const OrdinaryComputedPropertyLookup = union(enum) {
     slow,
 };
 
-pub const PlainObjectInt32DataProperties = struct {
-    writable: i32,
-    b: i32,
-    c: i32,
-};
-
 const DataSlot = struct {
     entry: *core.property.Entry,
     value: *core.JSValue,
 };
 
 pub inline fn dataPropertyValueForFastPath(
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
 ) ?core.JSValue {
-    _ = function;
-    _ = site_pc;
     const object = objectFromValue(receiver) orelse return null;
     if (!cacheableNamedDataObject(rt, object, atom_id)) return null;
 
@@ -96,43 +79,9 @@ pub inline fn dataPropertyValueForFastPath(
     return null;
 }
 
-pub fn functionOwnDataPropertyValueForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    // `rt` is retained for signature parity with the other fast-path probes; the
-    // legacy caller/arguments gate no longer needs the atom table to answer.
-    _ = rt;
+pub fn functionOwnDataPropertyValueForFastPath(value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = functionOwnDataPropertyObject(value, atom_id) orelse return null;
     return object.getOwnDataPropertyValue(atom_id);
-}
-
-pub fn functionOwnNativeBuiltinRefForFastPath(
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    rt: *core.JSRuntime,
-    value: core.JSValue,
-    atom_id: core.Atom,
-) ?core.function.NativeBuiltinRef {
-    _ = function;
-    _ = site_pc;
-    const object = functionOwnDataPropertyObject(value, atom_id) orelse return null;
-    if (object.hasExoticMethods()) return null;
-
-    for (object.shapeProps(), 0..) |prop, index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.isAccessor()) return null;
-        switch (object.propKindAt(index)) {
-            .data => {
-                return nativeBuiltinRefFromFunctionValue(object.propertyEntry(index).*.slot.data);
-            },
-            .auto_init => {
-                const materialized = try object.getProperty(atom_id);
-                defer materialized.free(rt);
-                return nativeBuiltinRefFromFunctionValue(materialized);
-            },
-            .var_ref, .accessor => return null,
-        }
-    }
-    return null;
 }
 
 fn functionOwnDataPropertyObject(value: core.JSValue, atom_id: core.Atom) ?*core.Object {
@@ -140,11 +89,6 @@ fn functionOwnDataPropertyObject(value: core.JSValue, atom_id: core.Atom) ?*core
     if (!isFunctionLikeClassId(object.class_id)) return null;
     if (atom_id == core.atom.ids.arguments or atom_id == core.atom.ids.caller) return null;
     return object;
-}
-
-fn nativeBuiltinRefFromFunctionValue(value: core.JSValue) ?core.function.NativeBuiltinRef {
-    const function_object = objectFromValue(value) orelse return null;
-    return core.function.decodeNativeBuiltinId(function_object.nativeFunctionId());
 }
 
 fn isFunctionLikeClassId(class_id: core.ClassId) bool {
@@ -205,68 +149,6 @@ fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: cor
     };
 }
 
-fn ownDataPropertyLookupForFastPath(object: *core.Object, atom_id: core.Atom) ?BorrowedOwnDataLookup {
-    return switch (fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id)) {
-        .value => |lookup| lookup,
-        .missing, .slow => null,
-    };
-}
-
-pub fn plainObjectInt32DataPropertiesForFastPath(
-    object: *core.Object,
-    writable_atom: core.Atom,
-    b_atom: core.Atom,
-    c_atom: core.Atom,
-) ?PlainObjectInt32DataProperties {
-    if (!plainObjectDataPropertyFastPathReceiver(object)) return null;
-    const writable = writableOwnDataPropertyLookupForObject(object, writable_atom) orelse return null;
-    const b = ownDataPropertyLookupForFastPath(object, b_atom) orelse return null;
-    const c = ownDataPropertyLookupForFastPath(object, c_atom) orelse return null;
-    return .{
-        .writable = writable.value.asInt32() orelse return null,
-        .b = b.value.asInt32() orelse return null,
-        .c = c.value.asInt32() orelse return null,
-    };
-}
-
-pub fn setPlainObjectInt32DataPropertyForFastPath(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: i32) !bool {
-    if (!plainObjectDataPropertyFastPathReceiver(object)) return false;
-    const lookup = writableOwnDataPropertyLookupForObject(object, atom_id) orelse return false;
-    return try setOwnDataPropertyLookup(rt, object, lookup, atom_id, core.JSValue.int32(value));
-}
-
-fn plainObjectDataPropertyFastPathReceiver(object: *core.Object) bool {
-    if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
-    return object.class_id == core.class.ids.object and !object.isArray() and !object.isGlobal();
-}
-
-pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
-    if (rt.atoms.kind(atom_id) == .private) return null;
-    const object = objectFromValue(value) orelse return null;
-    if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
-    if (object.class_id != core.class.ids.object and !object.isGlobal()) return null;
-
-    switch (fastOwnOrdinaryDataPropertyBorrowedValue(object, atom_id)) {
-        .value => |stored| return stored,
-        .missing => return null,
-        .slow => {},
-    }
-
-    const desc = (try object.getOwnProperty(rt, atom_id)) orelse return null;
-    defer desc.destroy(rt);
-    if (desc.kind != .data or !desc.value_present) return null;
-
-    return switch (fastOwnOrdinaryDataPropertyBorrowedValue(object, atom_id)) {
-        .value => |stored| stored,
-        .missing, .slow => null,
-    };
-}
-
-fn writableOwnDataPropertyLookupForObject(object: *core.Object, atom_id: core.Atom) ?BorrowedOwnDataLookup {
-    const lookup = ownDataPropertyLookupForFastPath(object, atom_id) orelse return null;
-    return writableOwnDataPropertyLookup(object, lookup, atom_id);
-}
-
 fn writableOwnDataPropertyLookup(object: *core.Object, lookup: BorrowedOwnDataLookup, atom_id: core.Atom) ?BorrowedOwnDataLookup {
     const slot = writableDataSlotAt(object, lookup.index, atom_id) orelse return null;
     return .{ .index = lookup.index, .value = slot.value.* };
@@ -277,32 +159,17 @@ fn setOwnDataPropertyLookup(rt: *core.JSRuntime, object: *core.Object, lookup: B
 }
 
 fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool {
+    _ = rt;
     const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
     if (atom_id != core.atom.ids.Private_brand and !slot.value.requiresRefCount() and !value.requiresRefCount()) {
         slot.value.* = value;
         return true;
     }
-    const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, value);
-    errdefer core.object.destroyPropertySlot(rt, atom_id, data_flags, .{ .data = next_value });
-    const old_value = slot.value.*;
-    slot.value.* = next_value;
-    core.object.destroyPropertySlot(rt, atom_id, data_flags, .{ .data = old_value });
+    slot.value.* = value;
     return true;
 }
 
-/// `writableDataSlotAt` guarantees the slot is `.data`; destroy with a
-/// data-kind flag (the w/e/c bits are irrelevant to `destroyPropertySlot`).
-const data_flags = core.property.Flags{ .kind = .data, .writable = true };
-
-fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.Atom) FastOwnDataResult {
-    const index = object.findProperty(atom_id) orelse return .missing;
-    return switch (object.propKindAt(index)) {
-        .data => .{ .value = object.propertyEntry(index).*.slot.data },
-        .var_ref, .auto_init, .accessor => .slow,
-    };
-}
-
-fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup {
+pub fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup {
     if (rt.atoms.kind(atom_id) == .private) return .slow;
     var cursor = objectFromValue(value) orelse return .slow;
     while (true) {
@@ -326,29 +193,10 @@ fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id:
     }
 }
 
-pub fn ordinaryComputedPropertyLookupForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup {
-    return ordinaryDataPropertyLookup(rt, value, atom_id);
-}
-
-pub fn ordinaryDataPropertyBorrowedValueForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    return switch (ordinaryDataPropertyLookup(rt, value, atom_id)) {
-        .value => |property_value| property_value,
-        .getter, .proxy, .undefined, .slow => null,
-    };
-}
-
 pub fn ordinaryDataPropertyValueOrUndefinedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     return switch (ordinaryDataPropertyLookup(rt, value, atom_id)) {
         .value => |property_value| property_value,
         .undefined => core.JSValue.undefinedValue(),
-        .getter, .proxy, .slow => null,
-    };
-}
-
-pub fn ordinaryDataPropertyIsUndefinedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?bool {
-    return switch (ordinaryDataPropertyLookup(rt, value, atom_id)) {
-        .value => |property_value| property_value.isUndefined(),
-        .undefined => true,
         .getter, .proxy, .slow => null,
     };
 }
@@ -430,18 +278,6 @@ pub fn globalDataPropertyValueForFastPathNoProfile(
     return lookup.value;
 }
 
-pub fn setGlobalDataPropertyForFastPath(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-    new_value: core.JSValue,
-) bool {
-    const lookup = globalDataPropertyLookupForFastPathNoProfile(rt, global, function, site_pc, atom_id) orelse return false;
-    return setGlobalDataPropertyLookup(rt, global, lookup, atom_id, new_value);
-}
-
 fn globalWritableDataStoreIndexForFastPath(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
@@ -472,29 +308,6 @@ fn globalWritableDataStoreLookupForFastPath(
     }
     const lookup = globalOwnDataPropertyBorrowedLookup(global, atom_id) orelse return null;
     return globalWritableDataPropertyLookupAt(global, lookup.index, atom_id);
-}
-
-pub fn globalWritableDataStoreInt32ForFastPath(
-    rt: *core.JSRuntime,
-    lexicals: ?*core.Object,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?i32 {
-    const lookup = globalWritableDataStoreLookupForFastPath(rt, lexicals, global, function, site_pc, atom_id) orelse return null;
-    return lookup.value.asInt32();
-}
-
-pub fn globalWritableDataStoreAvailableForFastPath(
-    rt: *core.JSRuntime,
-    lexicals: ?*core.Object,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) bool {
-    return globalWritableDataStoreLookupForFastPath(rt, lexicals, global, function, site_pc, atom_id) != null;
 }
 
 pub fn setGlobalWritableDataStoreForFastPathOwned(
@@ -547,23 +360,18 @@ fn installableGlobalDataPropertyLookup(
 
 fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool {
     const slot = writableDataSlotAt(global, index, atom_id) orelse return false;
-    const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-    const old_slot = slot.entry.slot;
-    slot.entry.slot = .{ .data = next_value };
+    slot.entry.slot = .{ .data = new_value };
     // Updating an existing global var is a heap store like any other: the
     // global object is long-lived, so a fresh value stored into it is an
     // old-to-young edge the minor cannot see without the remembered set.
-    rt.gc.generationalBarrier(global.gcHeader(), next_value.cycleMarkHeader());
-    core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
+    rt.gc.generationalBarrier(global.gcHeader(), new_value.cycleMarkHeader());
     return true;
 }
 
 fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool {
     const slot = writableDataSlotAt(global, index, atom_id) orelse return false;
-    const old_slot = slot.entry.slot;
     slot.entry.slot = .{ .data = new_value };
     rt.gc.generationalBarrier(global.gcHeader(), new_value.cycleMarkHeader());
-    core.object.destroyPropertySlot(rt, atom_id, data_flags, old_slot);
     return true;
 }
 
@@ -591,13 +399,10 @@ test "fast own data property replacement retains private brand atom" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    var object_alive = true;
-    defer if (object_alive) object.value().free(rt);
 
     const brand = try rt.atoms.newSymbol("fastPrivateBrandReplacement", .private);
     {
         const initial = try rt.symbolValue(brand);
-        defer initial.free(rt);
         try object.defineOwnProperty(
             rt,
             core.atom.ids.Private_brand,
@@ -608,29 +413,22 @@ test "fast own data property replacement retains private brand atom" {
     try std.testing.expect(rt.atoms.name(brand) != null);
 
     const lookup_value = try rt.symbolValue(brand);
-    defer lookup_value.free(rt);
     const lookup = writableOwnDataPropertyLookup(
         object,
         .{ .index = 0, .value = lookup_value },
         core.atom.ids.Private_brand,
     ).?;
     const replacement = try rt.symbolValue(brand);
-    defer replacement.free(rt);
     try std.testing.expect(try setOwnDataPropertyLookup(rt, object, lookup, core.atom.ids.Private_brand, replacement));
     try std.testing.expect(rt.atoms.name(brand) != null);
     const stored = try object.getProperty(core.atom.ids.Private_brand);
-    defer stored.free(rt);
     try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
-
-    object.value().free(rt);
-    object_alive = false;
 }
 
 test "global own data slot helpers preserve lookup and write ownership" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
 
     const name = try rt.internAtom("globalSlotFunction");
     const key = try rt.internAtom("globalSlotAdapter");
@@ -641,8 +439,6 @@ test "global own data slot helpers preserve lookup and write ownership" {
 
     const initial = try core.string.String.createAscii(rt, "initial");
     try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), true, true, true));
-    initial.value().free(rt);
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), initial.header().rc);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
@@ -679,54 +475,40 @@ test "global own data slot helpers preserve lookup and write ownership" {
     try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, execution_function, 0, other_key) == null);
 
     const lexicals = try core.Object.create(rt, core.class.ids.object, null);
-    defer lexicals.value().free(rt);
     try lexicals.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
     try std.testing.expect(globalWritableDataStoreIndexForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
     try std.testing.expect(globalWritableDataStoreLookupForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
     const shadowed_owned = try core.string.String.createAscii(rt, "shadowed-owned");
     var shadowed_transferred = false;
-    errdefer if (!shadowed_transferred) shadowed_owned.value().free(rt);
     const shadowed_store = setGlobalWritableDataStoreForFastPathOwned(rt, lexicals, global, execution_function, 0, key, shadowed_owned.value());
     if (shadowed_store) shadowed_transferred = true;
     try std.testing.expect(!shadowed_store);
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), shadowed_owned.header().rc);
-    shadowed_owned.value().free(rt);
     shadowed_transferred = true;
 
     const copied = copied: {
         const value = try core.string.String.createAscii(rt, "copied");
-        errdefer value.value().free(rt);
         try std.testing.expect(setGlobalDataPropertyLookup(rt, global, lookup, key, value.value()));
         break :copied value;
     };
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 2), copied.header().rc);
-    copied.value().free(rt);
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), copied.header().rc);
     try std.testing.expectEqual(copied.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const owned = try core.string.String.createAscii(rt, "owned");
     var owned_transferred = false;
-    errdefer if (!owned_transferred) owned.value().free(rt);
     try std.testing.expect(setGlobalOwnWritableDataPropertyAtOwned(rt, global, lookup.index, key, owned.value()));
     owned_transferred = true;
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), owned.header().rc);
     try std.testing.expectEqual(owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const lookup_owned = try core.string.String.createAscii(rt, "lookup-owned");
     var lookup_transferred = false;
-    errdefer if (!lookup_transferred) lookup_owned.value().free(rt);
     const writable_store = globalWritableDataStoreLookupForFastPath(rt, null, global, execution_function, 0, key).?;
     try std.testing.expect(setGlobalWritableDataStoreLookupOwned(rt, global, writable_store, key, lookup_owned.value()));
     lookup_transferred = true;
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), lookup_owned.header().rc);
     try std.testing.expectEqual(lookup_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 
     const fast_path_owned = try core.string.String.createAscii(rt, "fast-path-owned");
     var fast_path_transferred = false;
-    errdefer if (!fast_path_transferred) fast_path_owned.value().free(rt);
     try std.testing.expect(setGlobalWritableDataStoreForFastPathOwned(rt, null, global, execution_function, 0, key, fast_path_owned.value()));
     fast_path_transferred = true;
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), fast_path_owned.header().rc);
     try std.testing.expectEqual(fast_path_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
 }
 
@@ -734,7 +516,6 @@ test "global own data slot helpers reject readonly and accessor writes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
 
     const readonly_key = try rt.internAtom("readonlyGlobalSlot");
     const accessor_key = try rt.internAtom("accessorGlobalSlot");
@@ -756,8 +537,6 @@ test "global own data slot helpers reject readonly and accessor writes" {
     const getter = try core.Object.create(rt, core.class.ids.object, null);
     const setter = try core.Object.create(rt, core.class.ids.object, null);
     try global.defineOwnProperty(rt, accessor_key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
-    getter.value().free(rt);
-    setter.value().free(rt);
 
     const accessor_index = accessor_index: {
         for (global.shapeProps(), 0..) |prop, index| {

@@ -71,7 +71,6 @@ const test262OverridePath = runner_source.test262OverridePath;
 const test262UpstreamPath = runner_source.test262UpstreamPath;
 const test262_override_manifest = runner_source.override_manifest;
 const makeTestSourceFromBytes = runner_source.makeTestSourceFromBytes;
-const loadMetadataFromFile = runner_source.loadMetadataFromFile;
 pub const assertSameValue = runner_host.assertSameValue;
 pub const cleanupTest262Agents = runner_host.cleanupTest262Agents;
 pub const installTest262Globals = runner_host.installTest262Globals;
@@ -102,25 +101,9 @@ pub fn main(init: std.process.Init) !void {
     };
     defer summary.deinit(init.gpa);
 
-    dumpHostDispatchStats(init.environ_map);
     try printSummary(io, summary);
     const has_unexpected = summary.failed != 0 or summary.fixed != 0;
     std.process.exit(if (has_unexpected) 1 else 0);
-}
-
-/// The default execution path evaluates tests in-process, so the engine's
-/// per-site dispatch hit counters accumulate inside this runner. When built
-/// with `-Dzjs_enable_opcode_profile=true` and `ZJS_HOST_DISPATCH_STATS_FILE`
-/// is set, append the totals so measurement runs can include test262 slices.
-fn dumpHostDispatchStats(environ_map: *std.process.Environ.Map) void {
-    const host_dispatch_stats = test262_root.exec.host_dispatch_stats;
-    if (comptime !host_dispatch_stats.enabled) return;
-    const path = environ_map.get("ZJS_HOST_DISPATCH_STATS_FILE") orelse return;
-    var path_buf: [512:0]u8 = undefined;
-    if (path.len == 0 or path.len >= path_buf.len) return;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    host_dispatch_stats.appendToFile(&path_buf);
 }
 
 fn printUsage(io: std.Io) !void {
@@ -697,14 +680,12 @@ fn runEmbeddedEngine(
         stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
         break :failed zjs.JSValue.exception();
     };
-    defer value.free(rt);
 
     if (!value.isException()) {
         try dynamic_import_state.runJobs(ctx.core);
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
-            const async_exception = ctx.takePendingException();
-            async_exception.free(rt);
+            _ = ctx.takePendingException();
             return false;
         }
         if (is_async and !asyncHarnessCompleted(output.buffered())) {
@@ -738,7 +719,6 @@ fn asyncHarnessCompleted(output_bytes: []const u8) bool {
 fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: *[stderr_storage_len]u8) !?[]const u8 {
     if (!ctx.hasException()) return null;
     const thrown = ctx.takePendingException();
-    defer thrown.free(rt);
 
     if (thrown.isObject()) {
         var owned_name: ?[]u8 = null;
@@ -755,7 +735,6 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
         if (owned_name == null) {
             const ctor = ctx.getProperty(thrown, "constructor") catch null;
             if (ctor) |constructor| {
-                defer constructor.free(rt);
                 if (ctx.isCallable(constructor)) {
                     const maybe_name: ?[]u8 = ctx.functionName(constructor, rt.memory.allocator) catch |err| switch (err) {
                         error.OutOfMemory => return err,
@@ -793,7 +772,6 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
 
 fn exceptionStringProperty(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, value: zjs.JSValue, name: []const u8) !?[]u8 {
     const property = ctx.getProperty(value, name) catch return null;
-    defer property.free(rt);
     if (!property.isString()) return null;
     const bytes = try ctx.toOwnedUtf8(property, rt.memory.allocator);
     return bytes;

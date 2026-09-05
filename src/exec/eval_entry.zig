@@ -58,6 +58,11 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         break :blk try rt.internAtom(module_name_bytes);
     } else core.atom.null_atom;
     defer if (module_name != core.atom.null_atom) rt.atoms.free(module_name);
+    // TGC S3 §4 class B: bare id held across compilation and evaluation of
+    // the whole module body.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(rt);
+    defer module_name_roots.deactivate(rt);
 
     var compile_timing: bytecode.CompileTiming = .{};
     const compile_start = platform_clock.monotonicNanos();
@@ -123,7 +128,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             .evaluating, .evaluated => {},
             .errored => {
                 const exception = record.eval_exception orelse return error.InvalidBytecode;
-                _ = ctx.throwValue(exception.dup());
+                _ = ctx.throwValue(exception);
                 return error.JSException;
             },
             .linking => return error.ModuleLinkFailed,
@@ -141,7 +146,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // record above and linkModule published the persistent function/captures.
     const root_function_publish_start = if (module_record == null and options.timing != null) platform_clock.monotonicNanos() else 0;
     var root_function_value = core.JSValue.undefinedValue();
-    defer root_function_value.free(rt);
     var root_function_object: ?*core.Object = null;
     if (module_record == null) {
         const root_function = function orelse return error.InvalidBytecode;
@@ -176,7 +180,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         record.status = .evaluating;
         errdefer if (record.status == .evaluating) {
             record.status = .errored;
-            if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception.dup());
+            if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception);
         };
         const value = try runEvalModule(ctx, record, options.output, options.timing);
         if (record.status == .evaluating) record.status = .evaluated;
@@ -218,7 +222,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // The completion value is owned here while the post-run steps below can
     // still fail (e.g. OOM while draining promise jobs); release it on every
     // error exit (found by test-oom injection).
-    errdefer result.free(rt);
 
     // The VM invocation has been torn down, but the owned completion remains
     // live across context/global lookup and the post-run Job drain. Publish
@@ -240,7 +243,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         (options.discard_script_result or !options.return_completion))
     {
         completion_values[0] = core.JSValue.undefinedValue();
-        result.free(rt);
         return core.JSValue.undefinedValue();
     }
     return result;
@@ -253,13 +255,9 @@ fn runEvalModule(
     timing: ?*core.context.ContextEvalTiming,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    var module_state_value = (try core.Object.create(rt, core.class.ids.generator, null)).value();
-    defer module_state_value.free(rt);
+    const module_state_value = (try core.Object.create(rt, core.class.ids.generator, null)).value();
     const module_state = try property_ops.expectObject(module_state_value);
     var resume_value: ?core.JSValue = null;
-    defer if (resume_value) |value| {
-        value.free(rt);
-    };
 
     while (true) {
         const vm_start = platform_clock.monotonicNanos();
@@ -271,8 +269,7 @@ fn runEvalModule(
             resume_value,
         ) catch |err| return module_graph.moduleResolutionError(err);
         if (timing) |item| item.vm_run_ns += platform_clock.elapsedNanosSince(vm_start);
-        if (resume_value) |value| {
-            value.free(rt);
+        if (resume_value) |_| {
             resume_value = null;
         }
 
@@ -311,7 +308,6 @@ fn waitForModuleAwaitReaction(
     timing: ?*core.context.ContextEvalTiming,
 ) !ModuleAwaitResume {
     const rt = ctx.runtime;
-    defer awaited.free(rt);
     const global = try zjs_vm.contextGlobal(ctx);
     const reaction_value = try module_graph.createModuleAwaitReactionPromise(
         rt,
@@ -320,7 +316,6 @@ fn waitForModuleAwaitReaction(
         global,
         awaited,
     );
-    defer reaction_value.free(rt);
     const reaction = try property_ops.expectObject(reaction_value);
     if (reaction.class_id != core.class.ids.promise) return error.TypeError;
 
@@ -353,7 +348,7 @@ fn waitForModuleAwaitReaction(
         unreachable;
     };
     return .{
-        .value = settled.dup(),
+        .value = settled,
         .rejected = rejected,
     };
 }

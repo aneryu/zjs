@@ -75,10 +75,6 @@ pub const Flags = packed struct(u6) {
         return next;
     }
 
-    pub fn isData(self: Flags) bool {
-        return !self.deleted and self.kind == .data;
-    }
-
     pub fn isAccessor(self: Flags) bool {
         return !self.deleted and self.kind == .accessor;
     }
@@ -108,19 +104,12 @@ pub const Accessor = struct {
     getter: ?*gc.Header = null, // qjs JSObject *getter; NULL if undefined
     setter: ?*gc.Header = null, // qjs JSObject *setter; NULL if undefined
 
-    /// Build from values that the caller already owns refs on (transfer).
-    pub fn fromOwnedValues(getter_value: JSValue, setter_value: JSValue) Accessor {
+    /// Build the compact traced representation from accessor values.
+    pub fn fromBorrowedValues(getter_value: JSValue, setter_value: JSValue) Accessor {
         return .{
             .getter = accessorHeaderFromValue(getter_value),
             .setter = accessorHeaderFromValue(setter_value),
         };
-    }
-
-    /// Build from borrowed values, retaining the 0-2 object headers.
-    pub fn fromBorrowedValues(getter_value: JSValue, setter_value: JSValue) Accessor {
-        const self = fromOwnedValues(getter_value, setter_value);
-        self.retain();
-        return self;
     }
 
     pub fn getterValue(self: Accessor) JSValue {
@@ -149,22 +138,6 @@ pub const Accessor = struct {
 
     pub fn syncSetterFromVisitedValue(self: *Accessor, value: JSValue) void {
         self.setter = accessorHeaderFromValue(value);
-    }
-
-    pub fn retain(self: Accessor) void {
-        if (self.getter) |header| gc.retain(header);
-        if (self.setter) |header| gc.retain(header);
-    }
-
-    pub fn destroy(self: Accessor, rt: anytype) void {
-        // Route through JSValue.free so the deinit-phase object skip applies.
-        self.getterValue().free(rt);
-        self.setterValue().free(rt);
-    }
-
-    pub fn dup(self: Accessor) Accessor {
-        self.retain();
-        return self;
     }
 };
 
@@ -216,7 +189,7 @@ pub const AutoInitId = enum(u2) {
     prop = 2,
 };
 
-/// One owned Realm edge plus the QuickJS auto-init id, packed into one word.
+/// One traced Realm edge plus the QuickJS auto-init id, packed into one word.
 /// Realm contexts are GC allocations whose header address is at least
 /// four-byte aligned; the low two bits are therefore available for the id.
 pub const RealmAndAutoInitId = extern struct {
@@ -228,13 +201,7 @@ pub const RealmAndAutoInitId = extern struct {
         std.debug.assert(realm_header.metaConst().flags.kind == .realm_context);
         const address = @intFromPtr(realm_header);
         std.debug.assert(address & id_mask == 0);
-        gc.retain(realm_header);
         return .{ .raw = address | @intFromEnum(init_id) };
-    }
-
-    pub fn clone(self: RealmAndAutoInitId) RealmAndAutoInitId {
-        if (self.realmHeader()) |header| gc.retain(header);
-        return self;
     }
 
     pub fn id(self: RealmAndAutoInitId) AutoInitId {
@@ -253,12 +220,6 @@ pub const RealmAndAutoInitId = extern struct {
         std.debug.assert(address & id_mask == 0);
         const init_id = self.id();
         self.raw = address | @intFromEnum(init_id);
-    }
-
-    pub fn deinit(self: *RealmAndAutoInitId, rt: *JSRuntime) void {
-        const header = self.realmHeader() orelse return;
-        self.raw = 0;
-        gc.release(rt, header);
     }
 };
 
@@ -298,18 +259,6 @@ pub const AutoInitSlot = extern struct {
         if (self.realm_and_id.id() != .module_ns) return null;
         const stored = self.opaque_ptr orelse return null;
         return @ptrCast(@alignCast(stored));
-    }
-
-    pub fn clone(self: AutoInitSlot) AutoInitSlot {
-        return .{
-            .realm_and_id = self.realm_and_id.clone(),
-            .opaque_ptr = self.opaque_ptr,
-        };
-    }
-
-    pub fn deinit(self: *AutoInitSlot, rt: *JSRuntime) void {
-        self.realm_and_id.deinit(rt);
-        self.opaque_ptr = null;
     }
 };
 
@@ -389,41 +338,6 @@ pub const Slot = union {
     // `cell.pvalue`. Used for top-level lexical (`let`/`const`) bindings on
     // the global lexical env object, shared by pointer with frame.var_refs.
     var_ref: *VarRef,
-
-    pub fn destroy(self: Slot, flags: Flags, rt: anytype) void {
-        if (flags.deleted) return;
-        switch (flags.kind) {
-            .data => self.data.free(rt),
-            .accessor => self.accessor.destroy(rt),
-            .auto_init => {
-                var owned = self.auto_init;
-                owned.deinit(rt);
-            },
-            // The slot holds one ref on the cell (qjs add_property ref_count++);
-            // release it (qjs free_property VARREF branch -> free_var_ref).
-            // PRESERVE the cycle-collector guard: during remove_cycles a
-            // visited-but-not-preserved cell is freed by the collector, so we
-            // must not double-free it here.
-            .var_ref => {
-                const cell = self.var_ref;
-                if (gc.phaseIsTwoPassTeardown(rt.gc.phase) and cell.header.meta().flags.cycle_visited) return;
-                cell.valueRef().free(rt);
-            },
-        }
-    }
-
-    pub fn dup(self: Slot, flags: Flags) Slot {
-        if (flags.deleted) return .{ .data = JSValue.undefinedValue() };
-        return switch (flags.kind) {
-            .data => .{ .data = self.data.dup() },
-            .accessor => .{ .accessor = self.accessor.dup() },
-            .auto_init => .{ .auto_init = self.auto_init.clone() },
-            .var_ref => blk: {
-                _ = self.var_ref.valueRef().dup();
-                break :blk .{ .var_ref = self.var_ref };
-            },
-        };
-    }
 };
 
 comptime {

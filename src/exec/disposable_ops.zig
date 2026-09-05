@@ -103,14 +103,13 @@ pub fn disposableStackUse(
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (value.isNull() or value.isUndefined()) return value.dup();
+    if (value.isNull() or value.isUndefined()) return value;
     if (!value.isObject()) return error.TypeError;
 
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, caller_function, caller_frame);
-    defer dispose_method.free(ctx.runtime);
     if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
     try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .sync, .direct);
-    return value.dup();
+    return value;
 }
 
 pub fn disposableStackAdopt(
@@ -123,7 +122,7 @@ pub fn disposableStackAdopt(
     const on_dispose = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     if (!isCallableValue(on_dispose)) return error.TypeError;
     try stack.appendDisposableResource(rt, value, on_dispose, .adopt, .sync, .direct);
-    return value.dup();
+    return value;
 }
 
 pub fn disposableStackDefer(
@@ -159,14 +158,8 @@ pub fn disposableStackRecordDisposeError(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (pending_error.*) |suppressed| {
-        var thrown_owned = true;
-        errdefer if (thrown_owned) thrown.free(ctx.runtime);
-
         const combined = try suppressedErrorForDispose(ctx, output, global, thrown, suppressed, caller_function, caller_frame);
-        thrown_owned = false;
         pending_error.* = combined;
-        thrown.free(ctx.runtime);
-        suppressed.free(ctx.runtime);
     } else {
         pending_error.* = thrown;
     }
@@ -183,18 +176,16 @@ pub fn disposeDisposableStackResources(
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) {
         if (initial_error) |value| {
-            _ = ctx.throwValue(value.dup());
+            _ = ctx.throwValue(value);
             return error.JSException;
         }
         return core.JSValue.undefinedValue();
     }
     stack.disposableStackDisposedSlot().* = true;
 
-    var pending_error: ?core.JSValue = if (initial_error) |value| value.dup() else null;
-    errdefer if (pending_error) |value| value.free(ctx.runtime);
+    var pending_error: ?core.JSValue = if (initial_error) |value| value else null;
 
     while (stack.popDisposableResource()) |resource| {
-        defer resource.destroy(ctx.runtime);
         disposeResource(ctx, output, global, resource, caller_function, caller_frame) catch |err| {
             const thrown = try runtimeErrorValueForDisposableDispose(ctx, global, err);
             try disposableStackRecordDisposeError(ctx, output, global, &pending_error, thrown, caller_function, caller_frame);
@@ -223,7 +214,6 @@ pub fn usingAddSyncResource(
     if (!value.isObject()) return error.TypeError;
 
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, null, null);
-    defer dispose_method.free(ctx.runtime);
     if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
     try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .sync, .direct);
     return core.JSValue.undefinedValue();
@@ -261,12 +251,11 @@ pub fn disposeResource(
 ) !void {
     // AsyncDisposableStack awaits each result in promise continuations owned
     // by promise_ops. This helper is only the synchronous disposal algorithm.
-    const result = switch (resource.kind) {
+    _ = switch (resource.kind) {
         .use => try callValueOrBytecodeSyncInternal(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
         .adopt => try callValueOrBytecodeSyncInternal(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
         .defer_ => try callValueOrBytecodeSyncInternal(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
     };
-    result.free(ctx.runtime);
 }
 
 pub fn runtimeErrorValueForDisposableDispose(
@@ -348,19 +337,18 @@ pub fn usingDisposeAsyncStackForThrow(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len < 2) return error.TypeError;
-    var capability = try defaultPromiseCapability(ctx, output, global, null, null);
-    errdefer capability.deinit(ctx.runtime);
+    const capability = try defaultPromiseCapability(ctx, output, global, null, null);
 
     const stack = try asyncDisposableStackReceiver(args[0]);
     if (stack.disposableStackDisposed()) {
         try promiseRejectCapability(ctx, output, global, capability.reject, args[1], null, null);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     }
 
     stack.disposableStackDisposedSlot().* = true;
     try asyncDisposableStackStoreCapability(stack, ctx.runtime, capability);
     try asyncDisposableStackContinueOrReject(ctx, output, global, stack, args[1], null, null);
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 pub const AsyncDisposableStackMethod = enum(u8) {
@@ -438,23 +426,21 @@ pub fn asyncDisposableStackUse(
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (value.isNull() or value.isUndefined()) {
         try stack.appendDisposableResource(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), .use, .async, .direct);
-        return value.dup();
+        return value;
     }
     if (!value.isObject()) return error.TypeError;
 
     const async_dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_asyncDispose, caller_function, caller_frame);
-    defer async_dispose_method.free(ctx.runtime);
     if (!async_dispose_method.isNull() and !async_dispose_method.isUndefined()) {
         if (!isCallableValue(async_dispose_method)) return error.TypeError;
         try stack.appendDisposableResource(ctx.runtime, value, async_dispose_method, .use, .async, .direct);
-        return value.dup();
+        return value;
     }
 
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, caller_function, caller_frame);
-    defer dispose_method.free(ctx.runtime);
     if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
     try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .async, .async_from_sync);
-    return value.dup();
+    return value;
 }
 
 pub fn asyncDisposableStackAdopt(
@@ -467,7 +453,7 @@ pub fn asyncDisposableStackAdopt(
     const on_dispose = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     if (!isCallableValue(on_dispose)) return error.TypeError;
     try stack.appendDisposableResource(rt, value, on_dispose, .adopt, .async, .direct);
-    return value.dup();
+    return value;
 }
 
 pub fn asyncDisposableStackDefer(
@@ -498,21 +484,15 @@ pub fn asyncDisposableStackMove(
 }
 
 pub fn asyncDisposableStackStoreCapability(stack: *core.Object, rt: *core.JSRuntime, capability: PromiseCapabilityVm) !void {
-    const resolve = capability.resolve.dup();
-    var resolve_owned = true;
-    errdefer if (resolve_owned) resolve.free(rt);
-    const reject = capability.reject.dup();
-    var reject_owned = true;
-    errdefer if (reject_owned) reject.free(rt);
+    const resolve = capability.resolve;
+    const reject = capability.reject;
 
     const resolve_slot = stack.disposableStackAsyncResolveSlot();
     const reject_slot = stack.disposableStackAsyncRejectSlot();
 
     stack.clearDisposableStackAsyncCapability(rt);
     resolve_slot.* = resolve;
-    resolve_owned = false;
     reject_slot.* = reject;
-    reject_owned = false;
     // Both slots live in the stack's payload; the capability functions are made
     // right here while the stack itself is typically already old.
     rt.gc.generationalBarrier(stack.gcHeader(), resolve.cycleMarkHeader());
@@ -527,24 +507,22 @@ pub fn asyncDisposableStackDisposeAsync(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    var capability = try defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
+    const capability = try defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
 
     const stack = asyncDisposableStackReceiver(receiver) catch {
         const reason = try promiseErrorValue(ctx, global, error.TypeError);
-        defer reason.free(ctx.runtime);
         try promiseRejectCapability(ctx, output, global, capability.reject, reason, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     };
     if (stack.disposableStackDisposed()) {
         try promiseResolveCapability(ctx, output, global, capability.resolve, core.JSValue.undefinedValue(), caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     }
 
     stack.disposableStackDisposedSlot().* = true;
     try asyncDisposableStackStoreCapability(stack, ctx.runtime, capability);
     try asyncDisposableStackContinueOrReject(ctx, output, global, stack, null, caller_function, caller_frame);
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 pub fn asyncDisposableStackContinuation(
@@ -554,10 +532,9 @@ pub fn asyncDisposableStackContinuation(
     rejected: bool,
 ) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_disposable_stack_continuation);
-    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncDisposeStackSlot(rt), stack.value().dup());
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncDisposeStackSlot(rt), stack.value());
     (try callback_object.functionAsyncDisposeRejectedSlot(rt)).* = rejected;
     return callback;
 }
@@ -591,7 +568,6 @@ pub fn asyncDisposableStackContinueOrReject(
 ) !void {
     asyncDisposableStackContinue(ctx, output, global, stack, awaited_rejection, caller_function, caller_frame) catch |err| {
         const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
         try asyncDisposableStackRejectStored(ctx, output, global, stack, reason, caller_function, caller_frame);
     };
 }
@@ -610,14 +586,11 @@ pub fn asyncDisposableStackContinue(
     }
 
     while (stack.popDisposableResource()) |resource| {
-        defer resource.destroy(ctx.runtime);
         const result = asyncDisposeResource(ctx, output, global, resource, caller_function, caller_frame) catch |err| {
             const thrown = try runtimeErrorValueForDisposableDispose(ctx, global, err);
-            defer thrown.free(ctx.runtime);
             try asyncDisposableStackRecordError(ctx, output, global, stack, thrown, caller_function, caller_frame);
             continue;
         };
-        defer result.free(ctx.runtime);
         if (resource.hint == .async) {
             try asyncDisposableStackAwaitValue(ctx, output, global, stack, result, caller_function, caller_frame);
             return;
@@ -647,7 +620,6 @@ pub fn asyncDisposeResource(
         .defer_ => try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{}, caller_function, caller_frame),
     };
     if (resource.method_kind == .async_from_sync) {
-        result.free(ctx.runtime);
         return core.JSValue.undefinedValue();
     }
     return result;
@@ -663,14 +635,10 @@ pub fn asyncDisposableStackAwaitValue(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
     const awaited = try promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, caller_function, caller_frame);
-    defer awaited.free(ctx.runtime);
 
     const on_fulfilled = try asyncDisposableStackContinuation(ctx.runtime, global, stack, false);
-    defer on_fulfilled.free(ctx.runtime);
     const on_rejected = try asyncDisposableStackContinuation(ctx.runtime, global, stack, true);
-    defer on_rejected.free(ctx.runtime);
 
     // Same await-shaped internal attach as qjs js_async_function_resume
     // (quickjs.c:21268-21290): perform_promise_then, never a .then read.
@@ -691,7 +659,7 @@ pub fn asyncDisposableStackRecordError(
         const combined = try suppressedErrorForDispose(ctx, output, global, error_value, suppressed, caller_function, caller_frame);
         try stack.setOptionalValueSlot(ctx.runtime, slot, combined);
     } else {
-        try stack.setOptionalValueSlot(ctx.runtime, slot, error_value.dup());
+        try stack.setOptionalValueSlot(ctx.runtime, slot, error_value);
     }
 }
 
@@ -705,8 +673,7 @@ pub fn asyncDisposableStackResolveStored(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const resolve_value = (stack.disposableStackAsyncResolveSlot().*) orelse return;
-    const resolve = resolve_value.dup();
-    defer resolve.free(ctx.runtime);
+    const resolve = resolve_value;
     try promiseResolveCapability(ctx, output, global, resolve, value, caller_function, caller_frame);
     stack.clearDisposableStackAsyncCapability(ctx.runtime);
 }
@@ -721,8 +688,7 @@ pub fn asyncDisposableStackRejectStored(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const reject_value = (stack.disposableStackAsyncRejectSlot().*) orelse return;
-    const reject = reject_value.dup();
-    defer reject.free(ctx.runtime);
+    const reject = reject_value;
     try promiseRejectCapability(ctx, output, global, reject, reason, caller_function, caller_frame);
     stack.clearDisposableStackAsyncCapability(ctx.runtime);
 }
@@ -738,12 +704,10 @@ pub fn asyncIteratorAsyncDispose(
 ) !?core.JSValue {
     if (!function_object.isAsyncIteratorAsyncDisposeFunction()) return null;
 
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
+    const return_key = core.atom.ids.return_;
     const return_method = getValueProperty(ctx, output, global, receiver, return_key, caller_function, caller_frame) catch |err| {
         return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) {
         return try core.promise.fulfilledWithPrototype(ctx, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
     }
@@ -754,7 +718,6 @@ pub fn asyncIteratorAsyncDispose(
     const result = callValueOrBytecodeRoot(ctx, output, global, receiver, return_method, &.{core.JSValue.undefinedValue()}, caller_function, caller_frame) catch |err| {
         return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer result.free(ctx.runtime);
     const result_object = objectFromValue(result) orelse {
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
     };
@@ -763,10 +726,7 @@ pub fn asyncIteratorAsyncDispose(
         // the dispose promise settles only when `.return()`'s promise does
         // (no in-VM draining/sleeping; jobs are host-pumped).
         const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
-        errdefer promise.free(ctx.runtime);
         const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
-        defer resolving.resolve.free(ctx.runtime);
-        defer resolving.reject.free(ctx.runtime);
         try performPromiseThen(ctx, output, global, result, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), resolving.resolve, resolving.reject);
         return promise;
     }

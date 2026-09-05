@@ -58,13 +58,11 @@ test "gc stress deterministic tiny heap preserves live roots" {
     // Keep objects[0] as the named external root and drop the other
     // construction retains. The cycle through objects[0] keeps the rest.
     for (objects[1..]) |*slot| {
-        slot.*.?.value().free(&rt);
         slot.* = null;
     }
     _ = try rt.forceMajorGC(null);
     try std.testing.expectEqual(live_with_cycle, rt.gc.liveCount());
 
-    objects[0].?.value().free(&rt);
     objects[0] = null;
     _ = try rt.forceMajorGC(null);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -102,7 +100,6 @@ test "gc stress deterministic object cycles are reclaimed" {
 
     for (&objects, 0..) |*slot, index| {
         if ((index % 3) == 0) {
-            slot.*.?.value().free(rt);
             slot.* = null;
             external_alive[index] = false;
         }
@@ -110,7 +107,6 @@ test "gc stress deterministic object cycles are reclaimed" {
 
     for (&objects, 0..) |*slot, index| {
         if (external_alive[index]) {
-            slot.*.?.value().free(rt);
             slot.* = null;
         }
     }
@@ -153,13 +149,11 @@ test "gc stress weak map preserved key keeps value alive" {
 
     for (keys, values) |key, value| {
         try appendWeakCollectionEntry(rt, weakmap, key.?, value.?.value());
-        value.?.value().free(rt);
     }
     for (&values) |*slot| slot.* = null;
 
     for (&keys, 0..) |*slot, index| {
         if (index != preserved_index) {
-            slot.*.?.value().free(rt);
             slot.* = null;
         }
     }
@@ -170,9 +164,7 @@ test "gc stress weak map preserved key keeps value alive" {
     // one live empty root shape.
     try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());
 
-    weakmap.value().free(rt);
     weakmap_slot = null;
-    keys[preserved_index].?.value().free(rt);
     keys[preserved_index] = null;
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -219,12 +211,10 @@ test "gc stress weak map dead cyclic keys clear values" {
         const peer = keys[random.uintLessThan(usize, keys.len)].?;
         try key.?.defineOwnProperty(rt, peer_key, core.Descriptor.data(peer.value(), true, true, true));
         try appendWeakCollectionEntry(rt, weakmap, key.?, value.?.value());
-        value.?.value().free(rt);
     }
     for (&values) |*slot| slot.* = null;
 
     for (&keys) |*slot| {
-        slot.*.?.value().free(rt);
         slot.* = null;
     }
     try std.testing.expectEqual(@as(usize, count), weakmap.weakCollectionEntries().len);
@@ -234,7 +224,6 @@ test "gc stress weak map dead cyclic keys clear values" {
     // The live weakmap keeps its empty root shape alive.
     try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
 
-    weakmap.value().free(rt);
     weakmap_slot = null;
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -257,7 +246,7 @@ test "gc stress finalization registry dead target queues pending job" {
     var live_roots = core.runtime.rootObjects(.{ &registry_slot, &cleanup_slot });
     live_roots.activate(rt);
     defer live_roots.deactivate(rt);
-    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
+    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value();
 
     var target = try core.Object.create(rt, core.class.ids.object, null);
     var target_value = target.value();
@@ -276,9 +265,7 @@ test "gc stress finalization registry dead target queues pending job" {
         held.value(),
         core.JSValue.undefinedValue(),
     );
-    held.value().free(rt);
     dropGcPtr(&held);
-    target_value.free(rt);
     target_value = core.JSValue.undefinedValue();
     dropGcPtr(&target);
 
@@ -293,9 +280,7 @@ test "gc stress finalization registry dead target queues pending job" {
     try std.testing.expectEqual(@as(usize, 6), rt.gc.liveCount());
 
     rt.clearPendingFinalizationJobs();
-    registry.value().free(rt);
     registry_slot = null;
-    cleanup.value().free(rt);
     cleanup_slot = null;
     ctx.destroy();
     ctx_alive = false;
@@ -330,7 +315,7 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
         const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
         const captured_obj = try core.Object.create(rt, core.class.ids.object, null);
         const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-        fb.cpoolSlice()[0] = captured_obj.value().dup();
+        fb.cpoolSlice()[0] = captured_obj.value();
         fb.publishFixtureNoFail(rt);
 
         try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
@@ -346,11 +331,9 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     }
 
     for (&functions) |*slot| {
-        slot.*.?.value().free(rt);
         slot.* = null;
     }
     for (&captured) |*slot| {
-        slot.*.?.value().free(rt);
         slot.* = null;
     }
 

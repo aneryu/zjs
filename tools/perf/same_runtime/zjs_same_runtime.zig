@@ -1,12 +1,4 @@
 const std = @import("std");
-// Dossier variant identity. The A/B/C attribution candidates differ only by
-// this comptime option, and every artifact must be able to say which one
-// produced its numbers. It is read here rather than exposed through the zjs
-// CLI on purpose: adding a code path to the CLI perturbs the very binary the
-// process layer measures (21 symbols changed instruction counts in the
-// rejected --build-info approach), whereas the harness writes it once, outside
-// any timed window.
-const dossier_build_options = @import("dossier_options");
 
 const zjs = @import("zjs");
 const builtin = @import("builtin");

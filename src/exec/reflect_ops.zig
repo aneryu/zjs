@@ -3,7 +3,6 @@
 const core = @import("../core/root.zig");
 const call_mod = @import("call.zig");
 const exception_ops = @import("exception_ops.zig");
-const promise_ops = @import("promise_ops.zig");
 const reflect_dispatch = core.host_function.builtin_method_ids.reflect;
 const frame_mod = @import("frame.zig");
 const bytecode = @import("../bytecode.zig");
@@ -36,10 +35,8 @@ const array_construct_ref = core.function.NativeBuiltinRef{
 };
 
 // Shared call-runtime helpers that stay with the dispatcher in exec/call.zig.
-const activeGlobalObject = call.activeGlobalObject;
 const callValueWithThisGlobalsAndGlobal = call.callValueWithThisGlobalsAndGlobal;
 const defineObjectProperty = call.defineObjectProperty;
-const descriptorFromObjectBare = call.descriptorFromObjectBare;
 const expectObjectArg = call.expectObjectArg;
 const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
 const getValuePropertyViaGlobalSlots = call.getValuePropertyViaGlobalSlots;
@@ -120,7 +117,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             defer prototype.deinit(rt);
             const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype.object());
             errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
-            try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback.dup());
+            try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback);
             return instance.value();
         }
         if (std.mem.eql(u8, name, "WeakRef")) {
@@ -203,9 +200,6 @@ fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]cor
     out_root.init(rt, &rooted_out);
     defer out_root.deinit();
     var initialized: usize = 0;
-    errdefer {
-        for (out[0..initialized]) |item| item.free(rt);
-    }
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         out[index] = try object.getProperty(core.atom.atomFromUInt32(index));
@@ -216,7 +210,6 @@ fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]cor
 }
 
 fn freeReflectConstructArgumentList(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
     if (values.len != 0) rt.memory.free(core.JSValue, values);
 }
 
@@ -249,11 +242,9 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
 }
 
 fn reflectConstructPrototype(ctx: *core.JSContext, target_name: []const u8, new_target: core.JSValue) !object_ops.OwnedPrototype {
-    const rt = ctx.runtime;
     const new_target_object = thisObject(new_target) orelse return error.TypeError;
     const prototype_value = try new_target_object.getProperty(core.atom.ids.prototype);
     if (prototype_value.isObject()) return .{ .value = prototype_value };
-    prototype_value.free(rt);
 
     const fallback_realm = try call_runtime.functionRealmContext(ctx, new_target);
     if (object_ops.constructorClassPrototypeId(target_name)) |class_id| {
@@ -291,22 +282,20 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     var proxy_raw_owned = true;
     errdefer if (proxy_raw_owned) core.Object.destroyFromHeader(rt, proxy.gcHeader());
     try proxy.ensureProxyPayload(rt);
-    try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
-    try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
-    try defineObjectProperty(rt, object, "proxy", proxy.value());
+    try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0]);
+    try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1]);
+    try defineObjectProperty(rt, object, core.atom.ids.proxy, proxy.value());
     proxy_raw_owned = false;
-    proxy.value().free(rt);
     // QuickJS `js_proxy_revocable` uses JS_NewCFunctionData: the revoker is a
     // captured-data callable and therefore executes in its caller's realm.
     const function_proto = functionPrototypeFromGlobal(rt, realm_global) orelse return error.InvalidBuiltinRegistry;
     const revoke = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 0);
-    defer revoke.free(rt);
     const revoke_object = thisObject(revoke) orelse return error.TypeError;
     // Data carriers deliberately do not populate the true-C-function record
     // cache; dispatch decodes this stable id in the final caller-data arm.
     revoke_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke));
-    try revoke_object.setOptionalValueSlot(rt, try revoke_object.functionProxyRevokeTargetSlot(rt), proxy.value().dup());
-    try defineObjectProperty(rt, object, "revoke", revoke);
+    try revoke_object.setOptionalValueSlot(rt, try revoke_object.functionProxyRevokeTargetSlot(rt), proxy.value());
+    try defineObjectProperty(rt, object, core.atom.ids.revoke, revoke);
     return object.value();
 }
 
@@ -317,7 +306,6 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
 pub fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSValue {
     const proxy_slot = try function_object.functionProxyRevokeTargetSlot(rt);
     const proxy_value = function_object.takeOptionalValueSlot(proxy_slot) orelse return core.JSValue.undefinedValue();
-    defer proxy_value.free(rt);
     const proxy = thisObject(proxy_value) orelse return core.JSValue.undefinedValue();
     proxy.clearOptionalValueSlot(rt, proxy.proxyHandlerSlot());
     return core.JSValue.undefinedValue();
@@ -355,22 +343,17 @@ fn proxyReflectHasProperty(
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const target = try expectObjectArg(target_value);
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const has_atom = try ctx.runtime.internAtom("has");
-    defer ctx.runtime.atoms.free(has_atom);
+    const has_atom = core.atom.ids.has;
     const trap = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, handler_value, has_atom);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return reflectHasProperty(ctx, output, global, globals, target, atom_id);
     const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, handler_value, trap, &.{ target_value, key_value });
-    defer result.free(ctx.runtime);
     const trap_result = value_ops.isTruthy(result);
     const global_object = global orelse {
         // Bare-runtime fallback (no realm global): keep the raw target reads;
         // the VM path below mirrors js_proxy_has's exotic-dispatching reads.
         if (trap_result) return true;
         if (try target.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-            defer desc.destroy(ctx.runtime);
             if (desc.configurable == false or !target.isExtensible()) return error.TypeError;
         }
         return false;
@@ -471,7 +454,6 @@ pub fn reflectSetCall(
                 .invalid => {
                     if (object_ops.sameObjectIdentity(receiver_value, args[0])) {
                         const coerced = try array_ops.coerceTypedArrayElementInput(ctx, output, global, set_value);
-                        defer coerced.free(ctx.runtime);
                         try core.typed_array.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
                     }
                     return core.JSValue.boolean(true);
@@ -479,7 +461,6 @@ pub fn reflectSetCall(
                 .index => |index| {
                     if (object_ops.sameObjectIdentity(receiver_value, args[0])) {
                         const coerced = try array_ops.coerceTypedArrayElementForSet(ctx, output, global, object, set_value);
-                        defer coerced.free(ctx.runtime);
                         if (!try core.object.typedArrayIndexValid(ctx.runtime, object, index)) return core.JSValue.boolean(true);
                         if (try core.object.typedArrayImmutableBuffer(ctx.runtime, object)) return core.JSValue.boolean(false);
                         _ = try core.typed_array.typedArraySetElement(ctx.runtime, object, index, coerced);
@@ -510,7 +491,6 @@ pub fn reflectSetCall(
         return core.JSValue.boolean(ok);
     }
     const value_to_set = try array_ops.arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
-    defer if (!value_to_set.same(set_value)) value_to_set.free(ctx.runtime);
     object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
         error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return core.JSValue.boolean(false),
         error.InvalidLength => return error.RangeError,
@@ -576,13 +556,6 @@ pub fn reflectConstructCall(
     }
     return try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, args[0], construct_args, caller_function, caller_frame, new_target);
 }
-
-pub const ReflectConstructResolution = struct {
-    target: core.JSValue,
-    new_target: core.JSValue,
-    args: []const core.JSValue,
-    owned_args: []core.JSValue = &.{},
-};
 
 pub fn reflectHasCall(
     ctx: *core.JSContext,
@@ -671,7 +644,6 @@ pub fn reflectOwnKeysCall(
     errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
-        defer key_value.free(ctx.runtime);
         try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(key_value, true, true, true));
     }
     return out.value();

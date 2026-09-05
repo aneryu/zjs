@@ -348,15 +348,12 @@ pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []con
     defer root_frame.deactivate(rt);
 
     errdefer {
-        const failed_function = function_value;
         function_value = core.JSValue.undefinedValue();
-        failed_function.free(rt);
     }
 
     const source_string = try core.string.String.createUtf8(rt, source);
     source_value = source_string.value();
-    try function_object.setOptionalValueSlot(rt, try function_object.functionSourceSlot(rt), source_value.dup());
-    source_value.free(rt);
+    try function_object.setOptionalValueSlot(rt, try function_object.functionSourceSlot(rt), source_value);
     source_value = core.JSValue.undefinedValue();
 
     return function_value;
@@ -375,7 +372,6 @@ test "sourceFunction roots function and source while attaching source text" {
     defer rt.setGCThreshold(old_threshold);
 
     const function_value = try sourceFunction(ctx, "namedSource", "function namedSource() { return 1; }");
-    defer function_value.free(rt);
     const function_object = objectFromFunctionValue(function_value) orelse return error.TypeError;
     const source_value = function_object.functionSource() orelse return error.TypeError;
     const source_string = source_value.asStringBody() orelse return error.TypeError;
@@ -439,11 +435,9 @@ pub fn constructDynamicFunctionFromSource(
         for (args[0 .. args.len - 1], 0..) |arg, idx| {
             if (idx != 0) try params.append(ctx.runtime.memory.allocator, ',');
             const string_value = try string_ops.toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
-            defer string_value.free(ctx.runtime);
             try string_ops.appendSourceStringUtf8(ctx.runtime, &params, string_value);
         }
         const body_value = try string_ops.toStringForAnnexB(ctx, output, global, args[args.len - 1], caller_function, caller_frame);
-        defer body_value.free(ctx.runtime);
         try string_ops.appendSourceStringUtf8(ctx.runtime, &body, body_value);
     }
     const compile_realm = try call_runtime.functionRealmContext(ctx, constructor);
@@ -485,7 +479,6 @@ pub fn constructDynamicFunctionFromSource(
         owned_root,
         .root_global,
     );
-    defer root_function_value.free(ctx.runtime);
     var root_frame = core.runtime.rootValues(.{&root_function_value});
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
@@ -513,7 +506,6 @@ pub fn constructDynamicFunctionFromSource(
         .is_eval_code = true,
         .global_declarations_prevalidated = true,
     });
-    errdefer result.free(ctx.runtime);
     // `runWithArgs` returns the completion value owned, but ALSO leaves an owned
     // copy on `nested_stack`. When that stack is a `vm_stack` arena window (the
     // carved-frame fast path), the leftover slot sits ABOVE the arena watermark
@@ -525,9 +517,7 @@ pub fn constructDynamicFunctionFromSource(
     // the stack's owned copy now so the window is empty before any further
     // bytecode runs; `result` keeps the independently-owned reference.
     for (nested_stack.liveValues()) |*slot| {
-        const stale = slot.*;
         slot.* = core.JSValue.undefinedValue();
-        stale.free(ctx.runtime);
     }
     nested_stack.setLen(0);
     if (object_ops.functionObjectFromValue(result)) |function_object| {

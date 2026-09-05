@@ -56,24 +56,17 @@ const disposable_ops = @import("disposable_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const iterator_ops = @import("iterator_ops.zig");
-const string_ops = @import("string_ops.zig");
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-const boundFunctionArgs = call_runtime.boundFunctionArgs;
 const cachedRealmObject = object_ops.cachedRealmObject;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const callableObjectFromValue = object_ops.callableObjectFromValue;
 const closeIteratorForAbruptCompletion = forof_ops.closeIteratorForAbruptCompletion;
-const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
 const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
 const constructDynamicFunctionFromSource = function_ops.constructDynamicFunctionFromSource;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const constructorPrototypeObject = object_ops.constructorPrototypeObject;
 const createGeneratorObject = object_ops.createGeneratorObject;
 const createIteratorResult = iterator_ops.createIteratorResult;
-const defineDataPropertyByName = object_ops.defineDataPropertyByName;
 const defineValueProperty = object_ops.defineValueProperty;
-const findForOfIteratorIndex = forof_ops.findForOfIteratorIndex;
-const freeArgs = call_runtime.freeArgs;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
 const functionConstructorFromGlobal = builtin_glue.functionConstructorFromGlobal;
 const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
@@ -89,7 +82,6 @@ const pollGCSafePoint = call_runtime.pollGCSafePoint;
 const processExpiredAtomicsWaiters = atomics_ops.processExpiredAtomicsWaiters;
 const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
 const proxyTrapKeyValue = object_ops.proxyTrapKeyValue;
-const createBuiltinFunction = builtin_glue.createBuiltinFunction;
 const defineToStringTag = iterator_ops.defineToStringTag;
 const runNextAtomicsHostCompletion = atomics_ops.runNextAtomicsHostCompletion;
 const runNextOsRwHandler = call_runtime.runNextOsRwHandler;
@@ -135,8 +127,7 @@ pub const atomicsWaitAsyncPromise = atomics_ops.atomicsWaitAsyncPromise;
 
 pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     if (global.cachedPromiseProto(rt)) |prototype| return prototype;
-    const promise_atom = rt.internAtom("Promise") catch return null;
-    defer rt.atoms.free(promise_atom);
+    const promise_atom = core.atom.ids.Promise;
     const promise_constructor = global.getOwnDataObjectBorrowed(promise_atom) orelse return null;
     return promise_constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
@@ -146,10 +137,7 @@ pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
 
     const prototype = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const prototype_value = prototype.value();
-    var prototype_value_owned = true;
-    errdefer if (prototype_value_owned) prototype_value.free(rt);
     const constructor = try core.function.nativeFunctionForGlobal(rt, global, "AsyncFunction", 1);
-    defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
@@ -160,8 +148,6 @@ pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     const constructor_value = constructor_object.value();
     try storeRealmValue(rt, global, .async_function_constructor, constructor_value);
     try storeRealmValue(rt, global, .async_function_prototype, prototype_value);
-    prototype_value_owned = false;
-    prototype_value.free(rt);
     return prototype;
 }
 
@@ -171,19 +157,16 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, object.gcHeader());
     const method = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncIterator]", 0);
-    defer method.free(rt);
     const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(rt, async_iterator_atom, core.Descriptor.data(method, true, false, true));
     if (core.atom.predefinedId("Symbol.asyncDispose", .symbol)) |async_dispose_atom| {
         const dispose = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncDispose]", 0);
-        defer dispose.free(rt);
         const dispose_object = objectFromValue(dispose) orelse return error.TypeError;
         if (!try dispose_object.addAsyncIteratorAsyncDisposeFunction(rt)) return error.TypeError;
         try object.defineOwnProperty(rt, async_dispose_atom, core.Descriptor.data(dispose, true, false, true));
     }
     const value = object.value();
     object_raw_owned = false;
-    defer value.free(rt);
     try storeRealmValue(rt, global, .async_iterator_prototype, value);
     return object;
 }
@@ -197,27 +180,22 @@ pub fn asyncGeneratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Obje
     try installAsyncGeneratorPrototypeProperties(rt, global, object);
     const value = object.value();
     object_raw_owned = false;
-    defer value.free(rt);
     try storeRealmValue(rt, global, .async_generator_prototype, value);
     return object;
 }
 
 pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *core.Object, object: *core.Object) !void {
-    try defineAsyncGeneratorDataMethod(rt, global, object, "next", 1);
-    try defineAsyncGeneratorDataMethod(rt, global, object, "return", 1);
-    try defineAsyncGeneratorDataMethod(rt, global, object, "throw", 1);
+    try defineAsyncGeneratorDataMethod(rt, global, object, core.atom.ids.next, 1);
+    try defineAsyncGeneratorDataMethod(rt, global, object, core.atom.ids.return_, 1);
+    try defineAsyncGeneratorDataMethod(rt, global, object, core.atom.ids.throw, 1);
 
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "AsyncGenerator");
-    defer tag.free(rt);
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
 }
 
-pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32) !void {
-    const atom_id = try rt.internAtom(name);
-    defer rt.atoms.free(atom_id);
-    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
-    defer method.free(rt);
+pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
+    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
@@ -227,10 +205,7 @@ pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *c
     if (cachedRealmObject(rt, global, .async_generator_function_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
-    var object_value_owned = true;
-    errdefer if (object_value_owned) object_value.free(rt);
     const constructor = try core.function.nativeFunctionForGlobal(rt, global, "AsyncGeneratorFunction", 1);
-    defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
@@ -242,8 +217,6 @@ pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *c
     try async_generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, false, false, true));
     try defineToStringTag(rt, object, "AsyncGeneratorFunction");
     try storeRealmValue(rt, global, .async_generator_function_prototype, object_value);
-    object_value_owned = false;
-    object_value.free(rt);
     return object;
 }
 
@@ -255,7 +228,6 @@ pub fn defaultPromiseCapability(
     caller_frame: ?*frame_mod.Frame,
 ) !PromiseCapabilityVm {
     const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
     return promiseCapability(ctx, output, global, promise_constructor, caller_function, caller_frame);
 }
 
@@ -268,8 +240,7 @@ pub fn promiseResolveCapability(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{value}, caller_function, caller_frame);
-    result.free(ctx.runtime);
+    _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{value}, caller_function, caller_frame);
 }
 
 pub fn promiseConstruct(
@@ -305,14 +276,11 @@ pub fn promiseConstructWithPrototype(
     const executor = if (args.len >= 1) args[0] else return throwTypeErrorMessage(ctx, global, "not a function");
     if (!isCallableValue(executor)) return throwTypeErrorMessage(ctx, global, "not a function");
     const promise = try core.promise.constructWithPrototype(ctx, prototype);
-    errdefer promise.free(ctx.runtime);
 
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
     const resolve = resolving.resolve;
-    defer resolve.free(ctx.runtime);
     const reject = resolving.reject;
-    defer reject.free(ctx.runtime);
-    const result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, core.JSValue.undefinedValue(), executor, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
+    _ = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, core.JSValue.undefinedValue(), executor, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
         _ = objectFromValue(promise) orelse return err;
         var reason = try promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);
@@ -320,12 +288,10 @@ pub fn promiseConstructWithPrototype(
         // (qjs js_promise_constructor: JS_Call(resolving_funcs[1], ...)), which
         // honors the [[AlreadyResolved]] once-guard, instead of settling the
         // promise directly (which would override a prior resolve()).
-        const rejected = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject, &.{reason.value}, caller_function, caller_frame);
-        rejected.free(ctx.runtime);
+        _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject, &.{reason.value}, caller_function, caller_frame);
         reason.commit(ctx);
         return promise;
     };
-    result.free(ctx.runtime);
     return promise;
 }
 
@@ -342,7 +308,6 @@ pub fn createPromiseResolvingState(rt: *core.JSRuntime) !*core.Object {
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     state_val = state.value();
-    errdefer state_val.free(rt);
     (try state.promiseAlreadyResolvedSlot(rt)).* = false;
     return state;
 }
@@ -356,10 +321,6 @@ pub fn createPromiseResolvingPair(rt: *core.JSRuntime, global: *core.Object, pro
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    defer state_val.free(rt);
-    defer resolve_val.free(rt);
-    defer reject_val.free(rt);
-
     const state = try createPromiseResolvingState(rt);
     state_val = state.value();
 
@@ -367,8 +328,8 @@ pub fn createPromiseResolvingPair(rt: *core.JSRuntime, global: *core.Object, pro
     reject_val = try createPromiseResolvingFunction(rt, global, promise, true, state);
 
     return .{
-        .resolve = resolve_val.dup(),
-        .reject = reject_val.dup(),
+        .resolve = resolve_val,
+        .reject = reject_val,
     };
 }
 
@@ -382,11 +343,10 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
 
     const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
     function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
-    errdefer function_val.free(rt);
     const object = objectFromValue(function_val) orelse return error.TypeError;
     try object.setInternalCallableTag(rt, .promise_resolving);
-    try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
-    try object.setFunctionPromiseResolvingState(rt, state_val.dup());
+    try object.setFunctionPromiseResolvingTarget(rt, rooted_promise);
+    try object.setFunctionPromiseResolvingState(rt, state_val);
     (try object.functionPromiseResolvingRejectSlot(rt)).* = reject;
     return function_val;
 }
@@ -405,13 +365,11 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
 
     const state = try createPromiseResolvingState(rt);
     var state_alive = true;
-    defer if (state_alive) state.value().free(rt);
     const marker_key = try rt.internAtom("marker");
     defer rt.atoms.free(marker_key);
     const state_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-state-symbol");
     {
-        const state_marker_value = try rt.symbolValue(state_symbol);
-        defer state_marker_value.free(rt);
+        const state_marker_value = try rt.takeSymbolValue(state_symbol);
         try state.defineOwnProperty(rt, marker_key, core.Descriptor.data(state_marker_value, true, true, true));
     }
 
@@ -420,14 +378,8 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const promise_value = try rt.symbolValue(promise_symbol);
-    var promise_value_alive = true;
-    defer if (promise_value_alive) promise_value.free(rt);
+    const promise_value = try rt.takeSymbolValue(promise_symbol);
     const function_value = try createPromiseResolvingFunction(rt, global, promise_value, true, state);
-    promise_value.free(rt);
-    promise_value_alive = false;
-    var function_alive = true;
-    defer if (function_alive) function_value.free(rt);
     const function_object = objectFromValue(function_value) orelse return error.TypeError;
 
     // Root only the FUNCTION for the quiescent whole-heap collections below:
@@ -446,7 +398,6 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     try std.testing.expectEqual(promise_symbol, function_object.functionPromiseResolvingTarget().?.asSymbolAtom().?);
     try std.testing.expect(function_object.functionPromiseResolvingReject());
 
-    state.value().free(rt);
     state_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
@@ -455,14 +406,11 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     const stored_state = objectFromValue(stored_state_value) orelse return error.TypeError;
     {
         const marker_value = try stored_state.getProperty(marker_key);
-        defer marker_value.free(rt);
         try std.testing.expectEqual(state_symbol, marker_value.asSymbolAtom().?);
     }
 
     live_roots.deactivate(rt);
     live_roots_active = false;
-    function_value.free(rt);
-    function_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
     try std.testing.expect(rt.atoms.name(state_symbol) == null);
@@ -502,7 +450,7 @@ pub fn appendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reactio
     // reserved storage, so the promise is never observed in a torn state.
     const len = slot.*.len;
     std.debug.assert(len < capacity_slot.*);
-    slot.*.ptr[len] = reaction.dup();
+    slot.*.ptr[len] = reaction;
     slot.* = slot.*.ptr[0 .. len + 1];
     // The reaction list lives in the promise's payload, so the promise is the
     // owner. A pending promise is usually the older of the two -- it is what
@@ -532,10 +480,10 @@ pub fn promiseReactionRecord(
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
-    try record.setPromiseReactionOnFulfilled(rt, rooted_on_fulfilled.dup());
-    try record.setPromiseReactionOnRejected(rt, rooted_on_rejected.dup());
-    try record.setPromiseReactionResolve(rt, rooted_resolve.dup());
-    try record.setPromiseReactionReject(rt, rooted_reject.dup());
+    try record.setPromiseReactionOnFulfilled(rt, rooted_on_fulfilled);
+    try record.setPromiseReactionOnRejected(rt, rooted_on_rejected);
+    try record.setPromiseReactionResolve(rt, rooted_resolve);
+    try record.setPromiseReactionReject(rt, rooted_reject);
     return record.value();
 }
 
@@ -551,29 +499,11 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const on_fulfilled_value = try rt.symbolValue(on_fulfilled_symbol);
-    var on_fulfilled_alive = true;
-    defer if (on_fulfilled_alive) on_fulfilled_value.free(rt);
-    const on_rejected_value = try rt.symbolValue(on_rejected_symbol);
-    var on_rejected_alive = true;
-    defer if (on_rejected_alive) on_rejected_value.free(rt);
-    const resolve_value = try rt.symbolValue(resolve_symbol);
-    var resolve_alive = true;
-    defer if (resolve_alive) resolve_value.free(rt);
-    const reject_value = try rt.symbolValue(reject_symbol);
-    var reject_alive = true;
-    defer if (reject_alive) reject_value.free(rt);
+    const on_fulfilled_value = try rt.takeSymbolValue(on_fulfilled_symbol);
+    const on_rejected_value = try rt.takeSymbolValue(on_rejected_symbol);
+    const resolve_value = try rt.takeSymbolValue(resolve_symbol);
+    const reject_value = try rt.takeSymbolValue(reject_symbol);
     const record_value = try promiseReactionRecord(rt, on_fulfilled_value, on_rejected_value, resolve_value, reject_value);
-    on_fulfilled_value.free(rt);
-    on_fulfilled_alive = false;
-    on_rejected_value.free(rt);
-    on_rejected_alive = false;
-    resolve_value.free(rt);
-    resolve_alive = false;
-    reject_value.free(rt);
-    reject_alive = false;
-    var record_value_alive = true;
-    defer if (record_value_alive) record_value.free(rt);
     const record = objectFromValue(record_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(on_fulfilled_symbol) != null);
@@ -585,8 +515,6 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve(rt).?.asSymbolAtom().?);
     try std.testing.expectEqual(reject_symbol, record.promiseReactionReject(rt).?.asSymbolAtom().?);
 
-    record_value.free(rt);
-    record_value_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(on_fulfilled_symbol) == null);
     try std.testing.expect(rt.atoms.name(on_rejected_symbol) == null);
@@ -613,14 +541,11 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     ctx.global = global;
 
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
-    var reaction_alive = true;
-    defer if (reaction_alive) reaction.value().free(rt);
     const marker_key = try rt.internAtom("marker");
     defer rt.atoms.free(marker_key);
     const reaction_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-record-symbol");
     {
-        const reaction_marker_value = try rt.symbolValue(reaction_symbol);
-        defer reaction_marker_value.free(rt);
+        const reaction_marker_value = try rt.takeSymbolValue(reaction_symbol);
         try reaction.defineOwnProperty(rt, marker_key, core.Descriptor.data(reaction_marker_value, true, true, true));
     }
 
@@ -629,14 +554,10 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const reaction_payload = try rt.symbolValue(value_symbol);
-    var reaction_payload_alive = true;
-    defer if (reaction_payload_alive) reaction_payload.free(rt);
+    const reaction_payload = try rt.takeSymbolValue(value_symbol);
     var job = try promiseReactionJob(ctx, reaction, reaction_payload, true);
     var job_alive = true;
     defer if (job_alive) job.deinit();
-    reaction_payload.free(rt);
-    reaction_payload_alive = false;
 
     // The holder under test is the native Job struct; its JSValue refs are
     // invisible to a declared-roots tracing sweep, so name the job's slots
@@ -655,8 +576,6 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     try std.testing.expectEqual(value_symbol, job.payload.promise_reaction.value.asSymbolAtom().?);
     try std.testing.expect(job.payload.promise_reaction.rejected);
 
-    reaction.value().free(rt);
-    reaction_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
@@ -664,7 +583,6 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     const stored_reaction = objectFromValue(stored_reaction_value) orelse return error.TypeError;
     {
         const marker_value = try stored_reaction.getProperty(marker_key);
-        defer marker_value.free(rt);
         try std.testing.expectEqual(reaction_symbol, marker_value.asSymbolAtom().?);
     }
 
@@ -704,7 +622,6 @@ pub const PreparedPromiseReactionJobs = struct {
         const capacity = capacity_slot.*;
         promise.promiseReactionsSlot().* = &.{};
         capacity_slot.* = 0;
-        for (reactions) |reaction| reaction.free(ctx.runtime);
         if (capacity != 0) {
             ctx.runtime.memory.free(core.JSValue, reactions.ptr[0..capacity]);
         } else {
@@ -721,22 +638,19 @@ pub const PreparedPromiseReactionJobs = struct {
     }
 };
 
-test "prepared promise reaction jobs own direct symbol payloads" {
+test "prepared promise reaction jobs expose direct symbol payloads to an explicit root frame" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
-    defer reaction.value().free(rt);
 
     const jobs = try rt.memory.alloc(jobs_mod.Job, 2);
     const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
-    const first = try rt.symbolValue(first_atom);
-    defer first.free(rt);
+    const first = try rt.takeSymbolValue(first_atom);
     jobs[0] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), first, false);
     const second_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-second");
-    const second = try rt.symbolValue(second_atom);
-    defer second.free(rt);
+    const second = try rt.takeSymbolValue(second_atom);
     jobs[1] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), second, false);
     var prepared = PreparedPromiseReactionJobs{
         .jobs = jobs,
@@ -744,9 +658,26 @@ test "prepared promise reaction jobs own direct symbol payloads" {
     };
     defer prepared.deinit(rt);
 
+    var root_storage = [_]core.runtime.ValueRootValue{
+        .{ .value = &prepared.jobs[0].payload.promise_reaction.reaction },
+        .{ .value = &prepared.jobs[0].payload.promise_reaction.value },
+        .{ .value = &prepared.jobs[1].payload.promise_reaction.reaction },
+        .{ .value = &prepared.jobs[1].payload.promise_reaction.value },
+    };
+    var roots = core.runtime.ValueRootFrame{ .values = &root_storage };
+    roots.activate(rt);
+    var roots_active = true;
+    defer if (roots_active) roots.deactivate(rt);
+
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(first_atom) != null);
     try std.testing.expect(rt.atoms.name(second_atom) != null);
+
+    roots.deactivate(rt);
+    roots_active = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(first_atom) == null);
+    try std.testing.expect(rt.atoms.name(second_atom) == null);
 }
 
 pub fn preparePromiseReactionJobs(
@@ -801,34 +732,26 @@ pub fn promiseSettleValue(
         prepared_callback_job = jobs_mod.Job.initPromise(ctx, promise.value());
     }
 
-    const next_result = value.dup();
-    var next_result_owned = true;
-    errdefer if (next_result_owned) next_result.free(ctx.runtime);
+    const next_result = value;
     const result_slot = promise.promiseResultSlot();
 
     var next_reaction_arg: ?core.JSValue = null;
-    errdefer if (next_reaction_arg) |reaction_arg| reaction_arg.free(ctx.runtime);
     const reaction_arg_slot = promise.promiseReactionArgSlot();
     if (needs_callback_job) {
-        next_reaction_arg = value.dup();
+        next_reaction_arg = value;
     }
 
-    const old_result = result_slot.*;
     result_slot.* = next_result;
-    next_result_owned = false;
     // Settling writes straight into the payload rather than through
     // `Object.setPromiseResult`, so it takes the barrier itself: a promise
     // that has been pending for a while is old, and the value it settles with
     // was just produced.
     ctx.runtime.gc.generationalBarrier(promise.gcHeader(), next_result.cycleMarkHeader());
     promise.promiseIsRejectedSlot().* = rejected;
-    if (old_result) |stored| stored.free(ctx.runtime);
     if (next_reaction_arg) |reaction_arg| {
-        const old_reaction_arg = reaction_arg_slot.*;
         reaction_arg_slot.* = reaction_arg;
         ctx.runtime.gc.generationalBarrier(promise.gcHeader(), reaction_arg.cycleMarkHeader());
         next_reaction_arg = null;
-        if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
     if (rejected and !had_reactions and ctx.track_unhandled_rejections) {
         ctx.recordUnhandledPromiseRejection(promise.value(), value);
@@ -851,11 +774,9 @@ test "promiseSettleValue handles result self-assignment" {
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
-    defer promise.value().free(rt);
     const result = try core.Object.create(rt, core.class.ids.object, null);
 
-    try promise.setPromiseResult(rt, result.value().dup());
-    result.value().free(rt);
+    try promise.setPromiseResult(rt, result.value());
 
     const current = promise.promiseResult().?;
     try promiseSettleValue(ctx, global, promise, current, false);
@@ -871,25 +792,19 @@ test "promiseSettleValue roots direct symbol result while preparing reaction job
     ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer {
-        promise.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
 
     const reaction = try promiseReactionRecord(rt, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
     try appendPromiseReaction(rt, promise, reaction);
-    reaction.free(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settle-result-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    const settle_value = try rt.symbolValue(symbol_atom);
-    var settle_value_alive = true;
-    defer if (settle_value_alive) settle_value.free(rt);
+    const settle_value = try rt.takeSymbolValue(symbol_atom);
     try promiseSettleValue(ctx, global, promise, settle_value, false);
-    settle_value.free(rt);
-    settle_value_alive = false;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const result = promise.promiseResult() orelse return error.TypeError;
@@ -914,7 +829,6 @@ test "promiseSettleValue preserves pending state across reaction prepare and FIF
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
-    defer promise.value().free(rt);
 
     const reaction = try promiseReactionRecord(
         rt,
@@ -923,7 +837,6 @@ test "promiseSettleValue preserves pending state across reaction prepare and FIF
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     );
-    defer reaction.free(rt);
     try appendPromiseReaction(rt, promise, reaction);
 
     const baseline = rt.memory.allocated_bytes;
@@ -1042,7 +955,6 @@ pub fn promiseResolvingFunctionCall(
         // JS_ThrowTypeError(ctx, "promise self resolution").
         const error_global = objectRealmGlobal(function_object) orelse global;
         const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution");
-        defer error_value.free(ctx.runtime);
         try publishPromiseResolution(ctx, global, state, target, error_value, true);
         return core.JSValue.undefinedValue();
     }
@@ -1059,8 +971,7 @@ pub fn promiseResolvingFunctionCall(
             // Get(resolution, "then") once, and if callable enqueue the thenable
             // job (a settled/pending native promise is adopted via its `then`,
             // costing the same 2 ticks and observing patched `then`).
-            const then_key = try ctx.runtime.internAtom("then");
-            defer ctx.runtime.atoms.free(then_key);
+            const then_key = core.atom.ids.then;
 
             // Hold one FIFO slot before publishing the once-guard. After the
             // getter runs, a callable result can therefore be transferred to
@@ -1072,11 +983,9 @@ pub fn promiseResolvingFunctionCall(
             (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
             const then_value = getValueProperty(ctx, output, global, value, then_key, caller_function, caller_frame) catch |err| {
                 const reason = try promiseErrorValue(ctx, global, err);
-                defer reason.free(ctx.runtime);
                 try settlePromiseResolutionWithReservedOwner(ctx, global, target, reason, true, &thenable_slot_reserved);
                 return core.JSValue.undefinedValue();
             };
-            defer then_value.free(ctx.runtime);
             if (isCallableValue(then_value)) {
                 // Mirrors js_promise_resolve_function_call (quickjs.c:53626):
                 // resolving with a callable-then object ALWAYS enqueues a
@@ -1127,7 +1036,6 @@ fn promiseJobOomProbeFunction(
         .call = PromiseJobOomProbe.call,
     });
     const function = try core.function.nativeFunction(ctx, name, 0);
-    errdefer function.free(ctx.runtime);
     const object = objectFromValue(function) orelse return error.TypeError;
     object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
     object.externalHostFunctionIdSlot().* = external_id;
@@ -1153,7 +1061,6 @@ fn promiseBareCapabilityErrorFunction(
         .call = PromiseBareCapabilityErrorProbe.call,
     });
     const function = try core.function.nativeFunction(ctx, "bareCapabilityError", 0);
-    errdefer function.free(ctx.runtime);
     const object = objectFromValue(function) orelse return error.TypeError;
     object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
     object.externalHostFunctionIdSlot().* = external_id;
@@ -1168,7 +1075,6 @@ fn appendDummyPromiseReaction(rt: *core.JSRuntime, promise: *core.Object) !void 
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     );
-    defer reaction.free(rt);
     try appendPromiseReaction(rt, promise, reaction);
 }
 
@@ -1184,7 +1090,6 @@ test "Promise executor recursive OOM rejects with preallocated reason" {
 
     var probe = PromiseJobOomProbe{ .fail = true };
     const executor = try promiseJobOomProbeFunction(ctx, &probe, "executorOomProbe");
-    defer executor.free(rt);
 
     // The host executor first exhausts the heap and then reports a bare
     // TypeError. Error construction therefore recursively OOMs after user
@@ -1199,7 +1104,6 @@ test "Promise executor recursive OOM rejects with preallocated reason" {
         null,
         null,
     );
-    defer promise.free(rt);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     try std.testing.expect(promise_object.promiseIsRejected());
@@ -1218,14 +1122,8 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
-    defer target.value().free(rt);
     try appendDummyPromiseReaction(rt, target);
     const resolving = try createPromiseResolvingPair(rt, global, target.value());
-    var resolving_alive = true;
-    defer if (resolving_alive) {
-        resolving.resolve.free(rt);
-        resolving.reject.free(rt);
-    };
     const resolve_object = objectFromValue(resolving.resolve) orelse return error.TypeError;
     const reject_object = objectFromValue(resolving.reject) orelse return error.TypeError;
 
@@ -1234,7 +1132,7 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     // allocate.
     try rt.job_queue.ensureCapacity(1);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const resolve_result = (try promiseResolvingFunctionCall(
+    _ = (try promiseResolvingFunctionCall(
         ctx,
         null,
         global,
@@ -1243,14 +1141,13 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
         null,
         null,
     )).?;
-    resolve_result.free(rt);
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
 
     // The paired reject cannot bypass the continuation's frozen FIFO
     // position; the once-guard makes it a no-op.
-    const ignored_reject = (try promiseResolvingFunctionCall(
+    _ = (try promiseResolvingFunctionCall(
         ctx,
         null,
         global,
@@ -1259,12 +1156,8 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
         null,
         null,
     )).?;
-    ignored_reject.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
 
-    resolving.resolve.free(rt);
-    resolving.reject.free(rt);
-    resolving_alive = false;
     _ = rt.runObjectCycleRemoval();
 
     rt.setMemoryLimit(null);
@@ -1285,7 +1178,6 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
 
     var probe = PromiseBareCapabilityErrorProbe{};
     const resolve = try promiseBareCapabilityErrorFunction(ctx, &probe);
-    defer resolve.free(rt);
     const reaction = try promiseReactionRecord(
         rt,
         core.JSValue.undefinedValue(),
@@ -1293,7 +1185,6 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
         resolve,
         core.JSValue.undefinedValue(),
     );
-    defer reaction.free(rt);
     try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(5), false);
 
     const TailJob = struct {
@@ -1307,8 +1198,7 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(ctx.hasException());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
-    const exception = ctx.takeException();
-    exception.free(rt);
+    _ = ctx.takeException();
 
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
@@ -1325,16 +1215,12 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
-    defer target.value().free(rt);
     try appendDummyPromiseReaction(rt, target);
 
     const resolving = try createPromiseResolvingPair(rt, global, target.value());
-    defer resolving.resolve.free(rt);
-    defer resolving.reject.free(rt);
 
     var probe = PromiseJobOomProbe{ .fail = false };
     const handler = try promiseJobOomProbeFunction(ctx, &probe, "reactionOomProbe");
-    defer handler.free(rt);
     const reaction = try promiseReactionRecord(
         rt,
         handler,
@@ -1342,7 +1228,6 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
         resolving.resolve,
         resolving.reject,
     );
-    defer reaction.free(rt);
     try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(1), false);
 
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
@@ -1370,22 +1255,14 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
-    defer target.value().free(rt);
     try appendDummyPromiseReaction(rt, target);
     const resolving = try createPromiseResolvingPair(rt, global, target.value());
-    var resolving_alive = true;
-    defer if (resolving_alive) {
-        resolving.resolve.free(rt);
-        resolving.reject.free(rt);
-    };
     const resolve_object = objectFromValue(resolving.resolve) orelse return error.TypeError;
     const state = objectFromValue(resolve_object.functionPromiseResolvingState().?) orelse return error.TypeError;
 
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
-    defer thenable.value().free(rt);
     var probe = PromiseJobOomProbe{ .fail = false };
     const getter = try promiseJobOomProbeFunction(ctx, &probe, "thenGetterOomProbe");
-    defer getter.free(rt);
     const then_key = try rt.internAtom("then");
     defer rt.atoms.free(then_key);
     try thenable.defineOwnProperty(
@@ -1394,17 +1271,13 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
         core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true),
     );
 
-    const direct_result = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
-    direct_result.free(rt);
+    _ = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(state.promiseAlreadyResolved(rt));
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
 
-    resolving.resolve.free(rt);
-    resolving.reject.free(rt);
-    resolving_alive = false;
     _ = rt.runObjectCycleRemoval();
 
     rt.setMemoryLimit(null);
@@ -1425,21 +1298,13 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
-    defer target.value().free(rt);
     try appendDummyPromiseReaction(rt, target);
     const resolving = try createPromiseResolvingPair(rt, global, target.value());
-    var resolving_alive = true;
-    defer if (resolving_alive) {
-        resolving.resolve.free(rt);
-        resolving.reject.free(rt);
-    };
     const resolve_object = objectFromValue(resolving.resolve) orelse return error.TypeError;
 
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
-    defer thenable.value().free(rt);
     var probe = PromiseJobOomProbe{ .fail = true };
     const getter = try promiseJobOomProbeFunction(ctx, &probe, "thenGetterThrowOomProbe");
-    defer getter.free(rt);
     const then_key = try rt.internAtom("then");
     defer rt.atoms.free(then_key);
     try thenable.defineOwnProperty(
@@ -1448,17 +1313,13 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
         core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true),
     );
 
-    const direct_result = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
-    direct_result.free(rt);
+    _ = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
     try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
 
-    resolving.resolve.free(rt);
-    resolving.reject.free(rt);
-    resolving_alive = false;
     _ = rt.runObjectCycleRemoval();
 
     rt.setMemoryLimit(null);
@@ -1480,14 +1341,11 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
-    defer target.value().free(rt);
     try appendDummyPromiseReaction(rt, target);
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
-    defer thenable.value().free(rt);
 
     var probe = PromiseJobOomProbe{ .fail = true };
     const then_function = try promiseJobOomProbeFunction(ctx, &probe, "thenableOomProbe");
-    defer then_function.free(rt);
     try rt.job_queue.enqueuePromiseThenable(ctx, target.value(), thenable.value(), then_function);
 
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
@@ -1516,9 +1374,7 @@ test "promiseThenableJob roots direct function bytecode then callback while crea
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const target = try core.Object.create(rt, core.class.ids.promise, null);
-    defer target.value().free(rt);
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
-    defer thenable.value().free(rt);
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
         .flags = .{ .func_kind = .generator },
@@ -1527,13 +1383,11 @@ test "promiseThenableJob roots direct function bytecode then callback while crea
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var then_callback = core.JSValue.functionBytecode(&fb.header);
-    var then_callback_alive = true;
-    defer if (then_callback_alive) then_callback.free(rt);
+    const then_callback = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -1549,8 +1403,6 @@ test "promiseThenableJob roots direct function bytecode then callback while crea
 
     job.deinit();
     job_alive = false;
-    then_callback.free(rt);
-    then_callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -1577,7 +1429,7 @@ pub fn promiseThenableJobCall(
 
     invoke: {
         if (payload.phase == .invoke) {
-            const then_result = callValueOrBytecodeRoot(
+            _ = callValueOrBytecodeRoot(
                 ctx,
                 output,
                 global,
@@ -1596,13 +1448,12 @@ pub fn promiseThenableJobCall(
                 payload.phase = .reject;
                 break :invoke;
             };
-            then_result.free(ctx.runtime);
             return core.JSValue.undefinedValue();
         }
     }
 
     std.debug.assert(payload.phase == .reject);
-    const reject_result = try callValueOrBytecodeRoot(
+    _ = try callValueOrBytecodeRoot(
         ctx,
         output,
         global,
@@ -1612,7 +1463,6 @@ pub fn promiseThenableJobCall(
         caller_function,
         caller_frame,
     );
-    reject_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
 }
 
@@ -1692,7 +1542,7 @@ pub fn promiseReactionJobCall(
     // 'await' implementation of async functions" — an undefined resolving
     // function is skipped and the value dropped.
     if (settle.isUndefined()) return core.JSValue.undefinedValue();
-    const settle_result = callValueOrBytecodeRoot(
+    _ = callValueOrBytecodeRoot(
         ctx,
         output,
         global,
@@ -1712,7 +1562,6 @@ pub fn promiseReactionJobCall(
         }
         return err;
     };
-    settle_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
 }
 
@@ -1750,18 +1599,6 @@ pub const PromiseCapabilityVm = struct {
     promise: core.JSValue,
     resolve: core.JSValue,
     reject: core.JSValue,
-
-    pub fn deinit(self: PromiseCapabilityVm, rt: *core.JSRuntime) void {
-        self.promise.free(rt);
-        self.resolve.free(rt);
-        self.reject.free(rt);
-    }
-
-    pub fn releaseCallbacks(self: PromiseCapabilityVm, rt: *core.JSRuntime) core.JSValue {
-        self.resolve.free(rt);
-        self.reject.free(rt);
-        return self.promise;
-    }
 };
 
 pub fn promiseCapabilityExecutorCall(ctx: *core.JSContext, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
@@ -1776,7 +1613,7 @@ pub fn promiseCapabilityExecutorCall(ctx: *core.JSContext, function_object: *cor
     }
     const resolve = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const reject = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    try slot.setPromiseCapability(ctx.runtime, resolve.dup(), reject.dup());
+    try slot.setPromiseCapability(ctx.runtime, resolve, reject);
     return core.JSValue.undefinedValue();
 }
 
@@ -1817,7 +1654,6 @@ pub fn promiseCombinatorElementCall(
         .all_settled_fulfill, .all_settled_reject, .all_settled_keyed_fulfill, .all_settled_keyed_reject => {
             const rejected = mode == .all_settled_reject or mode == .all_settled_keyed_reject;
             const record = try promiseSettlementRecord(ctx.runtime, rejected, payload);
-            defer record.free(ctx.runtime);
             try promiseSetArrayIndex(ctx.runtime, values, index, record);
         },
         .any_reject => try promiseSetArrayIndex(ctx.runtime, values, index, payload),
@@ -1832,32 +1668,25 @@ pub fn promiseCombinatorElementCall(
     const reject_value = state.promiseCombinatorReject(ctx.runtime) orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
-            const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
+            _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
                 const reason = try promiseErrorValue(ctx, global, err);
-                defer reason.free(ctx.runtime);
                 try promiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
                 return core.JSValue.undefinedValue();
             };
-            result.free(ctx.runtime);
         },
         .all_keyed_resolve, .all_settled_keyed_fulfill, .all_settled_keyed_reject => {
             const keys_value = state.promiseCombinatorKeys(ctx.runtime) orelse return error.TypeError;
             const keys = objectFromValue(keys_value) orelse return error.TypeError;
             const keyed_result = try promiseKeyedResult(ctx.runtime, keys, values);
-            defer keyed_result.free(ctx.runtime);
-            const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{keyed_result}, caller_function, caller_frame) catch |err| {
+            _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{keyed_result}, caller_function, caller_frame) catch |err| {
                 const reason = try promiseErrorValue(ctx, global, err);
-                defer reason.free(ctx.runtime);
                 try promiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
                 return core.JSValue.undefinedValue();
             };
-            result.free(ctx.runtime);
         },
         .any_reject => {
             const aggregate_error = try promiseAggregateError(ctx, global, values);
-            defer aggregate_error.free(ctx.runtime);
-            const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error}, caller_function, caller_frame);
-            result.free(ctx.runtime);
+            _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error}, caller_function, caller_frame);
         },
     }
     return core.JSValue.undefinedValue();
@@ -1886,12 +1715,6 @@ pub fn promiseCapability(
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    defer slot_value.free(ctx.runtime);
-    defer executor_value.free(ctx.runtime);
-    defer promise_value.free(ctx.runtime);
-    defer resolve_value.free(ctx.runtime);
-    defer reject_value.free(ctx.runtime);
-
     const constructor_global = promiseConstructorRealmGlobal(constructor_value, global);
     const slot = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     slot_value = slot.value();
@@ -1908,17 +1731,17 @@ pub fn promiseCapability(
     executor_value = try builtin_glue.createDataFunction(ctx.runtime, constructor_global, "", 2);
     const executor_object = objectFromValue(executor_value) orelse return error.TypeError;
     try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
-    try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, slot_value.dup());
+    try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, slot_value);
 
     promise_value = try constructValueOrBytecode(ctx, output, global, constructor_value, &.{executor_value}, caller_function, caller_frame);
 
-    resolve_value = if (slot.promiseCapabilityResolve(ctx.runtime)) |stored| stored.dup() else core.JSValue.undefinedValue();
-    reject_value = if (slot.promiseCapabilityReject(ctx.runtime)) |stored| stored.dup() else core.JSValue.undefinedValue();
+    resolve_value = if (slot.promiseCapabilityResolve(ctx.runtime)) |stored| stored else core.JSValue.undefinedValue();
+    reject_value = if (slot.promiseCapabilityReject(ctx.runtime)) |stored| stored else core.JSValue.undefinedValue();
     if (!isCallableValue(resolve_value) or !isCallableValue(reject_value)) return error.TypeError;
     return .{
-        .promise = promise_value.dup(),
-        .resolve = resolve_value.dup(),
-        .reject = reject_value.dup(),
+        .promise = promise_value,
+        .resolve = resolve_value,
+        .reject = reject_value,
     };
 }
 
@@ -1945,21 +1768,18 @@ pub fn promiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     result_value = result.value();
-    errdefer result_value.free(rt);
 
     var index: u32 = 0;
     while (index < keys.arrayLength()) : (index += 1) {
         const index_atom = core.atom.atomFromUInt32(index);
         key_value = try keys.getProperty(index_atom);
         defer {
-            key_value.free(rt);
             key_value = core.JSValue.undefinedValue();
         }
         const key_atom = try property_ops.propertyKeyAtom(rt, key_value);
         defer rt.atoms.free(key_atom);
         value = try values.getProperty(index_atom);
         defer {
-            value.free(rt);
             value = core.JSValue.undefinedValue();
         }
         try property_ops.defineDataProperty(rt, result, key_atom, value);
@@ -1972,19 +1792,13 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer rt.destroy();
 
     const keys = try core.Object.createArray(rt, null);
-    var keys_alive = true;
-    defer if (keys_alive) keys.value().free(rt);
     const values = try core.Object.createArray(rt, null);
-    var values_alive = true;
-    defer if (values_alive) values.value().free(rt);
 
     const key_name = try value_ops.createStringValue(rt, "answer");
-    defer key_name.free(rt);
     try promiseSetArrayIndex(rt, keys, 0, key_name);
     const value_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-keyed-result-symbol");
     {
-        const keyed_value = try rt.symbolValue(value_symbol);
-        defer keyed_value.free(rt);
+        const keyed_value = try rt.takeSymbolValue(value_symbol);
         try promiseSetArrayIndex(rt, values, 0, keyed_value);
     }
 
@@ -1993,8 +1807,6 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer rt.setGCThreshold(old_threshold);
 
     const result_value = try promiseKeyedResult(rt, keys, values);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
     const result = objectFromValue(result_value) orelse return error.TypeError;
 
     // Root the RESULT (the holder under test) for the quiescent collections;
@@ -2006,24 +1818,17 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer if (result_roots_active) result_roots.deactivate(rt);
 
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
-    values.value().free(rt);
-    values_alive = false;
-    keys.value().free(rt);
-    keys_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const answer_atom = try rt.internAtom("answer");
     defer rt.atoms.free(answer_atom);
     {
         const stored = try result.getProperty(answer_atom);
-        defer stored.free(rt);
         try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
     }
 
     result_roots.deactivate(rt);
     result_roots_active = false;
-    result_value.free(rt);
-    result_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
@@ -2037,9 +1842,8 @@ pub fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: cor
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
     const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
-    defer status.free(rt);
-    try defineValueProperty(rt, record, "status", status);
-    try defineValueProperty(rt, record, if (rejected) "reason" else "value", rooted_payload);
+    try defineValueProperty(rt, record, core.atom.ids.status, status);
+    try defineValueProperty(rt, record, if (rejected) core.atom.ids.reason else core.atom.ids.value, rooted_payload);
     return record.value();
 }
 
@@ -2052,14 +1856,8 @@ test "promiseSettlementRecord roots direct symbol payload while defining status"
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const payload_value = try rt.symbolValue(symbol_atom);
-    var payload_alive = true;
-    defer if (payload_alive) payload_value.free(rt);
+    const payload_value = try rt.takeSymbolValue(symbol_atom);
     const record_value = try promiseSettlementRecord(rt, false, payload_value);
-    payload_value.free(rt);
-    payload_alive = false;
-    var record_alive = true;
-    defer if (record_alive) record_value.free(rt);
     const record = objectFromValue(record_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -2067,12 +1865,9 @@ test "promiseSettlementRecord roots direct symbol payload while defining status"
     defer rt.atoms.free(value_atom);
     {
         const value = try record.getProperty(value_atom);
-        defer value.free(rt);
         try std.testing.expectEqual(symbol_atom, value.asSymbolAtom().?);
     }
 
-    record_value.free(rt);
-    record_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2087,9 +1882,9 @@ pub fn promiseCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, 
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
-    try state.setPromiseCombinatorResolve(rt, rooted_resolve.dup());
-    try state.setPromiseCombinatorReject(rt, rooted_reject.dup());
-    try state.setPromiseCombinatorValues(rt, rooted_values.dup());
+    try state.setPromiseCombinatorResolve(rt, rooted_resolve);
+    try state.setPromiseCombinatorReject(rt, rooted_reject);
+    try state.setPromiseCombinatorValues(rt, rooted_values);
     (try state.promiseCombinatorRemainingSlot(rt)).* = 1;
     return state;
 }
@@ -2099,19 +1894,16 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
     defer rt.destroy();
 
     const values = try core.Object.create(rt, core.class.ids.array, null);
-    defer values.value().free(rt);
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var resolve_value = core.JSValue.functionBytecode(&fb.header);
-    var resolve_alive = true;
-    defer if (resolve_alive) resolve_value.free(rt);
+    const resolve_value = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -2133,8 +1925,6 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
     rt.gc.abortIncrementalCycle();
     core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
-    resolve_value.free(rt);
-    resolve_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2142,7 +1932,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
 pub fn promiseKeyedCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, reject_value: core.JSValue, values: *core.Object, keys: *core.Object) !*core.Object {
     const state = try promiseCombinatorState(rt, resolve_value, reject_value, values);
     errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
-    try state.setPromiseCombinatorKeys(rt, keys.value().dup());
+    try state.setPromiseCombinatorKeys(rt, keys.value());
     return state;
 }
 
@@ -2154,11 +1944,10 @@ pub fn promiseCombinatorCallback(
     index: u32,
 ) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .promise_combinator_element);
     (try callback_object.functionPromiseCombinatorModeSlot(rt)).* = @intFromEnum(mode);
-    try callback_object.setFunctionPromiseCombinatorState(rt, state.value().dup());
+    try callback_object.setFunctionPromiseCombinatorState(rt, state.value());
     (try callback_object.functionPromiseCombinatorIndexSlot(rt)).* = index;
     (try callback_object.functionPromiseCombinatorCalledSlot(rt)).* = false;
     return callback;
@@ -2173,8 +1962,7 @@ pub fn promiseRejectCapability(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
-    result.free(ctx.runtime);
+    _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
 }
 
 pub noinline fn promiseRejectCapabilityForError(
@@ -2187,7 +1975,6 @@ pub noinline fn promiseRejectCapabilityForError(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const reason = try promiseErrorValue(ctx, global, err);
-    defer reason.free(ctx.runtime);
     try promiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
 }
 
@@ -2200,13 +1987,13 @@ noinline fn rejectCombinatorAndRelease(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    capability: *PromiseCapabilityVm,
+    capability: *const PromiseCapabilityVm,
     err: anyerror,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 pub fn promiseResolveIdentity(
@@ -2221,12 +2008,11 @@ pub fn promiseResolveIdentity(
     const promise_object = objectFromValue(value) orelse return null;
     if (promise_object.class_id != core.class.ids.promise) return null;
     if (promiseConstructorDataValueForFastPath(promise_object)) |constructor| {
-        if (constructor.sameValue(constructor_value)) return value.dup();
+        if (constructor.sameValue(constructor_value)) return value;
         return null;
     }
     const constructor = try getValueProperty(ctx, output, global, value, core.atom.ids.constructor, caller_function, caller_frame);
-    defer constructor.free(ctx.runtime);
-    if (constructor.sameValue(constructor_value)) return value.dup();
+    if (constructor.sameValue(constructor_value)) return value;
     return null;
 }
 
@@ -2253,9 +2039,8 @@ pub fn promiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !co
     // the default species. The realm slot is populated at install time
     // (installPromiseExtras); the global read remains only as a fallback for
     // bare non-realm globals (unit-test contexts).
-    if (global.cachedRealmValue(ctx.runtime, .promise_constructor)) |stored| return stored.dup();
-    const promise_key = try ctx.runtime.internAtom("Promise");
-    defer ctx.runtime.atoms.free(promise_key);
+    if (global.cachedRealmValue(ctx.runtime, .promise_constructor)) |stored| return stored;
+    const promise_key = core.atom.ids.Promise;
     return try global.getProperty(promise_key);
 }
 
@@ -2268,20 +2053,16 @@ pub fn promiseSpeciesConstructor(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const default_constructor = try promiseDefaultConstructor(ctx, global);
-    errdefer default_constructor.free(ctx.runtime);
 
     const constructor_value = try getValueProperty(ctx, output, global, receiver, core.atom.ids.constructor, caller_function, caller_frame);
-    defer constructor_value.free(ctx.runtime);
     if (constructor_value.isUndefined()) return default_constructor;
     if (!constructor_value.isObject()) return error.TypeError;
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TypeError;
     const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
-    defer species_value.free(ctx.runtime);
     if (species_value.isUndefined() or species_value.isNull()) return default_constructor;
 
-    default_constructor.free(ctx.runtime);
-    return species_value.dup();
+    return species_value;
 }
 
 pub fn promiseConstructorRealmGlobal(constructor_value: core.JSValue, fallback_global: *core.Object) *core.Object {
@@ -2303,15 +2084,12 @@ pub fn promiseCombinatorCall(
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
-    var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
+    const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
 
-    const resolve_key = try ctx.runtime.internAtom("resolve");
-    defer ctx.runtime.atoms.free(resolve_key);
+    const resolve_key = core.atom.ids.resolve;
     const promise_resolve = getValueProperty(ctx, output, global, constructor_value, resolve_key, caller_function, caller_frame) catch |err| {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
-    defer promise_resolve.free(ctx.runtime);
     if (!isCallableValue(promise_resolve)) {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
@@ -2320,23 +2098,19 @@ pub fn promiseCombinatorCall(
     const iterator_method = getIteratorMethod(ctx, output, global, iterable) catch |err| {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
-    defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
     const iterator_value = callValueOrBytecodeRoot(ctx, output, global, iterable, iterator_method, &.{}, caller_function, caller_frame) catch |err| {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
-    defer iterator_value.free(ctx.runtime);
     _ = property_ops.expectObject(iterator_value) catch |err| {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
-    const next_key = try ctx.runtime.internAtom("next");
-    defer ctx.runtime.atoms.free(next_key);
+    const next_key = core.atom.ids.next;
     const iterator_next = getValueProperty(ctx, output, global, iterator_value, next_key, caller_function, caller_frame) catch |err| {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
-    defer iterator_next.free(ctx.runtime);
     if (!isCallableValue(iterator_next)) {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
@@ -2348,11 +2122,7 @@ pub fn promiseCombinatorCall(
     // `result instanceof Array` holds — qjs js_promise_all uses JS_NewArray
     // (quickjs.c:54012), not a null-proto object.
     const values = if (mode != .race) try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) else null;
-    const values_value = if (values) |array| array.value() else null;
-    defer if (values_value) |value| value.free(ctx.runtime);
     const state = if (values) |array| try promiseCombinatorState(ctx.runtime, capability.resolve, capability.reject, array) else null;
-    const state_value = if (state) |state_object| state_object.value() else null;
-    defer if (state_value) |value| value.free(ctx.runtime);
 
     var iterator_done = false;
     var index: u32 = 0;
@@ -2360,14 +2130,12 @@ pub fn promiseCombinatorCall(
         const next_result_value = callValueOrBytecodeRoot(ctx, output, global, iterator_value, iterator_next, &.{}, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer next_result_value.free(ctx.runtime);
         const next_result = property_ops.expectObject(next_result_value) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         const done_value = getValueProperty(ctx, output, global, next_result.value(), done_key, null, null) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer done_value.free(ctx.runtime);
         if (value_ops.isTruthy(done_value)) {
             iterator_done = true;
             break;
@@ -2375,7 +2143,6 @@ pub fn promiseCombinatorCall(
         const step_value = getValueProperty(ctx, output, global, next_result.value(), value_key, null, null) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer step_value.free(ctx.runtime);
 
         if (state) |state_object| {
             const remaining = state_object.promiseCombinatorRemaining(ctx.runtime);
@@ -2387,15 +2154,12 @@ pub fn promiseCombinatorCall(
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer next_promise.free(ctx.runtime);
 
-        const then_key = try ctx.runtime.internAtom("then");
-        defer ctx.runtime.atoms.free(then_key);
+        const then_key = core.atom.ids.then;
         const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer then_value.free(ctx.runtime);
         if (!isCallableValue(then_value)) {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
@@ -2407,26 +2171,23 @@ pub fn promiseCombinatorCall(
                 const callback = try promiseCombinatorCallback(ctx.runtime, global, .all_settled_fulfill, state.?, index);
                 break :blk callback;
             },
-            .any => capability.resolve.dup(),
-            .race => capability.resolve.dup(),
+            .any => capability.resolve,
+            .race => capability.resolve,
         };
-        defer on_fulfilled.free(ctx.runtime);
         const on_rejected = switch (mode) {
-            .all => capability.reject.dup(),
+            .all => capability.reject,
             .all_settled => blk: {
                 const callback = try promiseCombinatorCallback(ctx.runtime, global, .all_settled_reject, state.?, index);
                 break :blk callback;
             },
             .any => try promiseCombinatorCallback(ctx.runtime, global, .any_reject, state.?, index),
-            .race => capability.reject.dup(),
+            .race => capability.reject,
         };
-        defer on_rejected.free(ctx.runtime);
 
-        const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
+        _ = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
             if (!iterator_done) closeIteratorForAbruptCompletion(ctx, output, global, iterator_value);
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        then_result.free(ctx.runtime);
         index += 1;
     }
 
@@ -2437,23 +2198,20 @@ pub fn promiseCombinatorCall(
         if (next_remaining == 0) {
             switch (mode) {
                 .all, .all_settled => {
-                    const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()}, caller_function, caller_frame) catch |err| {
+                    _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{values.?.value()}, caller_function, caller_frame) catch |err| {
                         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
                     };
-                    result.free(ctx.runtime);
                 },
                 .any => {
                     const aggregate_error = try promiseAggregateError(ctx, global, values.?);
-                    defer aggregate_error.free(ctx.runtime);
-                    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{aggregate_error}, caller_function, caller_frame);
-                    result.free(ctx.runtime);
+                    _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{aggregate_error}, caller_function, caller_frame);
                 },
                 .race => {},
             }
         }
     }
 
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 pub fn promiseKeyedCombinatorCall(
@@ -2468,15 +2226,12 @@ pub fn promiseKeyedCombinatorCall(
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
-    var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
+    const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
 
-    const resolve_key = try ctx.runtime.internAtom("resolve");
-    defer ctx.runtime.atoms.free(resolve_key);
+    const resolve_key = core.atom.ids.resolve;
     const promise_resolve = getValueProperty(ctx, output, global, constructor_value, resolve_key, caller_function, caller_frame) catch |err| {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
     };
-    defer promise_resolve.free(ctx.runtime);
     if (!isCallableValue(promise_resolve)) {
         return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
     }
@@ -2492,32 +2247,23 @@ pub fn promiseKeyedCombinatorCall(
     defer core.Object.freeKeys(ctx.runtime, own_keys);
 
     const keys = try core.Object.createArray(ctx.runtime, null);
-    const keys_value = keys.value();
-    defer keys_value.free(ctx.runtime);
     const values = try core.Object.createArray(ctx.runtime, null);
-    const values_value = values.value();
-    defer values_value.free(ctx.runtime);
     const state = try promiseKeyedCombinatorState(ctx.runtime, capability.resolve, capability.reject, values, keys);
-    const state_value = state.value();
-    defer state_value.free(ctx.runtime);
 
     var index: u32 = 0;
     for (own_keys) |key| {
         const desc = proxyAwareOwnPropertyDescriptor(ctx, output, global, promises, key, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         } orelse continue;
-        defer desc.destroy(ctx.runtime);
         if (desc.enumerable != true) continue;
 
         const step_value = getValueProperty(ctx, output, global, promises_value, key, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer step_value.free(ctx.runtime);
 
         const key_value = proxyTrapKeyValue(ctx.runtime, key) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer key_value.free(ctx.runtime);
         try promiseSetArrayIndex(ctx.runtime, keys, index, key_value);
 
         const remaining = state.promiseCombinatorRemaining(ctx.runtime);
@@ -2527,14 +2273,11 @@ pub fn promiseKeyedCombinatorCall(
         const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer next_promise.free(ctx.runtime);
 
-        const then_key = try ctx.runtime.internAtom("then");
-        defer ctx.runtime.atoms.free(then_key);
+        const then_key = core.atom.ids.then;
         const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        defer then_value.free(ctx.runtime);
         if (!isCallableValue(then_value)) {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, error.TypeError, caller_function, caller_frame);
         }
@@ -2543,17 +2286,14 @@ pub fn promiseKeyedCombinatorCall(
             try promiseCombinatorCallback(ctx.runtime, global, .all_settled_keyed_fulfill, state, index)
         else
             try promiseCombinatorCallback(ctx.runtime, global, .all_keyed_resolve, state, index);
-        defer on_fulfilled.free(ctx.runtime);
         const on_rejected = if (all_settled)
             try promiseCombinatorCallback(ctx.runtime, global, .all_settled_keyed_reject, state, index)
         else
-            capability.reject.dup();
-        defer on_rejected.free(ctx.runtime);
+            capability.reject;
 
-        const then_result = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
+        _ = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        then_result.free(ctx.runtime);
         index += 1;
     }
 
@@ -2562,14 +2302,12 @@ pub fn promiseKeyedCombinatorCall(
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining == 0) {
         const keyed_result = try promiseKeyedResult(ctx.runtime, keys, values);
-        defer keyed_result.free(ctx.runtime);
-        const result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{keyed_result}, caller_function, caller_frame) catch |err| {
+        _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{keyed_result}, caller_function, caller_frame) catch |err| {
             return rejectCombinatorAndRelease(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
-        result.free(ctx.runtime);
     }
 
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 /// Per-method body for `Promise.resolve`, matching qjs
@@ -2599,11 +2337,9 @@ pub fn promiseResolveStaticCall(
     }
 
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
-    var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
-    const resolve_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
-    resolve_result.free(ctx.runtime);
-    return capability.releaseCallbacks(ctx.runtime);
+    const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
+    _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
+    return capability.promise;
 }
 
 pub fn promiseStaticCall(
@@ -2634,37 +2370,29 @@ pub fn promiseStaticCall(
         .resolve => unreachable,
         .reject => {
             const reason = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-            errdefer capability.deinit(ctx.runtime);
-            const reject_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
-            reject_result.free(ctx.runtime);
-            return capability.releaseCallbacks(ctx.runtime);
+            const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
+            _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
+            return capability.promise;
         },
         .try_ => {
             const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const callback_args = if (args.len >= 1) args[1..] else args[0..0];
-            var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-            errdefer capability.deinit(ctx.runtime);
+            const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
             const callback_result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback, callback_args, caller_function, caller_frame) catch |err| {
                 const reason = try promiseErrorValue(ctx, global, err);
-                defer reason.free(ctx.runtime);
-                const reject_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
-                reject_result.free(ctx.runtime);
-                return capability.releaseCallbacks(ctx.runtime);
+                _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{reason}, caller_function, caller_frame);
+                return capability.promise;
             };
-            defer callback_result.free(ctx.runtime);
-            const resolve_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{callback_result}, caller_function, caller_frame);
-            resolve_result.free(ctx.runtime);
-            return capability.releaseCallbacks(ctx.runtime);
+            _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{callback_result}, caller_function, caller_frame);
+            return capability.promise;
         },
         .with_resolvers => {
-            var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-            defer capability.deinit(ctx.runtime);
+            const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
             const result = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
             errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
-            try defineValueProperty(ctx.runtime, result, "promise", capability.promise);
-            try defineValueProperty(ctx.runtime, result, "resolve", capability.resolve);
-            try defineValueProperty(ctx.runtime, result, "reject", capability.reject);
+            try defineValueProperty(ctx.runtime, result, core.atom.ids.promise, capability.promise);
+            try defineValueProperty(ctx.runtime, result, core.atom.ids.resolve, capability.resolve);
+            try defineValueProperty(ctx.runtime, result, core.atom.ids.reject, capability.reject);
             return result.value();
         },
         else => unreachable,
@@ -2675,8 +2403,7 @@ pub const PromiseRejectionReason = struct {
     value: core.JSValue,
     from_exception: bool,
 
-    pub fn deinit(self: *PromiseRejectionReason, rt: *core.JSRuntime) void {
-        self.value.free(rt);
+    pub fn deinit(self: *PromiseRejectionReason, _: *core.JSRuntime) void {
         self.value = core.JSValue.undefinedValue();
         self.from_exception = false;
     }
@@ -2693,7 +2420,7 @@ pub fn promiseRejectionReason(
 ) HostError!PromiseRejectionReason {
     if (ctx.hasException()) {
         return .{
-            .value = ctx.runtime.current_exception.dup(),
+            .value = ctx.runtime.current_exception,
             .from_exception = true,
         };
     }
@@ -2709,7 +2436,7 @@ pub fn promiseRejectionReason(
             // completion (or retrying it) is not an option.  Use the same
             // allocation-free recursive-OOM fallback as Promise jobs.
             if (ctx.preallocated_oom_error) |preallocated| return .{
-                .value = preallocated.dup(),
+                .value = preallocated,
                 .from_exception = false,
             };
             return .{
@@ -2774,7 +2501,6 @@ pub fn asyncFunctionStart(
     call_entry_global: *core.Object,
 ) HostError!core.JSValue {
     const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
-    errdefer promise.free(ctx.runtime);
 
     const continuation_value = try createGeneratorObject(
         ctx,
@@ -2790,9 +2516,8 @@ pub fn asyncFunctionStart(
         call_entry_ctx,
         call_entry_global,
     );
-    defer continuation_value.free(ctx.runtime);
     const continuation = objectFromValue(continuation_value) orelse return error.TypeError;
-    try continuation.setOptionalValueSlot(ctx.runtime, continuation.generatorAsyncPromiseSlot(), promise.dup());
+    try continuation.setOptionalValueSlot(ctx.runtime, continuation.generatorAsyncPromiseSlot(), promise);
 
     try asyncFunctionRunAndSettle(
         call_entry_ctx,
@@ -2860,13 +2585,11 @@ pub fn asyncFunctionRunAndSettle(
     const result = asyncFunctionRunState(ctx, output, async_global, continuation, resume_value, resume_rejected) catch |err| {
         continuation.completeGeneratorExecution(ctx.runtime);
         const reason = try promiseErrorValue(ctx, async_global, err);
-        defer reason.free(ctx.runtime);
         try asyncFunctionSettle(ctx, output, async_global, continuation, reason, true, null, null);
         clearHandledRejectionException(ctx);
         asyncFunctionClearPromise(ctx.runtime, continuation);
         return;
     };
-    defer result.free(ctx.runtime);
 
     if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
         try asyncFunctionAwaitOrReject(ctx, output, async_global, continuation, result, null, null);
@@ -2890,7 +2613,6 @@ pub fn asyncFunctionAwaitOrReject(
     asyncFunctionAwait(ctx, output, global, continuation, awaited_value, caller_function, caller_frame) catch |err| {
         continuation.completeGeneratorExecution(ctx.runtime);
         const reason = try promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
         try asyncFunctionSettle(ctx, output, global, continuation, reason, true, caller_function, caller_frame);
         clearHandledRejectionException(ctx);
         asyncFunctionClearPromise(ctx.runtime, continuation);
@@ -2911,14 +2633,10 @@ pub fn asyncFunctionAwait(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
     const awaited = try promiseStaticCall(ctx, output, global, promise_constructor, &.{awaited_value}, .resolve, caller_function, caller_frame);
-    defer awaited.free(ctx.runtime);
 
     const on_fulfilled = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, false);
-    defer on_fulfilled.free(ctx.runtime);
     const on_rejected = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
-    defer on_rejected.free(ctx.runtime);
 
     // qjs js_async_function_resume (quickjs.c:21268-21290): the resume
     // callbacks attach through the INTERNAL perform_promise_then with
@@ -2934,10 +2652,9 @@ pub fn asyncFunctionResumeCallback(
     rejected: bool,
 ) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_function_resume);
-    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), continuation.value().dup());
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), continuation.value());
     (try callback_object.functionAsyncContinuationRejectedSlot(rt)).* = rejected;
     return callback;
 }
@@ -2978,11 +2695,8 @@ pub fn asyncFunctionSettle(
 
     const promise_value = continuation.generatorAsyncPromise() orelse return error.TypeError;
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise_value);
-    defer resolving.resolve.free(ctx.runtime);
-    defer resolving.reject.free(ctx.runtime);
     const settle = if (rejected) resolving.reject else resolving.resolve;
-    const result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{rooted_value}, caller_function, caller_frame);
-    result.free(ctx.runtime);
+    _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{rooted_value}, caller_function, caller_frame);
 }
 
 test "asyncFunctionSettle roots direct symbol result before promise stores it" {
@@ -2991,25 +2705,19 @@ test "asyncFunctionSettle roots direct symbol result before promise stores it" {
     const global = try testStandardGlobal(ctx);
     const continuation = try core.Object.create(rt, core.class.ids.generator, null);
     defer {
-        continuation.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
 
     const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
-    defer promise.free(rt);
-    try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise.dup());
+    try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-async-settle-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    const settle_value = try rt.symbolValue(symbol_atom);
-    var settle_value_alive = true;
-    defer if (settle_value_alive) settle_value.free(rt);
+    const settle_value = try rt.takeSymbolValue(symbol_atom);
     try asyncFunctionSettle(ctx, null, global, continuation, settle_value, false, null, null);
-    settle_value.free(rt);
-    settle_value_alive = false;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
@@ -3076,12 +2784,10 @@ pub fn asyncFromSyncIteratorThrow(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = wrapper;
-    const throw_key = try ctx.runtime.internAtom("throw");
-    defer ctx.runtime.atoms.free(throw_key);
+    const throw_key = core.atom.ids.throw;
     const throw_method = getValueProperty(ctx, output, global, sync_iterator, throw_key, caller_function, caller_frame) catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer throw_method.free(ctx.runtime);
     if (throw_method.isUndefined() or throw_method.isNull()) {
         // IteratorClose(sync_iter) with no pending exception; a close failure
         // rejects with that error, otherwise reject the TypeError
@@ -3090,12 +2796,10 @@ pub fn asyncFromSyncIteratorThrow(
             return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
         };
         const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
-        defer reason.free(ctx.runtime);
         return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(throw_method)) {
         const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
-        defer reason.free(ctx.runtime);
         return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     const result = if (args.len > 0)
@@ -3105,7 +2809,6 @@ pub fn asyncFromSyncIteratorThrow(
     const throw_result = result catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer throw_result.free(ctx.runtime);
     return asyncFromSyncIteratorContinuation(ctx, output, global, throw_result, sync_iterator, true, caller_function, caller_frame);
 }
 
@@ -3118,10 +2821,9 @@ pub fn asyncFromSyncIteratorCloseWrap(
     sync_iterator: core.JSValue,
 ) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_close_wrap);
-    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), sync_iterator.dup());
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), sync_iterator);
     return callback;
 }
 
@@ -3133,14 +2835,13 @@ pub fn asyncFromSyncIteratorCloseWrapCall(
     args: []const core.JSValue,
 ) HostError!?core.JSValue {
     const sync_iterator = function_object.functionAsyncContinuation() orelse return null;
-    const reason = if (args.len >= 1) args[0].dup() else core.JSValue.undefinedValue();
-    defer reason.free(ctx.runtime);
+    const reason = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     // JS_IteratorClose(…, TRUE): the close runs with the exception logically
     // pending — its own result and failures are discarded.
     iterator_ops.iteratorCloseValue(ctx, output, global, sync_iterator, null, null) catch {
         if (ctx.hasException()) ctx.clearException();
     };
-    _ = ctx.throwValue(reason.dup());
+    _ = ctx.throwValue(reason);
     return error.JSException;
 }
 
@@ -3155,15 +2856,12 @@ pub fn asyncFromSyncIteratorNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const next_method = if (wrapper.iteratorNext()) |stored| stored.dup() else blk: {
-        const next_key = try ctx.runtime.internAtom("next");
-        defer ctx.runtime.atoms.free(next_key);
+    const next_method = if (wrapper.iteratorNext()) |stored| stored else blk: {
+        const next_key = core.atom.ids.next;
         const method = try getValueProperty(ctx, output, global, sync_iterator, next_key, caller_function, caller_frame);
-        errdefer method.free(ctx.runtime);
         if (!isCallableValue(method)) return error.TypeError;
         break :blk method;
     };
-    defer next_method.free(ctx.runtime);
     const result = if (args.len > 0)
         callValueOrBytecodeRoot(ctx, output, global, sync_iterator, next_method, args[0..1], caller_function, caller_frame)
     else
@@ -3171,7 +2869,6 @@ pub fn asyncFromSyncIteratorNext(
     const next_result = result catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer next_result.free(ctx.runtime);
     _ = receiver;
     return asyncFromSyncIteratorContinuation(ctx, output, global, next_result, sync_iterator, true, caller_function, caller_frame);
 }
@@ -3187,13 +2884,10 @@ pub fn asyncFromSyncIteratorReturn(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = wrapper;
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
+    const return_key = core.atom.ids.return_;
     const return_method = try getValueProperty(ctx, output, global, sync_iterator, return_key, caller_function, caller_frame);
-    defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-        defer done_result.free(ctx.runtime);
         return core.promise.fulfilledWithPrototype(ctx, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) return error.TypeError;
@@ -3204,7 +2898,6 @@ pub fn asyncFromSyncIteratorReturn(
     const return_result = result catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer return_result.free(ctx.runtime);
     return asyncFromSyncIteratorContinuation(ctx, output, global, return_result, sync_iterator, false, caller_function, caller_frame);
 }
 
@@ -3218,30 +2911,26 @@ pub fn asyncFromSyncIteratorContinuation(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    var capability = try defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
+    const capability = try defaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
 
     const result_object = property_ops.expectObject(result) catch |err| {
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     };
     const done_key = core.atom.predefinedId("done", .string) orelse return error.TypeError;
     const done_value = getValueProperty(ctx, output, global, result_object.value(), done_key, caller_function, caller_frame) catch |err| {
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     };
-    defer done_value.free(ctx.runtime);
     const done = valueTruthy(done_value);
 
     const value_key = core.atom.predefinedId("value", .string) orelse return error.TypeError;
     const value = getValueProperty(ctx, output, global, result_object.value(), value_key, caller_function, caller_frame) catch |err| {
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     };
-    defer value.free(ctx.runtime);
 
     const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
     const value_wrapper_promise = promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, caller_function, caller_frame) catch |err| {
         // PromiseResolve threw: close the sync iterator with the exception
         // pending, then reject (quickjs.c:54544-54549).
@@ -3251,12 +2940,10 @@ pub fn asyncFromSyncIteratorContinuation(
             };
         }
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     };
-    defer value_wrapper_promise.free(ctx.runtime);
 
     const unwrap = try asyncFromSyncIteratorUnwrap(ctx.runtime, global, done);
-    defer unwrap.free(ctx.runtime);
 
     // onRejected close-wrap only when `!done && magic != GEN_MAGIC_RETURN`
     // (quickjs.c:54570-54579).
@@ -3264,7 +2951,6 @@ pub fn asyncFromSyncIteratorContinuation(
         try asyncFromSyncIteratorCloseWrap(ctx.runtime, global, sync_iterator)
     else
         core.JSValue.undefinedValue();
-    defer close_wrap.free(ctx.runtime);
 
     performPromiseThen(
         ctx,
@@ -3277,9 +2963,9 @@ pub fn asyncFromSyncIteratorContinuation(
         capability.reject,
     ) catch |err| {
         try promiseRejectCapabilityForError(ctx, output, global, capability.reject, err, caller_function, caller_frame);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     };
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 pub fn asyncFromSyncIteratorUnwrap(
@@ -3288,7 +2974,6 @@ pub fn asyncFromSyncIteratorUnwrap(
     done: bool,
 ) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_unwrap);
     (try callback_object.functionAsyncFromSyncUnwrapDoneSlot(rt)).* = if (done) 2 else 1;
@@ -3335,13 +3020,12 @@ pub fn promiseFinallyCallback(
     defer root_frame.deactivate(rt);
 
     const callback = try builtin_glue.createDataFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
-    errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .promise_finally_callback);
     (try callback_object.functionPromiseFinallyModeSlot(rt)).* = @intFromEnum(mode);
-    if (payload != null) try callback_object.setFunctionPromiseFinallyPayload(rt, rooted_payload.dup());
-    if (on_finally != null) try callback_object.setFunctionPromiseFinallyCallback(rt, rooted_on_finally.dup());
-    if (constructor_value != null) try callback_object.setFunctionPromiseFinallyConstructor(rt, rooted_constructor.dup());
+    if (payload != null) try callback_object.setFunctionPromiseFinallyPayload(rt, rooted_payload);
+    if (on_finally != null) try callback_object.setFunctionPromiseFinallyCallback(rt, rooted_on_finally);
+    if (constructor_value != null) try callback_object.setFunctionPromiseFinallyConstructor(rt, rooted_constructor);
     return callback;
 }
 
@@ -3357,9 +3041,7 @@ test "promiseFinallyCallback roots direct symbol payload while allocating callba
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const payload_value = try rt.symbolValue(symbol_atom);
-    var payload_alive = true;
-    defer if (payload_alive) payload_value.free(rt);
+    const payload_value = try rt.takeSymbolValue(symbol_atom);
     const callback = try promiseFinallyCallback(
         rt,
         global,
@@ -3368,18 +3050,12 @@ test "promiseFinallyCallback roots direct symbol payload while allocating callba
         null,
         null,
     );
-    payload_value.free(rt);
-    payload_alive = false;
-    var callback_alive = true;
-    defer if (callback_alive) callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = callback_object.functionPromiseFinallyPayload() orelse return error.TypeError;
     try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
 
-    callback.free(rt);
-    callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -3405,11 +3081,11 @@ pub fn promiseFinallyCallbackCall(
     switch (mode) {
         .return_value => {
             const payload = function_object.functionPromiseFinallyPayload() orelse return error.TypeError;
-            return payload.dup();
+            return payload;
         },
         .throw_reason => {
             const payload = function_object.functionPromiseFinallyPayload() orelse return error.TypeError;
-            _ = ctx.throwValue(payload.dup());
+            _ = ctx.throwValue(payload);
             return error.JSException;
         },
         .fulfill, .reject => {
@@ -3418,9 +3094,7 @@ pub fn promiseFinallyCallbackCall(
             const constructor_value = function_object.functionPromiseFinallyConstructor() orelse return error.TypeError;
 
             const callback_result = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), on_finally, &.{}, caller_function, caller_frame);
-            defer callback_result.free(ctx.runtime);
             const resolved = try promiseStaticCall(ctx, output, global, constructor_value, &.{callback_result}, .resolve, caller_function, caller_frame);
-            defer resolved.free(ctx.runtime);
 
             const continuation = try promiseFinallyCallback(
                 ctx.runtime,
@@ -3430,12 +3104,9 @@ pub fn promiseFinallyCallbackCall(
                 null,
                 null,
             );
-            defer continuation.free(ctx.runtime);
 
-            const then_key = try ctx.runtime.internAtom("then");
-            defer ctx.runtime.atoms.free(then_key);
+            const then_key = core.atom.ids.then;
             const then_value = try getValueProperty(ctx, output, global, resolved, then_key, caller_function, caller_frame);
-            defer then_value.free(ctx.runtime);
             if (!isCallableValue(then_value)) return error.TypeError;
             return try callValueOrBytecodeRoot(ctx, output, global, resolved, then_value, &.{continuation}, caller_function, caller_frame);
         },
@@ -3452,24 +3123,19 @@ pub fn promiseFinally(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const constructor_value = try promiseSpeciesConstructor(ctx, output, global, receiver, caller_function, caller_frame);
-    defer constructor_value.free(ctx.runtime);
 
     const on_finally = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const then_fulfilled = if (isCallableValue(on_finally))
         try promiseFinallyCallback(ctx.runtime, global, .fulfill, null, on_finally, constructor_value)
     else
-        on_finally.dup();
-    defer then_fulfilled.free(ctx.runtime);
+        on_finally;
     const then_rejected = if (isCallableValue(on_finally))
         try promiseFinallyCallback(ctx.runtime, global, .reject, null, on_finally, constructor_value)
     else
-        on_finally.dup();
-    defer then_rejected.free(ctx.runtime);
+        on_finally;
 
-    const then_atom = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_atom);
+    const then_atom = core.atom.ids.then;
     const then_value = try getValueProperty(ctx, output, global, receiver, then_atom, caller_function, caller_frame);
-    defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return error.TypeError;
     return callValueOrBytecodeRoot(ctx, output, global, receiver, then_value, &.{ then_fulfilled, then_rejected }, caller_function, caller_frame);
 }
@@ -3496,22 +3162,20 @@ pub fn performPromiseThen(
     if (object.promiseResultSlot().* == null and !object.promiseIsRejected() and
         atomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled))
     {
-        try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled.dup());
+        try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled);
         try object.setPromiseReactionArg(ctx.runtime, null);
         return;
     }
     const stored_on_fulfilled = if (isCallableValue(on_fulfilled)) on_fulfilled else core.JSValue.undefinedValue();
     const stored_on_rejected = if (isCallableValue(on_rejected)) on_rejected else core.JSValue.undefinedValue();
     const reaction = try promiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, resolve_value, reject_value);
-    defer reaction.free(ctx.runtime);
     if (object.promiseResultSlot().* == null) {
         try appendPromiseReaction(ctx.runtime, object, reaction);
         if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
         return;
     }
 
-    const result_value = if (object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    defer result_value.free(ctx.runtime);
+    const result_value = if (object.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
     var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
@@ -3541,7 +3205,6 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
 
     const reason = core.JSValue.int32(73);
     const promise_value = try core.promise.rejectedWithUnhandledPrototype(ctx, reason, null);
-    defer promise_value.free(rt);
     try std.testing.expect(ctx.hasUnhandledRejection());
     try std.testing.expect(ctx.hasException());
     try std.testing.expect(ctx.runtime.current_exception.sameValue(reason));
@@ -3613,16 +3276,14 @@ pub fn promiseThen(
         return error.TypeError;
     }
     const constructor_value = try promiseSpeciesConstructor(ctx, output, global, receiver, caller_function, caller_frame);
-    defer constructor_value.free(ctx.runtime);
-    var capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-    errdefer capability.deinit(ctx.runtime);
+    const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
     const on_fulfilled = if (is_catch) core.JSValue.undefinedValue() else if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const on_rejected = if (is_catch) (if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) else if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const stored_on_fulfilled = if (isCallableValue(on_fulfilled)) on_fulfilled else core.JSValue.undefinedValue();
     const stored_on_rejected = if (isCallableValue(on_rejected)) on_rejected else core.JSValue.undefinedValue();
     if (object.promiseResultSlot().* == null) {
         if (!object.promiseIsRejected() and atomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled)) {
-            try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled.dup());
+            try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled);
             try object.setPromiseReactionArg(ctx.runtime, null);
             // The single reaction callback runs `on_fulfilled` when the
             // waitAsync promise settles; settlePendingPromiseReaction then fires
@@ -3632,22 +3293,18 @@ pub fn promiseThen(
             // result — otherwise `waitAsync(...).value.then(a).then(b)` drops the
             // chain after the first reaction (b never runs).
             const chain_reaction = try promiseReactionRecord(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), capability.resolve, capability.reject);
-            defer chain_reaction.free(ctx.runtime);
             try appendPromiseReaction(ctx.runtime, object, chain_reaction);
             if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
-            return capability.releaseCallbacks(ctx.runtime);
+            return capability.promise;
         }
         const reaction = try promiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, capability.resolve, capability.reject);
-        defer reaction.free(ctx.runtime);
         try appendPromiseReaction(ctx.runtime, object, reaction);
         if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
-        return capability.releaseCallbacks(ctx.runtime);
+        return capability.promise;
     }
-    const result_value = if (object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    defer result_value.free(ctx.runtime);
+    const result_value = if (object.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
 
     const reaction = try promiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, capability.resolve, capability.reject);
-    defer reaction.free(ctx.runtime);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
     var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
@@ -3661,7 +3318,7 @@ pub fn promiseThen(
     ctx.runtime.job_queue.enqueueReserved(prepared_job);
     prepared_job_owned = false;
     job_slot_reserved = false;
-    return capability.releaseCallbacks(ctx.runtime);
+    return capability.promise;
 }
 
 pub fn promiseCatchGeneric(
@@ -3671,10 +3328,8 @@ pub fn promiseCatchGeneric(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const then_atom = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_atom);
+    const then_atom = core.atom.ids.then;
     const then_value = try getValueProperty(ctx, output, global, receiver, then_atom, null, null);
-    defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return error.TypeError;
     const on_rejected = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const catch_args = [_]core.JSValue{ core.JSValue.undefinedValue(), on_rejected };
@@ -3688,10 +3343,8 @@ pub fn settlePendingPromiseReaction(
     promise: *core.Object,
 ) !void {
     const callback = promise.promiseReactionCallback() orelse return;
-    var callback_value = callback.dup();
-    defer callback_value.free(ctx.runtime);
-    var arg = if (promise.promiseReactionArg()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    defer arg.free(ctx.runtime);
+    var callback_value = callback;
+    var arg = if (promise.promiseReactionArg()) |stored| stored else core.JSValue.undefinedValue();
     var root_frame = core.runtime.rootValues(.{ &callback_value, &arg });
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
@@ -3702,32 +3355,23 @@ pub fn settlePendingPromiseReaction(
     const callback_args = [_]core.JSValue{arg};
     const callback_result = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback_value, &callback_args, null, null) catch |err| {
         const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
-        defer rejected.free(ctx.runtime);
         const rejected_object = objectFromValue(rejected) orelse return error.TypeError;
         const is_rejected = rejected_object.promiseIsRejected();
-        const next_result = if (rejected_object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-        var next_result_owned = true;
-        defer if (next_result_owned) next_result.free(ctx.runtime);
+        const next_result = if (rejected_object.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
         var prepared_reactions = try preparePromiseReactionJobs(ctx, promise, next_result, is_rejected);
         errdefer prepared_reactions.deinit(ctx.runtime);
         promise.promiseIsRejectedSlot().* = is_rejected;
         try promise.setPromiseResult(ctx.runtime, next_result);
-        next_result_owned = false;
         prepared_reactions.commit(ctx, promise);
         return;
     };
-    defer callback_result.free(ctx.runtime);
     if (promise.promiseResult() != null or promise.promiseReactionCallback() != null) return;
-    if (promise.promiseResult()) |stored| stored.free(ctx.runtime);
     if (objectFromValue(callback_result)) |result_promise| {
         if (result_promise.class_id == core.class.ids.promise and result_promise.promiseIsRejected()) {
-            const next_result = if (result_promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-            var next_result_owned = true;
-            defer if (next_result_owned) next_result.free(ctx.runtime);
+            const next_result = if (result_promise.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
             var prepared_reactions = try preparePromiseReactionJobs(ctx, promise, next_result, true);
             errdefer prepared_reactions.deinit(ctx.runtime);
             try promise.setPromiseResult(ctx.runtime, next_result);
-            next_result_owned = false;
             promise.promiseIsRejectedSlot().* = true;
             prepared_reactions.commit(ctx, promise);
             return;
@@ -3735,7 +3379,7 @@ pub fn settlePendingPromiseReaction(
     }
     var prepared_reactions = try preparePromiseReactionJobs(ctx, promise, callback_result, false);
     errdefer prepared_reactions.deinit(ctx.runtime);
-    try promise.setPromiseResult(ctx.runtime, callback_result.dup());
+    try promise.setPromiseResult(ctx.runtime, callback_result);
     promise.promiseIsRejectedSlot().* = false;
     prepared_reactions.commit(ctx, promise);
 }
@@ -3746,7 +3390,6 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     const global = try testStandardGlobal(ctx);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer {
-        promise.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
@@ -3759,16 +3402,14 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(callback_symbol);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(callback_symbol);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var callback = core.JSValue.functionBytecode(&fb.header);
-    var callback_alive = true;
-    defer if (callback_alive) callback.free(rt);
+    const callback = core.JSValue.functionBytecode(&fb.header);
     const arg_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-arg-symbol");
-    const arg_value = try rt.symbolValue(arg_symbol);
-    try promise.setPromiseReactionCallback(rt, callback.dup());
+    const arg_value = try rt.takeSymbolValue(arg_symbol);
+    try promise.setPromiseReactionCallback(rt, callback);
     try promise.setPromiseReactionArg(rt, arg_value);
 
     const old_threshold = rt.gcThreshold();
@@ -3787,8 +3428,6 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     try std.testing.expectEqual(arg_symbol, generator.generatorArgs()[0].asSymbolAtom().?);
 
     try promise.setPromiseResult(rt, null);
-    callback.free(rt);
-    callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(callback_symbol) == null);
     try std.testing.expect(rt.atoms.name(arg_symbol) == null);
@@ -3979,7 +3618,6 @@ pub fn drainOnePendingJob(
     }
     if (result) |value| {
         const status: jobs_mod.RunOneStatus = if (value.isException()) .exception else .success;
-        value.free(job_ctx.runtime);
         if (status == .exception) return .exception;
     }
     pollGCSafePoint(job_ctx) catch |err| {
@@ -4004,22 +3642,17 @@ pub fn awaitThenableValue(
     const awaited_object = objectFromValue(awaited) orelse return null;
     if (awaited_object.class_id == core.class.ids.promise) return null;
 
-    const then_key = try ctx.runtime.internAtom("then");
-    defer ctx.runtime.atoms.free(then_key);
+    const then_key = core.atom.ids.then;
     const then_value = try getValueProperty(ctx, output, global, awaited, then_key, caller_function, caller_frame);
-    defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return null;
 
     const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
-    defer promise.free(ctx.runtime);
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
     const resolve = resolving.resolve;
-    defer resolve.free(ctx.runtime);
     const reject = resolving.reject;
-    defer reject.free(ctx.runtime);
 
-    const then_result = callValueOrBytecodeRoot(ctx, output, global, awaited, then_value, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
+    _ = callValueOrBytecodeRoot(ctx, output, global, awaited, then_value, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
         var reason = try promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);
         try promise_object.setPromiseResult(ctx.runtime, reason.value);
@@ -4028,7 +3661,6 @@ pub fn awaitThenableValue(
         reason.commit(ctx);
         return try finishAwaitedPromise(ctx, promise_object);
     };
-    then_result.free(ctx.runtime);
 
     // resolve(anotherThenable) inside `then` enqueues a nested thenable job
     // (js_promise_resolve_function_call -> JS_EnqueueJob). This helper serves
@@ -4041,10 +3673,9 @@ pub fn awaitThenableValue(
 }
 
 pub fn finishAwaitedPromise(ctx: *core.JSContext, promise: *core.Object) !core.JSValue {
-    const result = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    errdefer result.free(ctx.runtime);
+    const result = if (promise.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
     if (promise.promiseIsRejected()) {
-        _ = ctx.throwValue(result.dup());
+        _ = ctx.throwValue(result);
         return error.JSException;
     }
     return result;
@@ -4058,9 +3689,7 @@ pub fn rejectModuleNamespaceSuperSet(ctx: *core.JSContext, receiver: core.JSValu
     // reads the live export and must propagate ReferenceError while it is TDZ.
     // Only a successful/absent descriptor reaches the namespace write
     // rejection and becomes TypeError.
-    if (try receiver_object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-        desc.destroy(ctx.runtime);
-    }
+    _ = try receiver_object.getOwnProperty(ctx.runtime, atom_id);
     return error.TypeError;
 }
 

@@ -7,7 +7,6 @@ const construct_mod = @import("construct.zig");
 const core = @import("../core/root.zig");
 const date_ops = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
-const property_ops = @import("property_ops.zig");
 const std = @import("std");
 const value_ops = @import("value_ops.zig");
 
@@ -115,7 +114,7 @@ pub fn constructBuiltinSuperConstructor(
     var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
     if (std.mem.eql(u8, name, "Object")) {
-        if (new_target.sameValue(constructor) and args.len >= 1 and args[0].isObject()) return args[0].dup();
+        if (new_target.sameValue(constructor) and args.len >= 1 and args[0].isObject()) return args[0];
         const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
         return instance.value();
     }
@@ -140,7 +139,6 @@ pub fn constructBuiltinSuperConstructor(
             if (args[0].isBigInt())
                 break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, args[0]));
             const coerced = try coercion_ops.toPrimitiveForNumber(ctx, output, global, args[0]);
-            defer coerced.free(ctx.runtime);
             if (coerced.isBigInt())
                 break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, coerced));
             break :blk try value_ops.toNumberValue(ctx.runtime, coerced);

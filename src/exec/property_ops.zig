@@ -30,7 +30,7 @@ pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.A
 
 pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
-    if (object_value.isGlobal() and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
+    if (object_value.isGlobal() and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value();
     return try object_value.getProperty(atom_id);
 }
 

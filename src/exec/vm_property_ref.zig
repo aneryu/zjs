@@ -4,7 +4,6 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 
@@ -19,15 +18,7 @@ const varRefCellFromValue = slot_ops.varRefCellFromValue;
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const vm_property = @import("vm_property.zig");
 const Step = vm_property.Step;
-const decodeGlobalDataGet = vm_property.decodeGlobalDataGet;
-const frameHasVarRefBinding = vm_property.frameHasVarRefBinding;
 const hasObjectBinding = vm_property.hasObjectBinding;
-const stringFromValue = vm_property.stringFromValue;
-const varRefReadableBorrowed = vm_property.varRefReadableBorrowed;
-
-const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyValueForFastPath;
-const globalWritableDataStoreAvailableForFastPath = property_direct.globalWritableDataStoreAvailableForFastPath;
-const setGlobalWritableDataStoreForFastPathOwned = property_direct.setGlobalWritableDataStoreForFastPathOwned;
 
 const op = bytecode.opcode.op;
 
@@ -68,10 +59,8 @@ fn dynEnvProbeAccess(
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj_value = stack.peek() orelse return error.StackUnderflow;
-    defer obj_value.free(ctx.runtime);
     const object = property_ops.expectObject(obj_value) catch {
-        const dropped = try stack.pop();
-        dropped.free(ctx.runtime);
+        _ = try stack.pop();
         return .continue_loop;
     };
     const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
@@ -86,8 +75,7 @@ fn dynEnvProbeAccess(
     else
         false;
     if (!has_binding or blocked) {
-        const dropped = try stack.pop();
-        dropped.free(ctx.runtime);
+        _ = try stack.pop();
         return .continue_loop;
     }
     const still_has_binding = if (flags.kind == .read or flags.kind == .get_ref)
@@ -107,9 +95,7 @@ fn dynEnvProbeAccess(
                 try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame)
             else
                 core.JSValue.undefinedValue();
-            errdefer value.free(ctx.runtime);
-            const dropped = try stack.pop();
-            dropped.free(ctx.runtime);
+            _ = try stack.pop();
             try stack.pushOwned(value);
         },
         .delete => {
@@ -119,29 +105,25 @@ fn dynEnvProbeAccess(
                 if (object.findProperty(atom_id)) |index| {
                     if (object.asVarRefAt(index)) |cell| {
                         if (cell.varRefIsDeletableSlot().*) {
-                            deleted_cell_value = cell.valueRef().dup();
+                            deleted_cell_value = cell.valueRef();
                             has_deleted_cell = true;
                         }
                     }
                 }
             }
-            defer if (has_deleted_cell) deleted_cell_value.free(ctx.runtime);
             const deleted = object.deleteProperty(ctx.runtime, atom_id);
             if (deleted and has_deleted_cell) {
                 if (varRefCellFromValue(deleted_cell_value)) |cell| {
-                    const old_value = cell.varRefValueSlot().*;
                     cell.varRefValueSlot().* = core.JSValue.uninitialized();
                     cell.is_lexical = false;
                     cell.varRefIsConstSlot().* = false;
-                    old_value.free(ctx.runtime);
                 }
             }
             if (!deleted and function.isStrictMode()) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
-            const dropped = try stack.pop();
-            dropped.free(ctx.runtime);
+            _ = try stack.pop();
             try stack.pushOwned(core.JSValue.boolean(deleted));
         },
         .get_ref => {
@@ -149,12 +131,10 @@ fn dynEnvProbeAccess(
                 try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame)
             else
                 core.JSValue.undefinedValue();
-            errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
         .make_ref => {
             const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-            errdefer key_value.free(ctx.runtime);
             try stack.pushOwned(key_value);
         },
         .put => unreachable,
@@ -185,14 +165,12 @@ pub noinline fn makeSlotRef(
         },
         op.make_var_ref_ref => blk: {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, idx);
-            break :blk frame.var_refs[idx].retain();
+            break :blk frame.var_refs[idx];
         },
         else => unreachable,
     };
-    defer cell.release(ctx.runtime);
     const ref_value = cell.valueRef();
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    errdefer key_value.free(ctx.runtime);
     try stack.push(ref_value);
     try stack.pushOwned(key_value);
 }
@@ -234,7 +212,6 @@ pub fn makeVarRef(
         break :object_value if (has_global_binding) global_value else core.JSValue.undefinedValue();
     };
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     try stack.push(object_value);
     try stack.push(key_value);
 }
@@ -264,14 +241,11 @@ pub fn getRefValue(
     frame: *frame_mod.Frame,
 ) !void {
     if (stack.len() < 2) return error.StackUnderflow;
-    const obj = stack.values[stack.len() - 2].dup();
-    defer obj.free(ctx.runtime);
-    const key = stack.values[stack.len() - 1].dup();
-    defer key.free(ctx.runtime);
+    const obj = stack.values[stack.len() - 2];
+    const key = stack.values[stack.len() - 1];
     if (obj.isUndefined()) return error.ReferenceError;
     if (varRefCellFromValue(obj) != null) {
-        const value = slot_ops.adapterValueDup(obj);
-        errdefer value.free(ctx.runtime);
+        const value = slot_ops.adapterValueBorrow(obj);
         if (value.isUninitialized()) return error.ReferenceError;
         try stack.pushOwned(value);
         return;
@@ -289,7 +263,6 @@ pub fn getRefValue(
         return;
     }
     const value = try object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
-    errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
 
@@ -318,23 +291,18 @@ pub fn putRefValue(
     frame: *frame_mod.Frame,
 ) !void {
     const value = try stack.pop();
-    errdefer value.free(ctx.runtime);
     const key = try stack.pop();
-    defer key.free(ctx.runtime);
     var obj = try stack.pop();
-    defer obj.free(ctx.runtime);
 
     const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
     if (obj.isUndefined()) {
         if (runtime_strict) return error.ReferenceError;
-        const global_value = global.value().dup();
-        obj.free(ctx.runtime);
+        const global_value = global.value();
         obj = global_value;
     }
     if (varRefCellFromValue(obj)) |cell| {
         if (cell.varRefIsFunctionNameSlot().*) {
             if (!runtime_strict) {
-                value.free(ctx.runtime);
                 return;
             }
             _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
@@ -344,19 +312,16 @@ pub fn putRefValue(
             _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
             return error.TypeError;
         }
-        var ref_slot = obj.dup();
-        defer ref_slot.free(ctx.runtime);
+        var ref_slot = obj;
         slot_ops.replaceAdapterOwned(ctx, &ref_slot, value);
         return;
     }
-    defer value.free(ctx.runtime);
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
     const object = try property_ops.expectObject(obj);
     const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
     if (!still_exists and runtime_strict) return error.ReferenceError;
-    const result = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
-    result.free(ctx.runtime);
+    _ = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
 }
 
 pub noinline fn putRefValueVm(
@@ -390,7 +355,6 @@ fn dynEnvProbeStore(
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     if (obj.isUndefined()) return .continue_loop;
     {
         const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
@@ -415,13 +379,11 @@ fn dynEnvProbeStore(
         return error.ReferenceError;
     }
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
-    const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+    _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
-    result.free(ctx.runtime);
     return .done;
 }
 
@@ -456,9 +418,7 @@ pub noinline fn deletePropertyVm(
     catch_target: *?usize,
 ) !Step {
     const prop = try stack.pop();
-    defer prop.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     // qjs js_operator_delete (quickjs.c:16072) runs JS_ValueToAtom on the key
     // FIRST: user toString/Symbol.toPrimitive side effects (and their
     // exceptions) fire before any base check.
@@ -474,11 +434,10 @@ pub noinline fn deletePropertyVm(
     // JS_DeleteProperty (quickjs.c:10920) converts the base via JS_ToObject and
     // runs the real delete on the wrapper, so string-exotic non-configurable
     // props (indices, .length) report false and strict mode throws.
-    const obj_value = if (obj.isObject()) obj.dup() else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
+    const obj_value = if (obj.isObject()) obj else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer obj_value.free(ctx.runtime);
     const object = try property_ops.expectObject(obj_value);
     const deleted = if (object.proxyTarget() != null) blk: {
         break :blk object_ops.deleteValueProperty(ctx, output, global, obj_value, object, atom_id, function, frame) catch |err| {

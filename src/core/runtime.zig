@@ -423,14 +423,9 @@ pub const ValueRootBuffer = struct {
         if (source.len == 0) return .{};
 
         const values = try rt.memory.alloc(JSValue, source.len);
-        var initialized: usize = 0;
-        errdefer {
-            for (values[0..initialized]) |value| value.free(rt);
-            rt.memory.free(JSValue, values);
-        }
+        errdefer rt.memory.free(JSValue, values);
         for (source, 0..) |value, idx| {
-            values[idx] = value.dup();
-            initialized += 1;
+            values[idx] = value;
         }
         return .{ .values = values };
     }
@@ -438,11 +433,6 @@ pub const ValueRootBuffer = struct {
     pub fn deinit(self: *ValueRootBuffer, rt: *JSRuntime) void {
         const values = self.values;
         self.values = &.{};
-        for (values) |*slot| {
-            const value = slot.*;
-            slot.* = JSValue.undefinedValue();
-            value.free(rt);
-        }
         if (values.len != 0) rt.memory.free(JSValue, values);
     }
 
@@ -461,14 +451,13 @@ pub const CellRootBuffer = struct {
     pub fn initCopy(rt: *JSRuntime, source: []const *var_ref_mod.VarRef) !CellRootBuffer {
         if (source.len == 0) return .{};
         const cells = try rt.memory.alloc(*var_ref_mod.VarRef, source.len);
-        for (source, 0..) |cell, idx| cells[idx] = cell.dupCell();
+        for (source, 0..) |cell, idx| cells[idx] = cell;
         return .{ .cells = cells };
     }
 
     pub fn deinit(self: *CellRootBuffer, rt: *JSRuntime) void {
         const cells = self.cells;
         self.cells = &.{};
-        for (cells) |cell| cell.freeCell(rt);
         if (cells.len != 0) rt.memory.free(*var_ref_mod.VarRef, cells);
     }
 
@@ -490,6 +479,23 @@ pub const ObjectRootValue = struct {
 /// `*Shape` local as a root unless it is named here.
 pub const HeaderRootValue = struct {
     header: *gc.Header,
+};
+
+/// TGC S3 §4 class B: an atom id held by a native frame.
+///
+/// An `atom.Atom` is a bare `u32`. Neither a `ValueRootValue` (there is no
+/// JSValue) nor the conservative stack scan (an integer is not a pointer into
+/// the heap) can report it, so a native frame that holds an id across a point
+/// where JS can run or the allocator can collect must name it here.
+pub const AtomRootSlot = union(enum) {
+    /// One `atom.Atom` local, read through its address so a re-assignment
+    /// inside the window is visible to the tracer.
+    single: *const atom.Atom,
+    /// A native `[]Atom` array under construction. The pointer is to the
+    /// slice header, not to its bytes, so `appendOwnedAtom`-style reallocation
+    /// mid-build stays covered and the partially filled array is traced at its
+    /// current length.
+    list: *const []atom.Atom,
 };
 
 /// Precise ValueRootFrame linking. Always on: tests need it because they have
@@ -514,7 +520,6 @@ pub const ValueRootFrameStats = struct {
     linked: usize = 0,
     container_linked: usize = 0,
     scalar_linked: usize = 0,
-    scalar_skipped: usize = 0,
 
     pub fn reset(self: *@This()) void {
         self.* = .{};
@@ -531,6 +536,9 @@ pub const ValueRootFrame = struct {
     values: []const ValueRootValue = &.{},
     objects: []const ObjectRootValue = &.{},
     headers: if (value_root_frames_enabled) []const HeaderRootValue else void =
+        if (value_root_frames_enabled) &.{} else {},
+    /// TGC S3 §4 class B atom-id roots; see `AtomRootSlot`.
+    atoms: if (value_root_frames_enabled) []const AtomRootSlot else void =
         if (value_root_frames_enabled) &.{} else {},
 
     /// True when this frame roots a native JSValue/cell array or window.
@@ -550,6 +558,14 @@ pub const ValueRootFrame = struct {
         return self.slices.len != 0;
     }
 
+    /// Atom ids can never be recovered by the conservative scanner, so a
+    /// frame naming any must link even in the container-only production
+    /// policy that drops scalar JSValue frames.
+    pub inline fn hasAtomRoots(self: *const ValueRootFrame) bool {
+        if (comptime !value_root_frames_enabled) return false;
+        return self.atoms.len != 0;
+    }
+
     /// Activate this frame at its final stack address. The matching
     /// `deactivate` must run before the frame or any referenced root storage
     /// leaves scope. Default `rc` production erases both operations at
@@ -559,7 +575,7 @@ pub const ValueRootFrame = struct {
             const container = self.hasNativeWindow();
             if (comptime builtin.is_test) value_root_frame_stats.activate_calls += 1;
             if (comptime value_root_link_containers_only) {
-                if (!container) {
+                if (!container and !self.hasAtomRoots()) {
                     return;
                 }
             }
@@ -595,21 +611,6 @@ pub const ValueRootFrame = struct {
             rt.active_value_roots = self.previous;
             self.previous = null;
         }
-    }
-
-    /// Test/measurement helper: link only if this is a container/window,
-    /// regardless of the compile-time policy. Used to quantify all-on vs
-    /// containers-only against the same frame set.
-    pub fn activateContainersOnly(self: *ValueRootFrame, rt: *JSRuntime) void {
-        if (comptime !value_root_frames_enabled) return;
-        if (!self.hasNativeWindow()) {
-            if (comptime builtin.is_test) {
-                value_root_frame_stats.activate_calls += 1;
-                value_root_frame_stats.scalar_skipped += 1;
-            }
-            return;
-        }
-        self.activate(rt);
     }
 };
 
@@ -704,6 +705,72 @@ comptime {
     }
 }
 
+/// A `ValueRootFrame` carrying only `AtomRootSlot` storage, with the same
+/// declare/activate/deactivate discipline as `rootValues` (TGC S3 §4 class B).
+///
+///     var atom_roots = core.runtime.rootAtoms(.{&key});
+///     atom_roots.activate(rt);
+///     defer atom_roots.deactivate(rt);
+///
+/// Unlike `ValueRootScope`, this is never compiled out by
+/// `value_root_link_containers_only`: the conservative scanner cannot stand in
+/// for it, so dropping the frame in production would drop the root itself.
+pub fn AtomRootScope(comptime count: usize) type {
+    return struct {
+        const Self = @This();
+
+        storage: if (value_root_frames_enabled) [count]AtomRootSlot else void =
+            if (value_root_frames_enabled) undefined else {},
+        frame: if (value_root_frames_enabled) ValueRootFrame else void =
+            if (value_root_frames_enabled) .{} else {},
+
+        /// Bind the frame to this scope's storage at its final stack address,
+        /// then link it — same reason as `ValueRootScope.activate`.
+        pub inline fn activate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_frames_enabled) {
+                self.frame.atoms = &self.storage;
+                self.frame.activate(rt);
+            }
+        }
+
+        pub inline fn deactivate(self: *Self, rt: *JSRuntime) void {
+            if (comptime value_root_frames_enabled) self.frame.deactivate(rt);
+        }
+    };
+}
+
+/// Build an inactive `AtomRootScope` over `slots`, a tuple of `*const Atom`
+/// (or `*Atom`). The caller activates it; see `AtomRootScope`.
+pub inline fn rootAtoms(slots: anytype) AtomRootScope(slots.len) {
+    if (comptime value_root_frames_enabled) {
+        var scope: AtomRootScope(slots.len) = .{};
+        inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .single = slot };
+        return scope;
+    }
+    return .{};
+}
+
+/// Root a native `[]Atom` array through its slice header, so appends and the
+/// reallocations they cause stay covered for the whole build window.
+pub inline fn rootAtomList(list: *const []atom.Atom) AtomRootScope(1) {
+    if (comptime value_root_frames_enabled) {
+        var scope: AtomRootScope(1) = .{};
+        scope.storage[0] = .{ .list = list };
+        return scope;
+    }
+    return .{};
+}
+
+/// Root several `[]Atom` arrays (and/or single ids) with one frame.
+pub inline fn rootAtomSlots(slots: anytype) AtomRootScope(slots.len) {
+    if (comptime value_root_frames_enabled) {
+        var scope: AtomRootScope(slots.len) = .{};
+        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
+        return scope;
+    }
+    return .{};
+}
+
 pub const RootTraceError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 
 pub const RootVisitor = struct {
@@ -714,6 +781,13 @@ pub const RootVisitor = struct {
     /// Void in default `rc` so RootVisitor constructions stay two callbacks.
     visit_header: if (value_root_frames_enabled)
         ?*const fn (context: *anyopaque, header: *const gc.Header) RootTraceError!void
+    else
+        void = if (value_root_frames_enabled) null else {},
+    /// TGC S3 §2.2. Atom ids are bare `u32`s, so a root holding one has no
+    /// value or header to report; this is the third callback and it is
+    /// optional so the 17 existing `RootVisitor` constructions stay untouched.
+    visit_atom: if (value_root_frames_enabled)
+        ?*const fn (context: *anyopaque, id: atom.Atom) RootTraceError!void
     else
         void = if (value_root_frames_enabled) null else {},
 
@@ -734,14 +808,6 @@ pub const RootVisitor = struct {
         for (stored) |stored_value| try self.constValue(stored_value);
     }
 
-    pub fn optionalValue(self: *RootVisitor, slot: *?JSValue) RootTraceError!void {
-        if (slot.*) |stored| {
-            var value_slot = stored;
-            try self.value(&value_slot);
-            slot.* = value_slot;
-        }
-    }
-
     pub fn optionalObject(self: *RootVisitor, slot: *?*Object) RootTraceError!void {
         try self.visit_object(self.context, slot);
     }
@@ -755,6 +821,14 @@ pub const RootVisitor = struct {
         if (comptime value_root_frames_enabled) {
             const callback = self.visit_header orelse return;
             try callback(self.context, header);
+        }
+    }
+
+    /// No-op unless the visitor is a tracer that owns atom liveness.
+    pub fn atomRoot(self: *RootVisitor, id: atom.Atom) RootTraceError!void {
+        if (comptime value_root_frames_enabled) {
+            const callback = self.visit_atom orelse return;
+            try callback(self.context, id);
         }
     }
 
@@ -866,7 +940,6 @@ pub const JSValueHandle = struct {
     /// Takes ownership of `value`.
     pub fn init(runtime: *JSRuntime, value: JSValue) !JSValueHandle {
         const slot = runtime.createPersistentRootSlot(value) catch |err| {
-            value.free(runtime);
             return err;
         };
         return .{
@@ -877,8 +950,7 @@ pub const JSValueHandle = struct {
 
     /// Duplicates `value` before storing it.
     pub fn initDup(runtime: *JSRuntime, value: JSValue) !JSValueHandle {
-        const retained = value.dup();
-        return init(runtime, retained);
+        return init(runtime, value);
     }
 
     pub fn get(self: JSValueHandle) JSValue {
@@ -891,7 +963,7 @@ pub const JSValueHandle = struct {
         const slot = self.slot orelse return;
         self.runtime = null;
         self.slot = null;
-        runtime.destroyPersistentRootSlot(slot);
+        _ = runtime.takePersistentRootSlot(slot);
     }
 
     /// Compatibility spelling: by-value wrapper that asserts `rt` matches the
@@ -948,7 +1020,6 @@ pub const HandleScope = struct {
     pub fn local(self: *HandleScope, value: JSValue) !LocalHandle {
         std.debug.assert(self.active);
         const slot = self.runtime.createLocalRootSlot(value) catch |err| {
-            value.free(self.runtime);
             return err;
         };
         return .{ .slot = slot };
@@ -956,7 +1027,7 @@ pub const HandleScope = struct {
 
     /// Duplicates `value` before storing it.
     pub fn localDup(self: *HandleScope, value: JSValue) !LocalHandle {
-        return self.local(value.dup());
+        return self.local(value);
     }
 };
 
@@ -1020,7 +1091,6 @@ pub const NativePin = struct {
         self.runtime = null;
         self.header = null;
         runtime.gc.unpinHeader(header);
-        gc.release(runtime, header);
     }
 };
 
@@ -1030,19 +1100,12 @@ pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
 }
 
 pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
-    gc.retain(header);
-    errdefer gc.release(runtime, header);
     try runtime.gc.pinHeader(header);
     return .{
         .runtime = runtime,
         .header = header,
     };
 }
-
-pub const DeferredWeakValueFree = struct {
-    value: JSValue,
-    prepared_identity: ?usize = null,
-};
 
 pub const NativeCleanupJob = struct {
     finalizer: host_function.ExternalFinalizer,
@@ -1207,6 +1270,17 @@ pub const JSRuntime = struct {
     small_inline_published_bytes: usize = 0,
     small_inline_specialized_bytes: usize = 0,
     small_inline_destroy: ?*const fn (rt: *JSRuntime, fb: *anyopaque) void = null,
+    /// TGC S3 §2.2 edge H. The small-inline `CallerState` hangs off a
+    /// FunctionBytecode's hot pad and holds atom ids (`callee_name`,
+    /// `callee_file`, `apply_forward[].method_atom`); it lives in exec, which
+    /// core must not import, so the FB trace reports those ids through this
+    /// hook -- the same seam `small_inline_destroy` uses for teardown.
+    small_inline_trace_atoms: ?*const fn (
+        rt: *JSRuntime,
+        fb: *anyopaque,
+        ctx: *anyopaque,
+        visit: *const fn (ctx: *anyopaque, id: atom.Atom) void,
+    ) void = null,
     owner_thread_id: std.Thread.Id,
     memory: memory.MemoryAccount,
     compact_state: RuntimeCompactState = .{},
@@ -1289,9 +1363,6 @@ pub const JSRuntime = struct {
     draining_deferred_class_payload_finalizers: bool = false,
     active_deferred_class_payload_finalizer: ?*DeferredClassPayloadFinalizer = null,
     deferred_class_payload_finalizer_run_count: usize = 0,
-    deferred_weak_value_frees: []DeferredWeakValueFree = &.{},
-    deferred_weak_value_frees_capacity: usize = 0,
-    draining_deferred_weak_value_frees: bool = false,
     borrowed_weak_cleanup_identities: []usize = &.{},
     borrowed_weak_cleanup_identities_capacity: usize = 0,
     /// O(1) membership companion for `borrowed_weak_cleanup_identities`.
@@ -1310,13 +1381,7 @@ pub const JSRuntime = struct {
     slots2_payloads: std.AutoHashMapUnmanaged(*Object, class.Payload) = .empty,
     slots2_payload_attach_count: usize = 0,
     next_weak_id: usize = 1,
-    borrowed_weak_cleanup_realm_identities: []usize = &.{},
-    borrowed_weak_cleanup_realm_identities_capacity: usize = 0,
     borrowed_weak_cleanup_active: bool = false,
-    borrowed_weak_cleanup_realm_identity_fallback: bool = false,
-    borrowed_weak_cleanup_seen_holder: bool = false,
-    borrowed_weak_cleanup_needs_rescan: bool = false,
-    current_deferred_weak_value_free_identity: ?usize = null,
     malloc_gc_threshold: usize = default_gc_threshold,
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
@@ -1446,6 +1511,10 @@ pub const JSRuntime = struct {
         rt.gc.observeSlabArenas(&rt.memory.small_slab);
         try rt.gc.serveObjectCells(&rt.memory);
         rt.atoms = atom.AtomTable.init(&rt.memory);
+        // TGC S3: the atom table needs the collector to answer "is a major
+        // marking?" and "what epoch is it?". `rt` is already at its final
+        // address here (the caller allocated it before calling in).
+        rt.atoms.owner_runtime = rt;
         rt.atoms.runtime = rt;
         try rt.classes.initInPlace(&rt.memory, &rt.atoms);
         errdefer {
@@ -1459,6 +1528,7 @@ pub const JSRuntime = struct {
         rt.small_inline_published_bytes = 0;
         rt.small_inline_specialized_bytes = 0;
         rt.small_inline_destroy = null;
+        rt.small_inline_trace_atoms = null;
         rt.install_standard_globals_cb = default_standard_globals_installer;
         rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.context_head = null;
@@ -1495,9 +1565,6 @@ pub const JSRuntime = struct {
         rt.draining_deferred_class_payload_finalizers = false;
         rt.active_deferred_class_payload_finalizer = null;
         rt.deferred_class_payload_finalizer_run_count = 0;
-        rt.deferred_weak_value_frees = &.{};
-        rt.deferred_weak_value_frees_capacity = 0;
-        rt.draining_deferred_weak_value_frees = false;
         rt.borrowed_weak_cleanup_identities = &.{};
         rt.borrowed_weak_cleanup_identities_capacity = 0;
         rt.borrowed_weak_cleanup_identity_set = .empty;
@@ -1506,13 +1573,7 @@ pub const JSRuntime = struct {
         rt.slots2_payloads = .empty;
         rt.slots2_payload_attach_count = 0;
         rt.next_weak_id = 1;
-        rt.borrowed_weak_cleanup_realm_identities = &.{};
-        rt.borrowed_weak_cleanup_realm_identities_capacity = 0;
         rt.borrowed_weak_cleanup_active = false;
-        rt.borrowed_weak_cleanup_realm_identity_fallback = false;
-        rt.borrowed_weak_cleanup_seen_holder = false;
-        rt.borrowed_weak_cleanup_needs_rescan = false;
-        rt.current_deferred_weak_value_free_identity = null;
         rt.malloc_gc_threshold = options.gc_threshold;
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
@@ -1594,46 +1655,30 @@ pub const JSRuntime = struct {
         for (backtrace_frames) |frame| {
             self.atoms.free(frame.function_name);
             self.atoms.free(frame.filename);
-            frame.function_value.free(self);
         }
         if (backtrace_capacity != 0) {
             self.memory.free(context_mod.BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
         }
-        const current_exception = self.current_exception;
         self.current_exception = JSValue.uninitialized();
         self.current_exception_uncatchable = false;
         self.current_exception_out_of_memory = false;
-        current_exception.free(self);
         self.clearWeakRefKeptAlive();
         self.job_queue.deinit();
-        self.drainDeferredWeakValueFrees();
         self.clearPendingFinalizationJobs();
-        const recent_two_unit_string = self.recent_two_unit_string;
         self.recent_two_unit_string = null;
-        if (recent_two_unit_string) |cached| JSValue.string(cached.string.header()).free(self);
         for (&self.recent_atom_strings) |*slot| {
-            const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(stored.string.header()).free(self);
         }
         self.compact_state.recent_atom_string_next = 0;
-        const empty_string = self.empty_string;
         self.empty_string = null;
-        if (empty_string) |cached| JSValue.string(cached.header()).free(self);
         for (&self.single_byte_strings) |*slot| {
-            const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.percent_hex_strings) |*slot| {
-            const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         for (&self.small_int_strings) |*slot| {
-            const cached = slot.*;
             slot.* = null;
-            if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
@@ -1642,13 +1687,11 @@ pub const JSRuntime = struct {
         self.drainDeferredClassPayloadFinalizers();
         self.gc.host_quiescent = true;
         _ = self.runObjectCycleRemoval();
-        self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.clearPendingFinalizationJobs();
         _ = self.runObjectCycleRemoval();
         self.gc.host_quiescent = false;
-        self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
@@ -1664,7 +1707,7 @@ pub const JSRuntime = struct {
         // released now. Dynamic symbol bodies cannot: their rc also represents
         // property-key atoms held by shapes, which intentionally outlive objects
         // until phase 3 of gc.deinit.
-        self.atoms.releaseCachedStrings(self);
+        self.atoms.releaseCachedStrings();
         // The context list is borrowed enumeration, never a teardown owner.
         // Every host create-ref must have been dropped (`JSContext.destroy`)
         // before the Runtime goes; realms still on the list are heap nodes
@@ -1680,7 +1723,7 @@ pub const JSRuntime = struct {
         // Shapes and every other GC-managed atom owner are now gone. Clear
         // residual dynamic symbol bodies (notably Symbol.for's registry ref)
         // before AtomTable.deinit asserts that no materialized bodies remain.
-        self.atoms.releaseValueSymbolBodiesAfterGc(self);
+        self.atoms.releaseValueSymbolBodiesAfterGc();
         // These containers live for the whole runtime. `memory.allocator` may
         // temporarily point at a parser arena, so both allocation and teardown
         // must use the stable backing allocator that owns runtime state.
@@ -1804,19 +1847,6 @@ pub const JSRuntime = struct {
     }
 
     pub inline fn allocRuntimeAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
-        if (comptime runtime_allocation_requests_gc) {
-            if (byte_count != 0) self.requestGCForAllocation(byte_count);
-        }
-        return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
-    }
-
-    /// QJS runs its allocation-threshold GC trigger from object creation, not
-    /// from JSString/JSStringRope allocation. Production string churn therefore
-    /// bypasses the per-allocation threshold bookkeeping. Test builds must keep
-    /// the injected allocation callback, and force-GC builds must still collect
-    /// before every runtime allocation, so those comptime modes retain the full
-    /// request path.
-    pub inline fn allocStringAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
         if (comptime runtime_allocation_requests_gc) {
             if (byte_count != 0) self.requestGCForAllocation(byte_count);
         }
@@ -2194,7 +2224,7 @@ pub const JSRuntime = struct {
                 .live => ctx.runtime_next,
                 .constructing => ctx.construction_next,
             };
-            if (!gc.phaseIsTwoPassTeardown(self.gc.phase) or
+            if (self.gc.phase != .tracer_destroy or
                 !ctx.header.metaConst().flags.cycle_visited)
             {
                 return context_mod.RealmRef.retain(ctx);
@@ -2309,15 +2339,28 @@ pub const JSRuntime = struct {
         if (self.active_deferred_class_payload_finalizer) |job| {
             try job.traceRoots(self, visitor);
         }
-        for (self.deferred_weak_value_frees) |*item| {
-            try visitor.value(&item.value);
-        }
         try self.job_queue.traceRoots(visitor);
         for (self.weakref_kept_alive) |*kept| try visitor.value(kept);
         for (self.root_providers) |provider| {
             try provider.trace(provider.context, visitor);
         }
-        if (comptime gc.string_tracer_owned) try self.traceStringCacheRoots(visitor);
+        try self.traceStringCacheRoots(visitor);
+        try self.traceAtomRoots(visitor);
+    }
+
+    /// TGC S3 §2.2 roots I and J: the two engine-global tables that own atom
+    /// ids outside any GC header. Both are exact -- `popBacktraceFrame` and
+    /// `Table.unregister` release the same ids.
+    fn traceAtomRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
+        if (comptime !value_root_frames_enabled) return;
+        if (visitor.visit_atom == null) return;
+        for (self.backtrace_frames) |frame| {
+            try visitor.atomRoot(frame.function_name);
+            try visitor.atomRoot(frame.filename);
+        }
+        for (self.classes.records) |record| {
+            try visitor.atomRoot(record.class_name);
+        }
     }
 
     /// TGC S2: the runtime's interned/cached flat strings are roots while the
@@ -2458,6 +2501,16 @@ pub const JSRuntime = struct {
             for (current.values) |root| {
                 try visitor.value(root.value);
             }
+            if (comptime value_root_frames_enabled) {
+                if (visitor.visit_atom != null) {
+                    for (current.atoms) |root| switch (root) {
+                        .single => |slot| try visitor.atomRoot(slot.*),
+                        // Read the slice header now: the frame may have been
+                        // linked before the array had any element at all.
+                        .list => |list| for (list.*) |id| try visitor.atomRoot(id),
+                    };
+                }
+            }
             for (current.slices) |root| {
                 switch (root) {
                     .mutable => |values| try visitor.values(values.*),
@@ -2556,11 +2609,6 @@ pub const JSRuntime = struct {
             self.weak_root_slots_capacity = 0;
             self.memory.free(*WeakRootSlot, old_slots);
         }
-    }
-
-    fn destroyPersistentRootSlot(self: *JSRuntime, slot: *RootSlot) void {
-        const value = self.takePersistentRootSlot(slot);
-        value.free(self);
     }
 
     fn takePersistentRootSlot(self: *JSRuntime, slot: *RootSlot) JSValue {
@@ -2668,7 +2716,7 @@ pub const JSRuntime = struct {
             if (old.len != 0) self.memory.free(JSValue, old);
         }
         self.weakref_kept_alive = self.weakref_kept_alive.ptr[0 .. len + 1];
-        self.weakref_kept_alive[len] = value.dup();
+        self.weakref_kept_alive[len] = value;
     }
 
     /// Clear [[KeptAlive]] at job end, not at an arbitrary safepoint.
@@ -2677,7 +2725,6 @@ pub const JSRuntime = struct {
         const capacity = self.weakref_kept_alive_capacity;
         self.weakref_kept_alive = &.{};
         self.weakref_kept_alive_capacity = 0;
-        for (values) |stored| stored.free(self);
         if (capacity != 0) self.memory.free(JSValue, values.ptr[0..capacity]);
     }
 
@@ -2733,10 +2780,10 @@ pub const JSRuntime = struct {
             if (atom_id > std.math.maxInt(atom.Atom)) return JSValue.undefinedValue();
             const symbol_atom: atom.Atom = @intCast(atom_id);
             if (self.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
-            return self.atoms.symbolValueIfLive(self, symbol_atom) catch JSValue.undefinedValue();
+            return self.atoms.symbolValueIfLive(self, symbol_atom);
         }
         const object = self.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
-        return object.value().dup();
+        return object.value();
     }
 
     /// Resolves an even weak identity (`weak_id << 1`) to its registered
@@ -2745,7 +2792,7 @@ pub const JSRuntime = struct {
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
         const object = self.objectFromWeakIdentity(identity) orelse return null;
-        if (gc.headerRefCountIsZeroOrHusk(object.gcHeader())) return null;
+        if (gc.headerIsHusk(object.gcHeader())) return null;
         return object;
     }
 
@@ -2799,9 +2846,7 @@ pub const JSRuntime = struct {
         while (index > start) {
             index -= 1;
             const slot = self.local_root_slots[index];
-            const value = slot.value;
             slot.value = JSValue.undefinedValue();
-            value.free(self);
             self.memory.destroy(RootSlot, slot);
         }
         self.local_root_slots = self.local_root_slots[0..start];
@@ -2855,7 +2900,7 @@ pub const JSRuntime = struct {
 
     pub fn dupValue(self: *JSRuntime, value: JSValue) JSValue {
         _ = self;
-        return value.dup();
+        return value;
     }
 
     pub fn freeValue(self: *JSRuntime, value: JSValue) void {
@@ -3424,7 +3469,7 @@ pub const JSRuntime = struct {
 
     pub fn gcPendingForTest(self: JSRuntime) bool {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.gc.hasPendingRequest();
+        return self.gc.hasPendingMajorRequest();
     }
 
     pub fn gcLastRequestReasonForTest(self: JSRuntime) ?gc.RequestReason {
@@ -3605,7 +3650,7 @@ pub const JSRuntime = struct {
         for (self.weak_root_slots) |slot| {
             if (slot.identity != null) count += 1;
         }
-        var gc_iter = self.gc.objectIterator();
+        var gc_iter = self.gc.objectIterator(.all);
         while (gc_iter.next()) |header| {
             if (header.meta().flags.kind == .object) {
                 const obj = Object.fromHeader(header);
@@ -3656,12 +3701,6 @@ pub const JSRuntime = struct {
     fn parseUnsignedToken(token: []const u8) ?usize {
         if (token.len == 0 or std.mem.eql(u8, token, "max")) return null;
         return std.fmt.parseInt(usize, token, 10) catch null;
-    }
-
-    fn maybeRunObjectCycleRemoval(self: *JSRuntime) void {
-        if (self.gc_running) return;
-        if (self.memory.allocated_bytes <= self.malloc_gc_threshold) return;
-        _ = self.runObjectCycleRemoval();
     }
 
     inline fn prospectiveAllocationTotal(self: *const JSRuntime, size: usize) usize {
@@ -3887,13 +3926,11 @@ pub const JSRuntime = struct {
         }
 
         const created = try string.String.createUtf16Pair(self, first, second);
-        const old = self.recent_two_unit_string;
         self.recent_two_unit_string = .{
             .first = first,
             .second = second,
             .string = created,
         };
-        if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
 
@@ -3911,13 +3948,11 @@ pub const JSRuntime = struct {
         // the table-side cache); no-op for symbol atoms.
         self.atoms.cacheString(atom_id, created);
         const slot_index: usize = self.compact_state.recent_atom_string_next;
-        const old = self.recent_atom_strings[slot_index];
         self.recent_atom_strings[slot_index] = .{
             .atom_id = atom_id,
             .string = created,
         };
         self.compact_state.recent_atom_string_next = @intCast((slot_index + 1) % self.recent_atom_strings.len);
-        if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
 
@@ -4047,12 +4082,10 @@ pub const JSRuntime = struct {
             while (candidate) |ctx| : (candidate = ctx.runtime_next) {
                 if (ctx.global != null) continue;
                 global.class_id = class.ids.global_object;
-                gc.retain(global.gcHeader());
                 ctx.global = global;
                 _ = global.ensureGlobalPayload(self) catch |err| {
                     ctx.rollbackIntrinsicBootstrap();
                     ctx.global = null;
-                    global.value().free(self);
                     return @errorCast(err);
                 };
                 adopted_context = ctx;
@@ -4064,7 +4097,6 @@ pub const JSRuntime = struct {
             if (adopted_context) |ctx| {
                 ctx.rollbackIntrinsicBootstrap();
                 ctx.global = null;
-                global.value().free(self);
             }
             return @errorCast(err);
         };
@@ -4424,152 +4456,27 @@ pub const JSRuntime = struct {
         self.memory.free(*Object, old_items);
     }
 
-    pub fn enqueueDeferredWeakValueFree(self: *JSRuntime, value: JSValue) !void {
-        try self.enqueueDeferredWeakValueFreeWithPreparedIdentity(value, null);
-    }
-
-    pub fn enqueueDeferredWeakValueFreeWithPreparedIdentity(self: *JSRuntime, value: JSValue, prepared_identity: ?usize) !void {
-        const index = self.deferred_weak_value_frees.len;
-        try self.ensureDeferredWeakValueFreeCapacity(index + 1);
-        self.deferred_weak_value_frees = self.deferred_weak_value_frees.ptr[0 .. index + 1];
-        self.deferred_weak_value_frees[index] = .{ .value = value, .prepared_identity = prepared_identity };
-    }
-
-    pub fn hasDeferredWeakValueFrees(self: *const JSRuntime) bool {
-        return self.deferred_weak_value_frees.len != 0;
-    }
-
-    pub fn drainDeferredWeakValueFrees(self: *JSRuntime) void {
-        if (self.draining_deferred_weak_value_frees) return;
-        self.draining_deferred_weak_value_frees = true;
-        defer self.draining_deferred_weak_value_frees = false;
-
-        while (self.deferred_weak_value_frees.len != 0) {
-            const old_len = self.deferred_weak_value_frees.len;
-            const item = self.deferred_weak_value_frees[old_len - 1];
-            self.deferred_weak_value_frees = self.deferred_weak_value_frees.ptr[0 .. old_len - 1];
-            var skip_identity = item.prepared_identity;
-            if (skip_identity == null) {
-                skip_identity = self.prepareBorrowedWeakCleanupForLastRefValue(item.value);
-            }
-            const previous_skip_identity = self.current_deferred_weak_value_free_identity;
-            self.current_deferred_weak_value_free_identity = skip_identity;
-            defer self.current_deferred_weak_value_free_identity = previous_skip_identity;
-            if (item.value.refCountHeader()) |header| {
-                if (gc.headerRefCountIsZeroOrHusk(header)) {
-                    const already_consumed_prepared_object =
-                        header.meta().flags.kind == .object and
-                        skip_identity != null and
-                        skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
-                    std.debug.assert(already_consumed_prepared_object);
-                    if (already_consumed_prepared_object) continue;
-                }
-            }
-            item.value.free(self);
-        }
-        if (self.deferred_weak_value_frees_capacity != 0) {
-            const old_items = self.deferred_weak_value_frees.ptr[0..self.deferred_weak_value_frees_capacity];
-            self.deferred_weak_value_frees = &.{};
-            self.deferred_weak_value_frees_capacity = 0;
-            self.memory.free(DeferredWeakValueFree, old_items);
-        }
-    }
-
-    fn ensureDeferredWeakValueFreeCapacity(self: *JSRuntime, min_capacity: usize) !void {
-        if (self.deferred_weak_value_frees_capacity >= min_capacity) return;
-        var next_capacity = if (self.deferred_weak_value_frees_capacity == 0) @as(usize, 16) else self.deferred_weak_value_frees_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.memory.alloc(DeferredWeakValueFree, next_capacity);
-        errdefer self.memory.free(DeferredWeakValueFree, next);
-        const old_items = self.deferred_weak_value_frees;
-        const old_capacity = self.deferred_weak_value_frees_capacity;
-        @memcpy(next[0..old_items.len], old_items);
-        self.deferred_weak_value_frees = next[0..old_items.len];
-        self.deferred_weak_value_frees_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.memory.free(DeferredWeakValueFree, old_items.ptr[0..old_capacity]);
-        }
-    }
-
     pub fn beginBorrowedWeakCleanup(self: *JSRuntime) void {
         std.debug.assert(!self.borrowed_weak_cleanup_active);
         self.borrowed_weak_cleanup_active = true;
-        self.borrowed_weak_cleanup_realm_identity_fallback = false;
-        self.borrowed_weak_cleanup_seen_holder = false;
-        self.borrowed_weak_cleanup_needs_rescan = false;
-        self.current_deferred_weak_value_free_identity = null;
         self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = if (self.borrowed_weak_cleanup_identities_capacity == 0)
             &.{}
         else
             self.borrowed_weak_cleanup_identities.ptr[0..0];
-        self.borrowed_weak_cleanup_realm_identities = if (self.borrowed_weak_cleanup_realm_identities_capacity == 0)
-            &.{}
-        else
-            self.borrowed_weak_cleanup_realm_identities.ptr[0..0];
     }
 
     pub fn endBorrowedWeakCleanup(self: *JSRuntime) void {
         self.borrowed_weak_cleanup_active = false;
-        self.borrowed_weak_cleanup_realm_identity_fallback = false;
-        self.borrowed_weak_cleanup_seen_holder = false;
-        self.borrowed_weak_cleanup_needs_rescan = false;
-        self.current_deferred_weak_value_free_identity = null;
         self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = if (self.borrowed_weak_cleanup_identities_capacity == 0)
             &.{}
         else
             self.borrowed_weak_cleanup_identities.ptr[0..0];
-        self.borrowed_weak_cleanup_realm_identities = if (self.borrowed_weak_cleanup_realm_identities_capacity == 0)
-            &.{}
-        else
-            self.borrowed_weak_cleanup_realm_identities.ptr[0..0];
     }
 
     pub fn borrowedWeakCleanupActive(self: *const JSRuntime) bool {
         return self.borrowed_weak_cleanup_active;
-    }
-
-    pub fn markBorrowedWeakCleanupHolderSeen(self: *JSRuntime) void {
-        self.borrowed_weak_cleanup_seen_holder = true;
-    }
-
-    pub fn borrowedWeakCleanupSeenHolder(self: *const JSRuntime) bool {
-        return self.borrowed_weak_cleanup_seen_holder;
-    }
-
-    pub fn markBorrowedWeakCleanupNeedsRescan(self: *JSRuntime) void {
-        self.borrowed_weak_cleanup_needs_rescan = true;
-    }
-
-    pub fn takeBorrowedWeakCleanupNeedsRescan(self: *JSRuntime) bool {
-        const needs_rescan = self.borrowed_weak_cleanup_needs_rescan;
-        self.borrowed_weak_cleanup_needs_rescan = false;
-        return needs_rescan;
-    }
-
-    pub fn enqueueBorrowedWeakCleanupRealmIdentity(self: *JSRuntime, identity: usize) void {
-        const index = self.borrowed_weak_cleanup_realm_identities.len;
-        self.ensureBorrowedWeakCleanupRealmIdentityCapacity(index + 1) catch {
-            self.borrowed_weak_cleanup_realm_identity_fallback = true;
-            return;
-        };
-        self.borrowed_weak_cleanup_realm_identities = self.borrowed_weak_cleanup_realm_identities.ptr[0 .. index + 1];
-        self.borrowed_weak_cleanup_realm_identities[index] = identity;
-    }
-
-    pub fn borrowedWeakCleanupRealmIdentityMatches(self: *const JSRuntime, identity: usize) bool {
-        if (self.borrowed_weak_cleanup_realm_identity_fallback) return self.borrowedWeakCleanupIdentityMatches(identity);
-        var index = self.borrowed_weak_cleanup_realm_identities.len;
-        while (index != 0) {
-            index -= 1;
-            if (self.borrowed_weak_cleanup_realm_identities[index] == identity) return true;
-        }
-        return false;
-    }
-
-    pub fn borrowedWeakCleanupMayMatchRealmIdentity(self: *const JSRuntime) bool {
-        return self.borrowed_weak_cleanup_realm_identity_fallback or self.borrowed_weak_cleanup_realm_identities.len != 0;
     }
 
     pub fn borrowedWeakCleanupIdentityCount(self: *const JSRuntime) usize {
@@ -4584,21 +4491,6 @@ pub const JSRuntime = struct {
         }
         self.borrowed_weak_cleanup_identities = self.borrowed_weak_cleanup_identities.ptr[0 .. index + 1];
         self.borrowed_weak_cleanup_identities[index] = identity;
-    }
-
-    /// Prepare borrowed-pointer cleanup before a last-ref value is released.
-    /// The raw identity is also returned when no holder can reference the
-    /// ordinary object; that records the completed liveness check so the
-    /// deferred free does not conservatively enqueue an irrelevant full-table
-    /// cleanup later.
-    pub fn prepareBorrowedWeakCleanupForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
-        _ = value;
-        if (!self.borrowed_weak_cleanup_active) return null;
-        // `objectFromLastRefValue` inferred "this release is the last one" from
-        // the refcount. The tracer maintains no such count for objects, so
-        // there is nothing to infer and the preparation has no work to do; it
-        // retired with the collector that could answer the question.
-        return null;
     }
 
     pub fn borrowedWeakCleanupIdentityMatches(self: *const JSRuntime, identity: usize) bool {
@@ -4627,25 +4519,13 @@ pub const JSRuntime = struct {
         return false;
     }
 
-    pub fn isCurrentDeferredWeakValueFreeIdentity(self: *const JSRuntime, identity: usize) bool {
-        return self.current_deferred_weak_value_free_identity == identity;
-    }
-
     pub fn clearBorrowedWeakCleanupIdentities(self: *JSRuntime) void {
         const identities: []usize = if (self.borrowed_weak_cleanup_identities_capacity != 0) self.borrowed_weak_cleanup_identities.ptr[0..self.borrowed_weak_cleanup_identities_capacity] else self.borrowed_weak_cleanup_identities[0..0];
-        const realm_identities: []usize = if (self.borrowed_weak_cleanup_realm_identities_capacity != 0) self.borrowed_weak_cleanup_realm_identities.ptr[0..self.borrowed_weak_cleanup_realm_identities_capacity] else self.borrowed_weak_cleanup_realm_identities[0..0];
         self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = &.{};
         self.borrowed_weak_cleanup_identities_capacity = 0;
-        self.borrowed_weak_cleanup_realm_identities = &.{};
-        self.borrowed_weak_cleanup_realm_identities_capacity = 0;
         self.borrowed_weak_cleanup_active = false;
-        self.borrowed_weak_cleanup_realm_identity_fallback = false;
-        self.borrowed_weak_cleanup_seen_holder = false;
-        self.borrowed_weak_cleanup_needs_rescan = false;
-        self.current_deferred_weak_value_free_identity = null;
         if (identities.len != 0) self.memory.free(usize, identities);
-        if (realm_identities.len != 0) self.memory.free(usize, realm_identities);
     }
 
     fn ensureBorrowedWeakCleanupIdentityCapacity(self: *JSRuntime, min_capacity: usize) !void {
@@ -4659,22 +4539,6 @@ pub const JSRuntime = struct {
         @memcpy(next[0..old_items.len], old_items);
         self.borrowed_weak_cleanup_identities = next[0..old_items.len];
         self.borrowed_weak_cleanup_identities_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.memory.free(usize, old_items.ptr[0..old_capacity]);
-        }
-    }
-
-    fn ensureBorrowedWeakCleanupRealmIdentityCapacity(self: *JSRuntime, min_capacity: usize) !void {
-        if (self.borrowed_weak_cleanup_realm_identities_capacity >= min_capacity) return;
-        var next_capacity = if (self.borrowed_weak_cleanup_realm_identities_capacity == 0) @as(usize, 4) else self.borrowed_weak_cleanup_realm_identities_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.memory.alloc(usize, next_capacity);
-        errdefer self.memory.free(usize, next);
-        const old_items = self.borrowed_weak_cleanup_realm_identities;
-        const old_capacity = self.borrowed_weak_cleanup_realm_identities_capacity;
-        @memcpy(next[0..old_items.len], old_items);
-        self.borrowed_weak_cleanup_realm_identities = next[0..old_items.len];
-        self.borrowed_weak_cleanup_realm_identities_capacity = next_capacity;
         if (old_capacity != 0) {
             self.memory.free(usize, old_items.ptr[0..old_capacity]);
         }
@@ -4812,7 +4676,6 @@ test "value handle uses runtime persistent root slot" {
     try std.testing.expect(handle.get().isObject());
 
     const released = handle.take();
-    defer released.free(&rt);
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try std.testing.expect(released.isObject());
 

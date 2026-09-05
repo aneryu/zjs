@@ -15,7 +15,6 @@ const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
-const module_mod = @import("module.zig");
 const object_gc = @import("object_gc.zig");
 const object_payloads = @import("object_payloads.zig");
 const property = @import("property.zig");
@@ -35,7 +34,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const ObjectVisitSet = std.AutoHashMap(usize, void);
-const ObjectIncomingMap = std.AutoHashMap(usize, usize);
 const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 const OwnKeysError = std.mem.Allocator.Error;
 const PropertyReadError = errors.RuntimeError;
@@ -57,7 +55,7 @@ const FinalizingShapeStorage = extern struct {
     metadata: gc.Metadata = .{
         .alloc_info = .{ .standalone = true },
         .flags = .{ .kind = .shape, .is_pinned = true },
-        .lifetime = .{ .trace = .{} },
+        .lifetime = .{},
     },
     value: shape.Shape = .{
         .ownership = .{ .shared = 1 },
@@ -155,8 +153,6 @@ pub const BytecodeFunctionStorage = object_payloads.BytecodeFunctionStorage;
 
 const destroyOwnedValue = object_payloads.destroyOwnedValue;
 const replaceOwnedValue = object_payloads.replaceOwnedValue;
-const destroyValueSlice = object_payloads.destroyValueSlice;
-const destroyValueSliceWithCapacity = object_payloads.destroyValueSliceWithCapacity;
 const destroyOptionalVarRefCellSlice = object_payloads.destroyOptionalVarRefCellSlice;
 const createGeneratorExecutionStateWithStorage = generator_state.createGeneratorExecutionStateWithStorage;
 const destroyGeneratorExecutionState = generator_state.destroyGeneratorExecutionState;
@@ -692,7 +688,7 @@ pub const Object = extern struct {
     // Trace-only Shape projection stored in the low seven bits of Metadata
     // byte 6. The high bit is leased to the generational write barrier's
     // remembered-set membership fast check (and, since audit §10, to every
-    // other `gc.traceRememberedCacheEligible` carrier as well); every summary
+    // other GC carrier as well); every summary
     // writer must preserve it and every summary reader/audit must mask it out. The low two bits keep
     // exact property counts 0..2; low-bit value 3 is the overflow sentinel.
     // A traced slot has five states (four live kinds plus deleted, whose kind is
@@ -726,7 +722,7 @@ pub const Object = extern struct {
     }
 
     pub inline fn traceShapeSummary(self: *const Object) u8 {
-        return self.gcHeaderConst().metaConst().lifetime.trace.object_shape_summary & trace_shape_summary_storage_mask;
+        return self.gcHeaderConst().metaConst().lifetime.object_shape_summary & trace_shape_summary_storage_mask;
     }
 
     pub inline fn traceShapeSummaryIsExact(summary: u8) bool {
@@ -772,7 +768,7 @@ pub const Object = extern struct {
 
     inline fn storeTraceShapeSummary(self: *Object, summary: u8) void {
         std.debug.assert(summary & ~trace_shape_summary_storage_mask == 0);
-        const state = &self.gcHeader().meta().lifetime.trace;
+        const state = &self.gcHeader().meta().lifetime;
         state.object_shape_summary =
             (state.object_shape_summary & gc.trace_remembered_mask) | summary;
     }
@@ -785,7 +781,7 @@ pub const Object = extern struct {
     }
 
     pub fn traceShapeSummaryMatches(self: *const Object) bool {
-        const stored_summary = self.gcHeaderConst().metaConst().lifetime.trace.object_shape_summary &
+        const stored_summary = self.gcHeaderConst().metaConst().lifetime.object_shape_summary &
             trace_shape_summary_storage_mask;
         const expected_summary = shapeSummaryFor(self.shape_ref);
         // Overflow traces the Shape descriptors and ignores payload bits. The
@@ -798,7 +794,7 @@ pub const Object = extern struct {
     }
 
     inline fn commitTraceShapeAppend(self: *Object, old_len: usize, flags: property.Flags) void {
-        const state = &self.gcHeader().meta().lifetime.trace;
+        const state = &self.gcHeader().meta().lifetime;
         if (old_len >= trailing_property_capacity) {
             if (old_len == trailing_property_capacity)
                 // Exact count 2 ends in binary `10`; incrementing makes the
@@ -973,7 +969,7 @@ pub const Object = extern struct {
         self.shape_ref = final_shape;
         rt.gc.removeConstructionRoot(self.gcHeader());
         rt.registerObjectWithBytes(self, self.bodyBytes()) catch |err| {
-            self.gcHeader().meta().lifetime.trace.object_shape_summary = 0;
+            self.gcHeader().meta().lifetime.object_shape_summary = 0;
             rt.gc.addConstructionRoot(self.gcHeader());
             self.shape_ref = undefined;
             rt.shapes.dropUnshared(final_shape);
@@ -1002,7 +998,7 @@ pub const Object = extern struct {
     /// own-property slots as a realm-pinned template. This is the zjs analogue
     /// of qjs `JS_NewObjectFromShape`: the caller has already paid the property
     /// transition cost once while building `template`; each later object only
-    /// retains that final shape and duplicates its value slots.
+    /// retains that final shape and copies its traced value slots.
     ///
     /// Object state outside the fixed property layout (array elements, class
     /// payload contents, extensibility, and rare flags) is intentionally not
@@ -1012,7 +1008,7 @@ pub const Object = extern struct {
         std.debug.assert(!template.isArray());
         std.debug.assert(!template.isProxy());
         std.debug.assert(!template.flags.is_borrowed_reference_holder);
-        return createPreparedPropertyTemplate(rt, template, template.propertyEntries(), .borrowed);
+        return createPreparedPropertyTemplate(rt, template, template.propertyEntries());
     }
 
     /// Allocate from a context-owned initial Shape. The caller supplies the
@@ -1292,62 +1288,6 @@ pub const Object = extern struct {
         return createArrayFromShape(rt, shape_ref, &entries);
     }
 
-    /// Construct a RegExp result from its realm-pinned named-property layout,
-    /// supplying the three per-result slots in the same allocation. QuickJS
-    /// does this with `JS_NewObjectFromShape(ctx->regexp_result_shape, props)`.
-    pub fn createRegExpMatchArrayFromPropertyTemplate(
-        rt: *JSRuntime,
-        template: *const Object,
-        match_index: i32,
-        input_value: JSValue,
-        groups_value: JSValue,
-    ) !*Object {
-        std.debug.assert(template.isArray());
-        std.debug.assert(!template.isProxy());
-        std.debug.assert(!template.flags.is_borrowed_reference_holder);
-        std.debug.assert(template.arrayLength() == 0);
-        std.debug.assert(template.arrayElements().len == 0);
-
-        const props = template.shape_ref.props();
-        const index_atom = comptime atom.predefinedId("index", .string).?;
-        const input_atom = comptime atom.predefinedId("input", .string).?;
-        const groups_atom = comptime atom.predefinedId("groups", .string).?;
-        std.debug.assert(template.shape_ref.prop_count == 3);
-        std.debug.assert(props[0].atom_id == index_atom);
-        std.debug.assert(props[1].atom_id == input_atom);
-        std.debug.assert(props[2].atom_id == groups_atom);
-        for (props) |prop| std.debug.assert(property.Flags.fromBits(prop.flags).kind == .data);
-
-        // `createPreparedPropertyTemplate(.owned)` consumes these refs on both
-        // success and error, matching qjs JS_NewObjectFromShape's `props`
-        // contract. The caller keeps its borrowed input/groups values.
-        const entries = [_]property.Entry{
-            .{ .slot = .{ .data = JSValue.int32(match_index) } },
-            .{ .slot = .{ .data = input_value.dup() } },
-            .{ .slot = .{ .data = groups_value.dup() } },
-        };
-        return createPreparedPropertyTemplate(rt, template, &entries, .owned);
-    }
-
-    /// Allocate a RegExp instance directly from the realm-pinned one-property
-    /// layout. This uses the general class-payload constructor because RegExp
-    /// owns internal state, but skips rebuilding `lastIndex` after allocation.
-    /// It is the direct counterpart of qjs `JS_NewObjectFromShape` with
-    /// `ctx->regexp_shape`.
-    pub fn createRegExpFromPropertyTemplate(rt: *JSRuntime, template: *const Object) !*Object {
-        std.debug.assert(template.class_id == class.ids.regexp);
-        std.debug.assert(!template.isProxy());
-        std.debug.assert(template.shape_ref.prop_count == 1);
-        std.debug.assert(template.propAtomAt(0) == atom.ids.lastIndex);
-        const last_index_flags = template.propFlagsAt(0);
-        std.debug.assert(last_index_flags.kind == .data);
-        std.debug.assert(last_index_flags.writable and !last_index_flags.enumerable and !last_index_flags.configurable);
-        return createInternal(rt, class.ids.regexp, template.getPrototype(), 0, .{
-            .shape_ref = template.shape_ref,
-            .entries = template.propertyEntries(),
-        });
-    }
-
     /// Allocate an arguments object (unmapped or mapped) straight from its
     /// realm-owned initial Shape, consuming caller-prepared property cells —
     /// the zjs analogue of qjs js_build_arguments / js_build_mapped_arguments
@@ -1390,18 +1330,6 @@ pub const Object = extern struct {
             std.debug.assert(!classHasExoticMethods(class_id, definition.has_exotic));
         }
 
-        // qjs JS_NewObjectFromShape consumes `props` unconditionally: copied
-        // into the object on success, destroyed by the shape flags on
-        // allocation failure (quickjs.c:5639-5646).
-        var owned_entries_pending = true;
-        errdefer if (owned_entries_pending) {
-            const props = initial_shape.props();
-            for (entries, 0..) |entry, index| {
-                const entry_flags = property.Flags.fromBits(props[index].flags);
-                destroyPropertySlot(rt, props[index].atom_id, entry_flags, entry.slot);
-            }
-        };
-
         // js_dup_shape on entry (quickjs.c:16165/16229); JS_NewObjectFromShape
         // consumes the Shape on every failure path (quickjs.c:5647).
         initial_shape.markShared();
@@ -1441,7 +1369,6 @@ pub const Object = extern struct {
         self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         @memcpy(self.propertyStorageEntries(entries.len), entries);
-        owned_entries_pending = false;
         property_storage_owned = false;
         self.refreshTraceShapeSummary();
         initialized = true;
@@ -1449,13 +1376,6 @@ pub const Object = extern struct {
         initialized = false;
         return self;
     }
-
-    const PreparedPropertyEntryOwnership = enum {
-        /// Retain each live slot while installing it; the caller keeps entries.
-        borrowed,
-        /// Consume every live slot, including when construction fails.
-        owned,
-    };
 
     /// Allocate an object directly from a realm-pinned, fully prepared shape.
     /// This is the core analogue of qjs `JS_NewObjectFromShape`: class layout,
@@ -1467,7 +1387,6 @@ pub const Object = extern struct {
         rt: *JSRuntime,
         template: *const Object,
         entries: []const property.Entry,
-        comptime entry_ownership: PreparedPropertyEntryOwnership,
     ) !*Object {
         std.debug.assert(!template.isProxy());
         std.debug.assert(!template.flags.is_borrowed_reference_holder);
@@ -1477,20 +1396,6 @@ pub const Object = extern struct {
             template.class_id == class.ids.array or
             template.class_id == class.ids.arguments or
             template.class_id == class.ids.mapped_arguments);
-
-        // qjs JS_NewObjectFromShape consumes `props` unconditionally: it
-        // copies the cells into the object on success and destroys them by the
-        // shape flags on allocation failure. Keep that ownership mode explicit
-        // rather than hiding a second retain/release pair in the prepared-shape
-        // constructor.
-        var owned_entries_pending = entry_ownership == .owned;
-        errdefer if (owned_entries_pending) {
-            const props = template.shape_ref.props();
-            for (entries, 0..) |entry, index| {
-                const entry_flags = property.Flags.fromBits(props[index].flags);
-                destroyPropertySlot(rt, props[index].atom_id, entry_flags, entry.slot);
-            }
-        };
 
         // qjs JS_NewObjectFromShape enters with an owned Shape and consumes it
         // on every failure path. Retain the prepared Shape before mirroring its
@@ -1529,19 +1434,7 @@ pub const Object = extern struct {
         };
         self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr;
         self.initArmPayload(null);
-        switch (entry_ownership) {
-            .borrowed => {
-                const props = shape_ref.props();
-                for (entries, 0..) |entry, index| {
-                    const entry_flags = property.Flags.fromBits(props[index].flags);
-                    self.propertyEntry(index).* = .{ .slot = entry.slot.dup(entry_flags) };
-                }
-            },
-            .owned => {
-                @memcpy(self.propertyStorageEntries(entries.len), entries);
-                owned_entries_pending = false;
-            },
-        }
+        @memcpy(self.propertyStorageEntries(entries.len), entries);
 
         property_storage_owned = false;
         self.refreshTraceShapeSummary();
@@ -1736,11 +1629,7 @@ pub const Object = extern struct {
             else => self.initArmPayload(class_payload),
         }
         if (property_template) |template| {
-            const props = template.shape_ref.props();
-            for (template.entries, 0..) |entry, index| {
-                const entry_flags = property.Flags.fromBits(props[index].flags);
-                self.propertyEntry(index).* = .{ .slot = entry.slot.dup(entry_flags) };
-            }
+            @memcpy(self.propertyStorageEntries(template.entries.len), template.entries);
         }
         if (inline_layout != null) self.initInlineClassPayloadGcPrefix();
         property_storage_owned = false;
@@ -1790,7 +1679,7 @@ pub const Object = extern struct {
             try rt.createRuntime(FunctionPayload)
         else
             try rt.memory.createNoTrigger(FunctionPayload);
-        payload.* = FunctionPayload.initNative();
+        payload.* = .{};
         return @ptrCast(payload);
     }
 
@@ -2091,10 +1980,8 @@ pub const Object = extern struct {
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
         if (rt.cached_iterator_next_entries.len == 0) return;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
-        const old_cached = rt.cached_iterator_next_entries[index].value;
         rt.cached_iterator_next_entries[index].value = null;
         removeCachedIteratorNextEntryAt(rt, index);
-        if (old_cached) |stored| stored.free(rt);
     }
 
     fn clearCachedIteratorNextWithoutFree(rt: *JSRuntime, self: *Object) void {
@@ -2307,16 +2194,8 @@ pub const Object = extern struct {
         return self.payloadArm().*;
     }
 
-    pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
-        return &ctx.cached_function_proto;
-    }
-
     pub fn setCachedFunctionProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
         const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
-        if (prototype) |stored| gc.retain(stored.gcHeader());
-        errdefer if (prototype) |stored| stored.value().free(rt);
-        const old_prototype = ctx.cached_function_proto;
         ctx.cached_function_proto = prototype;
         // The realm owns this slot and fills it lazily; see `setClassPrototype`.
         // Unpublished (constructing) realms are covered by their publication
@@ -2324,7 +2203,6 @@ pub const Object = extern struct {
         if (prototype) |stored| {
             if (ctx.header.metaConst().alloc_info.heap_accounted) rt.gc.generationalBarrier(&ctx.header, stored.gcHeader());
         }
-        if (old_prototype) |old| old.value().free(rt);
     }
 
     pub fn cachedFunctionProto(self: *const Object, rt: *const JSRuntime) ?*Object {
@@ -2332,16 +2210,8 @@ pub const Object = extern struct {
         return ctx.cached_function_proto;
     }
 
-    pub fn cachedPromiseProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
-        return &ctx.cached_promise_proto;
-    }
-
     pub fn setCachedPromiseProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
         const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
-        if (prototype) |stored| gc.retain(stored.gcHeader());
-        errdefer if (prototype) |stored| stored.value().free(rt);
-        const old_prototype = ctx.cached_promise_proto;
         ctx.cached_promise_proto = prototype;
         // The realm owns this slot and fills it lazily; see `setClassPrototype`.
         // Unpublished (constructing) realms are covered by their publication
@@ -2349,7 +2219,6 @@ pub const Object = extern struct {
         if (prototype) |stored| {
             if (ctx.header.metaConst().alloc_info.heap_accounted) rt.gc.generationalBarrier(&ctx.header, stored.gcHeader());
         }
-        if (old_prototype) |old| old.value().free(rt);
     }
 
     pub fn cachedPromiseProto(self: *const Object, rt: *const JSRuntime) ?*Object {
@@ -2363,15 +2232,12 @@ pub const Object = extern struct {
     /// would re-trace the global at the next minor, but a minor stops at an
     /// old, already-marked realm and never reaches the young value.
     pub fn setCachedRealmValue(self: *Object, rt: *JSRuntime, slot: RealmValueSlot, next_value: ?JSValue) !void {
-        errdefer if (next_value) |stored| stored.free(rt);
         const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         const cached = &ctx.cached_values[@intFromEnum(slot)];
-        const old_value = cached.*;
         cached.* = next_value;
         if (next_value) |stored| {
             if (ctx.header.metaConst().alloc_info.heap_accounted) rt.gc.generationalBarrier(&ctx.header, stored.cycleMarkHeader());
         }
-        if (old_value) |stored| stored.free(rt);
     }
 
     pub fn cachedRealmValue(self: *const Object, rt: *const JSRuntime, slot: RealmValueSlot) ?JSValue {
@@ -2381,18 +2247,6 @@ pub const Object = extern struct {
 
     pub fn cachedThrowTypeErrorIntrinsic(self: *const Object, rt: *const JSRuntime) ?JSValue {
         return self.cachedRealmValue(rt, .throw_type_error_intrinsic);
-    }
-
-    pub fn closeStdFile(self: *Object) void {
-        _ = self.closeStdFileWithResult();
-    }
-
-    pub fn closeStdFileWithResult(self: *Object) c_int {
-        const payload = self.stdFilePayload() orelse return 0;
-        const file = payload.file orelse return 0;
-        if (payload.is_stdio) return 0;
-        payload.file = null;
-        return runtime_mod.closeStdFileHandle(file, payload.is_popen);
     }
 
     fn enqueueDeferredStdFileClose(self: *Object, rt: *JSRuntime) void {
@@ -2425,8 +2279,8 @@ pub const Object = extern struct {
             // Only `.deinit` is excluded. `.remove_cycles` used to be
             // excluded beside it -- refcounting's cycle collector needed more
             // from teardown than this arm provides, and an earlier attempt to
-            // admit it tripped the former zero-ref queue's `.decref` phase
-            // assertion. `.tracer_destroy` became a separate value precisely
+            // admit it tripped the former zero-ref teardown machinery.
+            // `.tracer_destroy` became a separate value precisely
             // so it could be admitted here: the tracer frees every object
             // inside such a window, so lumping the two together meant the
             // tracing build never once used its own fast teardown. Measured:
@@ -2464,22 +2318,7 @@ pub const Object = extern struct {
         const accounted_size = self.accountedBodyBytesForPhysical(alloc_size);
         const old_property_capacity = self.propertyStorageCapacity();
         const old_storage_entries = self.propertyStorageEntries(old_property_capacity);
-        const old_properties = old_storage_entries[0..object_shape.prop_count];
-        const old_shape_props = object_shape.props()[0..@min(object_shape.prop_count, old_properties.len)];
         self.setPropertyStorageEmptyForDestroy();
-        for (old_properties, 0..) |entry, index| {
-            // qjs free_property (quickjs.c:6097-6113): data arm is !TMASK.
-            // kind==data && !deleted is bits 3..5 == 0 (TMASK in 3-4, deleted in 5).
-            const raw_flags: u6 = if (index < old_shape_props.len) old_shape_props[index].flags else 0;
-            if (raw_flags & 0b111000 == 0) {
-                entry.slot.data.freeFromPlainObjectDestroy(rt);
-                continue;
-            }
-            const entry_flags = property.Flags.fromBits(raw_flags);
-            if (entry_flags.deleted) continue;
-            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
-            destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
-        }
         if (propertyStoragePointerIsExternal(self, old_storage)) rt.memory.free(property.Entry, old_storage_entries);
         // js_free_shape (quickjs.c:5320-5325): an unshared shape dies with
         // its only holder; shared ones wait for the sweep.
@@ -2576,24 +2415,7 @@ pub const Object = extern struct {
         const old_storage = self.prop_values;
         const old_property_capacity = self.propertyStorageCapacity();
         const old_storage_entries = self.propertyStorageEntries(old_property_capacity);
-        const old_properties = old_storage_entries[0..self.shape_ref.prop_count];
-        const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.setPropertyStorageEmptyForDestroy();
-        for (old_properties, 0..) |entry, index| {
-            const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
-            // qjs free_property (quickjs.c:6097-6113): one unlikely TMASK test,
-            // then the untagged plain-data arm frees the slot value inline.
-            // Only the tagged arms (accessor/var_ref/auto_init) take the
-            // out-of-line path; a deleted entry (`atom == JS_ATOM_NULL` in
-            // qjs, an undefined data slot there) has nothing to free.
-            if (entry_flags.isData()) {
-                entry.slot.data.free(rt);
-                continue;
-            }
-            if (entry_flags.deleted) continue;
-            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
-            destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
-        }
         if (propertyStoragePointerIsExternal(self, old_storage)) rt.memory.free(property.Entry, old_storage_entries);
         rt.shapes.dropUnshared(self.shape_ref);
         self.shape_ref = finalizingShape();
@@ -2660,7 +2482,7 @@ pub const Object = extern struct {
         // may still decref and therefore dereference this header. Defer the
         // allocation free until that resource pass completes (qjs free_object,
         // quickjs.c:6382).
-        if (gc.phaseIsTwoPassTeardown(rt.gc.phase) or rt.gc.phase == .deinit) {
+        if (rt.gc.phase == .tracer_destroy or rt.gc.phase == .deinit) {
             // Stage 3, generic-teardown twin of the fast arm above. The class
             // predicate is spelled from state this path already loaded:
             // `has_inline_payload` comes from the same `destructionPlan` read
@@ -2820,8 +2642,6 @@ pub const Object = extern struct {
         if (rt.borrowed_reference_holders.len == 0) return;
         if (!destroyed.isGlobal()) return;
         if (rt.borrowedWeakCleanupActive()) {
-            if (destroyed.isGlobal()) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
-            if (rt.isCurrentDeferredWeakValueFreeIdentity(destroyed_identity)) return;
             rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
                 clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
             };
@@ -2830,7 +2650,6 @@ pub const Object = extern struct {
 
         rt.beginBorrowedWeakCleanup();
         defer rt.endBorrowedWeakCleanup();
-        if (destroyed.isGlobal()) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
         rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
             clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
         };
@@ -2840,22 +2659,10 @@ pub const Object = extern struct {
 
     pub fn drainBorrowedWeakCleanup(rt: *JSRuntime) void {
         var scanned_identity_count: usize = 0;
-        while (scanned_identity_count < rt.borrowedWeakCleanupIdentityCount() or rt.hasDeferredWeakValueFrees()) {
-            while (scanned_identity_count < rt.borrowedWeakCleanupIdentityCount()) {
-                const pass_end = rt.borrowedWeakCleanupIdentityCount();
-                clearBorrowedReferencesForBorrowedWeakCleanup(rt, scanned_identity_count);
-                if (rt.takeBorrowedWeakCleanupNeedsRescan()) {
-                    scanned_identity_count = pass_end;
-                } else {
-                    scanned_identity_count = rt.borrowedWeakCleanupIdentityCount();
-                }
-            }
-            rt.drainDeferredWeakValueFrees();
+        while (scanned_identity_count < rt.borrowedWeakCleanupIdentityCount()) {
+            clearBorrowedReferencesForMatcher(rt, .{ .runtime_batch = scanned_identity_count });
+            scanned_identity_count = rt.borrowedWeakCleanupIdentityCount();
         }
-    }
-
-    fn clearBorrowedReferencesForBorrowedWeakCleanup(rt: *JSRuntime, start_index: usize) void {
-        clearBorrowedReferencesForMatcher(rt, .{ .runtime_batch = start_index });
     }
 
     fn clearBorrowedReferencesForDestroyedIdentity(rt: *JSRuntime, destroyed_identity: usize) void {
@@ -2868,7 +2675,7 @@ pub const Object = extern struct {
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
-            if (gc.headerRefCountIsZeroOrHusk(current.gcHeader())) {
+            if (gc.headerIsHusk(current.gcHeader())) {
                 rt.unregisterBorrowedReferenceHolder(current);
                 continue;
             }
@@ -2876,21 +2683,16 @@ pub const Object = extern struct {
                 index += 1;
                 continue;
             }
-            gc.retain(current.gcHeader());
-            rt.markBorrowedWeakCleanupHolderSeen();
             current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher, &finalization_enqueue_blocked);
             if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
-                current.value().free(rt);
                 if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
                     index += 1;
                 }
                 continue;
             }
             const current_index = runtimeBorrowedReferenceHolderIndex(rt, current) orelse {
-                current.value().free(rt);
                 continue;
             };
-            current.value().free(rt);
             if (current_index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[current_index] == current) {
                 index = current_index + 1;
             } else {
@@ -2904,7 +2706,7 @@ pub const Object = extern struct {
         var read_index: usize = 0;
         while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
             const current = rt.borrowed_reference_holders[read_index];
-            if (!gc.headerRefCountIsZeroOrHusk(current.gcHeader())) {
+            if (!gc.headerIsHusk(current.gcHeader())) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
                 current.setBorrowedReferenceHolderIndex(write_index);
                 write_index += 1;
@@ -2961,59 +2763,6 @@ pub const Object = extern struct {
         return false;
     }
 
-    /// Remove weak entries whose keys are in the condemned cycle partition.
-    pub fn sweepCycleGarbageWeakCollectionEntriesForCycleGc(rt: *JSRuntime) void {
-        var zero_ref_scratch: gc.ZeroRefScratch = .{};
-        rt.gc.beginDecrefPhase(&zero_ref_scratch);
-        defer rt.gc.endDecrefPhase(rt, &zero_ref_scratch);
-
-        var current = rt.weak_reference_holder_head;
-        while (current) |holder| {
-            // Destruction is deferred by the DECREF phase, but capture the
-            // link first just as qjs list traversal does. Condemned holders
-            // are already detached from the live GC partition and will have
-            // their complete payload destroyed by the cycle batch.
-            const next = holder.weakReferenceHolderNext();
-            if (!objectIsCycleGarbage(holder)) {
-                if (holder.collectionPayloadConst()) |payload| {
-                    if (payload.weak_entries.len != 0) holder.sweepCycleGarbageWeakCollectionEntriesForHolder(rt);
-                }
-            }
-            current = next;
-        }
-    }
-
-    fn sweepCycleGarbageWeakCollectionEntriesForHolder(self: *Object, rt: *JSRuntime) void {
-        const payload = self.collectionPayload() orelse return;
-        var read_index: usize = 0;
-        var write_index: usize = 0;
-        var removed = false;
-        while (read_index < payload.weak_entries.len) : (read_index += 1) {
-            var entry = payload.weak_entries[read_index];
-            if (!weakIdentityReferencesCycleGarbage(rt, entry.key_identity)) {
-                if (write_index != read_index) payload.weak_entries[write_index] = entry;
-                write_index += 1;
-                continue;
-            }
-
-            rt.releaseWeakIdentity(entry.key_identity);
-            clearValueReferenceToVisited(rt, &entry.value);
-            entry.value.free(rt);
-            removed = true;
-        }
-        payload.weak_entries = payload.weak_entries.ptr[0..write_index];
-        if (removed) {
-            self.clearCollectionIndex(rt);
-            self.pruneBorrowedReferenceHolderIfEmpty(rt);
-        }
-    }
-
-    fn weakIdentityReferencesCycleGarbage(rt: *const JSRuntime, identity: usize) bool {
-        if ((identity & 1) != 0) return false;
-        const object = rt.liveObjectFromWeakIdentity(identity) orelse return false;
-        return objectIsCycleGarbage(object);
-    }
-
     const BorrowedIdentityMatcher = union(enum) {
         single: usize,
         runtime_batch: usize,
@@ -3060,7 +2809,7 @@ pub const Object = extern struct {
                     continue;
                 }
 
-                deferWeakEntryValueFree(rt, entry);
+                rt.releaseWeakIdentity(entry.key_identity);
             }
             payload.weak_entries = payload.weak_entries.ptr[0..write_index];
             if (write_index != old_len) self.clearCollectionIndex(rt);
@@ -3104,18 +2853,6 @@ pub const Object = extern struct {
         finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
     }
 
-    fn deferWeakEntryValueFree(rt: *JSRuntime, entry: WeakCollectionEntry) void {
-        rt.releaseWeakIdentity(entry.key_identity);
-        const prepared_identity = prepareBorrowedWeakCleanupForOwnedValue(rt, entry.value);
-        rt.enqueueDeferredWeakValueFreeWithPreparedIdentity(entry.value, prepared_identity) catch |err| switch (err) {
-            error.OutOfMemory => entry.value.free(rt),
-        };
-    }
-
-    fn prepareBorrowedWeakCleanupForOwnedValue(rt: *JSRuntime, stored_value: JSValue) ?usize {
-        return rt.prepareBorrowedWeakCleanupForLastRefValue(stored_value);
-    }
-
     pub const post_a_object_size_baseline: usize = 192;
     comptime {
         std.debug.assert(@sizeOf(Object) + union_arm_max_bytes <= post_a_object_size_baseline / 2);
@@ -3141,11 +2878,6 @@ pub const Object = extern struct {
 
     pub fn setIteratorLength(self: *Object, length: u32) void {
         self.iteratorLengthSlot().* = length;
-    }
-
-    pub fn arrayLengthSlot(self: *Object) *u32 {
-        std.debug.assert(self.isArray());
-        return &self.arrayArm().*.length;
     }
 
     pub fn arrayLength(self: *const Object) u32 {
@@ -3188,10 +2920,6 @@ pub const Object = extern struct {
     /// context's state and lifetime.
     pub inline fn isGlobal(self: *const Object) bool {
         return self.class_id == class.ids.global_object;
-    }
-
-    pub inline fn hasNullPrototype(self: *const Object) bool {
-        return self.shape_ref.proto == null;
     }
 
     pub inline fn hasPropertyStorage(self: *const Object) bool {
@@ -3376,13 +3104,6 @@ pub const Object = extern struct {
         unreachable;
     }
 
-    pub fn clearIteratorTarget(self: *Object, rt: *JSRuntime) void {
-        const target = self.iteratorTargetSlot();
-        const old_target = target.*;
-        target.* = null;
-        if (old_target) |stored| stored.free(rt);
-    }
-
     // ===== collection* / weak* =====
     pub fn collectionEntriesSlot(self: *Object) *[]CollectionEntry {
         if (self.collectionPayload()) |payload| return &payload.entries;
@@ -3470,12 +3191,11 @@ pub const Object = extern struct {
     /// entry-array cursor and then the target reference itself. Mirrors
     /// js_map_iterator_next's end-of-enumeration arm (quickjs.c:52608-52613),
     /// which decrefs the current record before dropping `it->obj`.
-    pub fn detachCollectionIteratorTarget(self: *Object, rt: *JSRuntime) void {
+    pub fn detachCollectionIteratorTarget(self: *Object, _: *JSRuntime) void {
         const payload = self.iteratorPayload() orelse return;
-        const target = payload.target orelse return;
+        if (payload.target == null) return;
         releaseIteratorCollectionCursor(self.class_id, payload);
         payload.target = null;
-        target.free(rt);
     }
 
     pub fn ensureCollectionEntryCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
@@ -3695,7 +3415,7 @@ pub const Object = extern struct {
         errdefer rt.job_queue.releaseReservedEntries(1);
         refreshed_entries.*[index] = .{
             .target_identity = target_identity,
-            .held_value = rooted_held_value.dup(),
+            .held_value = rooted_held_value,
             .unregister_token_identity = unregister_token_identity,
         };
         // `held_value` is the cell's one strong edge (the target and the
@@ -3713,31 +3433,16 @@ pub const Object = extern struct {
         unreachable;
     }
 
-    pub fn stdFile(self: *const Object) ?*std.c.FILE {
-        if (self.stdFilePayloadConst()) |payload| return payload.file;
-        return null;
-    }
-
     pub fn stdFileIsPopenSlot(self: *Object) *bool {
         if (self.stdFilePayload()) |payload| return &payload.is_popen;
         std.debug.assert(self.flags.class_payload_kind == .std_file);
         unreachable;
     }
 
-    pub fn stdFileIsPopen(self: *const Object) bool {
-        if (self.stdFilePayloadConst()) |payload| return payload.is_popen;
-        return false;
-    }
-
     pub fn stdFileIsStdioSlot(self: *Object) *bool {
         if (self.stdFilePayload()) |payload| return &payload.is_stdio;
         std.debug.assert(self.flags.class_payload_kind == .std_file);
         unreachable;
-    }
-
-    pub fn stdFileIsStdio(self: *const Object) bool {
-        if (self.stdFilePayloadConst()) |payload| return payload.is_stdio;
-        return false;
     }
 
     pub fn disposableStackDisposedSlot(self: *Object) *bool {
@@ -3781,8 +3486,8 @@ pub const Object = extern struct {
         payload.resources = payload.resources.ptr[0 .. index + 1];
         errdefer payload.resources = payload.resources[0..index];
         payload.resources[index] = .{
-            .value = resource_value.dup(),
-            .method = method.dup(),
+            .value = resource_value,
+            .method = method,
             .kind = kind,
             .hint = hint,
             .method_kind = method_kind,
@@ -3819,17 +3524,11 @@ pub const Object = extern struct {
         unreachable;
     }
 
-    pub fn clearDisposableStackAsyncCapability(self: *Object, rt: *JSRuntime) void {
+    pub fn clearDisposableStackAsyncCapability(self: *Object, _: *JSRuntime) void {
         if (self.disposableStackPayload()) |payload| {
-            const old_resolve = payload.async_dispose_resolve;
-            const old_reject = payload.async_dispose_reject;
-            const old_error = payload.async_dispose_error;
             payload.async_dispose_resolve = null;
             payload.async_dispose_reject = null;
             payload.async_dispose_error = null;
-            if (old_resolve) |stored| stored.free(rt);
-            if (old_reject) |stored| stored.free(rt);
-            if (old_error) |stored| stored.free(rt);
         }
     }
 
@@ -3859,50 +3558,27 @@ pub const Object = extern struct {
         source_payload.resource_capacity = 0;
     }
 
-    pub fn ensureVarRefPayload(self: *Object, rt: *JSRuntime) !*VarRefPayload {
-        if (self.varRefPayload()) |payload| return payload;
-        std.debug.assert(self.payloadArm().* == null);
-        const payload = try rt.createRuntime(VarRefPayload);
-        payload.* = .{};
-        self.payloadArm().* = @ptrCast(payload);
-        self.flags.class_payload_kind = .var_ref;
-        return payload;
-    }
-
-    pub fn initVarRefPayload(self: *Object, rt: *JSRuntime, initial_value: JSValue) !void {
-        _ = try self.ensureVarRefPayload(rt);
-        try self.setVarRefValue(rt, initial_value);
-    }
-
     pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
-        errdefer next_value.free(rt);
         const value_slot = self.varRefValueSlot();
-        const old_value = value_slot.*;
         value_slot.* = next_value;
         // The slot lives in this object's own var_ref payload, so the object is
         // the owner. (Not to be confused with `VarRef.setVarRefValue`, which
         // stores into a cell and takes the barrier there.)
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
-        if (old_value) |stored| stored.free(rt);
     }
 
     pub fn setOptionalValueSlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) !void {
-        errdefer if (next_value) |stored_value| stored_value.free(rt);
-        const old_value = slot.*;
         slot.* = next_value;
         // The receiver is the owner, which is what the generational barrier
         // needs (§8.3): a minor re-traces owners, so an old object gaining a
         // young child has to be remembered. Compiles away outside generational
         // builds.
         if (next_value) |stored| rt.gc.generationalBarrier(self.gcHeader(), stored.cycleMarkHeader());
-        if (old_value) |stored| stored.free(rt);
     }
 
-    pub fn clearOptionalValueSlot(self: *Object, rt: *JSRuntime, slot: *?JSValue) void {
+    pub fn clearOptionalValueSlot(self: *Object, _: *JSRuntime, slot: *?JSValue) void {
         _ = self;
-        const old_value = slot.*;
         slot.* = null;
-        if (old_value) |stored| stored.free(rt);
     }
 
     pub fn takeOptionalValueSlot(self: *Object, slot: *?JSValue) ?JSValue {
@@ -3910,35 +3586,6 @@ pub const Object = extern struct {
         const old_value = slot.*;
         slot.* = null;
         return old_value;
-    }
-
-    pub fn setValueSlice(self: *Object, rt: *JSRuntime, slot: *[]JSValue, next_values: []JSValue) !void {
-        _ = self;
-        errdefer {
-            var owned_next = next_values;
-            destroyValueSlice(rt, &owned_next);
-        }
-        destroyValueSlice(rt, slot);
-        slot.* = next_values;
-    }
-
-    pub fn setValueSliceWithCapacity(
-        self: *Object,
-        rt: *JSRuntime,
-        slot: *[]JSValue,
-        capacity: *usize,
-        next_values: []JSValue,
-        next_capacity: usize,
-    ) !void {
-        _ = self;
-        errdefer {
-            var owned_next = next_values;
-            var owned_capacity = next_capacity;
-            destroyValueSliceWithCapacity(rt, &owned_next, &owned_capacity);
-        }
-        destroyValueSliceWithCapacity(rt, slot, capacity);
-        slot.* = next_values;
-        capacity.* = next_capacity;
     }
 
     pub fn setPromiseResult(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
@@ -3954,31 +3601,31 @@ pub const Object = extern struct {
     }
 
     pub fn setFunctionPromiseCapabilitySlot(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseCapabilitySlotSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_capability_slot, next_value);
     }
 
     pub fn setFunctionPromiseResolvingTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingTargetSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_resolving_target, next_value);
     }
 
     pub fn setFunctionPromiseResolvingState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingStateSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_resolving_state, next_value);
     }
 
     pub fn setFunctionPromiseCombinatorState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseCombinatorStateSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_combinator_state, next_value);
     }
 
     pub fn setFunctionPromiseFinallyPayload(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyPayloadSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_finally_payload, next_value);
     }
 
     pub fn setFunctionPromiseFinallyCallback(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyCallbackSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_finally_callback, next_value);
     }
 
     pub fn setFunctionPromiseFinallyConstructor(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseFinallyConstructorSlot(rt), next_value);
+        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_finally_constructor, next_value);
     }
 
     pub fn varRefValueSlot(self: *Object) *?JSValue {
@@ -4036,7 +3683,6 @@ pub const Object = extern struct {
         kind: u8,
     ) !void {
         var owned_buffer = buffer_value;
-        errdefer owned_buffer.free(rt);
 
         const backing_object = objectFromValue(owned_buffer) orelse return error.TypeError;
         if (backing_object.class_id != class.ids.array_buffer and backing_object.class_id != class.ids.shared_array_buffer) {
@@ -4058,12 +3704,6 @@ pub const Object = extern struct {
         payload.fixed_length = fixed_length;
         payload.kind = kind;
         backing_payload.attachView(payload);
-    }
-
-    pub fn byteStorageSlot(self: *Object) *[]u8 {
-        if (self.bufferPayload()) |payload| return &payload.bytes;
-        std.debug.assert(self.flags.class_payload_kind == .buffer);
-        unreachable;
     }
 
     pub fn byteStorage(self: *const Object) []u8 {
@@ -4171,12 +3811,6 @@ pub const Object = extern struct {
         payload.updateViews();
     }
 
-    pub fn arrayBufferDetachedSlot(self: *Object) *bool {
-        if (self.bufferPayload()) |payload| return &payload.detached;
-        std.debug.assert(self.flags.class_payload_kind == .buffer);
-        unreachable;
-    }
-
     pub fn arrayBufferDetached(self: *const Object) bool {
         if (self.bufferPayloadConst()) |payload| return payload.detached;
         return false;
@@ -4215,12 +3849,6 @@ pub const Object = extern struct {
         return null;
     }
 
-    pub fn typedArrayByteOffsetSlot(self: *Object) *usize {
-        if (self.typedArrayPayload()) |payload| return &payload.byte_offset;
-        std.debug.assert(self.flags.class_payload_kind == .typed_array);
-        unreachable;
-    }
-
     pub fn typedArrayByteOffset(self: *const Object) usize {
         if (self.typedArrayPayloadConst()) |payload| return payload.byte_offset;
         return 0;
@@ -4239,12 +3867,6 @@ pub const Object = extern struct {
         if (class.isBytecodeFunctionClass(self.class_id)) return 0;
         if (self.functionPayloadConst()) |payload| return payload.native.typed_array_element_size;
         return 0;
-    }
-
-    pub fn typedArrayFixedLengthSlot(self: *Object) *?u32 {
-        if (self.typedArrayPayload()) |payload| return &payload.fixed_length;
-        std.debug.assert(self.flags.class_payload_kind == .typed_array);
-        unreachable;
     }
 
     pub fn typedArrayFixedLength(self: *const Object) ?u32 {
@@ -4289,12 +3911,9 @@ pub const Object = extern struct {
     /// RegExp source is required to be a string by the internal constructor.
     pub fn setRegexpSource(self: *Object, rt: *JSRuntime, source_value: JSValue) !void {
         const source = source_value.asStringBody() orelse return error.TypeError;
-        source.retain();
         const payload = self.regExpPayload() orelse return error.TypeError;
-        const old_source = payload.source;
         payload.source = source;
-        if (comptime gc.string_tracer_owned) rt.gc.generationalBarrierValue(self.gcHeader(), source.value());
-        if (old_source) |stored_string| stored_string.value().free(rt);
+        rt.gc.generationalBarrierValue(self.gcHeader(), source.value());
     }
 
     /// QuickJS keeps RegExp `lastIndex` as the first ordinary, non-configurable
@@ -4350,11 +3969,9 @@ pub const Object = extern struct {
         return &.{};
     }
 
-    pub fn clearRegexpCompiledBytecode(self: *Object, rt: *JSRuntime) void {
+    pub fn clearRegexpCompiledBytecode(self: *Object, _: *JSRuntime) void {
         if (self.regExpPayload()) |payload| {
-            const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = null;
-            if (old_bytecode) |stored_string| stored_string.value().free(rt);
             return;
         }
         std.debug.assert(self.flags.class_payload_kind == .regexp);
@@ -4371,10 +3988,8 @@ pub const Object = extern struct {
             // qjs wraps lre bytecode in a narrow JSString and stores that
             // string pointer in `u.regexp.bytecode` (quickjs.c:47624-47633).
             const owned = try string.String.createLatin1(rt, bytecode);
-            const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = owned;
-            if (comptime gc.string_tracer_owned) rt.gc.generationalBarrierValue(self.gcHeader(), owned.value());
-            if (old_bytecode) |stored_string| stored_string.value().free(rt);
+            rt.gc.generationalBarrierValue(self.gcHeader(), owned.value());
         } else {
             std.debug.assert(self.flags.class_payload_kind == .regexp);
             unreachable;
@@ -4388,11 +4003,8 @@ pub const Object = extern struct {
     pub fn setRegexpCompiledBytecodeString(self: *Object, rt: *JSRuntime, bytecode: *string.String) !void {
         if (bytecode.isWide() or bytecode.len() == 0) return error.TypeError;
         if (self.regExpPayload()) |payload| {
-            bytecode.retain();
-            const old_bytecode = payload.compiled_bytecode;
             payload.compiled_bytecode = bytecode;
-            if (comptime gc.string_tracer_owned) rt.gc.generationalBarrierValue(self.gcHeader(), bytecode.value());
-            if (old_bytecode) |stored_string| stored_string.value().free(rt);
+            rt.gc.generationalBarrierValue(self.gcHeader(), bytecode.value());
         } else {
             std.debug.assert(self.flags.class_payload_kind == .regexp);
             unreachable;
@@ -4575,10 +4187,15 @@ pub const Object = extern struct {
             if (atom_id > std.math.maxInt(atom.Atom)) return JSValue.undefinedValue();
             const symbol_atom: atom.Atom = @intCast(atom_id);
             if (rt.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
-            return rt.atoms.symbolValueIfLive(rt, symbol_atom) catch JSValue.undefinedValue();
+            const target = rt.atoms.symbolValueIfLive(rt, symbol_atom);
+            // A dead target must not enter [[KeptAlive]]: the object arm
+            // returns before `keepAliveWeakRefTarget` for the same reason.
+            if (target.isUndefined()) return JSValue.undefinedValue();
+            rt.keepAliveWeakRefTarget(target);
+            return target;
         }
         const target = rt.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
-        const retained = target.value().dup();
+        const retained = target.value();
         rt.keepAliveWeakRefTarget(retained);
         return retained;
     }
@@ -4624,14 +4241,9 @@ pub const Object = extern struct {
         return self.arrayArm().*.values[@intCast(index)];
     }
 
-    pub fn fastArrayElementSlot(self: *Object, index: u32) *JSValue {
-        std.debug.assert(self.isFastArrayIndexInBounds(index));
-        return &self.arrayArm().*.values[@intCast(index)];
-    }
-
     pub fn fastArrayElementDup(self: *const Object, index: u32) ?JSValue {
         if (!self.isFastArrayIndexInBounds(index)) return null;
-        return self.arrayArm().*.values[@intCast(index)].dup();
+        return self.arrayArm().*.values[@intCast(index)];
     }
 
     /// Indexed read of a MAPPED arguments object — qjs JS_GetPropertyValue's
@@ -4662,16 +4274,14 @@ pub const Object = extern struct {
         const refs = self.argumentsVarRefs();
         if (index >= refs.len) return null;
         const cell = refs[index] orelse return null;
-        return cell.pvalue.*.dup();
+        return cell.pvalue.*;
     }
 
     pub fn setFastArrayElementDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         const slot = &self.arrayArm().*.values[@intCast(index)];
-        const old = slot.*;
-        slot.* = new_value.dup();
+        slot.* = new_value;
         rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader());
-        old.free(rt);
         return true;
     }
 
@@ -4685,17 +4295,12 @@ pub const Object = extern struct {
         return true;
     }
 
-    /// Active-bytecode counterpart of `setFastArrayElementOwned`. The VM owns
-    /// `new_value` and has already established the runtime-teardown exclusion
-    /// carried by `freeDuringActiveBytecode`; false still leaves ownership with
-    /// the caller.
+    /// Active-bytecode counterpart of `setFastArrayElementOwned`.
     pub fn setFastArrayElementOwnedDuringActiveBytecode(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
         if (!self.isFastArrayIndexInBounds(index)) return false;
         const slot = &self.arrayArm().*.values[@intCast(index)];
-        const old_value = slot.*;
         slot.* = new_value;
         rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader());
-        old_value.freeDuringActiveBytecode(rt);
         return true;
     }
 
@@ -4729,36 +4334,6 @@ pub const Object = extern struct {
         if (elements.len != 0) self.markIndexedProperties(rt);
     }
 
-    pub fn clearFastArray(self: *Object) void {
-        if (!self.isArray()) return;
-        std.debug.assert(self.arrayArm().*.capacity == 0);
-        self.flags.fast_array = false;
-    }
-
-    pub fn setArraySparseLength(self: *Object, length: u32) void {
-        std.debug.assert(self.isArray());
-        std.debug.assert(self.arrayArm().*.capacity == 0);
-        // Sparse arrays carry no dense extent: count is 0, length is the
-        // JS-observable `.length`. (Invariant 5: sparse => array_count == 0.)
-        self.arrayArm().*.count = 0;
-        self.arrayArm().*.length = length;
-        self.flags.fast_array = false;
-    }
-
-    pub fn resetFastArrayEmpty(self: *Object) void {
-        std.debug.assert(self.isArray());
-        std.debug.assert(self.arrayArm().*.capacity == 0);
-        self.arrayArm().*.count = 0;
-        self.arrayArm().*.length = 0;
-        self.flags.fast_array = true;
-    }
-
-    pub fn takeLastFastArrayElement(self: *Object) ?JSValue {
-        if (!self.isArray() or !self.flags.fast_array or self.arrayArm().*.count == 0) return null;
-        self.arrayArm().*.count -= 1;
-        return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
-    }
-
     /// Pop the last element of a FULLY DENSE fast array (count == length),
     /// lowering BOTH the dense extent and the JS `.length` by one. Returns null
     /// for an empty or holey array (`length > count`) so the caller falls back
@@ -4772,16 +4347,6 @@ pub const Object = extern struct {
         return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
     }
 
-    pub fn borrowLastFastArrayElement(self: *Object) ?*JSValue {
-        if (!self.isArray() or !self.flags.fast_array or self.arrayArm().*.count == 0) return null;
-        return &self.arrayArm().*.values[@intCast(self.arrayArm().*.count - 1)];
-    }
-
-    pub fn shrinkFastArrayByOne(self: *Object) void {
-        std.debug.assert(self.isArray() and self.flags.fast_array and self.arrayArm().*.count != 0);
-        self.arrayArm().*.count -= 1;
-    }
-
     fn destroyArrayElements(self: *Object, rt: *JSRuntime) void {
         // Only these classes activate the dense-array union arm. Other class
         // arms may legitimately use all three words (notably inline RegExp's
@@ -4791,10 +4356,6 @@ pub const Object = extern struct {
             self.class_id != class.ids.arguments and
             self.class_id != class.ids.mapped_arguments) return;
         if (self.class_id == class.ids.mapped_arguments) {
-            for (self.argumentsVarRefs()) |maybe_cell| {
-                const cell = maybe_cell orelse continue;
-                cell.release(rt);
-            }
             const allocated = self.allocatedArrayElements();
             self.arrayArm().*.count = 0;
             self.arrayArm().*.capacity = 0;
@@ -4803,11 +4364,7 @@ pub const Object = extern struct {
             return;
         }
         if (!self.flags.fast_array and self.arrayArm().*.capacity == 0) return;
-        if (self.flags.fast_array) {
-            var index: usize = 0;
-            const count: usize = @intCast(self.arrayArm().*.count);
-            while (index < count) : (index += 1) self.arrayArm().*.values[index].free(rt);
-        } else {
+        if (self.flags.fast_array) {} else {
             std.debug.assert(self.arrayArm().*.capacity == 0);
         }
         const allocated = self.allocatedArrayElements();
@@ -4883,11 +4440,6 @@ pub const Object = extern struct {
         try self.ensureArrayBufferCapacity(rt, @intCast(needed));
     }
 
-    pub fn fastArrayValuesPtr(self: *const Object) ?[*]JSValue {
-        if (!self.isFastArray() or self.arrayArm().*.count == 0) return null;
-        return self.arrayArm().*.values;
-    }
-
     pub fn fastArrayCount(self: *const Object) u32 {
         return if (self.isFastArray()) self.arrayArm().*.count else 0;
     }
@@ -4904,11 +4456,6 @@ pub const Object = extern struct {
         return self.arrayElementsMut();
     }
 
-    pub fn arrayElementsForCount(self: *const Object) []const JSValue {
-        if (!self.flags.fast_array or self.arrayArm().*.count == 0) return &.{};
-        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.count))];
-    }
-
     pub fn setFastArrayCountAssumeCapacity(self: *Object, count: u32) void {
         std.debug.assert(count <= self.arrayArm().*.capacity);
         self.arrayArm().*.count = count;
@@ -4918,42 +4465,6 @@ pub const Object = extern struct {
     pub fn fastArraySlotAssumeCapacity(self: *Object, index: u32) *JSValue {
         std.debug.assert(index < self.arrayArm().*.capacity);
         return &self.arrayArm().*.values[@intCast(index)];
-    }
-
-    pub fn fastArraySetSparseLength(self: *Object, length: u32) void {
-        self.setArraySparseLength(length);
-    }
-
-    pub fn fastArrayResetEmpty(self: *Object) void {
-        self.resetFastArrayEmpty();
-    }
-
-    pub fn fastArrayAdoptElementsAssumingEmpty(self: *Object, elements: []JSValue) void {
-        self.adoptDenseArrayElementsAssumingEmpty(elements);
-    }
-
-    pub fn fastArrayTakeLast(self: *Object) ?JSValue {
-        return self.takeLastFastArrayElement();
-    }
-
-    pub fn fastArrayBorrowLast(self: *Object) ?*JSValue {
-        return self.borrowLastFastArrayElement();
-    }
-
-    pub fn fastArrayShrinkLast(self: *Object) void {
-        self.shrinkFastArrayByOne();
-    }
-
-    pub fn fastArrayHasIndex(self: *const Object, index: u32) bool {
-        return self.isFastArrayIndexInBounds(index);
-    }
-
-    pub fn fastArrayGetDup(self: *const Object, index: u32) ?JSValue {
-        return self.fastArrayElementDup(index);
-    }
-
-    pub fn fastArraySetDup(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) bool {
-        return self.setFastArrayElementDup(rt, index, new_value);
     }
 
     // ===== promise* =====
@@ -5148,12 +4659,6 @@ pub const Object = extern struct {
         return execution.frameUsesCombinedStorage();
     }
 
-    pub fn generatorCanRetainResidentStorageOwnership(self: *Object) bool {
-        const payload = self.generatorPayload() orelse return false;
-        const execution = payload.execution orelse return false;
-        return execution.canRetainResidentStorageOwnership();
-    }
-
     /// Called by the outer call wrapper after its live Frame and Stack have
     /// deinitialized. A running state cannot be freed inside the return opcode:
     /// both live owners still borrow/alias fields until VM unwind completes.
@@ -5166,12 +4671,8 @@ pub const Object = extern struct {
         destroyGeneratorExecutionState(rt, &payload.execution);
     }
 
-    pub fn generatorCurrentFunctionSlot(self: *Object) *JSValue {
-        return &self.generatorLiveExecution().current_function;
-    }
-
     pub fn setGeneratorCurrentFunction(self: *Object, rt: *JSRuntime, next_value: JSValue) void {
-        replaceOwnedValue(rt, self.generatorCurrentFunctionSlot(), next_value);
+        replaceOwnedValue(rt, &self.generatorLiveExecution().current_function, next_value);
     }
 
     pub fn generatorCurrentFunction(self: *const Object) ?JSValue {
@@ -5531,11 +5032,7 @@ pub const Object = extern struct {
             const expected_class = if (tag.usesCallerRealm()) class.ids.c_function_data else class.ids.c_function;
             std.debug.assert(self.class_id == expected_class);
         }
-        (try self.internalCallableTagSlot(rt)).* = tag;
-    }
-
-    pub fn internalCallableTagSlot(self: *Object, rt: *JSRuntime) !*host_function.InternalCallableTag {
-        return &(try self.ensureFunctionRarePayload(rt)).internal_callable_tag;
+        (try self.ensureFunctionRarePayload(rt)).internal_callable_tag = tag;
     }
 
     pub fn arrayIteratorKind(self: *const Object) u8 {
@@ -5608,12 +5105,6 @@ pub const Object = extern struct {
         if (marker == .none) return true;
         const payload = try self.ensureFunctionRarePayload(rt);
         return setTypedArrayBuiltinMarker(payload, marker);
-    }
-
-    pub fn addArrayIteratorKind(self: *Object, rt: *JSRuntime, kind: u8) !bool {
-        if (kind == 0) return true;
-        const payload = try self.ensureFunctionRarePayload(rt);
-        return setArrayIteratorKind(payload, kind);
     }
 
     pub fn addIteratorIdentityFunction(self: *Object, rt: *JSRuntime) !bool {
@@ -5716,10 +5207,6 @@ pub const Object = extern struct {
         return true;
     }
 
-    pub fn collectionMethodOwnerClassSlot(self: *Object, rt: *JSRuntime) !*class.ClassId {
-        return &(try self.ensureFunctionRarePayload(rt)).collection_method_owner_class;
-    }
-
     pub fn collectionMethodOwnerClass(self: *const Object) class.ClassId {
         if (self.functionRarePayloadConst()) |payload| return payload.collection_method_owner_class;
         return class.invalid_class_id;
@@ -5730,20 +5217,17 @@ pub const Object = extern struct {
         // finalized FunctionBytecode is already the execution record, so
         // attachment is a no-allocation pointer publication just like qjs
         // `js_closure2`'s `p->u.func.function_bytecode = b` transfer.
-        errdefer next_value.free(rt);
         if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         const header = next_value.objectHeader() orelse return error.InvalidBytecode;
         std.debug.assert(header.meta().flags.kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-        const old_fb = self.bytecodeArm().*.function_bytecode;
         self.bytecodeArm().*.function_bytecode = fb;
         // A FunctionBytecode is a traced heap object, and a closure gaining one
         // is an ordinary owner-to-child store. Closures are created lazily and
         // repeatedly against long-lived function objects, so this is the
         // old-to-young direction far more often than not.
         rt.gc.generationalBarrier(self.gcHeader(), &fb.header);
-        if (old_fb) |old| gc.release(rt, &old.header);
     }
 
     /// Direct qjs `u.func` view for a proven bytecode-function object.
@@ -5793,31 +5277,14 @@ pub const Object = extern struct {
         return &(try self.ensureFunctionRarePayload(rt)).proxy_revoke_target;
     }
 
-    pub fn functionProxyRevokeTarget(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.proxy_revoke_target;
-        return null;
-    }
-
-    pub fn functionPromiseCapabilitySlotSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_capability_slot;
-    }
-
     pub fn functionPromiseCapabilitySlot(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.promise_capability_slot;
         return null;
     }
 
-    pub fn functionPromiseResolvingTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_target;
-    }
-
     pub fn functionPromiseResolvingTarget(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_target;
         return null;
-    }
-
-    pub fn functionPromiseResolvingStateSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_resolving_state;
     }
 
     pub fn functionPromiseResolvingState(self: *const Object) ?JSValue {
@@ -5832,10 +5299,6 @@ pub const Object = extern struct {
     pub fn functionPromiseResolvingReject(self: *const Object) bool {
         if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_reject;
         return false;
-    }
-
-    pub fn functionPromiseCombinatorStateSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_combinator_state;
     }
 
     pub fn functionPromiseCombinatorState(self: *const Object) ?JSValue {
@@ -5870,26 +5333,14 @@ pub const Object = extern struct {
         return false;
     }
 
-    pub fn functionPromiseFinallyPayloadSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_payload;
-    }
-
     pub fn functionPromiseFinallyPayload(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_payload;
         return null;
     }
 
-    pub fn functionPromiseFinallyCallbackSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_callback;
-    }
-
     pub fn functionPromiseFinallyCallback(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_callback;
         return null;
-    }
-
-    pub fn functionPromiseFinallyConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_finally_constructor;
     }
 
     pub fn functionPromiseFinallyConstructor(self: *const Object) ?JSValue {
@@ -6007,7 +5458,6 @@ pub const Object = extern struct {
     /// reference on success.  An out-of-range index does not consume `cell`.
     pub fn replaceModuleCaptureSlotOwned(
         self: *Object,
-        rt: *JSRuntime,
         index: usize,
         cell: *var_ref_mod.VarRef,
     ) !void {
@@ -6015,22 +5465,18 @@ pub const Object = extern struct {
         const slots = self.bytecodeArm().*.captureSlots();
         if (index >= slots.len) return error.InvalidBytecode;
 
-        const old = slots[index];
         slots[index] = cell;
-        if (old) |old_cell| old_cell.freeCell(rt);
     }
 
     /// Roll one indexed module-import slot back to its pre-link null state.
     /// The previously installed cell is consumed on success; an invalid index
     /// changes nothing.
-    pub fn clearModuleImportCaptureSlot(self: *Object, rt: *JSRuntime, index: usize) !void {
+    pub fn clearModuleImportCaptureSlot(self: *Object, index: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
         const slots = self.bytecodeArm().*.captureSlots();
         if (index >= slots.len) return error.InvalidBytecode;
 
-        const old = slots[index];
         slots[index] = null;
-        if (old) |old_cell| old_cell.freeCell(rt);
     }
 
     /// Validate the module capture table before ordinary execution.  Sealing is
@@ -6044,20 +5490,6 @@ pub const Object = extern struct {
         for (slots) |slot| {
             if (slot == null) return error.InvalidBytecode;
         }
-    }
-
-    /// Find one closure cell by its immutable FB metadata. Used for the
-    /// language's hidden arrow captures (`this` / `new.target`) on cold semantic
-    /// paths such as direct eval and super; ordinary opcodes index cells
-    /// directly and never scan.
-    pub fn functionCaptureCell(self: *const Object, name: atom.Atom) ?*var_ref_mod.VarRef {
-        if (!class.isBytecodeFunctionClass(self.class_id)) return null;
-        const fb = self.bytecodeArm().*.function_bytecode orelse return null;
-        const captures = self.bytecodeArm().*.captureSlots();
-        for (fb.closureVar(), 0..) |capture, index| {
-            if (capture.var_name == name and index < captures.len) return captures[index];
-        }
-        return null;
     }
 
     /// Replace the closure-captures slice, releasing the previous cells —
@@ -6084,18 +5516,15 @@ pub const Object = extern struct {
     }
 
     /// Stores a strong `[[HomeObject]]` edge; callers must not write the slot directly.
-    pub fn setFunctionHomeObject(self: *Object, rt: *JSRuntime, home_object: ?*Object) !void {
+    pub fn setFunctionHomeObject(self: *Object, _: *JSRuntime, home_object: ?*Object) !void {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         const old_home_object = self.functionHomeObject();
         if (old_home_object == home_object) return;
-        if (home_object) |next| gc.retain(next.gcHeader());
-        errdefer if (home_object) |next| next.value().free(rt);
         if (self.bytecodeFunctionAux()) |aux| {
             aux.home_object = home_object;
         } else {
             self.bytecodeArm().*.home_or_aux = if (home_object) |next| @ptrCast(next) else null;
         }
-        if (old_home_object) |old| old.value().free(rt);
     }
 
     pub fn setCallSiteMetadata(
@@ -6108,12 +5537,8 @@ pub const Object = extern struct {
         is_native: bool,
     ) !void {
         const payload = try self.ensureOrdinaryPayload(rt);
-        const next_file = file.dup();
-        errdefer next_file.free(rt);
-        const next_function = function_name.dup();
-        errdefer next_function.free(rt);
-        const old_file = payload.callsite_file;
-        const old_function = payload.callsite_function;
+        const next_file = file;
+        const next_function = function_name;
         payload.callsite_file = next_file;
         payload.callsite_function = next_function;
         payload.callsite_line = line;
@@ -6128,8 +5553,6 @@ pub const Object = extern struct {
         // a condemned young function. `callsite_file` is a string and needs
         // nothing; the barrier tolerates it anyway.
         rt.gc.generationalBarrier(self.gcHeader(), next_function.cycleMarkHeader());
-        if (old_file) |stored| stored.free(rt);
-        if (old_function) |stored| stored.free(rt);
     }
 
     pub fn isCallSite(self: *const Object, rt: *const JSRuntime) bool {
@@ -6164,15 +5587,10 @@ pub const Object = extern struct {
 
     pub fn setErrorStack(self: *Object, rt: *JSRuntime, stack_value: JSValue) !void {
         const payload = try self.ensureOrdinaryPayload(rt);
-        const next_value = stack_value.dup();
-        errdefer next_value.free(rt);
-        const old_value = payload.error_stack;
-        const old_sites = payload.error_stack_sites;
+        const next_value = stack_value;
         payload.error_stack = next_value;
         payload.error_stack_sites = null;
         payload.error_stack_site_count = 0;
-        if (old_value) |stored| stored.free(rt);
-        if (old_sites) |stored| stored.free(rt);
     }
 
     pub fn errorStack(self: *const Object, rt: *const JSRuntime) ?JSValue {
@@ -6182,10 +5600,7 @@ pub const Object = extern struct {
 
     pub fn setErrorStackSites(self: *Object, rt: *JSRuntime, sites_value: JSValue) !void {
         const payload = try self.ensureOrdinaryPayload(rt);
-        const next_value = sites_value.dup();
-        errdefer next_value.free(rt);
-        const old_stack = payload.error_stack;
-        const old_sites = payload.error_stack_sites;
+        const next_value = sites_value;
         payload.error_stack = null;
         payload.error_stack_sites = next_value;
         payload.error_stack_site_count = capturedStackSiteCount(sites_value);
@@ -6195,8 +5610,6 @@ pub const Object = extern struct {
         // needs nothing: its value is a string, and strings are not registered
         // with the collector at all, so they are never condemned.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
-        if (old_stack) |stored| stored.free(rt);
-        if (old_sites) |stored| stored.free(rt);
     }
 
     pub fn errorStackSites(self: *const Object, rt: *const JSRuntime) ?JSValue {
@@ -6290,10 +5703,6 @@ pub const Object = extern struct {
         return null;
     }
 
-    pub fn setPromiseCapabilityResolve(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.promiseCapabilityResolveSlot(rt), next_value);
-    }
-
     pub fn promiseCapabilityRejectSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.promise_capability_reject;
@@ -6304,19 +5713,9 @@ pub const Object = extern struct {
         return null;
     }
 
-    pub fn setPromiseCapabilityReject(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.promiseCapabilityRejectSlot(rt), next_value);
-    }
-
     pub fn setPromiseCapability(self: *Object, rt: *JSRuntime, next_resolve: ?JSValue, next_reject: ?JSValue) !void {
-        errdefer {
-            if (next_resolve) |stored| stored.free(rt);
-            if (next_reject) |stored| stored.free(rt);
-        }
         const resolve_slot = try self.promiseCapabilityResolveSlot(rt);
         const reject_slot = try self.promiseCapabilityRejectSlot(rt);
-        const old_resolve = resolve_slot.*;
-        const old_reject = reject_slot.*;
         resolve_slot.* = next_resolve;
         reject_slot.* = next_reject;
         // The single-slot setters above go through `setOptionalValueSlot`,
@@ -6326,8 +5725,6 @@ pub const Object = extern struct {
         // reported (MINOR-AUDIT: ordinary owner -> condemned young function).
         if (next_resolve) |stored| rt.gc.generationalBarrier(self.gcHeader(), stored.cycleMarkHeader());
         if (next_reject) |stored| rt.gc.generationalBarrier(self.gcHeader(), stored.cycleMarkHeader());
-        if (old_resolve) |stored| stored.free(rt);
-        if (old_reject) |stored| stored.free(rt);
     }
 
     pub fn promiseCombinatorResolveSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -6728,12 +6125,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn stdFilePayloadConst(self: *const Object) ?*const StdFilePayload {
-        if (self.flags.class_payload_kind != .std_file) return null;
-        const ptr = self.payloadArm().* orelse return null;
-        return @ptrCast(@alignCast(ptr));
-    }
-
     fn destroyStdFilePayload(self: *Object, rt: *JSRuntime) void {
         const payload = self.stdFilePayload() orelse return;
         self.payloadArm().* = null;
@@ -7016,15 +6407,11 @@ pub const Object = extern struct {
                 self.bytecodeArm().*.home_or_aux = null;
                 aux.destroy(rt);
                 rt.memory.destroy(BytecodeFunctionAux, aux);
-            } else if (self.functionHomeObject()) |home| {
+            } else if (self.functionHomeObject()) |_| {
                 self.bytecodeArm().*.home_or_aux = null;
-                home.value().free(rt);
             }
 
-            if (self.bytecodeArm().*.function_bytecode) |fb| {
-                self.bytecodeArm().*.function_bytecode = null;
-                gc.release(rt, &fb.header);
-            }
+            self.bytecodeArm().*.function_bytecode = null;
             self.flags.class_payload_kind = .none;
             return;
         }
@@ -7056,29 +6443,6 @@ pub const Object = extern struct {
         return fromHeader(stored_header);
     }
 
-    const PayloadCollectContext = struct {
-        rt: *JSRuntime,
-        visited: *ObjectVisitSet,
-    };
-
-    const PayloadIncomingContext = struct {
-        visited: *const ObjectVisitSet,
-        incoming: *ObjectIncomingMap,
-        internal_bytecodes: *const ObjectVisitSet,
-        processed_bytecodes: *ObjectVisitSet,
-    };
-
-    const PayloadClearContext = struct {
-        rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        internal_bytecodes: *const ObjectVisitSet,
-    };
-
-    const PayloadBytecodeRefCountContext = struct {
-        function_bytecode: *const FunctionBytecode,
-        count: usize = 0,
-    };
-
     fn markClassPayload(self: *Object, rt: *JSRuntime, visitor: *class.PayloadVisitor) bool {
         // Arrays keep `array_values` (not a payload) in the union; bytecode
         // functions keep `u.func` (qjs JSObject.u.func). Neither is a host
@@ -7100,14 +6464,8 @@ pub const Object = extern struct {
         return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.payloadArm().*, visitor);
     }
 
-    fn countPayloadFunctionBytecodeRef(context_ptr: *anyopaque, value_ptr: *anyopaque) void {
-        const context: *PayloadBytecodeRefCountContext = @ptrCast(@alignCast(context_ptr));
-        const stored: *JSValue = @ptrCast(@alignCast(value_ptr));
-        context.count += countFunctionBytecodeValueRef(stored.*, context.function_bytecode);
-    }
-
     fn collectReachableObjects(rt: *JSRuntime, visited: *ObjectVisitSet, current: *Object) ObjectGraphError!void {
-        if (gc.headerRefCountIsZeroOrHusk(current.gcHeaderConst())) return;
+        if (gc.headerIsHusk(current.gcHeaderConst())) return;
         const visit = try visited.getOrPut(@intFromPtr(current));
         if (visit.found_existing) return;
         try current.collectDirectChildObjects(rt, visited);
@@ -7752,90 +7110,6 @@ pub const Object = extern struct {
         return fromHeader(header);
     }
 
-    fn accumulateIncomingReferences(
-        self: *Object,
-        rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        incoming: *ObjectIncomingMap,
-        internal_bytecodes: *const ObjectVisitSet,
-        processed_bytecodes: *ObjectVisitSet,
-    ) ObjectGraphError!void {
-        const AccumulateIncomingVisitor = struct {
-            visited: *const ObjectVisitSet,
-            incoming: *ObjectIncomingMap,
-            internal_bytecodes: *const ObjectVisitSet,
-            processed_bytecodes: *ObjectVisitSet,
-            err: ?ObjectGraphError = null,
-
-            pub fn visitObject(av: *@This(), obj_ptr: *?*Object) !void {
-                if (obj_ptr.*) |obj| {
-                    if (@intFromPtr(obj) == 0) return;
-                    try incrementIncomingIfVisited(av.visited, av.incoming, obj);
-                }
-            }
-
-            pub fn visitValue(av: *@This(), val_ptr: *JSValue) !void {
-                try accumulateValueIncoming(val_ptr.*, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
-            }
-
-            pub fn visitWeakCollectionEntry(av: *@This(), entry: *WeakCollectionEntry) !void {
-                try accumulateValueIncoming(entry.value, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
-            }
-
-            pub fn visitFinalizationCell(av: *@This(), entry: *FinalizationRegistryCell) !void {
-                if (entry.keepsHeldValuesAlive()) {
-                    try accumulateValueIncoming(entry.held_value, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
-                }
-            }
-        };
-        var visitor = AccumulateIncomingVisitor{
-            .visited = visited,
-            .incoming = incoming,
-            .internal_bytecodes = internal_bytecodes,
-            .processed_bytecodes = processed_bytecodes,
-        };
-        try self.traceChildEdgesFallible(rt, &visitor);
-    }
-
-    fn accumulateValueIncoming(
-        stored: JSValue,
-        visited: *const ObjectVisitSet,
-        incoming: *ObjectIncomingMap,
-        internal_bytecodes: *const ObjectVisitSet,
-        processed_bytecodes: *ObjectVisitSet,
-    ) ObjectGraphError!void {
-        if (objectFromValue(stored)) |child| {
-            try incrementIncomingIfVisited(visited, incoming, child);
-            return;
-        }
-        const function_bytecode = functionBytecodeFromValue(stored) orelse return;
-        const bytecode_address = @intFromPtr(function_bytecode);
-        if (!internal_bytecodes.contains(bytecode_address)) return;
-        const entry = try processed_bytecodes.getOrPut(bytecode_address);
-        if (entry.found_existing) return;
-        try accumulateFunctionBytecodeChildIncoming(function_bytecode, visited, incoming, internal_bytecodes, processed_bytecodes);
-    }
-
-    fn accumulateFunctionBytecodeChildIncoming(
-        function_bytecode: *const FunctionBytecode,
-        visited: *const ObjectVisitSet,
-        incoming: *ObjectIncomingMap,
-        internal_bytecodes: *const ObjectVisitSet,
-        processed_bytecodes: *ObjectVisitSet,
-    ) ObjectGraphError!void {
-        if (function_bytecode.realmContext()) |realm| {
-            if (realm.global) |realm_global| try incrementIncomingIfVisited(visited, incoming, realm_global);
-        }
-        for (function_bytecode.cpoolSlice()) |stored| try accumulateValueIncoming(stored, visited, incoming, internal_bytecodes, processed_bytecodes);
-    }
-
-    fn incrementIncomingIfVisited(visited: *const ObjectVisitSet, incoming: *ObjectIncomingMap, child: *Object) ObjectGraphError!void {
-        const address = @intFromPtr(child);
-        if (!visited.contains(address)) return;
-        const entry = incoming.getPtr(address) orelse return;
-        entry.* += 1;
-    }
-
     /// True when `child` is condemned garbage in the current cycle-removal round
     /// (it stayed `cycle_visited` after gc_scan, i.e. was not resurrected).
     inline fn objectIsCycleGarbage(child: *const Object) bool {
@@ -7892,44 +7166,6 @@ pub const Object = extern struct {
         return @fieldParentPtr("header", header);
     }
 
-    fn countFunctionBytecodeChildRefs(
-        owner: *const FunctionBytecode,
-        function_bytecode: *const FunctionBytecode,
-    ) usize {
-        var count: usize = 0;
-        for (owner.cpoolSlice()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        return count;
-    }
-
-    fn countClassPayloadFunctionBytecodeRefs(
-        self: *Object,
-        rt: *JSRuntime,
-        function_bytecode: *const FunctionBytecode,
-    ) usize {
-        var context = PayloadBytecodeRefCountContext{ .function_bytecode = function_bytecode };
-        var visitor = class.PayloadVisitor{
-            .context = @ptrCast(&context),
-            .visit_value = countPayloadFunctionBytecodeRef,
-        };
-        _ = self.markClassPayload(rt, &visitor);
-        return context.count;
-    }
-
-    fn countSlotFunctionBytecodeRefs(flags: property.Flags, slot: property.Slot, function_bytecode: *const FunctionBytecode) usize {
-        if (flags.deleted) return 0;
-        return switch (flags.kind) {
-            .data => countFunctionBytecodeValueRef(slot.data, function_bytecode),
-            .accessor => countFunctionBytecodeValueRef(slot.accessor.getterValue(), function_bytecode) +
-                countFunctionBytecodeValueRef(slot.accessor.setterValue(), function_bytecode),
-            .var_ref, .auto_init => 0,
-        };
-    }
-
-    fn countFunctionBytecodeValueRef(stored: JSValue, function_bytecode: *const FunctionBytecode) usize {
-        const header = stored.objectHeader() orelse return 0;
-        return if (header == &function_bytecode.header) 1 else 0;
-    }
-
     pub fn getPrototype(self: *const Object) ?*Object {
         return self.shape_ref.proto;
     }
@@ -7942,16 +7178,13 @@ pub const Object = extern struct {
             cursor = candidate.getPrototype();
         }
         if (!self.flags.extensible) return error.NotExtensible;
-        if (prototype) |proto| gc.retain(proto.gcHeader());
-        errdefer if (prototype) |proto| proto.value().free(rt);
         try rt.shapes.prepareUpdate(&self.shape_ref);
         // Every write to `shape_ref` is an owner adopting a Shape: the clone or
         // relocation this call may perform produces a fresh, young one, and a
         // long-lived owner reaching it is an old-to-young edge the minor's
         // sticky marks would otherwise stop short of.
         rt.gc.generationalBarrier(self.gcHeader(), &self.shape_ref.header);
-        const old_prototype = rt.shapes.replacePrototypeAssumePrepared(self.shape_ref, prototype);
-        if (old_prototype) |old| old.value().free(rt);
+        _ = rt.shapes.replacePrototypeAssumePrepared(self.shape_ref, prototype);
         self.flags.is_std_array_prototype = false;
     }
 
@@ -8026,14 +7259,13 @@ pub const Object = extern struct {
                 // channel. A failed builder leaves the placeholder intact for
                 // an explicit retry; it must never become a data descriptor
                 // containing `undefined`.
-                const transient = try materializeAutoInit(@constCast(self), index);
-                transient.free(rt);
+                _ = try materializeAutoInit(@constCast(self), index);
                 return try self.descriptorFromOwnPropertySlot(index);
             }
             return try self.descriptorFromOwnPropertySlot(index);
         }
         if (self.denseArrayElement(atom_id)) |stored| {
-            return descriptor.Descriptor.data(stored.dup(), true, true, true);
+            return descriptor.Descriptor.data(stored, true, true, true);
         }
         return null;
     }
@@ -8121,16 +7353,12 @@ pub const Object = extern struct {
     /// `proxyAwareOwnPropertyDescriptor`.
     pub fn existsOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) !bool {
         // Exotic `get_own_property` hook (quickjs.c:8884-8890). The hook
-        // builds a full descriptor; we destroy it immediately, but for the
-        // non-test class set this hook is never installed (see
-        // `exoticMethodsForClassId`) so the cost is paid only by the exotic
-        // classes that genuinely need it -- still no dup leaks past us.
+        // builds a full descriptor, but for the non-test class set this hook is
+        // never installed (see `exoticMethodsForClassId`) so the cost is paid
+        // only by the exotic classes that genuinely need it.
         if (self.exoticMethods(rt)) |methods| {
             if (methods.get_own_property) |hook| {
-                if (hook(@constCast(self), atom_id)) |desc| {
-                    desc.destroy(rt);
-                    return true;
-                }
+                if (hook(@constCast(self), atom_id) != null) return true;
             }
         }
         if (self.isArray() and atom_id == atom.ids.length) return true;
@@ -8194,16 +7422,16 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id)) |index| {
             const entry = self.propertyEntry(index).*;
             return switch (self.propKindAt(index)) {
-                .data => entry.slot.data.dup(),
-                .accessor => entry.slot.accessor.getterValue().dup(),
+                .data => entry.slot.data,
+                .accessor => entry.slot.accessor.getterValue(),
                 .auto_init => try materializeAutoInit(@constCast(self), index),
                 .var_ref => if (entry.slot.var_ref.varRefValue().isUninitialized())
                     error.ReferenceError
                 else
-                    entry.slot.var_ref.varRefValue().dup(),
+                    entry.slot.var_ref.varRefValue(),
             };
         }
-        if (self.denseArrayElement(atom_id)) |stored| return stored.dup();
+        if (self.denseArrayElement(atom_id)) |stored| return stored;
         if (self.getPrototype()) |proto| return try proto.getProperty(atom_id);
         return JSValue.undefinedValue();
     }
@@ -8240,14 +7468,13 @@ pub const Object = extern struct {
 
         return switch (result) {
             .value => |materialized| blk: {
-                errdefer materialized.free(rt);
                 if (!self.autoInitSlotStillMatches(index, expected_atom, expected_slot)) return error.IncompatibleDescriptor;
-                break :blk try self.commitAutoInitValue(rt, index, expected_atom, materialized);
+                break :blk try self.commitAutoInitValue(rt, index, materialized);
             },
             .var_ref => |cell| blk: {
                 if (expected_slot.realm_and_id.id() != .module_ns) return error.IncompatibleDescriptor;
                 if (!self.autoInitSlotStillMatches(index, expected_atom, expected_slot)) return error.IncompatibleDescriptor;
-                break :blk self.commitAutoInitVarRef(rt, index, expected_atom, cell);
+                break :blk self.commitAutoInitVarRef(rt, index, cell);
             },
         };
     }
@@ -8267,9 +7494,8 @@ pub const Object = extern struct {
         return current.realm_and_id.raw == expected.realm_and_id.raw and current.opaque_ptr == expected.opaque_ptr;
     }
 
-    fn commitAutoInitValue(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, materialized: JSValue) !JSValue {
+    fn commitAutoInitValue(self: *Object, rt: *JSRuntime, index: usize, materialized: JSValue) !JSValue {
         const old_flags = self.propFlagsAt(index);
-        const old_slot = self.propertyEntry(index).*.slot;
         if (!self.isGlobal()) {
             self.propertyEntry(index).*.slot = .{ .data = materialized };
             // Materialising a lazily installed builtin turns an inert
@@ -8278,8 +7504,7 @@ pub const Object = extern struct {
             // function created right now.
             rt.gc.generationalBarrier(self.gcHeader(), materialized.cycleMarkHeader());
             self.updateShapePropertyFlags(rt, index, old_flags.withKind(.data));
-            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
-            return materialized.dup();
+            return materialized;
         }
 
         // A global AUTOINIT becomes a cell at materialization time, not a data
@@ -8294,27 +7519,22 @@ pub const Object = extern struct {
         self.propertyEntry(index).*.slot = .{ .var_ref = cell };
         rt.gc.generationalBarrier(self.gcHeader(), &cell.header);
         self.updateShapePropertyFlags(rt, index, old_flags.withKind(.var_ref));
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
-        return cell.varRefValue().dup();
+        return cell.varRefValue();
     }
 
-    fn commitAutoInitVarRef(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, cell: *var_ref_mod.VarRef) JSValue {
+    fn commitAutoInitVarRef(self: *Object, rt: *JSRuntime, index: usize, cell: *var_ref_mod.VarRef) JSValue {
         const old_flags = self.propFlagsAt(index);
-        const old_slot = self.propertyEntry(index).*.slot;
-        self.propertyEntry(index).*.slot = .{ .var_ref = cell.dupCell() };
+        self.propertyEntry(index).*.slot = .{ .var_ref = cell };
         rt.gc.generationalBarrier(self.gcHeader(), &cell.header);
         self.updateShapePropertyFlags(rt, index, old_flags.withKind(.var_ref));
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
-        return cell.varRefValue().dup();
+        return cell.varRefValue();
     }
 
     fn materializeAutoInitEntryForMutation(self: *Object, index: usize) !void {
         if (index >= self.shape_ref.prop_count) return error.IncompatibleDescriptor;
         if (!self.isAutoInitAt(index)) return;
-        const realm_header = self.propertyEntry(index).*.slot.auto_init.realm_and_id.realmHeader() orelse return error.InvalidBuiltinRegistry;
-        const realm: *context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
-        const transient = try materializeAutoInit(self, index);
-        transient.free(realm.runtime);
+        _ = self.propertyEntry(index).*.slot.auto_init.realm_and_id.realmHeader() orelse return error.InvalidBuiltinRegistry;
+        _ = try materializeAutoInit(self, index);
     }
 
     /// True if the own property at `index` is an accessor. Auto-init
@@ -8345,7 +7565,7 @@ pub const Object = extern struct {
     fn materializeStringConstantAutoInit(rt: *JSRuntime, info: *const property.AutoInit) !JSValue {
         if (info.name.len == 0) {
             const cached = try rt.emptyString();
-            return cached.value().dup();
+            return cached.value();
         }
         const created = try string.String.createAscii(rt, info.name);
         return created.value();
@@ -8353,7 +7573,6 @@ pub const Object = extern struct {
 
     fn materializeEmptyArrayAutoInit(realm: *context_mod.RealmContext) !JSValue {
         const array_proto_value = try arrayPrototypeValueForAutoInit(realm);
-        defer array_proto_value.free(realm.runtime);
         const object = try Object.createArray(realm.runtime, objectFromValue(array_proto_value));
         return object.value();
     }
@@ -8361,7 +7580,6 @@ pub const Object = extern struct {
     fn materializeNativeFunctionAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) !JSValue {
         const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
         const materialized = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, 2);
-        errdefer materialized.free(realm.runtime);
         if (comptime runtime_mod.value_root_frames_enabled) {
             var live = materialized;
             var val_roots = runtime_mod.rootValues(.{&live});
@@ -8396,7 +7614,6 @@ pub const Object = extern struct {
     fn materializeArrayUnscopablesAutoInit(rt: *JSRuntime) !JSValue {
         const object = try Object.create(rt, class.ids.object, null);
         const unscopables_value = object.value();
-        errdefer unscopables_value.free(rt);
         // qjs js_array_unscopables (order incl. "at"; spec 23.1.3.41).
         const names = [_][]const u8{
             "at",
@@ -8457,7 +7674,6 @@ pub const Object = extern struct {
         const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
         const function_capacity: usize = 2 + if (info.host_function_prototype) @as(usize, 1) else 0;
         const function_value = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, function_capacity);
-        errdefer function_value.free(rt);
         const function_object = try Object.expect(function_value);
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
         if (info.external_host_function_id != 0) {
@@ -8466,10 +7682,8 @@ pub const Object = extern struct {
         }
         if (info.host_function_prototype) {
             const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-            defer object_proto_value.free(rt);
             const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 0);
             const prototype_value = prototype.value();
-            defer prototype_value.free(rt);
             const prototype_key = atom.ids.prototype;
             try function_object.defineOwnPropertyAssumingNew(rt, prototype_key, descriptor.Descriptor.data(prototype_value, true, true, true));
         }
@@ -8513,10 +7727,8 @@ pub const Object = extern struct {
         if (info.host_function_kind == 0) return error.InvalidBuiltinRegistry;
         const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
         const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        defer object_proto_value.free(rt);
         const console = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 3);
         const console_value = console.value();
-        errdefer console_value.free(rt);
         const methods = [_][]const u8{ "log", "warn", "error" };
         for (methods) |name| {
             try defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, realm_global);
@@ -8527,14 +7739,10 @@ pub const Object = extern struct {
     fn materializeNavigatorAutoInit(realm: *context_mod.RealmContext) !JSValue {
         const rt = realm.runtime;
         const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        defer object_proto_value.free(rt);
         const proto = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 2);
-        var proto_owned = true;
-        defer if (proto_owned) proto.value().free(rt);
 
         const tag = try string.String.createAscii(rt, "Navigator");
         const tag_value = tag.value();
-        defer tag_value.free(rt);
         try proto.defineOwnPropertyAssumingNew(
             rt,
             atom.predefinedId("Symbol.toStringTag", .symbol).?,
@@ -8542,13 +7750,11 @@ pub const Object = extern struct {
         );
 
         const getter = try function.nativeFunction(realm, "get userAgent", 0);
-        defer getter.free(rt);
         if (getter.refHeader()) |getter_header| {
             const getter_object = Object.fromHeader(getter_header);
             getter_object.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get)));
         }
-        const user_agent = try rt.internAtom("userAgent");
-        defer rt.atoms.free(user_agent);
+        const user_agent = atom.ids.userAgent;
         try proto.defineOwnPropertyAssumingNew(
             rt,
             user_agent,
@@ -8556,8 +7762,6 @@ pub const Object = extern struct {
         );
 
         const navigator = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, proto, 0);
-        proto.value().free(rt);
-        proto_owned = false;
         return navigator.value();
     }
 
@@ -8566,10 +7770,8 @@ pub const Object = extern struct {
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (rt.performance_time_origin_ms == 0) rt.performance_time_origin_ms = performanceAutoInitNowMs();
         const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        defer object_proto_value.free(rt);
         const performance = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 2);
         const performance_value = performance.value();
-        errdefer performance_value.free(rt);
 
         const now_key = atom.predefinedId("now", .string).?;
         const method_flags = property.Flags.data(true, false, true);
@@ -8610,14 +7812,12 @@ pub const Object = extern struct {
         const rt = realm.runtime;
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
-            if (stored.isObject()) return stored.dup();
+            if (stored.isObject()) return stored;
         }
         const object_ctor_value = try global.getProperty(atom.predefinedId("Object", .string).?);
-        defer object_ctor_value.free(rt);
         if (!object_ctor_value.isObject()) return error.InvalidBuiltinRegistry;
         const prototype_value = try objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
         if (prototype_value.isObject()) return prototype_value;
-        prototype_value.free(rt);
         return JSValue.nullValue();
     }
 
@@ -8631,7 +7831,6 @@ pub const Object = extern struct {
     fn materializeFunctionPrototypeAutoInit(self: *Object, realm: *context_mod.RealmContext) !JSValue {
         const rt = realm.runtime;
         const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        defer object_proto_value.free(rt);
         const prototype = try Object.create(rt, class.ids.object, objectFromValue(object_proto_value));
         var prototype_owned = true;
         errdefer if (prototype_owned) Object.destroyFromHeader(rt, prototype.gcHeader());
@@ -8661,7 +7860,6 @@ pub const Object = extern struct {
         const slot = property.AutoInitSlot.retainPrototype(&realm.header);
         try self.appendPreparedPropertyEntryImpl(
             true,
-            false,
             true,
             rt,
             atom.ids.prototype,
@@ -8690,7 +7888,6 @@ pub const Object = extern struct {
         std.debug.assert(flags.kind == .data);
         try self.appendPreparedPropertyEntryImpl(
             true,
-            false,
             true,
             rt,
             atom_id,
@@ -8703,15 +7900,13 @@ pub const Object = extern struct {
         const rt = realm.runtime;
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (global.cachedRealmValue(rt, .array_prototype)) |stored| {
-            if (stored.isObject()) return stored.dup();
+            if (stored.isObject()) return stored;
         }
         const array_key = atom.predefinedId("Array", .string) orelse return error.InvalidBuiltinRegistry;
         const array_ctor_value = try global.getProperty(array_key);
-        defer array_ctor_value.free(rt);
         if (!array_ctor_value.isObject()) return error.InvalidBuiltinRegistry;
         const prototype_value = try objectFromValue(array_ctor_value).?.getProperty(atom.ids.prototype);
         if (prototype_value.isObject()) return prototype_value;
-        prototype_value.free(rt);
         return JSValue.nullValue();
     }
 
@@ -8737,7 +7932,7 @@ pub const Object = extern struct {
     /// read. Accessor / var_ref prototypes (or an exotic receiver) return null
     /// to keep the general path. Returns a BORROWED pointer (Object.create dups
     /// it).
-    pub fn getOwnConstructorPrototypeObject(self: *Object, rt: *JSRuntime) !?*Object {
+    pub fn getOwnConstructorPrototypeObject(self: *Object, _: *JSRuntime) !?*Object {
         if (self.hasExoticMethods()) return null;
         const index = self.findProperty(atom.ids.prototype) orelse return null;
         const flags = self.propFlagsAt(index);
@@ -8745,8 +7940,7 @@ pub const Object = extern struct {
         switch (flags.kind) {
             .data => {},
             .auto_init => {
-                const materialized = try self.materializeAutoInit(index);
-                materialized.free(rt);
+                _ = try self.materializeAutoInit(index);
             },
             else => return null,
         }
@@ -8758,7 +7952,7 @@ pub const Object = extern struct {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
             const stored = self.asDataAt(index) orelse return null;
-            return .{ .index = index, .value = stored.dup() };
+            return .{ .index = index, .value = stored };
         }
         return null;
     }
@@ -8768,7 +7962,7 @@ pub const Object = extern struct {
         const prop = self.shape_ref.props()[index];
         const prop_flags = property.Flags.fromBits(prop.flags);
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return null;
-        return self.propertyEntry(index).*.slot.data.dup();
+        return self.propertyEntry(index).*.slot.data;
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
@@ -8807,10 +8001,9 @@ pub const Object = extern struct {
                 }
             }
         }
-        if (try self.defineModuleNamespaceProperty(rt, atom_id, desc)) return;
+        if (try self.defineModuleNamespaceProperty(atom_id, desc)) return;
         var actual_desc = desc;
-        const destroy_actual_desc = try self.prepareMappedArgumentsDescriptorForDefine(rt, atom_id, &actual_desc);
-        defer if (destroy_actual_desc) actual_desc.destroy(rt);
+        try self.prepareMappedArgumentsDescriptorForDefine(rt, atom_id, &actual_desc);
 
         if (self.isArray() and atom_id == atom.ids.length) {
             try self.defineArrayLength(rt, actual_desc);
@@ -8891,11 +8084,10 @@ pub const Object = extern struct {
         try self.appendPreparedPropertyEntryImpl(
             true,
             false,
-            false,
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
-            .{ .data = data_value.dup() },
+            .{ .data = data_value },
         );
     }
 
@@ -8913,20 +8105,6 @@ pub const Object = extern struct {
         try self.addProperty(rt, atom_id, desc);
     }
 
-    pub fn defineRegExpMatchMetadataPropertiesAssumingNew(self: *Object, rt: *JSRuntime, match_index: i32, input_value: JSValue, groups_value: JSValue) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.isArray());
-        std.debug.assert(self.flags.extensible);
-
-        const index_atom = comptime atom.predefinedId("index", .string).?;
-        const input_atom = comptime atom.predefinedId("input", .string).?;
-        const groups_atom = comptime atom.predefinedId("groups", .string).?;
-        const enumerable_flags = property.Flags.data(true, true, true);
-        try self.appendPreparedPropertyEntry(rt, index_atom, enumerable_flags, .{ .data = JSValue.int32(match_index) });
-        try self.appendPreparedPropertyEntry(rt, input_atom, enumerable_flags, .{ .data = input_value.dup() });
-        try self.appendPreparedPropertyEntry(rt, groups_atom, enumerable_flags, .{ .data = groups_value.dup() });
-    }
-
     pub fn defineJsonParseDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
@@ -8935,14 +8113,10 @@ pub const Object = extern struct {
 
         if (self.findProperty(atom_id)) |index| {
             try self.ensureUniqueShapeForMutation(rt);
-            const old_flags = self.propFlagsAt(index);
             const entry = self.propertyEntry(index);
-            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-            errdefer next_value.free(rt);
-            const old_slot = entry.slot;
+            const next_value = new_value;
             entry.slot = .{ .data = next_value };
             self.updateShapePropertyFlags(rt, index, property.Flags.data(true, true, true));
-            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -9077,7 +8251,6 @@ pub const Object = extern struct {
             !self.flags.extensible or
             self.findProperty(atom_id) != null)
         {
-            owned_cell.freeCell(rt);
             return error.IncompatibleDescriptor;
         }
         try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .var_ref = owned_cell });
@@ -9210,7 +8383,7 @@ pub const Object = extern struct {
                 .length = length,
                 .native_builtin_id = native_builtin_id,
             });
-            self.setEntryKindAndSlot(rt, atom_id, index, ai_flags, .{ .auto_init = next_slot });
+            self.setEntryKindAndSlot(rt, index, ai_flags, .{ .auto_init = next_slot });
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -9232,10 +8405,8 @@ pub const Object = extern struct {
         const index = self.findProperty(atom_id) orelse return error.IncompatibleDescriptor;
         const old_flags = self.propFlagsAt(index);
         if (!old_flags.isAutoInit()) return error.IncompatibleDescriptor;
-        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, source_value);
-        errdefer next_value.free(rt);
+        const next_value = source_value;
         try self.ensureUniqueShapeForMutation(rt);
-        const old_slot = self.propertyEntry(index).*.slot;
         self.propertyEntry(index).*.slot = .{ .data = next_value };
         // Publishes the slot itself instead of going through
         // `setEntryKindAndSlot`, so it has to take that funnel's barrier. The
@@ -9244,7 +8415,6 @@ pub const Object = extern struct {
         // replaces it was just built.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
         self.updateShapePropertyFlags(rt, index, flags.withKind(.data));
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
@@ -9327,39 +8497,6 @@ pub const Object = extern struct {
         }) });
     }
 
-    pub fn defineArrayUnscopablesAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        flags: property.Flags,
-    ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, null, .{
-            .name = "[Symbol.unscopables]",
-            .length = 0,
-            .kind = .array_unscopables,
-        }) });
-    }
-
-    pub fn defineStringConstantAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        bytes: []const u8,
-        flags: property.Flags,
-    ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, null, .{
-            .name = bytes,
-            .length = 0,
-            .kind = .string_constant,
-        }) });
-    }
-
     pub fn defineEmptyArrayAutoInitProperty(
         self: *Object,
         rt: *JSRuntime,
@@ -9402,7 +8539,6 @@ pub const Object = extern struct {
             });
             self.setEntryKindAndSlot(
                 rt,
-                atom_id,
                 index,
                 flags.withKind(.auto_init),
                 .{ .auto_init = next_slot },
@@ -9468,15 +8604,6 @@ pub const Object = extern struct {
         }) });
     }
 
-    pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.isArray() or !self.flags.length_writable) return false;
-        if (self.arrayElementStorageMode() != .dense) return false;
-        if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
-        const elements = self.arrayElements();
-        if (index >= elements.len) return false;
-        return self.setFastArrayElementDup(rt, index, new_value);
-    }
-
     /// QuickJS `can_extend_fast_array`: an ordinary dense Array may append
     /// without a prototype walk only when it is extensible and its direct
     /// prototype is null or the still-pristine intrinsic %Array.prototype%.
@@ -9508,42 +8635,8 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = if (take_ownership) new_value else new_value.dup();
+        element_slot.* = if (take_ownership) new_value else new_value;
         if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
-        self.markIndexedProperties(rt);
-        return true;
-    }
-
-    pub fn appendDenseArrayValues(self: *Object, rt: *JSRuntime, start: u32, values: []const JSValue) !bool {
-        // Dense append gate keys off the dense extent (array_count), not the
-        // logical length: a holey array appends at count. See add_fast_array_element.
-        if (!self.isArray() or start != self.arrayArm().*.count or !self.flags.length_writable) return false;
-        if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (!self.canExtendFastArray()) return false;
-        const added: u32 = std.math.cast(u32, values.len) orelse return false;
-        const limit = std.math.add(u32, start, added) catch return false;
-        if (limit > array.max_array_length) return false;
-
-        // Apply the eligibility checks above even for an empty append. qjs
-        // `js_array_push` admits `push()` to its fast case only
-        // when the receiver is the same extendable, fully-dense Array shape
-        // used for non-empty pushes; otherwise it performs the required
-        // ordinary length Set through the generic path.
-        if (values.len == 0) return true;
-        var guard_index = start;
-        while (guard_index < limit) : (guard_index += 1) {
-            const atom_id = atom.atomFromUInt32(guard_index);
-            if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
-        }
-
-        try self.ensureArrayElementCapacity(rt, @intCast(limit));
-        var element_index: usize = @intCast(start);
-        for (values) |item| {
-            self.arrayArm().*.values[element_index] = item.dup();
-            element_index += 1;
-        }
-        self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
         self.markIndexedProperties(rt);
         return true;
     }
@@ -9560,7 +8653,7 @@ pub const Object = extern struct {
         }
         var element_index: usize = @intCast(self.arrayArm().*.count);
         for (values) |item| {
-            self.arrayArm().*.values[element_index] = item.dup();
+            self.arrayArm().*.values[element_index] = item;
             element_index += 1;
         }
         if (comptime gc.generation_enabled) {
@@ -9580,7 +8673,7 @@ pub const Object = extern struct {
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = new_value.dup();
+        element_slot.* = new_value;
         if (self.arrayArm().*.length < 1) self.arrayArm().*.length = 1;
         self.markIndexedProperties(rt);
     }
@@ -9611,7 +8704,7 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findPropertyIndexTrusted(atom_id) != null) return false;
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = if (take_ownership) new_value else new_value.dup();
+        element_slot.* = if (take_ownership) new_value else new_value;
         if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
@@ -9628,7 +8721,7 @@ pub const Object = extern struct {
         self.arrayArm().*.length = @intCast(values.len);
         for (values, 0..) |item, index| {
             const element_slot = &self.arrayArm().*.values[index];
-            element_slot.* = item.dup();
+            element_slot.* = item;
         }
         if (values.len != 0) self.markIndexedProperties(rt);
         return true;
@@ -9659,123 +8752,6 @@ pub const Object = extern struct {
         self.markIndexedProperties(rt);
     }
 
-    pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
-        if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.arrayArm().*.count or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.getPrototype()) |proto| {
-            if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
-        }
-
-        const start_index: usize = @intCast(start);
-        const limit_index: usize = @intCast(limit);
-
-        try self.ensureArrayElementCapacity(rt, limit_index);
-        self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
-        self.markIndexedProperties(rt);
-
-        var index = start_index;
-        while (index < limit_index) : (index += 1) {
-            self.arrayArm().*.values[index] = JSValue.int32(@intCast(index));
-        }
-        return true;
-    }
-
-    pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
-        if (count == 0) return true;
-        if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.arrayArm().*.count or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.getPrototype()) |proto| {
-            if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
-        }
-
-        const limit = try std.math.add(u32, start_index, count);
-        if (limit > array.max_array_length) return false;
-        const last_offset = count - 1;
-        if (last_offset > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
-        const last_delta: i32 = @intCast(last_offset);
-        _ = std.math.add(i32, start_value, last_delta) catch return false;
-
-        const start_element: usize = @intCast(start_index);
-        const limit_element: usize = @intCast(limit);
-
-        try self.ensureArrayElementCapacity(rt, limit_element);
-        self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
-        self.markIndexedProperties(rt);
-
-        var offset: u32 = 0;
-        while (offset < count) : (offset += 1) {
-            const index = start_element + @as(usize, @intCast(offset));
-            const element_delta: i32 = @intCast(offset);
-            const element_value = start_value + element_delta;
-            self.arrayArm().*.values[index] = JSValue.int32(element_value);
-        }
-        return true;
-    }
-
-    pub fn appendDenseArrayInt32MulAndMaskRange(self: *Object, rt: *JSRuntime, start_index: u32, limit: u32, multiplier: i32, mask: i32) !bool {
-        if (start_index >= limit) return true;
-        if (multiplier < 0 or mask < 0) return false;
-        if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.arrayArm().*.count or !self.flags.length_writable or !self.flags.extensible) return false;
-        if (self.getPrototype()) |proto| {
-            if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
-        }
-
-        if (limit > array.max_array_length) return false;
-        const max_safe_integer: i128 = 9007199254740991;
-        const last_index = limit - 1;
-        const last_product = @as(i128, @intCast(last_index)) * @as(i128, multiplier);
-        if (last_product > max_safe_integer) return false;
-
-        const start_element: usize = @intCast(start_index);
-        const limit_element: usize = @intCast(limit);
-
-        try self.ensureArrayElementCapacity(rt, limit_element);
-        self.setFastArrayCountAssumeCapacity(limit);
-        if (limit > self.arrayArm().*.length) self.arrayArm().*.length = limit;
-        self.markIndexedProperties(rt);
-
-        var index = start_element;
-        while (index < limit_element) : (index += 1) {
-            const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
-            const product: i32 = @truncate(product_exact);
-            const element_value = product & mask;
-            self.arrayArm().*.values[index] = JSValue.int32(element_value);
-        }
-        return true;
-    }
-
-    pub fn overwriteDenseArrayInt32MaskedIndexRange(self: *Object, rt: *JSRuntime, start: u32, limit: u32, mask: u32) !bool {
-        if (start >= limit) return true;
-        if (limit > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
-        if (mask > atom.max_int_atom) return false;
-        if (!self.isArray() or !self.flags.length_writable) return false;
-        if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-
-        const mask_index: usize = @intCast(mask);
-        if (mask_index >= self.arrayArm().*.count) return false;
-
-        var guard_index: u32 = 0;
-        while (guard_index <= mask) : (guard_index += 1) {
-            const atom_id = atom.atomFromUInt32(guard_index);
-            if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
-            if (guard_index == std.math.maxInt(u32)) break;
-        }
-
-        var value_index = start;
-        while (value_index < limit) : (value_index += 1) {
-            const element_index: usize = @intCast(value_index & mask);
-            const element_slot = &self.arrayArm().*.values[element_index];
-            const old = element_slot.*;
-            const new_value = JSValue.int32(@intCast(value_index));
-            element_slot.* = new_value;
-            old.free(rt);
-        }
-        return true;
-    }
-
     pub fn reserveDenseArrayElements(self: *Object, rt: *JSRuntime, needed: u32) !void {
         if (!self.isArray()) return;
         try self.ensureArrayElementCapacity(rt, @intCast(needed));
@@ -9801,10 +8777,8 @@ pub const Object = extern struct {
             if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         }
 
-        const next_value = new_value.dup();
-        errdefer next_value.free(rt);
+        const next_value = new_value;
         const element_slot = &self.arrayArm().*.values[element_index];
-        const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         // These helpers write the dense slot themselves, reaching storage
         // through `ensureArrayElementCapacity` rather than the remembering
@@ -9813,7 +8787,6 @@ pub const Object = extern struct {
         // exactly the old-to-young edge the minor's sticky marks stop at.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
         self.markIndexedProperties(rt);
-        if (!appended) old.free(rt);
         return true;
     }
 
@@ -9843,19 +8816,6 @@ pub const Object = extern struct {
         return self.flags.is_std_array_prototype;
     }
 
-    /// Conservative proof for zjs-only bulk Set optimizations. Unlike qjs's
-    /// four `can_extend_fast_array` readers, these transforms may skip many
-    /// distinct Set operations and therefore inspect the actual chain.
-    fn arrayPrototypeChainAllowsBulkIndexedSet(proto: *Object) bool {
-        var cursor: ?*Object = proto;
-        while (cursor) |object| {
-            if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
-            if (object.flags.may_have_indexed_properties) return false;
-            cursor = object.getPrototype();
-        }
-        return true;
-    }
-
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: *const Object) bool {
         return self.isArray() and
             !self.hasExoticMethods() and
@@ -9878,10 +8838,8 @@ pub const Object = extern struct {
             if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         }
 
-        const next_value = new_value.dup();
-        errdefer next_value.free(rt);
+        const next_value = new_value;
         const element_slot = &self.arrayArm().*.values[element_index];
-        const old = if (appended) JSValue.undefinedValue() else element_slot.*;
         element_slot.* = next_value;
         // These helpers write the dense slot themselves, reaching storage
         // through `ensureArrayElementCapacity` rather than the remembering
@@ -9890,7 +8848,6 @@ pub const Object = extern struct {
         // exactly the old-to-young edge the minor's sticky marks stop at.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
         self.markIndexedProperties(rt);
-        if (!appended) old.free(rt);
     }
 
     // ===== set* properties =====
@@ -9933,18 +8890,15 @@ pub const Object = extern struct {
             const entry = self.propertyEntry(index);
             if (entry_flags.kind == .var_ref) {
                 const cell = entry.slot.var_ref;
-                const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                errdefer next_value.free(rt);
+                const next_value = new_value;
                 cell.setVarRefValue(rt, next_value);
                 return;
             }
             // Data or data-destined auto_init placeholder: overwrite with the
             // new value. A placeholder's lazy default is simply discarded; flip
             // the kind to `.data` in lockstep so the cell and shape stay in sync.
-            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-            errdefer next_value.free(rt);
+            const next_value = new_value;
             if (entry_flags.kind == .data) {
-                const old_slot = entry.slot;
                 entry.slot = .{ .data = next_value };
                 // Same old-to-young edge as `setOwnWritableDataProperty`'s
                 // arm below; this generic arm was the one copy without the
@@ -9953,11 +8907,10 @@ pub const Object = extern struct {
                 // receiver). The probe after it now witnesses the invariant.
                 rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
                 rt.gc.auditUnbarrieredStore(self.gcHeader(), next_value.cycleMarkHeader(), .set_property_data_overwrite);
-                destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             } else {
                 // auto_init data placeholder: needs the shape kind flip.
                 try self.ensureUniqueShapeForMutation(rt);
-                self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                self.setEntryKindAndSlot(rt, index, entry_flags.withKind(.data), .{ .data = next_value });
             }
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
@@ -10011,16 +8964,14 @@ pub const Object = extern struct {
             .accessor => return false,
             .var_ref => {
                 const cell = entry.slot.var_ref;
-                const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                errdefer next_value.free(rt);
+                const next_value = new_value;
                 cell.setVarRefValue(rt, next_value);
                 return true;
             },
             .auto_init => {
-                const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                errdefer next_value.free(rt);
+                const next_value = new_value;
                 try self.ensureUniqueShapeForMutation(rt);
-                self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                self.setEntryKindAndSlot(rt, index, entry_flags.withKind(.data), .{ .data = next_value });
                 self.pruneBorrowedReferenceHolderIfEmpty(rt);
                 return true;
             },
@@ -10032,15 +8983,12 @@ pub const Object = extern struct {
             stored.* = new_value;
             return true;
         }
-        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-        errdefer next_value.free(rt);
-        const old_slot = entry.slot;
+        const next_value = new_value;
         entry.slot = .{ .data = next_value };
         // Replacing a property value on a long-lived object is an
         // old-to-young edge; the non-refcounted fast arms above store
         // primitives and need none.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
-        destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
         return true;
     }
@@ -10054,10 +9002,8 @@ pub const Object = extern struct {
         const stored = &entry.slot.data;
         if (!prop_flags.writable and !stored.isUninitialized()) return false;
         if (atom_id == atom.ids.Private_brand) return false;
-        const old = stored.*;
         stored.* = new_value;
         rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader());
-        old.free(rt);
         return true;
     }
 
@@ -10091,29 +9037,24 @@ pub const Object = extern struct {
                     // setOwnWritableDataProperty probe with this one.
                     .var_ref => {
                         const cell = entry.slot.var_ref;
-                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                        errdefer next_value.free(rt);
+                        const next_value = new_value;
                         cell.setVarRefValue(rt, next_value);
                         return true;
                     },
                     // Data-destined auto_init placeholder: overwrite + flip kind.
                     .auto_init => {
-                        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-                        errdefer next_value.free(rt);
+                        const next_value = new_value;
                         try self.ensureUniqueShapeForMutation(rt);
-                        self.setEntryKindAndSlot(rt, atom_id, index, entry_flags.withKind(.data), .{ .data = next_value });
+                        self.setEntryKindAndSlot(rt, index, entry_flags.withKind(.data), .{ .data = next_value });
                         self.pruneBorrowedReferenceHolderIfEmpty(rt);
                         return true;
                     },
                     .accessor => unreachable, // excluded above
                 }
             }
-            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
-            errdefer next_value.free(rt);
-            const old_slot = entry.slot;
+            const next_value = new_value;
             entry.slot = .{ .data = next_value };
             rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
-            destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -10128,7 +9069,7 @@ pub const Object = extern struct {
                 return;
             }
         }
-        if (try self.defineModuleNamespaceProperty(rt, atom_id, desc)) return;
+        if (try self.defineModuleNamespaceProperty(atom_id, desc)) return;
 
         if (self.isArray() and atom_id == atom.ids.length) {
             try self.defineArrayLength(rt, desc);
@@ -10263,9 +9204,7 @@ pub const Object = extern struct {
                 // qjs's single-mask fast case (quickjs.c:9708-9713): swap the
                 // slot, free the old value. The owned store consumes new_value.
                 .data => {
-                    const old_slot = entry.slot;
                     entry.slot = .{ .data = new_value };
-                    destroyPropertySlot(rt, atom_id, entry_flags, old_slot);
                     return .done;
                 },
                 // JS_PROP_VARREF: set_value through the cell
@@ -10286,7 +9225,7 @@ pub const Object = extern struct {
                     // decline so setValueProperty (still `!T`) is the OOM
                     // channel. The object is unchanged.
                     self.ensureUniqueShapeForMutation(rt) catch return .slow;
-                    self.setEntryKindAndSlot(rt, atom_id, lookup.index, entry_flags.withKind(.data), .{ .data = new_value });
+                    self.setEntryKindAndSlot(rt, lookup.index, entry_flags.withKind(.data), .{ .data = new_value });
                     self.pruneBorrowedReferenceHolderIfEmpty(rt);
                     return .done;
                 },
@@ -10353,22 +9292,17 @@ pub const Object = extern struct {
         if (!self.flags.extensible) return .slow;
 
         // add_property(C_W_E) + direct slot store (quickjs.c:9884-9890).
-        // `slot_borrowed_until_commit`: on append OOM the staged value is
-        // un-staged without destroy, so `.slow` can leave ownership with the
-        // caller and the resolver remains the OOM channel. Success MOVEs the
-        // caller's ref into the committed slot (same consume-on-success
-        // contract as the previous owned-slot append). Both callers decode
-        // `atom_id` from the active immutable bytecode's OP_put_field
-        // operand, whose FunctionBytecode owns the atom across this
-        // allocation/GC window. qjs add_property relies on that same operand
-        // root and retains only the Shape's reference.
+        // On append failure the staged value is removed before returning
+        // `.slow`; on success the slot becomes traced at the shape commit.
+        // Both callers decode `atom_id` from the active immutable bytecode's
+        // OP_put_field operand, whose FunctionBytecode owns the atom across
+        // this allocation/GC window.
         //
         // `named_put_no_index`: tagged-int and indexed-class array-index
         // atoms already returned `.slow` above. qjs's ordinary add_property
         // (9884-9890) has no JS_AtomIsArrayIndex; a `bl atomIsArrayIndex`
         // here was TS ~144M on identifier keys.
         self.appendPreparedPropertyEntryImpl(
-            true,
             true,
             true,
             rt,
@@ -10379,7 +9313,7 @@ pub const Object = extern struct {
         return .done;
     }
 
-    fn defineModuleNamespaceProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !bool {
+    fn defineModuleNamespaceProperty(self: *Object, atom_id: atom.Atom, desc: descriptor.Descriptor) !bool {
         if (self.class_id != class.ids.module_ns) return false;
         const index = self.findProperty(atom_id) orelse return false;
         var flags = self.propFlagsAt(index);
@@ -10389,14 +9323,12 @@ pub const Object = extern struct {
         // QuickJS therefore instantiates an AUTOINIT export before validating
         // `desc`; a materialization failure remains the observable result.
         if (flags.kind == .auto_init) {
-            const transient = try self.materializeAutoInit(index);
-            transient.free(rt);
+            _ = try self.materializeAutoInit(index);
             flags = self.propFlagsAt(index);
             if (!self.isModuleNamespaceExportProperty(flags)) return error.IncompatibleDescriptor;
         }
 
         const current = try self.descriptorFromOwnPropertySlot(index);
-        defer current.destroy(rt);
 
         if (desc.kind == .accessor) return error.IncompatibleDescriptor;
         if (desc.configurable orelse false) return error.IncompatibleDescriptor;
@@ -10428,7 +9360,7 @@ pub const Object = extern struct {
         self.syncTraceShapePropertyFlags(index, deleted_flags);
         if (self.class_id == class.ids.mapped_arguments) {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
-                if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
+                if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(mapped_index);
             }
         }
         // qjs remove_global_object_property (quickjs.c:9289-9309): deleting a
@@ -10442,13 +9374,10 @@ pub const Object = extern struct {
         // slow path, so the observable semantics match.
         if (self.isGlobal() and old_flags.kind == .var_ref and !old_flags.deleted) {
             const cell = old_slot.var_ref;
-            const old_value = cell.varRefValueSlot().*;
             cell.varRefValueSlot().* = JSValue.uninitialized();
             cell.is_lexical = false;
             cell.is_const = false;
-            old_value.free(rt);
         }
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
         const object_shape = self.shape_ref;
         if (object_shape.deletedPropCount() >= 8 and
@@ -10472,7 +9401,7 @@ pub const Object = extern struct {
         }
 
         if (self.mappedArgumentsBindingIndexFromAtom(rt, atom_id)) |mapped_index| {
-            self.deleteMappedArgumentsBinding(rt, mapped_index);
+            self.deleteMappedArgumentsBinding(mapped_index);
             return true;
         }
 
@@ -10503,6 +9432,12 @@ pub const Object = extern struct {
 
         var keys: []atom.Atom = &.{};
         errdefer freeKeys(rt, keys);
+        // TGC S3 §4 class B: the result is a native []Atom grown by allocating
+        // appends; neither the value-root frames nor the conservative scan can
+        // see the ids inside it.
+        var keys_roots = runtime_mod.rootAtomList(&keys);
+        keys_roots.activate(rt);
+        defer keys_roots.deactivate(rt);
 
         const has_property_index_keys = hasPropertyIndexKeys(self, rt) or self.class_id == class.ids.mapped_arguments;
         if (!has_property_index_keys) {
@@ -10605,7 +9540,7 @@ pub const Object = extern struct {
                 }
             }
         }
-        self.detachAllMappedArgumentsBindings(rt);
+        self.detachAllMappedArgumentsBindings();
         for (0..self.shape_ref.prop_count) |index| {
             var entry_flags = self.propFlagsAt(index);
             if (entry_flags.deleted or entry_flags.isAccessor() or !entry_flags.writable) continue;
@@ -10719,13 +9654,11 @@ pub const Object = extern struct {
         if (desc.writable) |writable| self.flags.length_writable = writable;
     }
 
-    pub fn truncateArrayElements(self: *Object, rt: *JSRuntime, new_len: u32) void {
+    pub fn truncateArrayElements(self: *Object, _: *JSRuntime, new_len: u32) void {
         if (!self.isArray() or !self.flags.fast_array) return;
         const len: usize = @min(@as(usize, @intCast(new_len)), self.arrayArm().*.count);
         while (self.arrayArm().*.count > len) {
             self.arrayArm().*.count -= 1;
-            const old = self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
-            old.free(rt);
         }
     }
 
@@ -10743,7 +9676,6 @@ pub const Object = extern struct {
             if (self.findProperty(atom_id) != null) continue;
             try self.addProperty(rt, atom_id, descriptor.Descriptor.data(stored, true, true, true));
         }
-        for (elements) |stored| stored.free(rt);
         self.arrayArm().*.count = 0;
         self.freeArrayElementBufferAfterMove(rt);
         // Sparse array: count stays 0, length is the JS-observable `.length`.
@@ -10812,7 +9744,7 @@ pub const Object = extern struct {
     }
 
     inline fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
+        const slot = slotFromDescriptor(desc);
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
@@ -10834,8 +9766,7 @@ pub const Object = extern struct {
     /// RE-EXECUTION of the opcode with the value still owned by the VM stack
     /// slot, so the append leg installs the slot borrow-until-commit (its
     /// failure unwind must not destroy the caller's ref) and the duplicate-key
-    /// leg goes through replaceProperty's borrow (`slotFromDescriptor` dups)
-    /// and then frees the caller's ref only after the replace committed.
+    /// leg goes through `replaceProperty` before the new value is published.
     ///
     /// Takes the bare value instead of a `Descriptor`: qjs OP_define_field
     /// carries its property flags as the constant int `JS_PROP_C_W_E`
@@ -10886,15 +9817,6 @@ pub const Object = extern struct {
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.propertyEntry(index).*.slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
-            // replaceProperty is BORROW semantics (slotFromDescriptor dups the
-            // value into the new slot, object.zig:12284-ish); the define
-            // contract is consume-on-success (qjs JS_DefinePropertyValue frees
-            // its `val` argument), so retire the caller's ref here — without
-            // this, every duplicate refcounted literal key (`({a:o1,a:o2})`)
-            // leaked one ref. Failure paths above did not consume: the
-            // materialize/compat/replace errors leave ownership with the
-            // caller (replaceProperty's own errdefer frees only its dup).
-            data_value.free(rt);
             return;
         }
         // Both call sites (vm_literal.zig defineFieldFast + the cold defineField
@@ -10904,19 +9826,11 @@ pub const Object = extern struct {
         // current_function ref keeps live for the whole opcode. That external
         // root makes appendPreparedPropertyEntry's own atom guard redundant here,
         // so use the trusted (guard-free) add. Flags are the comptime C_W_E
-        // constant. No `.dup()` on the slot install: the value MOVES into the
-        // slot pre-owned, exactly qjs OP_define_field handing sp[-1] to
-        // JS_DefinePropertyValue with no extra dup (quickjs.c:19269). The move
-        // only COMMITS with the shape transition: `slot_borrowed_until_commit`
-        // keeps the failure unwind from destroying the caller's ref (the cold
-        // shell re-executes the opcode still owning the value — destroying it
-        // here would double-free a refcounted value on OOM mid-append). Tracing
-        // names the in-flight value through the mutation-window roots in
-        // `definePlainDataPropertyKnownFast`. Trial deletion still treats the
-        // live RC as an external root.
+        // constant. The value becomes visible to tracing only when the shape
+        // transition commits; until then the mutation-window root in
+        // `definePlainDataPropertyKnownFast` keeps it live.
         try self.appendPreparedPropertyEntryImpl(
             true, // caller_holds_atom_ref: the bytecode operand root (see above)
-            true, // slot_borrowed_until_commit: consume-on-success contract (see above)
             false,
             rt,
             atom_id,
@@ -10930,7 +9844,7 @@ pub const Object = extern struct {
     /// allocations below (which can trigger GC, whose object/shape sweep frees
     /// prop atoms — dropping an otherwise-unrooted atom to ref_count 0 mid-call).
     pub fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        return self.appendPreparedPropertyEntryImpl(false, false, false, rt, atom_id, entry_flags, slot);
+        return self.appendPreparedPropertyEntryImpl(false, false, rt, atom_id, entry_flags, slot);
     }
 
     /// `caller_holds_atom_ref == true` is the trusted bytecode-operand leg: the
@@ -10944,21 +9858,12 @@ pub const Object = extern struct {
     /// JS_DupAtom. MUST NOT be used with a transient/just-interned atom that has
     /// no other root than the elided guard.
     ///
-    /// `slot_borrowed_until_commit == true` (the definePlainDataPropertyKnownFast
-    /// leg only): the slot's data value is a BORROW of the caller's live ref
-    /// until the shape transition commits — on ANY failure the unwind restores
-    /// the pre-call object state WITHOUT destroying the slot value (ownership
-    /// stays with the caller, whose cold-shell re-execution still holds it on
-    /// the VM stack). On success the value is committed as MOVED (the caller's
-    /// consume-on-success contract). `false` keeps the historical owned-slot
-    /// unwind: failure destroys the prepared slot via destroyPropertySlot.
-    ///
     /// `named_put_no_index == true` is the OP_put_field ordinary miss
     /// (`setOrDefineOwnDataPropertyForPutFieldOwned`): tagged-int and
     /// indexed-class array-index atoms already declined, so this monomorph
     /// matches qjs add_property's probe-free named add (quickjs.c:9884-9890)
     /// and must not `bl atomIsArrayIndex`.
-    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, comptime named_put_no_index: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+    inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, comptime named_put_no_index: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         if (comptime runtime_mod.value_root_frames_enabled) {
             var holder: ?*Object = self;
             var in_flight: JSValue = if (entry_flags.kind == .data) slot.data else JSValue.undefinedValue();
@@ -10971,7 +9876,6 @@ pub const Object = extern struct {
             const live_slot: property.Slot = if (entry_flags.kind == .data) .{ .data = in_flight } else slot;
             return appendPreparedPropertyEntryWork(
                 caller_holds_atom_ref,
-                slot_borrowed_until_commit,
                 named_put_no_index,
                 self,
                 rt,
@@ -10982,7 +9886,6 @@ pub const Object = extern struct {
         }
         return appendPreparedPropertyEntryWork(
             caller_holds_atom_ref,
-            slot_borrowed_until_commit,
             named_put_no_index,
             self,
             rt,
@@ -10992,7 +9895,7 @@ pub const Object = extern struct {
         );
     }
 
-    inline fn appendPreparedPropertyEntryWork(comptime caller_holds_atom_ref: bool, comptime slot_borrowed_until_commit: bool, comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+    inline fn appendPreparedPropertyEntryWork(comptime caller_holds_atom_ref: bool, comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function
         // (defer at function scope), so gate via comptime rather than a runtime
@@ -11008,9 +9911,6 @@ pub const Object = extern struct {
             if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
         }
         const is_array_index = if (comptime named_put_no_index) false else rt.atoms.atomIsArrayIndex(atom_id);
-        var slot_owned = true;
-        errdefer if (!slot_borrowed_until_commit and slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
-
         const old_len = self.shape_ref.prop_count;
         const old_storage = self.prop_values;
         const old_capacity = self.propertyStorageCapacity();
@@ -11053,7 +9953,6 @@ pub const Object = extern struct {
         // through the mutation-window ValueRootFrame (§4.6). Trial deletion
         // keeps it because the untraced RC is an external root.
         self.propertyEntry(old_len).* = .{ .slot = slot };
-        slot_owned = false;
         // A new property on a long-lived object is an old-to-young edge like
         // any other store. The shape transition below takes its own barrier for
         // the Shape; this one is for whatever the slot holds. The two
@@ -11064,10 +9963,6 @@ pub const Object = extern struct {
 
         var inserted = true;
         errdefer if (inserted) {
-            // Borrow-until-commit: the pending value at old_len is the
-            // caller's ref (not ours to destroy); just un-stage the entry.
-            if (!slot_borrowed_until_commit)
-                destroyPropertySlot(rt, atom_id, entry_flags, self.propertyEntry(old_len).*.slot);
             self.propertyEntry(old_len).* = .{};
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {
@@ -11276,7 +10171,6 @@ pub const Object = extern struct {
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
-        const atom_id = self.propAtomAt(index);
         const old_flags = self.propFlagsAt(index);
         const merged = mergeDescriptor(old_flags, self.propertyEntry(index).*.slot, desc);
         const next_flags = flagsFromDescriptor(merged);
@@ -11287,8 +10181,7 @@ pub const Object = extern struct {
             // kind to `.data` here would desync the cell (slot=var_ref) from the
             // shape (kind=data) and crash the next read.
             const cell = self.propertyEntry(index).*.slot.var_ref;
-            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
-            errdefer next_value.free(rt);
+            const next_value = merged.value;
             const stored_flags = next_flags.withKind(.var_ref);
             if (old_flags.bits() != stored_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
             cell.setVarRefValue(rt, next_value);
@@ -11300,9 +10193,7 @@ pub const Object = extern struct {
             self.updateShapePropertyFlags(rt, index, stored_flags);
             return;
         }
-        const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
-        var next_owned = true;
-        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_flags, next_slot);
+        const next_slot = slotFromDescriptor(merged);
         if (old_flags.bits() != next_flags.bits()) try self.ensureUniqueShapeForMutation(rt);
         const old_slot = self.propertyEntry(index).*.slot;
         // qjs convert-to-getset (quickjs.c:10410-10426): VARREF → GETSET
@@ -11311,17 +10202,13 @@ pub const Object = extern struct {
         // through the global object (now the accessor).
         if (old_flags.kind == .var_ref and merged.kind == .accessor and self.isGlobal()) {
             const cell = old_slot.var_ref;
-            const old_value = cell.varRefValueSlot().*;
             cell.varRefValueSlot().* = JSValue.uninitialized();
             cell.is_lexical = false;
             cell.is_const = false;
-            old_value.free(rt);
         }
         self.propertyEntry(index).* = .{ .slot = next_slot };
-        next_owned = false;
         self.barrierPropertySlot(rt, next_flags, next_slot);
         self.updateShapePropertyFlags(rt, index, next_flags);
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
@@ -11365,13 +10252,12 @@ pub const Object = extern struct {
     /// fixes both the key and descriptor flags (for example qjs's arguments
     /// shape, where only the per-call `length` value changes).
     pub inline fn replaceOwnDataPropertyValueAtAssumingShapeOwned(self: *Object, rt: *JSRuntime, index: usize, new_value: JSValue) void {
+        _ = rt;
         std.debug.assert(index < self.shape_ref.prop_count);
         const prop = self.shape_ref.props()[index];
         const flags = property.Flags.fromBits(prop.flags);
         std.debug.assert(!flags.deleted and flags.kind == .data);
-        const old_slot = self.propertyEntry(index).*.slot;
         self.propertyEntry(index).*.slot = .{ .data = new_value };
-        destroyPropertySlot(rt, prop.atom_id, flags, old_slot);
     }
 
     /// The stored accessor at `index`, or null if not an accessor property.
@@ -11390,10 +10276,6 @@ pub const Object = extern struct {
 
     pub inline fn isAutoInitAt(self: *const Object, index: usize) bool {
         return self.propFlagsAt(index).isAutoInit();
-    }
-
-    pub inline fn isVarRefAt(self: *const Object, index: usize) bool {
-        return self.propFlagsAt(index).isVarRef();
     }
 
     /// Replace an existing ordinary property with the supplied VarRef cell.
@@ -11426,54 +10308,36 @@ pub const Object = extern struct {
         const old_flags = self.propFlagsAt(index);
         const old_slot = self.propertyEntry(index).*.slot;
         if (old_flags.kind == .data) {
-            cell.setVarRefValue(rt, old_slot.data.dup());
+            cell.setVarRefValue(rt, old_slot.data);
         }
         cell.is_lexical = false;
         cell.varRefIsConstSlot().* = !next_flags.writable;
         cell.varRefIsDeletableSlot().* = next_flags.configurable;
 
-        self.propertyEntry(index).*.slot = .{ .var_ref = cell.dupCell() };
+        self.propertyEntry(index).*.slot = .{ .var_ref = cell };
         // Same bare publication as the auto-init replacement above, and the
         // same direction: the owner is a long-lived environment or global
         // object and the cell is usually brand new.
         rt.gc.generationalBarrier(self.gcHeader(), &cell.header);
         self.updateShapePropertyFlags(rt, index, next_flags);
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     /// The single paired mutator for an EXISTING property entry: writes the
-    /// new slot arm AND the shape `Flags.kind` in lockstep, then releases the
-    /// old slot using the OLD flags. The caller must have ensured a unique
-    /// shape for mutation. `next_flags` carries the new kind; `next_slot` must
-    /// match `next_flags.kind`.
+    /// new slot arm and the shape `Flags.kind` in lockstep. The caller must
+    /// have ensured a unique shape for mutation. `next_flags` carries the new
+    /// kind; `next_slot` must match `next_flags.kind`.
     fn setEntryKindAndSlot(
         self: *Object,
         rt: *JSRuntime,
-        atom_id: atom.Atom,
         index: usize,
         next_flags: property.Flags,
         next_slot: property.Slot,
     ) void {
-        const old_flags = self.propFlagsAt(index);
-        const old_slot = self.propertyEntry(index).*.slot;
         self.propertyEntry(index).*.slot = next_slot;
         self.barrierPropertySlot(rt, next_flags, next_slot);
         self.updateShapePropertyFlags(rt, index, next_flags);
-        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
     }
-
-    pub const OwnDataPropertyFastLookup = struct {
-        index: usize,
-        flags: property.Flags,
-        value: JSValue,
-    };
-
-    pub const OwnDataPropertyFastResult = union(enum) {
-        value: OwnDataPropertyFastLookup,
-        missing,
-        slow,
-    };
 
     const PropertyProbe = struct {
         index: usize,
@@ -11510,13 +10374,6 @@ pub const Object = extern struct {
             if (prop.atom_id == atom_id) return .{ .index = index, .prop = prop };
         }
         return null;
-    }
-
-    pub fn findOwnDataPropertyFast(self: *const Object, atom_id: atom.Atom) OwnDataPropertyFastResult {
-        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return .missing;
-        const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.kind != .data) return .slow;
-        return .{ .value = .{ .index = lookup.index, .flags = flags, .value = self.propertyEntry(lookup.index).*.slot.data } };
     }
 
     pub inline fn findOwnPropertySlotTrusted(self: *const Object, atom_id: atom.Atom) ?OwnPropertySlotLookup {
@@ -11661,7 +10518,7 @@ pub const Object = extern struct {
         if (refs[index] == null) return;
 
         if (desc.kind == .accessor) {
-            self.deleteMappedArgumentsBinding(rt, index);
+            self.deleteMappedArgumentsBinding(index);
             return;
         }
 
@@ -11670,34 +10527,32 @@ pub const Object = extern struct {
         }
 
         if (desc.kind == .data and desc.writable != null and desc.writable.? == false) {
-            self.deleteMappedArgumentsBinding(rt, index);
+            self.deleteMappedArgumentsBinding(index);
         }
     }
 
-    fn prepareMappedArgumentsDescriptorForDefine(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: *descriptor.Descriptor) !bool {
-        if (self.class_id != class.ids.mapped_arguments) return false;
-        if (desc.kind != .data or desc.value_present) return false;
-        if (desc.writable == null or desc.writable.? != false) return false;
-        const index = array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return false;
-        const mapped_value = self.mappedArgumentsBindingValue(index) orelse return false;
+    fn prepareMappedArgumentsDescriptorForDefine(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: *descriptor.Descriptor) !void {
+        if (self.class_id != class.ids.mapped_arguments) return;
+        if (desc.kind != .data or desc.value_present) return;
+        if (desc.writable == null or desc.writable.? != false) return;
+        const index = array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return;
+        const mapped_value = self.mappedArgumentsBindingValue(index) orelse return;
         desc.value = mapped_value;
         desc.value_present = true;
-        return true;
     }
 
     fn setMappedArgumentsBindingValue(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefsMut();
         const cell = refs[slot_index] orelse return;
-        cell.setVarRefValue(rt, new_value.dup());
+        cell.setVarRefValue(rt, new_value);
     }
 
-    fn deleteMappedArgumentsBinding(self: *Object, rt: *JSRuntime, index: u32) void {
+    fn deleteMappedArgumentsBinding(self: *Object, index: u32) void {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefsMut();
-        const cell = refs[slot_index] orelse return;
+        if (refs[slot_index] == null) return;
         refs[slot_index] = null;
-        cell.release(rt);
     }
 
     fn mappedArgumentsBindingValue(self: *const Object, index: u32) ?JSValue {
@@ -11705,7 +10560,7 @@ pub const Object = extern struct {
         const refs = self.argumentsVarRefs();
         if (slot_index >= refs.len) return null;
         const cell = refs[slot_index] orelse return null;
-        return cell.varRefValue().dup();
+        return cell.varRefValue();
     }
 
     fn mappedArgumentsBindingIndexFromAtom(self: *const Object, rt: *const JSRuntime, atom_id: atom.Atom) ?u32 {
@@ -11730,7 +10585,6 @@ pub const Object = extern struct {
         const index = self.mappedArgumentsBindingIndexFromAtom(rt, atom_id) orelse return;
         if (self.findProperty(atom_id) != null) return;
         const mapped_value = self.mappedArgumentsBindingValue(index) orelse return;
-        defer mapped_value.free(rt);
         try self.addProperty(rt, atom_id, descriptor.Descriptor.data(mapped_value, true, true, true));
     }
 
@@ -11742,11 +10596,11 @@ pub const Object = extern struct {
         }
     }
 
-    fn detachAllMappedArgumentsBindings(self: *Object, rt: *JSRuntime) void {
+    fn detachAllMappedArgumentsBindings(self: *Object) void {
         if (self.class_id != class.ids.mapped_arguments) return;
         for (self.argumentsVarRefs(), 0..) |mapped, index| {
             if (mapped == null) continue;
-            self.deleteMappedArgumentsBinding(rt, @intCast(index));
+            self.deleteMappedArgumentsBinding(@intCast(index));
         }
     }
 };
@@ -11757,14 +10611,12 @@ test "object value refs keep nested symbol bodies without external symbol roots"
 
     const object = try Object.create(rt, class.ids.object, null);
     var object_value = object.value();
-    defer object_value.free(rt);
 
     const key = try rt.internAtom("external-object-root-symbol-slot");
     defer rt.atoms.free(key);
     const nested_value = try rt.newSymbolValue("external-object-root-nested-symbol");
     const nested_symbol = nested_value.asSymbolAtom().?;
     try object.defineOwnProperty(rt, key, descriptor.Descriptor.data(nested_value, true, true, true));
-    nested_value.free(rt);
 
     // The owner object is held only by this Zig local; the tracing sweep
     // needs it declared for the keep phase. Deactivated before the release
@@ -11780,7 +10632,6 @@ test "object value refs keep nested symbol bodies without external symbol roots"
 
     live_roots.deactivate(rt);
     roots_active = false;
-    object_value.free(rt);
     object_value = JSValue.undefinedValue();
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(nested_symbol) == null);
@@ -11794,20 +10645,12 @@ fn flagsFromDescriptor(desc: descriptor.Descriptor) property.Flags {
     };
 }
 
-fn slotFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descriptor.Descriptor) property.Slot {
+fn slotFromDescriptor(desc: descriptor.Descriptor) property.Slot {
     return switch (desc.kind) {
         .generic => .{ .data = JSValue.undefinedValue() },
-        .data => .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
+        .data => .{ .data = desc.value },
         .accessor => .{ .accessor = property.Accessor.fromBorrowedValues(desc.getter, desc.setter) },
     };
-}
-
-pub fn dupPropertyDataValue(_: *atom.AtomTable, _: atom.Atom, value: JSValue) JSValue {
-    return value.dup();
-}
-
-pub fn destroyPropertySlot(rt: *JSRuntime, _: atom.Atom, flags: property.Flags, slot: property.Slot) void {
-    slot.destroy(flags, rt);
 }
 
 fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
@@ -12050,8 +10893,7 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
             return try arrayLengthStringNumber(rt, data);
         }
         if (object.class_id == class.ids.number or object.class_id == class.ids.boolean) {
-            const primitive = (object.objectData() orelse return null).dup();
-            defer primitive.free(rt);
+            const primitive = (object.objectData() orelse return null);
             return try arrayLengthNumber(rt, primitive);
         }
     }
@@ -12140,7 +10982,6 @@ fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
 
 fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*Object) !JSValue {
     var rooted_value = value;
-    defer rooted_value.free(rt);
     var root_frame = runtime_mod.rootValues(.{&rooted_value});
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -12148,13 +10989,12 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*
     const arr = try Object.createArray(rt, prototype);
     errdefer Object.destroyFromHeader(rt, arr.gcHeader());
     const key_value = try entriesAtomToStringValue(rt, key);
-    defer key_value.free(rt);
     // qjs js_create_array (quickjs.c:9601): pre-sized dense fast array instead of
     // two per-element defineOwnProperty. key_value/rooted_value stay rooted (the
     // root_frame above + the local defer) across the slice alloc; dups precede adopt.
     const elements = try rt.memory.alloc(JSValue, 2);
-    elements[0] = key_value.dup();
-    elements[1] = rooted_value.dup();
+    elements[0] = key_value;
+    elements[1] = rooted_value;
     arr.adoptDenseArrayElementsAssumingEmpty(elements);
     arr.flags.may_have_indexed_properties = true;
     return arr.value();
@@ -12184,7 +11024,6 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
     for (owned_keys) |key| {
         if (rt.atoms.isPublicSymbol(key)) continue;
         const desc = (try object.getOwnProperty(rt, key)) orelse continue;
-        defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
         element_val = switch (mode) {
             .keys => try entriesAtomToStringValue(rt, key),
@@ -12192,7 +11031,6 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
             .entries => try entryArrayValue(rt, key, try object.getProperty(key), prototype),
         };
         defer {
-            element_val.free(rt);
             element_val = JSValue.undefinedValue();
         }
         try out.defineOwnProperty(rt, atom.atomFromUInt32(out_index), descriptor.Descriptor.data(element_val, true, true, true));
@@ -12215,18 +11053,17 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
 
 /// Extract the primitive string value from a string or String-wrapper receiver.
 fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
-    if (value.isString()) return value.dup();
+    if (value.isString()) return value;
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     const object = Object.fromHeader(header);
     if (object.class_id != class.ids.string) return error.TypeError;
-    return (object.objectData() orelse return error.TypeError).dup();
+    return (object.objectData() orelse return error.TypeError);
 }
 
 fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []const u8) !void {
     const tag_atom = atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag_value = try string.String.createUtf8(rt, tag_name);
-    defer tag_value.value().free(rt);
     try object.defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(tag_value.value(), false, false, true));
 }
 
@@ -12239,10 +11076,8 @@ fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8)
     const specific = try Object.create(rt, class.ids.object, base);
     errdefer Object.destroyFromHeader(rt, specific.gcHeader());
     base_raw_owned = false;
-    base.value().free(rt);
     try defineStringIteratorToStringTag(rt, specific, tag_name);
     const next = try function.nativeFunction(ctx, "next", 0);
-    defer next.free(rt);
     const next_object = (next.refHeader() orelse return error.TypeError);
     if (!next.isObject()) return error.TypeError;
     const next_function = Object.fromHeader(next_object);
@@ -12267,18 +11102,14 @@ pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValu
     defer root_frame.deactivate(rt);
 
     target = try stringIteratorPrimitiveValue(rooted_receiver);
-    defer target.free(rt);
     const prototype = try stringIteratorPrototype(ctx, "String Iterator");
     prototype_value = prototype.value();
-    defer prototype_value.free(rt);
     const object = try Object.create(rt, class.ids.string_iterator, prototype);
     object_value = object.value();
     errdefer {
-        const failed_object = object_value;
         object_value = JSValue.undefinedValue();
-        failed_object.free(rt);
     }
-    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target.dup());
+    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target);
     object.iteratorIndexSlot().* = 0;
     return object_value;
 }

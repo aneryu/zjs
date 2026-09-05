@@ -233,8 +233,31 @@ fn destroyCallerStateOpaque(rt: *JSRuntime, fb_ptr: *anyopaque) void {
     destroyCallerState(rt, fb);
 }
 
+/// TGC S3 §2.2 edge H, the mirror of `destroyCallerState`'s atom releases:
+/// report the same ids to the tracer while the FunctionBytecode is being
+/// traced. Registered next to `small_inline_destroy` so a runtime that never
+/// built a CallerState pays nothing.
+fn traceCallerStateAtoms(
+    rt: *JSRuntime,
+    fb_ptr: *anyopaque,
+    ctx: *anyopaque,
+    visit: *const fn (ctx: *anyopaque, id: core.Atom) void,
+) void {
+    _ = rt;
+    const fb: *FunctionBytecode = @ptrCast(@alignCast(fb_ptr));
+    const state = callerState(fb) orelse return;
+    var i: u8 = 0;
+    while (i < state.inlined_len) : (i += 1) {
+        visit(ctx, state.inlined[i].callee_name);
+        visit(ctx, state.inlined[i].callee_file);
+        const fwd = state.apply_forward[i];
+        if (fwd.method_atom != core.atom.null_atom) visit(ctx, fwd.method_atom);
+    }
+}
+
 fn ensureCallerState(rt: *JSRuntime, fb: *FunctionBytecode) ?*CallerState {
     if (rt.small_inline_destroy == null) rt.small_inline_destroy = destroyCallerStateOpaque;
+    if (rt.small_inline_trace_atoms == null) rt.small_inline_trace_atoms = traceCallerStateAtoms;
     if (callerStateMut(fb)) |existing| return existing;
     const state = rt.memory.create(CallerState) catch return null;
     state.* = .{};
@@ -377,7 +400,6 @@ pub fn specializeCallSite(
     const spec = cloneAndExpand(rt, base_fb, callee, callee_fn_obj, call_pc, kind, argc) orelse return;
     const next = JSValue.functionBytecode(&spec.header);
     caller_obj.setFunctionBytecodeValue(rt, next) catch {
-        core.gc.release(rt, &spec.header);
         return;
     };
 }
@@ -1130,7 +1152,7 @@ fn cloneAndExpand(
         0;
     spec.stack_size = caller.stack_size + extra_stack;
     spec.var_ref_count = caller.openVarRefCount();
-    spec.func_name = rt.atoms.dup(caller.funcName());
+    spec.func_name = rt.atoms.dupForHolder(caller.funcName());
 
     const dst_code = new_layout.byteCodeSliceMut(spec);
     @memcpy(dst_code[0..new_len], combined[0..new_len]);
@@ -1138,14 +1160,14 @@ fn cloneAndExpand(
     const src_cpool = caller.cpoolSlice();
     const dst_cpool = new_layout.cpoolSliceMut(spec);
     for (src_cpool, dst_cpool) |src_v, *dst_v| {
-        dst_v.* = src_v.dup();
+        dst_v.* = src_v;
     }
 
     const src_vars = caller.allVarDefs();
     const dst_vars = new_layout.vardefsSliceMut(spec);
     for (src_vars, 0..) |src_v, i| {
         dst_vars[i] = src_v;
-        dst_vars[i].var_name = rt.atoms.dup(src_v.var_name);
+        dst_vars[i].var_name = rt.atoms.dupForHolder(src_v.var_name);
     }
     var vi = src_vars.len;
     while (vi < dst_vars.len) : (vi += 1) {
@@ -1156,17 +1178,17 @@ fn cloneAndExpand(
     const dst_cv = new_layout.closureVarSliceMut(spec);
     for (src_cv, dst_cv) |src, *dst| {
         dst.* = src;
-        dst.var_name = rt.atoms.dup(src.var_name);
+        dst.var_name = rt.atoms.dupForHolder(src.var_name);
     }
 
     // Dup every atom embedded in the copied + rewritten code.
     var atom_it = FunctionBytecode.BytecodeAtomIterator{ .byte_code = dst_code };
     while (atom_it.next()) |a| {
-        _ = rt.atoms.dup(a);
+        _ = rt.atoms.dupForHolder(a);
     }
 
     if (spec.debugInfoMut()) |dbg| {
-        dbg.filename = rt.atoms.dup(caller.filenameAtom());
+        dbg.filename = rt.atoms.dupForHolder(caller.filenameAtom());
         const src_pc2 = caller.pc2lineBuf();
         if (src_pc2.len != 0) {
             const copy = rt.memory.alloc(u8, src_pc2.len) catch {
@@ -1178,7 +1200,7 @@ fn cloneAndExpand(
         }
     }
     if (spec.hotExtensionMut()) |hot| {
-        hot.script_or_module = rt.atoms.dup(caller.scriptOrModule());
+        hot.script_or_module = rt.atoms.dupForHolder(caller.scriptOrModule());
         var facts = caller.callFacts();
         // Extra TAKE locals forbid Fast leaf / exact-args (those frames
         // assert var_count==0). They do not invalidate simple_inline_base:
@@ -1205,12 +1227,12 @@ fn cloneAndExpand(
         var oi: u8 = 0;
         while (oi < src_state.inlined_len and oi < max_sites) : (oi += 1) {
             var copy = src_state.inlined[oi];
-            copy.callee_name = rt.atoms.dup(copy.callee_name);
-            copy.callee_file = rt.atoms.dup(copy.callee_file);
+            copy.callee_name = rt.atoms.dupForHolder(copy.callee_name);
+            copy.callee_file = rt.atoms.dupForHolder(copy.callee_file);
             state.inlined[oi] = copy;
             var fwd = src_state.apply_forward[oi];
             if (fwd.method_atom != core.atom.null_atom)
-                fwd.method_atom = rt.atoms.dup(fwd.method_atom);
+                fwd.method_atom = rt.atoms.dupForHolder(fwd.method_atom);
             state.apply_forward[oi] = fwd;
         }
         state.inlined_len = src_state.inlined_len;
@@ -1228,8 +1250,8 @@ fn cloneAndExpand(
             .pc_hi = item.pc_hi,
             .call_pc = item.call_pc,
             .callee_fb = callee,
-            .callee_name = rt.atoms.dup(callee.funcName()),
-            .callee_file = rt.atoms.dup(callee.filenameAtom()),
+            .callee_name = rt.atoms.dupForHolder(callee.funcName()),
+            .callee_file = rt.atoms.dupForHolder(callee.filenameAtom()),
             .parent = 0xFF,
             .kind = kind,
             .this_slot = item.this_slot,
@@ -1245,7 +1267,7 @@ fn cloneAndExpand(
         state.apply_forward[state.inlined_len] = if (item.forward_call_rel != 0xFFFFFFFF)
             .{
                 .method_atom = if (item.method_atom != 0)
-                    rt.atoms.dup(@as(core.Atom, @intCast(item.method_atom)))
+                    rt.atoms.dupForHolder(@as(core.Atom, @intCast(item.method_atom)))
                 else
                     core.atom.null_atom,
                 .call_pc = item.pc_lo + item.forward_call_rel,
@@ -1280,22 +1302,17 @@ pub fn windowFits(frame: *const frame_mod.Frame, fb: *const FunctionBytecode, si
 }
 
 /// Move `this_value` and `args[0..consumedArgSlots]` into the caller's local
-/// window. Each stored value is taken by ownership (no dup). Extra entries
-/// past the consumed count stay in `args` for `releaseCallRegionAfterInline`.
+/// window. Extra entries are discarded when the caller retreats the stack.
 pub fn installInlineWindow(
     frame: *frame_mod.Frame,
     fb: *const FunctionBytecode,
     site: *const InlinedSite,
     this_value: JSValue,
     args: []JSValue,
-    rt: *JSRuntime,
 ) void {
     const locals = frame.locals;
     if (site.this_slot < locals.len) {
-        // Move. A dup here leaked one object per inlined `new` (N3f = 5e6).
-        valueReplace(rt, &locals[site.this_slot], this_value);
-    } else {
-        this_value.free(rt);
+        locals[site.this_slot] = this_value;
     }
     const arg_slots = consumedArgSlots(fb, site);
     var i: u16 = 0;
@@ -1307,75 +1324,9 @@ pub fn installInlineWindow(
             break :blk owned;
         } else JSValue.undefinedValue();
         if (slot < locals.len) {
-            valueReplace(rt, &locals[slot], v);
-        } else {
-            v.free(rt);
+            locals[slot] = v;
         }
     }
-}
-
-/// R-v11-a — call-region ownership after a constructor TAKE.
-///
-/// Region layout is `[func, new_target, args…]` (length = 2+argc).
-/// `installInlineWindow` has already MOVEd the instance into `this_slot`
-/// (that value is not region[0]) and MOVEd `args[0..consumed_args]`.
-///
-/// | slot | constructor |
-/// | slot0 (func) | DROP |
-/// | slot1 (new_target) | DROP |
-/// | args[0..consumed] | undefined (MOVEd into the window) |
-/// | args[consumed..] | DROP extras |
-///
-/// Move + free on the same slot is a double-free (mirror of the N3f
-/// installInlineWindow dup-and-keep leak). After this returns, the caller
-/// `setLen`s past the region; abandoned slots must not hold a live ref.
-///
-/// R1 keeps this walker on the extras>0 cold arm only (`noinline` so the
-/// ctor handler does not eat the loop). The 2-slot TAKE success path
-/// inlines the two DROPs beside `setLen` via `releaseCtorTakeRegion`.
-pub noinline fn releaseCallRegionAfterInline(
-    rt: *JSRuntime,
-    kind: Kind,
-    region: []JSValue,
-    consumed_args: u16,
-) void {
-    if (region.len < 2) return;
-    if (kind == .constructor) {
-        region[0].freeDuringActiveBytecode(rt);
-    }
-    region[1].freeDuringActiveBytecode(rt);
-    const extra_off: usize = 2 + @as(usize, consumed_args);
-    var i = extra_off;
-    while (i < region.len) : (i += 1) {
-        region[i].freeDuringActiveBytecode(rt);
-    }
-}
-
-/// R1 — last two beats of a constructor TAKE before `setLen`.
-///
-/// EB's 4.44M hits are exactly `[func, new_target]` (argc == consumed).
-/// Those two DROPs are the v11 table's constructor columns; fusing them
-/// here deletes the `bl releaseCallRegionAfterInline` from the take
-/// sequence. extras (`argc > consumed`) keep the outlined walker so the
-/// protocol stays bit-for-bit and the handler does not grow a loop.
-pub inline fn releaseCtorTakeRegion(
-    rt: *JSRuntime,
-    region: []JSValue,
-    consumed_args: u16,
-) void {
-    std.debug.assert(region.len >= 2);
-    if (region.len > 2 + @as(usize, consumed_args)) {
-        releaseCallRegionAfterInline(rt, .constructor, region, consumed_args);
-        return;
-    }
-    region[0].freeDuringActiveBytecode(rt);
-    region[1].freeDuringActiveBytecode(rt);
-}
-
-fn valueReplace(rt: *JSRuntime, slot: *JSValue, next: JSValue) void {
-    const prev = slot.*;
-    slot.* = next;
-    prev.free(rt);
 }
 
 pub fn logicalInlineFrames(

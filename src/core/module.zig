@@ -182,14 +182,13 @@ pub const PendingDefinition = struct {
 
     /// Release an unconsumed definition. Every owner is detached first so value
     /// destruction may safely re-enter GC/registry tracing.
-    pub fn deinit(self: *PendingDefinition, rt: anytype) void {
+    pub fn deinit(self: *PendingDefinition, _: anytype) void {
         const requests = self.requests;
         const imports = self.imports;
         const exports = self.exports;
         const indirect_exports = self.indirect_exports;
         const star_exports = self.star_exports;
         const import_attributes = self.import_attributes;
-        const func_obj = self.func_obj;
 
         self.requests = &.{};
         self.imports = &.{};
@@ -211,7 +210,6 @@ pub const PendingDefinition = struct {
             self.atoms.free(entry.local_name);
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
-                cell.free(rt);
             }
         }
         for (indirect_exports) |entry| {
@@ -222,7 +220,6 @@ pub const PendingDefinition = struct {
             self.atoms.free(entry.key);
             self.atoms.free(entry.value);
         }
-        func_obj.free(rt);
 
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
@@ -234,7 +231,7 @@ pub const PendingDefinition = struct {
 
     pub fn addRequest(self: *PendingDefinition, module_name: atom.Atom) !u32 {
         const index = std.math.cast(u32, self.requests.len) orelse return error.ModuleMetadataOverflow;
-        const owned_name = self.atoms.dup(module_name);
+        const owned_name = self.atoms.dupForHolder(module_name);
         errdefer self.atoms.free(owned_name);
         try append(self.memory, RequestEntry, &self.requests, .{ .module_name = owned_name });
         return index;
@@ -249,9 +246,9 @@ pub const PendingDefinition = struct {
         is_namespace: bool,
     ) !void {
         try self.validateRequestIndex(request_index);
-        const owned_import_name = self.atoms.dup(import_name);
+        const owned_import_name = self.atoms.dupForHolder(import_name);
         errdefer self.atoms.free(owned_import_name);
-        const owned_local_name = self.atoms.dup(local_name);
+        const owned_local_name = self.atoms.dupForHolder(local_name);
         errdefer self.atoms.free(owned_local_name);
         try append(self.memory, ImportEntry, &self.imports, .{
             .request_index = request_index,
@@ -269,9 +266,9 @@ pub const PendingDefinition = struct {
         var_idx: u16,
     ) !void {
         if (self.exports.len > std.math.maxInt(u32)) return error.ModuleMetadataOverflow;
-        const owned_export_name = self.atoms.dup(export_name);
+        const owned_export_name = self.atoms.dupForHolder(export_name);
         errdefer self.atoms.free(owned_export_name);
-        const owned_local_name = self.atoms.dup(local_name);
+        const owned_local_name = self.atoms.dupForHolder(local_name);
         errdefer self.atoms.free(owned_local_name);
         try append(self.memory, ExportEntry, &self.exports, .{
             .export_name = owned_export_name,
@@ -289,9 +286,9 @@ pub const PendingDefinition = struct {
     ) !void {
         try self.validateRequestIndex(request_index);
         if (self.indirect_exports.len > std.math.maxInt(u32)) return error.ModuleMetadataOverflow;
-        const owned_export_name = self.atoms.dup(export_name);
+        const owned_export_name = self.atoms.dupForHolder(export_name);
         errdefer self.atoms.free(owned_export_name);
-        const owned_import_name = self.atoms.dup(import_name);
+        const owned_import_name = self.atoms.dupForHolder(import_name);
         errdefer self.atoms.free(owned_import_name);
         try append(self.memory, IndirectExportEntry, &self.indirect_exports, .{
             .request_index = request_index,
@@ -313,9 +310,9 @@ pub const PendingDefinition = struct {
         value: atom.Atom,
     ) !void {
         try self.validateRequestIndex(request_index);
-        const owned_key = self.atoms.dup(key);
+        const owned_key = self.atoms.dupForHolder(key);
         errdefer self.atoms.free(owned_key);
-        const owned_value = self.atoms.dup(value);
+        const owned_value = self.atoms.dupForHolder(value);
         errdefer self.atoms.free(owned_value);
         try append(self.memory, ImportAttributeEntry, &self.import_attributes, .{
             .request_index = request_index,
@@ -421,25 +418,8 @@ pub const ModuleRecord = struct {
         self.* = .{
             .memory = account,
             .atoms = atoms,
-            .module_name = atoms.dup(name),
+            .module_name = atoms.dupForHolder(name),
         };
-    }
-
-    /// Under the tracing collector this does nothing: `.module` is one of the
-    /// kinds in `gc.refCountRemoved`, so a record's lifetime is decided by
-    /// reachability alone. That is safe today only because every caller is a
-    /// test -- nothing in the engine or the embedding surface holds a record
-    /// across an allocation on the strength of this call. A host that needed
-    /// to would have no way to say so: `rootObjects` takes `?*Object` and
-    /// there is no header-rooting form. Adding one is the work if that
-    /// changes; silently counting again would not help, because the count no
-    /// longer keeps anything alive.
-    pub fn retain(self: *ModuleRecord) void {
-        gc.retain(&self.header);
-    }
-
-    pub fn release(self: *ModuleRecord, rt: anytype) void {
-        gc.release(rt, &self.header);
     }
 
     /// Install a complete definition into a fresh, unpublished target. This
@@ -487,17 +467,13 @@ pub const ModuleRecord = struct {
 
     /// Detach and release the definition during finalization. Loaded records are
     /// never reset in place for a new generation.
-    fn clearForDestroy(self: *ModuleRecord, rt: anytype) void {
+    fn clearForDestroy(self: *ModuleRecord, _: anytype) void {
         const requests = self.requests;
         const imports = self.imports;
         const exports = self.exports;
         const indirect_exports = self.indirect_exports;
         const star_exports = self.star_exports;
         const import_attributes = self.import_attributes;
-        const func_obj = self.func_obj;
-        const module_ns = self.module_ns;
-        const import_meta = self.import_meta;
-        const eval_exception = self.eval_exception;
 
         // Detach every owned payload before releases can re-enter tracing.
         self.definition_installed = false;
@@ -528,7 +504,6 @@ pub const ModuleRecord = struct {
             self.atoms.free(entry.local_name);
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
-                cell.free(rt);
             }
         }
         for (indirect_exports) |entry| {
@@ -539,10 +514,6 @@ pub const ModuleRecord = struct {
             self.atoms.free(entry.key);
             self.atoms.free(entry.value);
         }
-        func_obj.free(rt);
-        module_ns.free(rt);
-        if (import_meta) |value| value.free(rt);
-        if (eval_exception) |value| value.free(rt);
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
         if (exports.len != 0) self.memory.free(ExportEntry, exports);
@@ -560,7 +531,7 @@ pub const ModuleRecord = struct {
         self.clearForDestroy(rt);
         self.atoms.free(owned_module_name);
 
-        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) {
+        if (rt.gc.phase == .tracer_destroy) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -600,6 +571,28 @@ pub const ModuleRecord = struct {
         try Helper.callVisitValue(visitor, &self.module_ns);
         if (self.import_meta) |*value| try Helper.callVisitValue(visitor, value);
         if (self.eval_exception) |*value| try Helper.callVisitValue(visitor, value);
+
+        // TGC S3 §2.2 edge E: the record's own name plus every atom in the
+        // six metadata arrays -- exactly the set `clearForDestroy` releases.
+        // `star_exports` holds only a request index, so it contributes none.
+        try atom.callVisitAtom(visitor, self.module_name);
+        for (self.requests) |entry| try atom.callVisitAtom(visitor, entry.module_name);
+        for (self.imports) |entry| {
+            try atom.callVisitAtom(visitor, entry.import_name);
+            try atom.callVisitAtom(visitor, entry.local_name);
+        }
+        for (self.exports) |entry| {
+            try atom.callVisitAtom(visitor, entry.export_name);
+            try atom.callVisitAtom(visitor, entry.local_name);
+        }
+        for (self.indirect_exports) |entry| {
+            try atom.callVisitAtom(visitor, entry.export_name);
+            try atom.callVisitAtom(visitor, entry.import_name);
+        }
+        for (self.import_attributes) |entry| {
+            try atom.callVisitAtom(visitor, entry.key);
+            try atom.callVisitAtom(visitor, entry.value);
+        }
     }
 
     pub inline fn traceChildEdgesNoFail(self: *ModuleRecord, rt: anytype, visitor: anytype) void {
@@ -614,17 +607,11 @@ pub const ModuleRecord = struct {
     /// (mirrors qjs js_set_module_evaluated error path setting
     /// `m->eval_exception`, quickjs.c:31279).
     pub fn setEvalException(self: *ModuleRecord, rt: anytype, value: value_mod.JSValue) void {
-        if (self.eval_exception) |old| old.free(rt);
         self.eval_exception = value;
         rt.gc.generationalBarrier(&self.header, value.cycleMarkHeader());
     }
 
     pub fn request(self: *ModuleRecord, request_index: u32) ?*RequestEntry {
-        if (@as(usize, request_index) >= self.requests.len) return null;
-        return &self.requests[@intCast(request_index)];
-    }
-
-    pub fn requestConst(self: *const ModuleRecord, request_index: u32) ?*const RequestEntry {
         if (@as(usize, request_index) >= self.requests.len) return null;
         return &self.requests[@intCast(request_index)];
     }
@@ -720,12 +707,11 @@ pub const ModuleRecord = struct {
         return cell;
     }
 
-    pub fn clearRetainedExportCellNoFail(self: *ModuleRecord, rt: anytype, export_index: u32) void {
+    pub fn clearRetainedExportCellNoFail(self: *ModuleRecord, _: anytype, export_index: u32) void {
         const entry = &self.exports[@intCast(export_index)];
         const owned = entry.retained_cell orelse return;
         std.debug.assert(VarRef.fromValue(owned) != null);
         entry.retained_cell = null;
-        owned.free(rt);
     }
 
     pub fn resetLinkTransientNoFail(self: *ModuleRecord) void {
@@ -781,13 +767,9 @@ pub const Registry = struct {
         };
     }
 
-    pub fn deinit(self: *Registry, rt: anytype) void {
+    pub fn deinit(self: *Registry) void {
         while (self.head) |record| {
-            // Membership borrows the pointer but owns the record's initial
-            // reference. Splice first so a zero-ref finalizer cannot unlink it
-            // twice, then release that list base-reference.
             self.unlink(record);
-            record.release(rt);
         }
         std.debug.assert(self.tail == null);
         std.debug.assert(self.count == 0);

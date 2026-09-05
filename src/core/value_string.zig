@@ -64,7 +64,7 @@ pub fn appendValueString(
 ) AppendStringError!void {
     if (comptime policy.symbol == .describe) {
         if (value.asSymbolAtom()) |atom_id| {
-            const description = symbol.description(&rt.atoms, atom_id) orelse "";
+            const description = symbol.description(rt, atom_id) orelse "";
             try buffer.appendSlice(rt.memory.allocator, "Symbol(");
             try buffer.appendSlice(rt.memory.allocator, description);
             try buffer.append(rt.memory.allocator, ')');
@@ -115,8 +115,7 @@ fn appendObjectString(
         if (object_value.class_id == class.ids.number or object_value.class_id == class.ids.boolean or
             object_value.class_id == class.ids.big_int or object_value.class_id == class.ids.symbol)
         {
-            const primitive = (object_value.objectData() orelse return error.TypeError).dup();
-            defer primitive.free(rt);
+            const primitive = (object_value.objectData() orelse return error.TypeError);
             return appendValueString(rt, buffer, primitive, policy);
         }
     }
@@ -151,7 +150,6 @@ fn appendArrayString(
     while (index < array.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const value = try array.getProperty(atom.atomFromUInt32(index));
-        defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value, policy);
     }
 }

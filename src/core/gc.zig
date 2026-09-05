@@ -49,6 +49,15 @@ pub const space_model_enabled: bool = address_registry_enabled;
 /// 64 KiB block heap.
 pub const block_heap_enabled: bool = trace_stw_enabled;
 
+/// TGC S3 (`docs/tracing-gc-s3-spec.md` §2.6): the atom table's liveness is
+/// decided by the tracer instead of `DynamicAtom.ref_count`. While this is
+/// `false` the whole S3-a machinery still runs -- `Collector.visitAtom` edges,
+/// the insertion barrier, black allocation and `AtomTable.sweepDead` -- but
+/// `sweepDead` only AUDITS (it reports entries rc keeps alive that the trace
+/// did not reach) and never retires an entry, so liveness is bit-for-bit the
+/// refcounted one. Flipping it to `true` makes `sweepDead` the killer.
+pub const atom_tracer_owned: bool = false;
+
 const BlockHeapMod = @import("gc_block_heap.zig");
 const gc_space = @import("gc_space.zig");
 
@@ -297,10 +306,6 @@ pub const incremental_assist_interval_bytes: usize = 512 * 1024;
 pub const small_heap_major_headroom_bytes: usize =
     if (generation_enabled) minor_young_threshold * 96 else 0;
 
-/// Deprecated spelling kept for the tests and comments that name the nursery
-/// role; identical value.
-pub const nursery_headroom_bytes: usize = small_heap_major_headroom_bytes;
-
 const GenerationState = if (generation_enabled)
     @import("gc_generation.zig").State
 else
@@ -385,10 +390,7 @@ pub const ExternalMemoryToken = struct {
 /// Value order is load-bearing for codegen, mirroring qjs's
 /// `JS_GC_OBJ_TYPE_JS_OBJECT == 0` (quickjs.c:423): the hot `kind == .object`
 /// guards compile to a single `tst` of the masked byte, and the recurring
-/// zero-ref kind sets become contiguous ranges — {object..module} is the
-/// enqueue/finalize/remove_cycles set and {object..shape} is the
-/// cycle-candidate/deinit set, each a single unsigned compare. string/big_int
-/// (plain refcounted payloads, never cycle-tracked) sit at the top.
+/// encoded kind checks stay compact.
 pub const RefKind = enum(u3) {
     object = 0,
     function_bytecode = 1,
@@ -400,90 +402,28 @@ pub const RefKind = enum(u3) {
     big_int = 7,
 };
 
-/// Stage-0 tracing inventory for every encoded GC reference kind. Adding a
-/// RefKind without classifying its carrier is a compile error. This does not
-/// claim the composite tracing heap exists; `allocation_ledger` rows are the
-/// missing Implementation behind that future Interface.
-pub const HeapCensusClass = enum(u8) {
-    rc_registry,
-    allocation_ledger,
-};
-
-pub const StrongEdgeClass = enum(u8) {
-    registry_trace,
-    string_family,
-    leaf,
-};
-
-/// Physical prefix carried by a RefKind.  `.metadata` is the shared eight-byte
-/// allocator/GC prefix immediately before the carrier header;
-/// `.string_rc` was the four-byte refcount-only prefix used by flat strings and
-/// ropes, which intentionally has no allocator or lifecycle fields.
-pub const PrefixModel = enum(u8) {
-    metadata,
-    string_rc,
-};
-
 /// Legal allocation carriers for a kind.  Only plain objects may enter the
 /// collector block heap; every other Metadata kind is slab/standalone, while
 /// strings use their dedicated prefixed allocation family.
 pub const AllocationCarrier = enum(u8) {
     block_slab_or_standalone,
     slab_or_standalone,
-    string_family,
 };
 
-/// Meaning of the `Metadata.rc` word for this kind in a tracing build.  The
-/// word is still physically present for `trace_removed`, but must remain at
-/// its construction value because reachability, not retains, owns liveness.
-pub const RefCountSemantics = enum(u8) {
-    trace_removed,
-    retained,
-};
-
-pub const RefKindDescriptor = struct {
-    kind: RefKind,
-    census: HeapCensusClass,
-    strong_edges: StrongEdgeClass,
-    cycle_candidate: bool,
-};
-
-pub const ref_kind_catalog = [_]RefKindDescriptor{
-    .{ .kind = .object, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
-    .{ .kind = .function_bytecode, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
-    .{ .kind = .var_ref, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
-    .{ .kind = .realm_context, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
-    .{ .kind = .module, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
-    .{ .kind = .shape, .census = .rc_registry, .strong_edges = .registry_trace, .cycle_candidate = true },
-    // RefKind does not distinguish flat strings from StringRope. Flat strings
-    // are leaves; ropes own left/right JSValue edges. Neither is on gc_obj_list.
-    .{ .kind = .string, .census = if (string_tracer_owned) .rc_registry else .allocation_ledger, .strong_edges = .string_family, .cycle_candidate = string_tracer_owned },
-    .{ .kind = .big_int, .census = .rc_registry, .strong_edges = .leaf, .cycle_candidate = true },
-};
-
-pub inline fn refKindDescriptor(kind: RefKind) *const RefKindDescriptor {
-    return &ref_kind_catalog[@intFromEnum(kind)];
-}
-
-/// Representation-only contract kept separate from `RefKindDescriptor`.
-/// The latter is indexed by existing runtime census code; widening it would
-/// change that table's stride in shipped code merely to serve an audit.
 pub const RepresentationKindDescriptor = struct {
     kind: RefKind,
-    prefix: PrefixModel,
     allocation: AllocationCarrier,
-    ref_count: RefCountSemantics,
 };
 
 pub const representation_kind_catalog = [_]RepresentationKindDescriptor{
-    .{ .kind = .object, .prefix = .metadata, .allocation = .block_slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .function_bytecode, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .var_ref, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .realm_context, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .module, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .shape, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
-    .{ .kind = .string, .prefix = .metadata, .allocation = if (string_tracer_owned) .block_slab_or_standalone else .string_family, .ref_count = if (string_tracer_owned) .trace_removed else .retained },
-    .{ .kind = .big_int, .prefix = .metadata, .allocation = .slab_or_standalone, .ref_count = .trace_removed },
+    .{ .kind = .object, .allocation = .block_slab_or_standalone },
+    .{ .kind = .function_bytecode, .allocation = .slab_or_standalone },
+    .{ .kind = .var_ref, .allocation = .slab_or_standalone },
+    .{ .kind = .realm_context, .allocation = .slab_or_standalone },
+    .{ .kind = .module, .allocation = .slab_or_standalone },
+    .{ .kind = .shape, .allocation = .slab_or_standalone },
+    .{ .kind = .string, .allocation = .block_slab_or_standalone },
+    .{ .kind = .big_int, .allocation = .slab_or_standalone },
 };
 
 pub inline fn representationKindDescriptor(kind: RefKind) *const RepresentationKindDescriptor {
@@ -493,56 +433,17 @@ pub inline fn representationKindDescriptor(kind: RefKind) *const RepresentationK
 comptime {
     const tags = std.meta.tags(RefKind);
     std.debug.assert(@intFromEnum(RefKind.object) == representation.object_kind_tag);
-    // Runtime census code indexes this table. Representation audits must not
-    // widen its four-byte element or change shipped lookup geometry.
-    std.debug.assert(@sizeOf(RefKindDescriptor) == 4);
-    std.debug.assert(ref_kind_catalog.len == tags.len);
     std.debug.assert(representation_kind_catalog.len == tags.len);
-    for (ref_kind_catalog, 0..) |descriptor, index| {
-        std.debug.assert(@intFromEnum(descriptor.kind) == index);
-        std.debug.assert(descriptor.cycle_candidate == (descriptor.census == .rc_registry));
-    }
     for (representation_kind_catalog, 0..) |descriptor, index| {
         std.debug.assert(@intFromEnum(descriptor.kind) == index);
-        // Since S2-a1 every kind carries the eight-byte Metadata prefix; the
-        // string family still keeps its count in the prefix's lifetime word.
-        std.debug.assert(descriptor.prefix == .metadata);
         std.debug.assert((descriptor.allocation == .block_slab_or_standalone) ==
-            (descriptor.kind == .object or (string_tracer_owned and descriptor.kind == .string)));
-        std.debug.assert((descriptor.allocation == .string_family) == (descriptor.kind == .string and !string_tracer_owned));
-        std.debug.assert((descriptor.ref_count == .trace_removed) == refCountRemoved(descriptor.kind));
+            (descriptor.kind == .object or descriptor.kind == .string));
     }
 }
 
 pub const GcKind = RefKind;
 
 pub const gc_kind_count: usize = @typeInfo(GcKind).@"enum".fields.len;
-
-/// Kinds whose lifetime the tracer owns outright under `trace_stw`, so their
-/// refcount is not maintained at all -- retain and release are no-ops and the
-/// shared lifetime word carries mark/husk state instead.
-///
-/// `.shape` and `.realm_context` are traced too but keep their counts, for
-/// reasons that have nothing to do with liveness. A Shape's `rc == 1` is the
-/// exclusive-ownership test that licenses mutating a shape in place instead of
-/// splitting it copy-on-write; freezing it would silently license mutating a
-/// shared one. A Realm is a host handle with an explicit `JSContext.destroy`
-/// API and a teardown-order contract (`context_head == null`) that the runtime
-/// asserts. Strings, ropes, symbols and BigInt are not traced at all, so their
-/// counts are the only thing keeping them alive.
-/// TGC S2 liveness switch for the string family (flat strings, ropes, symbol
-/// bodies). false: strings are refcounted raw-slab allocations the tracer
-/// never sees (S2-a1 state). true: strings are block cells / extents that the
-/// tracer marks and sweeps, and their count is dead. Every S2 change lands
-/// behind this constant so both builds gate until the flip (S2 spec §5.0).
-pub const string_tracer_owned: bool = false;
-
-pub inline fn refCountRemoved(kind: GcKind) bool {
-    return switch (kind) {
-        .object, .function_bytecode, .var_ref, .module, .shape, .realm_context, .big_int => true,
-        .string => string_tracer_owned,
-    };
-}
 
 /// O2-B's marking-epoch exemption. Only kinds whose lifetime is owned by the
 /// tracer AND whose struct never moves under the mutator may persist as raw
@@ -555,8 +456,7 @@ pub inline fn refCountRemoved(kind: GcKind) bool {
 /// Keep this separate from enum ranges: Realm sits between VarRef and Module.
 pub inline fn frontierEpochSafe(kind: GcKind) bool {
     return switch (kind) {
-        .object, .function_bytecode, .var_ref, .module, .big_int => true,
-        .string => string_tracer_owned,
+        .object, .function_bytecode, .var_ref, .module, .string, .big_int => true,
         .realm_context, .shape => false,
     };
 }
@@ -564,21 +464,14 @@ pub inline fn frontierEpochSafe(kind: GcKind) bool {
 comptime {
     for (std.meta.tags(GcKind)) |kind| {
         const expected = switch (kind) {
-            .object, .function_bytecode, .var_ref, .module, .big_int => true,
-            .string => string_tracer_owned,
+            .object, .function_bytecode, .var_ref, .module, .string, .big_int => true,
             .realm_context, .shape => false,
         };
         std.debug.assert(frontierEpochSafe(kind) == expected);
-        // A raw frontier pointer requires tracer-owned lifetime; the converse
-        // does not hold (Shape relocates). If either catalog changes, O2 must
-        // be reopened here.
-        if (frontierEpochSafe(kind)) std.debug.assert(refCountRemoved(kind));
     }
 }
 pub const Phase = enum {
     none,
-    /// A batch of zero-ref releases is being held for an outermost drain.
-    decref,
     /// The tracer is running a destruction slice. It used to share this role
     /// with refcounting's `.remove_cycles`, and a single value forced every
     /// site to serve both -- visibly so in `Object.destroyFromHeader`, whose
@@ -588,14 +481,6 @@ pub const Phase = enum {
     tracer_destroy,
     deinit,
 };
-
-/// The teardown window where resources are freed in one pass and structs in
-/// another, so a struct free must be parked. There used to be two such
-/// windows; the refcounting one is gone, and this predicate survives as the
-/// name its call sites read.
-pub inline fn phaseIsTwoPassTeardown(phase: Phase) bool {
-    return phase == .tracer_destroy;
-}
 
 pub const MajorPhase = enum(u8) {
     idle,
@@ -689,7 +574,7 @@ pub const BlockFlags = packed struct(u8) {
 
 /// Byte 2 of the metadata prefix = the allocator's `block_size_idx` byte (qjs
 /// `JSMallocBlockHeader.block_size_idx`, quickjs.c:275), now stamped for GC
-/// allocations too, plus two zjs accounting bits in the unused high bits
+/// allocations too, plus two zjs state bits in the unused high bits
 /// (slab classes only need 5 bits; qjs marks its large blocks via
 /// `u.block_idx == FREE_NIL` instead, but zjs stores encoded heap bytes in
 /// that u16 for standalone prefixes, so the discriminator lives here).
@@ -698,11 +583,7 @@ pub const AllocInfo = packed struct(u8) {
     /// free paths read it back instead of re-deriving the class from the byte
     /// size (qjs `__js_free`, quickjs.c:1614-1617).
     block_size_idx: u5 = 0,
-    /// Alloc-time large-space classification, stamped by registration and
-    /// valid iff `heap_accounted`. Cold accounting audits compare it with the
-    /// live object's current byte size; it is independent of whether the
-    /// physical carrier is a slab, block cell, or standalone.
-    large: bool = false,
+    reserved: bool = false,
     /// The allocation has been published to the live heap. Kept separate from
     /// size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
@@ -730,68 +611,20 @@ pub const TraceHeaderFlags = packed struct(u8) {
 pub const trace_object_shape_summary_mask: u8 = 0b0111_1111;
 pub const trace_remembered_mask: u8 = 0b1000_0000;
 
-/// Kinds whose byte-6 bit7 may carry the remembered-owner membership cache
-/// (audit §10). Two exclusions, for two unrelated reasons:
-///
-///   * `.big_int` keeps a live `i32` in the SAME word (`LifetimeWord.rc`;
-///     `resetHeaderLifetimeForPublication` special-cases it). byte 6 is that
-///     count's third byte, so setting bit7 would be `rc += 0x800000`.
-///   * `.string` has no `Metadata` prefix at all (`PrefixModel.string_rc`, a
-///     bare four-byte count), so `header.meta()` does not name its memory.
-///
-/// What remains is exactly the `gc_obj_list` carrier set -- which is also
-/// exactly the set that can reach `remember`/`forgetGenerationalOwner`, since
-/// both are entered only through the barrier (Object/VarRef/Module/Realm/Shape
-/// owners) and through `removeGcObjectAfter` (list members only). The contiguous
-/// enum range makes the gate one unsigned compare, the same price as the
-/// `== .object` test it replaces.
-pub inline fn traceRememberedCacheEligible(kind: GcKind) bool {
-    return kind != .string or string_tracer_owned;
-}
-
-comptime {
-    // The test above must stay the enumeration of the admitted kinds.
-    for (std.meta.tags(GcKind)) |kind| {
-        const expected = switch (kind) {
-            .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => true,
-            .string => string_tracer_owned,
-        };
-        std.debug.assert(traceRememberedCacheEligible(kind) == expected);
-        // Ineligibility must coincide with "not a gc_obj_list carrier", which
-        // is what makes the two exclusions unreachable rather than merely
-        // forbidden: `refKindDescriptor(...).cycle_candidate` is the same set.
-        std.debug.assert(traceRememberedCacheEligible(kind) == refKindDescriptor(kind).cycle_candidate);
-        // Only the admitted kinds have a Metadata prefix to lease a bit from.
-        if (traceRememberedCacheEligible(kind))
-            std.debug.assert(representationKindDescriptor(kind).prefix == .metadata);
-    }
-}
-
 pub const TraceHeaderState = extern struct {
     mark_epoch: u16 = 0,
     /// Shared Object byte: low seven bits are the Shape trace projection; bit7
     /// is remembered-set membership. A native byte keeps both hot reads at a
     /// fixed offset. Object owns the summary encoding/mutation audit;
     /// gc_generation owns remembered. Non-Object carriers keep the LOW SEVEN
-    /// bits zero -- the Shape projection is Object-only -- but every kind in
-    /// `traceRememberedCacheEligible` may carry bit7 (audit §10).
+    /// bits zero -- the Shape projection is Object-only -- but every kind may
+    /// carry bit7 (audit §10).
     object_shape_summary: u8 = 0,
     flags: TraceHeaderFlags = .{},
 };
 
-/// Physical offset 4 is kind dependent. Registry carriers use `trace`; heap
-/// BigInt keeps `rc`, because it is outside the tracing heap and the generic
-/// JSValue retain/free ABI still reaches this exact payload-4 word. `rc` is
-/// therefore NOT dead with the refcounting collector gone: `.big_int` is its
-/// one remaining user and the union arm exists for it.
-pub const LifetimeWord = extern union {
-    rc: i32,
-    trace: TraceHeaderState,
-};
-
 /// qjs-style block-prefix metadata. The allocator-owned first four bytes keep
-/// the JSMallocBlockHeader ABI. The tail is a lifetime union rather than a
-/// shared refcount: tracer-owned carriers use a mark epoch + husk state there.
+/// the JSMallocBlockHeader ABI. The tail stores mark epoch and husk state.
 /// For slab-backed objects these 8 bytes ARE the allocator block header;
 /// persistent/over-aligned objects keep a standalone prefix.
 pub const Metadata = extern struct {
@@ -801,7 +634,7 @@ pub const Metadata = extern struct {
     size_class: u16 align(8) = 0,
     alloc_info: AllocInfo = .{},
     flags: BlockFlags = .{},
-    lifetime: LifetimeWord = .{ .trace = .{} },
+    lifetime: TraceHeaderState = .{},
 };
 
 /// Size of the metadata prefix that precedes every GC object (objectPtr - 8).
@@ -816,8 +649,6 @@ comptime {
     std.debug.assert(@offsetOf(Metadata, "alloc_info") == representation.metadata_alloc_info_offset);
     std.debug.assert(@offsetOf(Metadata, "flags") == representation.metadata_flags_offset);
     std.debug.assert(@offsetOf(Metadata, "lifetime") == representation.metadata_rc_offset);
-    std.debug.assert(@sizeOf(LifetimeWord) == 4);
-    std.debug.assert(@alignOf(LifetimeWord) == 4);
     std.debug.assert(@sizeOf(TraceHeaderState) == 4);
     std.debug.assert(@sizeOf(TraceHeaderFlags) == 1);
     std.debug.assert(@offsetOf(TraceHeaderState, "mark_epoch") == 0);
@@ -827,7 +658,6 @@ comptime {
     std.debug.assert(trace_object_shape_summary_mask & trace_remembered_mask == 0);
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .standalone = true })) == representation.alloc_info_standalone_mask);
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .heap_accounted = true })) == representation.alloc_info_heap_accounted_mask);
-    std.debug.assert(@as(u8, @bitCast(AllocInfo{ .large = true })) == representation.alloc_info_large_mask);
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .block_size_idx = representation.block_cell_size_class })) == representation.block_cell_alloc_info);
     // Kind occupies the low 3 bits of the shared kind/flags byte; a bare tag
     // byte (all flags clear) equals the enum value, which is what the raw
@@ -849,7 +679,7 @@ comptime {
 ///
 ///   * `flags.young` (byte 3): a minor traces the whole reachable young set,
 ///     so an old-to-young edge out of a young owner needs no record.
-///   * `lifetime.trace.object_shape_summary` bit7 (byte 6): the remembered-set
+///   * `lifetime.object_shape_summary` bit7 (byte 6): the remembered-set
 ///     membership cache of audit §10. Set implies present in the map (the
 ///     direction `verifyPublishedHeaderRepresentation`'s
 ///     `RememberedCacheWithoutOwner` enforces at every collection boundary),
@@ -876,7 +706,7 @@ pub const barrier_young_bit: u64 = blk: {
 
 pub const barrier_remembered_bit: u64 = blk: {
     var probe: Metadata = .{};
-    probe.lifetime.trace.object_shape_summary = trace_remembered_mask;
+    probe.lifetime.object_shape_summary = trace_remembered_mask;
     break :blk @bitCast(probe);
 };
 
@@ -946,12 +776,6 @@ pub const TraceHeader = extern struct {
         self.next_non_object = next;
     }
 
-    pub inline fn retain(self: *TraceHeader) void {
-        if (refCountRemoved(self.metaConst().flags.kind)) return;
-        std.debug.assert(headerRefCount(self) > 0);
-        incrementHeaderRefCount(self);
-    }
-
     pub fn pinned(self: *const TraceHeader) bool {
         return self.metaConst().flags.is_pinned;
     }
@@ -961,50 +785,9 @@ pub const TraceHeader = extern struct {
     }
 };
 
-/// Common QuickJS-style refcount word. Every refcounted JSValue payload points
-/// at its body, with this header at the fixed `payload - 4` offset (`__js_rc`
-/// in quickjs.h). Strings and heap BigInt use it. GC carriers reinterpret the
-/// same physical word as `TraceHeaderState`, and every raw JSValue
-/// retain/release is gated before it.
-pub const RefCountHeader = extern struct {
-    rc: i32 = 1,
-
-    comptime {
-        std.debug.assert(@sizeOf(RefCountHeader) == 4);
-    }
-
-    pub inline fn retain(self: *RefCountHeader) void {
-        std.debug.assert(self.rc > 0);
-        self.rc += 1;
-    }
-};
-
-/// Compatibility alias for the standalone prefix used by String/StringRope.
-pub const StringHeader = RefCountHeader;
-
 /// Byte size of the prefix reserved ahead of every flat `String` and
-/// `StringRope` allocation: a full `Metadata` word (S2-a1). Its `lifetime`
-/// tail is the refcount word at payload-4 that `StringHeader` names, so the
-/// string family's rc arithmetic is unchanged while the carrier now has the
-/// same eight-byte prefix as every GC kind (kind = `.string`, no list link).
+/// `StringRope` allocation: a full collector `Metadata` word.
 pub const string_prefix_size: usize = metadata_prefix_size;
-
-/// Physical payload displacement of the four-byte lifetime word. It is an RC
-/// word only for the kinds/configurations documented on `LifetimeWord`.
-pub const ref_count_offset_from_payload: usize = @sizeOf(RefCountHeader);
-
-pub inline fn refCountHeaderFromPayload(payload: *anyopaque) *RefCountHeader {
-    const address = @intFromPtr(payload);
-    std.debug.assert(address >= ref_count_offset_from_payload);
-    return @ptrFromInt(address - ref_count_offset_from_payload);
-}
-
-comptime {
-    // A GC value stores `Header *` in its payload. Metadata immediately
-    // precedes that header, and its lifetime tail must land at the same
-    // payload - 4 address used by strings, symbols, and ropes.
-    std.debug.assert(metadata_prefix_size - @offsetOf(Metadata, "lifetime") == ref_count_offset_from_payload);
-}
 
 pub const Header = TraceHeader;
 pub const GCObjectHeader = Header;
@@ -1070,62 +853,8 @@ pub inline fn setDeferredNext(header: *GCObjectHeader, next: ?*GCObjectHeader) v
     deferredLinkSlot(header).* = next;
 }
 
-/// An O2-B frontier entry. Its representation stays one raw address, but the
-/// distinct type makes every private/shared enqueue prove the publication,
-/// header-agreement, lifetime-kind, and mark-claim preconditions first.
-///
-/// The constructor is deliberately module-private. Queue code can unwrap an
-/// entry it received, but it cannot manufacture one from `*Header`.
-pub const FrontierSafeHeader = enum(usize) {
-    _,
-
-    inline fn init(raw_header: *Header) FrontierSafeHeader {
-        return @enumFromInt(@intFromPtr(raw_header));
-    }
-
-    pub inline fn header(self: FrontierSafeHeader) *Header {
-        return @ptrFromInt(@intFromEnum(self));
-    }
-};
-
-comptime {
-    std.debug.assert(@sizeOf(FrontierSafeHeader) == @sizeOf(*Header));
-    std.debug.assert(@alignOf(FrontierSafeHeader) == @alignOf(*Header));
-}
-
-/// The authoritative count for kinds which retain RC semantics in this build.
-/// Under trace_stw Shape and Realm moved their real count into existing body
-/// padding; BigInt remains in the prefix because JSValue's payload-4 ABI owns
-/// it. Calling this for a tracer-owned kind is a contract violation.
-pub inline fn headerRefCount(h: *const Header) i32 {
-    // No list kind keeps a count any more (S1-c closed the BigInt tail);
-    // every caller is behind a `refCountRemoved` gate that is now always true.
-    _ = h;
-    unreachable;
-}
-
-pub inline fn setHeaderRefCount(h: *Header, value: i32) void {
-    std.debug.assert(value >= 0);
-    _ = h;
-    unreachable;
-}
-
-pub inline fn incrementHeaderRefCount(h: *Header) void {
-    const old = headerRefCount(h);
-    std.debug.assert(old >= 0 and old < std.math.maxInt(i32));
-    setHeaderRefCount(h, old + 1);
-}
-
-pub inline fn decrementHeaderRefCount(h: *Header) i32 {
-    const old = headerRefCount(h);
-    std.debug.assert(old > 0);
-    const next = old - 1;
-    setHeaderRefCount(h, next);
-    return next;
-}
-
-pub inline fn headerRefCountIsZeroOrHusk(h: *const Header) bool {
-    return h.metaConst().lifetime.trace.flags.husk;
+pub inline fn headerIsHusk(h: *const Header) bool {
+    return h.metaConst().lifetime.flags.husk;
 }
 
 /// True when dropping the last WeakRef may reclaim the resource-stripped
@@ -1133,14 +862,14 @@ pub inline fn headerRefCountIsZeroOrHusk(h: *const Header) bool {
 /// objects never go through the zero-ref queue.
 pub inline fn headerIsReclaimableWeakHusk(h: *const Header) bool {
     std.debug.assert(h.metaConst().flags.kind == .object);
-    return h.metaConst().lifetime.trace.flags.husk;
+    return h.metaConst().lifetime.flags.husk;
 }
 
 pub inline fn setHeaderWeakHusk(h: *Header) void {
     std.debug.assert(h.metaConst().flags.kind == .object);
     {
         std.debug.assert(!h.metaConst().alloc_info.heap_accounted);
-        std.debug.assert(h.metaConst().lifetime.trace.flags.reserved == 0);
+        std.debug.assert(h.metaConst().lifetime.flags.reserved == 0);
         // I4 ordering pin. The whole-byte store below also erases the
         // remembered-owner cache bit, so it MUST run after the object has left
         // the remembered map (`unregisterObjectWithBytes` ->
@@ -1148,20 +877,16 @@ pub inline fn setHeaderWeakHusk(h: *Header) void {
         // deregistration would leave bit=0/map=1 and make the forget-side skip
         // strand a dangling address -- silently, since nothing else reads the
         // bit on this path. Assert the invariant here instead.
-        std.debug.assert(h.metaConst().lifetime.trace.object_shape_summary & trace_remembered_mask == 0);
+        std.debug.assert(h.metaConst().lifetime.object_shape_summary & trace_remembered_mask == 0);
         // Resource teardown has already released and replaced shape_ref. A
         // husk has no property graph, so do not retain a stale body projection.
-        h.meta().lifetime.trace.object_shape_summary = 0;
-        h.meta().lifetime.trace.flags.husk = true;
+        h.meta().lifetime.object_shape_summary = 0;
+        h.meta().lifetime.flags.husk = true;
     }
 }
 
-inline fn resetHeaderLifetimeForPublication(h: *Header) void {
-    h.meta().lifetime.trace = .{};
-}
-
 inline fn assertInitialHeaderLifetime(h: *const Header) void {
-    const state = h.metaConst().lifetime.trace;
+    const state = h.metaConst().lifetime;
     std.debug.assert(state.mark_epoch == 0);
     std.debug.assert(!state.flags.husk);
     std.debug.assert(state.flags.reserved == 0);
@@ -1176,11 +901,9 @@ inline fn assertInitialHeaderLifetime(h: *const Header) void {
         std.debug.assert(state.object_shape_summary & trace_object_shape_summary_mask == 0);
 }
 
-/// Shape and Realm retain true refcount semantics, so a mutator last-release
-/// may unlink them at an arbitrary list position. They store the one backlink
-/// the compact Header removed, in body space made available by that same
-/// shrink. Tracer-owned kinds are only detached by collector cursor walks and
-/// intentionally carry no backlink.
+/// Shape and Realm may be relocated or rolled back at an arbitrary list
+/// position. They store the backlink removed from the compact Header in body
+/// space; other kinds are detached by collector cursor walks.
 inline fn storedListPrevious(h: *const Header) ?*Header {
     return switch (h.metaConst().flags.kind) {
         .shape => blk: {
@@ -1302,13 +1025,6 @@ pub inline fn listDelAfterTraversalOwned(head: *IntrusiveHeaderList, previous: *
     el.next_non_object = null;
 }
 
-/// qjs `list_del` (list.h:69-78 / remove_gc_object at quickjs.c:6548).
-/// Arbitrary mutations recover the predecessor once. Sequential collector
-/// walks must use `listDelAfter` so a sweep remains O(population).
-pub inline fn listDel(head: *IntrusiveHeaderList, el: *Header) void {
-    listDelAfter(head, listPrevious(head, el), el);
-}
-
 pub inline fn listFirst(head: *const IntrusiveHeaderList) ?*Header {
     const next = head.sentinel.next_non_object.?;
     if (next == @constCast(&head.sentinel)) return null;
@@ -1400,47 +1116,6 @@ pub const DeferredFreeStack = struct {
     }
 };
 
-/// Large enough for ordinary Shape/Realm release cascades without making
-/// every outermost zero transition reserve a 512-byte frame. Deeper cascades
-/// use the scratch allocator arm below and are pinned by the overflow test.
-pub const zero_ref_inline_capacity: usize = 8;
-
-/// One-call anti-recursion worklist for Shape/Realm eager-zero teardown.
-/// Nodes remain published while queued here, so the canonical header word is
-/// never borrowed. Overflow storage is returned before the outermost release
-/// completes.
-pub const ZeroRefScratch = struct {
-    inline_items: [zero_ref_inline_capacity]*GCObjectHeader = undefined,
-    inline_len: usize = 0,
-    overflow: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
-    read_index: usize = 0,
-
-    fn deinit(self: *ZeroRefScratch) void {
-        self.overflow.deinit(std.heap.page_allocator);
-        self.* = .{};
-    }
-
-    fn append(self: *ZeroRefScratch, header: *GCObjectHeader) void {
-        if (self.inline_len < self.inline_items.len) {
-            self.inline_items[self.inline_len] = header;
-            self.inline_len += 1;
-            return;
-        }
-        self.overflow.append(std.heap.page_allocator, header) catch
-            @panic("gc: zero-ref scratch worklist OOM");
-    }
-
-    fn next(self: *ZeroRefScratch) ?*GCObjectHeader {
-        const total = self.inline_len + self.overflow.items.len;
-        if (self.read_index >= total) return null;
-        const index = self.read_index;
-        self.read_index += 1;
-        if (index < self.inline_len) return self.inline_items[index];
-        return self.overflow.items[index - self.inline_len];
-    }
-};
-
-
 /// Header-external membership authority for published `.object` allocations
 /// that are not served by the block heap. Block objects are enumerated by the
 /// block allocation bitmap; every other traced kind remains on `gc_obj_list`.
@@ -1493,14 +1168,6 @@ const NonBlockObjectAuthority = struct {
             self.doomed.appendAssumeCapacity(header);
     }
 
-    fn popDoomed(self: *NonBlockObjectAuthority) ?*GCObjectHeader {
-        return self.doomed.pop();
-    }
-
-    fn popTemporary(self: *NonBlockObjectAuthority) ?*GCObjectHeader {
-        return self.temporary.pop();
-    }
-
     fn deinit(self: *NonBlockObjectAuthority, allocator: std.mem.Allocator) void {
         std.debug.assert(self.doomed.items.len == 0);
         std.debug.assert(self.temporary.items.len == 0);
@@ -1508,42 +1175,6 @@ const NonBlockObjectAuthority = struct {
         self.doomed.deinit(allocator);
         self.temporary.deinit(allocator);
         self.* = .{};
-    }
-};
-
-pub const HeaderList = struct {
-    list: IntrusiveHeaderList = .{},
-    count: usize = 0,
-
-    pub fn init(self: *HeaderList) void {
-        listInit(&self.list);
-        self.count = 0;
-    }
-
-    pub fn append(self: *HeaderList, header: *Header) void {
-        std.debug.assert(!headerLinked(header));
-        listAddTail(&self.list, header);
-        self.count += 1;
-    }
-
-    pub fn remove(self: *HeaderList, header: *Header) void {
-        listDel(&self.list, header);
-        std.debug.assert(self.count != 0);
-        self.count -= 1;
-    }
-
-    pub fn popFront(self: *HeaderList) ?*Header {
-        const header = listFirst(&self.list) orelse return null;
-        self.remove(header);
-        return header;
-    }
-
-    /// Successor of `header` on this list, or null at the sentinel.
-    /// Mirrors `list_for_each_safe`'s saved `el1` (qjs:6797).
-    pub fn nextAfter(self: *const HeaderList, header: *const Header) ?*Header {
-        const next = header.nextNonObject().?;
-        if (next == &self.list.sentinel) return null;
-        return next;
     }
 };
 
@@ -1572,13 +1203,11 @@ pub const InvariantError = error{
     /// forgot the young-suffix anchor and the next minor would walk freed
     /// memory (the `unlinkObjectWithBytes` hole, 2026-08-25).
     DanglingYoungHead,
-    NegativeRefCount,
     InvalidHeaderState,
     MissingHeapAllocation,
     HeapLiveBytesMismatch,
     OldLiveBytesMismatch,
     LargeObjectBytesMismatch,
-    LargeObjectClassificationMismatch,
     CarrierOldNewMismatch,
     CarrierRawOwnedMismatch,
     CarrierGenerationMismatch,
@@ -1586,14 +1215,12 @@ pub const InvariantError = error{
     DuplicateExternalMemoryToken,
     EmptyExternalMemoryToken,
     ExternalTokenBytesMismatch,
-    LeakedExternalMemoryToken,
     DuplicatePinEntry,
     EmptyPinEntry,
     PinnedHeaderFlagMismatch,
     PinnedHeaderMissingEntry,
     PinEntryNotLive,
     YoungCountMismatch,
-    RememberedCountMismatch,
     RememberedOwnerNotLive,
     RememberedOwnerYoung,
     RememberedCacheWithoutOwner,
@@ -1609,7 +1236,6 @@ pub const InvariantError = error{
     DeferredFreeAuditOutOfMemory,
     ConstructionRootStateMismatch,
     RepresentationKindMismatch,
-    RepresentationPrefixModelMismatch,
     RepresentationAllocationCarrierMismatch,
     RepresentationPrefixFieldMismatch,
     ObjectShapeSummaryMismatch,
@@ -1635,7 +1261,6 @@ pub const InvariantError = error{
 /// its lifecycle bits were meaningful merely because it has Metadata bytes).
 pub const MetadataSemanticState = enum {
     registry_published,
-    detached_leaf,
     construction_block_object,
 };
 
@@ -1650,16 +1275,14 @@ pub fn verifyMetadataSemantics(
 ) InvariantError!void {
     if (meta.flags.kind != expected_kind) return error.RepresentationKindMismatch;
     const descriptor = representationKindDescriptor(expected_kind);
-    if (descriptor.prefix != .metadata) return error.RepresentationPrefixModelMismatch;
 
     const is_block_cell = meta.alloc_info.block_size_idx == representation.block_cell_size_class;
     switch (descriptor.allocation) {
         .block_slab_or_standalone => {},
         .slab_or_standalone => if (is_block_cell)
             return error.RepresentationAllocationCarrierMismatch,
-        .string_family => return error.RepresentationPrefixModelMismatch,
     }
-    if (is_block_cell and (meta.alloc_info.standalone or meta.alloc_info.large))
+    if (is_block_cell and meta.alloc_info.standalone)
         return error.RepresentationAllocationCarrierMismatch;
     if (meta.alloc_info.standalone) {
         if (meta.alloc_info.block_size_idx != 0)
@@ -1667,20 +1290,14 @@ pub fn verifyMetadataSemantics(
     } else if (!is_block_cell and meta.alloc_info.block_size_idx >= memory.SmallObjectSlab.class_count) {
         return error.RepresentationAllocationCarrierMismatch;
     }
-    // `large` is the registry's logical space/accounting class, not a
-    // physical-allocation carrier bit. A FunctionBytecode header can be slab
-    // backed while its FAM-sized heap footprint crosses the large threshold.
-    if (meta.alloc_info.large and !meta.alloc_info.heap_accounted)
-        return error.RepresentationPrefixFieldMismatch;
-
     switch (state) {
         .registry_published => {
-            if (!refKindDescriptor(expected_kind).cycle_candidate or !meta.alloc_info.heap_accounted)
+            if (!meta.alloc_info.heap_accounted)
                 return error.RepresentationPrefixFieldMismatch;
             if (meta.alloc_info.standalone and meta.size_class == 0)
                 return error.RepresentationPrefixFieldMismatch;
             {
-                const lifetime = meta.lifetime.trace;
+                const lifetime = meta.lifetime;
                 if (lifetime.flags.husk or lifetime.flags.reserved != 0)
                     return error.RepresentationPrefixFieldMismatch;
                 // The low seven bits are Object's Shape projection and must
@@ -1691,32 +1308,19 @@ pub fn verifyMetadataSemantics(
                 // reach `.registry_published` anyway -- neither is a cycle
                 // candidate -- so this arm is belt-and-braces).
                 if (expected_kind != .object) {
-                    const permitted: u8 = if (traceRememberedCacheEligible(expected_kind))
-                        trace_remembered_mask
-                    else
-                        0;
-                    if (lifetime.object_shape_summary & ~permitted != 0)
+                    if (lifetime.object_shape_summary & ~trace_remembered_mask != 0)
                         return error.RepresentationPrefixFieldMismatch;
                 }
             }
         },
-        .detached_leaf => {
-            if (refKindDescriptor(expected_kind).cycle_candidate or meta.alloc_info.heap_accounted or meta.alloc_info.large)
-                return error.RepresentationPrefixFieldMismatch;
-            if (meta.flags.mark or meta.flags.young or meta.flags.finalizing or
-                meta.flags.is_pinned or meta.flags.cycle_visited or meta.lifetime.rc <= 0)
-            {
-                return error.RepresentationPrefixFieldMismatch;
-            }
-        },
         .construction_block_object => {
-            const initial_lifetime = meta.lifetime.trace.mark_epoch == 0 and
-                meta.lifetime.trace.object_shape_summary == 0 and
-                !meta.lifetime.trace.flags.husk and
-                meta.lifetime.trace.flags.reserved == 0;
+            const initial_lifetime = meta.lifetime.mark_epoch == 0 and
+                meta.lifetime.object_shape_summary == 0 and
+                !meta.lifetime.flags.husk and
+                meta.lifetime.flags.reserved == 0;
             if (expected_kind != .object or !is_block_cell or
                 meta.alloc_info.heap_accounted or meta.alloc_info.standalone or
-                meta.alloc_info.large or meta.flags.mark or meta.flags.young or
+                meta.flags.mark or meta.flags.young or
                 meta.flags.finalizing or !meta.flags.is_pinned or
                 meta.flags.cycle_visited or !initial_lifetime)
             {
@@ -1729,7 +1333,7 @@ pub fn verifyMetadataSemantics(
 /// 19. GE Stats
 /// Retained collection-round durations. Sized so a benchmark-scale run (the
 /// V8 suite does ~880 rounds) keeps its whole history rather than a tail.
-pub const pause_sample_capacity: usize = 1024;
+pub const pause_sample_capacity: usize = 128;
 
 /// Pause percentiles over the retained window. Absent when no round has
 /// completed — an empty distribution is reported as null rather than as zeros,
@@ -1866,23 +1470,19 @@ pub const Registry = struct {
 
     // qjs `rt->gc_obj_list` / `rt->tmp_obj_list`.
     // Published Objects are deliberately absent: block cells use allocation
-    // bitmaps, and the rare non-block population uses the authority stored in
-    // the address registry's cold state.
+    // bitmaps, and the rare non-block population uses a side authority.
     // Each intrusive list is a cyclic sentinel (list.h). Call `initLists` after
     // the Registry reaches its stable address — sentinels are self-referential.
     gc_obj_list: IntrusiveHeaderList = .{},
 
     /// First young object in `gc_obj_list`, or null when nothing is young.
-    /// See `youngIterator` for why the young set is a suffix.
+    /// See `objectIterator(.young)` for why the young set is a suffix.
     young_head: ?*Header = null,
     /// Predecessor of `young_head`. Compact trace nodes have no backlink, so
     /// retaining this one per-runtime cursor lets a minor detach a young list
     /// suffix in O(young) rather than searching from the list head per corpse.
     young_predecessor: ?*Header = null,
     tmp_obj_list: IntrusiveHeaderList = .{},
-    /// Active outermost Shape/Realm eager-zero worklist. It is transient and
-    /// never borrows a published header's canonical `.next` word.
-    zero_ref_scratch: ?*ZeroRefScratch = null,
     // No live-object counter: qjs add_gc_object/remove_gc_object
     // (quickjs.c:6540/6548) are pure list splices with no count scalar.
     // Diagnostics (`liveCount`) derive the count by walking, like
@@ -1911,8 +1511,7 @@ pub const Registry = struct {
     // freed struct. The batch driver drains this list after the resource pass.
     /// Structs whose resources are gone and whose storage waits for pass B.
     ///
-    /// A singly-linked LIFO, not the doubly-linked `HeaderList` it used to
-    /// be. Nothing removes from the middle -- park at one end, drain from
+    /// A singly-linked LIFO. Nothing removes from the middle -- park at one end, drain from
     /// the same end -- and a doubly-linked splice per corpse is five memory
     /// operations where one suffices. The queue carries every destroyed
     /// object: 41 M of them on raytrace, 72 M on earley-boyer, and the drain
@@ -1942,6 +1541,7 @@ pub const Registry = struct {
     arena_slab: ?*memory.SmallObjectSlab = null,
     /// Page-radix map of published GC objects.
     address_registry: AddressRegistryTable = .{},
+    nonblock_objects: ?*NonBlockObjectAuthority = null,
 
     /// Publication-size histogram for Stage 4 class freeze.
     space_histogram: SpaceHistogram = .{},
@@ -2051,7 +1651,6 @@ pub const Registry = struct {
         self.refreshBarrierGate();
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
-        self.zero_ref_scratch = null;
         for (&self.doomed_by_kind) |*head| listInit(head);
         self.cycle_deferred_frees = .{};
         if (comptime block_heap_enabled) self.deferred_run_topology_verified = false;
@@ -2121,7 +1720,6 @@ pub const Registry = struct {
             // queued address, then return every private/shared segment.
             self.closeMarkingAndDrainFrontier(.monotonic);
         }
-        std.debug.assert(self.zero_ref_scratch == null);
         self.phase = .deinit;
 
         // Phase 0: unpublished construction-root shells (detached generator
@@ -2171,14 +1769,16 @@ pub const Registry = struct {
         // after JSRuntime's host-quiescent teardown collections; the explicit
         // side authority is nevertheless a complete fallback for every
         // non-block Object still owned at this boundary.
-        while (self.nonBlockObjectCount() != 0) {
-            const h = self.nonBlockObjectAt(self.nonBlockObjectCount() - 1);
-            std.debug.assert(h.metaConst().flags.kind == .object);
-            self.removeNonBlockObject(h);
-            self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
-            h.meta().flags.finalizing = true;
-            object.Object.destroyFromHeader(rt, h);
-            rt.drainDeferredClassPayloadFinalizers();
+        if (self.nonblock_objects) |authority| {
+            while (authority.items.items.len != 0) {
+                const h = authority.items.items[authority.items.items.len - 1];
+                std.debug.assert(h.metaConst().flags.kind == .object);
+                self.removeNonBlockObject(h);
+                self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
+                h.meta().flags.finalizing = true;
+                object.Object.destroyFromHeader(rt, h);
+                rt.drainDeferredClassPayloadFinalizers();
+            }
         }
         while (!listEmpty(&self.gc_obj_list)) {
             // Compact headers have no backlink on tracer-owned kinds. Teardown
@@ -2256,7 +1856,6 @@ pub const Registry = struct {
 
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
-        self.zero_ref_scratch = null;
 
         std.debug.assert(self.cycle_deferred_frees.count == 0);
         if (self.external_tokens_capacity != 0) {
@@ -2277,14 +1876,12 @@ pub const Registry = struct {
         // TGC S2: string carriers that survived the host-quiescent teardown
         // collections (atom-table roots) leave through the same unpublish +
         // return path the sweep uses, so the accounting oracle balances.
-        if (comptime string_tracer_owned) string.destroyAllStringCarriersForDeinit(rt);
+        string.destroyAllStringCarriersForDeinit(rt);
 
-        if (self.nonBlockObjectAuthority()) |authority| {
+        if (self.nonblock_objects) |authority| {
             authority.deinit(addressRegistryAllocator());
             addressRegistryAllocator().destroy(authority);
-            if (comptime block_heap_enabled) {
-                self.address_registry.nonblock_objects = null;
-            }
+            self.nonblock_objects = null;
         }
         if (comptime address_registry_enabled) {
             self.address_registry.deinit(addressRegistryAllocator());
@@ -2454,10 +2051,6 @@ pub const Registry = struct {
         if (slot.reason == null) slot.reason = reason;
     }
 
-    pub fn hasPendingRequest(self: Registry) bool {
-        return self.major_request.pending;
-    }
-
     pub fn hasPendingMajorRequest(self: Registry) bool {
         return self.major_request.pending;
     }
@@ -2625,22 +2218,6 @@ pub const Registry = struct {
         };
     }
 
-    pub fn add(self: *Registry, h: *GCObjectHeader) !void {
-        try self.addWithSize(h, defaultHeapBytes(h));
-    }
-
-    pub fn addWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
-        resetHeaderLifetimeForPublication(h);
-        h.meta().flags = .{ .kind = h.meta().flags.kind };
-        h.meta().alloc_info.heap_accounted = false;
-        // Registration re-derives and re-stamps the large classification;
-        // clearing it here upholds addInitializedWithSizeNoFail's clear-on-entry
-        // invariant for re-registered headers.
-        h.meta().alloc_info.large = false;
-        if (h.metaConst().flags.kind != .object) h.setNextNonObject(null);
-        try self.addInitializedWithSize(h, bytes);
-    }
-
     /// Register a freshly allocated header whose prefix and intrusive links are
     /// already initialized. Typed MemoryAccount allocations plus their owning
     /// constructors provide this invariant, avoiding duplicate hot-path stores.
@@ -2656,7 +2233,7 @@ pub const Registry = struct {
     /// know the block heap declined; the fallible generic publication API calls
     /// it again as a defensive boundary for test/embedding-created carriers.
     pub fn prepareNonBlockObjectAuthority(self: *Registry) !void {
-        const authority = self.nonBlockObjectAuthority() orelse unreachable;
+        const authority = self.nonblock_objects orelse unreachable;
         try authority.prepare(addressRegistryAllocator());
     }
 
@@ -2712,26 +2289,17 @@ pub const Registry = struct {
         std.debug.assert(!h.meta().alloc_info.heap_accounted);
         // Strings have no TraceHeader link word (the body starts at the
         // handle), so "unlinked" is only meaningful for list carriers.
-        if (h.metaConst().flags.kind != .object and !(string_tracer_owned and h.metaConst().flags.kind == .string))
+        if (h.metaConst().flags.kind != .object and h.metaConst().flags.kind != .string)
             std.debug.assert(!headerLinked(h));
 
         const is_large = self.isLargeAllocation(bytes);
-        // The large bit is clear on entry for every registration: initGcPrefix
-        // zeroes it on fresh allocations, and both unaccount sites
-        // (recordHeapFreeWithBytes / addWithSize) clear it together with
-        // heap_accounted. This keeps the hot RMW below the same single-bit orr
-        // it always was; only the cold large arm pays a second byte store.
-        std.debug.assert(!h.meta().alloc_info.large);
         // Read the alloc_info byte ONCE, before the heap_accounted store.
         // Every classification this publication still needs from it --
         // standalone prefix, block-cell size class -- is by construction
-        // unchanged by setting bit 6 (heap_accounted) or bit 5 (large). The
-        // compiler cannot prove that on its own: Registry writes through
-        // `self` may alias the header, so every later `alloc_info` read used to
-        // become a reload of the byte just stored. On this host the dependent
-        // of that reload carried ~40% of this function's self cycles, and a
-        // second reload (after the young-bit store to the adjacent byte)
-        // another ~7%.
+        // unchanged by setting heap_accounted. The compiler cannot prove that
+        // on its own: Registry writes through `self` may alias the header, so
+        // every later `alloc_info` read used to become a reload of the byte
+        // just stored.
         const info_at_entry = h.metaConst().alloc_info;
         const is_block_cell = info_at_entry.block_size_idx == representation.block_cell_size_class;
         if (comptime arm == .fast) {
@@ -2759,24 +2327,15 @@ pub const Registry = struct {
         // qjs add_gc_object writes header bookkeeping once and then
         // list_add_tail's (quickjs.c:6540-6546). No membership flag. GC pacing
         // is owned by MemoryAccount.allocated_bytes; logical space bytes and
-        // counts are derived by statsSnapshot. Only the cold large arm stamps
-        // the alloc-time classification for representation auditing.
+        // counts are derived by statsSnapshot.
         if (comptime arm == .fast) {
             std.debug.assert(!is_large);
-        } else if (is_large) {
-            @branchHint(.unlikely);
-            h.meta().alloc_info.large = true;
         }
 
-        // Keep the tracked-kind classification after the large cold arm. In
-        // trace builds the publication tail also keeps a far-field Registry
-        // base live for block/generation state; carrying `tracked` across the
-        // cold arm forced every small Object publication to spill one extra
-        // callee-saved register.
         const tracked = isCycleCandidate(h);
         // Checkers for the two hoisted classifications above. Everything this
         // function does between the read and here writes `heap_accounted`,
-        // `large`, `size_class` or Registry scalars -- none of which may move
+        // `size_class` or Registry scalars -- none of which may move
         // `standalone` or `block_size_idx`.
         std.debug.assert(info_at_entry.standalone == h.metaConst().alloc_info.standalone);
         std.debug.assert(is_block_cell == isBlockCellHeader(h));
@@ -2788,17 +2347,17 @@ pub const Registry = struct {
         // heap's medium/large extent tables are their enumeration (marked
         // through `extentSetMark`, swept by `Heap.sweepStringExtents`).
         const is_list_carrier = tracked and !is_block_cell and
-            !(string_tracer_owned and h.metaConst().flags.kind == .string);
+            h.metaConst().flags.kind != .string;
         if (comptime address_registry_enabled) {
             if (is_nonblock_object) {
-                self.nonBlockObjectAuthority().?.publish(h);
+                self.nonblock_objects.?.publish(h);
             } else if (is_list_carrier) {
                 self.linkGcObjectTail(h);
             }
             self.registerLiveAddressClassified(h, bytes, tracked, standalone, is_block_cell, arm);
             self.observeNewPublication(h, bytes);
         } else if (is_nonblock_object) {
-            self.nonBlockObjectAuthority().?.publish(h);
+            self.nonblock_objects.?.publish(h);
         } else if (is_list_carrier) self.linkGcObjectTail(h);
     }
 
@@ -2814,7 +2373,6 @@ pub const Registry = struct {
             self.addInitializedWithSizeNoFail(h, bytes);
             return;
         }
-        std.debug.assert(!h.meta().alloc_info.large);
         h.meta().alloc_info.heap_accounted = true;
         if (comptime heap_accounting_oracle_enabled) {
             self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, false);
@@ -2825,39 +2383,10 @@ pub const Registry = struct {
         }
         if (comptime address_registry_enabled) {
             self.linkGcObjectTail(h);
-            self.registerLiveAddress(h, bytes, true);
+            const info = h.metaConst().alloc_info;
+            self.registerLiveAddressClassified(h, bytes, true, info.standalone, isBlockCellHeader(h), .cold);
             self.observeNewPublication(h, bytes);
         } else self.linkGcObjectTail(h);
-    }
-
-    fn defaultHeapBytes(h: *const GCObjectHeader) usize {
-        return switch (h.metaConst().flags.kind) {
-            // The allocation-layout bit shares Object's existing weak-count
-            // word; no property access or tracing path needs to decode the
-            // property pointer. Inline class payloads still use the explicit
-            // WithBytes APIs, as before.
-            // Symmetric with publication: block cells are charged their
-            // physical body capacity (class rounding), standalone their size.
-            .object => object.Object.fromHeaderConst(h).bodyBytes(),
-            .function_bytecode => blk: {
-                const fb: *const FunctionBytecode = @fieldParentPtr("header", h);
-                break :blk fb.heapByteSize();
-            },
-            .var_ref => @sizeOf(var_ref.VarRef),
-            .realm_context => @sizeOf(context_mod.JSContext),
-            .module => @sizeOf(module_mod.ModuleRecord),
-            // A shape's heap footprint includes its inline FAM (hash table +
-            // prop[]); recompute from the live capacity fields (qjs get_shape_size).
-            .shape => blk: {
-                const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
-                break :blk sh.accountedAllocationSize();
-            },
-            .string => if (comptime string_tracer_owned) string.accountedAllocationSizeFromHeader(h) else 0,
-            .big_int => blk: {
-                const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
-                break :blk big.accountedAllocationSize();
-            },
-        };
     }
 
     fn encodeHeapBytes(bytes: usize) u16 {
@@ -2889,7 +2418,7 @@ pub const Registry = struct {
                 const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
                 break :blk sh.accountedAllocationSize();
             },
-            .string => if (comptime string_tracer_owned) string.accountedAllocationSizeFromHeader(h) else 0,
+            .string => string.accountedAllocationSizeFromHeader(h),
             .big_int => blk: {
                 const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
                 break :blk big.accountedAllocationSize();
@@ -2902,22 +2431,18 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.metaConst().flags.kind == .object or h.metaConst().flags.kind == .function_bytecode or h.metaConst().flags.kind == .var_ref or h.metaConst().flags.kind == .shape or h.metaConst().flags.kind == .realm_context or h.metaConst().flags.kind == .module or h.metaConst().flags.kind == .big_int or
-            (string_tracer_owned and h.metaConst().flags.kind == .string);
+        return h.metaConst().flags.kind == .object or h.metaConst().flags.kind == .function_bytecode or h.metaConst().flags.kind == .var_ref or h.metaConst().flags.kind == .shape or h.metaConst().flags.kind == .realm_context or h.metaConst().flags.kind == .module or h.metaConst().flags.kind == .big_int or h.metaConst().flags.kind == .string;
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (!header.meta().alloc_info.heap_accounted or bytes == 0) return;
         self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
-        // The cold verifier owns size/classification validation. Production
-        // only restores the publication bits; test/audit builds also debit
-        // the independent lifecycle oracle compiled above.
+        // Production restores the publication bit; test/audit builds also
+        // debit the independent lifecycle oracle compiled above.
         const is_large = self.isLargeAllocation(bytes);
-        std.debug.assert(header.meta().alloc_info.large == is_large);
         if (comptime heap_accounting_oracle_enabled) {
             self.heap_accounting_oracle.recordUnpublish(@intFromPtr(header), bytes, is_large);
         }
-        header.meta().alloc_info.large = false;
         header.meta().alloc_info.heap_accounted = false;
         if (comptime carrier.lifecycle_state_enabled) {
             self.memory.carrierTransition(@intFromPtr(header), .doomed) catch
@@ -3025,11 +2550,6 @@ pub const Registry = struct {
         self.recordHeapFreeWithBytes(h, bytes);
     }
 
-    pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
-        const bytes = storedHeapBytes(h) orelse defaultHeapBytes(h);
-        self.unlinkObjectWithBytes(h, bytes);
-    }
-
     /// TGC S2: unpublish an extent string the extent sweep found dead
     /// (`string.sweepStringExtents`). Not `unlinkObjectWithBytes`: that path
     /// reads the intrusive link word, which a string does not have. What a
@@ -3041,14 +2561,12 @@ pub const Registry = struct {
     /// byte debit plus the remembered-owner release -- the string twin of
     /// what `unregisterObjectWithBytes` does for an Object cell.
     pub fn unpublishStringCell(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
-        comptime std.debug.assert(string_tracer_owned);
         std.debug.assert(isBlockCellHeader(h));
         self.recordHeapFreeWithBytes(h, bytes);
         if (comptime generation_enabled) self.forgetGenerationalOwner(h);
     }
 
     pub fn unpublishStringExtent(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
-        comptime std.debug.assert(string_tracer_owned);
         std.debug.assert(h.metaConst().flags.kind == .string);
         std.debug.assert(h.metaConst().alloc_info.standalone);
         self.recordHeapFreeWithBytes(h, bytes);
@@ -3104,11 +2622,28 @@ pub const Registry = struct {
     /// every superblock, filtering per cell on the `young` header bit --
     /// recycled cells put OLD objects inside young-listed blocks.
     ///
-    /// NOT enumerated here: TGC S2 extent strings (standalone `.string`
-    /// prefixes over the cell ceiling). They have no link word and no cell,
-    /// so their only enumeration is the block heap's medium/large extent
-    /// tables (`Heap.sweepStringExtents`); census/verify consumers that need
-    /// them must walk those tables.
+    /// A fourth phase enumerates TGC S2 extent strings (standalone `.string`
+    /// prefixes over the cell ceiling). They have no link word, no cell and
+    /// no bitmap, so the block heap's medium/large tables are their only
+    /// enumeration -- without this phase every whole-heap census and every
+    /// whole-heap checker was blind to the string bodies that dominate a
+    /// string-heavy heap's bytes.
+    ///
+    /// Only `.all` gets it. The young selections must not: an extent is in
+    /// the young SET but in no young CARRIER, so it has neither a young-block
+    /// nor a list-suffix position to be produced from -- its young
+    /// enumeration is `Heap.young_extents`
+    /// (`Heap.sweepYoungStringExtents` / `retireYoungStringExtents`), and
+    /// `verifyGenerationInvariants` adds that half to the census by hand.
+    /// `.dead_block` must not either: that is a bitmap condemnation walk over
+    /// block cells, and an extent is condemned against the mark epoch
+    /// instead.
+    ///
+    /// Consumers see a header that is NOT an Object and NOT a list carrier:
+    /// it has no `next_non_object` link and its mark lives in the extent
+    /// table, so anything that dereferences past the eight-byte prefix must
+    /// dispatch on `flags.kind` first. `Registry.headerMarked` /
+    /// `setHeaderMarked` / `heapByteSizeFromHeader` already do.
     pub const GcObjectIterator = struct {
         cursor: ?*GCObjectHeader,
         sentinel: *const GCObjectHeader,
@@ -3129,6 +2664,12 @@ pub const Registry = struct {
         blk_index: usize = 0,
         cell_index: u32 = 0,
         young_block: usize = 0,
+        /// Extent phase cursor; null means the selection excludes extents or
+        /// the phase is retired. This is the one part of the iterator that is
+        /// not a scalar -- two hash-map key iterators -- so it is kept last,
+        /// after the fields the earlier phases index.
+        extents: if (block_heap_enabled) ?BlockHeapMod.Heap.ExtentKeyIterator else void =
+            if (block_heap_enabled) null else {},
 
         pub fn next(self: *GcObjectIterator) ?*GCObjectHeader {
             if (self.cursor) |current| {
@@ -3153,15 +2694,33 @@ pub const Registry = struct {
             }
             if (self.side_objects) {
                 const registry = self.registryFromSentinel();
-                // Re-read the authority on every step: a block or payload
-                // marker may publish another non-block Object and grow the
-                // backing array before or during this final phase.
-                while (self.blk_index < registry.nonBlockObjectCount()) {
-                    const current = registry.nonBlockObjectAt(self.blk_index);
-                    self.blk_index += 1;
-                    if (self.young_only and !current.metaConst().flags.young) continue;
-                    if (self.unmarked_only and registry.headerMarked(current)) continue;
-                    return current;
+                if (registry.nonblock_objects) |authority| {
+                    // Re-read the storage on every step: a block or payload
+                    // marker may publish another non-block Object and grow the
+                    // backing array before or during this final phase.
+                    while (self.blk_index < authority.items.items.len) {
+                        const current = authority.items.items[self.blk_index];
+                        self.blk_index += 1;
+                        if (self.young_only and !current.metaConst().flags.young) continue;
+                        if (self.unmarked_only and registry.headerMarked(current)) continue;
+                        return current;
+                    }
+                }
+            }
+            if (comptime block_heap_enabled) {
+                if (self.extents) |*keys| {
+                    while (keys.next()) |base| {
+                        const header: *GCObjectHeader = @ptrFromInt(base + metadata_prefix_size);
+                        // The prefix exists from `createStringExtent`, but the
+                        // object does not until publication stamps
+                        // `heap_accounted` -- and `unpublishStringExtent`
+                        // clears it again before the table entry goes away.
+                        if (!header.metaConst().alloc_info.heap_accounted) continue;
+                        std.debug.assert(header.metaConst().flags.kind == .string);
+                        std.debug.assert(header.metaConst().alloc_info.standalone);
+                        return header;
+                    }
+                    self.extents = null;
                 }
             }
             return null;
@@ -3269,19 +2828,12 @@ pub const Registry = struct {
         temporary_object_index: usize = 0,
         sweep_current: ?*GCObjectHeader,
         current_yielded: bool = false,
-        /// TGC S2: string extents sit in the block heap's medium/large
-        /// tables, outside every list and bitmap; audits enumerate them here.
-        extents: if (block_heap_enabled) BlockHeapMod.Heap.ExtentKeyIterator else void =
-            if (block_heap_enabled) undefined else {},
 
         fn next(self: *HeapAccountingIterator) ?*GCObjectHeader {
+            // TGC S2 string extents arrive from `live`'s extent phase
+            // (`objectIterator(.all)`); this iterator adds only the corpses
+            // that have already left it.
             if (self.live.next()) |header| return header;
-            if (comptime block_heap_enabled and string_tracer_owned) {
-                while (self.extents.next()) |base| {
-                    const header: *GCObjectHeader = @ptrFromInt(base + metadata_prefix_size);
-                    if (header.metaConst().alloc_info.heap_accounted) return header;
-                }
-            }
             while (self.doomed_kind_index < gc_kind_count) {
                 const bucket = &self.doomed_by_kind[self.doomed_kind_index];
                 const current = self.doomed_cursor orelse bucket.sentinel.next_non_object orelse {
@@ -3315,24 +2867,44 @@ pub const Registry = struct {
         }
     };
 
-    pub fn objectIterator(self: *const Registry) GcObjectIterator {
+    pub const ObjectIteration = enum { all, dead_block, young, young_block, young_list };
+
+    pub fn objectIterator(self: *const Registry, comptime selection: ObjectIteration) GcObjectIterator {
+        const include_list = selection == .all or selection == .young or selection == .young_list;
+        const include_blocks = selection != .young_list;
+        const young_only = selection == .young or selection == .young_block or selection == .young_list;
         return .{
-            .cursor = self.gc_obj_list.sentinel.next_non_object,
+            .cursor = if (selection == .all)
+                self.gc_obj_list.sentinel.next_non_object
+            else if (include_list)
+                self.young_head
+            else
+                null,
             .sentinel = &self.gc_obj_list.sentinel,
-            .heap = if (comptime block_heap_enabled) &self.block_heap else {},
-            .side_objects = true,
+            .heap = if (comptime block_heap_enabled)
+                (if (include_blocks) &self.block_heap else null)
+            else {},
+            .unmarked_only = selection == .dead_block,
+            .young_only = young_only,
+            .side_objects = selection == .all or selection == .young or selection == .young_list,
+            .young_block = if (comptime block_heap_enabled and young_only and include_blocks)
+                (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
+            else
+                0,
+            .extents = if (comptime block_heap_enabled)
+                (if (selection == .all) self.block_heap.extentKeys() else null)
+            else {},
         };
     }
 
     fn heapAccountingIterator(self: *const Registry) HeapAccountingIterator {
-        const authority = self.nonBlockObjectAuthority();
+        const authority = self.nonblock_objects;
         return .{
-            .live = self.objectIterator(),
+            .live = self.objectIterator(.all),
             .doomed_by_kind = &self.doomed_by_kind,
             .doomed_objects = if (authority) |value| value.doomed.items else &.{},
             .temporary_objects = if (authority) |value| value.temporary.items else &.{},
             .sweep_current = self.sweep_current,
-            .extents = if (comptime block_heap_enabled) self.block_heap.extentKeys() else {},
         };
     }
 
@@ -3383,10 +2955,10 @@ pub const Registry = struct {
             meta.flags.young or
             meta.flags.finalizing or
             !meta.flags.is_pinned or
-            meta.lifetime.trace.mark_epoch != 0 or
-            meta.lifetime.trace.object_shape_summary != 0 or
-            meta.lifetime.trace.flags.husk or
-            meta.lifetime.trace.flags.reserved != 0)
+            meta.lifetime.mark_epoch != 0 or
+            meta.lifetime.object_shape_summary != 0 or
+            meta.lifetime.flags.husk or
+            meta.lifetime.flags.reserved != 0)
         {
             return false;
         }
@@ -3438,98 +3010,6 @@ pub const Registry = struct {
         return blockCellPublicationAllowance(context, cell_addr);
     }
 
-    /// Dead block cells only. List condemnation is a separate cursor walk so
-    /// compact-header deletion can splice with its known predecessor.
-    pub fn deadBlockCandidateIterator(self: *const Registry) GcObjectIterator {
-        return .{
-            .cursor = null,
-            .sentinel = &self.gc_obj_list.sentinel,
-            .heap = if (comptime block_heap_enabled) &self.block_heap else {},
-            .unmarked_only = true,
-        };
-    }
-
-    pub fn youngIterator(self: *const Registry) GcObjectIterator {
-        return .{
-            .cursor = self.young_head,
-            .sentinel = &self.gc_obj_list.sentinel,
-            .heap = if (comptime block_heap_enabled) &self.block_heap else {},
-            .young_only = true,
-            .side_objects = true,
-            .young_block = if (comptime block_heap_enabled)
-                (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
-            else
-                0,
-        };
-    }
-
-    /// Young block cells only; the non-block suffix has its own predecessor
-    /// cursor and is consumed separately by the minor sweep.
-    pub fn youngBlockIterator(self: *const Registry) GcObjectIterator {
-        return .{
-            .cursor = null,
-            .sentinel = &self.gc_obj_list.sentinel,
-            .heap = if (comptime block_heap_enabled) &self.block_heap else {},
-            .young_only = true,
-            .young_block = if (comptime block_heap_enabled)
-                (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
-            else
-                0,
-        };
-    }
-
-    /// Young non-block carriers only. Block cells have their own bitmap-word
-    /// clearing path, while the intrusive suffix still needs the ordinary
-    /// fixed-header epoch store.
-    pub fn youngListIterator(self: *const Registry) GcObjectIterator {
-        return .{
-            .cursor = self.young_head,
-            .sentinel = &self.gc_obj_list.sentinel,
-            .heap = if (comptime block_heap_enabled) null else {},
-            .young_only = true,
-            .side_objects = true,
-        };
-    }
-
-    pub fn clearYoungBlockMarksStw(self: *Registry) void {
-        if (comptime block_heap_enabled) self.block_heap.clearYoungBlockMarksStw();
-    }
-
-    /// Non-reclaiming census of the intrusive RC registry. One Adapter for a
-    /// future CompositeHeapCensus, not a complete heap census: String/Rope
-    /// and BigInt need the allocation-ledger Adapter in `ref_kind_catalog`.
-    pub const Census = struct {
-        by_kind: [ref_kind_catalog.len]usize = [_]usize{0} ** ref_kind_catalog.len,
-        total: usize = 0,
-
-        pub fn count(self: Census, kind: RefKind) usize {
-            return self.by_kind[@intFromEnum(kind)];
-        }
-
-        pub fn covers(self: Census, kind: RefKind) bool {
-            _ = self;
-            return refKindDescriptor(kind).census == .rc_registry;
-        }
-
-        pub fn completeForAllRefKinds(self: Census) bool {
-            _ = self;
-            inline for (ref_kind_catalog) |descriptor| {
-                if (descriptor.census != .rc_registry) return false;
-            }
-            return true;
-        }
-    };
-
-    pub fn census(self: *const Registry) Census {
-        var result = Census{};
-        var iterator = self.objectIterator();
-        while (iterator.next()) |header| {
-            result.by_kind[@intFromEnum(header.metaConst().flags.kind)] += 1;
-            result.total += 1;
-        }
-        return result;
-    }
-
     /// Served from the collector's block heap: enumerated by block bitmaps,
     /// never linked on `gc_obj_list`, young-tracked at block granularity.
     pub inline fn isBlockCellHeader(h: *const GCObjectHeader) bool {
@@ -3546,7 +3026,7 @@ pub const Registry = struct {
     /// never a property-access branch: construction/free, Shape capacity, and
     /// block-cell sizing meet here without taxing the paths they protect.
     pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) InvariantError!void {
-        var iterator = self.objectIterator();
+        var iterator = self.objectIterator(.all);
         while (iterator.next()) |header| {
             if (header.metaConst().flags.kind != .object) continue;
             const owner = object.Object.fromHeaderConst(header);
@@ -3622,14 +3102,6 @@ pub const Registry = struct {
         }
     }
 
-    fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(isCycleCandidate(header));
-        std.debug.assert(header.metaConst().flags.kind != .object);
-        std.debug.assert(!headerLinked(header));
-        self.stageYoungTailPredecessor();
-        listAddTail(&self.gc_obj_list, header);
-    }
-
     /// qjs `list_add_tail` (quickjs.c:6545).
     inline fn linkGcObjectTail(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(header.metaConst().flags.kind != .object);
@@ -3649,7 +3121,7 @@ pub const Registry = struct {
     }
 
     fn removeNonBlockObject(self: *Registry, header: *GCObjectHeader) void {
-        const authority = self.nonBlockObjectAuthority() orelse return;
+        const authority = self.nonblock_objects orelse return;
         if (!authority.remove(header)) return;
         self.unregisterNonBlockObject(header);
     }
@@ -3662,37 +3134,10 @@ pub const Registry = struct {
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!isBlockCellHeader(header));
         std.debug.assert(!header.metaConst().flags.cycle_visited);
-        const authority = self.nonBlockObjectAuthority() orelse unreachable;
+        const authority = self.nonblock_objects orelse unreachable;
         authority.condemn(header, temporary);
         self.unregisterNonBlockObject(header);
         header.meta().flags.cycle_visited = true;
-    }
-
-    pub fn doomedNonBlockObjectCount(self: *const Registry) usize {
-        const authority = self.nonBlockObjectAuthority() orelse return 0;
-        return authority.doomed.items.len;
-    }
-
-    pub fn temporaryNonBlockObjectCount(self: *const Registry) usize {
-        const authority = self.nonBlockObjectAuthority() orelse return 0;
-        return authority.temporary.items.len;
-    }
-
-    pub fn popDoomedNonBlockObject(self: *Registry) ?*GCObjectHeader {
-        const authority = self.nonBlockObjectAuthority() orelse return null;
-        return authority.popDoomed();
-    }
-
-    pub fn popTemporaryNonBlockObject(self: *Registry) ?*GCObjectHeader {
-        const authority = self.nonBlockObjectAuthority() orelse return null;
-        return authority.popTemporary();
-    }
-
-    pub fn condemnedNonBlockObjectContains(self: *const Registry, header: *const GCObjectHeader) bool {
-        const authority = self.nonBlockObjectAuthority() orelse return false;
-        for (authority.doomed.items) |candidate| if (candidate == header) return true;
-        for (authority.temporary.items) |candidate| if (candidate == header) return true;
-        return false;
     }
 
     /// Publication marks a freshly appended carrier young immediately after
@@ -3745,7 +3190,7 @@ pub const Registry = struct {
     /// what the whole-heap `clearMarks` walk used to cost ~milliseconds per
     /// cycle to do by hand. The epoch never moves between majors, so sticky
     /// marks survive for the minors exactly as before. Everything not in a
-    /// block cell uses the fixed `Metadata.lifetime.trace` epoch at payload
+    /// block cell uses the fixed `Metadata.lifetime` epoch at payload
     /// minus 4; Shape and Realm keep their ownership counts in their bodies.
     ///
     /// Dispatch cost is one byte read (`alloc_info`, which shares the cell's
@@ -3755,9 +3200,8 @@ pub const Registry = struct {
     pub inline fn frontierSafeHeaderAfterMarkClaim(
         self: *const Registry,
         header: *GCObjectHeader,
-    ) FrontierSafeHeader {
-        // O2-B adds no shipped instruction: the wrapper is pointer-sized and
-        // all proof checks are compiled only into safety/test binaries.
+    ) *Header {
+        // All proof checks are compiled only into safety/test binaries.
         if (comptime std.debug.runtime_safety) {
             const meta = header.metaConst();
             if (!frontierEpochSafe(meta.flags.kind))
@@ -3773,7 +3217,7 @@ pub const Registry = struct {
             if (!self.headerMarked(header))
                 @panic("gc: FRONTIER SAFETY: queue admission preceded mark claim");
         }
-        return FrontierSafeHeader.init(header);
+        return header;
     }
 
     /// Admission for an owner that would be re-traced after a mutator write.
@@ -3788,7 +3232,7 @@ pub const Registry = struct {
     pub inline fn frontierSafeHeaderForRequeue(
         self: *const Registry,
         header: *GCObjectHeader,
-    ) ?FrontierSafeHeader {
+    ) ?*Header {
         if (!self.headerMarked(header)) return null;
         return self.frontierSafeHeaderAfterMarkClaim(header);
     }
@@ -3830,15 +3274,13 @@ pub const Registry = struct {
             // epoch either -- the mark lives in the heap's extent table,
             // keyed by the allocation base (body - 8). Cold: only strings
             // over the cell ceiling get here.
-            if (comptime string_tracer_owned) {
-                if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
-                    @branchHint(.unlikely);
-                    return self.block_heap.extentIsMarked(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
-                }
+            if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
+                @branchHint(.unlikely);
+                return self.block_heap.extentIsMarked(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
             }
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-        return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
+        return @atomicLoad(u16, &h.metaConst().lifetime.mark_epoch, .monotonic) == self.header_mark_epoch;
     }
 
     /// Mark probe for a typed carrier whose representation descriptor excludes
@@ -3847,7 +3289,7 @@ pub const Registry = struct {
     /// discriminator repeats work for every object sharing the same shape.
     pub inline fn headerMarkedKnownNonBlock(self: *const Registry, h: *const GCObjectHeader) bool {
         std.debug.assert(h.metaConst().alloc_info.block_size_idx != representation.block_cell_size_class);
-        return @atomicLoad(u16, &h.metaConst().lifetime.trace.mark_epoch, .monotonic) == self.header_mark_epoch;
+        return @atomicLoad(u16, &h.metaConst().lifetime.mark_epoch, .monotonic) == self.header_mark_epoch;
     }
 
     pub inline fn setHeaderMarked(self: *const Registry, h: *GCObjectHeader) void {
@@ -3859,16 +3301,14 @@ pub const Registry = struct {
                 return;
             }
             // Extent string: table-held mark, see `headerMarked`.
-            if (comptime string_tracer_owned) {
-                if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
-                    @branchHint(.unlikely);
-                    self.block_heap.extentSetMark(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
-                    return;
-                }
+            if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
+                @branchHint(.unlikely);
+                self.block_heap.extentSetMark(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
+                return;
             }
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-        @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, self.header_mark_epoch, .monotonic);
+        @atomicStore(u16, &h.meta().lifetime.mark_epoch, self.header_mark_epoch, .monotonic);
     }
 
     /// Retire a block cell the tracer has just finished expanding.
@@ -3914,7 +3354,7 @@ pub const Registry = struct {
             }
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
-        @atomicStore(u16, &h.meta().lifetime.trace.mark_epoch, 0, .monotonic);
+        @atomicStore(u16, &h.meta().lifetime.mark_epoch, 0, .monotonic);
     }
 
     /// O(1) whole-population unmark for the ordinary case. One wrap scrub is
@@ -3928,12 +3368,12 @@ pub const Registry = struct {
         var cursor = self.gc_obj_list.sentinel.next_non_object;
         while (cursor) |header| {
             if (header == &self.gc_obj_list.sentinel) break;
-            @atomicStore(u16, &header.meta().lifetime.trace.mark_epoch, 0, .monotonic);
+            @atomicStore(u16, &header.meta().lifetime.mark_epoch, 0, .monotonic);
             cursor = header.nextNonObject();
         }
-        if (self.nonBlockObjectAuthority()) |authority| {
+        if (self.nonblock_objects) |authority| {
             for (authority.items.items) |header| {
-                @atomicStore(u16, &header.meta().lifetime.trace.mark_epoch, 0, .monotonic);
+                @atomicStore(u16, &header.meta().lifetime.mark_epoch, 0, .monotonic);
             }
         }
         self.header_mark_epoch = 1;
@@ -3958,7 +3398,7 @@ pub const Registry = struct {
             self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
             std.debug.assert(!header.metaConst().flags.cycle_visited);
             const cell_kind = header.metaConst().flags.kind;
-            std.debug.assert(cell_kind == .object or (string_tracer_owned and cell_kind == .string));
+            std.debug.assert(cell_kind == .object or cell_kind == .string);
             std.debug.assert(isBlockCellHeader(header));
         }
         header.meta().flags.cycle_visited = true;
@@ -3971,20 +3411,6 @@ pub const Registry = struct {
         std.debug.assert(!header.meta().flags.cycle_visited);
         self.removeGcObjectAfter(previous, header);
         header.meta().flags.cycle_visited = true;
-    }
-
-    pub fn restoreCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
-        std.debug.assert(header.meta().flags.cycle_visited);
-        header.meta().flags.cycle_visited = false;
-        if (header.metaConst().flags.kind == .object) {
-            if (!isBlockCellHeader(header)) self.nonBlockObjectAuthority().?.publish(header);
-        } else {
-            self.appendGcObject(header);
-        }
-        if (comptime address_registry_enabled) {
-            const bytes = storedHeapBytes(header) orelse defaultHeapBytes(header);
-            self.registerLiveAddress(header, bytes, true);
-        }
     }
 
     /// Discard an open incremental cycle so a full STW collection can run.
@@ -4095,6 +3521,21 @@ pub const Registry = struct {
             stats.envelope_max_begin_bytes = begin;
             stats.envelope_max_peak_bytes = peak;
         }
+    }
+
+    /// TGC S3 §2.3: the body half of `AtomTable.shadeAtomIfMarking`. A value
+    /// symbol's body is a tracer-owned string cell with no owner header on the
+    /// barrier's side (the holder stored a bare `u32` id), so this is
+    /// `publishGreyCold`'s mark-and-queue without the owner-requeue arm that
+    /// `shadeForConcurrentMark` needs for rc-managed targets.
+    pub fn shadeCellForAtomBarrier(self: *Registry, header: *GCObjectHeader) void {
+        if (comptime !concurrent_enabled) return;
+        if (self.headerMarked(header)) return;
+        // An unpublished cell greys itself at publication; naming it now would
+        // put a still-failable construction on the queue.
+        if (!header.meta().alloc_info.heap_accounted) return;
+        self.setHeaderMarked(header);
+        _ = self.concurrent_mark_queue.push(self.frontierSafeHeaderAfterMarkClaim(header));
     }
 
     pub inline fn shadeForConcurrentMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
@@ -4261,7 +3702,7 @@ pub const Registry = struct {
         // The gate proves the owner old and unremembered -- EXCEPT when
         // `detailed_reports` closed the gate for accounting reasons, in which
         // case nothing has been proven and the young test still has to run.
-        if (self.generation.isYoung(owner)) return;
+        if (owner.metaConst().flags.young) return;
         self.rememberGenerationalOwner(owner);
     }
 
@@ -4332,7 +3773,6 @@ pub const Registry = struct {
             // at all, and `.big_int` aliases the byte onto its live refcount.
             // Audit §10.3 walked every barrier call site and found neither
             // kind; this turns that survey into a machine check.
-            std.debug.assert(traceRememberedCacheEligible(owner.metaConst().flags.kind));
         }
         return barrierOwnerWord(owner) & self.barrier_gate != 0;
     }
@@ -4343,19 +3783,14 @@ pub const Registry = struct {
     /// owners use Metadata byte 6 as a membership cache; the hash map remains
     /// authoritative and every non-object owner keeps the existing fallback.
     inline fn rememberGenerationalOwner(self: *Registry, owner: *GCObjectHeader) void {
-        if (traceRememberedCacheEligible(owner.metaConst().flags.kind)) {
-            const summary = &owner.meta().lifetime.trace.object_shape_summary;
-            if (summary.* & trace_remembered_mask != 0) return;
-            if (!self.generation.rememberOwner(addressRegistryAllocator(), owner)) return;
-            summary.* |= trace_remembered_mask;
-            return;
-        }
-        _ = self.generation.rememberOwner(addressRegistryAllocator(), owner);
+        const summary = &owner.meta().lifetime.object_shape_summary;
+        if (summary.* & trace_remembered_mask != 0) return;
+        if (!self.generation.rememberOwner(addressRegistryAllocator(), owner)) return;
+        summary.* |= trace_remembered_mask;
     }
 
     inline fn clearGenerationalRememberedBit(owner: *GCObjectHeader) void {
-        if (!traceRememberedCacheEligible(owner.metaConst().flags.kind)) return;
-        owner.meta().lifetime.trace.object_shape_summary &= ~trace_remembered_mask;
+        owner.meta().lifetime.object_shape_summary &= ~trace_remembered_mask;
     }
 
     inline fn clearGenerationalRememberedBits(self: *Registry) void {
@@ -4400,34 +3835,23 @@ pub const Registry = struct {
     /// out never to reach here on splay/raytrace/earley-boyer at all -- block
     /// cells are reclaimed by the bitmap sweep, so the detach traffic is the
     /// list carriers, `.shape` and `.var_ref` (§9.5).
-    inline fn forgetGenerationalOwner(self: *Registry, header: *GCObjectHeader) void {
-        if (traceRememberedCacheEligible(header.metaConst().flags.kind)) {
-            const summary = &header.meta().lifetime.trace.object_shape_summary;
-            if (summary.* & trace_remembered_mask == 0) {
-                self.generation.forgetUnremembered(header);
-                return;
-            }
-            summary.* &= ~trace_remembered_mask;
+    pub inline fn forgetGenerationalOwner(self: *Registry, header: *GCObjectHeader) void {
+        const summary = &header.meta().lifetime.object_shape_summary;
+        if (summary.* & trace_remembered_mask == 0) {
+            self.generation.forgetUnremembered(header);
+            return;
         }
+        summary.* &= ~trace_remembered_mask;
         self.generation.forget(header);
-    }
-
-    /// Deletion mutant for the sticky fresh-trace oracle. A missing owner must
-    /// remove both the authoritative entry and its redundant cache bit; leaving
-    /// only the bit would manufacture an invalid representation instead of the
-    /// missing-barrier state the oracle is meant to reject.
-    pub fn forgetGenerationalOwnerForTest(self: *Registry, header: *GCObjectHeader) void {
-        if (comptime !builtin.is_test) @compileError("test-only remembered-owner mutation");
-        self.forgetGenerationalOwner(header);
     }
 
     inline fn generationalBarrierDetailed(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
         self.generation.stats.barrier_calls += 1;
-        if (self.generation.isYoung(owner)) {
+        if (owner.metaConst().flags.young) {
             self.generation.stats.barrier_young_owner += 1;
             return;
         }
-        if (!self.generation.isYoung(target)) {
+        if (!target.metaConst().flags.young) {
             self.generation.stats.barrier_old_target += 1;
             return;
         }
@@ -4525,7 +3949,7 @@ pub const Registry = struct {
         // Reached with an open gate only when the owner is old AND not yet
         // remembered, so the owner classification the pre-fold code repeated
         // here is exactly what the gate just did.
-        if (!self.generation.isYoung(target)) return;
+        if (!target.metaConst().flags.young) return;
         self.rememberGenerationalOwner(owner);
     }
 
@@ -4593,7 +4017,17 @@ pub const Registry = struct {
         }
         const authority = try addressRegistryAllocator().create(NonBlockObjectAuthority);
         authority.* = .{};
-        self.address_registry.nonblock_objects = authority;
+        self.nonblock_objects = authority;
+    }
+
+    fn noteSlabArenaCreated(ctx: *anyopaque, base: usize) void {
+        const registry: *Registry = @ptrCast(@alignCast(ctx));
+        registry.address_registry.noteArenaCreated(addressRegistryAllocator(), base);
+    }
+
+    fn noteSlabArenaReleased(ctx: *anyopaque, base: usize) void {
+        const registry: *Registry = @ptrCast(@alignCast(ctx));
+        registry.address_registry.noteArenaReleased(base);
     }
 
     pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void {
@@ -4605,36 +4039,15 @@ pub const Registry = struct {
         // walk visits nothing -- but the observer's correctness must not depend
         // on that ordering, because an arena created before it is installed is
         // invisible to the conservative scanner forever.
-        slab.forEachArena(self, struct {
-            fn call(ctx: *anyopaque, base: usize) void {
-                const registry: *Registry = @ptrCast(@alignCast(ctx));
-                registry.address_registry.noteArenaCreated(addressRegistryAllocator(), base);
-            }
-        }.call);
+        slab.forEachArena(self, noteSlabArenaCreated);
         slab.arena_observer = .{
             .ctx = self,
-            .on_create = struct {
-                fn call(ctx: *anyopaque, base: usize) void {
-                    const registry: *Registry = @ptrCast(@alignCast(ctx));
-                    registry.address_registry.noteArenaCreated(addressRegistryAllocator(), base);
-                }
-            }.call,
-            .on_release = struct {
-                fn call(ctx: *anyopaque, base: usize) void {
-                    const registry: *Registry = @ptrCast(@alignCast(ctx));
-                    registry.address_registry.noteArenaReleased(base);
-                }
-            }.call,
+            .on_create = noteSlabArenaCreated,
+            .on_release = noteSlabArenaReleased,
         };
     }
 
-    inline fn registerLiveAddress(self: *Registry, header: *GCObjectHeader, bytes: usize, tracked: bool) void {
-        if (!tracked) return;
-        const info = header.metaConst().alloc_info;
-        self.registerLiveAddressClassified(header, bytes, true, info.standalone, isBlockCellHeader(header), .cold);
-    }
-
-    /// `registerLiveAddress` for callers that already hold the header's
+    /// Register a live address using classification already held by the caller.
     /// `alloc_info` classification in a register. Publication reads that byte,
     /// then writes it, then would need it again for three separate decisions;
     /// threading the answers through keeps it to one load per publication.
@@ -4680,15 +4093,8 @@ pub const Registry = struct {
     /// moment it is published until a collection lets it survive. One bit in a
     /// byte the allocator already writes, rather than a hash-map insert per
     /// allocation.
-    inline fn markPublishedYoung(self: *Registry, header: *GCObjectHeader) void {
-        self.markPublishedYoungClassified(
-            header,
-            isBlockCellHeader(header),
-            .cold,
-        );
-    }
-
-    /// `markPublishedYoung` for callers holding the block-cell answer already.
+    /// Mark a published header young using the block-cell answer already held
+    /// by the caller.
     /// The young bit lives in flags (byte 3) and the block-cell class in
     /// alloc_info (byte 2) of the same prefix word, so deriving the class after
     /// the young store forced a reload of a byte adjacent to a just-issued
@@ -4723,6 +4129,25 @@ pub const Registry = struct {
                 self.publishGreyCold(header);
             }
         }
+        if (comptime block_heap_enabled) {
+            // Extent strings ARE in the generational young set -- a >128 B
+            // string body is exactly the kind of short-lived allocation a
+            // minor exists to reclaim, and leaving them out made pdfjs hold
+            // 343 MB live waiting for a major (spec 7.2 (2)). What they are
+            // not in is any young CARRIER: no cell, no block, no list link.
+            // Their enumeration is `Heap.young_extents`, appended by the
+            // allocator, swept by `Heap.sweepYoungStringExtents` and retired
+            // by `retireYoungStringExtents`. A non-block-cell string is
+            // always an extent (`String.createUninitialized`; ropes always
+            // fit a cell).
+            if (!is_block_cell and header.metaConst().flags.kind == .string) {
+                @branchHint(.unlikely);
+                std.debug.assert(header.metaConst().alloc_info.standalone);
+                header.meta().flags.young = true;
+                self.generation.stats.young_count += 1;
+                return;
+            }
+        }
         header.meta().flags.young = true;
         self.generation.stats.young_count += 1;
         if (comptime block_heap_enabled) {
@@ -4742,14 +4167,13 @@ pub const Registry = struct {
         }
         // Non-block Objects are not part of the allocation-ordered intrusive
         // suffix. Their side authority is small and filtered on the young bit
-        // by `youngListIterator`, so no list anchor belongs to them.
+        // by `objectIterator(.young_list)`, so no list anchor belongs to them.
         if (header.metaConst().flags.kind == .object) return;
-        // Neither are extent strings: `publishInitialized` never linked them
-        // (no link word), so anchoring the young suffix on one would send the
-        // next minor's list walk through string bytes.
-        if (comptime string_tracer_owned) {
-            if (header.metaConst().flags.kind == .string) return;
-        }
+        // Extent strings never reach here: they returned above, right after
+        // their young bit. They have no link word, so anchoring the young
+        // suffix on one would send the next minor's list walk through string
+        // bytes -- `Heap.young_extents` is their anchor instead.
+        std.debug.assert(header.metaConst().flags.kind != .string);
         // This object was just appended at the tail, so if no suffix was open
         // it starts here.
         if (self.young_head == null) {
@@ -4843,34 +4267,6 @@ pub const Registry = struct {
                 object.Object.fromHeaderConst(header).hasSlots2Layout(),
             );
         } else self.space_histogram.record(bytes);
-    }
-
-    /// Hold zero-ref GC nodes until a batch traversal is complete. QuickJS
-    /// uses the same DECREF phase around its weakref_list walk so payload
-    /// finalizers cannot unlink the next weak holder out from under the walk;
-    /// the tracer's `processWeak` inherited that discipline verbatim.
-    pub fn beginDecrefPhase(self: *Registry, scratch: *ZeroRefScratch) void {
-        std.debug.assert(self.phase == .none);
-        std.debug.assert(self.zero_ref_scratch == null);
-        scratch.* = .{};
-        self.zero_ref_scratch = scratch;
-        // .none -> .decref; teardown's .deinit phase cannot overlap this
-        // batch (asserted above).
-        self.phase = .decref;
-    }
-
-    pub fn endDecrefPhase(self: *Registry, rt: anytype, scratch: *ZeroRefScratch) void {
-        std.debug.assert(self.phase == .decref);
-        std.debug.assert(self.zero_ref_scratch == scratch);
-        defer {
-            self.zero_ref_scratch = null;
-            self.phase = .none;
-            scratch.deinit();
-        }
-        // Nothing is admitted to the scratch any more: every list kind is
-        // tracer-owned. The phase bracket alone is what processWeak needs.
-        std.debug.assert(scratch.next() == null);
-        _ = rt;
     }
 
     pub fn recordFailure(self: *Registry, err: CollectionError) void {
@@ -4974,7 +4370,7 @@ pub const Registry = struct {
         // depends on the address index: list carriers and side-authoritative
         // Objects can replay every missing range before sweep. Keep the flag
         // sticky if any retry fails; the caller will mark without reclaiming.
-        var live = self.objectIterator();
+        var live = self.objectIterator(.all);
         while (live.next()) |header| {
             if (!header.metaConst().alloc_info.standalone) continue;
             if (self.address_registry.by_header.contains(@intFromPtr(header))) continue;
@@ -5015,7 +4411,7 @@ pub const Registry = struct {
             if (!isCycleCandidate(h) or h.metaConst().flags.kind == .object)
                 return error.CorruptGcList;
             {
-                const state = h.metaConst().lifetime.trace;
+                const state = h.metaConst().lifetime;
                 if (state.flags.reserved != 0 or state.flags.husk or state.mark_epoch > self.header_mark_epoch)
                     return error.InvalidHeaderState;
                 // Every list member is an eligible carrier (the range gate is
@@ -5024,8 +4420,6 @@ pub const Registry = struct {
                 if (h.metaConst().flags.kind != .object and
                     state.object_shape_summary & trace_object_shape_summary_mask != 0)
                     return error.InvalidHeaderState;
-                if (!refCountRemoved(h.metaConst().flags.kind) and headerRefCount(h) < 0)
-                    return error.NegativeRefCount;
             }
             // No "mark bit left set" check here: sticky generations keep a
             // survivor's mark bit between collections as the record of "this
@@ -5042,7 +4436,7 @@ pub const Registry = struct {
             if (self.young_head == null and self.young_predecessor != null) return error.DanglingYoungHead;
         }
 
-        const nonblock_items = if (self.nonBlockObjectAuthority()) |authority|
+        const nonblock_items = if (self.nonblock_objects) |authority|
             authority.items.items
         else
             &.{};
@@ -5087,7 +4481,7 @@ pub const Registry = struct {
         }
         if (!cursor_found) return error.DoomedCursorMismatch;
 
-        if (self.nonBlockObjectAuthority()) |authority| {
+        if (self.nonblock_objects) |authority| {
             const live = authority.items.items;
             const doomed = authority.doomed.items;
             const temporary = authority.temporary.items;
@@ -5142,7 +4536,10 @@ pub const Registry = struct {
             self.block_heap.doomed_blocks != null
         else
             false;
-        const temporary_objects = self.temporaryNonBlockObjectCount() != 0;
+        const temporary_objects = if (self.nonblock_objects) |authority|
+            authority.temporary.items.len != 0
+        else
+            false;
         if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null or temporary_objects) and
             !self.doomed_pending and self.phase != .tracer_destroy)
         {
@@ -5198,11 +4595,9 @@ pub const Registry = struct {
         // a cache bit no auditor can see is a cache bit with no soundness
         // evidence behind it, and `.shape`/`.var_ref` are where the traffic is.
         if (comptime generation_enabled) {
-            if (traceRememberedCacheEligible(kind)) {
-                const cached = meta.lifetime.trace.object_shape_summary & trace_remembered_mask != 0;
-                if (cached and !self.generation.remembered.contains(@intFromPtr(header)))
-                    return error.RememberedCacheWithoutOwner;
-            }
+            const cached = meta.lifetime.object_shape_summary & trace_remembered_mask != 0;
+            if (cached and !self.generation.remembered.contains(@intFromPtr(header)))
+                return error.RememberedCacheWithoutOwner;
         }
 
         if (comptime block_heap_enabled) {
@@ -5212,7 +4607,7 @@ pub const Registry = struct {
             if ((physical_block != null) != stamped_block)
                 return error.RepresentationAllocationCarrierMismatch;
             if (physical_block) |block| {
-                if (kind != .object and !(string_tracer_owned and kind == .string))
+                if (kind != .object and kind != .string)
                     return error.RepresentationAllocationCarrierMismatch;
                 const actual_index = block.cellIndex(cell_addr) orelse
                     return error.RepresentationCellIndexMismatch;
@@ -5230,7 +4625,7 @@ pub const Registry = struct {
     /// cache bit before clearing the map, so the two representations must agree
     /// in both directions whenever this checker runs.
     pub fn verifyRepresentationInvariants(self: *const Registry) InvariantError!void {
-        var live = self.objectIterator();
+        var live = self.objectIterator(.all);
         while (live.next()) |header| {
             try self.verifyPublishedHeaderRepresentation(header, null);
         }
@@ -5243,7 +4638,7 @@ pub const Registry = struct {
                 cursor = header.nextNonObject();
             }
         }
-        if (self.nonBlockObjectAuthority()) |authority| {
+        if (self.nonblock_objects) |authority| {
             for (authority.doomed.items) |header| {
                 try self.verifyPublishedHeaderRepresentation(header, .object);
             }
@@ -5261,9 +4656,7 @@ pub const Registry = struct {
                 // itself: an eligible resident whose bit is clear is precisely
                 // the state that makes `forgetUnremembered` strand a dangling
                 // address, so the checker must cover every leasing kind.
-                if (traceRememberedCacheEligible(header.metaConst().flags.kind) and
-                    header.metaConst().lifetime.trace.object_shape_summary & trace_remembered_mask == 0)
-                {
+                if (header.metaConst().lifetime.object_shape_summary & trace_remembered_mask == 0) {
                     return error.RememberedOwnerMissingCache;
                 }
             }
@@ -5275,12 +4668,20 @@ pub const Registry = struct {
     /// by the next minor; an under-count silently postpones that minor.
     pub fn verifyGenerationInvariants(self: *Registry) InvariantError!void {
         var actual_young: usize = 0;
-        var young = self.youngIterator();
+        var young = self.objectIterator(.young);
         while (young.next()) |_| actual_young += 1;
-        if (actual_young != self.generation.stats.young_count) return error.YoungCountMismatch;
-        if (self.generation.remembered.count() != self.generation.stats.remembered_owners) {
-            return error.RememberedCountMismatch;
+        if (comptime block_heap_enabled) {
+            // The extent half of the young set is in no young carrier, so the
+            // iterator above cannot see it (`markPublishedYoungClassified`).
+            // Count it from the extent tables rather than from
+            // `Heap.young_extents`, which tolerates stale/duplicate bases.
+            var extents = self.block_heap.extentKeys();
+            while (extents.next()) |base| {
+                const header: *const GCObjectHeader = @ptrFromInt(base + metadata_prefix_size);
+                if (header.metaConst().flags.young) actual_young += 1;
+            }
         }
+        if (actual_young != self.generation.stats.young_count) return error.YoungCountMismatch;
         var remembered = self.generation.remembered.keyIterator();
         while (remembered.next()) |addr| {
             const header: *GCObjectHeader = @ptrFromInt(addr.*);
@@ -5296,15 +4697,18 @@ pub const Registry = struct {
             self.young_head != null or
             self.young_predecessor != null or
             self.generation.stats.young_count != 0 or
-            self.generation.remembered.count() != 0 or
-            self.generation.stats.remembered_owners != 0)
+            self.generation.remembered.count() != 0)
         {
             return error.RetirementStateMismatch;
         }
         if (comptime block_heap_enabled) {
             if (self.block_heap.young_blocks != null) return error.RetirementStateMismatch;
+            // `clearYoungState` promotes and empties the extent half of the
+            // young set; a leftover entry is a young extent nothing will ever
+            // retire (the state the lane-C audit found).
+            if (self.block_heap.young_extents.items.len != 0) return error.RetirementStateMismatch;
         }
-        var survivors = self.objectIterator();
+        var survivors = self.objectIterator(.all);
         while (survivors.next()) |header| {
             if (!header.metaConst().flags.young) continue;
             if (self.headerMarked(header) or header.metaConst().flags.is_pinned) {
@@ -5322,6 +4726,15 @@ pub const Registry = struct {
         }
         if (comptime block_heap_enabled and carrier.block_generation_enabled) {
             self.block_heap.verifyGenerationAuthority() catch return error.CarrierOldNewMismatch;
+        }
+        if (comptime block_heap_enabled) {
+            // The extent page index is what makes a conservative candidate
+            // resolve to a >128-byte string; a hole in it drops a live root.
+            self.block_heap.verifyExtentPageIndex() catch return error.CarrierOldNewMismatch;
+            // The medium free-run buckets are the allocator's only view of
+            // free page runs. A run cached above the bitmap's truth hands the
+            // same pages to two extents.
+            self.block_heap.verifyMediumBuckets() catch return error.CarrierOldNewMismatch;
         }
         if (comptime block_heap_enabled and carrier.lifecycle_state_enabled) {
             self.block_heap.verifyLifecycleAuthority() catch return error.CarrierOldNewMismatch;
@@ -5348,9 +4761,6 @@ pub const Registry = struct {
             const bytes = heapByteSizeFromHeader(rt, header);
             if (bytes == 0) return error.MissingHeapAllocation;
             const is_large = self.isLargeAllocation(bytes);
-            if (header.metaConst().alloc_info.large != is_large) {
-                return error.LargeObjectClassificationMismatch;
-            }
             heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);
             if (is_large) {
                 large_object_bytes = std.math.add(usize, large_object_bytes, bytes) catch std.math.maxInt(usize);
@@ -5466,60 +4876,31 @@ pub const Registry = struct {
         if (accounted_external_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
     }
 
-    pub fn verifyNoExternalTokenLeaks(self: Registry) InvariantError!void {
-        if (self.external_tokens.len != 0) return error.LeakedExternalMemoryToken;
-        if (self.stats.external_bytes != 0) return error.ExternalTokenBytesMismatch;
-        if (self.stats.external_untracked_bytes != 0) return error.ExternalTokenBytesMismatch;
-    }
-
     /// Diagnostic/test-only: derived by walking, exactly like `liveCountKind`.
     /// The hot alloc/free paths keep no live-object counter (qjs
     /// add_gc_object/remove_gc_object are pure list splices).
     pub fn liveCount(self: *const Registry) usize {
         var count: usize = 0;
-        var iterator = self.objectIterator();
+        var iterator = self.objectIterator(.all);
         while (iterator.next()) |_| count += 1;
         return count;
     }
 
     pub fn liveCountKind(self: *const Registry, kind: GcKind) usize {
         var count: usize = 0;
-        var iterator = self.objectIterator();
+        var iterator = self.objectIterator(.all);
         while (iterator.next()) |header| {
             if (header.metaConst().flags.kind == kind) count += 1;
         }
         return count;
     }
 
-    pub inline fn nonBlockObjectCount(self: *const Registry) usize {
-        const authority = self.nonBlockObjectAuthority() orelse return 0;
-        return authority.items.items.len;
-    }
-
-    pub inline fn nonBlockObjectAt(self: *const Registry, index: usize) *GCObjectHeader {
-        return self.nonBlockObjectAuthority().?.items.items[index];
-    }
-
-    pub fn nonBlockObjectAuthorityCountForTest(self: *const Registry) usize {
-        return self.nonBlockObjectCount();
-    }
-
-    pub fn nonBlockObjectAuthorityContainsForTest(
-        self: *const Registry,
-        header: *const GCObjectHeader,
-    ) bool {
-        const authority = self.nonBlockObjectAuthority() orelse return false;
-        return authority.indexOf(header) != null;
-    }
-
-    inline fn nonBlockObjectAuthority(self: *const Registry) ?*NonBlockObjectAuthority {
-        const context = self.address_registry.nonblock_objects orelse return null;
-        return @ptrCast(@alignCast(context));
-    }
-
     pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool {
         if (self.sweep_current == header) return true;
-        if (self.condemnedNonBlockObjectContains(header)) return true;
+        if (self.nonblock_objects) |authority| {
+            for (authority.doomed.items) |candidate| if (candidate == header) return true;
+            for (authority.temporary.items) |candidate| if (candidate == header) return true;
+        }
         // Condemned-but-not-yet-destroyed nodes remain runtime-owned with
         // resources intact.
         var condemned = self.tmp_obj_list.sentinel.next_non_object;
@@ -5528,7 +4909,7 @@ pub const Registry = struct {
             if (candidate == header) return true;
             condemned = candidate.nextNonObject();
         }
-        var iterator = self.objectIterator();
+        var iterator = self.objectIterator(.all);
         while (iterator.next()) |candidate| {
             if (candidate == header) return true;
         }
@@ -5580,7 +4961,7 @@ pub const Registry = struct {
                 const header: *GCObjectHeader = @ptrFromInt(handle.base);
                 const kind = header.metaConst().flags.kind;
                 // Block cells hold Objects, and string bodies once TGC S2 is on.
-                if (kind != .object and !(string_tracer_owned and kind == .string)) return error.HeaderMismatch;
+                if (kind != .object and kind != .string) return error.HeaderMismatch;
                 if (expected_kind) |expected| if (kind != expected) return error.KindMismatch;
                 if (resolved.state == .published and !header.metaConst().alloc_info.heap_accounted) {
                     return error.HeaderMismatch;
@@ -5603,35 +4984,3 @@ pub const Registry = struct {
         return .{ .tracing = header };
     }
 };
-
-/// 9.1 统一的非原子 retain/release/dup/free 路径
-pub inline fn retain(header: anytype) void {
-    header.retain();
-}
-
-pub inline fn release(rt: anytype, header: anytype) void {
-    comptime {
-        @setEvalBranchQuota(10_000);
-    }
-    if (comptime @TypeOf(header.*) == StringHeader) {
-        string.String.releaseFromHeader(rt, header);
-        return;
-    }
-    if (refCountRemoved(header.meta().flags.kind)) return;
-    if (decrementHeaderRefCount(header) == 0) destroyZeroRef(rt, header);
-}
-
-/// Slow path after the caller has already decremented the common RC word to 0.
-/// JSValue.free uses this after its QuickJS-style payload-4 fast path; direct
-/// GC owners also arrive here through `release` above.
-pub noinline fn destroyZeroRef(rt: anytype, header: *Header) align(32) void {
-    std.debug.assert(headerRefCount(header) == 0);
-    const kind = header.metaConst().flags.kind;
-    if (rt.gc.phase == .deinit and Registry.isCycleCandidate(header)) return;
-    if (header.metaConst().flags.finalizing or header.metaConst().flags.cycle_visited) return;
-
-    // Every list kind is tracer-owned and has no RC transition; only the
-    // string family (S2) still reaches a zero-ref destroy, through its own
-    // StringHeader path, never through here.
-    std.debug.assert(refCountRemoved(kind));
-}

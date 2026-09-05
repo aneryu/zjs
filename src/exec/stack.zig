@@ -94,16 +94,8 @@ pub const Stack = struct {
         self.policy.arena_window = value;
     }
 
-    pub inline fn isResidentWindow(self: *const Stack) bool {
-        return self.policy.resident_window;
-    }
-
     pub inline fn setResidentWindow(self: *Stack, value: bool) void {
         self.policy.resident_window = value;
-    }
-
-    pub inline fn basePtr(self: *const Stack) [*]JSValue {
-        return self.values;
     }
 
     pub inline fn topPtr(self: *const Stack) [*]JSValue {
@@ -183,7 +175,7 @@ pub const Stack = struct {
         self.capacity = 0;
     }
 
-    pub inline fn deinit(self: *Stack, rt: anytype) void {
+    pub inline fn deinit(self: *Stack, _: anytype) void {
         const values = self.liveValues();
         const backing = self.backingValues();
         const stack_capacity = self.capacity;
@@ -193,16 +185,14 @@ pub const Stack = struct {
         self.policy.arena_window = false;
         self.policy.resident_window = false;
         for (values) |*slot| {
-            const value = slot.*;
             slot.* = JSValue.undefinedValue();
-            value.free(rt);
         }
         if (stack_capacity != 0 and !arena_window and !resident_window) self.memory.free(JSValue, backing);
     }
 
     pub fn push(self: *Stack, value: JSValue) !void {
         try self.reserveAdditional(1);
-        self.top_ptr[0] = if (value.requiresRefCount()) value.dup() else value;
+        self.top_ptr[0] = value;
         self.top_ptr += 1;
     }
 
@@ -214,7 +204,7 @@ pub const Stack = struct {
 
     pub fn pushAssumeCapacity(self: *Stack, value: JSValue) void {
         std.debug.assert(self.len() < self.capacity);
-        self.top_ptr[0] = if (value.requiresRefCount()) value.dup() else value;
+        self.top_ptr[0] = value;
         self.top_ptr += 1;
     }
 
@@ -232,7 +222,7 @@ pub const Stack = struct {
 
     pub fn peek(self: Stack) ?JSValue {
         if (self.top_ptr == self.values) return null;
-        return (self.top_ptr - 1)[0].dup();
+        return (self.top_ptr - 1)[0];
     }
 
     pub fn peekBorrowed(self: Stack) ?JSValue {
@@ -283,12 +273,3 @@ pub const Stack = struct {
         if (old_capacity != 0 and !old_arena_window and !old_resident_window) self.memory.free(JSValue, old_backing);
     }
 };
-
-/// Read the value `offset` slots below the top of the stack without popping
-/// (moved from the dissolved exec/vm_utils.zig).
-pub fn stackValueFromTop(stack: *const Stack, offset: u8) !JSValue {
-    const index_from_top: usize = offset;
-    const stack_len = stack.len();
-    if (index_from_top >= stack_len) return error.StackUnderflow;
-    return stack.values[stack_len - 1 - index_from_top].dup();
-}

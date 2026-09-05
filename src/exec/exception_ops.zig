@@ -30,7 +30,6 @@ pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 /// and are documented there.
 pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     const error_value = try createNamedErrorWithoutStack(ctx.runtime, global, name, message);
-    errdefer error_value.free(ctx.runtime);
     try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
     return error_value;
 }
@@ -39,8 +38,7 @@ pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []cons
 /// This is the QuickJS `ctx->native_error_proto[]` path: mutable constructor
 /// bindings and receiver objects do not participate in Realm selection.
 pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object, prototype: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
-    var rooted_prototype = prototype.value().dup();
-    defer rooted_prototype.free(ctx.runtime);
+    var rooted_prototype = prototype.value();
     var root_frame = core.runtime.rootValues(.{&rooted_prototype});
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
@@ -48,10 +46,8 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
     const rooted_object = property_ops.expectObject(rooted_prototype) catch return error.InvalidBuiltinRegistry;
     const object = try core.Object.create(ctx.runtime, core.class.ids.error_, rooted_object);
     const error_value = object.value();
-    errdefer error_value.free(ctx.runtime);
     const message_value = try value_ops.createStringValue(ctx.runtime, message);
-    defer message_value.free(ctx.runtime);
-    try defineNonEnumValueProperty(ctx.runtime, object, "message", message_value);
+    try defineNonEnumValueProperty(ctx.runtime, object, core.atom.ids.message, message_value);
     try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
     _ = name;
     return error_value;
@@ -72,7 +68,6 @@ pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, n
     const ctor_key = try rt.internAtom(name);
     defer rt.atoms.free(ctor_key);
     const ctor_value = try global.getProperty(ctor_key);
-    defer ctor_value.free(rt);
     return buildNamedErrorObject(rt, ctor_value, name, message);
 }
 
@@ -82,11 +77,9 @@ pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, n
 /// materialized from its lazy builtin string placeholder.
 pub fn createPreallocatedOutOfMemoryError(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
     const error_value = try createNamedErrorWithoutStack(rt, global, "InternalError", "out of memory");
-    errdefer error_value.free(rt);
     const error_object = objectFromValue(error_value) orelse return error.TypeError;
     const name_value = try value_ops.createStringValue(rt, "InternalError");
-    defer name_value.free(rt);
-    try defineNonEnumValueProperty(rt, error_object, "name", name_value);
+    try defineNonEnumValueProperty(rt, error_object, core.atom.ids.name, name_value);
     return error_value;
 }
 
@@ -103,14 +96,12 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
     // non-enumerable); `name`/`constructor` resolve through the prototype
     // installed below (qjs allocates directly on ctx->native_error_proto[]).
     const message_value = try value_ops.createStringValue(rt, message);
-    defer message_value.free(rt);
-    try defineNonEnumValueProperty(rt, object, "message", message_value);
+    try defineNonEnumValueProperty(rt, object, core.atom.ids.message, message_value);
     var prototype_installed = false;
     if (rooted_ctor_value.isObject()) {
         const ctor = property_ops.expectObject(rooted_ctor_value) catch null;
         if (ctor) |ctor_object| {
             const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
-            defer proto_value.free(rt);
             if (proto_value.isObject()) {
                 const proto = property_ops.expectObject(proto_value) catch null;
                 if (proto) |prototype| {
@@ -126,8 +117,7 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
         // `name` so `e.name` still identifies the error class. qjs cannot
         // reach this state — every JSErrorEnum has a native_error_proto.
         const name_value = try value_ops.createStringValue(rt, name);
-        defer name_value.free(rt);
-        try defineNonEnumValueProperty(rt, object, "name", name_value);
+        try defineNonEnumValueProperty(rt, object, core.atom.ids.name, name_value);
     }
     return object.value();
 }
@@ -137,17 +127,13 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-error-constructor-symbol");
-    const ctor_value = try rt.symbolValue(symbol_atom);
-    var ctor_alive = true;
-    defer if (ctor_alive) ctor_value.free(rt);
+    const ctor_value = try rt.takeSymbolValue(symbol_atom);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
     const error_value = try buildNamedErrorObject(rt, ctor_value, "TypeError", "boom");
-    var error_alive = true;
-    defer if (error_alive) error_value.free(rt);
     const object = try property_ops.expectObject(error_value);
 
     // The ctor value stays rooted across the allocating construction even
@@ -158,14 +144,12 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     defer rt.atoms.free(message_key);
     {
         const stored = try object.getProperty(message_key);
-        defer stored.free(rt);
         try std.testing.expect(stored.isString());
     }
     const constructor_key = try rt.internAtom("constructor");
     defer rt.atoms.free(constructor_key);
     {
         const stored = try object.getProperty(constructor_key);
-        defer stored.free(rt);
         try std.testing.expect(!stored.same(ctor_value));
     }
     // Non-object ctor (symbol) => no prototype; the degraded fallback stamps
@@ -174,14 +158,9 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     defer rt.atoms.free(name_key);
     {
         const stored = try object.getProperty(name_key);
-        defer stored.free(rt);
         try std.testing.expect(stored.isString());
     }
-    ctor_value.free(rt);
-    ctor_alive = false;
 
-    error_value.free(rt);
-    error_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -251,18 +230,14 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
 /// otherwise rebuild a backtrace from whichever context first reads it.
 pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors: *core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const ctor_key = try rt.internAtom("AggregateError");
-    defer rt.atoms.free(ctor_key);
+    const ctor_key = core.atom.ids.AggregateError;
     const ctor_value = try global.getProperty(ctor_key);
-    defer ctor_value.free(rt);
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
     const aggregate_error = object.value();
-    errdefer aggregate_error.free(rt);
     if (ctor_value.isObject()) {
         if (property_ops.expectObject(ctor_value) catch null) |ctor_object| {
             const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
-            defer proto_value.free(rt);
             if (proto_value.isObject()) {
                 if (property_ops.expectObject(proto_value) catch null) |prototype| {
                     try object.setPrototype(rt, prototype);
@@ -270,7 +245,7 @@ pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors:
             }
         }
     }
-    try defineNonEnumValueProperty(rt, object, "errors", errors.value());
+    try defineNonEnumValueProperty(rt, object, core.atom.ids.errors, errors.value());
     try error_stack_ops.attachStackToErrorValue(ctx, global, aggregate_error);
     return aggregate_error;
 }
@@ -292,7 +267,7 @@ pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytyp
         // rejection phase instead of either disappearing or invoking user code
         // a second time on retry.
         if (create_err == error.OutOfMemory) {
-            if (ctx.preallocated_oom_error) |preallocated| return preallocated.dup();
+            if (ctx.preallocated_oom_error) |preallocated| return preallocated;
             // Construction-only/bare contexts may not yet have installed the
             // zjs preallocated safety object. Match QuickJS's recursive-OOM
             // escape hatch: retain a non-allocating null abrupt value rather
@@ -317,7 +292,6 @@ pub fn rejectedPromiseForRuntimeError(
     }
     const error_info = runtimeErrorInfo(err) orelse return err;
     const error_value = try createNamedError(ctx, global, error_info.name, error_info.message);
-    defer error_value.free(ctx.runtime);
     const promise = try core.promise.rejectedWithPrototype(ctx, error_value, prototype);
     if (ctx.hasException()) ctx.clearException();
     return promise;
@@ -355,7 +329,7 @@ pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
         // contract without allocating on the exhausted heap.
         if (!ctx.hasException()) {
             const fallback = if (ctx.preallocated_oom_error) |preallocated|
-                preallocated.dup()
+                preallocated
             else
                 core.JSValue.nullValue();
             _ = ctx.throwValue(fallback);
@@ -374,17 +348,6 @@ pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
 pub inline fn pollInterrupt(ctx: *core.JSContext, global: *core.Object) !void {
     if (!ctx.pollInterrupt()) return;
     return throwInterrupted(ctx, global);
-}
-
-/// Throw `InternalError "stack overflow"` and return the native-recursion
-/// sentinel. Mirrors QuickJS `JS_ThrowStackOverflow` (quickjs.c:7789-7791). The
-/// `error.StackOverflow` sentinel is mapped back to this InternalError by
-/// `runtimeErrorInfo`/`promiseErrorInfo` for any path that does not observe the
-/// already-thrown value directly.
-pub fn throwStackOverflow(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
-    const error_value = try createNamedError(ctx, global, "InternalError", "stack overflow");
-    _ = ctx.throwValue(error_value);
-    return error.StackOverflow;
 }
 
 pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
@@ -409,8 +372,8 @@ pub fn callSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.fu
     if (!isCallSiteObject(rt, object)) return null;
     return switch (id) {
         .callsite_get_function => core.JSValue.nullValue(),
-        .callsite_get_function_name => if (object.callSiteFunctionName(rt)) |value| value.dup() else core.JSValue.nullValue(),
-        .callsite_get_file_name => if (object.callSiteFile(rt)) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_function_name => if (object.callSiteFunctionName(rt)) |value| value else core.JSValue.nullValue(),
+        .callsite_get_file_name => if (object.callSiteFile(rt)) |value| value else core.JSValue.nullValue(),
         .callsite_get_line_number => if (object.callSiteIsNative(rt)) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteLine(rt)),
         .callsite_get_column_number => if (object.callSiteIsNative(rt)) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteColumn(rt)),
         .callsite_is_native => core.JSValue.boolean(object.callSiteIsNative(rt)),
@@ -421,7 +384,6 @@ pub fn callSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.fu
 pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
     const function_object = objectFromValue(current_function_value) orelse return ctx.runtime.atoms.dup(fallback);
     const name_desc = (try function_object.getOwnProperty(ctx.runtime, core.atom.ids.name)) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
-    defer name_desc.destroy(ctx.runtime);
     if (name_desc.kind != .data or !name_desc.value.isString()) return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
 
     var bytes = std.ArrayList(u8).empty;
@@ -434,7 +396,6 @@ pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.Backtrace
     const function_value = frame.function_value;
     if (function_value.isUndefined()) return frame.function_name;
     frame.function_value = core.JSValue.undefinedValue();
-    defer function_value.free(ctx.runtime);
     const resolved = backtraceFunctionNameAtom(ctx, frame.function_name, function_value) catch ctx.runtime.atoms.dup(core.atom.ids.empty_string);
     ctx.runtime.atoms.free(frame.function_name);
     frame.function_name = resolved;
@@ -484,7 +445,6 @@ pub fn isErrorConstructorName(name: []const u8) bool {
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
     const object = property_ops.expectObject(value) catch return rt.memory.allocator.dupe(u8, "");
     const name_value = try object.getProperty(core.atom.ids.name);
-    defer name_value.free(rt);
     if (!name_value.isString()) return rt.memory.allocator.dupe(u8, "");
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -727,9 +687,7 @@ const objectFromValue = core.value_semantics.objectFromValue;
 /// the attribute set qjs uses for every own property it defines on error
 /// objects (JS_ThrowError2 quickjs.c:7652, js_aggregate_error_constructor
 /// quickjs.c:41593).
-fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
+fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: core.JSValue) !void {
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, false, true));
 }
 

@@ -60,13 +60,11 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
         \\}
         \\oomCaught ? "caught:" + oomName : "uncaught"
     , .{ .filename = "<oom-cap>" });
-    defer caught.free(rt);
     try expectStringValue(caught, "caught:InternalError");
 
     // Same context must keep working after the OOM was caught and the
     // oversized value released.
     const followup = try wrapper.eval("6 * 7", .{ .filename = "<oom-cap>" });
-    defer followup.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), followup.asInt32());
 
     // Array growth variant: same cap, same catchable shape. Chunky
@@ -82,11 +80,9 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
         \\}
         \\arrName
     , .{ .filename = "<oom-cap>" });
-    defer array_caught.free(rt);
     try expectStringValue(array_caught, "InternalError");
 
     const final = try wrapper.eval("\"alive\"", .{ .filename = "<oom-cap>" });
-    defer final.free(rt);
     try expectStringValue(final, "alive");
 }
 
@@ -170,7 +166,7 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     // Phase 1 (normal memory): compile the probe up front so phase 2 runs
     // without parsing.
     const setup = try wrapper.eval(
-        \\function trigger() { return { grown: [1, 2, 3] }; }
+        \\function trigger() { return "x".repeat(65536); }
         \\function probe() {
         \\  var name = "";
         \\  __exhaust();
@@ -180,7 +176,6 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
         \\}
         \\"ready"
     , .{ .filename = "<oom-pin>" });
-    defer setup.free(rt);
     try expectStringValue(setup, "ready");
 
     // Phase 2: inside one already-compiled call, exhaust the heap, force an
@@ -188,7 +183,6 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     // the preallocated InternalError and (b) zero allocations reached the
     // backing allocator inside the __exhaust..__report window.
     const result = try wrapper.eval("probe()", .{ .filename = "<oom-pin>" });
-    defer result.free(rt);
     try expectStringValue(result, "InternalError");
 
     try std.testing.expect(state.window_allocations != null);

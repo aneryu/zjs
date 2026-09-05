@@ -337,7 +337,7 @@ inline fn stringPrimitiveConcat(host_call: NativeCall) HostError!?core.JSValue {
     const rt = host_call.ctx.runtime;
     if (total == 0) {
         const empty = rt.emptyString() catch |err| return @as(HostError, @errorCast(err));
-        return empty.value().dup();
+        return empty.value();
     }
     const created = core.string.String.createLatin1Parts(rt, parts[0 .. args.len + 1], total) catch |err|
         return @as(HostError, @errorCast(err));
@@ -450,7 +450,6 @@ inline fn stringCharCodeAtDirectHost(
     // receivers leaked the dup of every string receiver that reached this
     // coercion path (i.e. every `charCodeAt` whose index argument needs
     // observable ToNumber).
-    defer string_value.free(ctx.runtime);
     if (string_value.ropeBody()) |node| {
         _ = node.flatten() catch |err| return @as(HostError, @errorCast(err));
     }
@@ -655,24 +654,21 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
         try stringValueFromSearchArgument(rt, rooted_args[0])
     else
         try createStringValue(rt, "");
-    defer data_value.free(rt);
     const data = stringValueFromReceiver(data_value) orelse return error.TypeError;
     try data.ensureFlat(rt);
 
     const object = try core.Object.create(rt, core.class.ids.string, prototype);
     object_value = object.value();
     errdefer {
-        const failed_object = object_value;
         object_value = core.JSValue.undefinedValue();
-        failed_object.free(rt);
     }
 
-    try object.setOptionalValueSlot(rt, object.objectDataSlot(), data_value.dup());
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), data_value);
     var index: u32 = 0;
     while (index < data.len()) : (index += 1) {
         try defineStringIndexUnitProperty(rt, object, index, data.codeUnitAt(index));
     }
-    try defineReadonlyIntProperty(rt, object, "length", @intCast(data.len()));
+    try defineReadonlyIntProperty(rt, object, core.atom.ids.length, @intCast(data.len()));
     return object_value;
 }
 
@@ -712,7 +708,7 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: 
         const byte: u8 = @intCast(first);
         if (byte <= 0x7f) {
             if (try rt.singleByteString(byte)) |cached| {
-                return iteratorResult(rt, global, cached.value().dup(), false);
+                return iteratorResult(rt, global, cached.value(), false);
             }
         }
         const out = try core.string.String.createLatin1(rt, &.{byte});
@@ -745,14 +741,14 @@ pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVal
         const first: u16 = @intCast(@as(u32, @bitCast(first_code)) & 0xffff);
         const second: u16 = @intCast(@as(u32, @bitCast(second_code)) & 0xffff);
         const cached = try rt.recentTwoUnitString(first, second);
-        return cached.value().dup();
+        return cached.value();
     }
     if (args.len == 1) {
         const code = args[0].asInt32() orelse return error.TypeError;
         const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
         if (unit <= 0xff) {
             const byte: u8 = @intCast(unit);
-            if (try rt.singleByteString(byte)) |cached| return cached.value().dup();
+            if (try rt.singleByteString(byte)) |cached| return cached.value();
         }
     }
 
@@ -1051,9 +1047,7 @@ fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
     const out = try core.Object.createArray(rt, null);
     out_value = out.value();
     errdefer {
-        const failed_out = out_value;
         out_value = core.JSValue.undefinedValue();
-        failed_out.free(rt);
     }
 
     const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].isUndefined())
@@ -1120,11 +1114,6 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
         try string_value.ensureFlat(rt);
         const out = try core.Object.createArray(rt, null);
         out_value = out.value();
-        errdefer {
-            const failed_out = out_value;
-            out_value = core.JSValue.undefinedValue();
-            failed_out.free(rt);
-        }
 
         const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].isUndefined())
             try toUint32Limit(rt, rooted_args[1])
@@ -1138,7 +1127,6 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
         }
 
         sep_value = try stringValueFromSearchArgument(rt, rooted_args[0]);
-        defer sep_value.free(rt);
         const sep = stringValueFromReceiver(sep_value) orelse return error.TypeError;
 
         var out_index: u32 = 0;
@@ -1208,17 +1196,10 @@ fn match(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
 
     const out = try core.Object.createArray(rt, null);
     out_value = out.value();
-    errdefer {
-        const failed_out = out_value;
-        out_value = core.JSValue.undefinedValue();
-        failed_out.free(rt);
-    }
     try defineStringElement(rt, out, 0, bytes[index .. index + needle.items.len]);
-    try defineIntProperty(rt, out, "index", @intCast(index));
+    try defineIntProperty(rt, out, core.atom.ids.index, @intCast(index));
     input = try createStringValue(rt, bytes);
-    defer input.free(rt);
-    const input_key = try rt.internAtom("input");
-    defer rt.atoms.free(input_key);
+    const input_key = core.atom.ids.input;
     try out.defineOwnProperty(rt, input_key, core.Descriptor.data(input, true, false, true));
     return out_value;
 }
@@ -1287,7 +1268,6 @@ fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, val
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    defer rooted_value.free(rt);
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(rooted_value, true, true, true));
 }
 
@@ -1300,7 +1280,6 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
     const units: [1]u16 = .{unit};
     const string = try core.string.String.createUtf16(rt, &units);
     const value = string.value();
-    defer value.free(rt);
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
 }
 
@@ -1391,7 +1370,6 @@ fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bo
 
 fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower: bool) !core.JSValue {
     const string_value = primitive.asStringBody() orelse {
-        primitive.free(rt);
         return error.TypeError;
     };
 
@@ -1402,7 +1380,6 @@ fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower
     const data = string_value.resolveData();
     const slen = string_value.len();
     if (slen == 0) return primitive;
-    defer primitive.free(rt);
 
     switch (data) {
         .latin1 => |bytes| {
@@ -1452,11 +1429,11 @@ fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower
 }
 
 fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
-    if (receiver.isString()) return receiver.dup();
+    if (receiver.isString()) return receiver;
     if (receiver.isObject()) {
         const object = try expectObject(receiver);
         if (object.class_id == core.class.ids.string) {
-            return (object.objectData() orelse return error.TypeError).dup();
+            return (object.objectData() orelse return error.TypeError);
         }
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.memory.allocator);
@@ -1546,7 +1523,6 @@ fn indexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !
 fn indexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer needle_value.free(rt);
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
         const start = if (args.len >= 2) try stringSearchStart(rt, string_value.len(), args[1]) else @as(usize, 0);
         const index = stringIndexOfUnits(string_value, needle, start);
@@ -1586,7 +1562,6 @@ fn lastIndexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValu
 fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer needle_value.free(rt);
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
 
         if (needle.len() == 0) {
@@ -1615,7 +1590,6 @@ fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
 
 fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
-    defer primitive.free(rt);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(core.string.stringValueLenUnchecked(primitive)))) return core.JSValue.float64(std.math.nan(f64));
     return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index)));
@@ -1623,7 +1597,6 @@ fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
 
 fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
-    defer primitive.free(rt);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     const primitive_len = core.string.stringValueLenUnchecked(primitive);
     if (index < 0 or index >= @as(i64, @intCast(primitive_len))) return core.JSValue.undefinedValue();
@@ -1851,7 +1824,6 @@ fn contains(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, 
 fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer needle_value.free(rt);
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
         const pos = if (args.len >= 2) try stringSearchStart(rt, string_value.len(), args[1]) else 0;
         const found = switch (mode) {
@@ -1900,7 +1872,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 }
 
 fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    if (value.isString()) return value.dup();
+    if (value.isString()) return value;
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, value);
@@ -1991,10 +1963,10 @@ fn createLatin1SliceValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
 }
 
 fn stringPrimitiveValue(value: core.JSValue) !core.JSValue {
-    if (value.isString()) return value.dup();
+    if (value.isString()) return value;
     const object = try expectObject(value);
     if (object.class_id != core.class.ids.string) return error.TypeError;
-    return (object.objectData() orelse return error.TypeError).dup();
+    return (object.objectData() orelse return error.TypeError);
 }
 
 pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
@@ -2016,9 +1988,7 @@ fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue {
 /// Owning wrapper over the single `CreateIterResultObject` owner: this file's
 /// callers hand over their reference to `value`.
 fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue {
-    var rooted_value = value;
-    defer rooted_value.free(rt);
-    return iterator_ops.createIteratorResult(rt, global, rooted_value, done);
+    return iterator_ops.createIteratorResult(rt, global, value, done);
 }
 
 test "string iteratorResult roots direct function bytecode value while creating result" {
@@ -2029,34 +1999,25 @@ test "string iteratorResult roots direct function bytecode value while creating 
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var result_value = core.JSValue.functionBytecode(&fb.header);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
+    const result_value = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const iterator_result_value = try iteratorResult(rt, null, result_value.dup(), false);
-    var iterator_result_alive = true;
-    defer if (iterator_result_alive) iterator_result_value.free(rt);
+    const iterator_result_value = try iteratorResult(rt, null, result_value, false);
     const iterator_result = try expectObject(iterator_result_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
         const stored = try iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
-        defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
 
-    iterator_result_value.free(rt);
-    iterator_result_alive = false;
-    result_value.free(rt);
-    result_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2073,70 +2034,55 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     defer rt.setGCThreshold(old_threshold);
 
     const text = try createStringValue(rt, "aba");
-    defer text.free(rt);
 
     const wrapper_value = try constructWithPrototype(rt, &.{text}, null);
-    defer wrapper_value.free(rt);
     const wrapper = try expectObject(wrapper_value);
     const wrapped_data = wrapper.objectData() orelse return error.TypeError;
     const wrapped_string = stringValueFromReceiver(wrapped_data) orelse return error.TypeError;
     try std.testing.expect(wrapped_string.eqlBytes("aba"));
 
     const iterator_value = try iterator(ctx, text);
-    defer iterator_value.free(rt);
     const iterator_object = try expectObject(iterator_value);
     const iterator_target = iterator_object.iteratorTarget() orelse return error.TypeError;
     const iterator_string = stringValueFromReceiver(iterator_target) orelse return error.TypeError;
     try std.testing.expect(iterator_string.eqlBytes("aba"));
 
     const separator = try createStringValue(rt, "b");
-    defer separator.free(rt);
     const split_value = try splitReceiver(rt, text, &.{separator});
-    defer split_value.free(rt);
     const split_object = try expectObject(split_value);
     const split_first = try split_object.getProperty(core.atom.atomFromUInt32(0));
-    defer split_first.free(rt);
     const split_second = try split_object.getProperty(core.atom.atomFromUInt32(1));
-    defer split_second.free(rt);
     try std.testing.expect((stringValueFromReceiver(split_first) orelse return error.TypeError).eqlBytes("a"));
     try std.testing.expect((stringValueFromReceiver(split_second) orelse return error.TypeError).eqlBytes("a"));
 
     const needle = try createStringValue(rt, "ba");
-    defer needle.free(rt);
     const match_value = try match(rt, "ababa", &.{needle});
-    defer match_value.free(rt);
     const match_object = try expectObject(match_value);
     const match_item = try match_object.getProperty(core.atom.atomFromUInt32(0));
-    defer match_item.free(rt);
     try std.testing.expect((stringValueFromReceiver(match_item) orelse return error.TypeError).eqlBytes("ba"));
     const input_key = try rt.internAtom("input");
     defer rt.atoms.free(input_key);
     const input_value = try match_object.getProperty(input_key);
-    defer input_value.free(rt);
     try std.testing.expect((stringValueFromReceiver(input_value) orelse return error.TypeError).eqlBytes("ababa"));
 }
 
 const expectObject = core.value_semantics.expectObject;
 
-fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void {
     var object_value = object.value();
     var root_frame = core.runtime.rootValues(.{&object_value});
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
 }
 
-fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void {
     var object_value = object.value();
     var root_frame = core.runtime.rootValues(.{&object_value});
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), false, false, false));
 }
 

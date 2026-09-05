@@ -69,7 +69,6 @@ pub fn createForInIterator(
     var root_frame = core.runtime.rootValues(.{ &iterator_val, &source_val });
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
-    defer source_val.free(rt);
 
     const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
     errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
@@ -88,9 +87,9 @@ pub fn createForInIterator(
     if (object_value.isNull() or object_value.isUndefined()) return iterator.value();
 
     // JS_ToObjectFree for primitives (quickjs.c:16277-16279).
-    source_val = if (object_value.isObject()) object_value.dup() else try primitiveObjectForAccess(rt, global, object_value);
+    source_val = if (object_value.isObject()) object_value else try primitiveObjectForAccess(rt, global, object_value);
     const source = try property_ops.expectObject(source_val);
-    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), source_val.dup());
+    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), source_val);
 
     if (forInFastArrayCount(rt, source)) |count| {
         // "for fast arrays, we only store the number of elements"
@@ -100,6 +99,8 @@ pub fn createForInIterator(
     } else {
         // normal_case (quickjs.c:16318-16326).
         const keys = try forInSnapshotOwnStringKeys(ctx, output, global, source, iterator);
+        // TGC S3 §2.3: the key snapshot moves into a published iterator payload.
+        for (keys) |key| rt.atoms.shadeAtomIfMarking(key);
         iterator.iteratorAtomKeysSlot().* = keys;
         iterator.setIteratorLength(std.math.cast(u32, keys.len) orelse return error.OutOfMemory);
     }
@@ -152,6 +153,15 @@ pub fn forInSnapshotOwnStringKeys(
     defer core.Object.freeKeys(rt, all);
     var out: []core.Atom = &.{};
     errdefer freeAtomList(rt, out);
+    // TGC S3 §4 class B: `out` and the `all` snapshot are native []Atom
+    // arrays held across a per-key [[GetOwnProperty]] that can reach a proxy
+    // trap.
+    var key_roots = core.runtime.rootAtomSlots(.{
+        core.runtime.AtomRootSlot{ .list = &out },
+        core.runtime.AtomRootSlot{ .list = &all },
+    });
+    key_roots.activate(rt);
+    defer key_roots.deactivate(rt);
     for (all) |key| {
         // JS_GPN_STRING_MASK: array-index atoms are string kind (JS_AtomGetKind).
         if (rt.atoms.kind(key) != .string) continue;
@@ -185,7 +195,6 @@ fn forInOwnKeyIsEnumerable(
     }
     const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, key, null, null) orelse return false;
     const is_enumerable = desc.enumerable orelse false;
-    desc.destroy(ctx.runtime);
     return is_enumerable;
 }
 
@@ -337,7 +346,6 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
     // `error.JSException`.
     const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
-    defer if (pending_exception) |value| value.free(ctx.runtime);
     var before = stack.len();
     while (findTopClosableForOfRecordIndexBefore(stack, before)) |record_index| {
         // Transfer the record's iterator ownership out before invoking user
@@ -347,12 +355,11 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
         const iterator_value = stack.values[record_index];
         stack.values[record_index] = core.JSValue.undefinedValue();
         closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-        iterator_value.free(ctx.runtime);
         if (ctx.hasException()) ctx.clearException();
         before = record_index;
     }
     if (pending_exception) |value| {
-        _ = ctx.throwValue(value.dup());
+        _ = ctx.throwValue(value);
         if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
     }
 }
@@ -368,11 +375,10 @@ pub fn closeIteratorForAbruptCompletion(
     if (ctx.exceptionIsUncatchable()) return;
     const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
-    defer if (pending_exception) |value| value.free(ctx.runtime);
     closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
     if (ctx.hasException()) ctx.clearException();
     if (pending_exception) |value| {
-        _ = ctx.throwValue(value.dup());
+        _ = ctx.throwValue(value);
         if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
     }
 }
@@ -400,11 +406,9 @@ pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
 /// every IteratorNext abrupt completion. That prevents IteratorClose from
 /// calling `return()` on the iterator whose `next`/result access just failed,
 /// while leaving any enclosing iterator records available for normal unwind.
-pub fn abandonForOfIteratorAtIndex(rt: *core.JSRuntime, stack: *stack_mod.Stack, index: usize) void {
+pub fn abandonForOfIteratorAtIndex(_: *core.JSRuntime, stack: *stack_mod.Stack, index: usize) void {
     std.debug.assert(isForOfRecordAt(stack, index));
-    const iterator = stack.values[index];
     stack.values[index] = core.JSValue.undefinedValue();
-    iterator.free(rt);
 }
 
 pub fn abandonForOfIteratorAtDepth(rt: *core.JSRuntime, stack: *stack_mod.Stack, depth: u8) !void {
@@ -441,13 +445,10 @@ pub fn closeIteratorFromVmImpl(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !void {
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
+    const return_key = core.atom.ids.return_;
     const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
     const out = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
-    defer out.free(ctx.runtime);
     if (!out.isObject()) return error.TypeError;
 }

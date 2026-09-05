@@ -582,7 +582,6 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
         return err;
     };
     {
-        defer value.free(rt);
         try expectValue(rt, value, snippet.expect);
     }
 
@@ -591,7 +590,6 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
 
     if (snippet.post_source) |post_source| {
         const post_value = try wrapper.eval(post_source, .{ .filename = corpus_filename });
-        defer post_value.free(rt);
         try expectStringValue(rt, post_value, snippet.post_expect);
     }
 
@@ -753,11 +751,9 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
         hooks,
         allocator,
     );
-    value.free(rt);
 
     {
         const post_value = try wrapper.eval("__graph === 42 ? \"graph-ok\" : \"graph-bad\"", .{ .filename = corpus_filename });
-        defer post_value.free(rt);
         try expectStringValue(rt, post_value, "graph-ok");
     }
 
@@ -916,9 +912,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
         defer ctx.destroy();
         var wrapper = BindingContext.borrowCore(ctx);
 
-        if (wrapper.eval(snippet.source, .{ .mode = snippet.mode, .filename = corpus_filename })) |value| {
-            value.free(rt);
-        } else |err| switch (err) {
+        if (wrapper.eval(snippet.source, .{ .mode = snippet.mode, .filename = corpus_filename })) |value| {} else |err| switch (err) {
             error.OutOfMemory => {},
             error.JSException => {
                 if (!ctx.hasException()) return error.TestUnexpectedResult;
@@ -929,7 +923,6 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
         }
         if (ctx.hasException()) {
             const pending = ctx.takePendingException();
-            pending.free(rt);
         }
 
         if (snippet.drain_jobs) {
@@ -943,11 +936,9 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
             };
             if (ctx.hasException()) {
                 const pending = ctx.takePendingException();
-                pending.free(rt);
             }
             if (ctx.hasUnhandledRejection()) {
                 const rejection = ctx.takeUnhandledRejection();
-                rejection.free(rt);
             }
         }
         if (snippet.collect_cycles) _ = rt.runObjectCycleRemoval();
@@ -957,7 +948,6 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
         // the injected failure, it is not itself an injection target.
         injector.disarmed = true;
         const canary = try wrapper.eval(canary_source, .{ .filename = "<oom-canary>" });
-        defer canary.free(rt);
         try expectStringValue(rt, canary, "canary-ok");
     }
 }
@@ -1038,9 +1028,7 @@ test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
 
     rt.setMemoryLimit(null);
     const selected = try zjs.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, name);
-    defer selected.free(rt);
     const selected_again = try zjs.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, name);
-    defer selected_again.free(rt);
     try std.testing.expectEqual(core.VarRef.fromValue(selected).?, core.VarRef.fromValue(selected_again).?);
 }
 
@@ -1088,7 +1076,6 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
             \\      ? "realm-retry-ok" : "realm-retry-bad";
             \\})(1)
         , .{ .filename = "<realm-bootstrap-retry>" });
-        defer canary.free(rt);
         try expectStringValue(rt, canary, "realm-retry-ok");
     }
     try injector.expectBalanced();
@@ -1161,7 +1148,6 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         try std.testing.expectEqual(external_count_before + 1, rt.external_host_functions.len);
 
         const canary = try created.eval(canary_source, .{ .filename = "<binding-construction-retry>" });
-        defer canary.free(rt);
         try expectStringValue(rt, canary, "canary-ok");
     }
     try injector.expectBalanced();
@@ -1262,7 +1248,6 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     recovered.publishFixtureNoFail(rt);
     recovered_published = true;
     try std.testing.expectEqual(baseline_live + 1, rt.gc.liveCount());
-    core.JSValue.functionBytecode(&recovered.header).free(rt);
 
     try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);

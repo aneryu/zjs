@@ -284,11 +284,6 @@ inline fn formOf(op_id: u8) Form {
     return @enumFromInt(op_id);
 }
 
-fn isJumpOp(form: Form) bool {
-    return form == .if_false or form == .if_true or form == .goto or
-        form == .@"catch" or form == .gosub;
-}
-
 /// Operand offsets derived from the declaration (contract 2). The values are
 /// what the hand-written deltas were -- the point is that they can no longer
 /// drift from the declaration without a compile error.

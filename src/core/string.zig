@@ -1,10 +1,9 @@
-//! Refcounted flat strings, deferred ropes, and code-unit operations.
+//! Traced flat strings, deferred ropes, and code-unit operations.
 //!
-//! A string JSValue owns one reference to either a flat `String` or a
-//! `StringRope`; rope nodes own both children and materialize a stable flat
+//! A string JSValue names either a flat `String` or a `StringRope`; rope nodes
+//! trace both children and materialize a stable flat
 //! body on first borrowed-content read. Allocation and release always go
-//! through the originating Runtime. Layout and the four-byte RC prefix are
-//! load-bearing for JSValue decoding and GC accounting. QuickJS source map:
+//! through the originating Runtime. QuickJS source map:
 //! `JSString`/`JSStringRope` at quickjs.c:583-609. Core and higher layers may
 //! import this module; it has no exec/binding dependency.
 
@@ -28,25 +27,21 @@ pub const StringError = error{
 pub const max_length: usize = (1 << 30) - 1;
 
 /// Deferred concatenation node (QuickJS `JSStringRope` analogue). A rope is a
-/// STANDALONE refcounted heap object reached through a `JSValue` tagged
+/// traced heap object reached through a `JSValue` tagged
 /// `Tag.string_rope` (never a `*String`). It owns its `left`/`right` children
 /// as `JSValue`s (each may itself be a flat `Tag.string` or another
 /// `Tag.string_rope`, so rope-of-rope chains are handled). Generic ropes keep
 /// only the QJS-like tree state plus the runtime needed by the infallible
-/// borrowed-string API. The zjs-only growable accumulator tail lives in an
-/// optional sidecar, so ordinary QJS-style rope nodes do not pay for its
-/// buffer union and bookkeeping.
+/// borrowed-string API.
 ///
 /// The first content read MATERIALIZES the rope into a flat `*String`
 /// (`flatten`, mirroring qjs `js_linearize_string_rope`) and caches it in
-/// `left` with `depth == 0`, releasing the former children and the tail. This
+/// `left` with `depth == 0`, releasing the former children. This
 /// mirrors qjs's linearized `left=flat, right=empty` representation without a
 /// separate flat/hash payload. All borrowed slices returned to readers point
 /// into that owned flat string, so they stay valid for as long as the rope
-/// object is alive. The refcount lives in a 4-byte `gc.StringHeader`
-/// prefix at `ropePtr - 4` (see `String` below), reached through `header()`.
-/// Like QuickJS, a `Tag.string_rope` value stores the rope body pointer; the
-/// common RC word is always recovered from payload - 4.
+/// object is alive. Like QuickJS, a `Tag.string_rope` value stores the rope
+/// body pointer.
 pub const StringRope = struct {
     left: JSValue,
     right: JSValue,
@@ -54,7 +49,7 @@ pub const StringRope = struct {
     /// one pointer for on-demand linearization. QJS receives `JSContext *` at
     /// its linearization call site and therefore does not need it in the node.
     rt: *JSRuntime,
-    /// Total length in code units, including the tail sidecar's used units.
+    /// Total length in code units.
     /// QJS uses uint32_t and caps strings below 2^30; keep the same width.
     len: u32,
     /// Maximum child depth plus one, matching QuickJS `JSStringRope.depth`.
@@ -63,12 +58,6 @@ pub const StringRope = struct {
     /// bounded. Zero is reserved for an already-linearized rope.
     depth: u8,
     wide: bool,
-    /// The trailing tail-state slot exists only on the larger accumulator-node
-    /// allocation. Ordinary QJS-style nodes keep this flag clear and end at
-    /// `@sizeOf(StringRope)`.
-    flags: u8 = 0,
-
-    const accumulator_tail_slot_flag: u8 = 1 << 0;
 
     comptime {
         std.debug.assert(@sizeOf(StringRope) == 48);
@@ -79,45 +68,30 @@ pub const StringRope = struct {
         std.debug.assert(@offsetOf(StringRope, "len") == 40);
         std.debug.assert(@offsetOf(StringRope, "depth") == 44);
         std.debug.assert(@offsetOf(StringRope, "wide") == 45);
-        std.debug.assert(@offsetOf(StringRope, "flags") == 46);
     }
 
-    /// Size of the refcount prefix reserved ahead of a `StringRope` node. The
-    /// node holds pointers (`@alignOf(StringRope) == 8`), so the 4-byte rc word
-    /// is padded up to the node's alignment to keep the struct that follows it
-    /// aligned. The rc word lives in the LAST 4 bytes of the prefix, i.e. at
-    /// `nodePtr - 4`, so `header()` returns the same fixed-offset RC word a flat
-    /// string would.
-    pub const rc_prefix_size: usize = std.mem.alignForward(usize, gc.string_prefix_size, @alignOf(StringRope));
+    /// Size of the collector metadata prefix ahead of a rope node.
+    pub const metadata_prefix_size: usize = std.mem.alignForward(usize, gc.string_prefix_size, @alignOf(StringRope));
 
-    /// Pointer to the 4-byte refcount word sitting immediately before this rope
-    /// node (`ropePtr - 4`), mirroring `String.header()` and QuickJS `__js_rc`.
-    pub inline fn header(self: *const StringRope) *gc.StringHeader {
-        const base: [*]u8 = @ptrCast(@constCast(self));
-        return @ptrCast(@alignCast(base - gc.ref_count_offset_from_payload));
+    /// Unified collector handle. String-family handles are their body pointer;
+    /// the metadata is immediately before the body.
+    pub inline fn header(self: *const StringRope) *gc.GCObjectHeader {
+        return @ptrCast(@alignCast(@constCast(self)));
     }
 
-    /// Recover a rope node from its refcount-word pointer (inverse of
-    /// `header()`). The rc word sits four bytes before the node (the
-    /// Metadata prefix's lifetime tail), exactly like a flat string.
-    pub inline fn fromHeader(hdr: *gc.StringHeader) *StringRope {
-        const base: [*]u8 = @ptrCast(hdr);
-        return @ptrCast(@alignCast(base + gc.ref_count_offset_from_payload));
+    pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *StringRope {
+        return @ptrCast(@alignCast(hdr));
     }
 
     /// The `Metadata` word at the allocation base (`nodePtr - 8`).
     pub inline fn metadata(self: *const StringRope) *gc.Metadata {
         const base: [*]u8 = @ptrCast(@constCast(self));
-        return @ptrCast(@alignCast(base - rc_prefix_size));
+        return @ptrCast(@alignCast(base - metadata_prefix_size));
     }
 
     /// A `Tag.string_rope` JSValue pointing at this node.
     pub fn value(self: *StringRope) JSValue {
         return JSValue.stringRope(self.header());
-    }
-
-    pub inline fn retain(self: *StringRope) void {
-        self.header().retain();
     }
 
     pub fn isWide(self: *const StringRope) bool {
@@ -135,38 +109,9 @@ pub const StringRope = struct {
         return self.depth == 0;
     }
 
-    pub fn supportsTail(self: *const StringRope) bool {
-        return self.flags & accumulator_tail_slot_flag != 0;
-    }
-
-    fn tailStateSlot(self: *const StringRope) ?*?*RopeTailState {
-        if (!self.supportsTail()) return null;
-        const tail_address = @intFromPtr(self) + @sizeOf(StringRope);
-        return @ptrFromInt(tail_address);
-    }
-
-    pub fn hasTail(self: *const StringRope) bool {
-        const slot = self.tailStateSlot() orelse return false;
-        return slot.* != null;
-    }
-
-    pub fn tailLen(self: *const StringRope) usize {
-        const slot = self.tailStateSlot() orelse return 0;
-        return if (slot.*) |tail| tail.len else 0;
-    }
-
     fn flatString(self: *const StringRope) ?*String {
         if (!self.isLinearized()) return null;
         return self.left.asStringBodyRaw();
-    }
-
-    fn tailResolved(self: *const StringRope) ?String.ResolvedData {
-        const slot = self.tailStateSlot() orelse return null;
-        const tail = slot.* orelse return null;
-        return switch (tail.data) {
-            .latin1 => |buf| .{ .latin1 = buf[0..tail.len] },
-            .utf16 => |buf| .{ .utf16 = buf[0..tail.len] },
-        };
     }
 
     /// Materializes this rope into a flat `*String`, caching its owned value in
@@ -190,22 +135,15 @@ pub const StringRope = struct {
             writeLatin1Terminator(s.latin1Mut());
             break :blk s;
         };
-        const old_left = self.left;
-        const old_right = self.right;
-        // Tracer-owned strings: the rope is a heap owner adopting a fresh
-        // (young / possibly unmarked) child.
-        if (comptime gc.string_tracer_owned) {
-            rt.gc.generationalBarrierValue(@ptrCast(@alignCast(self)), flat.value());
-        }
+        // The rope is a heap owner adopting a fresh (young / possibly
+        // unmarked) child.
+        rt.gc.generationalBarrierValue(@ptrCast(@alignCast(self)), flat.value());
         self.left = flat.value();
         self.right = JSValue.undefinedValue();
-        freeRopeTail(rt, self);
         self.depth = 0;
         // Release the former tree only after publishing the new owned flat
         // child. String destruction has no user callback, but this ordering
         // also keeps the rope internally valid under force-GC diagnostics.
-        old_left.free(rt);
-        old_right.free(rt);
         return flat;
     }
 
@@ -224,19 +162,6 @@ pub const StringRope = struct {
     pub fn contentHash(self: *StringRope) u32 {
         return stringValueContentHash(self.value()).?;
     }
-};
-
-/// Sidecar used only by zjs's fused `add_loc` accumulator extension. Keeping
-/// it out of `StringRope` makes the ordinary concat/rebalance node compact like
-/// QJS while retaining the measured O(1) tail-append win for exclusive locals.
-const RopeTailState = struct {
-    data: Data,
-    len: usize,
-
-    const Data = union(enum) {
-        latin1: []u8,
-        utf16: []u16,
-    };
 };
 
 pub fn isAsciiBytes(bytes: []const u8) bool {
@@ -282,23 +207,13 @@ pub const String = struct {
     hash_meta: HashMeta = .{},
     atom_id: u32 = no_atom_id,
 
-    /// Pointer to the 4-byte refcount prefix sitting immediately before this
-    /// struct (`stringPtr - 4`, qjs `JSRefCountHeader` analogue). The rc word is
-    /// allocated as a leading prefix so the flat `String` struct is exactly 12B
-    /// (mirroring qjs `JSString`: two u32 bitfields + `atom_type`), with the rc
-    /// kept out of band. A `Tag.string`/`Tag.string_rope`/`Tag.symbol` JSValue
-    /// stores the body pointer, so its RC is at the same payload - 4 offset as
-    /// every GC-backed refcounted value.
-    pub inline fn header(self: *const String) *gc.StringHeader {
-        const base: [*]u8 = @ptrCast(@constCast(self));
-        return @ptrCast(@alignCast(base - gc.ref_count_offset_from_payload));
+    /// Unified collector handle. String-family handles are their body pointer.
+    pub inline fn header(self: *const String) *gc.GCObjectHeader {
+        return @ptrCast(@alignCast(@constCast(self)));
     }
 
-    /// Recover a `*String` from its refcount prefix pointer (inverse of
-    /// `header()`; replaces the old `@fieldParentPtr("header", …)`).
-    pub inline fn fromHeader(hdr: *gc.StringHeader) *String {
-        const base: [*]u8 = @ptrCast(hdr);
-        return @ptrCast(@alignCast(base + gc.ref_count_offset_from_payload));
+    pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *String {
+        return @ptrCast(@alignCast(hdr));
     }
 
     /// The `Metadata` word at the allocation base (`stringPtr - 8`).
@@ -357,14 +272,6 @@ pub const String = struct {
         return self;
     }
 
-    /// Copies `units` into a fresh inline string; the caller retains ownership
-    /// of `units` (it is NOT adopted). QuickJS `JSString` characters are always
-    /// inline, so there is no owned-buffer fast path anymore.
-    pub fn createUtf16Owned(rt: *JSRuntime, units: []const u16, capacity: usize) !*String {
-        _ = capacity;
-        return createUtf16(rt, units);
-    }
-
     pub fn createUtf16Pair(rt: *JSRuntime, first: u16, second: u16) !*String {
         if (first <= 0xff and second <= 0xff) {
             const self = try createUninitialized(rt, .latin1, 2);
@@ -393,10 +300,9 @@ pub const String = struct {
     }
 
     pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
-        // Atom-table cache hit: hand out one more reference to the string
-        // already materialized for this atom, skipping the UTF-8 decode.
+        // Atom-table cache hit: reuse the traced string already materialized
+        // for this atom, skipping the UTF-8 decode.
         if (rt.atoms.cachedString(atom_id)) |cached| {
-            gc.retain(cached.header());
             return cached;
         }
         const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
@@ -415,10 +321,9 @@ pub const String = struct {
     /// JSON parser produce, so keys built from runtime strings unify with
     /// keys interned from source text. The string is then bound into the
     /// atom table's per-atom string cache (`AtomTable.cacheString`): the
-    /// table holds a string reference and `atom_id` becomes a weak
-    /// back-pointer, making repeated conversions of the same string a
-    /// ref-count bump; the reverse direction (`AtomTable.toStringValue`)
-    /// reuses the same cached string with zero conversion.
+    /// table traces the cached string and `atom_id` becomes a weak
+    /// back-pointer; the reverse direction (`AtomTable.toStringValue`) reuses
+    /// the same string with zero conversion.
     /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
         if (self.atom_id != no_atom_id) return rt.atoms.dup(self.atom_id);
@@ -527,28 +432,6 @@ pub const String = struct {
         return createLatin1Concat(rt, a, b);
     }
 
-    pub fn createLatin1RepeatedConcatWithSeed(rt: *JSRuntime, a: []const u8, suffix: []const u8, repeat_count: usize, seed: u32) !*String {
-        _ = seed;
-        const append_len = try std.math.mul(usize, suffix.len, repeat_count);
-        const total = try std.math.add(usize, a.len, append_len);
-        const self = try createUninitialized(rt, .latin1, total);
-        errdefer destroyFlat(rt, self);
-        const out = self.latin1Mut();
-        @memcpy(out[0..a.len], a);
-        if (suffix.len == 1) {
-            @memset(out[a.len..total], suffix[0]);
-        } else {
-            var offset = a.len;
-            var remaining = repeat_count;
-            while (remaining != 0) : (remaining -= 1) {
-                @memcpy(out[offset..][0..suffix.len], suffix);
-                offset += suffix.len;
-            }
-        }
-        writeLatin1Terminator(out);
-        return self;
-    }
-
     /// Concatenate two utf16 unit buffers into a single freshly allocated
     /// utf16 string. The runtime owns the result.
     pub fn createUtf16Concat(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
@@ -580,11 +463,6 @@ pub const String = struct {
                 break :blk self;
             },
         };
-    }
-
-    pub fn createUtf16ConcatWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
-        _ = seed;
-        return createUtf16Concat(rt, a, b);
     }
 
     pub fn createLatin1(rt: *JSRuntime, bytes: []const u8) !*String {
@@ -634,22 +512,7 @@ pub const String = struct {
         // tag decoding independently for all three fields.
         const left_info = stringValueInfo(left);
         const right_info = stringValueInfo(right);
-        const node = try createRopeNode(rt, left, right, left_info, right_info, false);
-        left_info.header.retain();
-        right_info.header.retain();
-        return node;
-    }
-
-    /// Creates the zjs-only fused-local accumulator rope. Its base node keeps
-    /// the same compact QJS layout; only this allocation receives one trailing
-    /// nullable tail-state slot.
-    pub fn createAccumulatorRope(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
-        const left_info = stringValueInfo(left);
-        const right_info = stringValueInfo(right);
-        const node = try createRopeNode(rt, left, right, left_info, right_info, true);
-        left_info.header.retain();
-        right_info.header.retain();
-        return node;
+        return createRopeNode(rt, left, right, left_info, right_info);
     }
 
     /// Consuming counterpart of `createRope`, matching QJS
@@ -659,9 +522,7 @@ pub const String = struct {
     pub fn createRopeOwned(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
         const left_info = stringValueInfo(left);
         const right_info = stringValueInfo(right);
-        return createRopeNode(rt, left, right, left_info, right_info, false) catch |err| {
-            left.free(rt);
-            right.free(rt);
+        return createRopeNode(rt, left, right, left_info, right_info) catch |err| {
             return err;
         };
     }
@@ -675,10 +536,8 @@ pub const String = struct {
         if (node.depth <= rope_max_depth) return rope_value;
 
         const balanced = rebalanceRope(rt, rope_value) catch |err| {
-            rope_value.free(rt);
             return err;
         };
-        rope_value.free(rt);
         return balanced;
     }
 
@@ -691,10 +550,8 @@ pub const String = struct {
         if (node.depth <= rope_max_depth) return rope_value;
 
         const balanced = rebalanceRope(rt, rope_value) catch |err| {
-            rope_value.free(rt);
             return err;
         };
-        rope_value.free(rt);
         return balanced;
     }
 
@@ -716,16 +573,6 @@ pub const String = struct {
 
     pub fn value(self: *String) JSValue {
         return JSValue.string(self.header());
-    }
-
-    pub inline fn retain(self: *String) void {
-        self.header().retain();
-    }
-
-    pub fn releaseFromHeader(rt: *JSRuntime, hdr: *gc.StringHeader) void {
-        std.debug.assert(hdr.rc > 0);
-        hdr.rc -= 1;
-        if (hdr.rc == 0) destroyFromHeader(rt, hdr);
     }
 
     pub fn len(self: *const String) usize {
@@ -839,33 +686,6 @@ pub const String = struct {
         };
     }
 
-    pub fn destroyFromHeader(rt: *JSRuntime, hdr: *gc.StringHeader) void {
-        // rc-zero path only: under the tracer-owned build `JSValue.free` is a
-        // no-op for string tags and death goes through `destroyCellFromHeader`.
-        std.debug.assert(!gc.string_tracer_owned);
-        const self: *String = String.fromHeader(hdr);
-        // `atom_id` is a weak back-pointer: it holds no atom reference.
-        // A string bound to a live dynamic atom cannot be destroyed (the
-        // atom table holds a reference), so reaching here with a dynamic
-        // id would mean the table failed to clear the back-pointer.
-        if (self.atom_id != no_atom_id) {
-            const atom_id = self.atom_id;
-            if (!atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
-                if (rt.atoms.onSymbolBodyZeroRef(rt, atom_id, self)) return;
-            } else {
-                std.debug.assert(atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id));
-            }
-        }
-        destroyFlat(rt, self);
-    }
-
-    pub fn destroyWeakSymbolBody(rt: *JSRuntime, self: *String) void {
-        std.debug.assert(!gc.string_tracer_owned);
-        std.debug.assert(self.header().rc == 0);
-        self.atom_id = no_atom_id;
-        destroyFlat(rt, self);
-    }
-
     const StorageTag = enum { latin1, utf16 };
 
     fn createUninitialized(rt: *JSRuntime, comptime tag: StorageTag, unit_count: usize) !*String {
@@ -874,46 +694,41 @@ pub const String = struct {
         // compare bounds all string construction.
         if (unit_count > max_length) return error.StringTooLong;
         const inline_layout = inlineAllocationLayout(tag, unit_count) orelse return error.OutOfMemory;
+        // TGC S2-f (3): flat string bodies are collector carriers now, so
+        // string churn has to cross the same allocation-threshold boundary
+        // object construction does. qjs could skip it (`js_alloc_string` is
+        // plain malloc + refcount, and `js_trigger_gc` fires only from
+        // `JS_NewObjectFromShape`), but under the tracer a pure string loop
+        // would otherwise allocate without bound: 380k x 320B leaves
+        // `young_count` at 380k and `collections` at zero. Level-triggered,
+        // one compare on the fast path, cold tail otherwise. It must precede
+        // every raw carrier pointer this function takes.
+        rt.collectBeforeObjectAllocation(inline_layout.total_size);
         // Reserve the eight-byte Metadata prefix ahead of the struct so
         // `String` itself stays exactly 12B (qjs `JSString`). The block base
         // is 8-aligned (Metadata), so the struct at `base + 8` keeps `String`'s
         // 4-byte alignment and the inline char FAM stays u16-aligned. The
-        // prefix's lifetime tail is the refcount word (`header()`).
-        if (comptime gc.string_tracer_owned) {
-            if (try rt.memory.createStringCell(inline_layout.total_size)) |base| {
-                const self: *String = @ptrCast(@alignCast(base + gc.string_prefix_size));
-                self.* = .{
-                    .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
-                    .hash_meta = .{},
-                    .atom_id = no_atom_id,
-                };
-                rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(self)), gc_block_heap.accountedBodyBytesForRequest(inline_layout.total_size, gc.string_prefix_size).?);
-                return self;
-            }
-            // Extent route (spec §5.7): over the cell ceiling the body lives
-            // in a medium page run / large mapping of the same heap, behind a
-            // standalone prefix. Publication stamps the encoded size and
-            // registers the address; the extent table is its enumeration.
-            const bytes = try rt.memory.createStringExtent(inline_layout.total_size);
-            const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_prefix_size));
+        // prefix carries collector metadata.
+        if (try rt.memory.createStringCell(inline_layout.total_size)) |base| {
+            const self: *String = @ptrCast(@alignCast(base + gc.string_prefix_size));
             self.* = .{
                 .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
                 .hash_meta = .{},
                 .atom_id = no_atom_id,
             };
-            rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(self)), inline_layout.total_size - gc.string_prefix_size);
+            rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(self)), gc_block_heap.accountedBodyBytesForRequest(inline_layout.total_size, gc.string_prefix_size).?);
             return self;
         }
-        const bytes = try rt.allocStringAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
-        errdefer rt.memory.freeAlignedBytes(bytes, inline_layout.allocation_alignment);
-        const meta: *gc.Metadata = @ptrCast(@alignCast(bytes.ptr));
-        meta.* = string_prefix_init;
+        // Extent route (spec §5.7): over the cell ceiling the body lives in a
+        // medium page run / large mapping of the same heap.
+        const bytes = try rt.memory.createStringExtent(inline_layout.total_size);
         const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_prefix_size));
         self.* = .{
             .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
             .hash_meta = .{},
             .atom_id = no_atom_id,
         };
+        rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(self)), inline_layout.total_size - gc.string_prefix_size);
         return self;
     }
 
@@ -923,21 +738,12 @@ pub const String = struct {
             .latin1 => inlineAllocationLayout(.latin1, self.len_meta.len) orelse unreachable,
             .utf16 => inlineAllocationLayout(.utf16, self.len_meta.len) orelse unreachable,
         };
-        if (comptime gc.string_tracer_owned) {
-            if (gc.Registry.isBlockCellHeader(@ptrCast(@alignCast(self)))) {
-                rt.memory.destroyStringCell(self, inline_layout.total_size);
-                return;
-            }
-            if (self.metadata().alloc_info.standalone) {
-                rt.memory.destroyStringExtent(self, inline_layout.total_size);
-                return;
-            }
+        if (gc.Registry.isBlockCellHeader(@ptrCast(@alignCast(self)))) {
+            rt.memory.destroyStringCell(self, inline_layout.total_size);
+            return;
         }
-        // Free from the Metadata prefix base (`stringPtr - 8`), the true
-        // allocation start whose size includes the prefix.
-        const base: [*]u8 = @ptrCast(self.metadata());
-        const bytes = base[0..inline_layout.total_size];
-        rt.memory.freeAlignedBytes(bytes, inline_layout.allocation_alignment);
+        std.debug.assert(self.metadata().alloc_info.standalone);
+        rt.memory.destroyStringExtent(self, inline_layout.total_size);
     }
 };
 
@@ -1035,15 +841,11 @@ pub inline fn stringValueLenUnchecked(value: JSValue) usize {
 
 /// Fixed-stack, allocation-free traversal of a string-or-rope value. This is
 /// the zjs analogue of QJS `JSStringRopeIter`: flat leaf slices are returned in
-/// code-unit order without materializing the rope. The extra `tail` phase
-/// accounts for zjs's optional accumulator sidecar (`left ++ right ++ tail`).
+/// code-unit order without materializing the rope.
 pub const StringValueIterator = struct {
     current: ?JSValue,
     nodes: [rope_iterator_stack_capacity]*const StringRope = undefined,
-    phases: [rope_iterator_stack_capacity]Phase = undefined,
     stack_len: usize = 0,
-
-    const Phase = enum(u1) { right, tail };
 
     pub fn init(value: JSValue) StringValueIterator {
         std.debug.assert(value.isString());
@@ -1069,7 +871,6 @@ pub const StringValueIterator = struct {
 
                 std.debug.assert(self.stack_len < self.nodes.len);
                 self.nodes[self.stack_len] = node;
-                self.phases[self.stack_len] = .right;
                 self.stack_len += 1;
                 self.current = node.left;
                 continue;
@@ -1078,18 +879,8 @@ pub const StringValueIterator = struct {
             if (self.stack_len == 0) return null;
             const top = self.stack_len - 1;
             const node = self.nodes[top];
-            switch (self.phases[top]) {
-                .right => {
-                    self.phases[top] = .tail;
-                    self.current = node.right;
-                },
-                .tail => {
-                    self.stack_len = top;
-                    if (node.tailResolved()) |resolved| {
-                        if (resolved.len() != 0) return resolved;
-                    }
-                },
-            }
+            self.stack_len = top;
+            self.current = node.right;
         }
     }
 };
@@ -1123,19 +914,7 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
             continue;
         }
         relative -= left_len;
-
-        const right_len = stringValueLenUnchecked(node.right);
-        if (relative < right_len) {
-            current = node.right;
-            continue;
-        }
-        relative -= right_len;
-
-        const tail = node.tailResolved() orelse unreachable;
-        return switch (tail) {
-            .latin1 => |bytes| bytes[relative],
-            .utf16 => |units| units[relative],
-        };
+        current = node.right;
     }
 }
 
@@ -1289,7 +1068,6 @@ const StringValueInfo = struct {
     len: usize,
     depth: u8,
     wide: bool,
-    header: *gc.StringHeader,
 };
 
 /// QJS `js_new_string_rope`'s one-tag-test operand classification.
@@ -1298,11 +1076,11 @@ fn stringValueInfo(value: JSValue) StringValueInfo {
     const header = value.stringHeaderAssumeStringLike();
     if (tag == ValueTag.string_rope) {
         const node = StringRope.fromHeader(header);
-        return .{ .len = node.len_(), .depth = node.depth, .wide = node.wide, .header = header };
+        return .{ .len = node.len_(), .depth = node.depth, .wide = node.wide };
     }
     std.debug.assert(tag == ValueTag.string or tag == ValueTag.symbol);
     const flat = String.fromHeader(header);
-    return .{ .len = flat.len(), .depth = 0, .wide = flat.isWide(), .header = header };
+    return .{ .len = flat.len(), .depth = 0, .wide = flat.isWide() };
 }
 
 fn createRopeNode(
@@ -1311,22 +1089,19 @@ fn createRopeNode(
     right: JSValue,
     left_info: StringValueInfo,
     right_info: StringValueInfo,
-    with_accumulator_tail_slot: bool,
 ) !*StringRope {
     const total = try std.math.add(usize, left_info.len, right_info.len);
     // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c:4898).
     if (total > max_length) return error.StringTooLong;
-    const node = try allocRopeNode(rt, with_accumulator_tail_slot);
+    const node = try allocRopeNode(rt);
     node.* = .{
         .left = left,
         .right = right,
         .len = @intCast(total),
         .depth = @max(left_info.depth, right_info.depth) +| 1,
         .wide = left_info.wide or right_info.wide,
-        .flags = if (with_accumulator_tail_slot) StringRope.accumulator_tail_slot_flag else 0,
         .rt = rt,
     };
-    if (node.tailStateSlot()) |slot| slot.* = null;
     return node;
 }
 
@@ -1361,16 +1136,11 @@ fn createOwnedRope(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
 fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSValue) !void {
     const leaf_len = stringValueLen(owned_leaf);
     if (leaf_len == 0) {
-        owned_leaf.free(rt);
         return;
     }
 
     var leaf: ?JSValue = owned_leaf;
     var accumulated: ?JSValue = null;
-    errdefer {
-        if (leaf) |value| value.free(rt);
-        if (accumulated) |value| value.free(rt);
-    }
 
     var bucket_index: usize = 0;
     while (leaf_len >= rope_bucket_len[bucket_index + 1]) : (bucket_index += 1) {
@@ -1408,21 +1178,14 @@ fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSVal
 
 fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSValue) !void {
     const node = value.ropeBody() orelse {
-        return addRopeRebalanceLeaf(rt, buckets, value.dup());
+        return addRopeRebalanceLeaf(rt, buckets, value);
     };
     if (node.flatString()) |flat| {
-        return addRopeRebalanceLeaf(rt, buckets, flat.value().dup());
+        return addRopeRebalanceLeaf(rt, buckets, flat.value());
     }
 
     try collectRopeRebalanceLeaves(rt, buckets, node.left);
     try collectRopeRebalanceLeaves(rt, buckets, node.right);
-    if (node.tailResolved()) |tail| {
-        const flat = switch (tail) {
-            .latin1 => |bytes| try String.createLatin1(rt, bytes),
-            .utf16 => |units| try String.createUtf16(rt, units),
-        };
-        try addRopeRebalanceLeaf(rt, buckets, flat.value());
-    }
 }
 
 /// Returns a new balanced value without consuming `rope`. This is the Boehm,
@@ -1430,14 +1193,10 @@ fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSVa
 /// `js_rebalancee_string_rope`.
 fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
     var buckets: RopeBuckets = @splat(null);
-    errdefer for (&buckets) |*entry| {
-        if (entry.*) |value| value.free(rt);
-    };
 
     try collectRopeRebalanceLeaves(rt, &buckets, rope);
 
     var result: ?JSValue = null;
-    errdefer if (result) |value| value.free(rt);
     for (&buckets) |*entry| {
         const bucket = entry.* orelse continue;
         entry.* = null;
@@ -1452,200 +1211,38 @@ fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
     return (try String.createLatin1(rt, "")).value();
 }
 
-/// Appends flat content to a not-yet-materialized rope by extending the rope's
-/// private tail buffer (amortized doubling) instead of chaining a new rope node
-/// per concatenation. Returns false when the caller must keep the regular
-/// new-node linking (materialized rope). Aliasing is the caller's contract,
-/// exactly like the flat `append*InPlace` family (reference-count accounting at
-/// the call site). On allocation failure the rope is left untouched.
-/// "Nobody but the caller holds this rope": the guard behind every in-place
-/// rope mutation (tail append / accumulator reuse). The refcount answers it
-/// exactly; a tracer-owned rope (TGC S2) has no share count at all, so the
-/// answer is a conservative `false` and the caller takes the fresh-node path
-/// (spec §5.7 "value_ops": in-place append is dropped and measured later).
-pub inline fn ropeExclusivelyHeld(node: *const StringRope) bool {
-    if (comptime gc.string_tracer_owned) return false;
-    return node.header().rc == 1;
-}
-
-/// `ropeExclusivelyHeld` generalized to a caller-known alias count `n` (the
-/// fused `add_loc` path holds the local slot plus its transient dup = 2).
-pub inline fn ropeShareCountAtMost(node: *const StringRope, n: usize) bool {
-    if (comptime gc.string_tracer_owned) return false;
-    return @as(usize, @intCast(node.header().rc)) <= n;
-}
-
-pub fn appendRopeTail(node: *StringRope, rt: *JSRuntime, suffix: String.ResolvedData, max_ref_count: usize) !bool {
-    std.debug.assert(node.rt == rt);
-    if (node.isLinearized()) return false;
-    if (!node.supportsTail()) return false;
-    // A shared rope (a rope child, or otherwise held by an INDEPENDENT owner)
-    // must not mutate in place: another owner's view would change under it.
-    // The caller passes `max_ref_count` = the number of references it knows to
-    // be aliases of the accumulator it is overwriting (e.g. the fused
-    // `add_loc` path holds the local slot plus its own transient dup = 2). Any
-    // reference beyond that is an independent observer, so appending in place
-    // would corrupt it — bail. This is the refcount analogue of the old
-    // `rope_child` snapshot bit, generalized to the caller's known-alias count.
-    if (!ropeShareCountAtMost(node, max_ref_count)) return false;
-    const add_len = suffix.len();
-    if (add_len == 0) return true;
-    const new_total = checkedAddLength(node.len_(), add_len) orelse return false;
-    // Length cap on the in-place tail-append fast path: past JS_STRING_LEN_MAX
-    // the append bails to createRope, which throws error.StringTooLong (qjs
-    // JS_ConcatString cap, quickjs.c:4898). One compare on the hot churn loop.
-    if (new_total > max_length) return false;
-    const used = node.tailLen();
-    const need = checkedAddLength(used, add_len) orelse return false;
-
-    const tail_slot = node.tailStateSlot().?;
-    const widen_tail = if (tail_slot.*) |tail| switch (tail.data) {
-        .latin1 => suffix == .utf16,
-        .utf16 => true,
-    } else suffix == .utf16;
-    if (widen_tail) {
-        const buf = try ropeTailEnsureWide(rt, node, need);
-        switch (suffix) {
-            .latin1 => |bytes| for (bytes, used..) |byte, index| {
-                buf[index] = byte;
-            },
-            .utf16 => |units| @memcpy(buf[used..][0..add_len], units),
-        }
-    } else {
-        const buf = try ropeTailEnsureNarrow(rt, node, need);
-        @memcpy(buf[used..][0..add_len], suffix.latin1);
-    }
-    if (suffix == .utf16) node.wide = true;
-    tail_slot.*.?.len = need;
-    node.len = @intCast(new_total);
-    return true;
-}
-
-/// Allocates the optional accumulator-tail sidecar and its first buffer. The
-/// node is not mutated until both allocations succeed.
-fn createRopeTailState(rt: *JSRuntime, node: *StringRope, comptime T: type, need: usize) ![]T {
-    const state = try rt.createRuntime(RopeTailState);
-    errdefer rt.destroyRuntime(RopeTailState, state);
-    const buf = try rt.allocRuntime(T, nextStringCapacity(0, need));
-    state.* = .{
-        .data = if (T == u8) .{ .latin1 = buf } else .{ .utf16 = buf },
-        .len = 0,
-    };
-    node.tailStateSlot().?.* = state;
-    return buf;
-}
-
-/// Total allocation size for a `StringRope` node: the (padded) refcount prefix
+/// Total allocation size for a `StringRope` node: the padded metadata prefix
 /// plus the node struct. The prefix is padded to the node's alignment so the
-/// node lands aligned at `base + StringRope.rc_prefix_size`.
-const rope_node_alloc_size: usize = StringRope.rc_prefix_size + @sizeOf(StringRope);
-const accumulator_rope_node_alloc_size: usize = rope_node_alloc_size + @sizeOf(?*RopeTailState);
-const rope_node_alignment: std.mem.Alignment = std.mem.Alignment.of(StringRope);
+/// node lands aligned at `base + StringRope.metadata_prefix_size`.
+const rope_node_alloc_size: usize = StringRope.metadata_prefix_size + @sizeOf(StringRope);
 
 comptime {
     // The padded prefix must be a whole multiple of the node's alignment so the
-    // struct that follows it stays aligned, and it must be large enough to hold
-    // the 4-byte rc word that sits at `nodePtr - 4`.
-    std.debug.assert(StringRope.rc_prefix_size % @alignOf(StringRope) == 0);
-    std.debug.assert(StringRope.rc_prefix_size == gc.string_prefix_size);
-    std.debug.assert(@sizeOf(StringRope) % @alignOf(?*RopeTailState) == 0);
+    // struct that follows it stays aligned.
+    std.debug.assert(StringRope.metadata_prefix_size % @alignOf(StringRope) == 0);
+    std.debug.assert(StringRope.metadata_prefix_size == gc.string_prefix_size);
 }
 
-/// Allocates a `StringRope` node with a leading padded rc prefix (rc set to 1),
-/// mirroring the flat `String` prefix model. Returns the node pointer; the rc
-/// word lives at `nodePtr - 4` and is reached through `node.header()`.
-fn allocRopeNode(rt: *JSRuntime, with_accumulator_tail_slot: bool) !*StringRope {
-    const alloc_size = if (with_accumulator_tail_slot) accumulator_rope_node_alloc_size else rope_node_alloc_size;
-    // Ropes never take the extent route: both node sizes fit a cell.
-    comptime std.debug.assert(gc_block_heap.canAllocCellSize(accumulator_rope_node_alloc_size));
-    if (comptime gc.string_tracer_owned) {
-        if (try rt.memory.createStringCell(alloc_size)) |base| {
-            const node: *StringRope = @ptrCast(@alignCast(base + StringRope.rc_prefix_size));
-            rt.gc.addInitializedWithSizeNoFail(@ptrCast(node), gc_block_heap.accountedBodyBytesForRequest(alloc_size, StringRope.rc_prefix_size).?);
-            // Rope discriminator: the prefix `mark` flag is free for strings
-            // (cell bitmaps and extent tables hold the mark authority).
-            node.metadata().flags.mark = true;
-            return node;
-        }
-    }
-    const bytes = try rt.allocStringAlignedBytes(alloc_size, rope_node_alignment);
-    errdefer rt.memory.freeAlignedBytes(bytes, rope_node_alignment);
-    const node: *StringRope = @ptrCast(@alignCast(bytes.ptr + StringRope.rc_prefix_size));
-    node.metadata().* = string_prefix_init_rope;
+/// Allocates a `StringRope` node with its leading collector metadata.
+fn allocRopeNode(rt: *JSRuntime) !*StringRope {
+    // Ropes never take the extent route: the node fits a block cell.
+    comptime std.debug.assert(gc_block_heap.canAllocCellSize(rope_node_alloc_size));
+    // TGC S2-f (3): same allocation-threshold boundary as flat bodies (see
+    // `String.createUninitialized`). Before the cell pointer is taken.
+    rt.collectBeforeObjectAllocation(rope_node_alloc_size);
+    const base = (try rt.memory.createStringCell(rope_node_alloc_size)) orelse unreachable;
+    const node: *StringRope = @ptrCast(@alignCast(base + StringRope.metadata_prefix_size));
+    rt.gc.addInitializedWithSizeNoFail(@ptrCast(node), gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
+    // Rope discriminator: the prefix `mark` flag is free for strings (cell
+    // bitmaps and extent tables hold the mark authority).
+    node.metadata().flags.mark = true;
     return node;
-}
-
-/// Frees a `StringRope` node from its allocation base (`nodePtr - rc_prefix_size`).
-fn freeRopeNode(rt: *JSRuntime, node: *StringRope) void {
-    const base: [*]u8 = @as([*]u8, @ptrCast(node)) - StringRope.rc_prefix_size;
-    const alloc_size = if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
-    if (comptime gc.string_tracer_owned) {
-        if (gc.Registry.isBlockCellHeader(@ptrCast(node))) {
-            rt.memory.destroyStringCell(node, alloc_size);
-            return;
-        }
-    }
-    const bytes = base[0..alloc_size];
-    rt.memory.freeAlignedBytes(bytes, rope_node_alignment);
-}
-
-/// Releases a rope's private tail buffer (no-op for tail-less ropes).
-fn freeRopeTail(rt: *JSRuntime, node: *StringRope) void {
-    const slot = node.tailStateSlot() orelse return;
-    const state = slot.* orelse return;
-    switch (state.data) {
-        .latin1 => |buf| rt.memory.free(u8, buf),
-        .utf16 => |buf| rt.memory.free(u16, buf),
-    }
-    slot.* = null;
-    rt.destroyRuntime(RopeTailState, state);
-}
-
-/// Grows (or creates) a narrow tail buffer to hold `need` used bytes and
-/// returns it. Callers must route wide tails through `ropeTailEnsureWide`.
-fn ropeTailEnsureNarrow(rt: *JSRuntime, node: *StringRope, need: usize) ![]u8 {
-    const state = node.tailStateSlot().?.* orelse return createRopeTailState(rt, node, u8, need);
-    switch (state.data) {
-        .latin1 => |buf| {
-            if (need <= buf.len) return buf;
-            const grown = try rt.allocRuntime(u8, nextStringCapacity(buf.len, need));
-            @memcpy(grown[0..state.len], buf[0..state.len]);
-            rt.memory.free(u8, buf);
-            state.data = .{ .latin1 = grown };
-            return grown;
-        },
-        .utf16 => unreachable,
-    }
-}
-
-/// Grows (or creates) a wide tail buffer to hold `need` used units and
-/// returns it. A narrow tail is widened in place so a wide suffix can land
-/// in the same buffer.
-fn ropeTailEnsureWide(rt: *JSRuntime, node: *StringRope, need: usize) ![]u16 {
-    const state = node.tailStateSlot().?.* orelse return createRopeTailState(rt, node, u16, need);
-    switch (state.data) {
-        .utf16 => |buf| {
-            if (need <= buf.len) return buf;
-            const grown = try rt.allocRuntime(u16, nextStringCapacity(buf.len, need));
-            @memcpy(grown[0..state.len], buf[0..state.len]);
-            rt.memory.free(u16, buf);
-            state.data = .{ .utf16 = grown };
-            return grown;
-        },
-        .latin1 => |buf| {
-            const widened = try rt.allocRuntime(u16, nextStringCapacity(buf.len, need));
-            for (buf[0..state.len], 0..) |byte, index| widened[index] = byte;
-            rt.memory.free(u8, buf);
-            state.data = .{ .utf16 = widened };
-            return widened;
-        },
-    }
 }
 
 /// QJS caps rope depth at 60 and walks its tree without allocating. Do the
 /// same here: the only possible failure during flattening is allocation of the
 /// destination flat string itself. Each unlinearized zjs rope contributes
-/// `left ++ right ++ optional-tail`.
+/// `left ++ right`.
 fn copyRopeContent(comptime T: type, root: *const StringRope, out: []T) void {
     std.debug.assert(root.isLinearized() or root.depth <= String.rope_max_depth);
     var offset: usize = 0;
@@ -1660,9 +1257,6 @@ fn copyRopeNodeContent(comptime T: type, node: *const StringRope, out: []T, offs
     }
     copyRopeValueContent(T, node.left, out, offset);
     copyRopeValueContent(T, node.right, out, offset);
-    if (node.tailResolved()) |resolved| {
-        offset.* += copyResolvedUnits(T, out[offset.*..], resolved);
-    }
 }
 
 fn copyRopeValueContent(comptime T: type, value: JSValue, out: []T, offset: *usize) void {
@@ -1696,44 +1290,9 @@ fn copyResolvedUnits(comptime T: type, out: []T, resolved: String.ResolvedData) 
     }
 }
 
-/// Destroys a rope object when its refcount reaches 0. QJS's depth-60 invariant
-/// bounds the recursive release chain, so the generic node needs no intrusive
-/// destroy link.
-pub fn destroyRope(rt: *JSRuntime, node: *StringRope) void {
-    // rc-zero path only (see `String.destroyFromHeader`); sweep-time death of
-    // a tracer-owned rope is `destroyCellFromHeader`.
-    std.debug.assert(!gc.string_tracer_owned);
-    if (node.isLinearized()) {
-        std.debug.assert(!node.hasTail());
-        node.left.free(rt);
-    } else {
-        std.debug.assert(node.depth <= String.rope_max_depth);
-        freeRopeTail(rt, node);
-        node.left.free(rt);
-        node.right.free(rt);
-    }
-    freeRopeNode(rt, node);
-}
-
 const InlineAllocationLayout = struct {
     total_size: usize,
     allocation_alignment: std.mem.Alignment,
-};
-
-/// Initial Metadata for a freshly allocated flat string or rope node: kind
-/// `.string`, no list membership or registry publication (both still absent
-/// until S2-a2), count 1 in the lifetime tail.
-const string_prefix_init: gc.Metadata = .{
-    .flags = .{ .kind = .string },
-    .lifetime = .{ .rc = 1 },
-};
-
-/// Rope nodes set the prefix `mark` flag as their discriminator: for the
-/// string family that bit carries no mark authority (block bitmaps / extent
-/// tables do), so it is free to tell a 48-byte rope from a flat body.
-const string_prefix_init_rope: gc.Metadata = .{
-    .flags = .{ .kind = .string, .mark = true },
-    .lifetime = .{ .rc = 1 },
 };
 
 pub inline fn metaIsRope(meta: *const gc.Metadata) bool {
@@ -1746,8 +1305,7 @@ pub inline fn metaIsRope(meta: *const gc.Metadata) bool {
 pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize {
     const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
     const total = if (metaIsRope(meta)) blk: {
-        const node: *const StringRope = @ptrCast(@alignCast(header));
-        break :blk if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
+        break :blk rope_node_alloc_size;
     } else blk: {
         const body: *const String = @ptrCast(@alignCast(header));
         const layout = if (body.len_meta.is_wide)
@@ -1767,20 +1325,15 @@ pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize
 /// convention `traceStringEdges` uses); the prefix at `header - 8` tells a
 /// rope from a flat body. Nothing here touches a refcount and nothing calls
 /// `JSValue.free`: a rope's `left`/`right` are traced values the sweep
-/// reclaims on their own, and only the native pieces (rope tail buffer, atom
-/// table entry) need an explicit hand-off before the cell goes back.
+/// reclaims on their own, and only an atom-table entry needs an explicit
+/// hand-off before a flat symbol body's cell goes back.
 pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
-    comptime std.debug.assert(gc.string_tracer_owned);
     std.debug.assert(gc.Registry.isBlockCellHeader(header));
     const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
     if (metaIsRope(meta)) {
         const node: *StringRope = @ptrCast(@alignCast(header));
-        // A linearized rope never has a tail (see `destroyRope`); for the
-        // rest the tail is a private native buffer with no GC edges.
-        freeRopeTail(rt, node);
-        const alloc_size = if (node.supportsTail()) accumulator_rope_node_alloc_size else rope_node_alloc_size;
-        rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(alloc_size, StringRope.rc_prefix_size).?);
-        rt.memory.destroyStringCell(node, alloc_size);
+        rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
+        rt.memory.destroyStringCell(node, rope_node_alloc_size);
         return;
     }
     const body: *String = @ptrCast(@alignCast(header));
@@ -1807,10 +1360,9 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
 /// extent is dead by definition. Cells are collected first so freeing does
 /// not disturb the bitmap walk.
 pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
-    comptime std.debug.assert(gc.string_tracer_owned);
     var cells = std.ArrayList(*gc.GCObjectHeader).empty;
     defer cells.deinit(std.heap.page_allocator);
-    var it = rt.gc.objectIterator();
+    var it = rt.gc.objectIterator(.all);
     while (it.next()) |header| {
         if (header.metaConst().flags.kind != .string) continue;
         if (!gc.Registry.isBlockCellHeader(header)) continue;
@@ -1823,9 +1375,19 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
 }
 
 pub fn sweepStringExtents(rt: *JSRuntime) usize {
-    comptime std.debug.assert(gc.string_tracer_owned);
     const heap = &rt.gc.block_heap;
     return heap.sweepStringExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
+}
+
+/// Minor twin of `sweepStringExtents` (spec 7.2 (2)): destroy every extent in
+/// the heap's young list the minor did not mark. Sound for the same reason
+/// the young cell sweep is: an old object's write to a young extent is in the
+/// remembered set (`generationalBarrierValue`; `cycleMarkHeader` accepts the
+/// string tags), the minor force-traces every remembered owner, and an extent
+/// has no out-edges of its own -- ropes always fit a cell.
+pub fn sweepYoungStringExtents(rt: *JSRuntime) usize {
+    const heap = &rt.gc.block_heap;
+    return heap.sweepYoungStringExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
 }
 
 /// `Heap.sweepStringExtents` callback: the same handshake a condemned flat
@@ -1849,12 +1411,6 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize) void
     }
     rt.gc.unpublishStringExtent(header, user_bytes - gc.string_prefix_size);
     rt.memory.destroyStringExtent(body, user_bytes);
-}
-
-comptime {
-    // The extent sweep is wired by the collector; until that call lands, keep
-    // its body analysed in switch-on builds so it cannot rot unnoticed.
-    if (gc.string_tracer_owned) _ = &sweepStringExtents;
 }
 
 /// Child edges of a string-family carrier: flat bodies are leaves, ropes own
@@ -1913,20 +1469,6 @@ fn finalLatin1AllocationLen(unit_count: usize) ?usize {
 
 fn writeLatin1Terminator(bytes: []u8) void {
     bytes.ptr[bytes.len] = 0;
-}
-
-fn checkedAddLength(a: usize, b: usize) ?usize {
-    const result = @addWithOverflow(a, b);
-    return if (result[1] == 0) result[0] else null;
-}
-
-fn nextStringCapacity(current: usize, needed: usize) usize {
-    var capacity = if (current == 0) @as(usize, 16) else current;
-    while (capacity < needed) {
-        const doubled = @mulWithOverflow(capacity, 2);
-        capacity = if (doubled[1] == 0 and doubled[0] > capacity) doubled[0] else needed;
-    }
-    return capacity;
 }
 
 /// Folds a full 32-bit content hash into the 30-bit field qjs `JSString.hash`
@@ -2071,31 +1613,17 @@ test "string compare uses code-unit ordering for same and mixed width strings" {
     defer rt.destroy();
 
     const latin_a = try String.createUtf8(rt, "abc");
-    const latin_a_value = latin_a.value();
-    defer latin_a_value.free(rt);
     const latin_b = try String.createUtf8(rt, "abd");
-    const latin_b_value = latin_b.value();
-    defer latin_b_value.free(rt);
     try std.testing.expectEqual(@as(i32, 0), latin_a.compare(latin_a));
     try std.testing.expect(latin_a.compare(latin_b) < 0);
 
     const wide_a = try String.createUtf16(rt, &.{0x0100});
-    const wide_a_value = wide_a.value();
-    defer wide_a_value.free(rt);
     const wide_b = try String.createUtf16(rt, &.{ 0x00ff, 0x0100 });
-    const wide_b_value = wide_b.value();
-    defer wide_b_value.free(rt);
     try std.testing.expect(wide_a.compare(wide_b) > 0);
 
     const wide_parent = try String.createUtf16(rt, &.{ 0x0100, 'a' });
-    const wide_parent_value = wide_parent.value();
-    defer wide_parent_value.free(rt);
     const wide_slice = try String.createSlice(rt, wide_parent, 1, 1);
-    const wide_slice_value = wide_slice.value();
-    defer wide_slice_value.free(rt);
     const latin_single = try String.createUtf8(rt, "a");
-    const latin_single_value = latin_single.value();
-    defer latin_single_value.free(rt);
     try std.testing.expectEqual(@as(i32, 0), latin_single.compare(wide_slice));
 }
 
@@ -2104,21 +1632,13 @@ test "flatStringsEqNear matches js_string_eq on same-width flats" {
     defer rt.destroy();
 
     const a = try String.createUtf8(rt, "k0");
-    defer a.value().free(rt);
     const b = try String.createUtf8(rt, "k0");
-    defer b.value().free(rt);
     const c = try String.createUtf8(rt, "k32");
-    defer c.value().free(rt);
     const empty_a = try String.createUtf8(rt, "");
-    defer empty_a.value().free(rt);
     const empty_b = try String.createUtf8(rt, "");
-    defer empty_b.value().free(rt);
     const wide_a = try String.createUtf16(rt, &[_]u16{ 0x3b1, 0x3b2 });
-    defer wide_a.value().free(rt);
     const wide_b = try String.createUtf16(rt, &[_]u16{ 0x3b1, 0x3b2 });
-    defer wide_b.value().free(rt);
     const wide_c = try String.createUtf16(rt, &[_]u16{ 0x3b1, 0x3b3 });
-    defer wide_c.value().free(rt);
 
     try std.testing.expectEqual(true, flatStringsEqNear(a, a).?);
     try std.testing.expectEqual(true, flatStringsEqNear(a, b).?);
@@ -2135,14 +1655,10 @@ test "string compare short-circuits equal interned atom ids" {
     defer rt.destroy();
 
     const first = try String.createUtf8(rt, "length");
-    const first_value = first.value();
-    defer first_value.free(rt);
     const first_atom = try first.internAtom(rt);
     defer rt.atoms.free(first_atom);
 
     const second = try String.createUtf8(rt, "length");
-    const second_value = second.value();
-    defer second_value.free(rt);
     const second_atom = try second.internAtom(rt);
     defer rt.atoms.free(second_atom);
 

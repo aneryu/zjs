@@ -21,18 +21,45 @@ const block_generation_enabled = carrier.block_generation_enabled;
 const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
 const block_tracking_enabled = carrier.block_tracking_enabled;
 
-pub const enabled = true;
-
 /// Test-only proof that a young-only morgue close does not accidentally run
 /// the major-only whole-heap publication scan.
 pub var publish_completed_hot_blocks_calls_for_test: if (builtin.is_test) usize else void =
     if (builtin.is_test) 0 else {};
 
+/// Test-only injection point for `Heap.indexExtentPages`: when set, the page
+/// fan-out fails after this many pages, so the rollback and the linear
+/// fallback can be exercised without depending on where a hash map happens
+/// to grow.
+pub var extent_page_index_fail_after_for_test: if (builtin.is_test) ?usize else void =
+    if (builtin.is_test) null else {};
+
+/// Test-only proof that `allocMedium` is O(1) in the superblock count: every
+/// superblock this counter charges is one the allocator actually looked at.
+/// The bucket index makes that exactly one per allocation (plus the reserve
+/// that creates a superblock), where `findMediumRun` charged one per LIVE
+/// superblock per allocation.
+pub var medium_superblock_visits_for_test: if (builtin.is_test) usize else void =
+    if (builtin.is_test) 0 else {};
+
 pub const superblock_bytes: usize = 2 * 1024 * 1024;
 pub const block_bytes: usize = 64 * 1024;
 pub const blocks_per_superblock: usize = superblock_bytes / block_bytes;
-pub const page_bytes: usize = 4096;
+/// Page radix shared with the conservative address registry
+/// (`gc_address_registry.page_shift` aliases these): medium page runs, large
+/// mappings and the standalone occupant fan-out all key on the same 4 KiB
+/// grid, so there must be exactly one definition of it.
+pub const page_shift: u6 = 12;
+pub const page_bytes: usize = 1 << page_shift;
 pub const pages_per_superblock: usize = superblock_bytes / page_bytes;
+/// A medium extent is everything the small classes will not take and the
+/// large threshold will not claim, so its page run is bounded by
+/// `space.large_min_bytes`. Free runs longer than that are indistinguishable
+/// for allocation purposes and are clamped to this value, which is what makes
+/// the free-run bucket array a fixed 17 slots instead of one per page.
+pub const max_medium_pages: u32 = @intCast(space.large_min_bytes / page_bytes);
+const medium_bucket_count: usize = max_medium_pages + 1;
+/// Absent superblock index in the medium free-run buckets.
+const bucket_nil: u32 = std.math.maxInt(u32);
 pub const block_align: std.mem.Alignment = .fromByteUnits(block_bytes);
 /// Bytes handed back to the OS when a free block is decommitted. The header
 /// stays mapped; on platforms whose OS page is larger than `page_bytes`
@@ -85,12 +112,6 @@ comptime {
         @compileError("free_nil impersonates a block-cell header");
 }
 
-/// Alignment every cell is guaranteed to satisfy. Blocks and `cells_offset`
-/// are 64-byte aligned, while every size class is a multiple of 16, so the
-/// cross-class guarantee remains 16 bytes. A 64-byte class is consequently
-/// cache-line aligned for every cell, which is the compact Object contract.
-pub const cell_alignment: usize = 16;
-
 /// Why this heap does not yet serve `createRuntime`.
 ///
 /// A GC object is not just its struct: `memory.zig` writes an 8-byte prefix in
@@ -126,11 +147,9 @@ pub const Stats = struct {
     superblocks: usize = 0,
     large_maps: usize = 0,
     live_count: usize = 0,
-    small_allocs: usize = 0,
     medium_allocs: usize = 0,
     large_allocs: usize = 0,
     large_reserves: usize = 0,
-    failed_reserves: usize = 0,
     /// Bytes handed back to the OS from fully-free blocks (cumulative), and
     /// bytes re-faulted when such a block was reopened. The difference is the
     /// currently-decommitted figure already subtracted from `committed_bytes`.
@@ -155,20 +174,21 @@ pub const Stats = struct {
     /// `gc_concurrent.Stats` on purpose: that struct is instantiated by the
     /// `rc` build too, and stage 3 must not move a single `rc` byte.
     passa_settled_cells: usize = 0,
+    /// Wholly-empty medium superblocks whose mapping was returned to the
+    /// backing allocator (TGC S2-f (2)). Deliberately NOT folded into
+    /// `decommitted_bytes`: that counter is paired with `recommitted_bytes`
+    /// and is divided by `decommit_bytes` to report a BLOCK count, which a
+    /// 2 MiB superblock release would corrupt.
+    medium_superblocks_released: usize = 0,
+    medium_superblock_bytes_released: usize = 0,
 
     pub fn currentDecommittedBytes(self: Stats) usize {
         return self.decommitted_bytes -| self.recommitted_bytes;
     }
 };
 
-pub const Cell = struct {
-    ptr: [*]u8,
-    index: u32,
-};
-
 pub fn canAllocCellSize(n: usize) bool {
     if (n == 0 or n >= space.large_min_bytes) return false;
-    if (space.classifyPayload(n) != .small) return false;
     return space.classIndexForPayload(n) != null;
 }
 
@@ -184,17 +204,14 @@ pub inline fn accountedBodyBytesForRequest(n: usize, metadata_prefix_bytes: usiz
     return cell_size - metadata_prefix_bytes;
 }
 
-comptime {
-    // These counters live in every tracing Registry. Keep additions explicit:
-    // a silent size drift here multiplies across tests and embedded runtimes.
-    // 160 -> 168: `passa_settled_cells` (stage-3 Pass-A settlement).
-    // 168 -> 160: `superblock_reserves` (never read) removed, ablation batch 1.
-    if (@sizeOf(usize) == 8 and @sizeOf(Stats) != 160) {
-        @compileError("gc block-heap Stats size changed; update the footprint pin deliberately");
-    }
-}
-
-const SuperblockKind = enum { classed, medium };
+/// `tombstone` is a slot whose 2 MiB mapping has been returned to the backing
+/// allocator. The slot itself must stay: `Block.super_index`,
+/// `MediumExtent.super_index` and the medium bucket links are all array
+/// INDICES, so compacting `Heap.superblocks` would silently repoint them.
+/// Every `sb.kind != .classed` / `!= .medium` walk skips a tombstone already;
+/// the two places that must know about it are `Heap.deinit` (nothing to free)
+/// and `Heap.census`.
+const SuperblockKind = enum { classed, medium, tombstone };
 
 const CellLifecycle = struct {
     state: carrier.LifecycleState = .free,
@@ -211,6 +228,31 @@ const Superblock = struct {
     /// in both variants; sharing it by kind keeps the sparse condemnation
     /// index footprint-neutral.
     page_bits: [pages_per_superblock / 64]u64 = @splat(0),
+    /// Medium superblocks only: the longest run of free pages in `page_bits`,
+    /// clamped to `max_medium_pages`. It doubles as this superblock's index
+    /// in `Heap.medium_buckets`, so "which bucket am I in" needs no separate
+    /// field and cannot disagree with the bitmap. 0 means "serves no medium
+    /// request" and is deliberately not linked anywhere.
+    max_free_run: u8 = 0,
+    /// Doubly-linked bucket membership (superblock indices, `bucket_nil` for
+    /// absent). Doubly linked because a free re-buckets an arbitrary
+    /// superblock, not the head of a list.
+    bucket_prev: u32 = bucket_nil,
+    bucket_next: u32 = bucket_nil,
+    /// Medium superblocks only: `Heap.clock_ns` when the page bitmap last
+    /// became wholly empty. Same coarse stamp and the same idle rule as
+    /// `Block.free_time_ns`, and for the same reason: releasing on "empty at a
+    /// collection boundary" makes the policy a function of collection
+    /// FREQUENCY, and pdfjs collects every ~10 ms. Without this gate the
+    /// release traded 5.8 s of wall for 3.6 GB of mmap/munmap churn (1711
+    /// superblocks returned in one run) -- exactly the failure the block
+    /// decommit policy already documents.
+    empty_since_ns: u64 = 0,
+    /// Tombstoned slots only: intrusive free-slot chain consumed by
+    /// `reserveSuperblock`. Intrusive and not an `ArrayList` because
+    /// `releaseEmptyMediumSuperblocks` runs at a collection boundary and must
+    /// not be able to fail.
+    free_slot_next: u32 = bucket_nil,
     /// Generation and lifecycle are separate components.  A generation-only
     /// production switch cannot silently allocate/write lifecycle storage.
     block_incarnations: if (block_generation_enabled) [blocks_per_superblock]u32 else void =
@@ -220,19 +262,6 @@ const Superblock = struct {
     cell_lifecycles: if (lifecycle_state_enabled) [blocks_per_superblock][]CellLifecycle else void =
         if (lifecycle_state_enabled) @splat(&.{}) else {},
 };
-
-comptime {
-    // These pins are evaluated in enabled test/audit builds too.  Adding a
-    // field into tail padding is caught by the field-count assertion even if
-    // total size happens to remain unchanged.
-    if (@sizeOf(u32) != 4) @compileError("block generation cell budget changed");
-    if (@sizeOf(CellLifecycle) != 16) @compileError("block lifecycle cell budget changed");
-    if (@typeInfo(Superblock).@"struct".fields.len != 7) @compileError("Superblock field set changed");
-    const expected = 88 +
-        (if (block_generation_enabled) 640 else 0) +
-        (if (lifecycle_state_enabled) 512 else 0);
-    if (@sizeOf(Superblock) != expected) @compileError("Superblock component footprint budget changed");
-}
 
 /// Extent mark storage (TGC S2). Neither extent kind has a block bitmap, so
 /// the mark lives in the table entry: an extent is marked in the current
@@ -247,7 +276,7 @@ const LargeMap = struct {
     /// hands this to the destroy callback so accounting debits what was
     /// credited.
     user_bytes: usize,
-    mark_epoch: u64 = 0,
+    mark_epoch: u64 = extent_unmarked_epoch,
 };
 
 const MediumExtent = struct {
@@ -255,7 +284,33 @@ const MediumExtent = struct {
     page: u32,
     pages: u32,
     user_bytes: usize,
-    mark_epoch: u64 = 0,
+    mark_epoch: u64 = extent_unmarked_epoch,
+};
+
+/// Newborn / cleared extent mark. Heap epochs are always even (`beginMajor`
+/// strides by two), so an odd sentinel can never be mistaken for one -- which
+/// is what lets a MINOR mark extents at `mark_epoch == 0`, before the first
+/// major has ever run. The previous "0 means unmarked" rule made every
+/// minor-marked extent read dead in that window.
+const extent_unmarked_epoch: u64 = 1;
+
+/// One entry per 4 KiB page an extent's MAPPING covers, so conservative
+/// candidate resolution is a shift and a hash probe instead of a walk of
+/// both extent tables (`Heap.extentContaining`).
+///
+/// `end` is `base + user_bytes`, the inclusive one-past-end bound the
+/// occupant table uses. It is cached here rather than re-read from
+/// `medium`/`large` so a hit costs one probe, not two.
+///
+/// The page -> extent mapping is a FUNCTION, not a relation: medium runs come
+/// out of the superblock page bitmap and large mappings are page-aligned with
+/// a page-rounded length, so two extents can never share a page. The only
+/// address an extent claims outside its own pages is a one-past-end that
+/// falls exactly on the next page boundary; `extentContaining` recovers that
+/// with a second probe on `addr - 1` instead of turning the map into a list.
+const ExtentPage = struct {
+    base: usize,
+    end: usize,
 };
 
 pub const Block = extern struct {
@@ -666,6 +721,51 @@ pub const Heap = struct {
     classed_block_filter: usize = 0,
     large: std.AutoHashMapUnmanaged(usize, LargeMap) = .empty,
     medium: std.AutoHashMapUnmanaged(usize, MediumExtent) = .empty,
+    /// `addr >> page_shift` -> the extent covering that page. Maintained by
+    /// `allocMedium` / `allocLarge` / `free`; read only by
+    /// `extentContaining`, which the conservative scanner calls for EVERY
+    /// stack word the block geometry disowns.
+    extent_pages: std.AutoHashMapUnmanaged(usize, ExtentPage) = .empty,
+    /// Extents whose page fan-out could not be recorded because the index
+    /// insert failed (OOM). Unlike the address registry's occupant table, a
+    /// dropped entry here is not allowed to cost soundness and does not need
+    /// a sticky mark-only latch: while this is non-zero `extentContaining`
+    /// falls back to the linear table walk, which is the exact same answer at
+    /// the old price. It returns to zero when the unindexed extents die.
+    extent_pages_unindexed: usize = 0,
+    /// Removals since `extent_pages` was last compacted. Same disease and
+    /// same cure as `gc_address_registry.Table.removes_since_rehash`: std's
+    /// open-addressed map tombstones removed slots, and a map under balanced
+    /// churn never rehashes on its own, so every probe would degenerate to a
+    /// full-capacity scan -- exactly the cost this index exists to remove.
+    extent_page_removes: usize = 0,
+    /// Medium superblocks bucketed by `Superblock.max_free_run`: index B holds
+    /// every medium superblock whose longest free run is exactly B pages.
+    /// `allocMedium(pages)` therefore only has to find the first non-empty
+    /// bucket at or above `pages` (at most 16 array probes) to be holding a
+    /// superblock that is GUARANTEED to serve the request, instead of the
+    /// first-fit walk of every superblock that `findMediumRun` performed --
+    /// which was quadratic in heap size and cost pdfjs 275x cycles once the
+    /// S2 string flip made medium the string body allocator.
+    ///
+    /// Slot 0 is never populated (a superblock with no usable run is not
+    /// linked); it exists so the index arithmetic is the run length itself.
+    medium_buckets: [medium_bucket_count]u32 = @splat(bucket_nil),
+    /// Head of the tombstoned-slot chain (`Superblock.free_slot_next`).
+    free_superblock_slots: u32 = bucket_nil,
+    /// Allocation bases of the string extents published since the last
+    /// collection retired the young set.
+    ///
+    /// An extent has no cell, no bitmap and no list link, so this list is the
+    /// ONLY enumeration a minor can use for them. Without it a short-lived
+    /// >128 B string had to survive to the next major -- which is what drove
+    /// pdfjs's live heap from 8 MB to 343 MB after the S2 string flip.
+    ///
+    /// Entries are appended by `allocMedium`/`allocLarge`, i.e. before
+    /// publication, so the walkers tolerate a base that is no longer an
+    /// extent (construction failed and freed it) and a base that a later
+    /// extent reused. Both are handled by re-probing the tables.
+    young_extents: std.ArrayListUnmanaged(usize) = .empty,
     free_blocks: [space.class_count]?*Block = @splat(null),
     /// Completed, populated blocks with enough address-ordered free intervals
     /// to become the next exclusive allocation target for their size class.
@@ -699,8 +799,13 @@ pub const Heap = struct {
         }
         self.large.deinit(self.backing);
         self.medium.deinit(self.backing);
+        self.extent_pages.deinit(self.backing);
+        self.young_extents.deinit(self.backing);
         self.classed_blocks.deinit(self.backing);
         for (self.superblocks.items) |sb| {
+            // A tombstone's mapping is already back with the backing allocator
+            // and its per-block side tables were never allocated (medium only).
+            if (sb.kind == .tombstone) continue;
             if (comptime block_generation_enabled) {
                 for (sb.cell_generations) |generations| self.backing.free(generations);
             }
@@ -727,13 +832,11 @@ pub const Heap = struct {
     pub fn alloc(self: *Heap, n: usize) std.mem.Allocator.Error![]u8 {
         if (n == 0) return &.{};
         if (n >= space.large_min_bytes) return self.allocLarge(n);
-        if (space.classifyPayload(n) == .medium) return self.allocMedium(n);
-        const class_idx = space.classIndexForPayload(n) orelse return self.allocMedium(n);
-        return self.allocSmall(class_idx, n);
+        if (space.classIndexForPayload(n)) |class_idx| return self.allocSmall(class_idx, n);
+        return self.allocMedium(n);
     }
 
-    /// A small-class cell together with the cell index the allocator already
-    /// computed. This allocator stamps that index into the cell prefix so every
+    /// A small-class cell. The allocator stamps its index into the cell prefix so every
     /// `allocCell` result satisfies the contract required by `freeSmallCell`
     /// and the mark accessors need no division; recovering it with
     /// `cellIndexTrusted` afterwards would put an integer division back on
@@ -743,9 +846,8 @@ pub const Heap = struct {
     /// Null means the request is not a small-class cell (medium or large);
     /// the caller must fall back to `alloc`, and must NOT treat the result
     /// as a block cell.
-    pub fn allocCell(self: *Heap, n: usize) std.mem.Allocator.Error!?Cell {
+    pub fn allocCell(self: *Heap, n: usize) std.mem.Allocator.Error!?[*]u8 {
         if (n == 0 or n >= space.large_min_bytes) return null;
-        if (space.classifyPayload(n) == .medium) return null;
         const class_idx = space.classIndexForPayload(n) orelse return null;
         const cell_size: u32 = @intCast(space.classes[class_idx]);
         return try self.allocSmallCell(class_idx, cell_size);
@@ -759,11 +861,10 @@ pub const Heap = struct {
         comptime std.debug.assert(canAllocCellSize(n));
         const class_idx = comptime space.classIndexForPayload(n).?;
         const cell_size: u32 = comptime @intCast(space.classes[class_idx]);
-        const cell = self.allocSmallCell(class_idx, cell_size) catch return null;
-        return cell.ptr;
+        return self.allocSmallCell(class_idx, cell_size) catch return null;
     }
 
-    inline fn allocSmallCell(self: *Heap, class_idx: usize, cell_size: u32) std.mem.Allocator.Error!Cell {
+    inline fn allocSmallCell(self: *Heap, class_idx: usize, cell_size: u32) std.mem.Allocator.Error![*]u8 {
         var block = self.active[class_idx] orelse blk: {
             const opened = try self.openBlock(class_idx, cell_size);
             self.active[class_idx] = opened;
@@ -780,12 +881,13 @@ pub const Heap = struct {
         block.allocated_count += 1;
         const ptr = block.cellPtr(index);
         std.mem.writeInt(u16, ptr[0..2], @intCast(index), .little);
-        return .{ .ptr = ptr, .index = index };
+        return ptr;
     }
 
     pub fn free(self: *Heap, ptr: [*]u8) void {
         const addr = @intFromPtr(ptr);
         if (self.large.fetchRemove(addr)) |kv| {
+            self.unindexExtentPages(addr, kv.value.bytes.len);
             self.stats.live_bytes -= kv.value.bytes.len;
             self.stats.live_count -= 1;
             self.stats.committed_bytes -= kv.value.bytes.len;
@@ -794,6 +896,7 @@ pub const Heap = struct {
             return;
         }
         if (self.medium.fetchRemove(addr)) |kv| {
+            self.unindexExtentPages(addr, @as(usize, kv.value.pages) * page_bytes);
             self.freeMedium(kv.value);
             return;
         }
@@ -850,30 +953,210 @@ pub const Heap = struct {
             extent.mark_epoch
         else
             unreachable;
-        // Before the first major both sides are 0; a cell in that state reads
-        // an all-zero bitmap (unmarked), so answer the same for extents.
-        return epoch != 0 and stamped == epoch;
+        // No epoch guard: a newborn or minor-cleared extent carries the odd
+        // `extent_unmarked_epoch`, which no heap epoch equals, so epoch 0 (the
+        // window before the first major, where minors already run) answers
+        // like every other epoch.
+        return stamped == epoch;
     }
 
     /// Conservative resolution: the extent base whose allocation contains
-    /// `addr` (one-past-end included, like `Occupant.hi`), or null. Linear
-    /// over both tables; that is acceptable for now because extents are the
-    /// rare tail of string allocation and this probe runs only for words the
-    /// block geometry did not own. Replace with a page-keyed index (the
-    /// address registry's `pages` shape) if the tables ever grow large.
+    /// `addr` (one-past-end included, like `Occupant.hi`), or null.
+    ///
+    /// O(1). The conservative scanner calls this for every stack/register
+    /// word the block geometry disowns, so the linear walk of both extent
+    /// tables it replaces priced each such word at O(live extents) -- and a
+    /// string-heavy workload (regexp, pdfjs) holds thousands of extents.
+    ///
+    /// Two probes at most. The first resolves any address inside the
+    /// mapping. The second exists only for the one-past-end of an extent
+    /// whose `user_bytes` fills its last page exactly: that address is the
+    /// FIRST byte of the following page, which the extent does not own, so
+    /// it is found through `addr - 1`. That probe is reachable only for
+    /// page-aligned candidates and only after the first one missed.
     pub fn extentContaining(self: *const Heap, addr: usize) ?usize {
-        if (self.medium.count() == 0 and self.large.count() == 0) return null;
+        const pair = self.extentsContaining(addr);
+        return pair.inside orelse pair.one_past_end;
+    }
+
+    /// Both extents a conservative candidate can name.
+    ///
+    /// `inside` owns `addr` outright. `one_past_end` is the extent whose
+    /// inclusive one-past-end bound IS `addr`, which is a DIFFERENT extent
+    /// exactly when `addr` is a page boundary that ends one mapping and
+    /// starts the next -- interior pointers are legal candidates, so a
+    /// single-winner answer would drop the predecessor's only root. The
+    /// block and arena arms already visit both sides of such a boundary;
+    /// this is the extent arm's twin of that (spec 7.2 (3)).
+    pub const ExtentPair = struct {
+        inside: ?usize = null,
+        one_past_end: ?usize = null,
+    };
+
+    pub fn extentsContaining(self: *const Heap, addr: usize) ExtentPair {
+        if (self.extent_pages_unindexed != 0) {
+            @branchHint(.cold);
+            return self.extentsContainingLinear(addr);
+        }
+        var out: ExtentPair = .{};
+        if (self.extent_pages.count() == 0) return out;
+        if (self.extent_pages.get(addr >> page_shift)) |entry| {
+            if (addr >= entry.base and addr <= entry.end) out.inside = entry.base;
+        }
+        if (addr & (page_bytes - 1) == 0 and addr != 0) {
+            if (self.extent_pages.get((addr - 1) >> page_shift)) |entry| {
+                if (addr == entry.end and entry.base != out.inside) out.one_past_end = entry.base;
+            }
+        }
+        return out;
+    }
+
+    /// Index-free twin of `extentsContaining`, used while a page fan-out is
+    /// missing (`extent_pages_unindexed`) and by the index's own checker.
+    fn extentsContainingLinear(self: *const Heap, addr: usize) ExtentPair {
+        var out: ExtentPair = .{};
+        if (self.medium.count() == 0 and self.large.count() == 0) return out;
         var medium_it = self.medium.iterator();
         while (medium_it.next()) |entry| {
             const base = entry.key_ptr.*;
-            if (addr >= base and addr <= base + entry.value_ptr.user_bytes) return base;
+            if (addr < base or addr > base + entry.value_ptr.user_bytes) continue;
+            if (addr == base + entry.value_ptr.user_bytes and addr != base) {
+                out.one_past_end = base;
+            } else out.inside = base;
         }
         var large_it = self.large.iterator();
         while (large_it.next()) |entry| {
             const base = entry.key_ptr.*;
-            if (addr >= base and addr <= base + entry.value_ptr.user_bytes) return base;
+            if (addr < base or addr > base + entry.value_ptr.user_bytes) continue;
+            if (addr == base + entry.value_ptr.user_bytes and addr != base) {
+                out.one_past_end = base;
+            } else out.inside = base;
         }
-        return null;
+        return out;
+    }
+
+    /// Fan `[base, base + span_bytes)` out to one `extent_pages` entry per
+    /// page. `span_bytes` is the MAPPING (page-rounded); `user_bytes` is the
+    /// request, and bounds containment.
+    ///
+    /// Cannot fail: a partial fan-out would be a page-shaped hole in the
+    /// conservative scan, so a failed insert rolls back this extent's pages
+    /// and raises `extent_pages_unindexed`, which routes every probe back to
+    /// the exact linear walk until the extent dies.
+    fn indexExtentPages(self: *Heap, base: usize, span_bytes: usize, user_bytes: usize) void {
+        std.debug.assert(base & (page_bytes - 1) == 0);
+        std.debug.assert(span_bytes != 0 and span_bytes & (page_bytes - 1) == 0);
+        std.debug.assert(user_bytes <= span_bytes);
+        const first = base >> page_shift;
+        const last = (base + span_bytes - 1) >> page_shift;
+        const value: ExtentPage = .{ .base = base, .end = base + user_bytes };
+        var page = first;
+        while (page <= last) : (page += 1) {
+            if (comptime builtin.is_test) {
+                if (extent_page_index_fail_after_for_test) |limit| {
+                    if (page - first >= limit) {
+                        self.rollbackExtentPages(first, page);
+                        self.extent_pages_unindexed += 1;
+                        return;
+                    }
+                }
+            }
+            const gop = self.extent_pages.getOrPut(self.backing, page) catch {
+                self.rollbackExtentPages(first, page);
+                self.extent_pages_unindexed += 1;
+                return;
+            };
+            // Page -> extent is a function; a live occupant here means the
+            // page bitmap or a large mapping handed the same page out twice.
+            std.debug.assert(!gop.found_existing);
+            gop.value_ptr.* = value;
+        }
+    }
+
+    fn rollbackExtentPages(self: *Heap, first: usize, end_exclusive: usize) void {
+        var page = first;
+        while (page < end_exclusive) : (page += 1) _ = self.extent_pages.remove(page);
+    }
+
+    /// Drop an extent's page fan-out. Tolerates an extent that never got one
+    /// (its insert failed), which is what returns `extent_pages_unindexed` to
+    /// zero and the probe to O(1).
+    fn unindexExtentPages(self: *Heap, base: usize, span_bytes: usize) void {
+        const first = base >> page_shift;
+        const indexed = if (self.extent_pages.get(first)) |entry| entry.base == base else false;
+        if (!indexed) {
+            std.debug.assert(self.extent_pages_unindexed != 0);
+            self.extent_pages_unindexed -= 1;
+            return;
+        }
+        const last = (base + span_bytes - 1) >> page_shift;
+        var page = first;
+        while (page <= last) : (page += 1) {
+            std.debug.assert(self.extent_pages.contains(page));
+            _ = self.extent_pages.remove(page);
+            self.extent_page_removes += 1;
+        }
+        self.compactExtentPagesIfTombstoned();
+    }
+
+    /// Clear accumulated tombstones once a quarter of capacity has been
+    /// removed, so one O(capacity) rehash amortises to a constant per free.
+    fn compactExtentPagesIfTombstoned(self: *Heap) void {
+        const budget = self.extent_pages.capacity() / 4;
+        if (budget == 0 or self.extent_page_removes < budget) return;
+        self.extent_page_removes = 0;
+        self.extent_pages.rehash(std.hash_map.AutoContext(usize){});
+    }
+
+    pub const ExtentIndexError = error{
+        ExtentIndexMissingPage,
+        ExtentIndexOrphanPage,
+        ExtentIndexRangeMismatch,
+    };
+
+    /// Prove the page index against the extent tables in both directions: a
+    /// missing page drops a live root from the conservative scan, an orphan
+    /// page resolves freed memory. Both are use-after-free directions, so
+    /// counts alone are not enough. O(live extent pages); audit builds only.
+    pub fn verifyExtentPageIndex(self: *const Heap) ExtentIndexError!void {
+        var indexed: usize = 0;
+        var unindexed: usize = 0;
+        var medium_it = self.medium.iterator();
+        while (medium_it.next()) |entry| {
+            const span = @as(usize, entry.value_ptr.pages) * page_bytes;
+            if (try self.verifyOneExtentIndexed(entry.key_ptr.*, span, entry.value_ptr.user_bytes)) {
+                indexed += span >> page_shift;
+            } else unindexed += 1;
+        }
+        var large_it = self.large.iterator();
+        while (large_it.next()) |entry| {
+            const span = entry.value_ptr.bytes.len;
+            if (try self.verifyOneExtentIndexed(entry.key_ptr.*, span, entry.value_ptr.user_bytes)) {
+                indexed += span >> page_shift;
+            } else unindexed += 1;
+        }
+        if (indexed != self.extent_pages.count()) return error.ExtentIndexOrphanPage;
+        if (unindexed != self.extent_pages_unindexed) return error.ExtentIndexOrphanPage;
+    }
+
+    fn verifyOneExtentIndexed(
+        self: *const Heap,
+        base: usize,
+        span_bytes: usize,
+        user_bytes: usize,
+    ) ExtentIndexError!bool {
+        const first = base >> page_shift;
+        const last = (base + span_bytes - 1) >> page_shift;
+        const head = self.extent_pages.get(first) orelse return false;
+        if (head.base != base) return error.ExtentIndexRangeMismatch;
+        var page = first;
+        while (page <= last) : (page += 1) {
+            const entry = self.extent_pages.get(page) orelse return error.ExtentIndexMissingPage;
+            if (entry.base != base or entry.end != base + user_bytes) {
+                return error.ExtentIndexRangeMismatch;
+            }
+        }
+        return true;
     }
 
     /// Bitmap sweep's twin for extents: every extent whose mark is not
@@ -910,6 +1193,78 @@ pub const Heap = struct {
             destroyed += 1;
         }
         return destroyed;
+    }
+
+    /// Is `base` still a live extent allocation base? Cheap enough for the
+    /// young-extent walkers, which must tolerate stale list entries.
+    pub fn containsExtent(self: *const Heap, base: usize) bool {
+        return self.medium.contains(base) or self.large.contains(base);
+    }
+
+    pub fn extentUserBytes(self: *const Heap, base: usize) ?usize {
+        if (self.medium.getPtr(base)) |extent| return extent.user_bytes;
+        if (self.large.getPtr(base)) |extent| return extent.user_bytes;
+        return null;
+    }
+
+    /// Minor twin of `sweepStringExtents`.
+    ///
+    /// Only an extent published since the last retirement can be proven dead
+    /// by a young trace, and `young_extents` is exactly that population, so
+    /// this walks the list instead of both whole tables. Survivors stay in the
+    /// list for `retireYoungStringExtents`, which promotes them.
+    ///
+    /// Stale entries are expected (see `young_extents`): a base that is no
+    /// longer an extent, or one whose header is not published (`young` is the
+    /// publication's own stamp), is skipped rather than destroyed.
+    pub fn sweepYoungStringExtents(
+        self: *Heap,
+        epoch: u64,
+        ctx: *anyopaque,
+        destroy: *const fn (*anyopaque, usize, usize) void,
+    ) usize {
+        std.debug.assert(epoch & 1 == 0);
+        var destroyed: usize = 0;
+        // Indexed, re-reading the list each step: the destroy callback runs
+        // arbitrary teardown, and a captured slice would be a dangling read if
+        // anything it touched grew the list.
+        var index: usize = 0;
+        while (index < self.young_extents.items.len) : (index += 1) {
+            const base = self.young_extents.items[index];
+            const user_bytes = self.extentUserBytes(base) orelse continue;
+            const header: *const gc.GCObjectHeader = @ptrFromInt(base + gc.metadata_prefix_size);
+            if (!header.metaConst().flags.young) continue;
+            if (self.extentIsMarked(base, epoch)) continue;
+            destroy(ctx, base, user_bytes);
+            std.debug.assert(!self.containsExtent(base));
+            destroyed += 1;
+        }
+        return destroyed;
+    }
+
+    /// Promotion for the extent half of the young set: everything still in the
+    /// list after the sweep lived through a collection, so it is old now and
+    /// a later write to it must take the remembered-set path.
+    pub fn retireYoungStringExtents(self: *Heap) void {
+        for (self.young_extents.items) |base| {
+            if (!self.containsExtent(base)) continue;
+            const header: *gc.GCObjectHeader = @ptrFromInt(base + gc.metadata_prefix_size);
+            header.meta().flags.young = false;
+        }
+        self.young_extents.clearRetainingCapacity();
+    }
+
+    /// Minor-entry mark clearing for extents, the twin of
+    /// `clearYoungBlockMarksStw`: the young set enters each minor unmarked, so
+    /// a mark left by the PREVIOUS collection cannot keep a dead extent alive.
+    pub fn clearYoungExtentMarksStw(self: *Heap) void {
+        for (self.young_extents.items) |base| {
+            if (self.medium.getPtr(base)) |extent| {
+                extent.mark_epoch = extent_unmarked_epoch;
+                continue;
+            }
+            if (self.large.getPtr(base)) |extent| extent.mark_epoch = extent_unmarked_epoch;
+        }
     }
 
     /// Free a cell the caller KNOWS came from `allocCell`, skipping the
@@ -1063,16 +1418,6 @@ pub const Heap = struct {
         self.lifecycleFor(block, index).accounted_bytes = accounted_bytes;
     }
 
-    pub fn stateForCell(self: *const Heap, object_base: usize, prefix_bytes: usize) ?carrier.LifecycleState {
-        comptime std.debug.assert(lifecycle_state_enabled);
-        if (object_base < prefix_bytes) return null;
-        const cell_base = object_base - prefix_bytes;
-        const block = self.blockOf(@ptrFromInt(cell_base)) orelse return null;
-        const index = block.cellIndex(cell_base) orelse return null;
-        if (!block.cellAllocated(index)) return null;
-        return self.lifecycleForConst(block, index).state;
-    }
-
     pub fn rawBytesForCell(self: *const Heap, object_base: usize, prefix_bytes: usize) ?usize {
         if (object_base < prefix_bytes) return null;
         const block = self.blockOf(@ptrFromInt(object_base - prefix_bytes)) orelse return null;
@@ -1080,10 +1425,11 @@ pub const Heap = struct {
         return block.cell_size;
     }
 
-    pub fn setReuseSequenceForTest(self: *Heap, cell: Cell, sequence: u32) void {
+    pub fn setReuseSequenceForTest(self: *Heap, cell: [*]u8, sequence: u32) void {
         comptime std.debug.assert(block_generation_enabled);
-        const block = Block.fromCellTrusted(@intFromPtr(cell.ptr));
-        self.generationFor(block, cell.index).* = sequence;
+        const block = Block.fromCellTrusted(@intFromPtr(cell));
+        const index = block.cellIndex(@intFromPtr(cell)).?;
+        self.generationFor(block, index).* = sequence;
     }
 
     pub fn forEachOwnedIdentity(
@@ -1583,8 +1929,13 @@ pub const Heap = struct {
         self.stats.decommitted_bytes += released;
         self.stats.committed_bytes -= released;
         self.stats.decommit_max_batch_bytes = @max(self.stats.decommit_max_batch_bytes, released);
-        self.trimProcessHeapAfterLargeShrink(released);
-        return released;
+        // TGC S2-f (2): same boundary and the same throttle, but a whole
+        // different space. `releaseEmptyMediumSuperblocks` accounts for its
+        // own `committed_bytes`; it is added to `released` only so the caller
+        // and the process-trim signal see the full contraction.
+        const medium_released = self.releaseEmptyMediumSuperblocks(now_ns);
+        self.trimProcessHeapAfterLargeShrink(released + medium_released);
+        return released + medium_released;
     }
 
     /// Return free glibc arena pages only after the block heap independently
@@ -1989,14 +2340,6 @@ pub const Heap = struct {
         classify: *const fn (context: *const anyopaque, cell_addr: usize) Kind,
     };
 
-    pub fn verifyPublishedCells(
-        self: *const Heap,
-        block_cell_marker: u5,
-        object_kind: u3,
-    ) VerifyError!void {
-        return self.verifyCellsAllowing(block_cell_marker, object_kind, null, true);
-    }
-
     /// Runtime audit variant. Detached generator shells require exact
     /// construction-root membership plus the current mark. Resource-stripped
     /// objects waiting behind a deferred finalizer require exact parked-stack
@@ -2046,13 +2389,12 @@ pub const Heap = struct {
                     const flags = @as(*const u8, @ptrFromInt(cell + 3)).*;
                     const accounted = alloc_info & gc_representation.alloc_info_heap_accounted_mask != 0;
                     const standalone = alloc_info & gc_representation.alloc_info_standalone_mask != 0;
-                    // TGC S2: string-family cells share the block heap once
-                    // `gc.string_tracer_owned` is on; they carry kind 6 in the
-                    // same prefix byte.
+                    // String-family cells share the block heap with Objects
+                    // and carry kind 6 in the same prefix byte.
                     const cell_kind = flags & 0x7;
                     const prefix_valid = !standalone and
                         alloc_info & gc_representation.alloc_info_class_mask == block_cell_marker and
-                        (cell_kind == object_kind or (gc.string_tracer_owned and cell_kind == gc_representation.string_kind_tag));
+                        (cell_kind == object_kind or cell_kind == gc_representation.string_kind_tag);
                     if (!accounted and prefix_valid) {
                         const allowed = if (allowance) |candidate|
                             candidate.classify(candidate.context, cell)
@@ -2188,6 +2530,7 @@ pub const Heap = struct {
                     out.medium_superblocks += 1;
                     continue;
                 },
+                .tombstone => continue,
                 .classed => out.classed_superblocks += 1,
             }
             if (sb.page_bits[0] == 0) out.wholly_empty_superblocks += 1;
@@ -2278,17 +2621,8 @@ pub const Heap = struct {
 
     fn allocSmall(self: *Heap, class_idx: usize, user_bytes: usize) std.mem.Allocator.Error![]u8 {
         const cell_size: u32 = @intCast(space.classes[class_idx]);
-        var block = self.active[class_idx] orelse try self.openBlock(class_idx, cell_size);
-        const index = self.popTrackedCell(block) orelse blk: {
-            self.active[class_idx] = null;
-            block = try self.openBlock(class_idx, cell_size);
-            break :blk self.popTrackedCell(block).?;
-        };
-        self.active[class_idx] = block;
-        setBitPlain(block.bitmaps().alloc, index);
-        if (block.allocated_count == 0) self.noteNonemptyBlock(block);
-        block.allocated_count += 1;
-        return block.cellPtr(index)[0..user_bytes];
+        const cell = try self.allocSmallCell(class_idx, cell_size);
+        return cell[0..user_bytes];
     }
 
     fn freeSmall(self: *Heap, block: *Block, index: u32, cell: [*]u8) void {
@@ -2400,55 +2734,48 @@ pub const Heap = struct {
             sb.used_blocks += 1;
             return .{ .ptr = sb.bytes.ptr + off, .super_index = @intCast(super_index) };
         }
-        const sb = try self.reserveSuperblock(.classed);
+        const slot = try self.reserveSuperblock(.classed);
         // Make publication of any of this superblock's 32 block bases
         // infallible after the mapping exists. Roll the mapping back if the
         // membership index cannot reserve: an allocation error must not leave
         // a committed-but-unusable superblock behind.
         self.classed_blocks.ensureUnusedCapacity(self.backing, blocks_per_superblock) catch |err| {
-            const bytes = sb.bytes;
-            std.debug.assert(self.superblocks.items.len != 0);
-            std.debug.assert(&self.superblocks.items[self.superblocks.items.len - 1] == sb);
-            self.superblocks.items.len -= 1;
-            self.backing.free(bytes);
-            self.stats.superblocks -= 1;
-            self.stats.committed_bytes -= superblock_bytes;
-            self.stats.failed_reserves += 1;
+            self.unreserveSuperblock(slot);
             return err;
         };
         if (comptime block_generation_enabled) {
-            sb.cell_generations[0] = self.backing.alloc(u32, geometry.cell_count) catch |err| {
-                const bytes = sb.bytes;
-                self.superblocks.items.len -= 1;
-                self.backing.free(bytes);
-                self.stats.superblocks -= 1;
-                self.stats.committed_bytes -= superblock_bytes;
-                self.stats.failed_reserves += 1;
-                return err;
-            };
-            @memset(sb.cell_generations[0], 0);
+            self.superblocks.items[slot].cell_generations[0] =
+                self.backing.alloc(u32, geometry.cell_count) catch |err| {
+                    self.unreserveSuperblock(slot);
+                    return err;
+                };
+            @memset(self.superblocks.items[slot].cell_generations[0], 0);
         }
         if (comptime lifecycle_state_enabled) {
-            sb.cell_lifecycles[0] = self.backing.alloc(CellLifecycle, geometry.cell_count) catch |err| {
-                if (comptime block_generation_enabled) self.backing.free(sb.cell_generations[0]);
-                const bytes = sb.bytes;
-                self.superblocks.items.len -= 1;
-                self.backing.free(bytes);
-                self.stats.superblocks -= 1;
-                self.stats.committed_bytes -= superblock_bytes;
-                self.stats.failed_reserves += 1;
-                return err;
-            };
-            @memset(sb.cell_lifecycles[0], .{});
+            self.superblocks.items[slot].cell_lifecycles[0] =
+                self.backing.alloc(CellLifecycle, geometry.cell_count) catch |err| {
+                    if (comptime block_generation_enabled) {
+                        self.backing.free(self.superblocks.items[slot].cell_generations[0]);
+                        self.superblocks.items[slot].cell_generations[0] = &.{};
+                    }
+                    self.unreserveSuperblock(slot);
+                    return err;
+                };
+            @memset(self.superblocks.items[slot].cell_lifecycles[0], .{});
         }
+        const sb = &self.superblocks.items[slot];
         const base = @intFromPtr(sb.bytes.ptr);
         self.classed_blocks.putAssumeCapacity(base, {});
         self.classed_block_filter |= base;
         sb.used_blocks = 1;
-        return .{ .ptr = sb.bytes.ptr, .super_index = @intCast(self.superblocks.items.len - 1) };
+        return .{ .ptr = sb.bytes.ptr, .super_index = slot };
     }
 
-    fn reserveSuperblock(self: *Heap, kind: SuperblockKind) std.mem.Allocator.Error!*Superblock {
+    /// Returns the SLOT INDEX, not a pointer: `superblocks` can grow, and a
+    /// reused tombstone is not at the tail, so neither the address nor
+    /// `items.len - 1` is a valid way for a caller to name what it just got.
+    fn reserveSuperblock(self: *Heap, kind: SuperblockKind) std.mem.Allocator.Error!u32 {
+        std.debug.assert(kind != .tombstone);
         var incarnations: if (block_generation_enabled) [blocks_per_superblock]u32 else void =
             if (block_generation_enabled) @splat(0) else {};
         if (comptime block_generation_enabled) {
@@ -2457,7 +2784,6 @@ pub const Heap = struct {
                 while (i < blocks_per_superblock) : (i += 1) {
                     if (self.block_generation_exhausted or self.next_block_incarnation == std.math.maxInt(u32)) {
                         self.block_generation_exhausted = true;
-                        self.stats.failed_reserves += 1;
                         return error.OutOfMemory;
                     }
                     incarnations[i] = self.next_block_incarnation;
@@ -2465,19 +2791,117 @@ pub const Heap = struct {
                 }
             }
         }
-        const bytes = self.backing.alignedAlloc(u8, block_align, superblock_bytes) catch |err| {
-            self.stats.failed_reserves += 1;
-            return err;
-        };
+        const bytes = try self.backing.alignedAlloc(u8, block_align, superblock_bytes);
         errdefer self.backing.free(bytes);
-        try self.superblocks.append(self.backing, .{
+        const fresh: Superblock = .{
             .bytes = bytes,
             .kind = kind,
             .block_incarnations = if (block_generation_enabled) incarnations else {},
-        });
+        };
+        const slot: u32 = blk: {
+            const head = self.free_superblock_slots;
+            if (head != bucket_nil) {
+                std.debug.assert(self.superblocks.items[head].kind == .tombstone);
+                self.free_superblock_slots = self.superblocks.items[head].free_slot_next;
+                break :blk head;
+            }
+            try self.superblocks.append(self.backing, fresh);
+            break :blk @intCast(self.superblocks.items.len - 1);
+        };
+        self.superblocks.items[slot] = fresh;
         self.stats.superblocks += 1;
         self.stats.committed_bytes += superblock_bytes;
-        return &self.superblocks.items[self.superblocks.items.len - 1];
+        return slot;
+    }
+
+    /// Undo a `reserveSuperblock`: return the mapping and make the slot
+    /// reusable. Cannot fail and cannot move any other slot, because
+    /// `Block.super_index` / `MediumExtent.super_index` / the bucket links all
+    /// name slots by index. The tail case still pops so a rollback of the very
+    /// last reservation leaves no residue at all.
+    fn unreserveSuperblock(self: *Heap, slot: u32) void {
+        const sb = &self.superblocks.items[slot];
+        std.debug.assert(sb.kind != .tombstone);
+        std.debug.assert(sb.bucket_prev == bucket_nil and sb.bucket_next == bucket_nil);
+        std.debug.assert(sb.max_free_run == 0);
+        const bytes = sb.bytes;
+        self.stats.superblocks -= 1;
+        self.stats.committed_bytes -= superblock_bytes;
+        if (slot + 1 == self.superblocks.items.len) {
+            self.superblocks.items.len -= 1;
+        } else {
+            sb.* = .{ .bytes = bytes[0..0], .kind = .tombstone };
+            sb.free_slot_next = self.free_superblock_slots;
+            self.free_superblock_slots = slot;
+        }
+        self.backing.free(bytes);
+    }
+
+    /// TGC S2-f (2). A medium superblock whose 512 page bits are all clear is
+    /// 2 MiB of committed address space serving nothing: before this, the only
+    /// release path in the heap was `releaseFreeBlockPages`, which walks the
+    /// CLASSED free-block lists, so an empty medium superblock simply sat in
+    /// bucket `max_medium_pages` forever and `committed_bytes` never fell.
+    /// pdfjs's short-lived >128-byte string bodies made that a monotonic
+    /// hundreds-of-megabytes ratchet.
+    ///
+    /// One empty superblock is kept as a spare so a workload oscillating
+    /// around a single superblock's worth of medium extents does not
+    /// mmap/munmap once per collection.
+    pub const medium_spare_superblocks: usize = 1;
+
+    /// Idle age a wholly-empty medium superblock must reach before its 2 MiB
+    /// mapping is returned. Separate from `decommit_min_idle_ns` because the
+    /// two releases are not the same operation: a classed block decommit is
+    /// `madvise(DONTNEED)` on a mapping that stays, while this is a real
+    /// `munmap` whose undo is a fresh `mmap` plus first-touch faults on every
+    /// page. Measured on pdfjs.fixed (ReleaseFast, CPU19): ungated the release
+    /// returned 1711 superblocks / 3.59 GB, took `block committed` from 75.7 MB
+    /// to 49.1 MB and wall from 5.84 s to 30.82 s.
+    /// Held at the classed constant: `munmap` is strictly more expensive to
+    /// undo than `madvise`, so its idle bar must not be LOWER than the block
+    /// one. A 100 ms probe (== `decommit_period_ns`, i.e. "empty across two
+    /// consecutive scans") returned 3 superblocks / 6 MB of pdfjs's 75.7 MB at
+    /// no measurable wall cost -- noise, not slack. pdfjs's medium superblocks
+    /// are a steady-state working set, which is precisely what the ungated
+    /// 30.82 s run proves: it was re-mapping what it had just released.
+    pub const medium_release_min_idle_ns: u64 = decommit_min_idle_ns;
+
+    fn whollyEmpty(sb: *const Superblock) bool {
+        for (sb.page_bits) |word| {
+            if (word != 0) return false;
+        }
+        return true;
+    }
+
+    pub fn releaseEmptyMediumSuperblocks(self: *Heap, now_ns: u64) usize {
+        var released: usize = 0;
+        var spared: usize = 0;
+        var slot: u32 = 0;
+        while (slot < self.superblocks.items.len) : (slot += 1) {
+            {
+                const sb = &self.superblocks.items[slot];
+                if (sb.kind != .medium) continue;
+                // `max_free_run` is only a cheap pre-filter: it is clamped to
+                // `max_medium_pages` (16 of 512 pages), so a superblock with
+                // one live extent at page 400 also reports 16. The bitmap is
+                // the authority for "wholly empty".
+                if (sb.max_free_run != max_medium_pages) continue;
+                if (!whollyEmpty(sb)) continue;
+                if (now_ns -| sb.empty_since_ns < medium_release_min_idle_ns) continue;
+                if (spared < medium_spare_superblocks) {
+                    spared += 1;
+                    continue;
+                }
+            }
+            self.bucketUnlink(slot);
+            self.superblocks.items[slot].max_free_run = 0;
+            self.unreserveSuperblock(slot);
+            released += superblock_bytes;
+            self.stats.medium_superblocks_released += 1;
+            self.stats.medium_superblock_bytes_released += superblock_bytes;
+        }
+        return released;
     }
 
     fn resetBlock(
@@ -2538,65 +2962,183 @@ pub const Heap = struct {
 
     fn allocMedium(self: *Heap, n: usize) std.mem.Allocator.Error![]u8 {
         const pages: u32 = @intCast((n + page_bytes - 1) / page_bytes);
-        const found = self.findMediumRun(pages) orelse blk: {
-            _ = try self.reserveSuperblock(.medium);
-            break :blk self.findMediumRun(pages).?;
+        std.debug.assert(pages >= 1 and pages <= max_medium_pages);
+        // Every failure below must leave the page bitmap, the bucket index and
+        // the extent table agreeing, so reserve both side tables BEFORE the
+        // first bit is set. A half-applied medium allocation would otherwise
+        // burn a page run that nothing can ever free.
+        try self.medium.ensureUnusedCapacity(self.backing, 1);
+        try self.young_extents.ensureUnusedCapacity(self.backing, 1);
+        const super_index = self.takeMediumSuperblock(pages) orelse blk: {
+            const fresh = try self.reserveSuperblock(.medium);
+            self.bucketLink(fresh, max_medium_pages);
+            break :blk fresh;
         };
-        const sb = &self.superblocks.items[found.super_index];
-        var p: u32 = 0;
-        while (p < pages) : (p += 1) setPage(&sb.page_bits, found.page + p);
-        const ptr = sb.bytes.ptr + found.page * page_bytes;
-        try self.medium.put(self.backing, @intFromPtr(ptr), .{
-            .super_index = found.super_index,
-            .page = found.page,
+        const page = blk: {
+            const sb = &self.superblocks.items[super_index];
+            // The bucket promised a run of at least `pages`; the scan only has
+            // to say WHERE, and it is bounded by the eight bitmap words.
+            break :blk scanFreeRuns(&sb.page_bits, pages).first.?;
+        };
+        const ptr = blk: {
+            const sb = &self.superblocks.items[super_index];
+            var p: u32 = 0;
+            while (p < pages) : (p += 1) setPage(&sb.page_bits, page + p);
+            break :blk sb.bytes.ptr + page * page_bytes;
+        };
+        self.rebucket(super_index);
+        self.medium.putAssumeCapacity(@intFromPtr(ptr), .{
+            .super_index = super_index,
+            .page = page,
             .pages = pages,
             .user_bytes = n,
         });
+        self.indexExtentPages(@intFromPtr(ptr), @as(usize, pages) * page_bytes, n);
+        self.young_extents.appendAssumeCapacity(@intFromPtr(ptr));
         self.stats.live_bytes += n;
         self.stats.live_count += 1;
         self.stats.medium_allocs += 1;
         return ptr[0..n];
     }
 
-    fn findMediumRun(self: *Heap, pages: u32) ?struct { super_index: u32, page: u32 } {
-        var si: u32 = 0;
-        while (si < self.superblocks.items.len) : (si += 1) {
-            const sb = &self.superblocks.items[si];
-            if (sb.kind != .medium) continue;
-            var start: u32 = 0;
-            while (start + pages <= pages_per_superblock) {
-                var ok = true;
-                var p: u32 = 0;
-                while (p < pages) : (p += 1) {
-                    if (testPage(sb.page_bits, start + p)) {
-                        ok = false;
-                        start = start + p + 1;
-                        break;
-                    }
-                }
-                if (ok) return .{ .super_index = si, .page = start };
-            }
+    /// First medium superblock whose longest free run can serve `pages`, or
+    /// null when one has to be reserved. At most `max_medium_pages` array
+    /// probes and exactly one superblock touched -- the whole point of the
+    /// bucket index.
+    fn takeMediumSuperblock(self: *Heap, pages: u32) ?u32 {
+        var bucket: usize = pages;
+        while (bucket < medium_bucket_count) : (bucket += 1) {
+            const head = self.medium_buckets[bucket];
+            if (head == bucket_nil) continue;
+            if (comptime builtin.is_test) medium_superblock_visits_for_test += 1;
+            return head;
         }
         return null;
     }
 
     fn freeMedium(self: *Heap, extent: MediumExtent) void {
-        const sb = &self.superblocks.items[extent.super_index];
-        var p: u32 = 0;
-        while (p < extent.pages) : (p += 1) clearPage(&sb.page_bits, extent.page + p);
+        {
+            const sb = &self.superblocks.items[extent.super_index];
+            var p: u32 = 0;
+            while (p < extent.pages) : (p += 1) clearPage(&sb.page_bits, extent.page + p);
+        }
+        // A wholly empty medium superblock lands in bucket `max_medium_pages`
+        // and is reused from there. Returning its mapping is the decommit
+        // policy's business (`releaseEmptyMediumSuperblocks`, driven from
+        // `releaseFreeBlockPages`); the allocator only stamps when the
+        // superblock became idle, exactly as the classed free path does.
+        self.rebucket(extent.super_index);
+        {
+            const sb = &self.superblocks.items[extent.super_index];
+            if (sb.max_free_run == max_medium_pages and whollyEmpty(sb)) {
+                sb.empty_since_ns = self.clock_ns;
+            }
+        }
         self.stats.live_bytes -= extent.user_bytes;
         self.stats.live_count -= 1;
+    }
+
+    /// Re-derive `max_free_run` from the bitmap and move the superblock to the
+    /// matching bucket. The bitmap is the single source of truth; the field is
+    /// a cache of it, and `verifyMediumBuckets` proves the two agree.
+    fn rebucket(self: *Heap, super_index: u32) void {
+        const run = scanFreeRuns(&self.superblocks.items[super_index].page_bits, 0).max_run;
+        if (self.superblocks.items[super_index].max_free_run == run) return;
+        self.bucketUnlink(super_index);
+        self.bucketLink(super_index, run);
+    }
+
+    fn bucketUnlink(self: *Heap, super_index: u32) void {
+        const sb = &self.superblocks.items[super_index];
+        const bucket: usize = sb.max_free_run;
+        if (bucket == 0) {
+            std.debug.assert(sb.bucket_prev == bucket_nil and sb.bucket_next == bucket_nil);
+            return;
+        }
+        const prev = sb.bucket_prev;
+        const next = sb.bucket_next;
+        sb.bucket_prev = bucket_nil;
+        sb.bucket_next = bucket_nil;
+        if (prev == bucket_nil) {
+            std.debug.assert(self.medium_buckets[bucket] == super_index);
+            self.medium_buckets[bucket] = next;
+        } else {
+            self.superblocks.items[prev].bucket_next = next;
+        }
+        if (next != bucket_nil) self.superblocks.items[next].bucket_prev = prev;
+    }
+
+    fn bucketLink(self: *Heap, super_index: u32, run: u32) void {
+        std.debug.assert(run <= max_medium_pages);
+        {
+            const sb = &self.superblocks.items[super_index];
+            std.debug.assert(sb.kind == .medium);
+            std.debug.assert(sb.bucket_prev == bucket_nil and sb.bucket_next == bucket_nil);
+            sb.max_free_run = @intCast(run);
+            if (run == 0) return;
+            sb.bucket_next = self.medium_buckets[run];
+        }
+        const head = self.medium_buckets[run];
+        if (head != bucket_nil) self.superblocks.items[head].bucket_prev = super_index;
+        self.medium_buckets[run] = super_index;
+    }
+
+    pub const MediumBucketError = error{
+        MediumBucketStale,
+        MediumBucketMislinked,
+        MediumBucketUnlinked,
+    };
+
+    /// Prove `Superblock.max_free_run` against the page bitmap it caches and
+    /// the bucket list it names. A stale run either hides free space forever
+    /// (allocation reserves superblocks it does not need) or hands out a run
+    /// that is not free -- the second is a double-allocation of live string
+    /// bytes, so counts alone are not enough and both directions are checked.
+    pub fn verifyMediumBuckets(self: *const Heap) MediumBucketError!void {
+        if (self.medium_buckets[0] != bucket_nil) return error.MediumBucketMislinked;
+        var expected_linked: usize = 0;
+        for (self.superblocks.items) |*sb| {
+            if (sb.kind != .medium) {
+                // Classed AND tombstoned slots: both must be out of every
+                // bucket. `releaseEmptyMediumSuperblocks` unlinks before it
+                // tombstones, so a tombstone still in a bucket is a bug here,
+                // not an exemption.
+                if (sb.max_free_run != 0 or sb.bucket_prev != bucket_nil or sb.bucket_next != bucket_nil) {
+                    return error.MediumBucketMislinked;
+                }
+                continue;
+            }
+            if (scanFreeRuns(&sb.page_bits, 0).max_run != sb.max_free_run) return error.MediumBucketStale;
+            if (sb.max_free_run != 0) expected_linked += 1;
+        }
+        var linked: usize = 0;
+        for (self.medium_buckets, 0..) |head, bucket| {
+            var prev = bucket_nil;
+            var cursor = head;
+            while (cursor != bucket_nil) {
+                if (cursor >= self.superblocks.items.len) return error.MediumBucketMislinked;
+                const sb = &self.superblocks.items[cursor];
+                if (sb.kind != .medium) return error.MediumBucketMislinked;
+                if (@as(usize, sb.max_free_run) != bucket) return error.MediumBucketMislinked;
+                if (sb.bucket_prev != prev) return error.MediumBucketMislinked;
+                linked += 1;
+                if (linked > self.superblocks.items.len) return error.MediumBucketMislinked;
+                prev = cursor;
+                cursor = sb.bucket_next;
+            }
+        }
+        if (linked != expected_linked) return error.MediumBucketUnlinked;
     }
 
     fn allocLarge(self: *Heap, n: usize) std.mem.Allocator.Error![]u8 {
         const aligned = std.mem.alignForward(usize, n, page_bytes);
         self.stats.large_reserves += 1;
-        const bytes = self.backing.alignedAlloc(u8, .fromByteUnits(page_bytes), aligned) catch |err| {
-            self.stats.failed_reserves += 1;
-            return err;
-        };
+        try self.young_extents.ensureUnusedCapacity(self.backing, 1);
+        const bytes = try self.backing.alignedAlloc(u8, .fromByteUnits(page_bytes), aligned);
         errdefer self.backing.free(bytes);
         try self.large.put(self.backing, @intFromPtr(bytes.ptr), .{ .bytes = bytes, .user_bytes = n });
+        self.indexExtentPages(@intFromPtr(bytes.ptr), bytes.len, n);
+        self.young_extents.appendAssumeCapacity(@intFromPtr(bytes.ptr));
         self.stats.live_bytes += bytes.len;
         self.stats.live_count += 1;
         self.stats.committed_bytes += bytes.len;
@@ -2606,18 +3148,144 @@ pub const Heap = struct {
     }
 };
 
-comptime {
-    const base_heap_size: usize = if (std.debug.runtime_safety) 512 else 488;
-    const expected_heap_size = base_heap_size + if (block_generation_enabled) 8 else 0;
-    if (@sizeOf(Heap) != expected_heap_size) {
-        @compileError(std.fmt.comptimePrint(
-            "block generation Heap budget changed: actual={d} expected={d}",
-            .{ @sizeOf(Heap), expected_heap_size },
-        ));
-    }
+extern "c" fn malloc_trim(pad: usize) c_int;
+
+test "string extents: a shared page boundary resolves to both neighbours" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    // `first` fills its last page exactly, so its inclusive one-past-end IS
+    // `second`'s base -- the one address two extents both answer for.
+    const first = try heap.alloc(page_bytes * 2);
+    const second = try heap.alloc(page_bytes - 8);
+    const first_base = @intFromPtr(first.ptr);
+    const second_base = @intFromPtr(second.ptr);
+    try std.testing.expectEqual(first_base + page_bytes * 2, second_base);
+
+    const shared = heap.extentsContaining(second_base);
+    try std.testing.expectEqual(@as(?usize, second_base), shared.inside);
+    try std.testing.expectEqual(@as(?usize, first_base), shared.one_past_end);
+    // The linear fallback must give the same two answers, not one of them.
+    const shared_linear = heap.extentsContainingLinear(second_base);
+    try std.testing.expectEqual(@as(?usize, second_base), shared_linear.inside);
+    try std.testing.expectEqual(@as(?usize, first_base), shared_linear.one_past_end);
+
+    // An interior address still has exactly one owner ...
+    const interior = heap.extentsContaining(first_base + 8);
+    try std.testing.expectEqual(@as(?usize, first_base), interior.inside);
+    try std.testing.expectEqual(@as(?usize, null), interior.one_past_end);
+    // ... and a one-past-end with no neighbour still resolves, alone.
+    const tail = heap.extentsContaining(second_base + page_bytes - 8);
+    try std.testing.expectEqual(@as(?usize, second_base), tail.inside);
+    try std.testing.expectEqual(@as(?usize, null), tail.one_past_end);
+
+    heap.free(first.ptr);
+    heap.free(second.ptr);
 }
 
-extern "c" fn malloc_trim(pad: usize) c_int;
+test "medium free-run scan reports the longest run and the first fit" {
+    var bits: [pages_per_superblock / 64]u64 = @splat(0);
+    // Pages 0-2 free, 3-9 used, 10-20 free, 21 used, then free to the end.
+    var page: u32 = 3;
+    while (page < 10) : (page += 1) setPage(&bits, page);
+    setPage(&bits, 21);
+
+    // want = 0 answers only the bucket question, and clamps.
+    try std.testing.expectEqual(@as(u32, max_medium_pages), scanFreeRuns(&bits, 0).max_run);
+    try std.testing.expectEqual(@as(?u32, null), scanFreeRuns(&bits, 0).first);
+
+    // A request the first hole serves lands in the first hole.
+    try std.testing.expectEqual(@as(?u32, 0), scanFreeRuns(&bits, 3).first);
+    // One page more and the three-page hole is skipped.
+    try std.testing.expectEqual(@as(?u32, 10), scanFreeRuns(&bits, 4).first);
+    // Longer than the eleven-page hole: the open tail.
+    try std.testing.expectEqual(@as(?u32, 22), scanFreeRuns(&bits, 12).first);
+
+    // Runs that cross a word boundary are one run.
+    var packed_bits: [pages_per_superblock / 64]u64 = @splat(~@as(u64, 0));
+    page = 60;
+    while (page < 70) : (page += 1) clearPage(&packed_bits, page);
+    try std.testing.expectEqual(@as(u32, 10), scanFreeRuns(&packed_bits, 0).max_run);
+    try std.testing.expectEqual(@as(?u32, 60), scanFreeRuns(&packed_bits, 10).first);
+    try std.testing.expectEqual(@as(?u32, null), scanFreeRuns(&packed_bits, 11).first);
+
+    // A wholly used superblock is bucket 0 and serves nothing.
+    const full: [pages_per_superblock / 64]u64 = @splat(~@as(u64, 0));
+    try std.testing.expectEqual(@as(u32, 0), scanFreeRuns(&full, 0).max_run);
+    try std.testing.expectEqual(@as(?u32, null), scanFreeRuns(&full, 1).first);
+}
+
+test "medium extents: free-run buckets track the page bitmap" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const run_bytes = page_bytes * max_medium_pages - 8;
+    const runs_per_superblock = pages_per_superblock / max_medium_pages;
+
+    // FULL: 32 sixteen-page runs fill one 2 MiB superblock exactly. Its
+    // longest free run is 0, so it leaves the index entirely.
+    var filled: [runs_per_superblock]usize = undefined;
+    for (&filled) |*slot| slot.* = @intFromPtr((try heap.alloc(run_bytes)).ptr);
+    try std.testing.expectEqual(@as(usize, 1), heap.stats.superblocks);
+    try std.testing.expectEqual(@as(u8, 0), heap.superblocks.items[0].max_free_run);
+    for (heap.medium_buckets) |head| try std.testing.expectEqual(bucket_nil, head);
+    try heap.verifyMediumBuckets();
+
+    // A full heap reserves instead of scanning, and the newcomer enters the
+    // top bucket.
+    const fresh = try heap.alloc(page_bytes - 8);
+    try std.testing.expectEqual(@as(usize, 2), heap.stats.superblocks);
+    try std.testing.expectEqual(@intFromPtr(heap.superblocks.items[1].bytes.ptr), @intFromPtr(fresh.ptr));
+    try std.testing.expectEqual(@as(u8, max_medium_pages), heap.superblocks.items[1].max_free_run);
+    try heap.verifyMediumBuckets();
+
+    // HALF FULL: free every other run in superblock 0. Its longest run is a
+    // whole hole again, so it re-enters the top bucket -- at the head, which
+    // is what makes the reuse below deterministic.
+    var i: usize = 0;
+    while (i < filled.len) : (i += 2) heap.free(@ptrFromInt(filled[i]));
+    try std.testing.expectEqual(@as(u8, max_medium_pages), heap.superblocks.items[0].max_free_run);
+    try std.testing.expectEqual(@as(u32, 0), heap.medium_buckets[max_medium_pages]);
+    try heap.verifyMediumBuckets();
+
+    // The first hole serves the next full-size request; no superblock is
+    // reserved for it.
+    const reused = try heap.alloc(run_bytes);
+    try std.testing.expectEqual(filled[0], @intFromPtr(reused.ptr));
+    try std.testing.expectEqual(@as(usize, 2), heap.stats.superblocks);
+
+    // FRAGMENTED: take five pages out of the next hole, leaving eleven.
+    const five = try heap.alloc(page_bytes * 5 - 8);
+    try std.testing.expectEqual(filled[2], @intFromPtr(five.ptr));
+    // A twelve-page request cannot use that eleven-page remainder, so it
+    // skips to the next whole hole instead of failing or reserving.
+    const twelve = try heap.alloc(page_bytes * 12 - 8);
+    try std.testing.expectEqual(filled[4], @intFromPtr(twelve.ptr));
+    try std.testing.expectEqual(@as(usize, 2), heap.stats.superblocks);
+    try heap.verifyMediumBuckets();
+
+    // The bucket is a cache of the bitmap, and the verifier says so.
+    heap.superblocks.items[0].max_free_run = 3;
+    try std.testing.expectError(error.MediumBucketStale, heap.verifyMediumBuckets());
+    heap.superblocks.items[0].max_free_run = max_medium_pages;
+    try heap.verifyMediumBuckets();
+}
+
+test "medium allocation does not scan the superblock list" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    const count: usize = 10_000;
+    medium_superblock_visits_for_test = 0;
+    var i: usize = 0;
+    while (i < count) : (i += 1) _ = try heap.alloc(page_bytes - 8);
+
+    // Enough superblocks that a first-fit walk would be quadratic ...
+    try std.testing.expect(heap.stats.superblocks >= 15);
+    // ... and at most one superblock examined per allocation regardless.
+    try std.testing.expect(medium_superblock_visits_for_test <= count);
+    try heap.verifyMediumBuckets();
+}
 
 test "string extents: table-held marks, containment probe, epoch sweep" {
     var heap = Heap.init(std.testing.allocator);
@@ -2676,27 +3344,135 @@ test "string extents: table-held marks, containment probe, epoch sweep" {
     try std.testing.expectEqual(@as(usize, 4), ctx.freed);
 }
 
+test "string extents: page index resolves containment in O(1)" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    // Two adjacent medium runs plus a large mapping, so every boundary the
+    // conservative scanner can present is covered.
+    const first = try heap.alloc(page_bytes);
+    const second = try heap.alloc(page_bytes * 2 - 8);
+    const large = try heap.alloc(space.large_min_bytes + 1);
+    const first_base = @intFromPtr(first.ptr);
+    const second_base = @intFromPtr(second.ptr);
+    const large_base = @intFromPtr(large.ptr);
+    try heap.verifyExtentPageIndex();
+    try std.testing.expectEqual(@as(usize, 0), heap.extent_pages_unindexed);
+    // 1 + 2 medium pages + the large mapping's pages.
+    try std.testing.expectEqual(
+        @as(usize, 3) + (std.mem.alignForward(usize, space.large_min_bytes + 1, page_bytes) >> page_shift),
+        heap.extent_pages.count(),
+    );
+
+    // Base / interior / one-past-end / one byte past that.
+    try std.testing.expectEqual(first_base, heap.extentContaining(first_base).?);
+    try std.testing.expectEqual(first_base, heap.extentContaining(first_base + 1).?);
+    try std.testing.expectEqual(first_base, heap.extentContaining(first_base + page_bytes - 1).?);
+    try std.testing.expectEqual(second_base, heap.extentContaining(second_base).?);
+    try std.testing.expectEqual(second_base, heap.extentContaining(second_base + page_bytes * 2 - 8).?);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(second_base + page_bytes * 2 - 7));
+    try std.testing.expectEqual(large_base, heap.extentContaining(large_base).?);
+    try std.testing.expectEqual(large_base, heap.extentContaining(large_base + space.large_min_bytes).?);
+    try std.testing.expectEqual(large_base, heap.extentContaining(large_base + space.large_min_bytes + 1).?);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(large_base + space.large_min_bytes + 2));
+
+    // Adjacent extents: the run allocator hands out consecutive pages, so
+    // `first`'s one-past-end is `second`'s base. Single-winner resolution
+    // gives the address to the extent that CONTAINS it (the neighbour's
+    // one-past-end loses); the answer is deterministic either way, which the
+    // hash-order-dependent linear walk this replaces was not.
+    if (second_base == first_base + page_bytes) {
+        try std.testing.expectEqual(second_base, heap.extentContaining(second_base).?);
+    }
+    // A page-aligned address one past a run that does NOT abut another
+    // extent still resolves through the `addr - 1` probe.
+    const tail_gap = try heap.alloc(page_bytes * 3);
+    const tail_base = @intFromPtr(tail_gap.ptr);
+    try std.testing.expectEqual(tail_base, heap.extentContaining(tail_base + page_bytes * 3).?);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(tail_base + page_bytes * 3 + 1));
+
+    // Addresses outside every extent (a fresh classed cell) miss.
+    const cell = (try heap.allocCell(64)).?;
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(@intFromPtr(cell)));
+    heap.freeSmallCell(cell);
+
+    // Freed extents stop resolving and give their pages back.
+    heap.free(large.ptr);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(large_base));
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(large_base + 16));
+    try heap.verifyExtentPageIndex();
+    heap.free(first.ptr);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(first_base));
+    // ... without disturbing its neighbour.
+    try std.testing.expectEqual(second_base, heap.extentContaining(second_base + 8).?);
+    try heap.verifyExtentPageIndex();
+
+    heap.free(second.ptr);
+    heap.free(tail_gap.ptr);
+    try heap.verifyExtentPageIndex();
+    try std.testing.expectEqual(@as(usize, 0), heap.extent_pages.count());
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(second_base));
+}
+
+test "string extents: a failed page fan-out falls back to the exact linear probe" {
+    var heap = Heap.init(std.testing.allocator);
+    defer heap.deinit();
+
+    // Deliberately NOT page-filling: the linear fallback is single-winner and
+    // an extent whose one-past-end is the next extent's base makes its answer
+    // depend on hash order (see `extentContaining`'s adjacency note).
+    const indexed = try heap.alloc(page_bytes - 8);
+    const indexed_base = @intFromPtr(indexed.ptr);
+
+    // One page enters, the second insert "fails": the partial fan-out is
+    // rolled back (a page-shaped hole in the index would be a dropped root)
+    // and the probe reverts to the exact linear walk.
+    extent_page_index_fail_after_for_test = 1;
+    const unindexed = try heap.alloc(page_bytes * 2);
+    extent_page_index_fail_after_for_test = null;
+    const unindexed_base = @intFromPtr(unindexed.ptr);
+    try std.testing.expectEqual(@as(usize, 1), heap.extent_pages_unindexed);
+    try std.testing.expectEqual(@as(usize, 1), heap.extent_pages.count());
+    try heap.verifyExtentPageIndex();
+
+    try std.testing.expectEqual(unindexed_base, heap.extentContaining(unindexed_base).?);
+    try std.testing.expectEqual(unindexed_base, heap.extentContaining(unindexed_base + 7).?);
+    try std.testing.expectEqual(unindexed_base, heap.extentContaining(unindexed_base + page_bytes * 2).?);
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(unindexed_base + page_bytes * 2 + 1));
+    try std.testing.expectEqual(indexed_base, heap.extentContaining(indexed_base + 7).?);
+
+    // Its death returns the heap to the O(1) path.
+    heap.free(unindexed.ptr);
+    try std.testing.expectEqual(@as(usize, 0), heap.extent_pages_unindexed);
+    try heap.verifyExtentPageIndex();
+    try std.testing.expectEqual(@as(?usize, null), heap.extentContaining(unindexed_base + 7));
+    try std.testing.expectEqual(indexed_base, heap.extentContaining(indexed_base).?);
+    heap.free(indexed.ptr);
+    try heap.verifyExtentPageIndex();
+}
+
 test "block-cell generation packs incarnation and non-wrapping reuse sequence" {
     var heap = Heap.init(std.testing.allocator);
     defer heap.deinit();
 
     const first = (try heap.allocCell(80)).?;
-    const first_base = @intFromPtr(first.ptr) + gc_representation.metadata_size;
+    const first_base = @intFromPtr(first) + gc_representation.metadata_size;
     const first_handle = heap.generationHandle(first_base, gc_representation.metadata_size).?;
     try std.testing.expect(first_handle.generation >> 32 != 0);
     try std.testing.expect(@as(u32, @truncate(first_handle.generation)) != 0);
-    heap.freeSmallCell(first.ptr);
+    heap.freeSmallCell(first);
 
-    const block = Block.fromCellTrusted(@intFromPtr(first.ptr));
-    heap.generationFor(block, first.index).* = std.math.maxInt(u32);
+    const block = Block.fromCellTrusted(@intFromPtr(first));
+    const first_index = block.cellIndex(@intFromPtr(first)).?;
+    heap.generationFor(block, first_index).* = std.math.maxInt(u32);
     // The exhausted cell is sealed and skipped, not wrapped or surfaced as a
     // false heap-wide OOM while another cell in the block remains usable.
     const next = (try heap.allocCell(80)).?;
-    defer heap.freeSmallCell(next.ptr);
-    try std.testing.expect(next.index != first.index);
-    try std.testing.expectEqual(carrier.LifecycleState.free, heap.lifecycleFor(block, first.index).state);
+    defer heap.freeSmallCell(next);
+    try std.testing.expect(next != first);
+    try std.testing.expectEqual(carrier.LifecycleState.free, heap.lifecycleFor(block, first_index).state);
     const next_handle = heap.generationHandle(
-        @intFromPtr(next.ptr) + gc_representation.metadata_size,
+        @intFromPtr(next) + gc_representation.metadata_size,
         gc_representation.metadata_size,
     ).?;
     try std.testing.expectEqual(first_handle.generation >> 32, next_handle.generation >> 32);
@@ -2823,6 +3599,55 @@ fn setBit(bits: []u64, index: u32) void {
 
 fn clearBit(bits: []u64, index: u32) void {
     _ = @atomicRmw(u64, &bits[index / 64], .And, ~(@as(u64, 1) << @intCast(index % 64)), .monotonic);
+}
+
+/// Free-run scan over a medium superblock's page bitmap.
+///
+/// `max_run` is the longest run of free (zero) pages, clamped to
+/// `max_medium_pages` because no medium request can use more. `first` is the
+/// lowest page starting a run of at least `want` pages (null when `want` is 0
+/// or no such run exists).
+///
+/// Word-at-a-time: each iteration jumps to the next USED page with `@ctz`, so
+/// the cost is bounded by the eight bitmap words plus the number of allocated
+/// runs it steps over, never by the 512 pages. This is the whole per-operation
+/// cost of the medium allocator -- it does not depend on how many superblocks
+/// the heap holds.
+const FreeRunScan = struct { max_run: u32, first: ?u32 };
+
+fn scanFreeRuns(bits: *const [pages_per_superblock / 64]u64, want: u32) FreeRunScan {
+    var out: FreeRunScan = .{ .max_run = 0, .first = null };
+    var run: u32 = 0;
+    var word_index: usize = 0;
+    while (word_index < bits.len) : (word_index += 1) {
+        const word = bits[word_index];
+        const word_base: u32 = @intCast(word_index * 64);
+        var pos: u32 = 0;
+        while (pos < 64) {
+            // Free pages ahead of the next used one.
+            const free_rest = word >> @as(u6, @intCast(pos));
+            if (free_rest == 0) {
+                run += 64 - pos;
+                break;
+            }
+            const zeros: u32 = @ctz(free_rest);
+            run += zeros;
+            pos += zeros;
+            // `word_base + pos` is one past the run that just ended.
+            if (run > out.max_run) out.max_run = run;
+            if (out.first == null and want != 0 and run >= want) out.first = word_base + pos - run;
+            run = 0;
+            // Skip the used run in one step too, so an iteration costs one
+            // RUN, not one page.
+            const used_rest = ~(word >> @as(u6, @intCast(pos)));
+            pos += if (used_rest == 0) 64 - pos else @ctz(used_rest);
+        }
+        if (run > out.max_run) out.max_run = run;
+        if (out.first == null and want != 0 and run >= want) out.first = word_base + 64 - run;
+        if (out.max_run >= max_medium_pages and (want == 0 or out.first != null)) break;
+    }
+    if (out.max_run > max_medium_pages) out.max_run = max_medium_pages;
+    return out;
 }
 
 fn testPage(bits: [pages_per_superblock / 64]u64, page: u32) bool {

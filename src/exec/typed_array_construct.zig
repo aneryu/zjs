@@ -21,10 +21,8 @@ pub fn arrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue,
     var max_byte_length: ?usize = null;
     if (args.len >= 2 and !args[1].isUndefined() and args[1].isObject()) {
         const options = try typed_array_core.expectObject(args[1]);
-        const key = try rt.internAtom("maxByteLength");
-        defer rt.atoms.free(key);
+        const key = core.atom.ids.maxByteLength;
         const max_value = try options.getProperty(key);
-        defer max_value.free(rt);
         if (!max_value.isUndefined()) {
             const max = try typed_array_core.toIndexUsize(rt, max_value);
             if (max < byte_length) return error.RangeError;
@@ -39,10 +37,8 @@ pub fn sharedArrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JS
     var max_byte_length: ?usize = null;
     if (args.len >= 2 and !args[1].isUndefined() and args[1].isObject()) {
         const options = try typed_array_core.expectObject(args[1]);
-        const key = try rt.internAtom("maxByteLength");
-        defer rt.atoms.free(key);
+        const key = core.atom.ids.maxByteLength;
         const max_value = try options.getProperty(key);
-        defer max_value.free(rt);
         if (!max_value.isUndefined()) {
             const max = try typed_array_core.toIndexUsize(rt, max_value);
             if (max < byte_length) return error.RangeError;

@@ -10,7 +10,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -20,9 +19,7 @@ const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const class_init_ops = @import("class_init_ops.zig");
 const inline_calls = @import("inline_calls.zig");
-const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 
 const op = bytecode.opcode.op;
@@ -43,16 +40,6 @@ pub const CallStep = enum {
     inline_constructor,
 };
 
-pub const TailCallResult = union(enum) {
-    handled,
-    return_value: core.JSValue,
-    /// Eligible bytecode target for tail-call frame reuse; the dispatch
-    /// loop replaces the current inline frame instead of recursing. The
-    /// InlineCallRequest is written through the caller's shared `req_out` slot
-    /// (payload-free variant → no per-call sret alloca for the 88-byte request).
-    tail_inline,
-};
-
 pub const CallDepthGuard = struct {
     ctx: *core.JSContext,
     planned_stack_bytes: usize,
@@ -64,12 +51,6 @@ pub const CallDepthGuard = struct {
         rt.hot.call_depth -= 1;
         rt.hot.native_call_depth -= 1;
     }
-};
-
-pub const CallProfileGuard = struct {
-    pub fn deinit(_: @This()) void {}
-
-    pub fn adoptRetiredCaller(_: *@This(), _: @This()) void {}
 };
 
 pub fn enterCallDepth(
@@ -91,16 +72,6 @@ pub fn enterCallDepth(
     rt.hot.call_depth += 1;
     rt.hot.native_call_depth += 1;
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
-}
-
-/// Accounting for inline (same interpreter loop) bytecode call frames.
-pub fn enterInlineCallDepth(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-) !void {
-    return enterInlineCallDepthMode(ctx, global, function, argc, false);
 }
 
 pub fn enterInlineCallDepthMode(
@@ -295,10 +266,6 @@ noinline fn inlineCallDepthOverflow(ctx: *core.JSContext, global: *core.Object) 
     return error.StackOverflow;
 }
 
-pub fn enterCallProfile(_: *core.JSRuntime) CallProfileGuard {
-    return .{};
-}
-
 pub inline fn initFrameLocals(
     ctx: *core.JSContext,
     function: *const bytecode.FunctionBytecode,
@@ -347,7 +314,7 @@ pub inline fn initFrameVarRefs(
         };
         // Inherit: pointer copy + rc++ per slot (qjs JS_CLOSURE_REF form,
         // quickjs.c:17322-17324).
-        for (var_refs, 0..) |cell, idx| owned_refs[idx] = cell.dupCell();
+        for (var_refs, 0..) |cell, idx| owned_refs[idx] = cell;
         frame.var_refs = owned_refs;
         return;
     }
@@ -368,13 +335,8 @@ pub inline fn initFrameVarRefs(
             }
             break :blk try allocFrameVarRefWindow(ctx, frame, function.closureVar().len);
         };
-        var initialized: usize = 0;
-        errdefer {
-            for (owned_refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
-        }
         for (function.closureVar(), 0..) |cv, idx| {
             owned_refs[idx] = try legacyInitialClosureVarRef(ctx, global, cv);
-            initialized += 1;
         }
         frame.var_refs = owned_refs;
         return;
@@ -391,10 +353,6 @@ pub inline fn initFrameVarRefs(
         }
         break :blk try allocFrameVarRefWindow(ctx, frame, function.varRefNamesLen());
     };
-    var initialized: usize = 0;
-    errdefer {
-        for (owned_refs[0..initialized]) |cell| cell.freeCell(ctx.runtime);
-    }
     var idx: usize = 0;
     while (idx < function.varRefNamesLen()) : (idx += 1) {
         const var_name = function.varRefName(idx);
@@ -428,7 +386,6 @@ pub inline fn initFrameVarRefs(
             const val = call_runtime.globalLexicalValueForGlobal(ctx, global, var_name) orelse try global.getProperty(var_name);
             owned_refs[idx] = try core.VarRef.createClosed(ctx.runtime, val);
         }
-        initialized += 1;
     }
     frame.var_refs = owned_refs;
 }
@@ -448,7 +405,6 @@ fn legacyInitialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: by
         .global, .global_ref, .global_decl => {
             const cell_value = try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name);
             return core.VarRef.fromValue(cell_value) orelse {
-                cell_value.free(ctx.runtime);
                 return error.InvalidBytecode;
             };
         },
@@ -519,37 +475,6 @@ pub fn call(
         .continue_loop => .continue_loop,
         .inline_call => .inline_call,
     };
-}
-
-/// Generic tail-call helper. Source-emitted `op.tail_call` no longer
-/// enters here — the dispatch table aliases it to `op_call` so the
-/// empty-leaf / exact-args / simple_inline / pushExactSimple chain
-/// stays on the same I-cache copy (X-89 rework).
-pub noinline fn tailCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    allow_inline: bool,
-    req_out: *call_runtime.InlineCallRequest,
-) !TailCallResult {
-    const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
-    // Inline is allowed so JS→JS tails stay on the same Machine (qjs nested
-    // JS_CallInternal). a4a301e0 forced allow_inline=false and broke
-    // machine_inits==1 (forEach/JSON reviver `return helper()`). The
-    // dispatch `.tail` arm must still pushCall, not tailCallReuse: reuse
-    // is the H3 TCO pit (Error.stack drops outer, 20000-deep does not overflow).
-    switch (try call_runtime.execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline, req_out)) {
-        .done => {},
-        .continue_loop => return .handled,
-        .inline_call => return .tail_inline,
-    }
-    if (stack.peek()) |value| return .{ .return_value = value };
-    return .{ .return_value = core.JSValue.undefinedValue() };
 }
 
 /// Result of `nativeMethodFastDispatch` — the outlined native c_function arm
@@ -684,7 +609,7 @@ pub noinline fn nativeMethodFastDispatch(
     // entering user-observable code (mirrors callMethod's poll-then-call).
     frame.pc += 2; // consume argc operand
     exception_ops.pollInterrupt(ctx, global) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
         return err;
     };
@@ -700,12 +625,12 @@ pub noinline fn nativeMethodFastDispatch(
         frame,
     ));
     if (builtin_dispatch.nativeIsExc(ctx, result)) {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         const err = builtin_dispatch.nativeHostError(ctx);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .caught;
         return err;
     }
-    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+    call_runtime.popOwnedStackRegion(stack, region_base);
     if (dropUnusedCallResult(ctx, function, frame, result)) return .hit;
     stack.pushOwnedAssumeCapacity(result);
     return .hit;
@@ -798,23 +723,23 @@ pub noinline fn callMethod(
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
     exception_ops.pollInterrupt(ctx, global) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (fast_result) |value| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (dropUnusedCallResult(ctx, function, frame, value)) return .done;
         stack.pushOwnedAssumeCapacity(value);
         return .done;
     }
     const maybe_array_result = array_ops.arrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -822,25 +747,24 @@ pub noinline fn callMethod(
         array_result
     else
         call_runtime.callValueOrBytecodeRootPreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
-            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+            call_runtime.popOwnedStackRegion(stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+    call_runtime.popOwnedStackRegion(stack, region_base);
     if (dropUnusedCallResult(ctx, function, frame, result)) return .done;
     stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
 
 fn dropUnusedCallResult(
-    ctx: *core.JSContext,
+    _: *core.JSContext,
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
-    value: core.JSValue,
+    _: core.JSValue,
 ) bool {
     if (frame.pc >= function.byteCode().len or function.byteCode()[frame.pc] != op.drop) return false;
     frame.pc += 1;
-    value.free(ctx.runtime);
     return true;
 }
 
@@ -920,7 +844,7 @@ pub noinline fn apply(
         const new_target = stack.values[region_base + 1];
         const array_value = stack.values[region_base + 2];
         var apply_args = array_ops.argsFromArray(ctx.runtime, array_value) catch |err| {
-            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+            call_runtime.popOwnedStackRegion(stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
@@ -934,7 +858,7 @@ pub noinline fn apply(
             const current_len = stack.len();
             if (final_len > current_len) {
                 stack.reserveAdditional(final_len - current_len) catch |err| {
-                    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+                    call_runtime.popOwnedStackRegion(stack, region_base);
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
@@ -944,10 +868,8 @@ pub noinline fn apply(
             // and new.target in their original owned slots; replace only the
             // materialized-array suffix with the final moved argument list.
             const rooted_func = stack.values[region_base];
-            const rooted_array = stack.values[region_base + 2];
             stack.values[region_base + 2] = core.JSValue.undefinedValue();
             stack.setLen(region_base + 2);
-            rooted_array.free(ctx.runtime);
             for (apply_args, 0..) |*arg, index| {
                 stack.values[region_base + 2 + index] = arg.*;
                 arg.* = core.JSValue.undefinedValue();
@@ -965,12 +887,11 @@ pub noinline fn apply(
         }
 
         const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, new_target) catch |err| {
-            call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+            call_runtime.popOwnedStackRegion(stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-        errdefer result.free(ctx.runtime);
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         stack.pushOwnedAssumeCapacity(result);
         return .done;
     }
@@ -988,7 +909,7 @@ pub noinline fn apply(
     const this_value = stack.values[region_base + 1];
     const array_value = stack.values[region_base + 2];
     var apply_args = array_ops.argsFromArray(ctx.runtime, array_value) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -1002,7 +923,7 @@ pub noinline fn apply(
         const current_len = stack.len();
         if (final_len > current_len) {
             stack.reserveAdditional(final_len - current_len) catch |err| {
-                call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+                call_runtime.popOwnedStackRegion(stack, region_base);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
@@ -1011,12 +932,10 @@ pub noinline fn apply(
         // reserveAdditional may relocate the backing, so reload every slot.
         const rooted_func = stack.values[region_base];
         const rooted_this = stack.values[region_base + 1];
-        const rooted_array = stack.values[region_base + 2];
         stack.values[region_base] = rooted_this;
         stack.values[region_base + 1] = rooted_func;
         stack.values[region_base + 2] = core.JSValue.undefinedValue();
         stack.setLen(region_base + 2);
-        rooted_array.free(ctx.runtime);
 
         for (apply_args, 0..) |*arg, index| {
             stack.values[region_base + 2 + index] = arg.*;
@@ -1033,11 +952,11 @@ pub noinline fn apply(
     }
 
     const result = call_runtime.callValueOrBytecodeRootPreRooted(ctx, output, global, this_value, func, apply_args, function, frame) catch |err| {
-        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        call_runtime.popOwnedStackRegion(stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+    call_runtime.popOwnedStackRegion(stack, region_base);
     stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
@@ -1064,24 +983,19 @@ pub noinline fn constructor(
         remaining -= 1;
         args_buf[remaining] = try stack.pop();
     }
-    defer for (args_buf) |arg| arg.free(ctx.runtime);
     const top = try stack.pop();
     const has_explicit_new_target = stack.len() != 0;
     const new_target = top;
     const func = if (has_explicit_new_target)
         stack.pop() catch |err| {
-            top.free(ctx.runtime);
             return err;
         }
     else
         top;
-    defer if (has_explicit_new_target) new_target.free(ctx.runtime);
-    defer func.free(ctx.runtime);
     const result = call_runtime.constructValueOrBytecodeWithNewTargetInternal(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
     return .done;
 }
@@ -1161,15 +1075,13 @@ pub fn initCtor(
     // constructor call exactly as JS_GetPrototype's owned result does.
     const super_object = function_object.getPrototype() orelse
         return throwCtorTypeError(ctx, global, "not a function");
-    const super = super_object.value().dup();
-    defer super.free(ctx.runtime);
+    const super = super_object.value();
     const original_args = frame.originalArgs();
     const args = if (original_args.len != 0)
         original_args[0..@min(frame.actual_arg_count, original_args.len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
     const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.newTargetValue());
-    errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
 

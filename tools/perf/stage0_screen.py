@@ -356,12 +356,21 @@ def compare_stats(
 
         old_leaves = gc_snapshot.numeric_leaves(old_stats)
         new_leaves = gc_snapshot.numeric_leaves(new_stats)
-        if old_leaves.keys() != new_leaves.keys():
-            raise Stage0Error(f"GC stats schema differs for {bench}")
-        for path in sorted(old_leaves):
+        # Losing a metric is a broken candidate and stays fatal.  Gaining one is
+        # how instrumentation grows against a FROZEN baseline snapshot (the S2
+        # string kind is the first case): the baseline JSON can never be
+        # re-emitted, so a new leaf is scored against 0 and shows up as drift
+        # rather than aborting the screen.
+        missing_in_candidate = sorted(old_leaves.keys() - new_leaves.keys())
+        if missing_in_candidate:
+            raise Stage0Error(
+                f"GC stats schema differs for {bench}: candidate dropped "
+                + ", ".join(missing_in_candidate)
+            )
+        for path in sorted(new_leaves):
             if path in CONTRACT_PATHS:
                 continue
-            row = drift_row(bench, path, old_leaves[path], new_leaves[path])
+            row = drift_row(bench, path, old_leaves.get(path, 0), new_leaves[path])
             if row["crossed"]:
                 other_drifts.append(row)
 

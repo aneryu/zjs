@@ -355,76 +355,9 @@ pub const BigInt = struct {
         return normalize(.{ .negative = false, .limbs = limbs, .allocator = allocator });
     }
 
-    pub fn addInPlace(self: *BigInt, other: BigInt) !void {
-        if (self.negative == other.negative) {
-            try self.addAbsInPlace(other);
-            return;
-        }
-        const order = compareAbsParts(self.limbs, other.limbs);
-        if (order == .eq) {
-            self.deinit();
-            return;
-        }
-        if (order == .gt) {
-            try self.subAbsInPlace(other);
-            // sign stays same
-        } else {
-            const temp = try subAlloc(self.allocator, other, self.*);
-            self.deinit();
-            self.* = temp;
-        }
-    }
-
     pub fn addPositiveSmallInPlace(self: *BigInt, addend: Limb) !void {
         std.debug.assert(!self.negative);
         try addSmallInPlace(self, addend);
-    }
-
-    fn addAbsInPlace(self: *BigInt, other: BigInt) !void {
-        const max_len = @max(self.limbs.len, other.limbs.len);
-        // Same 1M-bit result bound as js_bigint_add's js_bigint_new cap
-        // (quickjs.c:11811); checked on the real (carry-resolved) length below.
-        try checkLimbCount(max_len);
-        if (self.limbs.len < max_len) {
-            const next = try self.allocator.realloc(self.limbs, max_len);
-            @memset(next[self.limbs.len..], 0);
-            self.limbs = next;
-        }
-        var carry: DoubleLimb = 0;
-        for (0..max_len) |i| {
-            const a: DoubleLimb = self.limbs[i];
-            const b: DoubleLimb = if (i < other.limbs.len) other.limbs[i] else 0;
-            const sum = a + b + carry;
-            self.limbs[i] = @truncate(sum);
-            carry = sum >> limb_bits;
-        }
-        if (carry != 0) {
-            try checkLimbCount(max_len + 1);
-            const next = try self.allocator.realloc(self.limbs, max_len + 1);
-            next[max_len] = @intCast(carry);
-            self.limbs = next;
-        }
-    }
-
-    fn subAbsInPlace(self: *BigInt, other: BigInt) !void {
-        var borrow: i128 = 0;
-        for (self.limbs, 0..) |*a, i| {
-            const b: i128 = if (i < other.limbs.len) @intCast(other.limbs[i]) else 0;
-            var diff: i128 = @as(i128, a.*) - b - borrow;
-            if (diff < 0) {
-                diff += @as(i128, 1) << limb_bits;
-                borrow = 1;
-            } else {
-                borrow = 0;
-            }
-            a.* = @intCast(diff);
-        }
-        // Hand the limbs to `normalize` before calling: it frees them if it
-        // fails, and leaving `self` aliasing the same slice would make the
-        // caller's `deinit` a second free.
-        const owned = self.*;
-        self.* = .{ .allocator = owned.allocator };
-        self.* = try normalize(owned);
     }
 
     fn absCloneWithAllocator(self: BigInt, allocator: std.mem.Allocator) !BigInt {

@@ -9,7 +9,6 @@ pub fn namespace(comptime token: type) type {
         //!
         const std = @import("std");
         const atom_module = @import("core/atom.zig");
-        const memory = @import("core/memory.zig");
         const simple_token = @import("simple_token.zig");
         const unicode = @import("libs/unicode.zig");
         const t = token;
@@ -1789,11 +1788,6 @@ pub fn namespace(comptime token: type) type {
             };
         }
 
-        // memory module unused right now; kept for future eviction tests.
-        comptime {
-            _ = memory;
-        }
-
         // ---- TypeScript Streaming Type-Filter Erasure Helpers ----
 
         pub const Range = struct {
@@ -3313,51 +3307,6 @@ pub fn namespace(comptime token: type) type {
             return tsIsIdentStart(c) or unicode.isAsciiDigitByte(c);
         }
 
-        pub const RegExpLiteral = struct {
-            pattern: []const u8,
-            flags: []const u8,
-            end_offset: usize,
-        };
-
-        pub fn scanRegExpLiteral(source: []const u8, slash_offset: usize) !RegExpLiteral {
-            if (slash_offset >= source.len or source[slash_offset] != '/') return error.NotRegExpLiteral;
-            var i = slash_offset + 1;
-            var in_class = false;
-            var escaped = false;
-
-            while (i < source.len) : (i += 1) {
-                const c = source[i];
-                if (c == '\n' or c == '\r') return error.UnterminatedRegExp;
-                if (escaped) {
-                    escaped = false;
-                    continue;
-                }
-                if (c == '\\') {
-                    escaped = true;
-                    continue;
-                }
-                if (c == '[') {
-                    in_class = true;
-                    continue;
-                }
-                if (c == ']') {
-                    in_class = false;
-                    continue;
-                }
-                if (c == '/' and !in_class) break;
-            }
-            if (i >= source.len) return error.UnterminatedRegExp;
-
-            const pattern = source[slash_offset + 1 .. i];
-            i += 1;
-            const flags_start = i;
-            while (i < source.len and unicode.isAsciiIdentifierPartByte(source[i])) : (i += 1) {}
-            return .{
-                .pattern = pattern,
-                .flags = source[flags_start..i],
-                .end_offset = i,
-            };
-        }
         pub const SourceKind = SourceKindImpl;
         pub const Lexer = LexerImpl;
     };

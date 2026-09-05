@@ -78,7 +78,7 @@ pub noinline fn nativeFromHostError(ctx: *core.JSContext, global: ?*core.Object,
 fn installNativeExceptionFallback(ctx: *core.JSContext) void {
     if (ctx.hasException()) return;
     const fallback = if (ctx.preallocated_oom_error) |preallocated|
-        preallocated.dup()
+        preallocated
     else
         core.JSValue.nullValue();
     _ = ctx.throwValue(fallback);
@@ -437,7 +437,7 @@ pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err:
         // callers propagate exactly as before.
         if (create_err == error.OutOfMemory and !ctx.hasException()) {
             const fallback = if (ctx.preallocated_oom_error) |preallocated|
-                preallocated.dup()
+                preallocated
             else
                 core.JSValue.nullValue();
             _ = ctx.throwValue(fallback);

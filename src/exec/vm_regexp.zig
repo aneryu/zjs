@@ -43,11 +43,8 @@ pub noinline fn pushLiteral(
     global: *core.Object,
 ) !void {
     const compiled = try stack.pop();
-    defer compiled.free(ctx.runtime);
     const pattern = try stack.pop();
-    defer pattern.free(ctx.runtime);
 
     const value = try constructCompiledLiteralInRealm(ctx.runtime, global, pattern, compiled);
-    errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }

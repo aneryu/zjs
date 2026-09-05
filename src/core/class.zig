@@ -259,10 +259,6 @@ pub const Record = struct {
         return self.id != invalid_class_id;
     }
 
-    pub fn hasInlinePayload(self: Record) bool {
-        return self.inline_payload_size != 0;
-    }
-
     pub fn finalizeBindingData(self: Record) void {
         const data = self.binding_data orelse return;
         const finalizer = self.binding_data_finalizer orelse return;
@@ -459,6 +455,13 @@ pub const Table = struct {
 
     pub fn register(self: *Table, id: ClassId, def: Definition) !void {
         try self.requireOwnerThread();
+        // TGC S3 §4 class B: `name_atom` is a bare id and this file sits below
+        // runtime.zig, so it cannot name an `AtomRootFrame`. Grow the record
+        // table first instead -- then the only allocation left between the
+        // intern and `dupForHolder` is gone and the id spans no collection
+        // point at all. `registerAtom` re-checks both, idempotently.
+        if (id == invalid_class_id) return error.InvalidClassId;
+        try self.ensureCapacity(@as(usize, id) + 1);
         const name_atom = try self.atoms.internString(def.class_name);
         defer self.atoms.free(name_atom);
         try self.registerAtom(id, name_atom, def);
@@ -722,7 +725,7 @@ pub const Table = struct {
         if (state.generation == 0) state.generation = 1;
         self.records[id] = .{
             .id = id,
-            .class_name = self.atoms.dup(name_atom),
+            .class_name = self.atoms.dupForHolder(name_atom),
             .binding_identity = def.binding_identity,
             .binding_data = def.binding_data,
             .binding_data_finalizer = def.binding_data_finalizer,

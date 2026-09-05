@@ -392,7 +392,7 @@ pub fn completeResumeState(
     var catch_target = state.catch_target;
     if (!state.throw_on_entry) return catch_target;
     const thrown = resume_value orelse core.JSValue.undefinedValue();
-    _ = ctx.throwValue(thrown.dup());
+    _ = ctx.throwValue(thrown);
     try closeIteratorForPendingError(ctx, output, global, stack, function, frame);
     if (!(try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, &catch_target, global, error.JSException))) {
         return error.JSException;
@@ -475,8 +475,6 @@ pub noinline fn yieldValue(
     stop_on_yield: bool,
 ) !Result {
     const value = try stack.pop();
-    var value_owned = true;
-    errdefer if (value_owned) value.free(ctx.runtime);
     if (stop_on_yield) {
         if (generator) |generator_object| {
             try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
@@ -485,12 +483,9 @@ pub noinline fn yieldValue(
             payload.started = true;
             payload.just_yielded = true;
         }
-        value_owned = false;
         return .{ .return_value = value };
     }
     try stack.reserveAdditional(1);
-    value.free(ctx.runtime);
-    value_owned = false;
     stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
     return .none;
 }
@@ -529,8 +524,6 @@ fn yieldStarRaw(
     const expanded_lowering = frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.dup;
     if (expanded_lowering) {
         const result_object = try stack.pop();
-        var result_object_owned = true;
-        errdefer if (result_object_owned) result_object.free(ctx.runtime);
         if (stop_on_yield) {
             if (generator) |generator_object| {
                 try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
@@ -540,18 +533,13 @@ fn yieldStarRaw(
                 generator_object.generatorJustYieldedSlot().* = true;
             } else {
                 try stack.reserveAdditional(2);
-                result_object.free(ctx.runtime);
-                result_object_owned = false;
                 stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
                 stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
                 return .none;
             }
-            result_object_owned = false;
             return .{ .return_value = result_object };
         }
         try stack.reserveAdditional(2);
-        result_object.free(ctx.runtime);
-        result_object_owned = false;
         stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
         stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
         return .none;
@@ -561,10 +549,9 @@ fn yieldStarRaw(
     var using_stored_iterator = false;
     var next_arg = core.JSValue.undefinedValue();
     var next_arg_needs_free = false;
-    defer if (next_arg_needs_free) next_arg.free(ctx.runtime);
     if (generator) |generator_object| {
         if (generator_object.generatorYieldStarIterator()) |stored| {
-            iterator_value = stored.dup();
+            iterator_value = stored;
             using_stored_iterator = true;
             if (generator_object.generatorStarted() and stack.len() > 0) {
                 next_arg = try stack.pop();
@@ -572,18 +559,13 @@ fn yieldStarRaw(
             }
         } else {
             const iterable = try stack.pop();
-            defer iterable.free(ctx.runtime);
             iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, iterable, function, frame);
         }
     } else {
         const iterable = try stack.pop();
-        defer iterable.free(ctx.runtime);
         iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, iterable, function, frame);
     }
-    defer iterator_value.free(ctx.runtime);
     const step = try iterator_ops.iteratorStepResult(ctx, output, global, iterator_value, next_arg);
-    defer step.result.free(ctx.runtime);
-    defer step.value.free(ctx.runtime);
     if (step.done) {
         try stack.reserveAdditional(1);
         if (generator) |generator_object| {
@@ -594,13 +576,13 @@ fn yieldStarRaw(
     }
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            if (!using_stored_iterator) generator_object.setGeneratorYieldStarIterator(ctx.runtime, iterator_value.dup());
+            if (!using_stored_iterator) generator_object.setGeneratorYieldStarIterator(ctx.runtime, iterator_value);
             try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc, catch_target);
             generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
-        return .{ .return_value = step.result.dup() };
+        return .{ .return_value = step.result };
     }
     try stack.reserveAdditional(1);
     stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
@@ -641,7 +623,6 @@ fn awaitValueRaw(
 ) HostError!Result {
     const suspend_mode = awaitSuspendMode(function, suspend_on_module_await, stop_on_yield);
     const awaited = try stack.pop();
-    defer awaited.free(ctx.runtime);
     if (suspend_mode == .raw) {
         if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited, catch_target)) |result| return result;
         try stack.push(awaited);
@@ -649,7 +630,6 @@ fn awaitValueRaw(
     }
     const promise = objectFromValue(awaited) orelse {
         if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
-            defer value.free(ctx.runtime);
             if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, catch_target)) |result| return result;
             try stack.push(value);
             return .none;
@@ -660,7 +640,6 @@ fn awaitValueRaw(
     };
     if (promise.class_id != core.class.ids.promise) {
         if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
-            defer value.free(ctx.runtime);
             if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, catch_target)) |result| return result;
             try stack.push(value);
             return .none;
@@ -672,10 +651,9 @@ fn awaitValueRaw(
     try promise_ops.settlePendingPromiseReaction(ctx, output, global, promise);
     if (suspend_mode == .settled and promise.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
     if (promise.promiseResult() == null) try promise_ops.awaitPendingPromise(ctx, output, global, promise);
-    const result = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    defer result.free(ctx.runtime);
+    const result = if (promise.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
     if (promise.promiseIsRejected()) {
-        _ = ctx.throwValue(result.dup());
+        _ = ctx.throwValue(result);
         return error.JSException;
     }
     if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result, catch_target)) |suspended| return suspended;
@@ -698,7 +676,7 @@ fn suspendAwaitValue(
     generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.await_op);
     generator_object.generatorStartedSlot().* = true;
     generator_object.generatorJustYieldedSlot().* = true;
-    return .{ .return_value = value.dup() };
+    return .{ .return_value = value };
 }
 
 fn awaitSuspendMode(function: *const bytecode.FunctionBytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
@@ -733,7 +711,3 @@ fn closeIteratorForPendingError(
 }
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
-
-fn readInt(comptime T: type, bytes: []const u8) T {
-    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
-}

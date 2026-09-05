@@ -1,8 +1,8 @@
-//! The engine's 16-byte tagged JSValue representation and refcount operations.
+//! The engine's 16-byte tagged JSValue representation.
 //!
-//! Immediate values are copied freely; object/string/symbol/bytecode/module
-//! values own one reference per JSValue and `dup`/`free` must balance against
-//! the originating Runtime. Borrowed views never extend that lifetime. The
+//! Values are copied freely; traced heap values are kept alive by heap edges,
+//! root frames, or native pins. `dup`/`free` remain compatibility operations.
+//! The
 //! extern `Repr` field order, 8-byte tag, tag numbers, and alignment are
 //! compiler/plugin ABI and dispatch-codegen pins. QuickJS source map: JSValue
 //! tag/payload accessors in quickjs.h and the pointer decoders at
@@ -14,11 +14,7 @@ const std = @import("std");
 const bignum = @import("../libs/bigint.zig");
 const gc = @import("gc.zig");
 const string_mod = @import("string.zig");
-
-/// Value-free profile hooks stay off even in `zjs-profile`. Compiling them
-/// into JSValue.free / call-profile guards slid WPO (zlib SIGSEGV, `sp==0`
-/// into `op_return`). Dispatch counts live in `cont`/`next` only.
-const value_free_profile = false;
+const tracer_owned_first_tag: i32 = Tag.symbol;
 
 pub const Tag = struct {
     /// Deviation from qjs (JS_TAG_BIG_INT = -9): heap BigInt is tracer-owned
@@ -136,16 +132,16 @@ pub const JSValue = extern struct {
         return make(Tag.big_int, @intFromPtr(header));
     }
 
-    pub fn string(header: *gc.StringHeader) JSValue {
-        return make(Tag.string, @intFromPtr(header) + gc.ref_count_offset_from_payload);
+    pub fn string(header: *gc.GCObjectHeader) JSValue {
+        return make(Tag.string, @intFromPtr(header));
     }
 
-    pub fn stringRope(header: *gc.StringHeader) JSValue {
-        return make(Tag.string_rope, @intFromPtr(header) + gc.ref_count_offset_from_payload);
+    pub fn stringRope(header: *gc.GCObjectHeader) JSValue {
+        return make(Tag.string_rope, @intFromPtr(header));
     }
 
-    pub fn symbol(header: *gc.StringHeader) JSValue {
-        return make(Tag.symbol, @intFromPtr(header) + gc.ref_count_offset_from_payload);
+    pub fn symbol(header: *gc.GCObjectHeader) JSValue {
+        return make(Tag.symbol, @intFromPtr(header));
     }
 
     pub fn object(header: *gc.Header) JSValue {
@@ -245,9 +241,8 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn requiresRefCount(self: JSValue) bool {
-        // QuickJS deliberately uses one unsigned range comparison here:
-        // negative refcounted tags [-8..-1] (including the unreachable -5
-        // hole) compare above every non-negative immediate tag.
+        // Legacy name retained for the public surface. This is now the cheap
+        // heap-value classifier used by store/barrier fast paths.
         const tag: u64 = @bitCast(self.repr.tag);
         const first: u64 = @bitCast(@as(i64, Tag.first));
         return tag >= first;
@@ -446,9 +441,9 @@ pub const JSValue = extern struct {
         return @ptrFromInt(payload);
     }
 
-    pub fn stringHeader(self: JSValue) ?*gc.StringHeader {
+    pub fn stringHeader(self: JSValue) ?*gc.GCObjectHeader {
         return switch (self.tagOf()) {
-            Tag.symbol, Tag.string, Tag.string_rope => self.refCountWordAssumeRefCounted(),
+            Tag.symbol, Tag.string, Tag.string_rope => ptrFromPayload(gc.GCObjectHeader, self.payloadOf()),
             else => null,
         };
     }
@@ -457,10 +452,10 @@ pub const JSValue = extern struct {
     /// tag as string/symbol/string_rope. Mirrors QJS's JS_VALUE_GET_STRING*
     /// macros and avoids repeating the tag switch while collecting multiple
     /// rope operand fields.
-    pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.StringHeader {
+    pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.GCObjectHeader {
         const tag = self.tagOf();
         std.debug.assert(tag == Tag.string or tag == Tag.symbol or tag == Tag.string_rope);
-        return self.refCountWordAssumeRefCounted();
+        return ptrFromPayload(gc.GCObjectHeader, self.payloadOf()).?;
     }
 
     pub fn objectHeader(self: JSValue) ?*gc.GCObjectHeader {
@@ -470,8 +465,8 @@ pub const JSValue = extern struct {
         };
     }
 
-    /// Full GC headers only. Strings and symbols use `stringHeader()` because
-    /// their bodies are refcount-only and do not carry cycle-list links.
+    /// List-backed GC headers only. Strings and symbols use `stringHeader()`
+    /// because their handles are body pointers without list links.
     pub fn refCountHeader(self: JSValue) ?*gc.Header {
         return switch (self.tagOf()) {
             Tag.object, Tag.module, Tag.function_bytecode => ptrFromPayload(gc.Header, self.payloadOf()),
@@ -489,116 +484,41 @@ pub const JSValue = extern struct {
         return ptrFromPayload(gc.Header, self.repr.payload);
     }
 
-    /// Lowest tracer-owned tag: `big_int` (-4) until TGC S2 flips
-    /// `gc.string_tracer_owned`, then `symbol` (-8) -- the whole heap tag
-    /// range, still one compare.
-    pub const tracer_owned_first_tag: i32 = if (gc.string_tracer_owned) Tag.symbol else Tag.big_int;
-
     /// Whether the tracing collector owns this value's lifetime: exactly the
-    /// tag set `cycleMarkHeader` accepts, i.e. everything that lives on
-    /// `gc_obj_list`. Strings, ropes and symbols fall outside it and keep
-    /// their counts until S2 -- the tracer never sees them.
+    /// tag set `cycleMarkHeader` accepts.
     pub inline fn isTracerOwned(self: JSValue) bool {
         const tag = self.repr.tag;
         return tag >= tracer_owned_first_tag and tag <= Tag.object;
     }
 
     pub inline fn dup(self: JSValue) JSValue {
-        if (!self.requiresRefCount()) return self;
-        // For a traced carrier this payload-4 word is mark/husk state, not a
-        // refcount. Every raw retain/release must stop here before treating it
-        // as `RefCountHeader`; liveness is decided by the trace.
-        if (self.isTracerOwned()) return self;
-        gc.retain(self.refCountWordAssumeRefCounted());
         return self;
     }
 
-    pub inline fn free(self: JSValue, rt: anytype) void {
-        comptime {
-            @setEvalBranchQuota(10_000);
-        }
-        if (!self.requiresRefCount()) return;
-        const tag = self.tagOf();
-        if (rt.gc.phase == .deinit and tag >= tracer_owned_first_tag and tag <= Tag.object) return;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        self.releaseCommonRefCount(rt);
-    }
+    pub fn free(_: JSValue, _: anytype) void {}
 
-    /// QuickJS-shaped release for an owner held by an active bytecode frame.
-    ///
-    /// Runtime teardown hard-fails before entering `gc.deinit` while any
-    /// bytecode call-depth owner is live (`JSRuntime.assertIdleForTeardown`).
-    /// A VM handler may therefore prove the deinit exclusion once at bytecode
-    /// entry instead of re-reading `gc.phase` for every `JS_FreeValue`-shaped
-    /// release. Keep the proof explicit here: Debug/ReleaseSafe catch a caller
-    /// outside that window, while ReleaseFast retains only QuickJS's tag-range
-    /// check, refcount decrement, profile hook, and zero-ref tail. That tail
-    /// keeps the phase gate in `gc.destroyZeroRef`, after the refcount reaches
-    /// zero, matching QuickJS `__JS_FreeValueRT` (quickjs.c:6431,6476).
-    ///
-    /// Generic/runtime teardown code must continue to use `free`.
-    pub inline fn freeDuringActiveBytecode(self: JSValue, rt: anytype) void {
-        comptime {
-            @setEvalBranchQuota(10_000);
-        }
+    /// Compatibility release for an owner held by an active bytecode frame;
+    /// the assertions preserve its caller contract.
+    pub inline fn freeDuringActiveBytecode(_: JSValue, rt: anytype) void {
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (!self.requiresRefCount()) return;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        self.releaseCommonRefCount(rt);
     }
 
-    /// Release a value whose caller has already proved the semantic tag is
-    /// `object`. This is the typed counterpart of QuickJS's direct Object
-    /// owner release: it preserves deinit/profile/zero-ref behavior while
-    /// avoiding the generic JSValue refcount-range and tag dispatch on the
-    /// common non-zero arm.
-    /// An Object is always tracer-owned, so the release is nothing but the
-    /// tag assertion: the trace decides liveness and the payload-4 word is
-    /// mark state. The refcount body went with the rc collector. The entry
-    /// point stays because it is the typed half of the value-ownership
-    /// protocol the VM handlers are written against.
+    /// Typed compatibility no-op for callers that already proved `object`.
     pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
         std.debug.assert(self.tagOf() == Tag.object);
         _ = rt;
     }
 
-    /// Active-bytecode twin of `freeObjectAssumeObject`. Runtime teardown is
-    /// excluded while a bytecode owner is live, so the common decrement pays
-    /// no pre-release phase probe; a zero ref still reaches
-    /// `gc.destroyZeroRef` and its QuickJS-shaped phase gate (quickjs.c:6476).
+    /// Active-bytecode twin of `freeObjectAssumeObject`.
     pub inline fn freeObjectAssumeObjectDuringActiveBytecode(self: JSValue, rt: anytype) void {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
     }
 
-    /// Property-slot release from `Object.destroyPlainObjectFast`.
-    ///
-    /// The caller has already proved `gc.phase` is not `.deinit` (the fast-arm
-    /// gate in `destroyFromHeader`). That
-    /// matches `free_property` → `JS_FreeValueRT` (quickjs.c:6111 / 697-704):
-    /// the decrement does not reload phase. An object last-ref goes straight
-    /// to the zero-ref queue (`__JS_FreeValueRT` 6471-6483) instead of hopping
-    /// through `JSValue.destroyZeroRef` + `gc.destroyZeroRef`.
-    pub inline fn freeFromPlainObjectDestroy(self: JSValue, rt: anytype) void {
-        if (!self.requiresRefCount()) return;
-        if (self.isTracerOwned()) return;
-        // Everything past the tracer-owned gate is a string, symbol, rope or
-        // BigInt: still refcounted, never on `gc_obj_list`, so the zero-ref
-        // queue hop the rc collector needed for the Object case is gone with
-        // the case itself.
-        std.debug.assert(self.tagOf() != Tag.object);
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        hdr.rc -= 1;
-        if (hdr.rc != 0) return;
-        self.destroyZeroRef(rt);
-    }
+    /// Compatibility no-op used by the plain-object teardown fast path.
+    pub inline fn freeFromPlainObjectDestroy(_: JSValue, _: anytype) void {}
 
     /// Read a 16-byte JSValue slot as two 64-bit integer loads. Hot
     /// property/operand slots are written and read across handlers as 64-bit
@@ -623,50 +543,19 @@ pub const JSValue = extern struct {
         words[1] = src[1];
     }
 
-    /// Frameless-handler variant of `freeObjectAssumeObject`: performs the
-    /// deinit-phase gate and the common non-zero refcount decrement inline, but
-    /// REPORTS a would-be zero refcount (leaving rc at 1) instead of invoking
-    /// the destroy machinery, so a leaf dispatch handler can route the rare
-    /// destroy through a tail-call and stay prologue-free (the destroy `bl` was
-    /// the only call in the hot get_field body, and it alone forced the
-    /// callee-saved spill frame). When this returns true the caller must
-    /// complete the release exactly once (e.g. `value.free(rt)`).
+    /// Compatibility predicate: traced values never require a destroy tail.
     pub inline fn releaseObjectAssumeObjectNeedsDestroy(self: JSValue, rt: anytype) bool {
         std.debug.assert(self.tagOf() == Tag.object);
         _ = rt;
-        // Always false: an Object is tracer-owned, so no release of one can
-        // ever be the last. The refcount body went with the rc collector.
         return false;
     }
 
-    /// Any-tag twin of `releaseObjectAssumeObjectNeedsDestroy` for the
-    /// resident put_field handler's old-slot value (which can be any
-    /// refcounted tag, not just object): performs the refcount-range gate,
-    /// the deinit-phase skip, and the common non-zero decrement inline, but
-    /// REPORTS a would-be zero refcount (leaving rc at 1) instead of invoking
-    /// the destroy machinery, so the leaf handler can park the value and
-    /// route the rare destroy through a cold tail without carrying a
-    /// callee-saved spill frame. When this returns true the caller must
-    /// complete the release exactly once (e.g. `value.free(rt)`).
-    pub inline fn releaseRefCountedNeedsDestroy(self: JSValue, rt: anytype) bool {
-        if (!self.requiresRefCount()) return false;
-        if (self.isTracerOwned()) return false;
-        const tag = self.tagOf();
-        if (rt.gc.phase == .deinit and tag >= tracer_owned_first_tag and tag <= Tag.object) return false;
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        if (hdr.rc == 1) return true;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        hdr.rc -= 1;
+    /// Any-tag compatibility twin; traced values never require a destroy tail.
+    pub inline fn releaseRefCountedNeedsDestroy(_: JSValue, _: anytype) bool {
         return false;
     }
 
     /// Active-bytecode twin of `releaseObjectAssumeObjectNeedsDestroy`.
-    /// The hot non-zero arm mirrors QuickJS `JS_FreeValue`: no GC-phase read;
-    /// the caller routes the zero-ref leg to the phase-aware destroy tail
-    /// (quickjs.c:6431,6476).
     pub inline fn releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(self: JSValue, rt: anytype) bool {
         std.debug.assert(self.tagOf() == Tag.object);
         std.debug.assert(rt.hot.call_depth != 0);
@@ -676,43 +565,10 @@ pub const JSValue = extern struct {
 
     /// Any-tag active-bytecode twin of
     /// `releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode`.
-    pub inline fn releaseRefCountedNeedsDestroyDuringActiveBytecode(self: JSValue, rt: anytype) bool {
+    pub inline fn releaseRefCountedNeedsDestroyDuringActiveBytecode(_: JSValue, rt: anytype) bool {
         std.debug.assert(rt.hot.call_depth != 0);
         std.debug.assert(rt.gc.phase != .deinit);
-        if (!self.requiresRefCount()) return false;
-        if (self.isTracerOwned()) return false;
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        if (hdr.rc == 1) return true;
-        if (comptime value_free_profile) {
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
-        }
-        hdr.rc -= 1;
         return false;
-    }
-
-    inline fn refCountWordAssumeRefCounted(self: JSValue) *gc.RefCountHeader {
-        const payload = ptrFromPayload(anyopaque, self.payloadOf()).?;
-        return gc.refCountHeaderFromPayload(payload);
-    }
-
-    inline fn releaseCommonRefCount(self: JSValue, rt: anytype) void {
-        if (self.isTracerOwned()) return;
-        const hdr = self.refCountWordAssumeRefCounted();
-        std.debug.assert(hdr.rc > 0);
-        hdr.rc -= 1;
-        if (hdr.rc == 0) self.destroyZeroRef(rt);
-    }
-
-    /// QuickJS `__JS_FreeValue` analogue: tag dispatch is paid only when the
-    /// common payload-4 refcount reaches zero.
-    noinline fn destroyZeroRef(self: JSValue, rt: anytype) void {
-        switch (self.tagOf()) {
-            Tag.string, Tag.symbol => string_mod.String.destroyFromHeader(rt, self.refCountWordAssumeRefCounted()),
-            Tag.string_rope => string_mod.destroyRope(rt, self.ropeBody().?),
-            Tag.module, Tag.function_bytecode, Tag.object => gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?),
-            else => unreachable,
-        }
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {

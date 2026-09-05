@@ -8,7 +8,6 @@ const iterator_ops = @import("iterator_ops.zig");
 const std = @import("std");
 const bignum = @import("../libs/bigint.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
@@ -272,7 +271,6 @@ pub fn mathArg(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Obje
 
 pub fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     if (primitive.isBigInt()) {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
         return error.TypeError;
@@ -282,7 +280,6 @@ pub fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core
         return error.TypeError;
     }
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    defer number_value.free(ctx.runtime);
     return value_ops.numberValue(number_value) orelse std.math.nan(f64);
 }
 
@@ -432,7 +429,6 @@ pub fn mathSumPrecise(
 ) HostError!core.JSValue {
     if (args.len < 1) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot read property 'Symbol.iterator' of undefined");
     const iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
 
     var finite_values = std.ArrayList(f64).empty;
     defer finite_values.deinit(ctx.runtime.memory.allocator);
@@ -444,7 +440,6 @@ pub fn mathSumPrecise(
 
     while (true) {
         const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
-        defer step.value.free(ctx.runtime);
         if (step.done) break;
         const number = value_ops.numberValue(step.value) orelse {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator_value, caller_function, caller_frame);
@@ -611,10 +606,6 @@ pub fn call(id: u32, args: []const core.JSValue) !f64 {
     };
 }
 
-pub fn abs(value: f64) f64 {
-    return @abs(value);
-}
-
 pub fn exp(value: f64) f64 {
     if (value == 1) return E;
     if (value == -1) return 1.0 / E;
@@ -624,10 +615,6 @@ pub fn exp(value: f64) f64 {
 pub fn log2(value: f64) f64 {
     if (exactPowerOfTwoExponent(value)) |exponent| return @floatFromInt(exponent);
     return @log2(value);
-}
-
-pub fn max(a: f64, b: f64) f64 {
-    return if (a > b) a else b;
 }
 
 fn mathHypotPrimitive(args: []const core.JSValue) !f64 {

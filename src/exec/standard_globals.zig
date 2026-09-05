@@ -730,19 +730,34 @@ pub const primitive_symbol_to_primitive_id: u32 = 45;
 // re-exported here unchanged.
 pub const navigator_user_agent = core.function.navigator_user_agent;
 
+/// A bootstrap property key taken from a `[]const u8` table field.
+///
+/// TGC S3 §4 class B. Every standard-globals spelling is in
+/// `predefined_atoms`, so the common answer is a const id the tracer never
+/// touches. The `internAtom` fallback exists for names the table does not
+/// cover, and there it yields a bare id held across a define that allocates.
+/// The ~25 call sites all sit inside comptime-table loops that pass the
+/// borrowed `method.name`/`accessor.property_name` slice straight through, so
+/// per-site `AtomRootFrame`s would mean re-typing the tables; the fallback
+/// takes an explicit pin instead (§2.5's counter: "a root the tracer cannot
+/// see"), released by the `freeTemporaryStringAtom` every site already pairs.
 fn temporaryStringAtom(rt: *core.JSRuntime, name: []const u8) !core.Atom {
-    return core.atom.predefinedId(name, .string) orelse try rt.internAtom(name);
+    if (core.atom.predefinedId(name, .string)) |id| return id;
+    const id = try rt.internAtom(name);
+    rt.atoms.pinForHost(id);
+    return id;
 }
 
 fn freeTemporaryStringAtom(rt: *core.JSRuntime, atom_id: core.Atom) void {
     if (core.atom.isConst(atom_id) or core.atom.isTaggedInt(atom_id)) return;
+    rt.atoms.unpinForHost(atom_id);
     rt.atoms.free(atom_id);
 }
 
 fn createBuiltinAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     if (bytes.len == 0) {
         const cached = try rt.emptyString();
-        return cached.value().dup();
+        return cached.value();
     }
     const string_value = try core.string.String.createAscii(rt, bytes);
     return string_value.value();
@@ -776,6 +791,16 @@ pub fn defineDataAssumingNew(
     const key = try temporaryStringAtom(rt, name);
     defer freeTemporaryStringAtom(rt, key);
     try target.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value, flags.writable, flags.enumerable, flags.configurable));
+}
+
+pub fn defineDataAtom(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    flags: Flags,
+) !void {
+    try target.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, flags.writable, flags.enumerable, flags.configurable));
 }
 
 pub fn defineDataAtomAssumingNew(
@@ -888,7 +913,6 @@ fn defineLazyNativeGetterAtomWithRealmAndMetadata(
 ) !void {
     const realm = try bootstrapPropertyRealm(rt, target, realm_global);
     const getter = try core.function.nativeFunction(realm, getter_name, 0);
-    defer getter.free(rt);
     try applyNativeFunctionMetadata(rt, getter, metadata);
     try defineAccessorAtom(rt, target, atom_id, getter, core.JSValue.undefinedValue(), flags);
 }
@@ -906,7 +930,6 @@ fn defineLazyNativeAccessorPairAtom(
 ) !void {
     const realm = try bootstrapPropertyRealm(rt, target, realm_global);
     const getter = try core.function.nativeFunction(realm, getter_name, 0);
-    defer getter.free(rt);
     if (getter_native_builtin_id != 0) expectObjectAssumeBootstrap(getter).setNativeBuiltinIdAndRecord(rt, getter_native_builtin_id);
 
     if (!std.mem.startsWith(u8, getter_name, "get ")) return error.InvalidBuiltinRegistry;
@@ -914,7 +937,6 @@ fn defineLazyNativeAccessorPairAtom(
     const setter_name = std.fmt.bufPrint(&setter_name_buf, "set {s}", .{getter_name["get ".len..]}) catch
         return error.InvalidBuiltinRegistry;
     const setter = try core.function.nativeFunction(realm, setter_name, setter_length);
-    defer setter.free(rt);
     if (setter_native_builtin_id != 0) expectObjectAssumeBootstrap(setter).setNativeBuiltinIdAndRecord(rt, setter_native_builtin_id);
     try defineAccessorAtom(rt, target, atom_id, getter, setter, flags);
 }
@@ -929,7 +951,6 @@ fn bootstrapPropertyRealm(rt: *core.JSRuntime, target: *core.Object, explicit_gl
 pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, method: Method) !void {
     const realm = try bootstrapPropertyRealm(rt, target, null);
     const value = try core.function.nativeFunction(realm, method.name, method.length);
-    defer value.free(rt);
     // Without this the function object carries no native record, so
     // `nativeMethodFastDispatch` rejects it and every call walks the
     // `callNativeCallableByName` name cascade instead.
@@ -980,7 +1001,6 @@ fn defineNativeMethodsAssumingNewWithRealm(rt: *core.JSRuntime, target: *core.Ob
 
 pub fn defineGlobalFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !void {
     const value = try core.function.nativeFunctionForGlobal(rt, global, name, length);
-    defer value.free(rt);
     try defineData(rt, global, name, value, global_flags);
 }
 
@@ -1004,7 +1024,6 @@ fn publishMethodAlias(
     replace_existing_auto_init: bool,
 ) !void {
     const value = try source.getProperty(source_atom);
-    defer value.free(rt);
     try publishMethodAliasValue(rt, target, alias_atom, value, replace_existing_auto_init);
 }
 
@@ -1034,7 +1053,6 @@ fn publishTypedArrayToStringAlias(
     atom_id: core.Atom,
 ) !void {
     const value = try source.getProperty(atom_id);
-    defer value.free(rt);
     try publishMethodAliasValue(rt, target, atom_id, value, true);
 
     if (!value.isObject()) return error.InvalidBuiltinRegistry;
@@ -1052,14 +1070,13 @@ fn createNamespaceObject(rt: *core.JSRuntime, global: *core.Object, methods: []c
         objectPrototypeFromGlobal(rt, global),
         methods.len + extra_property_count,
     );
-    errdefer namespace.value().free(rt);
     // Namespace is freshly created and method-table entries are unique
     // within `methods`; safe to skip the duplicate-property scan.
     try defineNativeMethodsAssumingNewWithRealm(rt, namespace, methods, global);
     return namespace;
 }
 
-fn defineLazyNamespace(rt: *core.JSRuntime, global: *core.Object, name: []const u8, kind: core.property.AutoInitKind) !void {
+fn defineLazyNamespace(rt: *core.JSRuntime, global: *core.Object, key: core.Atom, kind: core.property.AutoInitKind) !void {
     const info: *const core.property.AutoInit = switch (kind) {
         .math_namespace => &math_namespace_auto_init,
         .json_namespace => &json_namespace_auto_init,
@@ -1067,14 +1084,8 @@ fn defineLazyNamespace(rt: *core.JSRuntime, global: *core.Object, name: []const 
         .atomics_namespace => &atomics_namespace_auto_init,
         else => return error.InvalidBuiltinRegistry,
     };
-    if (!std.mem.eql(u8, name, info.name)) return error.InvalidBuiltinRegistry;
+    if (!std.mem.eql(u8, core.atom.predefinedName(key), info.name)) return error.InvalidBuiltinRegistry;
     const flags = core.property.Flags.data(global_flags.writable, global_flags.enumerable, global_flags.configurable);
-    if (core.atom.predefinedId(name, .string)) |key| {
-        try global.defineAutoInitPropertyFromDescriptor(rt, key, flags, global, info);
-        return;
-    }
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try global.defineAutoInitPropertyFromDescriptor(rt, key, flags, global, info);
 }
 
@@ -1086,7 +1097,6 @@ pub fn materializeBuiltinNamespaceAutoInit(rt: *core.JSRuntime, global: *core.Ob
         .atomics_namespace => try createNamespaceObject(rt, global, &atomics_methods, namespace_to_string_tag_property_count),
         else => return error.TypeError,
     };
-    errdefer namespace.value().free(rt);
     switch (kind) {
         .math_namespace => {
             try bindMathNativeRecords(rt, namespace);
@@ -1116,7 +1126,6 @@ fn createJsonNamespaceObject(rt: *core.JSRuntime, global: *core.Object) !*core.O
         objectPrototypeFromGlobal(rt, global),
         json_methods.len + namespace_to_string_tag_property_count,
     );
-    errdefer namespace.value().free(rt);
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
     const realm = try bootstrapPropertyRealm(rt, namespace, global);
     for (&json_methods) |*method| {
@@ -1303,7 +1312,6 @@ fn defineConstructor(
         length,
         constructorOwnPropertyCapacity(kind, static_methods.len),
     );
-    errdefer constructor_value.free(rt);
     // Prototype/method intern can collect before `.prototype` and the global
     // property exist. Exact-mark tests do not treat this Zig local as a root.
     var live_constructor = constructor_value;
@@ -1315,7 +1323,7 @@ fn defineConstructor(
     if (kind != .proxy) {
         const prototype_capacity = prototypeOwnPropertyCapacity(kind, prototype_methods.len);
         const prototype_value = if (existing_prototype) |prototype|
-            prototype.value().dup()
+            prototype.value()
         else if (kind == .function)
             try core.function.nativeFunctionWithPrototypeAndCapacity(realm, prototype_parent, "", 0, prototype_capacity)
         else if (kind == .array)
@@ -1328,7 +1336,6 @@ fn defineConstructor(
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.boolean, prototype_parent, prototype_capacity)).value()
         else
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, prototype_parent, prototype_capacity)).value();
-        errdefer prototype_value.free(rt);
         const prototype = expectObjectAssumeBootstrap(prototype_value);
         // %Array.prototype% is a real Array whose named builtin properties use
         // the cold ordinary payload while it remains non-dense. This is class
@@ -1349,8 +1356,7 @@ fn defineConstructor(
         }
         if (kind == .string) {
             const empty = try createBuiltinAsciiStringValue(rt, "");
-            defer empty.free(rt);
-            try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), empty.dup());
+            try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), empty);
         }
         if (kind == .boolean) {
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), core.JSValue.boolean(false));
@@ -1377,14 +1383,13 @@ fn defineConstructor(
         // JS_SetConstructor2 appends the prototype back-reference only after
         // its own function-list fields have been installed.
         if (prototype.isArray())
-            try defineData(rt, prototype, "constructor", live_constructor, method_flags)
+            try defineDataAtom(rt, prototype, core.atom.ids.constructor, live_constructor, method_flags)
         else
-            try defineDataAssumingNew(rt, prototype, "constructor", live_constructor, method_flags);
+            try defineDataAtomAssumingNew(rt, prototype, core.atom.ids.constructor, live_constructor, method_flags);
         // Constructor is freshly created above; "prototype" is unique among its
         // existing visible properties. For most constructors those are only
         // length/name; Number intentionally has its static fields first.
-        try defineDataAssumingNew(rt, constructor, "prototype", prototype_value, prototype_flags);
-        prototype_value.free(rt);
+        try defineDataAtomAssumingNew(rt, constructor, core.atom.ids.prototype, prototype_value, prototype_flags);
     }
 
     // `installStandardConstructors` invokes this once per distinct global
@@ -1527,7 +1532,6 @@ fn installStandardConstructorWithPrototype(
         static_methods,
         prototype_methods,
     );
-    defer constructor_value.free(rt);
     const constructor = expectObjectAssumeBootstrap(constructor_value);
     constructors[@intFromEnum(kind)] = constructor;
 
@@ -1548,54 +1552,53 @@ fn installStandardConstructorWithPrototype(
     switch (kind) {
         .object => {
             const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .object_prototype, object_proto.value().dup());
+            try global.setCachedRealmValue(rt, .object_prototype, object_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
         },
         .symbol => {
             const symbol_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .symbol_prototype, symbol_proto.value().dup());
+            try global.setCachedRealmValue(rt, .symbol_prototype, symbol_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
             try installSymbolExtras(rt, global, constructor);
         },
         .boolean => {
             const boolean_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .boolean_prototype, boolean_proto.value().dup());
+            try global.setCachedRealmValue(rt, .boolean_prototype, boolean_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id));
         },
         .proxy => {},
         .array => {
             (try constructor.arrayBuiltinMarkerSlot(rt)).* = .constructor;
             const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .array_prototype, array_proto.value().dup());
+            try global.setCachedRealmValue(rt, .array_prototype, array_proto.value());
             try installArrayPrototypeSymbols(rt, global, constructor);
             const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return error.InvalidBuiltinRegistry;
             const values = try array_proto.getProperty(values_key);
-            defer values.free(rt);
-            try global.setCachedRealmValue(rt, .array_prototype_values, values.dup());
+            try global.setCachedRealmValue(rt, .array_prototype_values, values);
         },
         .string => {
             const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .string_prototype, string_proto.value().dup());
+            try global.setCachedRealmValue(rt, .string_prototype, string_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.ConstructorMethod.call)));
             try installStringPrototypeAliases(rt, global, constructor);
         },
         .number => {
             const number_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .number_prototype, number_proto.value().dup());
+            try global.setCachedRealmValue(rt, .number_prototype, number_proto.value());
         },
         .bigint => {
             const bigint_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            try global.setCachedRealmValue(rt, .bigint_prototype, bigint_proto.value().dup());
+            try global.setCachedRealmValue(rt, .bigint_prototype, bigint_proto.value());
         },
         .regexp => {
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));
-            try global.setCachedRealmValue(rt, .regexp_constructor, constructor.value().dup());
+            try global.setCachedRealmValue(rt, .regexp_constructor, constructor.value());
             try installRegExpExtras(rt, global, constructor);
         },
         .promise => try installPromiseExtras(rt, global, constructor),
         .error_ => {
             try installErrorPrototypeExtras(rt, global, constructor);
-            try defineDataAssumingNew(rt, constructor, "stackTraceLimit", core.JSValue.int32(10), Flags{ .writable = true, .enumerable = false, .configurable = true });
+            try defineDataAtomAssumingNew(rt, constructor, core.atom.ids.stackTraceLimit, core.JSValue.int32(10), Flags{ .writable = true, .enumerable = false, .configurable = true });
         },
         .date => {
             setDateConstructorNativeRecord(rt, constructor);
@@ -1652,7 +1655,6 @@ fn installStandardConstructors(
         null,
         prototypeOwnPropertyCapacity(.object, object_prototype.len),
     )).value();
-    defer object_proto_value.free(rt);
     var live_object_proto = object_proto_value;
     var object_proto_roots = core.runtime.rootValues(.{&live_object_proto});
     object_proto_roots.activate(rt);
@@ -1666,7 +1668,6 @@ fn installStandardConstructors(
         0,
         prototypeOwnPropertyCapacity(.function, function_prototype.len),
     );
-    defer function_proto_value.free(rt);
     var live_function_proto = function_proto_value;
     var function_proto_roots = core.runtime.rootValues(.{&live_function_proto});
     function_proto_roots.activate(rt);
@@ -1749,10 +1750,10 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     const object_proto = constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
     try global.setPrototype(rt, object_proto);
 
-    try defineLazyNamespace(rt, global, "Math", .math_namespace);
-    try defineLazyNamespace(rt, global, "JSON", .json_namespace);
-    try defineLazyNamespace(rt, global, "Reflect", .reflect_namespace);
-    try defineLazyNamespace(rt, global, "Atomics", .atomics_namespace);
+    try defineLazyNamespace(rt, global, core.atom.ids.Math, .math_namespace);
+    try defineLazyNamespace(rt, global, core.atom.ids.JSON, .json_namespace);
+    try defineLazyNamespace(rt, global, core.atom.ids.Reflect, .reflect_namespace);
+    try defineLazyNamespace(rt, global, core.atom.ids.Atomics, .atomics_namespace);
     try installPerformance(rt, global);
     try installNavigator(rt, global);
 
@@ -1873,14 +1874,14 @@ fn isConcreteTypedArrayKind(kind: ConstructorKind) bool {
 
 fn installMathConstants(rt: *core.JSRuntime, math: *core.Object) !void {
     const flags = Flags{ .writable = false, .enumerable = false, .configurable = false };
-    try defineData(rt, math, "E", core.JSValue.float64(math_builtin.E), flags);
-    try defineData(rt, math, "LN10", core.JSValue.float64(math_builtin.LN10), flags);
-    try defineData(rt, math, "LN2", core.JSValue.float64(math_builtin.LN2), flags);
-    try defineData(rt, math, "LOG2E", core.JSValue.float64(math_builtin.LOG2E), flags);
-    try defineData(rt, math, "LOG10E", core.JSValue.float64(math_builtin.LOG10E), flags);
-    try defineData(rt, math, "PI", core.JSValue.float64(math_builtin.PI), flags);
-    try defineData(rt, math, "SQRT1_2", core.JSValue.float64(math_builtin.SQRT1_2), flags);
-    try defineData(rt, math, "SQRT2", core.JSValue.float64(math_builtin.SQRT2), flags);
+    try defineDataAtom(rt, math, core.atom.ids.E, core.JSValue.float64(math_builtin.E), flags);
+    try defineDataAtom(rt, math, core.atom.ids.LN10, core.JSValue.float64(math_builtin.LN10), flags);
+    try defineDataAtom(rt, math, core.atom.ids.LN2, core.JSValue.float64(math_builtin.LN2), flags);
+    try defineDataAtom(rt, math, core.atom.ids.LOG2E, core.JSValue.float64(math_builtin.LOG2E), flags);
+    try defineDataAtom(rt, math, core.atom.ids.LOG10E, core.JSValue.float64(math_builtin.LOG10E), flags);
+    try defineDataAtom(rt, math, core.atom.ids.PI, core.JSValue.float64(math_builtin.PI), flags);
+    try defineDataAtom(rt, math, core.atom.ids.SQRT1_2, core.JSValue.float64(math_builtin.SQRT1_2), flags);
+    try defineDataAtom(rt, math, core.atom.ids.SQRT2, core.JSValue.float64(math_builtin.SQRT2), flags);
 }
 
 fn bindMathNativeRecords(rt: *core.JSRuntime, math: *core.Object) !void {
@@ -1958,7 +1959,6 @@ fn bindMaterializedNativeRecordByAtom(
     native_id: i32,
 ) !void {
     const value = try object.getProperty(atom_id);
-    defer value.free(rt);
     if (!value.isObject()) return;
     const function_object = expectObjectAssumeBootstrap(value);
     function_object.setNativeBuiltinIdAndRecord(rt, native_id);
@@ -2002,8 +2002,7 @@ fn installUint8ArrayConstructorCodecExtras(rt: *core.JSRuntime, ctor: *core.Obje
 }
 
 fn installUint8ArrayCodecExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const from_base64_atom = try temporaryStringAtom(rt, "fromBase64");
-    defer freeTemporaryStringAtom(rt, from_base64_atom);
+    const from_base64_atom = core.atom.ids.fromBase64;
     if (!ctor.hasOwnProperty(from_base64_atom)) {
         try installUint8ArrayConstructorCodecExtras(rt, ctor);
     }
@@ -2702,7 +2701,6 @@ fn installWellKnownSymbolProperties(rt: *core.JSRuntime, symbol_ctor: *core.Obje
 fn defineWellKnownSymbol(rt: *core.JSRuntime, symbol_ctor: *core.Object, name: []const u8, symbol_name: []const u8) !void {
     const symbol_atom = core.atom.predefinedId(symbol_name, .symbol) orelse return error.InvalidBuiltinRegistry;
     const symbol_value = try rt.symbolValue(symbol_atom);
-    defer symbol_value.free(rt);
     try defineDataAssumingNew(rt, symbol_ctor, name, symbol_value, Flags{ .writable = false, .enumerable = false, .configurable = false });
 }
 
@@ -2859,8 +2857,7 @@ fn installErrorPrototypeExtras(rt: *core.JSRuntime, global: *core.Object, ctor: 
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
 
-    const stack_key = try temporaryStringAtom(rt, "stack");
-    defer freeTemporaryStringAtom(rt, stack_key);
+    const stack_key = core.atom.ids.stack;
     try defineLazyNativeAccessorPairAtom(
         rt,
         proto,
@@ -2882,7 +2879,7 @@ fn installPromiseExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.O
     // Mirror qjs ctx->promise_ctor (JS_AddIntrinsicPromise quickjs.c:54663):
     // the realm retains the intrinsic constructor so await / the default
     // species never depend on the mutable globalThis.Promise binding.
-    try global.setCachedRealmValue(rt, .promise_constructor, ctor.value().dup());
+    try global.setCachedRealmValue(rt, .promise_constructor, ctor.value());
 }
 
 fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
@@ -2924,7 +2921,7 @@ fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.
 fn installStringPrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 4);
-    try defineData(rt, proto, "length", core.JSValue.int32(0), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineDataAtom(rt, proto, core.atom.ids.length, core.JSValue.int32(0), Flags{ .writable = false, .enumerable = false, .configurable = true });
     try installNativeMethodAlias(rt, proto, "trimStart", "trimLeft");
     try installNativeMethodAlias(rt, proto, "trimEnd", "trimRight");
     const iterator_flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
@@ -2934,8 +2931,7 @@ fn installStringPrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor
 fn defineObjectPrototypeMethodsAssumingNew(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object) !void {
     try defineNativeMethodsAssumingNewWithRealm(rt, proto, object_prototype[0..6], global);
 
-    const proto_key = try rt.internAtom("__proto__");
-    defer rt.atoms.free(proto_key);
+    const proto_key = core.atom.ids.__proto__;
     try defineLazyNativeAccessorPairAtom(rt, proto, proto_key, "get __proto__", 0, 1, 0, Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
 
     try defineNativeMethodsAssumingNewWithRealm(rt, proto, object_prototype[6..], global);
@@ -2957,8 +2953,7 @@ fn installRegExpExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Ob
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 21);
 
-    const escape_key = try rt.internAtom("escape");
-    defer rt.atoms.free(escape_key);
+    const escape_key = core.atom.ids.escape;
     const escape_flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
     try ctor.defineAutoInitPropertyFromDescriptor(rt, escape_key, escape_flags, null, &regexp_escape_auto_init);
 
@@ -3131,8 +3126,7 @@ fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 3);
 
-    const disposed_key = try temporaryStringAtom(rt, "disposed");
-    defer freeTemporaryStringAtom(rt, disposed_key);
+    const disposed_key = core.atom.ids.disposed;
     try defineLazyNativeGetterAtomWithRealmAndMetadata(
         rt,
         proto,
@@ -3153,8 +3147,7 @@ fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, 
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 3);
 
-    const disposed_key = try temporaryStringAtom(rt, "disposed");
-    defer freeTemporaryStringAtom(rt, disposed_key);
+    const disposed_key = core.atom.ids.disposed;
     try defineLazyNativeGetterAtomWithRealmAndMetadata(
         rt,
         proto,
@@ -3165,8 +3158,7 @@ fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, 
         global,
     );
 
-    const dispose_async_key = try temporaryStringAtom(rt, "disposeAsync");
-    defer freeTemporaryStringAtom(rt, dispose_async_key);
+    const dispose_async_key = core.atom.ids.disposeAsync;
     try publishMethodAlias(rt, proto, proto, dispose_async_key, core.atom.ids.Symbol_asyncDispose, false);
 
     try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "AsyncDisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
@@ -3404,7 +3396,7 @@ fn getNamedPropertyForTest(rt: *core.JSRuntime, object: *core.Object, name: []co
 }
 
 fn expectNativeAliasForTest(
-    rt: *core.JSRuntime,
+    _: *core.JSRuntime,
     source_owner: *core.Object,
     source_atom: core.Atom,
     alias_owner: *core.Object,
@@ -3413,9 +3405,7 @@ fn expectNativeAliasForTest(
     id: u32,
 ) !void {
     const source = try source_owner.getProperty(source_atom);
-    defer source.free(rt);
     const alias = try alias_owner.getProperty(alias_atom);
-    defer alias.free(rt);
 
     try std.testing.expect(source.sameValue(alias));
     const function_object = expectObjectAssumeBootstrap(source);
@@ -3429,19 +3419,17 @@ fn getConstructorPrototypeForTest(
     constructor_name: []const u8,
 ) !core.JSValue {
     const constructor_value = try getNamedPropertyForTest(rt, global, constructor_name);
-    defer constructor_value.free(rt);
     return expectObjectAssumeBootstrap(constructor_value).getProperty(core.atom.ids.prototype);
 }
 
 fn expectNativeFunctionForTest(
-    rt: *core.JSRuntime,
+    _: *core.JSRuntime,
     owner: *core.Object,
     atom_id: core.Atom,
     domain: core.function.NativeBuiltinDomain,
     id: u32,
 ) !void {
     const value = try owner.getProperty(atom_id);
-    defer value.free(rt);
     const function_object = expectObjectAssumeBootstrap(value);
     try std.testing.expectEqual(core.function.nativeBuiltinId(domain, id), function_object.nativeFunctionId());
     try std.testing.expect(function_object.nativeRecord() != null);
@@ -3464,7 +3452,6 @@ test "intrinsic bootstrap registers global builtin domains through object proper
         defer rt.atoms.free(atom_id);
         try std.testing.expect(intrinsics.global.hasOwnProperty(atom_id));
         const desc = (try intrinsics.global.getOwnProperty(rt, atom_id)).?;
-        defer desc.destroy(rt);
         try std.testing.expectEqual(true, desc.writable.?);
         try std.testing.expectEqual(false, desc.enumerable.?);
         try std.testing.expectEqual(true, desc.configurable.?);
@@ -3473,7 +3460,6 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     const map_atom = try rt.internAtom("Map");
     defer rt.atoms.free(map_atom);
     const map_ctor = try intrinsics.global.getProperty(map_atom);
-    defer map_ctor.free(rt);
     try std.testing.expect(map_ctor.isObject());
     const map_ctor_object = core.Object.fromHeader(map_ctor.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
@@ -3481,7 +3467,6 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     const prototype_atom = try rt.internAtom("prototype");
     defer rt.atoms.free(prototype_atom);
     const prototype_desc = (try map_ctor_object.getOwnProperty(rt, prototype_atom)).?;
-    defer prototype_desc.destroy(rt);
     try std.testing.expectEqual(false, prototype_desc.writable.?);
     try std.testing.expectEqual(false, prototype_desc.enumerable.?);
     try std.testing.expectEqual(false, prototype_desc.configurable.?);
@@ -3492,7 +3477,6 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     const set_atom = try rt.internAtom("set");
     defer rt.atoms.free(set_atom);
     const set_desc = (try map_proto.getOwnProperty(rt, set_atom)).?;
-    defer set_desc.destroy(rt);
     try std.testing.expectEqual(true, set_desc.writable.?);
     try std.testing.expectEqual(false, set_desc.enumerable.?);
     try std.testing.expectEqual(true, set_desc.configurable.?);
@@ -3526,13 +3510,11 @@ test "lazy standard functions attach typed records for every formerly exceptiona
         const owner_key = try temporaryStringAtom(rt, item.owner);
         defer freeTemporaryStringAtom(rt, owner_key);
         const owner_value = try intrinsics.global.getProperty(owner_key);
-        defer owner_value.free(rt);
         const owner = expectObjectAssumeBootstrap(owner_value);
 
         const method_key = try temporaryStringAtom(rt, item.method);
         defer freeTemporaryStringAtom(rt, method_key);
         const method_value = try owner.getProperty(method_key);
-        defer method_value.free(rt);
         const function_object = expectObjectAssumeBootstrap(method_value);
 
         try std.testing.expectEqual(core.function.nativeBuiltinId(item.domain, item.id), function_object.nativeFunctionId());
@@ -3544,7 +3526,6 @@ test "lazy standard functions attach typed records for every formerly exceptiona
     const escape_key = try temporaryStringAtom(rt, "escape");
     defer freeTemporaryStringAtom(rt, escape_key);
     const escape_value = try intrinsics.global.getProperty(escape_key);
-    defer escape_value.free(rt);
     const escape_function = expectObjectAssumeBootstrap(escape_value);
     try std.testing.expectEqual(core.function.nativeBuiltinId(.uri, core.uri.escape_id), escape_function.nativeFunctionId());
     try std.testing.expect(escape_function.nativeRecord() != null);
@@ -3558,10 +3539,8 @@ test "bootstrap aliases retain exact native identity and records" {
     defer intrinsics.deinit(rt);
 
     const array_value = try getNamedPropertyForTest(rt, intrinsics.global, "Array");
-    defer array_value.free(rt);
     const array = expectObjectAssumeBootstrap(array_value);
     const array_proto_value = try array.getProperty(core.atom.ids.prototype);
-    defer array_proto_value.free(rt);
     const array_proto = expectObjectAssumeBootstrap(array_proto_value);
     try expectNativeAliasForTest(
         rt,
@@ -3574,10 +3553,8 @@ test "bootstrap aliases retain exact native identity and records" {
     );
 
     const string_value = try getNamedPropertyForTest(rt, intrinsics.global, "String");
-    defer string_value.free(rt);
     const string = expectObjectAssumeBootstrap(string_value);
     const string_proto_value = try string.getProperty(core.atom.ids.prototype);
-    defer string_proto_value.free(rt);
     const string_proto = expectObjectAssumeBootstrap(string_proto_value);
     const trim_start_atom = try temporaryStringAtom(rt, "trimStart");
     defer freeTemporaryStringAtom(rt, trim_start_atom);
@@ -3607,10 +3584,8 @@ test "bootstrap aliases retain exact native identity and records" {
     );
 
     const date_value = try getNamedPropertyForTest(rt, intrinsics.global, "Date");
-    defer date_value.free(rt);
     const date = expectObjectAssumeBootstrap(date_value);
     const date_proto_value = try date.getProperty(core.atom.ids.prototype);
-    defer date_proto_value.free(rt);
     const date_proto = expectObjectAssumeBootstrap(date_proto_value);
     const to_utc_string_atom = try temporaryStringAtom(rt, "toUTCString");
     defer freeTemporaryStringAtom(rt, to_utc_string_atom);
@@ -3627,7 +3602,6 @@ test "bootstrap aliases retain exact native identity and records" {
     );
 
     const number_value = try getNamedPropertyForTest(rt, intrinsics.global, "Number");
-    defer number_value.free(rt);
     const number = expectObjectAssumeBootstrap(number_value);
     const parse_int_atom = try temporaryStringAtom(rt, "parseInt");
     defer freeTemporaryStringAtom(rt, parse_int_atom);
@@ -3650,7 +3624,6 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     defer intrinsics.deinit(rt);
 
     const string_proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, "String");
-    defer string_proto_value.free(rt);
     const string_proto = expectObjectAssumeBootstrap(string_proto_value);
     const string_to_string_atom = try temporaryStringAtom(rt, "toString");
     defer freeTemporaryStringAtom(rt, string_to_string_atom);
@@ -3660,17 +3633,13 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     try expectNativeFunctionForTest(rt, string_proto, string_value_of_atom, .primitive, 52);
 
     const array_proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, "Array");
-    defer array_proto_value.free(rt);
     const array_proto = expectObjectAssumeBootstrap(array_proto_value);
     const typed_array_proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, "TypedArray");
-    defer typed_array_proto_value.free(rt);
     const typed_array_proto = expectObjectAssumeBootstrap(typed_array_proto_value);
 
     const to_string_atom = core.atom.predefinedId("toString", .string).?;
     const array_to_string = try array_proto.getProperty(to_string_atom);
-    defer array_to_string.free(rt);
     const typed_array_to_string = try typed_array_proto.getProperty(to_string_atom);
-    defer typed_array_to_string.free(rt);
     try std.testing.expect(array_to_string.sameValue(typed_array_to_string));
     const shared_to_string = expectObjectAssumeBootstrap(typed_array_to_string);
     try std.testing.expectEqual(core.property.ArrayBuiltinMarker.to_string, shared_to_string.arrayBuiltinMarker());
@@ -3679,9 +3648,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     const values_atom = core.atom.predefinedId("values", .string).?;
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
     const typed_array_values = try typed_array_proto.getProperty(values_atom);
-    defer typed_array_values.free(rt);
     const typed_array_iterator = try typed_array_proto.getProperty(iterator_atom);
-    defer typed_array_iterator.free(rt);
     try std.testing.expect(typed_array_values.sameValue(typed_array_iterator));
     const shared_values = expectObjectAssumeBootstrap(typed_array_values);
     try std.testing.expectEqual(core.property.TypedArrayBuiltinMarker.prototype_method, shared_values.typedArrayBuiltinMarker());
@@ -3701,7 +3668,6 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
         const atom_id = try temporaryStringAtom(rt, expected.name);
         defer freeTemporaryStringAtom(rt, atom_id);
         const value = try typed_array_proto.getProperty(atom_id);
-        defer value.free(rt);
         const function_object = expectObjectAssumeBootstrap(value);
         try std.testing.expectEqual(core.property.TypedArrayBuiltinMarker.prototype_method, function_object.typedArrayBuiltinMarker());
         try std.testing.expectEqual(expected.iterator_kind, function_object.arrayIteratorKind());
@@ -3709,7 +3675,6 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     }
 
     const typed_array_value = try getNamedPropertyForTest(rt, intrinsics.global, "TypedArray");
-    defer typed_array_value.free(rt);
     const typed_array = expectObjectAssumeBootstrap(typed_array_value);
     const TypedStatic = struct {
         name: []const u8,
@@ -3723,7 +3688,6 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
         const atom_id = try temporaryStringAtom(rt, expected.name);
         defer freeTemporaryStringAtom(rt, atom_id);
         const value = try typed_array.getProperty(atom_id);
-        defer value.free(rt);
         try std.testing.expectEqual(expected.marker, expectObjectAssumeBootstrap(value).typedArrayBuiltinMarker());
     }
 
@@ -3740,11 +3704,9 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     };
     for (collection_methods) |expected| {
         const proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, expected.constructor_name);
-        defer proto_value.free(rt);
         const atom_id = try temporaryStringAtom(rt, expected.method_name);
         defer freeTemporaryStringAtom(rt, atom_id);
         const value = try expectObjectAssumeBootstrap(proto_value).getProperty(atom_id);
-        defer value.free(rt);
         try std.testing.expectEqual(expected.owner_class, expectObjectAssumeBootstrap(value).collectionMethodOwnerClass());
     }
 
@@ -3753,7 +3715,6 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
         .{ .constructor_name = "Set", .method_name = "size", .owner_class = core.class.ids.set },
     }) |expected| {
         const proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, expected.constructor_name);
-        defer proto_value.free(rt);
         const proto = expectObjectAssumeBootstrap(proto_value);
         const atom_id = try temporaryStringAtom(rt, expected.method_name);
         defer freeTemporaryStringAtom(rt, atom_id);
@@ -3780,15 +3741,12 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     };
     for (disposable_stacks) |expected| {
         const proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, expected.constructor_name);
-        defer proto_value.free(rt);
         const proto = expectObjectAssumeBootstrap(proto_value);
 
         const method_atom = try temporaryStringAtom(rt, expected.method_name);
         defer freeTemporaryStringAtom(rt, method_atom);
         const method = try proto.getProperty(method_atom);
-        defer method.free(rt);
         const symbol_method = try proto.getProperty(expected.symbol_atom);
-        defer symbol_method.free(rt);
         try std.testing.expect(method.sameValue(symbol_method));
         if (expected.is_async) {
             try std.testing.expectEqual(@as(u8, 4), expectObjectAssumeBootstrap(method).asyncDisposableStackMethod());

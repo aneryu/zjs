@@ -14,7 +14,6 @@ const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");
 const jobs_mod = core.jobs;
 const parser = @import("../parser.zig");
-const platform_clock = @import("../platform_clock.zig");
 const exec = @import("root.zig");
 const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
@@ -136,10 +135,8 @@ pub const ModuleContinuation = struct {
     awaited_normalized: bool = false,
     ready: bool = false,
 
-    fn replaceAwaited(self: *ModuleContinuation, runtime: *core.JSRuntime, replacement: core.JSValue) void {
-        const old = self.awaited;
+    fn replaceAwaited(self: *ModuleContinuation, _: *core.JSRuntime, replacement: core.JSValue) void {
         self.awaited = replacement;
-        old.free(runtime);
     }
 };
 
@@ -149,10 +146,8 @@ const ModuleEvaluationWaiter = struct {
     resolve: core.JSValue,
     reject: core.JSValue,
 
-    fn deinit(self: *ModuleEvaluationWaiter, runtime: *core.JSRuntime, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ModuleEvaluationWaiter, _: *core.JSRuntime, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
-        self.resolve.free(runtime);
-        self.reject.free(runtime);
         self.realm.deinit();
     }
 };
@@ -169,11 +164,9 @@ pub const ImportLoaderType = enum { none, json, text };
 /// "type" string; "json" selects the JSON loader, anything else is ignored.
 fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) ImportLoaderType {
     if (!attributes.isObject()) return .none;
-    const type_atom = ctx.runtime.internAtom("type") catch return .none;
-    defer ctx.runtime.atoms.free(type_atom);
+    const type_atom = core.atom.ids.type_;
     const object = exec.property_ops.expectObject(attributes) catch return .none;
     const type_value = object.getOwnDataPropertyValue(type_atom) orelse return .none;
-    defer type_value.free(ctx.runtime);
     if (!type_value.isString()) return .none;
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(ctx.runtime.memory.allocator);
@@ -309,21 +302,14 @@ fn createModuleEvaluationWaiter(
     const waiters = state.waiterList();
     const rt = state.runtime;
     const resolvers_value = try core.promise.withResolvers(context, exec.promise_ops.promisePrototypeFromGlobal(rt, global));
-    defer resolvers_value.free(rt);
     const resolvers = try exec.property_ops.expectObject(resolvers_value);
-    const promise_atom = try rt.internAtom("promise");
-    defer rt.atoms.free(promise_atom);
-    const resolve_atom = try rt.internAtom("resolve");
-    defer rt.atoms.free(resolve_atom);
-    const reject_atom = try rt.internAtom("reject");
-    defer rt.atoms.free(reject_atom);
+    const promise_atom = core.atom.ids.promise;
+    const resolve_atom = core.atom.ids.resolve;
+    const reject_atom = core.atom.ids.reject;
 
     const promise = try resolvers.getProperty(promise_atom);
-    errdefer promise.free(rt);
     const resolve = try resolvers.getProperty(resolve_atom);
-    errdefer resolve.free(rt);
     const reject = try resolvers.getProperty(reject_atom);
-    errdefer reject.free(rt);
     const owned_path = try state.allocator.dupe(u8, path);
     errdefer state.allocator.free(owned_path);
     var realm = core.RealmRef.retain(context);
@@ -348,10 +334,13 @@ fn settleModuleEvaluationWaiters(
     const waiters = state.waiterList();
     const global = try exec.zjs_vm.contextGlobal(context);
     var namespace = core.JSValue.undefinedValue();
-    defer namespace.free(state.runtime);
     if (!rejected) {
         const module_name = try state.runtime.internAtom(path);
         defer state.runtime.atoms.free(module_name);
+        // TGC S3 §4 class B: bare module-name id held across module work.
+        var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+        module_name_roots.activate(state.runtime);
+        defer module_name_roots.deactivate(state.runtime);
         namespace = try exec.module.moduleNamespaceValue(context, module_name);
     }
 
@@ -365,7 +354,7 @@ fn settleModuleEvaluationWaiters(
         const waiter = waiters.items[index];
         const callback = if (rejected) waiter.reject else waiter.resolve;
         const payload = if (rejected) reason orelse core.JSValue.undefinedValue() else namespace;
-        const result = try exec.call_runtime.callValueOrBytecodeRoot(
+        _ = try exec.call_runtime.callValueOrBytecodeRoot(
             context,
             output,
             global,
@@ -375,7 +364,6 @@ fn settleModuleEvaluationWaiters(
             null,
             null,
         );
-        result.free(state.runtime);
         var settled_waiter = waiters.orderedRemove(index);
         settled_waiter.deinit(state.runtime, state.allocator);
     }
@@ -388,10 +376,14 @@ fn takeRecordedModuleEvaluationRejection(
 ) !?core.JSValue {
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return null;
     if (record.status != .errored) return null;
     if (context.hasException()) return context.takeException();
-    if (record.eval_exception) |reason| return reason.dup();
+    if (record.eval_exception) |reason| return reason;
     return null;
 }
 
@@ -402,9 +394,17 @@ fn moduleDependencyRejection(
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return null;
     var visited = std.ArrayList(core.Atom).empty;
     defer visited.deinit(runtime.memory.allocator);
+    // TGC S3 §4 class B: `visited` is a native []Atom grown while walking.
+    var visited_roots = core.runtime.rootAtomList(&visited.items);
+    visited_roots.activate(runtime);
+    defer visited_roots.deactivate(runtime);
     try visited.append(runtime.memory.allocator, module_name);
     return recordDependencyRejection(context, record, &visited);
 }
@@ -418,7 +418,7 @@ fn recordDependencyRejection(
     for (record.requests) |request| {
         const dependency = request.module orelse continue;
         if (dependency.status == .errored) {
-            if (dependency.eval_exception) |reason| return reason.dup();
+            if (dependency.eval_exception) |reason| return reason;
         }
         var already_visited = false;
         for (visited.items) |seen| {
@@ -442,9 +442,13 @@ fn recordModuleEvaluationRejection(
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return error.ModuleNotFound;
     record.status = .errored;
-    if (record.eval_exception == null) record.setEvalException(runtime, reason.dup());
+    if (record.eval_exception == null) record.setEvalException(runtime, reason);
 }
 
 pub fn createModuleAwaitReactionPromise(
@@ -455,7 +459,6 @@ pub fn createModuleAwaitReactionPromise(
     awaited: core.JSValue,
 ) !core.JSValue {
     const promise_constructor = try exec.promise_ops.promiseDefaultConstructor(context, global);
-    defer promise_constructor.free(runtime);
     const awaited_promise = try exec.promise_ops.promiseStaticCall(
         context,
         output,
@@ -466,24 +469,16 @@ pub fn createModuleAwaitReactionPromise(
         null,
         null,
     );
-    defer awaited_promise.free(runtime);
 
     const resolvers_value = try core.promise.withResolvers(context, exec.promise_ops.promisePrototypeFromGlobal(runtime, global));
-    defer resolvers_value.free(runtime);
     const resolvers = try exec.property_ops.expectObject(resolvers_value);
-    const promise_atom = try runtime.internAtom("promise");
-    defer runtime.atoms.free(promise_atom);
-    const resolve_atom = try runtime.internAtom("resolve");
-    defer runtime.atoms.free(resolve_atom);
-    const reject_atom = try runtime.internAtom("reject");
-    defer runtime.atoms.free(reject_atom);
+    const promise_atom = core.atom.ids.promise;
+    const resolve_atom = core.atom.ids.resolve;
+    const reject_atom = core.atom.ids.reject;
 
     const reaction_promise = try resolvers.getProperty(promise_atom);
-    errdefer reaction_promise.free(runtime);
     const resolve = try resolvers.getProperty(resolve_atom);
-    defer resolve.free(runtime);
     const reject = try resolvers.getProperty(reject_atom);
-    defer reject.free(runtime);
     try exec.promise_ops.performPromiseThen(
         context,
         output,
@@ -551,21 +546,17 @@ pub fn evaluateImportCall(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) exec.exceptions.HostError!core.JSValue {
-    const rt = ctx.runtime;
     // quickjs.c:31100 — `if (!JS_IsUndefined(options))`.
     var attributes = core.JSValue.undefinedValue();
-    errdefer attributes.free(rt);
     if (!options.isUndefined()) {
         // quickjs.c:31101 — options must be an object.
         if (!options.isObject()) {
             return rejectedImportTypeError(ctx, global, prototype, "options must be an object");
         }
-        const with_atom = try rt.internAtom("with");
-        defer rt.atoms.free(with_atom);
+        const with_atom = core.atom.ids.with;
         // quickjs.c:31105 — `attributes_obj = JS_GetProperty(options, "with")`.
         const attributes_obj = exec.object_ops.getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err|
             return rejectedImportRuntimeError(ctx, global, prototype, err);
-        defer attributes_obj.free(rt);
         // quickjs.c:31108 — `if (!JS_IsUndefined(attributes_obj))`.
         if (!attributes_obj.isUndefined()) {
             // quickjs.c:31113 — options.with must be an object.
@@ -601,8 +592,7 @@ fn buildImportAttributes(
 
     // quickjs.c:31117 — `attributes = JS_NewObjectProto(ctx, JS_NULL)`.
     const attributes_object = try core.Object.create(rt, core.class.ids.object, null);
-    var attributes = attributes_object.value();
-    errdefer attributes.free(rt);
+    const attributes = attributes_object.value();
 
     // quickjs.c:31118 — JS_GetOwnPropertyNamesInternal(STRING_MASK|ENUM_ONLY).
     // The proxy ownKeys trap runs here; a throwing trap propagates (mirrors
@@ -616,12 +606,10 @@ fn buildImportAttributes(
         // JS_GPN_ENUM_ONLY: only enumerable own properties.
         const desc = (try exec.object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, function, frame)) orelse continue;
         const enumerable = desc.enumerable orelse false;
-        desc.destroy(rt);
         if (!enumerable) continue;
 
         // quickjs.c:31123 — `val = JS_GetProperty(attributes_obj, key)`.
         const val = try exec.object_ops.getValueProperty(ctx, output, global, attributes_obj, key, function, frame);
-        defer val.free(rt);
         // quickjs.c:31126 — module attribute values must be strings.
         if (!val.isString()) {
             return exec.exception_ops.throwTypeErrorMessage(ctx, global, "module attribute values must be strings");
@@ -645,7 +633,6 @@ fn rejectedImportTypeError(
     message: []const u8,
 ) exec.exceptions.HostError!core.JSValue {
     const error_value = try exec.exception_ops.createNamedError(ctx, global, "TypeError", message);
-    defer error_value.free(ctx.runtime);
     return core.promise.rejectedWithPrototype(ctx, error_value, prototype);
 }
 
@@ -693,26 +680,17 @@ fn enqueueDynamicImportJobWithAttributes(
     _ = global;
     // This function owns the incoming `attributes` reference; defineOwnProperty
     // below dups it into the job slot, so free the original on return.
-    defer attributes.free(rt);
     const resolvers_value = try core.promise.withResolvers(ctx, prototype);
-    defer resolvers_value.free(rt);
     const resolvers = try exec.property_ops.expectObject(resolvers_value);
 
-    const promise_atom = try rt.internAtom("promise");
-    defer rt.atoms.free(promise_atom);
-    const resolve_atom = try rt.internAtom("resolve");
-    defer rt.atoms.free(resolve_atom);
-    const reject_atom = try rt.internAtom("reject");
-    defer rt.atoms.free(reject_atom);
+    const promise_atom = core.atom.ids.promise;
+    const resolve_atom = core.atom.ids.resolve;
+    const reject_atom = core.atom.ids.reject;
     const promise_value = try resolvers.getProperty(promise_atom);
-    errdefer promise_value.free(rt);
     const resolve_value = try resolvers.getProperty(resolve_atom);
-    defer resolve_value.free(rt);
     const reject_value = try resolvers.getProperty(reject_atom);
-    defer reject_value.free(rt);
 
     const basename_value = try exec.value_ops.createStringValue(rt, referrer_path);
-    defer basename_value.free(rt);
 
     try rt.job_queue.enqueueDynamicImport(
         ctx,
@@ -775,7 +753,6 @@ fn dynamicImportJobRun(
     };
 
     if (load_result) |namespace| {
-        defer namespace.free(rt);
         if (namespace.isObject()) {
             const object = try exec.property_ops.expectObject(namespace);
             if (object.class_id == core.class.ids.promise) {
@@ -795,8 +772,7 @@ fn dynamicImportJobRun(
                 return core.JSValue.undefinedValue();
             }
         }
-        const settle = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
-        settle.free(rt);
+        _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
     } else |err| {
         switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -805,9 +781,7 @@ fn dynamicImportJobRun(
             else => {},
         }
         const reason = try dynamicImportRejectionValue(ctx, global, err, specifier_bytes.items);
-        defer reason.free(rt);
-        const settle = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, null, null);
-        settle.free(rt);
+        _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, null, null);
     }
     return core.JSValue.undefinedValue();
 }
@@ -904,6 +878,10 @@ pub fn evalFileModuleGraphWithOutput(
     try exec.module.preloadFileModuleGraphWithOrder(io, allocator, context, source_text, normalized_filename, max_source_size, &module_postorder);
     const root_module_name = try runtime.internAtom(normalized_filename);
     defer runtime.atoms.free(root_module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var root_module_name_roots = core.runtime.rootAtoms(.{&root_module_name});
+    root_module_name_roots.activate(runtime);
+    defer root_module_name_roots.deactivate(runtime);
     const root_record = context.modules.find(root_module_name) orelse return error.ModuleNotFound;
     root_record.import_meta_main = true;
     try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
@@ -957,7 +935,6 @@ pub fn evalFileModuleGraphWithOutput(
     // Dynamic-import jobs may add TLA continuations to the shared scheduler.
     // Alternate one queued reaction with one ready module resume until both
     // queues quiesce while the loader state is still alive.
-    errdefer result.free(runtime);
     try drainModuleJobLoop(runtime, context, output, allocator, &continuations);
     return result;
 }
@@ -970,6 +947,10 @@ fn preloadedModuleNeedsEvaluation(context: *core.JSContext, path: []const u8) bo
     const runtime = context.runtime;
     const module_name = runtime.internAtom(path) catch return true;
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return true;
     return moduleNeedsEvaluation(record);
 }
@@ -993,6 +974,10 @@ pub fn evalFileModuleGraphWithHostHooks(
 
     const root_module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(root_module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var root_module_name_roots = core.runtime.rootAtoms(.{&root_module_name});
+    root_module_name_roots.activate(runtime);
+    defer root_module_name_roots.deactivate(runtime);
     const root_record = context.modules.find(root_module_name) orelse return error.ModuleNotFound;
     root_record.import_meta_main = true;
     var link_diagnostic: exec.module.LinkDiagnostic = .{};
@@ -1051,7 +1036,6 @@ pub fn evalFileModuleGraphWithHostHooks(
     // Drain jobs enqueued by a synchronously-completing root (dynamic-import
     // jobs in particular) while this runner's dynamic-import state is still
     // installed and alive.
-    errdefer result.free(runtime);
     try runJobs(runtime, context, output);
     return result;
 }
@@ -1097,10 +1081,13 @@ fn evalPreloadedFileModuleStep(
     resume_value: ?core.JSValue,
 ) !ModuleEvalStep {
     var input_continuation = continuation_value;
-    errdefer if (input_continuation) |value| value.free(runtime);
 
     const module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return error.ModuleNotFound;
     if (record.synthetic_kind != .none) {
         // Synthetic records publish their retained default cell during
@@ -1119,19 +1106,18 @@ fn evalPreloadedFileModuleStep(
             // m->eval_exception, quickjs.c:31279/31563).
             record.status = .errored;
             if (context.hasException()) {
-                record.setEvalException(runtime, context.runtime.current_exception.dup());
+                record.setEvalException(runtime, context.runtime.current_exception);
             }
         }
     }
 
-    var owned_continuation = if (input_continuation) |value| blk: {
+    const owned_continuation = if (input_continuation) |value| blk: {
         input_continuation = null;
         break :blk value;
     } else blk: {
         const object = try core.Object.create(runtime, core.class.ids.generator, null);
         break :blk object.value();
     };
-    errdefer owned_continuation.free(runtime);
     const continuation = try exec.property_ops.expectObject(owned_continuation);
     const result = exec.module.runModuleEvaluationStep(
         context,
@@ -1146,7 +1132,6 @@ fn evalPreloadedFileModuleStep(
             .awaited = result,
         } };
     }
-    owned_continuation.free(runtime);
     record.status = .evaluated;
     return .{ .completed = result };
 }
@@ -1162,10 +1147,7 @@ fn startPreloadedFileModuleStep(
     filename: []const u8,
 ) !ModuleEvalStep {
     if (try moduleDependencyRejection(context, filename)) |reason| {
-        var reason_owned = true;
-        defer if (reason_owned) reason.free(runtime);
         try recordModuleEvaluationRejection(context, filename, reason);
-        reason_owned = false;
         _ = context.throwValue(reason);
         return error.JSException;
     }
@@ -1180,18 +1162,14 @@ fn handleModuleEvalStep(
     filename: []const u8,
     keep_result: bool,
 ) !void {
-    const runtime = context.runtime;
-    appendModuleEvalStepRetainingOnError(
+    try appendModuleEvalStepRetainingOnError(
         context,
         allocator,
         continuations,
         step,
         filename,
         keep_result,
-    ) catch |err| {
-        freeModuleEvalStep(runtime, step);
-        return err;
-    };
+    );
 }
 
 /// Append a freshly-produced evaluation step, transferring its JSValue
@@ -1207,7 +1185,6 @@ fn appendModuleEvalStepRetainingOnError(
     filename: []const u8,
     keep_result: bool,
 ) !void {
-    const runtime = context.runtime;
     switch (step) {
         .completed => |value| {
             if (keep_result) {
@@ -1224,9 +1201,7 @@ fn appendModuleEvalStepRetainingOnError(
                     .completed = true,
                 };
                 try continuations.append(allocator, continuation);
-            } else {
-                value.free(runtime);
-            }
+            } else {}
         },
         .suspended => |suspended| {
             const path_copy = try allocator.dupe(u8, filename);
@@ -1255,6 +1230,10 @@ fn enqueueDeferredModuleStart(
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const module_record = context.modules.find(module_name) orelse return error.ModuleNotFound;
     const path_copy = try allocator.dupe(u8, filename);
     errdefer allocator.free(path_copy);
@@ -1281,7 +1260,6 @@ fn drainModuleContinuations(
 ) !core.JSValue {
     var kept_result: core.JSValue = core.JSValue.undefinedValue();
     var has_kept_result = false;
-    errdefer if (has_kept_result) kept_result.free(runtime);
     while (continuations.items.len != 0) {
         switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
             .stalled => if (!try drainOneModuleHostEvent(context, output)) {
@@ -1293,7 +1271,6 @@ fn drainModuleContinuations(
             },
             .progressed => {},
             .value => |value| {
-                if (has_kept_result) kept_result.free(runtime);
                 kept_result = value;
                 has_kept_result = true;
             },
@@ -1321,7 +1298,7 @@ fn drainModuleContinuationsForDependencies(
                 unreachable;
             },
             .progressed => {},
-            .value => |value| value.free(runtime),
+            .value => {},
         }
     }
     if (try moduleDependencyRejection(context, filename)) |reason| {
@@ -1343,10 +1320,7 @@ fn drainModuleJobLoop(
             switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
                 .stalled => {},
                 .progressed => continue,
-                .value => |value| {
-                    value.free(runtime);
-                    continue;
-                },
+                .value => continue,
             }
         }
 
@@ -1470,7 +1444,7 @@ fn drainOneScheduledModuleWork(
 /// If symbol-root registration ever becomes fallible again, the node is
 /// already owned by the list before that error escapes.
 fn reinsertRemovedModuleStep(
-    runtime: *core.JSRuntime,
+    _: *core.JSRuntime,
     continuations: *std.ArrayList(ModuleContinuation),
     index: usize,
     current: ModuleContinuation,
@@ -1478,8 +1452,6 @@ fn reinsertRemovedModuleStep(
     completion_rejected: bool,
 ) !void {
     var replacement = current;
-    replacement.continuation.free(runtime);
-    replacement.awaited.free(runtime);
     replacement.completed = switch (step) {
         .completed => true,
         .suspended => false,
@@ -1553,8 +1525,6 @@ fn retainRemovedModuleStep(
     // the superseded path and settled await owners.
     var superseded = current;
     allocator.free(superseded.path);
-    superseded.continuation.free(runtime);
-    superseded.awaited.free(runtime);
     superseded.realm.deinit();
     const appended = continuations.orderedRemove(continuations.items.len - 1);
     continuations.insertAssumeCapacity(index, appended);
@@ -1599,16 +1569,13 @@ fn drainOneModuleContinuation(
         }
         restore_current = false;
         allocator.free(current.path);
-        current.continuation.free(runtime);
         if (current.completion_rejected) {
             if (current.keep_result) {
-                const reason = current.awaited.dup();
-                current.awaited.free(runtime);
+                const reason = current.awaited;
                 _ = context.throwValue(reason);
                 current.realm.deinit();
                 return error.JSException;
             }
-            current.awaited.free(runtime);
             current.realm.deinit();
             return null;
         }
@@ -1616,7 +1583,6 @@ fn drainOneModuleContinuation(
             current.realm.deinit();
             return current.awaited;
         }
-        current.awaited.free(runtime);
         current.realm.deinit();
         return null;
     }
@@ -1648,14 +1614,13 @@ fn drainOneModuleContinuation(
     const continuation = current.continuation;
     const promise = try exec.property_ops.expectObject(awaited_promise);
     if (promise.class_id != core.class.ids.promise) return error.TypeError;
-    const resume_value = if (promise.promiseResult()) |stored| stored.dup() else {
+    const resume_value = if (promise.promiseResult()) |stored| stored else {
         _ = try exec.exception_ops.throwModuleHostStall(
             context,
             try exec.zjs_vm.contextGlobal(context),
         );
         unreachable;
     };
-    defer resume_value.free(runtime);
     const continuation_object = try exec.property_ops.expectObject(continuation);
     try exec.call_runtime.setGeneratorResumeCompletionType(runtime, continuation_object, if (promise.promiseIsRejected()) 2 else 0);
     const step = evalPreloadedFileModuleStep(
@@ -1663,7 +1628,7 @@ fn drainOneModuleContinuation(
         context,
         output,
         current.path,
-        continuation.dup(),
+        continuation,
         resume_value,
     ) catch |err| {
         if (err == error.OutOfMemory or err == error.ProcessExit) return err;
@@ -1697,9 +1662,17 @@ fn hasActiveAsyncDependency(
     const runtime = context.runtime;
     const module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return false;
     var visited = std.ArrayList(core.Atom).empty;
     defer visited.deinit(runtime.memory.allocator);
+    // TGC S3 §4 class B: `visited` is a native []Atom grown while walking.
+    var visited_roots = core.runtime.rootAtomList(&visited.items);
+    visited_roots.activate(runtime);
+    defer visited_roots.deactivate(runtime);
     return recordHasActiveAsyncDependency(context, continuations, record, filename, &visited);
 }
 
@@ -1729,14 +1702,12 @@ fn recordHasActiveAsyncDependency(
 }
 
 fn freeModuleContinuations(
-    runtime: *core.JSRuntime,
+    _: *core.JSRuntime,
     allocator: std.mem.Allocator,
     continuations: *std.ArrayList(ModuleContinuation),
 ) void {
     for (continuations.items) |*item| {
         allocator.free(item.path);
-        item.continuation.free(runtime);
-        item.awaited.free(runtime);
         item.realm.deinit();
     }
     continuations.deinit(allocator);
@@ -1749,16 +1720,6 @@ fn freeModuleEvaluationWaiters(
 ) void {
     for (waiters.items) |*waiter| waiter.deinit(runtime, allocator);
     waiters.deinit(allocator);
-}
-
-fn freeModuleEvalStep(runtime: *core.JSRuntime, step: ModuleEvalStep) void {
-    switch (step) {
-        .completed => |value| value.free(runtime),
-        .suspended => |suspended| {
-            suspended.continuation.free(runtime);
-            suspended.awaited.free(runtime);
-        },
-    }
 }
 
 pub fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
@@ -1817,6 +1778,10 @@ fn evalDynamicImportModule(
 
     const module_name = try runtime.internAtom(target_path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
 
     var preload_postorder = std.ArrayList([]const u8).empty;
     defer {
@@ -1908,6 +1873,10 @@ fn evalDynamicImportModule(
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);
         defer runtime.atoms.free(module_atom);
+        // TGC S3 §4 class B: bare module-name id held across module work.
+        var module_atom_roots = core.runtime.rootAtoms(.{&module_atom});
+        module_atom_roots.activate(runtime);
+        defer module_atom_roots.deactivate(runtime);
         const record = context.modules.find(module_atom) orelse return error.ModuleNotFound;
         if (record.synthetic_kind != .none) {
             // Synthetic file-module records carry no code; their default
@@ -1946,7 +1915,7 @@ fn throwCachedModuleEvalException(
 ) error{JSException} {
     _ = runtime;
     if (record.eval_exception) |exception| {
-        _ = context.throwValue(exception.dup());
+        _ = context.throwValue(exception);
     }
     return error.JSException;
 }
@@ -1998,6 +1967,10 @@ fn evalDynamicImportModuleWithHostHooks(
 
     const resolved_atom = try runtime.internAtom(resolved.path);
     defer runtime.atoms.free(resolved_atom);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var resolved_atom_roots = core.runtime.rootAtoms(.{&resolved_atom});
+    resolved_atom_roots.activate(runtime);
+    defer resolved_atom_roots.deactivate(runtime);
 
     const needs_preload = if (context.modules.find(resolved_atom)) |record|
         !record.requestsResolved()
@@ -2045,6 +2018,10 @@ fn evalDynamicImportModuleWithHostHooks(
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);
         defer runtime.atoms.free(module_atom);
+        // TGC S3 §4 class B: bare module-name id held across module work.
+        var module_atom_roots = core.runtime.rootAtoms(.{&module_atom});
+        module_atom_roots.activate(runtime);
+        defer module_atom_roots.deactivate(runtime);
         const record = context.modules.find(module_atom) orelse return error.ModuleNotFound;
         if (!moduleNeedsEvaluation(record)) continue;
 
@@ -2224,6 +2201,10 @@ fn preloadFileModuleGraphWithHostHooksInner(
 
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: bare module-name id held across module work.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     // Successfully completed records are load-once. An incomplete record is a
     // stable, recoverable publication from an earlier failed/re-entrant load:
     // compile the current source again only to validate its resolved request
@@ -2268,6 +2249,12 @@ fn preloadFileModuleGraphWithHostHooksInner(
         for (resolved_atoms[0..resolved_atom_count]) |atom_id| runtime.atoms.free(atom_id);
         if (resolved_atoms.len != 0) allocator.free(resolved_atoms);
     }
+    // TGC S3 §4 class B: a native []Atom filled by a re-entrant host hook.
+    // Root only the written prefix; the tail is still `undefined`.
+    var rooted_resolved_atoms: []core.Atom = resolved_atoms[0..0];
+    var resolved_atom_roots = core.runtime.rootAtomList(&rooted_resolved_atoms);
+    resolved_atom_roots.activate(runtime);
+    defer resolved_atom_roots.deactivate(runtime);
 
     for (artifact_view.record.requests, 0..) |request, index| {
         const specifier = runtime.atoms.name(request.module_name) orelse return error.InvalidAtom;
@@ -2275,6 +2262,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
         resolved_count += 1;
         resolved_atoms[index] = try runtime.internAtom(resolved_modules[index].path);
         resolved_atom_count += 1;
+        rooted_resolved_atoms = resolved_atoms[0..resolved_atom_count];
     }
 
     // Resolution hooks may re-enter the same Realm and publish or even finish

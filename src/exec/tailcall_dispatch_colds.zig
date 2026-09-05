@@ -9,8 +9,6 @@
 //! in the hot .text.zjs.op_handlers island implicitly via dispatch.coldStd's
 //! linksection wrapper — a grep for linksection will not find this file.
 
-const std = @import("std");
-const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const dispatch = @import("tailcall_dispatch.zig");
 const HostError = @import("exceptions.zig").HostError;
@@ -19,7 +17,6 @@ const Vm = dispatch.Vm;
 const Handler = dispatch.Handler;
 const coldStd = dispatch.coldStd;
 const op = bytecode.opcode.op;
-const JSValue = core.JSValue;
 
 const vm_value = @import("vm_value.zig");
 const vm_arith = @import("vm_arith.zig");
@@ -700,7 +697,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.nop] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = vm;
-            vm_control.nop();
         }
     }.b);
     t[op.push_this] = h(struct {

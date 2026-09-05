@@ -8,7 +8,6 @@
 const std = @import("std");
 const runner_metadata = @import("run_test262_metadata.zig");
 const TestMetadata = runner_metadata.TestMetadata;
-const parseMetadataText = runner_metadata.parse;
 pub const HarnessCache = struct {
     const Entry = struct {
         name: []const u8,
@@ -276,25 +275,4 @@ fn readHarnessFile(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]cons
         error.FileNotFound => null,
         else => |e| return e,
     };
-}
-
-pub fn loadMetadataFromFile(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) !TestMetadata {
-    const bytes = try readMetadataPrefix(allocator, io, test_path);
-    defer allocator.free(bytes);
-    return parseMetadataText(allocator, bytes);
-}
-
-fn readMetadataPrefix(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) ![]u8 {
-    if (test262Override(test_path) != null) return readTestSource(allocator, io, test_path);
-
-    const max_metadata_probe = 64 * 1024;
-    const file = try std.Io.Dir.cwd().openFile(io, test_path, .{});
-    defer file.close(io);
-    const buffer = try allocator.alloc(u8, max_metadata_probe);
-    errdefer allocator.free(buffer);
-    const len = try file.readPositionalAll(io, buffer, 0);
-    if (len == buffer.len) return buffer;
-    const exact = try allocator.dupe(u8, buffer[0..len]);
-    allocator.free(buffer);
-    return exact;
 }

@@ -6,7 +6,6 @@ const var_ref_mod = @import("var_ref.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const std = @import("std");
-const builtin = @import("builtin");
 
 const closeOpenVarRefCellSlots = payloads.closeOpenVarRefCellSlots;
 const callVisitValue = payloads.callVisitValue;
@@ -16,7 +15,7 @@ const destroyOwnedValue = payloads.destroyOwnedValue;
 const destroyValueSlice = payloads.destroyValueSlice;
 const destroyValueSliceValuesOnly = payloads.destroyValueSliceValuesOnly;
 const destroyValueSliceWithCapacity = payloads.destroyValueSliceWithCapacity;
-const destroyVarRefCellSliceValuesOnly = payloads.destroyVarRefCellSliceValuesOnly;
+const clearVarRefCellSlice = payloads.clearVarRefCellSlice;
 
 /// One queued async-generator request (mirrors qjs JSAsyncGeneratorRequest,
 /// quickjs.c:21354): completion type (GEN_MAGIC next=0 / return=1 / throw=2),
@@ -46,12 +45,6 @@ pub const GeneratorSuspendKind = enum(u8) {
 pub const SuspendedStackStorage = struct {
     values: []JSValue = &.{},
     capacity: usize = 0,
-
-    /// Grow the parked stack without changing ownership on failure. Values are
-    /// moved as raw slots (no dup/free); only the backing allocation changes.
-    pub fn ensureAdditional(self: *SuspendedStackStorage, rt: *JSRuntime, limit: usize, additional: usize) !void {
-        return self.ensureAdditionalWithResidentBacking(rt, limit, additional, false);
-    }
 
     /// `resident_backing` means the current buffer is trailing storage in its
     /// GeneratorExecutionState allocation. Growth migrates the live prefix to
@@ -118,13 +111,13 @@ pub const SuspendedFrameStorage = struct {
         if (owned.storage.len != 0) {
             destroyValueSliceValuesOnly(rt, &locals);
             destroyValueSliceValuesOnly(rt, &args);
-            destroyVarRefCellSliceValuesOnly(rt, &var_refs);
+            clearVarRefCellSlice(&var_refs);
             rt.memory.free(JSValue, owned.storage);
             return;
         }
         destroyValueSlice(rt, &locals);
         destroyValueSlice(rt, &args);
-        destroyVarRefCellSliceValuesOnly(rt, &var_refs);
+        clearVarRefCellSlice(&var_refs);
     }
 
     /// Release the live window contents while leaving the backing bytes to the
@@ -138,7 +131,7 @@ pub const SuspendedFrameStorage = struct {
         closeOpenVarRefCellSlots(rt, owned.open_var_refs);
         destroyValueSliceValuesOnly(rt, &locals);
         destroyValueSliceValuesOnly(rt, &args);
-        destroyVarRefCellSliceValuesOnly(rt, &var_refs);
+        clearVarRefCellSlice(&var_refs);
     }
 
     pub fn isEmpty(self: *const SuspendedFrameStorage) bool {
@@ -497,12 +490,6 @@ pub const GeneratorPayload = struct {
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
         destroyGeneratorExecutionState(rt, &self.execution);
         destroyOptionalValue(rt, &self.async_promise);
-        for (self.async_queue) |*req| {
-            req.result.free(rt);
-            req.promise.free(rt);
-            req.resolve.free(rt);
-            req.reject.free(rt);
-        }
         if (self.async_queue_capacity != 0) {
             rt.memory.free(AsyncGeneratorRequest, self.async_queue.ptr[0..self.async_queue_capacity]);
         }

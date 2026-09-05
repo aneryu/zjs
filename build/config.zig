@@ -12,7 +12,6 @@ pub const Ctx = struct {
     expect_config: []const u8,
     expect_config_debug: []const u8,
     expect_config_fast: []const u8,
-    dossier_options: *std.Build.Step.Options,
     engine_options: *std.Build.Step.Options,
     engine_options_fast: *std.Build.Step.Options,
     engine_options_dev: *std.Build.Step.Options,

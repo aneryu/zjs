@@ -10,7 +10,6 @@
 //! stay separate from cold catch and fallback bodies. Mirrors JS_CallInternal
 //! and constructor dispatch around quickjs.c:20817-20951.
 
-const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
 const bytecode = @import("../bytecode.zig");
@@ -33,7 +32,6 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const HostError = exceptions.HostError;
 const op = bytecode.opcode.op;
-const runWithArgs = zjs_vm.runWithArgs;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
 const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
@@ -58,12 +56,9 @@ const builtin_glue = @import("builtin_glue.zig");
 
 // --- Local/arg/var-ref slot ops moved to slot_ops.zig ---
 const slot_ops = @import("slot_ops.zig");
-const value_slot = @import("value_slot.zig");
 
 // --- Direct eval execution moved to eval_ops.zig ---
 const eval_ops = @import("eval_ops.zig");
-
-const atomics_wait = @import("atomics_wait.zig");
 
 pub const InlineCallRequest = struct {
     target: inline_calls.InlineTarget,
@@ -119,38 +114,21 @@ pub fn execCall(
     // call_constructor (or apply(1)); superclass identity alone cannot grant a
     // normal call permission to invoke a class constructor.
     const result = callValueOrBytecodeRootPreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
-        popOwnedStackRegion(ctx.runtime, stack, region_base);
+        popOwnedStackRegion(stack, region_base);
         try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
         return err;
     };
-    popOwnedStackRegion(ctx.runtime, stack, region_base);
+    popOwnedStackRegion(stack, region_base);
     stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
 
-/// Pop and release every owned value above `region_base` on the operand
-/// stack. Used by the zero-copy call sequence to drop the borrowed
-/// `func | args...` region once a call completes.
-pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_base: usize) void {
-    // Mirror qjs OP_call_method teardown (quickjs.c:18232): `call_argv` is a
-    // register-held local and the loop just `JS_FreeValue(call_argv[i])` — no
-    // per-slot poison-store and no re-derivation of the operand-stack base.
-    // This helper is reached only while the owning bytecode Machine is active,
-    // so the runtime cannot be in teardown. `freeDuringActiveBytecode` keeps
-    // QuickJS's tag/refcount/zero-ref behavior while omitting that impossible
-    // per-value phase probe. Destruction cannot push to this operand stack, so
-    // `stack.values` remains loop-invariant. Slots above the shrunk length are
-    // logically dead — every `push*` overwrites its target and GC scans only
-    // `values[0..len]` — so the qjs form omits the undefined poison-store.
-    const base = stack.values;
-    var index = stack.len();
-    while (index > region_base) {
-        index -= 1;
-        base[index].freeDuringActiveBytecode(rt);
-    }
+/// Drop the operand window above `region_base`; the collector scans only the
+/// published stack length.
+pub fn popOwnedStackRegion(stack: *stack_mod.Stack, region_base: usize) void {
     stack.setLen(region_base);
 }
 
@@ -196,7 +174,7 @@ pub fn tryCatchInFrame(
     try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
     const target = catch_target.* orelse return false;
     try stack.reserveAdditional(1);
-    var catch_value: core.JSValue = if (is_pending_exception)
+    const catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
     else
         exception_ops.createNamedError(ctx, global, error_info.?.name, error_info.?.message) catch |create_err| blk: {
@@ -207,7 +185,7 @@ pub fn tryCatchInFrame(
             // preallocated error is dup()ed, never rebuilt, so no stack can
             // be captured here.
             if (create_err == error.OutOfMemory) {
-                if (ctx.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
+                if (ctx.preallocated_oom_error) |prealloc| break :blk prealloc;
             }
             return create_err;
         };
@@ -215,9 +193,7 @@ pub fn tryCatchInFrame(
     errdefer if (catch_value_owned) {
         if (is_pending_exception) {
             _ = ctx.throwValue(catch_value);
-        } else {
-            catch_value.free(ctx.runtime);
-        }
+        } else {}
     };
     if (!is_pending_exception and ctx.hasException()) ctx.clearException();
     const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
@@ -406,12 +382,12 @@ const OwnedArgList = struct {
         self.root.init(rt, &self.rooted_prefix);
         errdefer self.deinit();
 
-        self.values[0] = receiver.dup();
+        self.values[0] = receiver;
         self.rooted_prefix = self.values[0..1];
-        self.values[1] = callable.dup();
+        self.values[1] = callable;
         self.rooted_prefix = self.values[0..2];
         for (args, 0..) |arg, index| {
-            self.values[index + 2] = arg.dup();
+            self.values[index + 2] = arg;
             self.rooted_prefix = self.values[0 .. index + 3];
         }
     }
@@ -436,9 +412,9 @@ const OwnedArgList = struct {
         self.root.init(rt, &self.rooted_prefix);
         errdefer self.deinit();
 
-        self.values[0] = receiver.dup();
+        self.values[0] = receiver;
         self.rooted_prefix = self.values[0..1];
-        self.values[1] = callable.dup();
+        self.values[1] = callable;
         self.rooted_prefix = self.values[0..2];
         @memcpy(self.values[2..], args);
         @memset(args, core.JSValue.undefinedValue());
@@ -450,9 +426,7 @@ const OwnedArgList = struct {
         var index = self.rooted_prefix.len;
         while (index > 0) {
             index -= 1;
-            const value = self.values[index];
             self.values[index] = core.JSValue.undefinedValue();
-            value.free(rt);
         }
         self.rooted_prefix = self.values[0..0];
         self.root.deinit();
@@ -1152,7 +1126,6 @@ noinline fn callNativeCallableByName(
     const dispatch = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object) orelse {
         return core.JSValue.undefinedValue();
     };
-    defer dispatch.name_value.free(ctx.runtime);
     const name = dispatch.name;
     if (name.len == 0) return core.JSValue.undefinedValue();
     if (std.mem.eql(u8, name, "raw")) {
@@ -1212,7 +1185,7 @@ noinline fn callNativeCallableByName(
             else => {},
         }
     }
-    if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
+    if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value;
     if (std.mem.eql(u8, name, "Function")) return function_ops.constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "GeneratorFunction")) return function_ops.constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
@@ -1288,13 +1261,13 @@ noinline fn callNativeCallableByName(
         if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
     }
     if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-        if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value.dup();
+        if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value;
         if (object_ops.objectFromValue(this_value)) |this_object| {
-            if (this_object.class_id == core.class.ids.array_iterator) return this_value.dup();
+            if (this_object.class_id == core.class.ids.array_iterator) return this_value;
         }
     }
     if (std.mem.eql(u8, name, "[Symbol.asyncIterator]")) {
-        return this_value.dup();
+        return this_value;
     }
     if (std.mem.eql(u8, name, "[Symbol.asyncDispose]")) {
         if (try promise_ops.asyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
@@ -1528,12 +1501,10 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
     });
     fb.publishFixtureNoFail(rt);
 
-    var func_value = core.JSValue.functionBytecode(&fb.header);
-    var func_alive = true;
-    defer if (func_alive) func_value.free(rt);
+    const func_value = core.JSValue.functionBytecode(&fb.header);
 
     const arg_atom = try rt.atoms.newValueSymbol("gc-call-value-inline-arg-root");
-    const arg_value = try rt.symbolValue(arg_atom);
+    const arg_value = try rt.takeSymbolValue(arg_atom);
     const args = [_]core.JSValue{arg_value};
 
     const Trigger = struct {
@@ -1571,7 +1542,7 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    const result = try callValueOrBytecodeRoot(
+    _ = try callValueOrBytecodeRoot(
         ctx,
         null,
         global,
@@ -1581,16 +1552,12 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         null,
         null,
     );
-    defer result.free(rt);
     rt.memory.trigger_gc_fn = saved_trigger_fn;
     rt.memory.trigger_gc_ctx = saved_trigger_ctx;
 
     try std.testing.expect(!trigger.trace_failed);
     try std.testing.expect(trigger.saw_arg);
 
-    func_value.free(rt);
-    func_alive = false;
-    arg_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
@@ -1657,7 +1624,6 @@ pub fn ordinaryHasInstance(
         }
         break :blk try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
     };
-    defer proto_value.free(ctx.runtime);
     const prototype = object_ops.objectFromValue(proto_value) orelse return error.TypeError;
     // Walk the prototype chain. The non-proxy step IS object.getPrototype() (a
     // direct shape.proto deref); inline it and only call the trap-aware step for
@@ -1911,7 +1877,6 @@ fn constructStringBuiltinNativeInScope(
         try value_ops.createStringValue(ctx.runtime, "")
     else
         try string_ops.toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype.object(), &.{string_value}, caller_function, caller_frame);
 }
 
@@ -1980,10 +1945,6 @@ fn constructDateBuiltinNativeInScope(
     defer prototype.deinit(ctx.runtime);
     var coerced_storage: [7]core.JSValue = undefined;
     var coerced: []core.JSValue = coerced_storage[0..0];
-    var coerced_owned = false;
-    defer if (coerced_owned) {
-        for (coerced) |value| value.free(ctx.runtime);
-    };
     var date_args: []const core.JSValue = args;
     if (args.len == 1) {
         if (object_ops.objectFromValue(args[0])) |object| {
@@ -1994,19 +1955,16 @@ fn constructDateBuiltinNativeInScope(
                 if (primitive.isString()) {
                     coerced_storage[0] = primitive;
                 } else {
-                    defer primitive.free(ctx.runtime);
                     if (primitive.isBigInt()) return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number"));
                     coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, primitive);
                 }
             }
             coerced = coerced_storage[0..1];
-            coerced_owned = true;
             date_args = coerced;
         } else if (!args[0].isString()) {
             if (args[0].isBigInt()) return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number"));
             coerced_storage[0] = try value_ops.toNumberValue(ctx.runtime, args[0]);
             coerced = coerced_storage[0..1];
-            coerced_owned = true;
             date_args = coerced;
         }
     } else if (args.len >= 2) {
@@ -2014,7 +1972,6 @@ fn constructDateBuiltinNativeInScope(
         while (coerced_len < args.len and coerced_len < coerced_storage.len) : (coerced_len += 1) {
             coerced_storage[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
             coerced = coerced_storage[0 .. coerced_len + 1];
-            coerced_owned = true;
         }
         date_args = coerced;
     }
@@ -2212,7 +2169,6 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
             caller_frame,
         );
     };
-    errdefer instance.free(ctx.runtime);
     // E6: the CallConstructorInternal entry poll (quickjs.c:20817) is paid by
     // the caller. A second poll here was the eliminated per-`new` tax.
     return .{ .instance = instance };
@@ -2244,14 +2200,11 @@ fn constructOrdinaryBytecodeFunctionObject(
         return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     }
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
-    errdefer instance.free(ctx.runtime);
     defer noteConstructorAllocation(fb, instance);
     const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
     if (result.isObject()) {
-        instance.free(ctx.runtime);
         return result;
     }
-    result.free(ctx.runtime);
     return instance;
 }
 
@@ -2349,7 +2302,6 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             }
         }
         const dispatch_name = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object);
-        defer if (dispatch_name) |dispatch| dispatch.name_value.free(ctx.runtime);
         var owned_name: ?[]u8 = null;
         defer if (owned_name) |name_bytes| ctx.runtime.memory.allocator.free(name_bytes);
         const name = if (dispatch_name) |dispatch|
@@ -2381,12 +2333,11 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
         if (std.mem.eql(u8, name, "GeneratorFunction")) return function_ops.constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Symbol")) return exception_ops.throwTypeErrorMessage(ctx, global, "Symbol is not a constructor");
-        if (array_ops.typedArrayConstructorName(name)) {
+        if (core.typed_array_names.isConcrete(name)) {
             if (try array_ops.typedArrayConstructFromIterable(ctx, output, global, func, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "Number")) {
             const primitive = try builtin_glue.numberFunctionCall(ctx, output, global, args);
-            defer primitive.free(ctx.runtime);
             return construct_mod.constructValue(ctx, func, &.{primitive}, &.{});
         }
         if (construct_native_ref) |native_ref| {
@@ -2488,13 +2439,10 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, new_target, copy_argv);
         }
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
-        errdefer instance.free(ctx.runtime);
         const result = try callFunctionBytecodeConstruct(ctx, func, func, instance, args, &.{}, output, global, new_target, copy_argv);
         if (result.isObject()) {
-            instance.free(ctx.runtime);
             return result;
         }
-        result.free(ctx.runtime);
         return instance;
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
@@ -2530,17 +2478,11 @@ fn constructExternalHostFunction(
 ) !core.JSValue {
     if (!function_object.hasOwnProperty(core.atom.ids.prototype)) return error.TypeError;
     const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
-    var instance_owned = true;
-    errdefer if (instance_owned) instance.free(ctx.runtime);
 
     const result = (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, instance, args)) orelse return error.TypeError;
     if (result.isObject()) {
-        instance.free(ctx.runtime);
-        instance_owned = false;
         return result;
     }
-    result.free(ctx.runtime);
-    instance_owned = false;
     return instance;
 }
 
@@ -2553,26 +2495,20 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.symbolValue(symbol_atom);
+    const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const weak_ref_value = try object_ops.constructWeakRefWithPrototype(rt, symbol_value, null);
-    var weak_ref_alive = true;
-    defer if (weak_ref_alive) weak_ref_value.free(rt);
     const weak_ref = object_ops.objectFromValue(weak_ref_value) orelse return error.TypeError;
 
     {
         const live = weak_ref.weakRefDeref(rt);
-        defer live.free(rt);
         try std.testing.expect(live.same(symbol_value));
     }
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    rt.clearWeakRefKeptAlive();
 
-    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
-
-    weak_ref_value.free(rt);
-    weak_ref_alive = false;
 }
 
 test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
@@ -2588,31 +2524,23 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var cleanup_callback = core.JSValue.functionBytecode(&fb.header);
-    var cleanup_callback_alive = true;
-    defer if (cleanup_callback_alive) cleanup_callback.free(rt);
+    const cleanup_callback = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
     const registry_value = try object_ops.constructFinalizationRegistryWithPrototype(ctx, cleanup_callback, null);
-    var registry_alive = true;
-    defer if (registry_alive) registry_value.free(rt);
     const registry = object_ops.objectFromValue(registry_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = registry.finalizationRegistryCleanupCallback() orelse return error.TypeError;
     try std.testing.expect(stored.same(cleanup_callback));
 
-    registry_value.free(rt);
-    registry_alive = false;
-    cleanup_callback.free(rt);
-    cleanup_callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2622,18 +2550,16 @@ test "finalizationRegistryAppendCell roots direct symbol fields while allocating
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
-    var registry_alive = true;
-    defer if (registry_alive) registry.value().free(rt);
     const target_atom = try rt.atoms.newValueSymbol("gc-finalization-target-symbol");
-    const target_value = try rt.symbolValue(target_atom);
+    const target_value = try rt.takeSymbolValue(target_atom);
     const held_atom = try rt.atoms.newValueSymbol("gc-finalization-held-symbol");
-    const held_value = try rt.symbolValue(held_atom);
+    const held_value = try rt.takeSymbolValue(held_atom);
     const token_atom = try rt.atoms.newValueSymbol("gc-finalization-token-symbol");
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const token_value = try rt.symbolValue(token_atom);
+    const token_value = try rt.takeSymbolValue(token_atom);
     try builtin_glue.finalizationRegistryAppendCell(
         rt,
         registry,
@@ -2652,12 +2578,7 @@ test "finalizationRegistryAppendCell roots direct symbol fields while allocating
         core.Object.weakIdentityFromValuePeek(rt, token_value),
         cell.unregister_token_identity,
     );
-    target_value.free(rt);
-    held_value.free(rt);
-    token_value.free(rt);
 
-    registry.value().free(rt);
-    registry_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(target_atom) == null);
     try std.testing.expect(rt.atoms.name(held_atom) == null);
@@ -2787,7 +2708,7 @@ pub fn functionRealmContext(caller: *core.JSContext, function_value: core.JSValu
         core.class.ids.async_generator_function,
         => object.bytecodeFunctionRealmContext() orelse error.InvalidBuiltinRegistry,
         core.class.ids.proxy => blk: {
-            if (object_ops.isRevokedProxy(object)) {
+            if (object.isProxy() and object.proxyHandler() == null) {
                 const caller_global = caller.global orelse return error.InvalidBuiltinRegistry;
                 _ = try exception_ops.throwTypeErrorMessage(caller, caller_global, "revoked proxy");
                 unreachable;
@@ -2822,24 +2743,23 @@ pub fn assertThrows(
     const expected = try property_ops.expectObject(args[0]);
     const expected_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, expected);
     defer ctx.runtime.memory.allocator.free(expected_name);
-    const result = callAssertThrowsCallback(ctx, output, global, args[1], caller_function, caller_frame) catch |err| {
+    _ = callAssertThrowsCallback(ctx, output, global, args[1], caller_function, caller_frame) catch |err| {
         if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
             if (try string_ops.consumePendingExceptionIfMatchesConstructor(ctx, expected_name)) {
                 return core.JSValue.undefinedValue();
             }
             return error.JSException;
         }
-        if (call_mod.errorNameMatchesConstructorForVm(err, expected_name)) {
+        if (call_mod.errorNameMatchesConstructor(err, expected_name)) {
             ctx.clearException();
             return core.JSValue.undefinedValue();
         }
         return error.JSException;
     };
-    defer result.free(ctx.runtime);
     return error.JSException;
 }
 
-pub fn callAssertThrowsCallback(
+fn callAssertThrowsCallback(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2861,11 +2781,8 @@ pub fn collectIteratorValues(
     const iterator = object_ops.objectFromValue(iterator_value) orelse return error.TypeError;
     const values = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     const values_value = values.value();
-    errdefer values_value.free(ctx.runtime);
-    const next_key = try ctx.runtime.internAtom("next");
-    defer ctx.runtime.atoms.free(next_key);
+    const next_key = core.atom.ids.next;
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
-    defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
 
     var index: u32 = 0;
@@ -2874,7 +2791,6 @@ pub fn collectIteratorValues(
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        defer next.free(ctx.runtime);
         const next_object = object_ops.objectFromValue(next) orelse {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return error.TypeError;
@@ -2883,13 +2799,11 @@ pub fn collectIteratorValues(
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        defer done.free(ctx.runtime);
         if (done.asBool() == true) break;
         const item = object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        defer item.free(ctx.runtime);
         values.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true)) catch |err| {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
@@ -2916,13 +2830,11 @@ pub fn cacheIteratorNextMethod(
     iterator_value: core.JSValue,
 ) !void {
     const iterator = try property_ops.expectObject(iterator_value);
-    const next_key = try ctx.runtime.internAtom("next");
-    defer ctx.runtime.atoms.free(next_key);
+    const next_key = core.atom.ids.next;
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
-    defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
     const cached = try iterator.cachedIteratorNextSlot(ctx.runtime);
-    try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
+    try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method);
 }
 
 pub fn appendIteratorValues(
@@ -2936,27 +2848,23 @@ pub fn appendIteratorValues(
     const source_object = property_ops.expectObject(source_value) catch null;
     const iterator_value = if (source_object != null and
         (source_object.?.class_id == core.class.ids.generator or source_object.?.class_id == core.class.ids.async_generator))
-        source_value.dup()
+        source_value
     else blk: {
         const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
-        defer iterator_method.free(ctx.runtime);
         if (!isCallableValue(iterator_method)) {
             _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
             return error.TypeError;
         }
         break :blk try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     };
-    defer iterator_value.free(ctx.runtime);
     if (!iterator_value.isObject()) return error.TypeError;
     var index = start_index;
     while (true) {
         const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
         if (step.done) {
-            step.value.free(ctx.runtime);
             break;
         }
         try property_ops.defineDataProperty(ctx.runtime, target, core.atom.atomFromUInt32(@intCast(index)), step.value);
-        step.value.free(ctx.runtime);
         index += 1;
     }
     return index;
@@ -2998,7 +2906,6 @@ pub fn appendSpreadValuesEnumerate(
 
     // iterator method = GetProperty(src, @@iterator)  (qjs quickjs.c:16834)
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
-    defer iterator_method.free(rt);
     if (!isCallableValue(iterator_method)) {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
         return error.TypeError;
@@ -3006,17 +2913,14 @@ pub fn appendSpreadValuesEnumerate(
 
     // enumobj = src[@@iterator]()  (qjs GetIterator, quickjs.c:16843)
     const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
-    defer iterator_value.free(rt);
     const iterator = property_ops.expectObject(iterator_value) catch return error.TypeError;
 
     // next = GetProperty(enumobj, "next")  (qjs quickjs.c:16846)
     const next_method = blk: {
-        if (iterator.cachedIteratorNext(rt)) |stored| break :blk stored.dup();
-        const next_key = try rt.internAtom("next");
-        defer rt.atoms.free(next_key);
+        if (iterator.cachedIteratorNext(rt)) |stored| break :blk stored;
+        const next_key = core.atom.ids.next;
         break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     };
-    defer next_method.free(rt);
     if (!isCallableValue(next_method)) return error.TypeError;
 
     var index = start_index;
@@ -3038,8 +2942,7 @@ pub fn appendSpreadValuesEnumerate(
         if (cursor > elements.len) break :fast;
         var i: usize = cursor;
         while (i < elements.len) : (i += 1) {
-            const item = elements[i].dup();
-            defer item.free(rt);
+            const item = elements[i];
             try property_ops.defineDataProperty(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
             index += 1;
         }
@@ -3051,11 +2954,9 @@ pub fn appendSpreadValuesEnumerate(
     while (true) {
         const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
         if (step.done) {
-            step.value.free(rt);
             break;
         }
         try property_ops.defineDataProperty(rt, target, core.atom.atomFromUInt32(@intCast(index)), step.value);
-        step.value.free(rt);
         index += 1;
     }
     return index;
@@ -3101,21 +3002,9 @@ pub fn existingGlobalLexicalEnvForGlobal(ctx: *core.JSContext, global: *core.Obj
     return null;
 }
 
-pub fn globalLexicalHas(ctx: *core.JSContext, atom_id: core.Atom) bool {
-    const env = existingGlobalLexicalEnv(ctx) orelse return false;
-    return env.hasOwnProperty(atom_id);
-}
-
 pub fn globalLexicalHasForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) bool {
     const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return false;
     return env.hasOwnProperty(atom_id);
-}
-
-pub fn globalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue {
-    const env = existingGlobalLexicalEnv(ctx) orelse return null;
-    if (env.getOwnDataPropertyValue(atom_id)) |value| return value;
-    if (!env.hasOwnProperty(atom_id)) return null;
-    return try env.getProperty(atom_id);
 }
 
 /// Return a fresh ref to the VarRef cell backing a top-level lexical binding
@@ -3126,7 +3015,7 @@ pub fn globalLexicalCell(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValue
     const env = existingGlobalLexicalEnv(ctx) orelse return null;
     const index = env.findProperty(atom_id) orelse return null;
     const cell = env.asVarRefAt(index) orelse return null;
-    return cell.valueRef().dup();
+    return cell.valueRef();
 }
 
 /// QuickJS `js_closure_global_var` for one ordinary GLOBAL capture. This is
@@ -3146,15 +3035,14 @@ pub fn selectOrdinaryGlobalClosureCell(
 ) !core.JSValue {
     if (existingGlobalLexicalEnvForGlobal(ctx, global)) |env| {
         if (env.findProperty(atom_id)) |index| {
-            if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+            if (env.asVarRefAt(index)) |cell| return cell.valueRef();
         }
     }
 
     while (global.findProperty(atom_id)) |index| {
         const flags = global.propFlagsAt(index);
         if (flags.isAutoInit()) {
-            const descriptor = (try global.getOwnProperty(ctx.runtime, atom_id)) orelse return error.InvalidBytecode;
-            descriptor.destroy(ctx.runtime);
+            _ = (try global.getOwnProperty(ctx.runtime, atom_id)) orelse return error.InvalidBytecode;
             // A failed builder must have returned its error and kept the
             // placeholder retryable. A successful read cannot leave the same
             // slot in AUTOINIT form.
@@ -3163,7 +3051,7 @@ pub fn selectOrdinaryGlobalClosureCell(
             }
             continue;
         }
-        if (global.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+        if (global.asVarRefAt(index)) |cell| return cell.valueRef();
         break;
     }
     return globalObjectGetUninitializedVar(ctx, global, atom_id);
@@ -3175,7 +3063,6 @@ pub fn selectOrdinaryGlobalClosureCell(
 fn globalUninitializedVarsEnv(ctx: *core.JSContext, global: *core.Object) !*core.Object {
     if (global.globalUninitializedVars()) |env| return env;
     const env = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer env.value().free(ctx.runtime);
     try global.setGlobalUninitializedVars(ctx.runtime, env);
     return env;
 }
@@ -3189,14 +3076,14 @@ pub fn globalObjectGetUninitializedVar(ctx: *core.JSContext, global: *core.Objec
     const rt = ctx.runtime;
     const env = try globalUninitializedVarsEnv(ctx, global);
     if (env.findProperty(atom_id)) |index| {
-        if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+        if (env.asVarRefAt(index)) |cell| return cell.valueRef();
     }
     const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
     // qjs JS_PROP_C_W_E | JS_PROP_VARREF (17088).
     // appendPreparedPropertyEntry consumes the cell slot on both success and
     // failure, so no caller-side errdefer may release it again.
     try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(true, true, true), .{ .var_ref = cell });
-    return cell.valueRef().dup();
+    return cell.valueRef();
 }
 
 /// qjs js_global_object_find_uninitialized_var (quickjs.c:17098-17123): if a
@@ -3209,12 +3096,10 @@ pub fn globalObjectFindUninitializedVar(ctx: *core.JSContext, global: *core.Obje
     const env = global.globalUninitializedVars() orelse return null;
     const index = env.findProperty(atom_id) orelse return null;
     const cell = env.asVarRefAt(index) orelse return null;
-    const cell_value = cell.valueRef().dup();
+    const cell_value = cell.valueRef();
     _ = env.deleteProperty(rt, atom_id);
     if (!is_lexical) {
-        const old_value = cell.varRefValueSlot().*;
         cell.varRefValueSlot().* = core.JSValue.undefinedValue();
-        old_value.free(rt);
     }
     return cell_value;
 }
@@ -3235,8 +3120,7 @@ pub fn ensureGlobalObjectVarRefCell(
     while (global.findProperty(atom_id)) |initial_index| {
         const initial_flags = global.propFlagsAt(initial_index);
         if (initial_flags.isAutoInit()) {
-            const desc = (try global.getOwnProperty(rt, atom_id)) orelse return error.OutOfMemory;
-            desc.destroy(rt);
+            _ = (try global.getOwnProperty(rt, atom_id)) orelse return error.OutOfMemory;
             if (global.propFlagsAt(initial_index).isAutoInit()) return error.OutOfMemory;
             continue;
         }
@@ -3251,7 +3135,7 @@ pub fn ensureGlobalObjectVarRefCell(
             }
             cell.varRefIsConstSlot().* = !next_flags.writable;
             cell.varRefIsDeletableSlot().* = next_flags.configurable;
-            return cell.valueRef().dup();
+            return cell.valueRef();
         }
         if (initial_flags.isAccessor() and (!is_function or !initial_flags.configurable)) return null;
 
@@ -3259,7 +3143,6 @@ pub fn ensureGlobalObjectVarRefCell(
         // side table. Keep the table ref until the shape clone/slot replacement
         // succeeds; this makes OOM rollback automatic.
         const cell_value = try globalObjectGetUninitializedVar(ctx, global, atom_id);
-        errdefer cell_value.free(rt);
         const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
         try global.replaceOwnPropertyWithVarRefCell(rt, atom_id, initial_index, next_flags, cell);
         const parked = global.globalUninitializedVars() orelse return error.InvalidBytecode;
@@ -3284,7 +3167,7 @@ pub fn ensureGlobalObjectVarRefCell(
         .{ .var_ref = cell },
     );
     cell.varRefIsDeletableSlot().* = configurable;
-    return cell.valueRef().dup();
+    return cell.valueRef();
 }
 
 /// qjs js_closure_define_global_var for one non-lexical GLOBAL_DECL slot: ensure
@@ -3305,13 +3188,11 @@ pub fn defineGlobalDeclVarCell(
     if (declaration.closureType() != .global_decl or declaration.isLexical()) return false;
     if (!atomIdOrNameEql(ctx.runtime, declaration.var_name, atom_id)) return false;
     const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable, is_function)) orelse return false;
-    defer cell_value.free(ctx.runtime);
     if (ref_idx >= frame.var_refs.len) {
         try frame_mod.ensureVarRefsCapacity(ctx, frame, ref_idx);
     }
-    const old_slot = slot_ops.varRefSlot(frame, ref_idx);
-    slot_ops.storeVarRefSlot(frame, ref_idx, cell_value.dup());
-    old_slot.free(ctx.runtime);
+    _ = slot_ops.varRefSlot(frame, ref_idx);
+    slot_ops.storeVarRefSlot(frame, ref_idx, cell_value);
 
     var rebound = true;
     const local_count = @min(function.varDefs().len, frame.locals.len);
@@ -3322,7 +3203,7 @@ pub fn defineGlobalDeclVarCell(
         // This is a compatibility mirror used by direct eval lookup. Keep the
         // frame plane raw; the authoritative global identity remains in the
         // typed frame.var_refs/global property cell.
-        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[local_idx], global_cell.varRefValue());
+        frame.locals[local_idx] = global_cell.varRefValue();
         rebound = true;
     }
     return rebound;
@@ -3336,7 +3217,7 @@ pub fn defineGlobalDeclVarCell(
 pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, is_const: bool) !core.JSValue {
     const env = try globalLexicalEnv(ctx);
     if (env.findProperty(atom_id)) |index| {
-        if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+        if (env.asVarRefAt(index)) |cell| return cell.valueRef();
     }
     const rt = ctx.runtime;
     // qjs quickjs.c:17148-17162: "if there is a corresponding global variable,
@@ -3369,7 +3250,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
             rt.gc.auditUnbarrieredStore(global.gcHeader(), &new_cell.header, .global_lexical_cell_replace);
             // Keep one rollback ref because appendPreparedPropertyEntry consumes
             // the transferred property ref even when its shape allocation fails.
-            const rollback_cell = old_cell.dupCell();
+            const rollback_cell = old_cell;
             var rollback_cell_owned = true;
             errdefer if (rollback_cell_owned) {
                 old_cell.varRefValueSlot().* = new_cell.varRefValueSlot().*;
@@ -3378,16 +3259,14 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
                 old_cell.varRefIsConstSlot().* = old_is_const;
                 global.propertyEntry(gidx).*.slot.var_ref = rollback_cell;
                 rt.gc.generationalBarrier(global.gcHeader(), &rollback_cell.header);
-                new_cell.freeCell(rt);
                 rollback_cell_owned = false;
             };
             // add_var_ref (17210-17223): the old cell becomes the lexical cell.
             old_cell.is_lexical = true;
             old_cell.varRefIsConstSlot().* = is_const;
             try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = old_cell });
-            rollback_cell.freeCell(rt);
             rollback_cell_owned = false;
-            return old_cell.valueRef().dup();
+            return old_cell.valueRef();
         }
     }
     // qjs 17193: reuse a parked uninitialized capture cell if one exists (the
@@ -3401,7 +3280,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
     cell.is_lexical = true;
     // appendPreparedPropertyEntry consumes cell_value on both paths.
     try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = cell });
-    return cell.valueRef().dup();
+    return cell.valueRef();
 }
 
 pub fn globalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) ?core.JSValue {
@@ -3409,7 +3288,7 @@ pub fn globalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, a
     if (env.getOwnDataPropertyValue(atom_id)) |value| return value;
     const index = env.findProperty(atom_id) orelse return null;
     const cell = env.asVarRefAt(index) orelse return null;
-    return cell.varRefValue().dup();
+    return cell.varRefValue();
 }
 
 pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void {
@@ -3441,31 +3320,8 @@ pub fn defineGlobalDeclLexicalCell(
     if (ref_idx >= frame.var_refs.len) {
         try frame_mod.ensureVarRefsCapacity(ctx, frame, ref_idx);
     }
-    const old_slot = slot_ops.varRefSlot(frame, ref_idx);
+    _ = slot_ops.varRefSlot(frame, ref_idx);
     slot_ops.storeVarRefSlot(frame, ref_idx, cell_value);
-    old_slot.free(ctx.runtime);
-    return true;
-}
-
-pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool {
-    const env = existingGlobalLexicalEnv(ctx) orelse return false;
-    if (env.findProperty(atom_id)) |index| {
-        // qjs JS_SetPropertyInternal VARREF: write through cell->pvalue,
-        // const guarded by cell->is_const. Shared cell => no write loss.
-        if (env.asVarRefAt(index)) |cell| {
-            if (cell.is_const) return error.TypeError;
-            cell.setVarRefValue(ctx.runtime, value.dup());
-            return true;
-        }
-    }
-    if (!env.hasOwnProperty(atom_id)) return false;
-    const rt = ctx.runtime;
-    if (initializeGlobalLexicalValue(rt, env, atom_id, value)) return true;
-    if (try env.setOwnWritableDataProperty(rt, atom_id, value)) return true;
-    env.setProperty(rt, atom_id, value) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-        else => return err,
-    };
     return true;
 }
 
@@ -3496,19 +3352,17 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
             .data => {
                 const stored = &env.propertyEntry(index).*.slot.data;
                 if (!stored.isUninitialized()) return false;
-                const next = value.dup();
-                const old_value = stored.*;
+                const next = value;
                 stored.* = next;
                 // Initialising a binding in a long-lived environment object is
                 // an old-to-young edge like any other property store.
                 rt.gc.generationalBarrier(env.gcHeader(), next.cycleMarkHeader());
-                old_value.free(rt);
                 return true;
             },
             .var_ref => {
                 const cell = env.propertyEntry(index).*.slot.var_ref;
                 if (!cell.varRefValue().isUninitialized()) return false;
-                cell.setVarRefValue(rt, value.dup());
+                cell.setVarRefValue(rt, value);
                 return true;
             },
             .accessor, .auto_init => return false,
@@ -3531,7 +3385,7 @@ pub fn indirectEval(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len == 0) return core.JSValue.undefinedValue();
-    if (!args[0].isString()) return args[0].dup();
+    if (!args[0].isString()) return args[0];
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
     try string_ops.appendSourceStringUtf8(ctx.runtime, &source, args[0]);
@@ -3563,7 +3417,6 @@ pub fn indirectEval(
             owned_root,
             .root_global,
         ) catch |err| break :blk err;
-        defer root_function_value.free(ctx.runtime);
         var root_values = [_]core.runtime.ValueRootValue{
             .{ .value = &root_function_value },
         };
@@ -3599,7 +3452,6 @@ pub fn indirectEval(
             try call_mod.restoreEvalGlobalLexicals(ctx, eval_global, saved_lexicals, keep_active_lexicals);
             return err;
         };
-        errdefer rooted_result.free(ctx.runtime);
         var root_frame = core.runtime.rootValues(.{&rooted_result});
         root_frame.activate(ctx.runtime);
         defer root_frame.deactivate(ctx.runtime);
@@ -3640,7 +3492,6 @@ pub const ActiveRootValueProbe = struct {
 };
 
 pub fn freeArgs(rt: *core.JSRuntime, args: []core.JSValue) void {
-    for (args) |arg| arg.free(rt);
     if (args.len != 0) rt.memory.free(core.JSValue, args);
 }
 
@@ -3652,13 +3503,10 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
     const global = try zjs_vm.contextGlobal(ctx);
 
     const source = try core.Object.create(rt, core.class.ids.object, null);
-    var source_alive = true;
-    defer if (source_alive) source.value().free(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-args-from-array-like-prefix-root");
-    const symbol_value = try rt.symbolValue(symbol_atom);
+    const symbol_value = try rt.takeSymbolValue(symbol_atom);
     try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
-    symbol_value.free(rt);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
     try source.defineAutoInitPropertyWithRealm(
         rt,
@@ -3714,8 +3562,6 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
 
     freeArgs(rt, args);
     args_alive = false;
-    source.value().free(rt);
-    source_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -3872,7 +3718,6 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
     if (fb.functionKind() == .async and generator_state == null) {
         var boxed_this: ?core.JSValue = null;
-        defer if (boxed_this) |value| value.free(function_ctx.runtime);
         const effective_this = try coerceCallThis(function_ctx, function_global, fb_runtime_strict, this_value, &boxed_this);
         return promise_ops.asyncFunctionStart(
             function_ctx,
@@ -4021,8 +3866,7 @@ pub fn generatorNext(
     const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     if (payload.done) {
         const done_result = try iterator_ops.createIteratorResult(ctx.runtime, generator_global, core.JSValue.undefinedValue(), true);
-        defer done_result.free(ctx.runtime);
-        return done_result.dup();
+        return done_result;
     }
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
@@ -4048,9 +3892,8 @@ pub fn generatorNext(
         object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
-    defer result.free(ctx.runtime);
     if (payload.just_yielded and generatorHasYieldStarResult(payload)) {
-        return result.dup();
+        return result;
     }
     return try iterator_ops.createIteratorResult(ctx.runtime, generator_global, result, !payload.just_yielded);
 }
@@ -4126,10 +3969,8 @@ pub fn syncGeneratorStep(
     if (payload.just_yielded and generatorHasYieldStarResult(payload)) {
         // yield* passthrough: `result` is already an iterator-result object — unwrap it
         // exactly as the generic for-of step would (read .done, then .value only if !done).
-        defer result.free(ctx.runtime);
         const done_key = core.atom.predefinedId("done", .string).?;
         const done_value = try object_ops.getValueProperty(ctx, output, global, result, done_key, null, null);
-        defer done_value.free(ctx.runtime);
         const done = value_ops.isTruthy(done_value);
         if (done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
         const value_key = core.atom.predefinedId("value", .string).?;
@@ -4191,10 +4032,9 @@ pub fn resumeGeneratorYieldStarCompletion(
         object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
-    defer result.free(ctx.runtime);
     const done = !object.generatorJustYielded();
     if (done) object.completeGeneratorExecution(ctx.runtime);
-    if (object.generatorJustYielded() and generatorYieldStarSuspended(ctx.runtime, object)) return result.dup();
+    if (object.generatorJustYielded() and generatorYieldStarSuspended(ctx.runtime, object)) return result;
     return try iterator_ops.createIteratorResult(ctx.runtime, global, result, done);
 }
 
@@ -4217,8 +4057,7 @@ pub fn generatorReturn(
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
     const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
-    var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
-    defer return_value.free(ctx.runtime);
+    var return_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, return_value, 1);
     }
@@ -4232,7 +4071,6 @@ pub fn generatorReturn(
                 return result;
             },
             .complete => |value| {
-                return_value.free(ctx.runtime);
                 return_value = value;
             },
         }
@@ -4262,10 +4100,9 @@ pub fn generatorReturn(
             object.completeGeneratorExecution(ctx.runtime);
             return err;
         };
-        defer result.free(ctx.runtime);
         const done = !payload.just_yielded;
         if (done) object.completeGeneratorExecution(ctx.runtime);
-        if (!done and generatorHasYieldStarResult(payload)) return result.dup();
+        if (!done and generatorHasYieldStarResult(payload)) return result;
         return try iterator_ops.createIteratorResult(ctx.runtime, generator_global, result, done);
     }
     object.completeGeneratorExecution(ctx.runtime);
@@ -4286,7 +4123,6 @@ pub fn resumeGeneratorCatchForRuntimeError(
     if (execution.suspended.catchTarget() == null) return null;
     const function_value = object.generatorFunctionBytecode() orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
-    defer thrown.free(ctx.runtime);
     const current_function_value = object.generatorCurrentFunction() orelse receiver;
     object.generatorResumeCompletionTypeSlot().* = 2;
     object.generatorJustYieldedSlot().* = false;
@@ -4308,7 +4144,6 @@ pub fn resumeGeneratorCatchForRuntimeError(
         object.completeGeneratorExecution(ctx.runtime);
         return resume_err;
     };
-    defer result.free(ctx.runtime);
     const done = !object.generatorJustYielded();
     if (done) object.completeGeneratorExecution(ctx.runtime);
     const result_value = generatorCatchResumeResultValue(result);
@@ -4332,26 +4167,21 @@ pub fn generatorYieldStarReturnStep(
     generator: *core.Object,
     return_arg: core.JSValue,
 ) !GeneratorYieldStarReturnStep {
-    const iterator_value = (generator.generatorYieldStarIterator() orelse return error.TypeError).dup();
-    defer iterator_value.free(ctx.runtime);
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
+    const iterator_value = (generator.generatorYieldStarIterator() orelse return error.TypeError);
+    const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    defer return_method.free(ctx.runtime);
 
     if (return_method.isUndefined() or return_method.isNull()) {
         generator.clearGeneratorYieldStarIterator(ctx.runtime);
-        return .{ .complete = return_arg.dup() };
+        return .{ .complete = return_arg };
     }
     if (!isCallableValue(return_method)) return error.TypeError;
 
     const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{return_arg}, null, null);
-    errdefer result_value.free(ctx.runtime);
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
     const done_key = core.atom.predefinedId("done", .string).?;
     const done_value = try object_ops.getValueProperty(ctx, output, global, result.value(), done_key, null, null);
-    defer done_value.free(ctx.runtime);
     const is_done = value_ops.isTruthy(done_value);
 
     if (!is_done) {
@@ -4361,8 +4191,6 @@ pub fn generatorYieldStarReturnStep(
 
     const value_key = core.atom.predefinedId("value", .string).?;
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
-    errdefer value.free(ctx.runtime);
-    result_value.free(ctx.runtime);
     generator.clearGeneratorYieldStarIterator(ctx.runtime);
     return .{ .complete = value };
 }
@@ -4374,12 +4202,9 @@ pub fn generatorYieldStarThrowStep(
     generator: *core.Object,
     thrown: core.JSValue,
 ) !GeneratorYieldStarThrowStep {
-    const iterator_value = (generator.generatorYieldStarIterator() orelse return error.TypeError).dup();
-    defer iterator_value.free(ctx.runtime);
-    const throw_key = try ctx.runtime.internAtom("throw");
-    defer ctx.runtime.atoms.free(throw_key);
+    const iterator_value = (generator.generatorYieldStarIterator() orelse return error.TypeError);
+    const throw_key = core.atom.ids.throw;
     const throw_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, throw_key, null, null);
-    defer throw_method.free(ctx.runtime);
 
     if (throw_method.isUndefined() or throw_method.isNull()) {
         try generatorYieldStarCloseForMissingThrow(ctx, output, global, iterator_value);
@@ -4389,12 +4214,10 @@ pub fn generatorYieldStarThrowStep(
     if (!isCallableValue(throw_method)) return error.TypeError;
 
     const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, throw_method, &.{thrown}, null, null);
-    errdefer result_value.free(ctx.runtime);
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
     const done_key = core.atom.predefinedId("done", .string).?;
     const done_value = try object_ops.getValueProperty(ctx, output, global, result.value(), done_key, null, null);
-    defer done_value.free(ctx.runtime);
     const is_done = value_ops.isTruthy(done_value);
 
     if (!is_done) {
@@ -4404,8 +4227,6 @@ pub fn generatorYieldStarThrowStep(
 
     const value_key = core.atom.predefinedId("value", .string).?;
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
-    errdefer value.free(ctx.runtime);
-    result_value.free(ctx.runtime);
     generator.clearGeneratorYieldStarIterator(ctx.runtime);
     return .{ .complete = value };
 }
@@ -4416,14 +4237,11 @@ pub fn generatorYieldStarCloseForMissingThrow(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !void {
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
+    const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
-    defer result.free(ctx.runtime);
     _ = property_ops.expectObject(result) catch return error.TypeError;
 }
 
@@ -4457,7 +4275,6 @@ pub fn generatorThrow(
         switch (step) {
             .yield_result => |result| return result,
             .complete => |value| {
-                defer value.free(ctx.runtime);
                 const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
                 const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
                 const current_function_value = object.generatorCurrentFunction() orelse receiver;
@@ -4481,7 +4298,6 @@ pub fn generatorThrow(
                     object.completeGeneratorExecution(ctx.runtime);
                     return err;
                 };
-                defer result.free(ctx.runtime);
                 const done = !object.generatorJustYielded();
                 if (done) object.completeGeneratorExecution(ctx.runtime);
                 return try iterator_ops.createIteratorResult(ctx.runtime, generator_global, result, done);
@@ -4512,7 +4328,6 @@ pub fn generatorThrow(
             object.completeGeneratorExecution(ctx.runtime);
             return err;
         };
-        defer result.free(ctx.runtime);
         const done = !object.generatorJustYielded();
         if (done) object.completeGeneratorExecution(ctx.runtime);
         const result_value = generatorCatchResumeResultValue(result);
@@ -4520,7 +4335,7 @@ pub fn generatorThrow(
     }
 
     object.completeGeneratorExecution(ctx.runtime);
-    _ = ctx.throwValue(thrown.dup());
+    _ = ctx.throwValue(thrown);
     return error.JSException;
 }
 
@@ -4537,16 +4352,6 @@ pub fn generatorPcAfterYieldStar(fb: *const bytecode.FunctionBytecode, pc: usize
     return pc + size;
 }
 
-pub fn isDirectIteratorClass(class_id: core.class.ClassId) bool {
-    return class_id == core.class.ids.array_iterator or
-        class_id == core.class.ids.string_iterator or
-        class_id == core.class.ids.map_iterator or
-        class_id == core.class.ids.set_iterator or
-        class_id == core.class.ids.regexp_string_iterator or
-        class_id == core.class.ids.generator or
-        class_id == core.class.ids.iterator_wrap;
-}
-
 pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iterator: core.JSValue, next_method: ?core.JSValue) !core.JSValue {
     var rooted_iterator = iterator;
     var rooted_next_method = next_method orelse core.JSValue.undefinedValue();
@@ -4558,13 +4363,13 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
     const prototype = try object_ops.wrapForValidIteratorPrototype(ctx.runtime, global);
     const wrapper = try core.Object.create(ctx.runtime, core.class.ids.iterator_wrap, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, wrapper.gcHeader());
-    try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorTargetSlot(), rooted_iterator.dup());
+    try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorTargetSlot(), rooted_iterator);
     if (next_method != null) {
-        try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), rooted_next_method.dup());
+        try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), rooted_next_method);
         return wrapper.value();
     }
     if (iterator_object.cachedIteratorNext(ctx.runtime)) |cached_next_method| {
-        try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), cached_next_method.dup());
+        try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), cached_next_method);
         iterator_object.clearCachedIteratorNext(ctx.runtime);
     }
     return wrapper.value();
@@ -4577,16 +4382,12 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
     global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(global.gcHeader());
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
-    defer iterator.value().free(rt);
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
-    defer prototype.value().free(rt);
     try builtin_glue.storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, prototype.value());
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
@@ -4596,31 +4397,23 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var next_method = core.JSValue.functionBytecode(&fb.header);
-    var next_method_alive = true;
-    defer if (next_method_alive) next_method.free(rt);
+    const next_method = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
     const wrapper_value = try wrapIteratorFromIterator(ctx, global, iterator.value(), next_method);
-    var wrapper_alive = true;
-    defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = object_ops.objectFromValue(wrapper_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.iteratorNext() orelse return error.TypeError;
     try std.testing.expect(stored.same(next_method));
 
-    wrapper_value.free(rt);
-    wrapper_alive = false;
-    next_method.free(rt);
-    next_method_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -4657,31 +4450,25 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
     global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
-    core.gc.retain(global.gcHeader());
     ctx.global = global;
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var result_value = core.JSValue.functionBytecode(&fb.header);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
+    const result_value = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
     const iterator_result_value = try iterator_ops.createIteratorResult(rt, global, result_value, false);
-    var iterator_result_alive = true;
-    defer if (iterator_result_alive) iterator_result_value.free(rt);
     const iterator_result = object_ops.objectFromValue(iterator_result_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -4689,23 +4476,17 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
     defer rt.atoms.free(value_atom);
     {
         const stored = try iterator_result.getProperty(value_atom);
-        defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
 
-    iterator_result_value.free(rt);
-    iterator_result_alive = false;
-    result_value.free(rt);
-    result_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
-    if (global.cachedThrowTypeErrorIntrinsic(rt)) |stored| return stored.dup();
+    if (global.cachedThrowTypeErrorIntrinsic(rt)) |stored| return stored;
 
     const thrower = try core.function.nativeFunctionForGlobal(rt, global, "", 0);
-    errdefer thrower.free(rt);
     const thrower_object = try property_ops.expectObject(thrower);
     try thrower_object.setFunctionRealmGlobalPtr(rt, global);
     if (object_ops.functionPrototypeFromGlobal(rt, global)) |function_prototype| {
@@ -4714,13 +4495,12 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
 
     try thrower_object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(0), false, false, false));
     const empty_name = try value_ops.createStringValue(rt, "");
-    defer empty_name.free(rt);
     try thrower_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name, false, false, false));
     try thrower_object.addThrowTypeErrorIntrinsicFunction(rt);
     try thrower_object.freeze(rt);
 
     try object_ops.installFunctionPrototypeThrowTypeErrorAccessors(rt, global, thrower);
-    try global.setCachedRealmValue(rt, .throw_type_error_intrinsic, thrower.dup());
+    try global.setCachedRealmValue(rt, .throw_type_error_intrinsic, thrower);
     return thrower;
 }
 
@@ -4786,7 +4566,6 @@ test "four-class bytecode constructability follows class and function flags" {
     const Fixture = struct {
         fn create(runtime: *core.JSRuntime, case: Case) !*core.Object {
             const object = try core.Object.create(runtime, case.class_id, null);
-            errdefer object.value().free(runtime);
 
             const fb = try bytecode.FunctionBytecode.createFixture(runtime, .{ .flags = .{
                 .func_kind = case.func_kind,
@@ -4810,7 +4589,6 @@ test "four-class bytecode constructability follows class and function flags" {
 
     for (cases) |case| {
         const function_object = try Fixture.create(rt, case);
-        defer function_object.value().free(rt);
         try std.testing.expect(isFunctionLikeClass(case.class_id));
         try std.testing.expectEqual(case.expected_constructor, try isConstructorLike(ctx, function_object.value()));
     }
@@ -4880,18 +4658,11 @@ pub fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []cons
     if (bound_count == 0 and args.len == 0) return &.{};
     const combined = try rt.memory.alloc(core.JSValue, bound_count + args.len);
     errdefer rt.memory.free(core.JSValue, combined);
-    var filled: usize = 0;
-    errdefer {
-        var index: usize = 0;
-        while (index < filled) : (index += 1) combined[index].free(rt);
-    }
     for (bound_args, 0..) |arg, index| {
-        combined[index] = arg.dup();
-        filled += 1;
+        combined[index] = arg;
     }
     for (args, 0..) |arg, arg_index| {
-        combined[bound_count + arg_index] = arg.dup();
-        filled += 1;
+        combined[bound_count + arg_index] = arg;
     }
     return combined;
 }
@@ -4972,7 +4743,6 @@ pub fn ordinarySetWithReceiver(
         return true;
     }
     if (try target.getOwnProperty(ctx.runtime, atom_id)) |own_desc| {
-        defer own_desc.destroy(ctx.runtime);
         return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, own_desc, caller_function, caller_frame);
     }
     if (target.getPrototype()) |prototype| {
@@ -4992,7 +4762,7 @@ pub fn definePropertiesCall(
     if (args.len < 2) return error.TypeError;
     const target = property_ops.expectObject(args[0]) catch return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object"));
     try definePropertiesOnTarget(ctx, output, global, target, args[1], caller_function, caller_frame);
-    return args[0].dup();
+    return args[0];
 }
 
 const math_ops = @import("math_ops.zig");
@@ -5000,6 +4770,41 @@ const math_ops = @import("math_ops.zig");
 pub const IntegrityLevel = enum {
     sealed,
     frozen,
+};
+
+/// Root provider for the `definePropertiesOnTarget` staging list; see the
+/// activation site for why the list needs one. Erased in default `rc`.
+const PendingDescriptorRoots = struct {
+    runtime: *core.JSRuntime,
+    list: *std.ArrayList(object_ops.PendingPropertyDescriptor),
+    registered: bool = false,
+
+    fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        const self: *PendingDescriptorRoots = @ptrCast(@alignCast(context));
+        for (self.list.items) |*entry| {
+            try visitor.atomRoot(entry.atom_id);
+            try visitor.value(&entry.desc.value);
+            try visitor.value(&entry.desc.getter);
+            try visitor.value(&entry.desc.setter);
+        }
+    }
+
+    fn provider(self: *PendingDescriptorRoots) core.runtime.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRoots };
+    }
+
+    inline fn activate(self: *PendingDescriptorRoots) !void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        try self.runtime.registerRootProvider(self.provider());
+        self.registered = true;
+    }
+
+    fn deactivate(self: *PendingDescriptorRoots) void {
+        if (comptime !core.runtime.value_root_frames_enabled) return;
+        if (!self.registered) return;
+        self.runtime.unregisterRootProvider(self.provider());
+        self.registered = false;
+    }
 };
 
 pub fn definePropertiesOnTarget(
@@ -5012,29 +4817,39 @@ pub fn definePropertiesOnTarget(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (properties_arg.isNull() or properties_arg.isUndefined()) return error.TypeError;
-    const properties_value = if (object_ops.objectFromValue(properties_arg)) |_| properties_arg.dup() else try object_ops.primitiveObjectForAccess(ctx.runtime, global, properties_arg);
-    defer properties_value.free(ctx.runtime);
+    const properties_value = if (object_ops.objectFromValue(properties_arg)) |_| properties_arg else try object_ops.primitiveObjectForAccess(ctx.runtime, global, properties_arg);
     const properties = object_ops.objectFromValue(properties_value) orelse return error.TypeError;
 
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, properties);
     defer core.Object.freeKeys(ctx.runtime, keys);
+    // TGC S3 §4 class B: the snapshot is a native []Atom held across every
+    // descriptor read below, each of which can reach a proxy trap.
+    var keys_roots = core.runtime.rootAtomList(&keys);
+    keys_roots.activate(ctx.runtime);
+    defer keys_roots.deactivate(ctx.runtime);
 
     var pending = std.ArrayList(object_ops.PendingPropertyDescriptor).empty;
     defer {
         for (pending.items) |item| item.destroy(ctx.runtime);
         pending.deinit(ctx.runtime.memory.allocator);
     }
+    // TGC S3 §2.2 root G: `PendingPropertyDescriptor` is a frame-resident atom
+    // box, and its heap-allocated backing array is visible to neither the
+    // value-root frames nor the conservative stack scan. A root provider (the
+    // `ContinuationRoots` pattern) reports the ids and the descriptor values
+    // the list is still holding; converting `atom_id` to a body JSValue would
+    // mean rewriting every defineOwnProperty seam it feeds.
+    var pending_roots = PendingDescriptorRoots{ .runtime = ctx.runtime, .list = &pending };
+    try pending_roots.activate();
+    defer pending_roots.deactivate();
 
     for (keys) |key| {
         const prop_desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, properties, key) orelse continue;
-        defer prop_desc.destroy(ctx.runtime);
         if (prop_desc.enumerable != true) continue;
 
         const desc_value = try object_ops.getValueProperty(ctx, output, global, properties_value, key, caller_function, caller_frame);
-        defer desc_value.free(ctx.runtime);
         const desc_object = object_ops.objectFromValue(desc_value) orelse return error.TypeError;
         const desc = try object_ops.descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
-        errdefer desc.destroy(ctx.runtime);
         const pending_key = ctx.runtime.atoms.dup(key);
         var pending_key_owned = true;
         errdefer if (pending_key_owned) ctx.runtime.atoms.free(pending_key);
@@ -5077,11 +4892,9 @@ pub fn callAccessorSetter(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (try object_ops.findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
         if (desc.kind != .accessor) return false;
         if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
-        const result = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
-        result.free(ctx.runtime);
+        _ = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
         return true;
     }
     return false;
@@ -5096,9 +4909,7 @@ pub fn inOp(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const rhs = try stack.pop();
-    defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
-    defer lhs.free(ctx.runtime);
     const object = property_ops.expectObject(rhs) catch {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'in' operand") catch |err| return err;
         return error.TypeError;
@@ -5121,9 +4932,7 @@ pub fn instanceofOp(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const rhs = try stack.pop();
-    defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
-    defer lhs.free(ctx.runtime);
     const result = try instanceofValue(ctx, output, global, lhs, rhs, caller_function, caller_frame);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(result));
 }
@@ -5148,7 +4957,6 @@ pub fn instanceofValue(
     // (quickjs.c:8139). Resolve it at comptime rather than hashing the spelling
     // through the predefined-symbol map on every `instanceof`.
     const has_instance = try instanceofMethod(ctx, output, global, rhs, caller_function, caller_frame);
-    defer has_instance.free(ctx.runtime);
     return instanceofValueWithMethod(ctx, output, global, lhs, rhs, has_instance, caller_function, caller_frame);
 }
 
@@ -5162,7 +4970,7 @@ pub fn instanceofMethod(
 ) !core.JSValue {
     const has_instance_atom = (comptime core.atom.predefinedId("Symbol.hasInstance", .symbol)) orelse return error.TypeError;
     const fast = object_ops.probeNamedDataProperty(ctx.runtime, rhs, has_instance_atom);
-    if (fast.slot) |slot| return slot.*.dup();
+    if (fast.slot) |slot| return slot.*;
     if (!fast.needs_slow) return core.JSValue.undefinedValue();
     return instanceofMethodSlow(ctx, output, global, rhs, caller_function, caller_frame);
 }
@@ -5191,7 +4999,6 @@ pub fn instanceofValueWithMethod(
 ) !bool {
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
         const result = try callValueOrBytecodeRoot(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
-        defer result.free(ctx.runtime);
         return coercion_ops.valueTruthy(result);
     }
     if (!isCallableValue(rhs)) {
@@ -5203,7 +5010,6 @@ pub fn instanceofValueWithMethod(
     }
     const object = try property_ops.expectObject(lhs);
     const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
-    defer proto_value.free(ctx.runtime);
     if (!proto_value.isObject()) {
         return error.TypeError;
     }
@@ -5220,7 +5026,6 @@ pub fn instanceofValueWithMethod(
 
 pub fn constructorNameEqlLocal(rt: *core.JSRuntime, object: *core.Object, expected: []const u8) !bool {
     const name_value = nativeFunctionNameValueLocal(rt, object) catch return false;
-    defer name_value.free(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try value_ops.appendRawString(rt, &bytes, name_value);
@@ -5232,11 +5037,9 @@ pub fn nativeFunctionNameValueLocal(rt: *core.JSRuntime, object: *core.Object) !
     if (dispatch_atom != core.atom.null_atom) {
         const dispatch_name = try rt.atoms.toStringValue(rt, dispatch_atom);
         if (dispatch_name.isString()) return dispatch_name;
-        dispatch_name.free(rt);
     }
     const name_value = try object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) {
-        name_value.free(rt);
         return error.TypeError;
     }
     return name_value;
@@ -5253,10 +5056,8 @@ pub fn isBlockedByUnscopables(
 ) !bool {
     const unscopables_atom = core.atom.predefinedId("Symbol.unscopables", .symbol) orelse return false;
     const unscopables = try object_ops.getValueProperty(ctx, output, global, object_value, unscopables_atom, caller_function, caller_frame);
-    defer unscopables.free(ctx.runtime);
     if (!unscopables.isObject()) return false;
     const blocked = try object_ops.getValueProperty(ctx, output, global, unscopables, atom_id, caller_function, caller_frame);
-    defer blocked.free(ctx.runtime);
     return coercion_ops.valueTruthy(blocked);
 }
 
@@ -5273,13 +5074,12 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
         }
         const slot = slot_ops.varRefSlot(frame, idx);
         if (slot_ops.adapterIsDeletedEvalBinding(slot)) continue;
-        const value = slot_ops.adapterValueDup(slot);
+        const value = slot_ops.adapterValueBorrow(slot);
         // Non-lexical bindings have no TDZ. An UNINITIALIZED cell here is a
         // parked global/eval placeholder (including an alias of a deleted eval
         // binding), so the name lookup must continue to the next environment.
         // Lexical cells remain visible so the caller can report their TDZ.
         if (!function.varRefIsLexicalAt(idx) and value.isUninitialized()) {
-            value.free(rt);
             continue;
         }
         return value;
@@ -5328,7 +5128,7 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
     }
     const atom_name = rt.atoms.name(atom_id) orelse "";
     if (rt.atoms.isPublicSymbol(atom_id)) {
-        if (core.symbol.description(&rt.atoms, atom_id)) |description| {
+        if (core.symbol.description(rt, atom_id)) |description| {
             try bytes.append(rt.memory.allocator, '[');
             try bytes.appendSlice(rt.memory.allocator, description);
             try bytes.append(rt.memory.allocator, ']');
@@ -5346,7 +5146,7 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
     if (index >= refs.len) return null;
     const cell = refs[index] orelse return null;
     if (!object.hasOwnProperty(atom_id)) return null;
-    return cell.varRefValue().dup();
+    return cell.varRefValue();
 }
 
 pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool {
@@ -5357,10 +5157,9 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
     const cell = refs[index] orelse return false;
     if (!object.hasOwnProperty(atom_id)) {
         refs[index] = null;
-        cell.release(ctx.runtime);
         return false;
     }
-    cell.setVarRefValue(ctx.runtime, value.dup());
+    cell.setVarRefValue(ctx.runtime, value);
     return true;
 }
 

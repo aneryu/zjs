@@ -30,9 +30,6 @@ else
 const vm_property_globals = @import("vm_property_globals.zig");
 const call_runtime = @import("call_runtime.zig");
 const tailcall_dispatch = @import("tailcall_dispatch.zig");
-comptime {
-    _ = tailcall_dispatch;
-}
 const array_ops = @import("array_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const HostError = exceptions.HostError;
@@ -60,14 +57,13 @@ pub fn runWithOutput(
     if (!function.isModule() and function.legacyBytecodeAdapter() == null) {
         const realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
         const global_object = try contextGlobal(realm);
-        const owned_function = core.JSValue.functionBytecode(@constCast(&function.header)).dup();
+        const owned_function = core.JSValue.functionBytecode(@constCast(&function.header));
         var root_function_value = try object_ops.createRootBytecodeFunctionObject(
             realm,
             global_object,
             owned_function,
             .root_global,
         );
-        defer root_function_value.free(ctx.runtime);
         var root_frame = core.runtime.rootValues(.{&root_function_value});
         root_frame.activate(ctx.runtime);
         defer root_frame.deactivate(ctx.runtime);
@@ -96,18 +92,6 @@ pub fn runWithOutput(
     return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false);
 }
 
-pub fn runWithOutputAndVarRefs(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    output: ?*std.Io.Writer,
-    var_refs: []const *core.VarRef,
-) !core.JSValue {
-    const global_object = try contextGlobal(ctx);
-    const this_value = if (function.isModule() or function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false);
-}
-
 /// Lazily build and cache the per-context global object. Subsequent
 /// eval calls reuse this object, matching QuickJS semantics where
 /// `JS_Eval` shares the per-context globals across invocations.
@@ -126,7 +110,6 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         null,
         call_mod.contextGlobalOwnPropertyCapacity(ctx.runtime),
     );
-    errdefer global_object.value().free(ctx.runtime);
     _ = try global_object.ensureGlobalPayload(ctx.runtime);
     // Associate the global while the Realm remains construction-only. Bootstrap
     // accessors can resolve that private association, but public Runtime/GC
@@ -137,8 +120,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         ctx.global = null;
     }
     try call_mod.installHostGlobals(ctx.runtime, global_object);
-    const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
-    thrower.free(ctx.runtime);
+    _ = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     if (ctx.preallocated_oom_error == null) {
         // Preallocate the out-of-memory catch value while the heap still has
         // room; when a memory limit is later exhausted, the catch machinery
@@ -153,9 +135,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         ) catch null;
     }
     const next_eval = try global_object.getProperty(core.atom.predefinedId("eval", .string).?);
-    const old_eval = ctx.eval_function;
     ctx.eval_function = next_eval;
-    old_eval.free(ctx.runtime);
     try ctx.finishConstruction();
     return global_object;
 }
@@ -225,7 +205,7 @@ fn resolveSuppliedRootCapture(
     _ = cv;
     const supplied: *SuppliedRootCaptures = @ptrCast(@alignCast(opaque_context orelse return error.InvalidBytecode));
     if (index >= supplied.cells.len) return error.InvalidBytecode;
-    return supplied.cells[index].retain();
+    return supplied.cells[index];
 }
 
 /// Compatibility entry for embedders/tests that execute a borrowed canonical
@@ -258,14 +238,13 @@ fn runCanonicalRootWithArgs(
             .context = @ptrCast(&supplied),
             .resolve = resolveSuppliedRootCapture,
         } };
-    const owned_function = core.JSValue.functionBytecode(@constCast(&function.header)).dup();
+    const owned_function = core.JSValue.functionBytecode(@constCast(&function.header));
     var root_function_value = try object_ops.createRootBytecodeFunctionObject(
         realm,
         realm_global,
         owned_function,
         capture_source,
     );
-    defer root_function_value.free(ctx.runtime);
     var root_frame = core.runtime.rootValues(.{&root_function_value});
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
@@ -445,8 +424,6 @@ fn runWithArgsState(
     entry_initial_pc: usize,
     entry_prepared_frame: ?*const PreparedEntryFrame,
 ) HostError!core.JSValue {
-    const call_profile_guard = vm_call.enterCallProfile(ctx.runtime);
-    defer call_profile_guard.deinit();
 
     // Ordinary canonical entry always has the real function object built by
     // closure2. Generator/async execution may instead carry its explicit

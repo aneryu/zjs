@@ -109,13 +109,6 @@ fn takeHeadRequest(gen: *core.Object) ?AsyncGeneratorRequest {
     return head;
 }
 
-fn freeRequest(rt: *core.JSRuntime, req: *const AsyncGeneratorRequest) void {
-    req.result.free(rt);
-    req.promise.free(rt);
-    req.resolve.free(rt);
-    req.reject.free(rt);
-}
-
 // ---------------------------------------------------------------------------
 // Settlement (mirrors js_async_generator_resolve_or_reject / _resolve / _reject,
 // quickjs.c:21481-21518)
@@ -130,7 +123,6 @@ fn settleHead(
     is_reject: bool,
 ) HostError!void {
     var req = takeHeadRequest(gen) orelse return;
-    defer freeRequest(ctx.runtime, &req);
     // The popped request's values live only in this native frame while the
     // resolving function runs; root them (and the settlement value) so a
     // forced GC inside the call cannot reclaim symbol-backed values.
@@ -145,8 +137,7 @@ fn settleHead(
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
     const settle_fn = if (is_reject) req.reject else req.resolve;
-    const call_result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle_fn, &.{rooted_result}, null, null);
-    call_result.free(ctx.runtime);
+    _ = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle_fn, &.{rooted_result}, null, null);
 }
 
 /// resolve with a fresh {value, done} iterator result per request
@@ -160,7 +151,6 @@ fn resolveHead(
     done: bool,
 ) HostError!void {
     const iterator_result = try iterator_ops.createIteratorResult(ctx.runtime, global, value, done);
-    defer iterator_result.free(ctx.runtime);
     try settleHead(ctx, output, global, gen, iterator_result, false);
 }
 
@@ -189,10 +179,9 @@ fn resolveFunction(
     is_reject: bool,
 ) !core.JSValue {
     const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    errdefer callback.free(rt);
     const callback_object = object_ops.objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_generator_resolve);
-    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), gen.value().dup());
+    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), gen.value());
     (try callback_object.functionAsyncContinuationRejectedSlot(rt)).* = is_reject;
     (try callback_object.functionAsyncGeneratorActionSlot(rt)).* = @intFromEnum(action);
     return callback;
@@ -207,13 +196,9 @@ fn asyncGeneratorAwait(
     action: ResolveAction,
 ) HostError!void {
     const promise_constructor = try promise_ops.promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
     const promise = try promise_ops.promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
-    defer promise.free(ctx.runtime);
     const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, action, false);
-    defer on_fulfilled.free(ctx.runtime);
     const on_rejected = try resolveFunction(ctx.runtime, global, gen, action, true);
-    defer on_rejected.free(ctx.runtime);
     // "no need to create 'thrownawayCapability' as in the spec" (quickjs.c:21464)
     try promise_ops.performPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
@@ -229,21 +214,16 @@ fn completedReturn(
     value: core.JSValue,
 ) HostError!void {
     const promise_constructor = try promise_ops.promiseDefaultConstructor(ctx, global);
-    defer promise_constructor.free(ctx.runtime);
     const promise = promise_ops.promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null) catch |err| blk: {
         switch (err) {
             error.OutOfMemory, error.ProcessExit, error.StackOverflow => return err,
             else => {},
         }
         const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.promiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
         break :blk try core.promise.rejectedWithPrototype(ctx, reason, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    defer promise.free(ctx.runtime);
     const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, .awaiting_return, false);
-    defer on_fulfilled.free(ctx.runtime);
     const on_rejected = try resolveFunction(ctx.runtime, global, gen, .awaiting_return, true);
-    defer on_rejected.free(ctx.runtime);
     try promise_ops.performPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
@@ -280,8 +260,7 @@ fn resumeBodyValue(
     stop_before_pc: ?usize,
 ) HostError!core.JSValue {
     const function_value = gen.generatorFunctionBytecode() orelse return error.TypeError;
-    const stored_current = if (gen.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current) |value| value.free(ctx.runtime);
+    const stored_current = if (gen.generatorCurrentFunction()) |value| value else null;
     const current_function_value = stored_current orelse gen.value();
     gen.generatorExecutingSlot().* = true;
     defer gen.generatorExecutingSlot().* = false;
@@ -345,12 +324,10 @@ fn execBody(
         // exception completion: complete then reject with the pending
         // exception (quickjs.c:21624-21628)
         const reason = try exception_ops.promiseErrorValue(ctx, global, err);
-        defer reason.free(rt);
         complete(ctx, gen);
         try settleHead(ctx, output, global, gen, reason, true);
         return .settled;
     };
-    defer result.free(rt);
 
     const suspended = gen.generatorJustYielded() and !gen.generatorDone();
     if (!suspended) {
@@ -369,7 +346,6 @@ fn execBody(
                 }
                 // qjs: throw_flag=TRUE; goto resume_exec
                 const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.promiseErrorValue(ctx, global, err);
-                defer reason.free(rt);
                 return try execBody(ctx, output, global, gen, .{ .throw_ = reason });
             };
             return .parked;
@@ -384,7 +360,6 @@ fn execBody(
                     else => {},
                 }
                 const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.promiseErrorValue(ctx, global, err);
-                defer reason.free(rt);
                 return try execBody(ctx, output, global, gen, .{ .throw_ = reason });
             };
             return .parked;
@@ -419,8 +394,7 @@ pub fn resumeNext(
         const queue = gen.asyncGeneratorQueue();
         if (queue.len == 0) return;
         const head_completion = queue[0].completion_type;
-        const head_result = queue[0].result.dup();
-        defer head_result.free(ctx.runtime);
+        const head_result = queue[0].result;
         switch (state(gen)) {
             // Parked at an await: only the resume trampoline re-enters
             // (quickjs.c:21580 resume_exec is trampoline-driven; enqueue
@@ -503,27 +477,18 @@ pub fn asyncGeneratorEnqueue(
     const gen_global = gen.generatorFunctionRealmGlobalPtr() orelse global;
     // Capability FIRST (observable via then-getter ticks; quickjs.c:21713).
     const promise = try core.promise.constructWithPrototype(ctx, promise_ops.promisePrototypeFromGlobal(rt, gen_global));
-    errdefer promise.free(rt);
     const resolving = try promise_ops.createPromiseResolvingPair(rt, gen_global, promise);
-    var resolving_owned = true;
-    errdefer if (resolving_owned) {
-        resolving.resolve.free(rt);
-        resolving.reject.free(rt);
-    };
     const arg = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     const req = AsyncGeneratorRequest{
         .completion_type = magic,
-        .result = arg.dup(),
-        .promise = promise.dup(),
+        .result = arg,
+        .promise = promise,
         .resolve = resolving.resolve,
         .reject = resolving.reject,
     };
     pushRequest(rt, gen, req) catch |err| {
-        req.result.free(rt);
-        req.promise.free(rt);
         return err;
     };
-    resolving_owned = false;
     if (state(gen) != .executing) {
         try resumeNext(ctx, output, gen_global, gen);
     }

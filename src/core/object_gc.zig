@@ -4,7 +4,6 @@
 //! lives on `Object.traceChildEdgesFallible` and is driven by
 //! `gc_trace_stw.traceHeaderEdges`; this module no longer marks anything.
 
-const class = @import("class.zig");
 const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
 const module_mod = @import("module.zig");
@@ -13,7 +12,6 @@ const block_heap = @import("gc_block_heap.zig");
 const runtime_mod = @import("runtime.zig");
 const var_ref_mod = @import("var_ref.zig");
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
-const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const Object = object_mod.Object;
 const FinalizationRegistryPayload = object_mod.FinalizationRegistryPayload;
 const JSRuntime = runtime_mod.JSRuntime;
@@ -27,7 +25,7 @@ pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
 inline fn freeCycleDeferredObject(rt: *JSRuntime, h: *gc.Header) void {
     const obj = Object.fromHeader(h);
     // qjs:6803-6806. deinit must still free weak husks (phase != remove_cycles).
-    if (gc.phaseIsTwoPassTeardown(rt.gc.phase) and obj.weakReferenceCount() != 0) {
+    if (rt.gc.phase == .tracer_destroy and obj.weakReferenceCount() != 0) {
         // Neither pop path clears the dead allocation's links. This is the one
         // branch that keeps the allocation, so finish the detach here.
         gc.setDeferredNext(h, null);

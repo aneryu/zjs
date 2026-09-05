@@ -308,12 +308,11 @@ fn test262AgentRun(agent: *Test262Agent) void {
     defer runtime_layer.cleanupAtomicsWaitersForContext(ctx);
     const global = ctx.globalObject() catch return;
     installTest262Globals(rt, ctx, global) catch return;
-    const result = ctx.eval(agent.source, .{
+    _ = ctx.eval(agent.source, .{
         .mode = .script,
         .filename = "<test262-agent>",
         .discard_script_result = true,
     }) catch return;
-    result.free(rt);
     ctx.runJobs(null) catch {};
     while (!test262AgentIsDone(agent)) {
         std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
@@ -407,12 +406,10 @@ fn test262AgentReceiveBroadcast(
     defer shared_buffer.release();
 
     const sab = try ctx.sharedArrayBufferFromRef(shared_buffer);
-    defer sab.free(ctx.runtimePtr());
-    const callback_result = try ctx.callFunction(args[0], &.{sab}, .{
+    _ = try ctx.callFunction(args[0], &.{sab}, .{
         .output = output,
         .realm_global = global,
     });
-    callback_result.free(ctx.runtimePtr());
     return zjs.JSValue.undefinedValue();
 }
 
@@ -518,19 +515,14 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
     try installAssertObject(rt, ctx, global);
 
     const ns_val = try ctx.getProperty(global.value(), "$262");
-    defer ns_val.free(rt);
 
-    var created_ns = false;
     const ns_target = if (ns_val.isObject()) ns_val else result: {
         const obj_val = try ctx.createObject();
         try ctx.defineDataProperty(global.value(), "$262", obj_val, .{ .enumerable = true });
-        created_ns = true;
         break :result obj_val;
     };
-    defer if (created_ns) ns_target.free(rt);
 
     const agent_val = try ctx.createObject();
-    defer agent_val.free(rt);
 
     const agent_methods = [_]struct {
         name: []const u8,
@@ -549,7 +541,6 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
 
     inline for (agent_methods) |m| {
         const func_val = try createExternalHostFunction(rt, ctx, m.name, m.length, m.call);
-        defer func_val.free(rt);
         try ctx.defineDataProperty(agent_val, m.name, func_val, .{ .enumerable = false });
     }
 
@@ -558,14 +549,12 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
     // Register evalScript on $262
     {
         const func_val = try createExternalHostFunction(rt, ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript));
-        defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "evalScript", func_val, .{ .enumerable = false });
     }
 
     // Register IsHTMLDDA on $262
     {
         const func_val = try createExternalHostFunction(rt, ctx, "IsHTMLDDA", 0, wrapExternal(hostCallIsHtmlDda));
-        defer func_val.free(rt);
         const is_html_dda_obj = test262InternalObjectFromValue(func_val).?;
         is_html_dda_obj.flags.is_html_dda = true;
 
@@ -575,28 +564,24 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
     // Register createRealm on $262
     {
         const func_val = try createExternalHostFunction(rt, ctx, "createRealm", 0, wrapExternal(test262CreateRealm));
-        defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "createRealm", func_val, .{ .enumerable = false });
     }
 
     // Register detachArrayBuffer on $262
     {
         const func_val = try createExternalHostFunction(rt, ctx, "detachArrayBuffer", 1, wrapExternal(test262DetachArrayBuffer));
-        defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "detachArrayBuffer", func_val, .{ .enumerable = false });
     }
 
     // Register gc on $262
     {
         const func_val = try createExternalHostFunction(rt, ctx, "gc", 0, wrapExternal(test262Gc));
-        defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "gc", func_val, .{ .enumerable = false });
     }
 }
 
 fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Object) !void {
     const assert_val = try createExternalHostFunction(rt, ctx, "assert", 1, wrapExternal(hostCallAssertTrue));
-    defer assert_val.free(rt);
     const methods = [_]struct {
         name: []const u8,
         length: i32,
@@ -609,7 +594,6 @@ fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Obj
     };
     inline for (methods) |method| {
         const method_val = try createExternalHostFunction(rt, ctx, method.name, method.length, method.call);
-        defer method_val.free(rt);
         try ctx.defineDataProperty(assert_val, method.name, method_val, .{});
     }
     try ctx.defineDataProperty(global.value(), "assert", assert_val, .{});
@@ -625,7 +609,6 @@ fn defineGlobalExternalHostFunction(
     with_prototype: bool,
 ) !void {
     const func_val = try createExternalHostFunctionWithRealm(rt, ctx, name, length, call, with_prototype, global);
-    defer func_val.free(rt);
     try ctx.defineDataProperty(global.value(), name, func_val, .{});
 }
 
@@ -689,7 +672,7 @@ fn hostCallAssertThrows(
     if (args.len < 2) return error.TypeError;
     const expected_name = try ctx.functionName(args[0], ctx.runtimePtr().memory.allocator);
     defer ctx.runtimePtr().memory.allocator.free(expected_name);
-    const result = ctx.callFunction(args[1], &.{}, .{
+    _ = ctx.callFunction(args[1], &.{}, .{
         .output = output,
         .realm_global = global,
     }) catch |err| {
@@ -705,7 +688,6 @@ fn hostCallAssertThrows(
         }
         return error.JSException;
     };
-    defer result.free(ctx.runtimePtr());
     return error.JSException;
 }
 
@@ -791,9 +773,7 @@ fn hostCallCompareArray(
     var index: u32 = 0;
     while (index < actual_length) : (index += 1) {
         const lhs = try ctx.getIndex(args[0], index);
-        defer lhs.free(ctx.runtimePtr());
         const rhs = try ctx.getIndex(args[1], index);
-        defer rhs.free(ctx.runtimePtr());
         if (!lhs.sameValue(rhs)) return error.JSException;
     }
     return zjs.JSValue.undefinedValue();
@@ -828,15 +808,13 @@ fn hostVerifyProperty(ctx: *zjs.JSContext, values: []const zjs.JSValue, callable
     const desc_index: usize = if (callable) 4 else 2;
     if ((!callable and values.len <= desc_index) or (callable and values.len < 4)) return error.TypeError;
 
-    var original = (try ctx.ownPropertyDescriptor(values[0], values[1], .{})) orelse {
+    const original = (try ctx.ownPropertyDescriptor(values[0], values[1], .{})) orelse {
         if (values[desc_index].isUndefined()) return zjs.JSValue.boolean(true);
         return error.JSException;
     };
-    defer original.destroy(rt);
 
     if (callable) {
         const actual = try ctx.getPropertyKey(values[0], values[1], .{});
-        defer actual.free(rt);
         if (!ctx.isCallable(actual)) return error.JSException;
         const expected_name = try stringBytes(ctx, values[2]);
         defer rt.memory.allocator.free(expected_name);
@@ -845,7 +823,6 @@ fn hostVerifyProperty(ctx: *zjs.JSContext, values: []const zjs.JSValue, callable
         if (!std.mem.eql(u8, expected_name, actual_name)) return error.JSException;
         const expected_length = values[3].asInt32() orelse return error.JSException;
         const length_value = try ctx.getProperty(actual, "length");
-        defer length_value.free(rt);
         if (length_value.asInt32() != expected_length) return error.JSException;
         if (values.len <= desc_index or values[desc_index].isUndefined()) return zjs.JSValue.boolean(true);
     }
@@ -861,10 +838,8 @@ const VerifyFlag = enum {
 };
 
 fn hostVerifyPropertyFlag(ctx: *zjs.JSContext, values: []const zjs.JSValue, flag: VerifyFlag) !zjs.JSValue {
-    const rt = ctx.runtimePtr();
     if (values.len < 2) return error.TypeError;
     const desc = (try ctx.ownPropertyDescriptor(values[0], values[1], .{})) orelse return error.JSException;
-    defer desc.destroy(rt);
     switch (flag) {
         .not_writable => if (desc.kind == .data and (desc.writable orelse false)) return error.JSException,
         .not_enumerable => if (desc.enumerable orelse false) return error.JSException,
@@ -874,38 +849,31 @@ fn hostVerifyPropertyFlag(ctx: *zjs.JSContext, values: []const zjs.JSValue, flag
 }
 
 fn verifyDescriptorObject(ctx: *zjs.JSContext, actual: zjs.PropertyDescriptor, expected: zjs.JSValue) !void {
-    const rt = ctx.runtimePtr();
     if (try expectedHas(ctx, expected, "value")) {
         const expected_value = try expectedValue(ctx, expected, "value");
-        defer expected_value.free(rt);
         if (!actual.value.sameValue(expected_value)) return error.JSException;
     }
     if (try expectedHas(ctx, expected, "writable")) {
         const writable_value = try expectedValue(ctx, expected, "writable");
-        defer writable_value.free(rt);
         const expected_writable = writable_value.asBool() orelse return error.JSException;
         if (actual.writable != expected_writable) return error.JSException;
     }
     if (try expectedHas(ctx, expected, "enumerable")) {
         const enumerable_value = try expectedValue(ctx, expected, "enumerable");
-        defer enumerable_value.free(rt);
         const expected_enumerable = enumerable_value.asBool() orelse return error.JSException;
         if (actual.enumerable != expected_enumerable) return error.JSException;
     }
     if (try expectedHas(ctx, expected, "configurable")) {
         const configurable_value = try expectedValue(ctx, expected, "configurable");
-        defer configurable_value.free(rt);
         const expected_configurable = configurable_value.asBool() orelse return error.JSException;
         if (actual.configurable != expected_configurable) return error.JSException;
     }
     if (try expectedHas(ctx, expected, "get")) {
         const expected_getter = try expectedValue(ctx, expected, "get");
-        defer expected_getter.free(rt);
         if (!actual.getter.sameValue(expected_getter)) return error.JSException;
     }
     if (try expectedHas(ctx, expected, "set")) {
         const expected_setter = try expectedValue(ctx, expected, "set");
-        defer expected_setter.free(rt);
         if (!actual.setter.sameValue(expected_setter)) return error.JSException;
     }
 }
@@ -963,10 +931,8 @@ fn test262CreateRealm(
     _ = global;
     _ = args;
     const realm_value = try ctx.createRealm();
-    errdefer realm_value.free(ctx.runtimePtr());
     const realm_global = try ctx.realmGlobalObject(realm_value);
     const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
-    defer eval_func.free(ctx.runtimePtr());
     try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
     return realm_value;
 }
@@ -1084,7 +1050,6 @@ test "test262 globals do not retain local namespace object reference" {
     const ns_val = try global.getProperty(ns_key);
     var weak = try rt.createWeakPersistentValue(ns_val, null, null);
     defer weak.deinit();
-    ns_val.free(rt);
 
     try std.testing.expect(weak.isAlive());
     try std.testing.expect(try ctx.deleteProperty(global.value(), "$262"));
@@ -1100,19 +1065,14 @@ test "test262 evalScript uses the installed function realm" {
     const global = try ctx.globalObject();
 
     const realm = try ctx.createRealm();
-    defer realm.free(rt);
     const realm_global = try ctx.realmGlobal(realm);
-    defer realm_global.free(rt);
     const realm_global_object = try ctx.realmGlobalObject(realm);
     try ctx.defineDataProperty(realm_global, "realmMarker", zjs.JSValue.int32(30), .{});
 
     const eval_func = try createExternalHostFunctionWithRealm(rt, ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global_object);
-    defer eval_func.free(rt);
 
     const source = try ctx.createString("realmMarker + 12");
-    defer source.free(rt);
     const result = try ctx.callFunction(eval_func, &.{source}, .{ .realm_global = global });
-    defer result.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
@@ -1127,7 +1087,6 @@ test "test262 agent string conversion follows JavaScript ToString" {
     try std.testing.expectEqualStrings("123", numeric);
 
     const object = try ctx.eval("({ toString() { return 'agent-object-string'; } })", .{});
-    defer object.free(rt);
     const object_text = try test262AgentStringValue(ctx, object);
     defer test262PageAllocator().free(object_text);
     try std.testing.expectEqualStrings("agent-object-string", object_text);
@@ -1140,7 +1099,6 @@ test "test262 timer integer conversion follows JavaScript ToNumber" {
     defer ctx.destroy();
 
     const object = try ctx.eval("({ valueOf() { return 7.9; } })", .{});
-    defer object.free(rt);
 
     const converted = try test262Int64Arg(ctx, &.{ zjs.JSValue.undefinedValue(), object }, 1);
     try std.testing.expectEqual(@as(i64, 7), converted);

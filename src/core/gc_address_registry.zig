@@ -7,7 +7,6 @@
 //! never dereferenced as guessed headers.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
@@ -15,18 +14,13 @@ const memory = @import("memory.zig");
 const Slab = memory.SmallObjectSlab;
 const block_heap_mod = @import("gc_block_heap.zig");
 
-pub const enabled = gc.address_registry_enabled;
-/// Registry mutation counters are observation only: production trace does not
-/// expose them through `--gc-stats`, and no allocation/collection policy reads
-/// them. Tests keep the accounting assertions. Conservative-lookup counters
-/// stay with that path's owning lane.
-pub const mutation_stats_enabled = builtin.is_test;
-
-pub const page_shift: u6 = 12;
-pub const page_size: usize = 1 << page_shift;
+/// One page grid for the whole collector: the block heap keys its extent
+/// index on the same shift, so the constant is defined once there and
+/// aliased here rather than duplicated.
+pub const page_shift: u6 = block_heap_mod.page_shift;
+pub const page_size: usize = block_heap_mod.page_bytes;
 
 pub const VerifyError = error{
-    AddressIndexCountMismatch,
     AddressIndexMissingPage,
     AddressIndexOrphanPage,
     AddressIndexDuplicatePageEntry,
@@ -44,31 +38,6 @@ pub const Occupant = struct {
 
     pub fn gcHeader(self: Occupant) *gc.Header {
         return @ptrFromInt(self.ptr);
-    }
-};
-
-pub const Stats = struct {
-    /// Slab arenas currently resolvable by mask.
-    arenas_live: usize = 0,
-    /// Arena bases that could not be recorded. Kept apart from
-    /// `failed_inserts` because the blast radius is different by two orders of
-    /// magnitude: one is a single object, the other is a whole 4 KiB arena.
-    arena_insert_failures: usize = 0,
-    /// Recovery attempts after such a failure.
-    arena_resyncs: usize = 0,
-    /// Tombstone compactions. Expect roughly `unregister_calls / (capacity/4)`;
-    /// a count of zero on a churning workload means the budget never fired.
-    rehashes: usize = 0,
-    live: usize = 0,
-    pages: usize = 0,
-    register_calls: usize = 0,
-    unregister_calls: usize = 0,
-    lookup_calls: usize = 0,
-    lookup_hits: usize = 0,
-    failed_inserts: usize = 0,
-
-    pub fn reset(self: *Stats) void {
-        self.* = .{};
     }
 };
 
@@ -95,7 +64,6 @@ pub const Table = struct {
 
     pages: std.AutoHashMapUnmanaged(usize, PageBucket) = .empty,
     by_header: std.AutoHashMapUnmanaged(usize, Occupant) = .empty,
-    stats: Stats = .{},
     /// Union of every registered range, so a conservative candidate outside
     /// the heap is rejected by two compares instead of a hash probe. The
     /// bounds never shrink; a stale-wide window only costs a probe that
@@ -129,13 +97,6 @@ pub const Table = struct {
     /// builds without the block heap), which every block arm treats as "no
     /// such population".
     block_heap: if (gc.block_heap_enabled) ?*const block_heap_mod.Heap else void =
-        if (gc.block_heap_enabled) null else {},
-    /// Registry-owned non-block Object authority. Type-erased so this lower
-    /// address-index module stays independent of the collector's record type.
-    /// The two incomplete flags occupy the high bits of the cold tombstone
-    /// counter, so this pointer consumes their former tail padding without
-    /// changing Table or Registry size or adding work to candidate filtering.
-    nonblock_objects: if (gc.block_heap_enabled) ?*anyopaque else void =
         if (gc.block_heap_enabled) null else {},
     /// One-word bloom filter over every 4 KiB base a candidate could resolve
     /// through: arena bases OR'd with occupant-table page bases. `ruleOut` is
@@ -209,7 +170,6 @@ pub const Table = struct {
     /// sweep again.
     pub fn noteArenaCreated(self: *Table, allocator: std.mem.Allocator, base: usize) void {
         self.arenas.put(allocator, base, {}) catch {
-            if (comptime mutation_stats_enabled) self.stats.arena_insert_failures += 1;
             self.setArenasIncomplete(true);
             return;
         };
@@ -222,7 +182,6 @@ pub const Table = struct {
         // it before the `addr - 1` probe can resolve it.
         if (base < self.bounds_lo) self.bounds_lo = base;
         if (base + Slab.arena_size + 1 > self.bounds_hi) self.bounds_hi = base + Slab.arena_size + 1;
-        if (comptime mutation_stats_enabled) self.stats.arenas_live += 1;
     }
 
     /// Re-register every arena the slab currently owns.
@@ -246,21 +205,17 @@ pub const Table = struct {
                 if (base + Slab.arena_size + 1 > sync.table.bounds_hi) {
                     sync.table.bounds_hi = base + Slab.arena_size + 1;
                 }
-                if (comptime mutation_stats_enabled) sync.table.stats.arenas_live += 1;
             }
         };
         var sync: Sync = .{ .table = self, .allocator = allocator };
         slab.forEachArena(&sync, Sync.visit);
         if (sync.ok) self.setArenasIncomplete(false);
-        if (comptime mutation_stats_enabled) self.stats.arena_resyncs += 1;
         return sync.ok;
     }
 
     /// A slab arena is being returned to the backing allocator.
     pub fn noteArenaReleased(self: *Table, base: usize) void {
-        if (self.arenas.remove(base)) {
-            if (comptime mutation_stats_enabled) self.stats.arenas_live -= 1;
-        }
+        _ = self.arenas.remove(base);
     }
 
     /// Resolve a candidate through the arena geometry.
@@ -356,10 +311,8 @@ pub const Table = struct {
     /// inside the global bounds. The block heap separately audits its exact
     /// block set and TinyBloom bits. Called only by arena/runtime-safety audit.
     pub fn verifyIndex(self: *Table, verify_scan_cache: bool) VerifyError!void {
-        var indexed: usize = 0;
         var by_it = self.by_header.iterator();
         while (by_it.next()) |entry| {
-            indexed += 1;
             const occupant = entry.value_ptr.*;
             if (entry.key_ptr.* != occupant.ptr or occupant.lo >= occupant.hi) {
                 return error.AddressIndexRangeMismatch;
@@ -380,20 +333,8 @@ pub const Table = struct {
                 if (matches != 1) return error.AddressIndexDuplicatePageEntry;
             }
         }
-        // The counters are a test-only observation mirror, not index state.
-        // ReleaseFast tracing deliberately erases their mutation-side writes;
-        // an opt-in arena audit must keep validating the structural maps
-        // without comparing them to an absent mirror.
-        if (comptime mutation_stats_enabled) {
-            if (indexed != self.stats.live) {
-                return error.AddressIndexCountMismatch;
-            }
-        }
-
-        var page_count: usize = 0;
         var page_it = self.pages.iterator();
         while (page_it.next()) |entry| {
-            page_count += 1;
             const page = entry.key_ptr.*;
             const bucket = entry.value_ptr;
             if (bucket.occupants.items.len == 0) return error.AddressIndexOrphanPage;
@@ -410,13 +351,6 @@ pub const Table = struct {
                     if (occupantsEqual(previous, occupant)) return error.AddressIndexDuplicatePageEntry;
                 }
             }
-        }
-        if (comptime mutation_stats_enabled) {
-            if (page_count != self.stats.pages) return error.AddressIndexCountMismatch;
-        }
-
-        if (comptime mutation_stats_enabled) {
-            if (self.arenas.count() != self.stats.arenas_live) return error.AddressIndexCountMismatch;
         }
         var arena_it = self.arenas.keyIterator();
         while (arena_it.next()) |base| {
@@ -547,7 +481,6 @@ pub const Table = struct {
     }
 
     fn insertOccupant(self: *Table, allocator: std.mem.Allocator, occupant: Occupant) std.mem.Allocator.Error!void {
-        if (comptime mutation_stats_enabled) self.stats.register_calls += 1;
         const key = occupant.ptr;
         // One hash probe, not two: `contains` followed by `put` hashed the
         // same key twice on every publication, which is the mutator's
@@ -569,12 +502,10 @@ pub const Table = struct {
             const gop = try self.pages.getOrPut(allocator, page);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{};
-                if (comptime mutation_stats_enabled) self.stats.pages += 1;
             }
             try gop.value_ptr.occupants.append(allocator, occupant);
             registered += 1;
         }
-        if (comptime mutation_stats_enabled) self.stats.live += 1;
     }
 
     pub fn remove(self: *Table, allocator: std.mem.Allocator, header: *gc.Header) void {
@@ -582,7 +513,6 @@ pub const Table = struct {
     }
 
     pub fn removePtr(self: *Table, allocator: std.mem.Allocator, identity: usize) void {
-        if (comptime mutation_stats_enabled) self.stats.unregister_calls += 1;
         const occupant = self.by_header.fetchRemove(identity) orelse return;
         const range = occupant.value;
         const first_page = range.lo >> page_shift;
@@ -599,10 +529,8 @@ pub const Table = struct {
             if (bucket.occupants.items.len == 0) {
                 bucket.occupants.deinit(allocator);
                 _ = self.pages.remove(page);
-                if (comptime mutation_stats_enabled) self.stats.pages -= 1;
             }
         }
-        if (comptime mutation_stats_enabled) self.stats.live -= 1;
         self.compactIfTombstoned();
     }
 
@@ -621,7 +549,6 @@ pub const Table = struct {
         self.removes_since_rehash = state;
         self.by_header.rehash(std.hash_map.AutoContext(usize){});
         self.pages.rehash(std.hash_map.AutoContext(usize){});
-        if (comptime mutation_stats_enabled) self.stats.rehashes += 1;
     }
 
     /// Every occupant containing `addr`, not just the greatest-`lo` one.
@@ -663,14 +590,29 @@ pub const Table = struct {
         // resolves below as well; this probe is the authoritative answer
         // (and the only one if that insert failed). Extent ranges are
         // disjoint from arenas and other standalone pages, so a hit ends the
-        // resolution -- one visit, not two.
-        if (comptime gc.string_tracer_owned and gc.block_heap_enabled) {
+        // resolution here.
+        //
+        // TWO extents can answer, though: a candidate on a page boundary that
+        // is one extent's inclusive one-past-end AND the next extent's base
+        // names both, exactly like the block and arena arms above, which is
+        // why both bases have to clear the filter before a word is dismissed.
+        // Picking a single winner would drop the predecessor's only root
+        // (spec 7.2 (3)).
+        if (comptime gc.block_heap_enabled) {
             if (self.block_heap) |heap| {
-                if (heap.extentContaining(addr)) |extent_base| {
-                    const header: *gc.Header = @ptrFromInt(extent_base + gc.metadata_prefix_size);
-                    if (!header.metaConst().alloc_info.heap_accounted) return 0;
-                    visit(context, header);
-                    return 1;
+                const pair = heap.extentsContaining(addr);
+                if (pair.inside != null or pair.one_past_end != null) {
+                    var hits: usize = 0;
+                    inline for (.{ pair.inside, pair.one_past_end }) |candidate| {
+                        if (candidate) |extent_base| {
+                            const header: *gc.Header = @ptrFromInt(extent_base + gc.metadata_prefix_size);
+                            if (header.metaConst().alloc_info.heap_accounted) {
+                                visit(context, header);
+                                hits += 1;
+                            }
+                        }
+                    }
+                    return hits;
                 }
             }
         }
@@ -739,13 +681,11 @@ pub const Table = struct {
             if (bucket.occupants.items.len == 0) {
                 bucket.occupants.deinit(allocator);
                 _ = self.pages.remove(page);
-                if (comptime mutation_stats_enabled) self.stats.pages -= 1;
             }
         }
     }
 
     pub inline fn noteFailedInsert(self: *Table) void {
-        if (comptime mutation_stats_enabled) self.stats.failed_inserts += 1;
         self.setOccupantsIncomplete(true);
     }
 };

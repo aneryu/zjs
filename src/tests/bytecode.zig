@@ -21,12 +21,8 @@ test "constant pool retains and releases values" {
     const value = text.value();
     const index = try pool.append(value);
     try std.testing.expectEqual(@as(u32, 0), index);
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 2), text.header().rc);
 
-    const loaded = pool.get(0).?;
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 3), text.header().rc);
-    loaded.free(rt);
-    value.free(rt);
+    _ = pool.get(0).?;
 }
 
 test "constant pool appendOwned transfers refcounted values" {
@@ -39,8 +35,6 @@ test "constant pool appendOwned transfers refcounted values" {
     const text = try core.string.String.createAscii(rt, "owned-constant");
     const value = text.value();
     _ = try pool.appendOwned(value);
-
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), text.header().rc);
 }
 
 test "constant pool retains owned unique symbol atoms until release" {
@@ -54,7 +48,7 @@ test "constant pool retains owned unique symbol atoms until release" {
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-symbol");
     const borrowed_value = try rt.symbolValue(borrowed_symbol);
     _ = try pool.append(borrowed_value);
-    borrowed_value.free(rt);
+    rt.atoms.free(borrowed_symbol);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
@@ -75,7 +69,7 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-owned-symbol");
-    _ = try pool.appendOwned(try rt.symbolValue(owned_symbol));
+    _ = try pool.appendOwned(try rt.takeSymbolValue(owned_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
@@ -157,15 +151,11 @@ test "script or module metadata owns each bytecode transfer" {
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    var fb_alive = true;
-    defer if (fb_alive) core.JSValue.functionBytecode(&fb.header).free(rt);
     try std.testing.expectEqual(display_filename, fb.filenameAtom());
     try std.testing.expectEqual(referrer, fb.scriptOrModule());
     try std.testing.expectEqual(atom_module.null_atom, fd.script_or_module);
     try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
 
-    core.JSValue.functionBytecode(&fb.header).free(rt);
-    fb_alive = false;
     // The published FB is the referrer atom's second owner, and the atom table
     // only balances when the FB is torn down -- which the tracer defers to a
     // collection. Nothing names the FB from here on, so the collection reaches
@@ -245,7 +235,6 @@ test "bytecode module record add failure releases duplicated atom references" {
 
 const atom_module = engine.core.atom;
 const pipeline = bytecode.pipeline;
-const pc2line = pipeline.pc2line;
 const stack_size = pipeline.stack_size;
 const function_def = bytecode.function_def;
 
@@ -425,7 +414,6 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(@as(usize, 0), @intFromPtr(fb) % 8);
         try std.testing.expectEqual(@as(usize, 8), @intFromPtr(fb) - @intFromPtr(fb.header.meta()));
         try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().flags.kind);
-        try helpers.expectRefCount(1, &fb.header);
         try std.testing.expect(!fb.header.meta().alloc_info.standalone);
 
         try std.testing.expect(fb.byte_code == null);
@@ -940,7 +928,6 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     );
     try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?.ctor_alloc.capacity);
     try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().flags.kind);
-    try helpers.expectRefCount(1, &second.header);
 }
 
 test "published no-debug no-extension FunctionBytecode uses the deferred zero-FAM free path" {
@@ -1056,8 +1043,6 @@ test "FunctionDef: cpool transfers refcounted owned values" {
 
     const text = try core.string.String.createAscii(rt, "function-def-owned");
     _ = try fd.appendCpoolOwned(text.value());
-
-    if (comptime !core.gc.string_tracer_owned) try std.testing.expectEqual(@as(i32, 1), text.header().rc);
 }
 
 test "FunctionDef: cpool retains unique symbol atoms until release" {
@@ -1074,7 +1059,7 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-symbol");
     const borrowed_value = try rt.symbolValue(borrowed_symbol);
     _ = try fd.appendCpool(borrowed_value);
-    borrowed_value.free(rt);
+    rt.atoms.free(borrowed_symbol);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
@@ -1098,7 +1083,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     defer if (fd_alive) fd.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-owned-symbol");
-    _ = try fd.appendCpoolOwned(try rt.symbolValue(owned_symbol));
+    _ = try fd.appendCpoolOwned(try rt.takeSymbolValue(owned_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
@@ -1454,7 +1439,6 @@ test "parent finalization failure releases its published child realm owner" {
     const child_header = parent.cpool[0].objectHeader() orelse return error.TestExpectedEqual;
     const child_fb: *bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", child_header));
     try std.testing.expectEqual(realm, child_fb.realmContext());
-    try helpers.expectRefCount(2, &realm.header);
 
     // The failed parent FunctionDef still owns the installed cpool value.
     // Releasing that owner must drop the child's independent RealmRef exactly
@@ -1466,7 +1450,6 @@ test "parent finalization failure releases its published child realm owner" {
     // collection. The realm survives it as a live host handle on the runtime's
     // context list; the orphaned child is named by nothing and is reclaimed.
     helpers.reclaimNow(rt);
-    try helpers.expectRefCount(1, &realm.header);
 }
 
 test "parent finalization moves an existing child FunctionBytecode cpool owner without rc churn" {
@@ -1480,9 +1463,7 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
 
     const child_fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name, .realm = realm });
     child_fb.publishFixtureNoFail(rt);
-    var child_value = core.JSValue.functionBytecode(&child_fb.header);
-    var child_value_alive = true;
-    defer if (child_value_alive) child_value.free(rt);
+    const child_value = core.JSValue.functionBytecode(&child_fb.header);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     var fd_alive = true;
@@ -1490,31 +1471,20 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     _ = try fd.appendScope(-1);
     try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
     _ = try fd.appendCpool(child_value);
-    child_value.free(rt);
-    child_value_alive = false;
-    const child_rc_before = helpers.refCountSnapshot(&child_fb.header);
-    if (comptime !core.gc.refCountRemoved(.function_bytecode))
-        try std.testing.expectEqual(@as(i32, 1), child_rc_before);
 
     const parent_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
     const parent_fb = &parent_slice[0];
     var parent_alive = true;
-    defer if (parent_alive) core.JSValue.functionBytecode(&parent_fb.header).free(rt);
 
     try std.testing.expect(fd.cpool[0].isUndefined());
-    try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
 
     fd.deinit(rt);
     fd_alive = false;
-    try helpers.expectRefCount(child_rc_before, &child_fb.header);
     try std.testing.expectEqual(name, child_fb.funcName());
     try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
 
-    const held_child = parent_fb.cpoolSlice()[0].dup();
-    var held_child_alive = true;
-    defer if (held_child_alive) held_child.free(rt);
-    const realm_refs_before_parent_free = helpers.refCountSnapshot(&realm.header);
+    _ = parent_fb.cpoolSlice()[0];
     {
         // `held_child` is the child's only remaining owner once the parent is
         // gone, and it is a Zig local the declared_only scan cannot see.
@@ -1526,16 +1496,10 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
         child_frame.activate(rt);
         defer child_frame.deactivate(rt);
 
-        core.JSValue.functionBytecode(&parent_fb.header).free(rt);
         parent_alive = false;
         helpers.reclaimNow(rt);
-        try helpers.expectRefCount(child_rc_before, &child_fb.header);
-        try helpers.expectRefCount(realm_refs_before_parent_free - 1, &realm.header);
     }
-    held_child.free(rt);
-    held_child_alive = false;
     helpers.reclaimNow(rt);
-    try helpers.expectRefCount(1, &realm.header);
 }
 
 // ---- F10.1b: FunctionDef-driven local-slot lowering ----
@@ -1635,7 +1599,6 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(atom_module.null_atom, fd.func_name);
     try std.testing.expectEqual(atom_module.null_atom, fd.filename);
@@ -1816,8 +1779,7 @@ test "abrupt FunctionBytecode finalization leaves the same runtime reusable" {
     defer rt.setMemoryLimit(null);
     const failed_result = pipeline.finalize.createFunctionBytecode(&failed_fd, .{ .realm = realm });
     rt.setMemoryLimit(null);
-    if (failed_result) |unexpected| {
-        core.JSValue.functionBytecode(&unexpected[0].header).free(rt);
+    if (failed_result) |_| {
         return error.TestUnexpectedResult;
     } else |err| {
         if (err != error.OutOfMemory) return err;
@@ -1833,7 +1795,6 @@ test "abrupt FunctionBytecode finalization leaves the same runtime reusable" {
 
     const recovered_slice = try pipeline.finalize.createFunctionBytecode(&recovery_fd, .{ .realm = realm });
     const recovered = &recovered_slice[0];
-    defer core.JSValue.functionBytecode(&recovered.header).free(rt);
     try std.testing.expectEqualStrings("recovered attempt", recovered.sourceText().?);
     try std.testing.expectEqual(bytecode.opcode.op.return_undef, recovered.byteCode()[0]);
 }
@@ -1871,7 +1832,6 @@ test "final bytecode vardefs are compact arguments plus locals" {
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(@as(usize, 2), fb.allVarDefs().len);
     try std.testing.expectEqual(arg_name, fb.argVarDefs()[0].var_name);
@@ -2019,7 +1979,6 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(fb.simpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
@@ -2037,7 +1996,6 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(!fb.simpleInlineEligible());
         try std.testing.expect(fb.strictSimpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
@@ -2063,7 +2021,6 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(fb.simpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
@@ -2093,7 +2050,6 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(!fb.simpleInlineEligible());
         try std.testing.expect(fb.strictSimpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
@@ -2124,7 +2080,6 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(!fb.simpleInlineEligible());
         try std.testing.expect(!fb.strictSimpleInlineEligible());
         try std.testing.expect(fb.strictSimpleSnapshotInlineEligible());
@@ -2194,7 +2149,6 @@ test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const expect_sloppy = !mode.strict and !mode.captured_arg;
         const expect_raw = mode.strict and !mode.captured_arg;
         try std.testing.expectEqual(expect_sloppy, fb.simpleInlineExactArgsLeaf());
@@ -2213,7 +2167,6 @@ test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
         try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(!fb.simpleInlineExactArgsLeaf());
         try std.testing.expect(!fb.rawThisInlineExactArgsLeaf());
         try std.testing.expect(fb.simpleInlineEmptyLeaf());
@@ -2256,7 +2209,6 @@ test "function bytecode publishes capture leaf kind by mode and geometry" {
 
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const expect_kind: LeafKind = if (mode.strict) .raw_this else .sloppy;
         try std.testing.expectEqual(expect_kind, fb.captureLeafKind());
         // Captured callees never overlap the established zero-arg empty-leaf
@@ -2276,7 +2228,6 @@ test "function bytecode publishes capture leaf kind by mode and geometry" {
         try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expectEqual(LeafKind.none, fb.captureLeafKind());
         try std.testing.expect(fb.simpleInlineEmptyLeaf());
     }
@@ -2301,7 +2252,6 @@ test "function bytecode publishes capture leaf kind by mode and geometry" {
         try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expectEqual(LeafKind.none, fb.captureLeafKind());
         try std.testing.expectEqual(LeafKind.sloppy, fb.exactArgsLeafKind());
     }
@@ -2325,7 +2275,6 @@ test "function bytecode publishes capture leaf kind by mode and geometry" {
         try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expectEqual(LeafKind.none, fb.captureLeafKind());
         try std.testing.expectEqual(LeafKind.none, fb.exactArgsLeafKind());
         try std.testing.expect(!fb.simpleInlineEmptyLeaf());
@@ -2497,7 +2446,6 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         try emitTestBody(&fd, &unbalanced_body, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(!fb.simpleInlineEmptyLeaf());
         try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
         try std.testing.expectEqual(!mode.strict, fb.simpleInlineEligible());
@@ -2513,7 +2461,6 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         try emitTestBody(&fd, &balanced_body, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expect(fb.simpleInlineEmptyLeaf());
     }
 
@@ -2534,7 +2481,6 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         try emitTestBody(&fd, &unbalanced_body, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expectEqual(LeafKind.sloppy, fb.exactArgsLeafKind());
     }
 
@@ -2553,7 +2499,6 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         try emitTestBody(&fd, &unbalanced_body, &.{});
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
         try std.testing.expectEqual(LeafKind.sloppy, fb.captureLeafKind());
     }
 }
@@ -2589,7 +2534,6 @@ test "direct eval reserves identity for visible function-scope locals and argume
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     // add_eval_variables captures the argument first, then every scope-zero
     // local in index order, including its newly appended `<var>` object.
@@ -2635,7 +2579,6 @@ test "surviving local references reserve compact open VarRef storage" {
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(@as(u16, 1), fb.openVarRefCount());
     try std.testing.expect(fb.varDefs()[0].isCaptured());
@@ -2679,7 +2622,6 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     var expected = [_]u8{0} ** 17;
     expected[0] = bytecode.opcode.op.special_object;
@@ -2735,7 +2677,6 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(@as(u16, 1), fb.openVarRefCount());
     try std.testing.expect(fd.args[0].is_captured);
@@ -2851,7 +2792,6 @@ test "createFunctionBytecode: final declaration metadata lives only in ClosureVa
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(@as(usize, 1), fb.closureVar().len);
     try std.testing.expectEqual(global_name, fb.closureVar()[0].var_name);
@@ -2895,8 +2835,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     const before_fb = rt.gcStats();
     const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
     const fb = &fb_slice[0];
-    var fb_alive = true;
-    defer if (fb_alive) core.JSValue.functionBytecode(&fb.header).free(rt);
     realm.destroy();
     realm_alive = false;
 
@@ -2920,8 +2858,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     // the debt untouched.
     try std.testing.expectEqual(@as(usize, 0), stats.allocation_debt);
 
-    core.JSValue.functionBytecode(&fb.header).free(rt);
-    fb_alive = false;
     // The tracer defers FB teardown to a collection. `fd` handed its owners to
     // the FB and holds no heap bytes of its own, so the cold live-object census
     // is expected to reach zero here.
@@ -2992,14 +2928,10 @@ fn runFunctionBytecodeFinalizeOomLifecycle(allocator: std.mem.Allocator) !void {
 
     const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
     const fb = &fb_slice[0];
-    var fb_owned = true;
-    errdefer if (fb_owned) core.JSValue.functionBytecode(&fb.header).free(rt);
     if (fb.sourceText() == null) {
         return error.TestUnexpectedResult;
     }
 
-    core.JSValue.functionBytecode(&fb.header).free(rt);
-    fb_owned = false;
     fd.deinit(rt);
     fd_owned = false;
     rt.atoms.free(captured_name);

@@ -10,7 +10,6 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     const install_zjs = artifacts.install_zjs;
     const install_zjs_profile = artifacts.install_zjs_profile;
     const internal_fast_mod = artifacts.internal_fast_mod;
-    const dossier_options = ctx.dossier_options;
 
     const run_perf_benchmark = b.addRunArtifact(zjs_exe);
     run_perf_benchmark.addArg("--perf-json");
@@ -147,7 +146,6 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
             .{ .name = "zjs", .module = internal_fast_mod },
         },
     });
-    same_runtime_mod.addOptions("dossier_options", dossier_options);
     const same_runtime_exe = b.addExecutable(.{
         .name = "zjs-same-runtime",
         .root_module = same_runtime_mod,
@@ -180,7 +178,6 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
             .{ .name = "zjs", .module = internal_fast_mod },
         },
     });
-    perf_direct_zjs_mod.addOptions("dossier_options", dossier_options);
     const perf_direct_zjs_exe = b.addExecutable(.{
         .name = "zjs-direct-bench",
         .root_module = perf_direct_zjs_mod,

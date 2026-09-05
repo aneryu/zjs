@@ -1,15 +1,12 @@
-//! Core function records, native-builtin identities, and function-object creation.
+//! Core native-builtin identities and function-object creation.
 //!
-//! `FunctionRecord` owns its name atom and the active payload's bytecode,
-//! constants, bound values, arguments, and home-object reference; `destroy`
-//! releases that complete set through the originating Runtime account. Encoded
-//! builtin domains are stable dispatch metadata shared with exec, not VM state.
+//! Encoded builtin domains are stable dispatch metadata shared with exec, not
+//! VM state.
 //! QuickJS map: `JSFunctionBytecode` and function object data around
 //! quickjs.c:619-713. Higher layers may consume this core module; it may not
 //! import parser/exec/runtime/binding.
 
 const atom = @import("atom.zig");
-const memory = @import("memory.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
@@ -19,16 +16,6 @@ const JSRuntime = runtime.JSRuntime;
 const RealmContext = @import("context.zig").RealmContext;
 const class = @import("class.zig");
 const std = @import("std");
-
-fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-    _ = atoms;
-    return value.dup();
-}
-
-fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
-    _ = atoms;
-    value.free(rt);
-}
 
 pub const NativeBuiltinDomain = enum(i32) {
     math = 1,
@@ -129,191 +116,6 @@ pub fn decodeNativeBuiltinId(encoded: i32) ?NativeBuiltinRef {
     return .{ .domain = domain, .id = @intCast(local_id) };
 }
 
-pub const Kind = enum {
-    native,
-    bytecode,
-    bound,
-};
-
-pub const FunctionKind = enum {
-    normal,
-    generator,
-    async_function,
-    async_generator,
-};
-
-pub const NativeCall = *const fn () JSValue;
-
-pub const NativeRecord = struct {
-    name: atom.Atom = atom.null_atom,
-    length: u16 = 0,
-    call: ?NativeCall = null,
-};
-
-pub const BytecodeRecord = struct {
-    name: atom.Atom = atom.null_atom,
-    bytecode: []u8 = &.{},
-    constants: []JSValue = &.{},
-};
-
-pub const BoundRecord = struct {
-    target: JSValue = JSValue.undefinedValue(),
-    this_value: JSValue = JSValue.undefinedValue(),
-    args: []JSValue = &.{},
-};
-
-pub const FunctionRecord = struct {
-    memory: *memory.MemoryAccount,
-    atoms: *atom.AtomTable,
-    kind: Kind,
-    function_kind: FunctionKind = .normal,
-    is_constructor: bool = false,
-    home_object: JSValue = JSValue.undefinedValue(),
-    payload: Payload,
-
-    const Payload = union(Kind) {
-        native: NativeRecord,
-        bytecode: BytecodeRecord,
-        bound: BoundRecord,
-    };
-
-    pub fn createNative(
-        account: *memory.MemoryAccount,
-        atoms: *atom.AtomTable,
-        name: atom.Atom,
-        length: u16,
-        call: ?NativeCall,
-        is_constructor: bool,
-    ) FunctionRecord {
-        return .{
-            .memory = account,
-            .atoms = atoms,
-            .kind = .native,
-            .is_constructor = is_constructor,
-            .payload = .{ .native = .{
-                .name = atoms.dup(name),
-                .length = length,
-                .call = call,
-            } },
-        };
-    }
-
-    pub fn createBytecode(
-        account: *memory.MemoryAccount,
-        atoms: *atom.AtomTable,
-        name: atom.Atom,
-        bytecode: []const u8,
-        constants: []const JSValue,
-        function_kind: FunctionKind,
-        is_constructor: bool,
-        home_object: JSValue,
-    ) !FunctionRecord {
-        const owned_code: []u8 = if (bytecode.len == 0)
-            &.{}
-        else blk: {
-            const owned = try account.alloc(u8, bytecode.len);
-            @memcpy(owned, bytecode);
-            break :blk owned;
-        };
-        var owned_code_owned = owned_code.len != 0;
-        errdefer if (owned_code_owned) account.free(u8, owned_code);
-
-        const owned_constants: []JSValue = if (constants.len == 0)
-            &.{}
-        else blk: {
-            const owned = try account.alloc(JSValue, constants.len);
-            errdefer account.free(JSValue, owned);
-            for (constants, owned) |constant, *slot| slot.* = dupOwnedValue(atoms, constant);
-            break :blk owned;
-        };
-
-        owned_code_owned = false;
-        return .{
-            .memory = account,
-            .atoms = atoms,
-            .kind = .bytecode,
-            .function_kind = function_kind,
-            .is_constructor = is_constructor,
-            .home_object = dupOwnedValue(atoms, home_object),
-            .payload = .{ .bytecode = .{
-                .name = atoms.dup(name),
-                .bytecode = owned_code,
-                .constants = owned_constants,
-            } },
-        };
-    }
-
-    pub fn createBound(
-        account: *memory.MemoryAccount,
-        atoms: *atom.AtomTable,
-        target: JSValue,
-        this_value: JSValue,
-        args: []const JSValue,
-        is_constructor: bool,
-    ) !FunctionRecord {
-        const owned_args: []JSValue = if (args.len == 0)
-            &.{}
-        else blk: {
-            const owned = try account.alloc(JSValue, args.len);
-            errdefer account.free(JSValue, owned);
-            for (args, owned) |arg, *slot| slot.* = dupOwnedValue(atoms, arg);
-            break :blk owned;
-        };
-
-        return .{
-            .memory = account,
-            .atoms = atoms,
-            .kind = .bound,
-            .is_constructor = is_constructor,
-            .payload = .{ .bound = .{
-                .target = dupOwnedValue(atoms, target),
-                .this_value = dupOwnedValue(atoms, this_value),
-                .args = owned_args,
-            } },
-        };
-    }
-
-    pub fn destroy(self: *FunctionRecord, rt: anytype) void {
-        const account = self.memory;
-        const atoms = self.atoms;
-        const home_object = self.home_object;
-        const payload = self.payload;
-        self.* = .{
-            .memory = account,
-            .atoms = atoms,
-            .kind = .native,
-            .payload = .{ .native = .{} },
-        };
-
-        freeOwnedValue(atoms, home_object, rt);
-        switch (payload) {
-            .native => |record| {
-                if (record.name != atom.null_atom) atoms.free(record.name);
-            },
-            .bytecode => |record| {
-                if (record.name != atom.null_atom) atoms.free(record.name);
-                for (record.constants) |*constant| {
-                    const value = constant.*;
-                    constant.* = JSValue.undefinedValue();
-                    freeOwnedValue(atoms, value, rt);
-                }
-                if (record.constants.len != 0) account.free(JSValue, record.constants);
-                if (record.bytecode.len != 0) account.free(u8, record.bytecode);
-            },
-            .bound => |record| {
-                freeOwnedValue(atoms, record.target, rt);
-                freeOwnedValue(atoms, record.this_value, rt);
-                for (record.args) |*arg| {
-                    const value = arg.*;
-                    arg.* = JSValue.undefinedValue();
-                    freeOwnedValue(atoms, value, rt);
-                }
-                if (record.args.len != 0) account.free(JSValue, record.args);
-            },
-        }
-    }
-};
-
 fn isAsciiBuiltinName(bytes: []const u8) bool {
     for (bytes) |b| {
         if (b >= 0x80) return false;
@@ -329,7 +131,6 @@ fn nativeFunctionWithClass(
     length: i32,
 ) !JSValue {
     const function_object = try Object.createWithOwnPropertyCapacity(rt, class_id, prototype, 2);
-    errdefer function_object.value().free(rt);
     try publishNativeFunctionMetadata(rt, function_object, name, length);
     return function_object.value();
 }
@@ -358,7 +159,6 @@ pub fn nativeFunctionWithPrototypeAndCapacity(
     const rt = realm.runtime;
     const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, prototype, capacity);
     function_object.setNativeFunctionRealm(realm);
-    errdefer function_object.value().free(rt);
     try publishNativeFunctionMetadata(rt, function_object, name, length);
     return function_object.value();
 }
@@ -397,19 +197,15 @@ fn publishNativeFunctionMetadataWork(
         try string.String.createAscii(rt, name)
     else
         try string.String.createUtf8(rt, name);
-    const name_value = if (name.len == 0) name_string.value().dup() else name_string.value();
-    defer name_value.free(rt);
+    const name_value = if (name.len == 0) name_string.value() else name_string.value();
 
     const name_key = atom.predefinedId("name", .string).?;
     try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));
 
-    function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
-}
-
-/// Construct a QuickJS C_FUNCTION_DATA-style carrier. It deliberately owns no
-/// realm; its callback receives the caller's RealmContext at dispatch time.
-pub fn nativeDataFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
-    return nativeDataFunctionWithPrototype(rt, null, name, length);
+    const dispatch_atom = try rt.internAtom(name);
+    // TGC S3 §2.3: this stores an atom id into a published function payload.
+    rt.atoms.shadeAtomIfMarking(dispatch_atom);
+    function_object.nativeDispatchNameSlot().* = dispatch_atom;
 }
 
 /// Construct a C_FUNCTION_DATA-style callable with the construction realm's
@@ -445,7 +241,6 @@ pub fn defineNativeMethod(realm: *RealmContext, target: *Object, name: []const u
     const rt = realm.runtime;
     const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
     const method = try nativeDataFunctionWithPrototype(rt, function_proto, name, length);
-    defer method.free(rt);
     try defineMethodData(rt, target, name, method, true, false, true);
 }
 

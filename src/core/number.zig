@@ -10,18 +10,12 @@ const core = @import("root.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
-const AppendStringError = core.value_string.AppendStringError;
-
-fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    return value.asStringBody();
-}
-
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
 /// narrow subset used by transitional `parse_int` bytecode.
 pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?core.JSValue) !f64 {
     if (input.isString()) {
         const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
-        const str = stringFromValue(input).?;
+        const str = input.asStringBody().?;
         try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseIntLatin1Bytes(bytes, radix),
@@ -31,7 +25,7 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &bytes, input);
+    try core.value_string.appendValueString(rt, &bytes, input, .{ .unwrap_wrappers = true });
 
     const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
     // appendValueString emits UTF-8 (qjs JS_ToCStringLen2, quickjs.c:4458);
@@ -45,7 +39,7 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
 /// narrow subset used by transitional `parse_float` bytecode.
 pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     if (input.isString()) {
-        const str = stringFromValue(input).?;
+        const str = input.asStringBody().?;
         try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseFloatLatin1Bytes(bytes),
@@ -55,7 +49,7 @@ pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &bytes, input);
+    try core.value_string.appendValueString(rt, &bytes, input, .{ .unwrap_wrappers = true });
     return parseFloatLatin1Bytes(core.value_format.trimJsWhitespace(bytes.items));
 }
 
@@ -195,12 +189,8 @@ pub fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &bytes, value);
-    return parseJsNumber(bytes.items);
-}
-
-fn parseJsNumber(bytes: []const u8) f64 {
-    return core.value_format.parseJsNumber(bytes);
+    try core.value_string.appendValueString(rt, &bytes, value, .{ .unwrap_wrappers = true });
+    return core.value_format.parseJsNumber(bytes.items);
 }
 
 /// Latin1 code-point whitespace. ASCII 0x09-0x0d/0x20 stay the first arm so
@@ -232,9 +222,4 @@ fn trimLeadingJsWhitespace(source: []const u8) []const u8 {
         index += width;
     }
     return source[index..];
-}
-
-/// This file's policy for the shared bare-runtime ToString owner.
-fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
-    return core.value_string.appendValueString(rt, buffer, value, .{ .unwrap_wrappers = true });
 }

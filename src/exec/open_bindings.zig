@@ -34,7 +34,7 @@ pub const Table = struct {
         if (index >= self.cells.len) return error.InvalidBytecode;
         if (self.cells[index]) |cell| {
             if (!cell.is_open or cell.pvalue != value_slot) return error.InvalidBytecode;
-            return cell.retain();
+            return cell;
         }
 
         const cell = try core.VarRef.createOpen(rt, value_slot);
@@ -42,7 +42,7 @@ pub const Table = struct {
         cell.is_lexical = flags.is_lexical;
         cell.is_function_name = flags.is_function_name;
         self.cells[index] = cell;
-        return cell.retain();
+        return cell;
     }
 
     pub fn close(self: *Table, rt: anytype, binding_index: u16) !void {
@@ -51,7 +51,6 @@ pub const Table = struct {
         const cell = self.cells[index] orelse return;
         self.cells[index] = null;
         cell.close(rt);
-        cell.release(rt);
     }
 
     pub fn closeAll(self: *Table, rt: anytype) void {
@@ -59,7 +58,6 @@ pub const Table = struct {
             const cell = entry.* orelse continue;
             entry.* = null;
             cell.close(rt);
-            cell.release(rt);
         }
     }
 

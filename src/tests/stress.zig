@@ -38,9 +38,7 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         0,
     };
     const plain = try createTailOpcodeFixture(&js, "__w2RawTail", &plain_code, 1);
-    defer plain.free(js.runtime);
     const method = try createTailOpcodeFixture(&js, "__w2RawMethodTail", &method_code, 2);
-    defer method.free(js.runtime);
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const plain_key = try js.runtime.internAtom("__w2RawTail");
@@ -73,7 +71,6 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         \\__w2ExpectRaw("method", __w2RawMethodTail);
         \\print("recovered:" + (20 + 22));
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -99,7 +96,6 @@ test "sloppy tail recursion still overflows like QuickJS" {
         \\}
         \\assert.sameValue(threw, true);
     );
-    defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
 
@@ -115,7 +111,7 @@ test "missing-argument abrupt teardown releases supplied args and pads exactly o
     // plain/strict/method entry arms, and the deep-recursion overflow unwind
     // (every live frame's window released during the exception walk; the
     // engine keeps running afterwards).
-    const setup = try js.eval(
+    _ = try js.eval(
         \\function padThrow(a, b) { return a.x + null.missing + String(b); }
         \\function strictPadThrow(a, b) { "use strict"; return a.x + null.missing + String(b); }
         \\const padThrowRecv = { m: function (a, b) { return a.x + null.missing + String(b); } };
@@ -135,12 +131,10 @@ test "missing-argument abrupt teardown releases supplied args and pads exactly o
         \\}
         \\exercisePaddedLeafThrow();
     );
-    setup.free(js.runtime);
     _ = js.runtime.runObjectCycleRemoval();
     const baseline_objects = js.runtime.gc.liveCount();
 
     const result = try js.eval("exercisePaddedLeafThrow()");
-    result.free(js.runtime);
     _ = js.runtime.runObjectCycleRemoval();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());

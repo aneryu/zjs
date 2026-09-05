@@ -1,5 +1,4 @@
-//! Concurrent-major state: the target-shading barrier and the handshake that
-//! makes it sound (§8.4, §7.4).
+//! Incremental-major state and target-shading barrier (§8.4, §7.4).
 //!
 //! The barrier is incremental-update and shades the *exact new target* of a
 //! strong write. That common target-shading arm deliberately reads no owner
@@ -8,16 +7,8 @@
 //! paying for owner state on every store. The two rare owner-requeue arms are
 //! different: retracing is necessary only after the owner has already been
 //! claimed black, so they verify that prior mark and skip a still-white owner.
-//!
-//! What makes it correct is not the shading alone but its pairing with the
-//! safepoint protocol. The heap store and the shading happen inside one
-//! `BarrierCriticalScope`, and a mutator may not acknowledge a safepoint
-//! while inside one. Final remark therefore cannot stop the mutator *between*
-//! a store and its shading, which is the only interleaving that could hide a
-//! reference from the marker.
 
 const std = @import("std");
-const gc = @import("gc.zig");
 
 pub const Stats = struct {
     shaded: usize = 0,
@@ -33,10 +24,6 @@ pub const Stats = struct {
     /// owner is counted here but skipped: only an already-black owner is
     /// actually appended to the frontier.
     barrier_requeued_owner: usize = 0,
-    /// Times a mutator observed a safepoint request while inside a critical
-    /// scope and had to finish the scope first. A high count means scopes are
-    /// too coarse and time-to-safepoint suffers (§1.3's latency row).
-    deferred_acks: usize = 0,
     /// Incremental cycles completed, and the marking increments they took.
     cycles_completed: usize = 0,
     cycles_aborted: usize = 0,
@@ -99,41 +86,17 @@ pub const Stats = struct {
     phase_cleared_nonblock_headers: usize = 0,
 };
 
-comptime {
-    // This state lives in every tracing Registry. Keep diagnostic growth
-    // deliberate instead of silently widening every runtime.
-    if (@sizeOf(usize) == 8 and @sizeOf(Stats) != 392) {
-        @compileError("gc concurrent Stats size changed; update the footprint pin deliberately");
-    }
-}
-
-fn ratioMillionthsCeil(numerator: usize, denominator: usize) usize {
+pub fn ratioMillionthsCeil(numerator: usize, denominator: usize) usize {
     if (denominator == 0) return 0;
     const wide_numerator = @as(u128, numerator) * 1_000_000;
     const rounded = (wide_numerator + @as(u128, denominator) - 1) / denominator;
     return @intCast(@min(rounded, std.math.maxInt(usize)));
 }
 
-pub fn envelopePeakOverThresholdMillionths(stats: Stats) usize {
-    return ratioMillionthsCeil(stats.envelope_max_peak_bytes, stats.envelope_max_threshold_bytes);
-}
-
-pub fn envelopeBeginOverThresholdMillionths(stats: Stats) usize {
-    return ratioMillionthsCeil(stats.envelope_max_begin_bytes, stats.envelope_max_threshold_bytes);
-}
-
-pub fn envelopePeakOverStartMillionths(stats: Stats) usize {
-    return ratioMillionthsCeil(stats.envelope_max_peak_bytes, stats.envelope_max_start_bytes);
-}
-
 pub const State = struct {
     /// Only changes while the runtime is stopped (§8.4), so a plain acquire
     /// load is enough on the mutator side.
     major_marking_active: std.atomic.Value(bool) = .init(false),
-    /// Set by the controller, observed at polls. A mutator that sees it must
-    /// still finish any open critical scope before parking.
-    safepoint_requested: std.atomic.Value(bool) = .init(false),
-    critical_depth: usize = 0,
     /// Running STW accumulator for the open cycle; drained into
     /// `stats.last_cycle_stw_ns` at completion.
     cycle_stw_ns: u64 = 0,
@@ -160,42 +123,5 @@ pub const State = struct {
         // boundaries with the world stopped, fences only in the slow path
         // (HeapInlines.h:106, Heap.cpp:2871).
         return self.major_marking_active.load(.monotonic);
-    }
-
-    /// Enter the region in which a store and its shading are indivisible with
-    /// respect to safepoints.
-    pub fn enterCritical(self: *State) void {
-        self.critical_depth += 1;
-    }
-
-    pub fn leaveCritical(self: *State) void {
-        std.debug.assert(self.critical_depth > 0);
-        self.critical_depth -= 1;
-    }
-
-    /// Whether this mutator may acknowledge a safepoint right now. Inside a
-    /// critical scope the answer is no, and the caller must poll again after
-    /// the scope closes -- that deferral is exactly what keeps final remark
-    /// from bisecting a store/shade pair.
-    pub fn mayAcknowledgeSafepoint(self: *State) bool {
-        if (self.critical_depth != 0) {
-            self.stats.deferred_acks += 1;
-            return false;
-        }
-        return true;
-    }
-};
-
-/// The `BarrierCriticalScope` of §8.4, as an RAII pair.
-pub const CriticalScope = struct {
-    state: *State,
-
-    pub fn begin(state: *State) CriticalScope {
-        state.enterCritical();
-        return .{ .state = state };
-    }
-
-    pub fn end(self: CriticalScope) void {
-        self.state.leaveCritical();
     }
 };

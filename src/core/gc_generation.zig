@@ -14,15 +14,10 @@
 //! never allocates on the mutator path beyond the set's own growth.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const gc = @import("gc.zig");
 
-/// Direct field assertions consume the mirrored remembered-owner count only
-/// in tests. Production reports derive the count from the owning hash map.
-const mutation_stats_enabled = builtin.is_test;
-
 /// The forget-side membership-cache skip (`forgetUnremembered`) rests on I0:
-/// for a `gc.traceRememberedCacheEligible` kind, a clear byte-6 bit7 implies
+/// for a GC carrier, a clear byte-6 bit7 implies
 /// absence from `remembered`. Under runtime safety we check I0 at the decision point on
 /// every single detach, and we latch the one interval where it is knowingly
 /// false (I3: the retirement transaction clears the bits before the map).
@@ -31,7 +26,6 @@ pub const remembered_skip_audit = std.debug.runtime_safety;
 
 pub const Stats = struct {
     young_count: usize = 0,
-    remembered_owners: usize = 0,
     remembered_drops: usize = 0,
     /// Times the minor was suspended for reclaiming too little to be worth its
     /// fixed cost. A workload that keeps its young objects alive is not a
@@ -96,14 +90,6 @@ pub const Stats = struct {
             self.minor_promote_ns_total;
     }
 };
-
-comptime {
-    // Registry embeds this structure. Keep its footprint change explicit:
-    // The minor outcome and phase totals grow the 64-bit layout from 144B to
-    // 216B. The conservative-only probe repurposes the obsolete RC-survival
-    // counter, so the release Registry does not grow for this evidence task.
-    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Stats) == 216);
-}
 
 pub const MinorPauseDistribution = struct {
     samples_total: usize,
@@ -193,18 +179,6 @@ pub const State = struct {
         return @min(if (rank == 0) 0 else rank - 1, len - 1);
     }
 
-    /// Record a freshly published object as young. Allocation failure is not
-    /// fatal: losing a young entry only means the object is treated as old and
-    /// collected by a major instead, which is the safe direction.
-    /// Young is a header bit now, not a set membership: a hash-map insert on
-    /// every allocation measured at 28% of benchmark throughput, and a
-    /// per-allocation fact has to live somewhere the allocator already
-    /// touches.
-    pub fn isYoung(self: *const State, header: *const gc.Header) bool {
-        _ = self;
-        return header.metaConst().flags.young;
-    }
-
     /// An old owner that now points at a young child. Recorded by owner so a
     /// minor can re-trace it; see §8.3 on why `tryMark(owner)` would be wrong
     /// (a sticky old mark would make the walk skip its children).
@@ -222,7 +196,6 @@ pub const State = struct {
             self.stats.remembered_drops += 1;
             return false;
         };
-        if (comptime mutation_stats_enabled) self.stats.remembered_owners = self.remembered.count();
         return true;
     }
 
@@ -230,7 +203,6 @@ pub const State = struct {
         if (comptime remembered_skip_audit) std.debug.assert(!self.retirement_window_open);
         _ = self.remembered.remove(@intFromPtr(header));
         self.forgetYoungCensus(header);
-        if (comptime mutation_stats_enabled) self.stats.remembered_owners = self.remembered.count();
     }
 
     /// `forget` for an owner the caller has already proven absent from the
@@ -244,13 +216,8 @@ pub const State = struct {
     /// That was also why the skip never fired: the detach traffic on splay /
     /// raytrace / earley-boyer is `.shape` and `.var_ref` (audit §9.5), block
     /// cells never reaching this path at all. §10 widened the lease to every
-    /// `gc.traceRememberedCacheEligible` kind, and this precondition with it.
-    ///
-    /// `remembered_owners` deliberately is NOT refreshed: nothing was removed,
-    /// so the mirrored count is still correct, and refreshing it would put the
-    /// `count()` load back on the path the skip exists to empty.
+    /// GC carrier kind, and this precondition with it.
     pub fn forgetUnremembered(self: *State, header: *const gc.Header) void {
-        std.debug.assert(gc.traceRememberedCacheEligible(header.metaConst().flags.kind));
         if (comptime remembered_skip_audit) {
             std.debug.assert(!self.retirement_window_open);
             // I0 is the entire licence for skipping the removal. Check it here,
@@ -302,7 +269,6 @@ pub const State = struct {
             self.stats.remembered_clears +|= 1;
         }
         self.stats.young_count = 0;
-        if (comptime mutation_stats_enabled) self.stats.remembered_owners = 0;
         // Map and cache now agree again (both empty), so I0 holds once more.
         if (comptime remembered_skip_audit) self.retirement_window_open = false;
     }
@@ -408,9 +374,5 @@ pub const State = struct {
 
     pub fn rememberedIterator(self: *const State) std.AutoHashMapUnmanaged(usize, void).KeyIterator {
         return self.remembered.keyIterator();
-    }
-
-    pub fn rememberedOwnerCount(self: *const State) usize {
-        return self.remembered.count();
     }
 };

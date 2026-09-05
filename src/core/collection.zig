@@ -19,7 +19,6 @@
 //! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const core = @import("root.zig");
 const bignum = @import("../libs/bigint.zig");
@@ -107,11 +106,6 @@ fn hashNumber(number: f64) u64 {
 fn hashStringValue(value: core.JSValue) u64 {
     const hash = core.string.stringValueContentHash(value) orelse return hashRefPointer(value);
     return mix64(@as(u64, hash) ^ (@as(u64, core.string.stringValueLen(value)) << 32));
-}
-
-pub fn strongEntryHashLatin1Concat(prefix: []const u8, digits: []const u8) u64 {
-    const seed = core.string.hashLatin1(prefix, 0);
-    return strongEntryHashLatin1ConcatWithSeed(prefix, digits, seed);
 }
 
 pub fn strongEntryHashLatin1ConcatWithSeed(prefix: []const u8, digits: []const u8, seed: u32) u64 {
@@ -228,10 +222,6 @@ fn weakEntryHash(key_identity: usize) u64 {
 
 // === Strong-entry append / index growth ===
 
-pub fn appendStrongEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !usize {
-    return try appendStrongEntryWithHash(rt, object, entry, strongEntryHash(entry.key));
-}
-
 pub fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
     var stored = entry;
     stored.hash = hash;
@@ -245,13 +235,7 @@ pub fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entr
 }
 
 pub fn appendStrongEntryOwned(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
-    var entry_owned = true;
-    errdefer if (entry_owned) entry.destroy(rt);
-    const index = try appendStrongEntry(rt, object, entry);
-    entry_owned = false;
-    var inserted = true;
-    errdefer if (inserted) rollbackLastStrongEntry(rt, object, index);
-    inserted = false;
+    _ = try appendStrongEntryWithHash(rt, object, entry, strongEntryHash(entry.key));
 }
 
 pub fn ensureStrongIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_active_count: usize) !void {
@@ -510,25 +494,23 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
 }
 
 pub fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
-    const removed = takeStrongEntry(object, index) orelse return;
-    removed.destroy(rt);
+    _ = takeStrongEntry(object, index) orelse return;
     if (!shouldCompactStrongEntries(object)) return;
     compactStrongEntries(object);
     shrinkStrongStorage(rt, object);
 }
 
-fn rollbackLastStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
+fn rollbackLastStrongEntry(object: *core.Object, index: usize) void {
     const entries_slot = object.collectionEntriesSlot();
     std.debug.assert(index + 1 == entries_slot.*.len);
-    const entry = takeStrongEntry(object, index) orelse return;
+    _ = takeStrongEntry(object, index) orelse return;
     entries_slot.* = entries_slot.*.ptr[0..index];
-    entry.destroy(rt);
 }
 
-pub fn rollbackStrongEntriesTo(rt: *core.JSRuntime, object: *core.Object, len: usize, active_count: usize) void {
+pub fn rollbackStrongEntriesTo(object: *core.Object, len: usize, active_count: usize) void {
     const entries_slot = object.collectionEntriesSlot();
     while (entries_slot.*.len > len) {
-        rollbackLastStrongEntry(rt, object, entries_slot.*.len - 1);
+        rollbackLastStrongEntry(object, entries_slot.*.len - 1);
     }
     object.collectionActiveCountSlot().* = active_count;
 }
@@ -569,7 +551,7 @@ pub fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) 
 /// reclaims the record unless an enumerator pinned it, so with no cursor parked
 /// the array is truncated to zero here; with a cursor parked the slots survive
 /// as tombstones, matching qjs's zombie records.
-pub fn clearStrongEntries(rt: *core.JSRuntime, object: *core.Object) void {
+pub fn clearStrongEntries(object: *core.Object) void {
     const entries_slot = object.collectionEntriesSlot();
     const old_len = entries_slot.*.len;
     if (old_len == 0) return;
@@ -586,15 +568,13 @@ pub fn clearStrongEntries(rt: *core.JSRuntime, object: *core.Object) void {
     if (drop_slots) entries_slot.* = entries_slot.*.ptr[0..0];
 
     for (0..old_len) |index| {
-        const entry = entries_slot.*.ptr[index];
-        if (!entry.active) continue;
+        if (!entries_slot.*.ptr[index].active) continue;
         entries_slot.*.ptr[index] = .{
             .key = core.JSValue.undefinedValue(),
             .value = core.JSValue.undefinedValue(),
             .active = false,
             .hash_next = strong_no_entry,
         };
-        entry.destroy(rt);
     }
     // Deliberately not calling `shrinkStrongStorage` here: qjs's clear frees
     // the records but keeps the hash table, and a cleared map is nearly always
@@ -675,15 +655,12 @@ pub fn sweepWeakEntries(
 pub fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (findWeakEntry(object, key_identity)) |index| {
         const entry = &object.weakCollectionEntriesSlot().*[index];
-        const next_value = value.dup();
-        const old_value = entry.value;
+        const next_value = value;
         entry.value = next_value;
-        old_value.free(rt);
         return;
     }
 
-    var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
-    errdefer entry.value.free(rt);
+    const entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value };
     try appendWeakEntry(rt, object, entry);
 }
 
@@ -709,9 +686,9 @@ pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_
     if (object.class_id != core.class.ids.map) return null;
     var int_buf: [16]u8 = undefined;
     const digits = dtoa.formatInt32(&int_buf, int_value);
-    const hash = strongEntryHashLatin1Concat(prefix, digits);
+    const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, core.string.hashLatin1(prefix, 0));
     const index = findStrongEntryLatin1Concat(object, prefix, digits, hash) orelse return null;
-    return object.collectionEntriesSlot().*[index].value.dup();
+    return object.collectionEntriesSlot().*[index].value;
 }
 
 /// Bulk insert-or-update Map entries keyed by `prefix ++ decimal(i)` for every
@@ -734,7 +711,7 @@ pub fn mapSetLatin1PrefixInt32Range(
     const original_len = object.collectionEntriesSlot().*.len;
     const original_active_count = object.collectionActiveCount();
     var inserted = false;
-    errdefer if (inserted) rollbackStrongEntriesTo(rt, object, original_len, original_active_count);
+    errdefer if (inserted) rollbackStrongEntriesTo(object, original_len, original_active_count);
 
     const prefix_seed = core.string.hashLatin1(prefix, 0);
     var int_buf: [16]u8 = undefined;
@@ -744,9 +721,7 @@ pub fn mapSetLatin1PrefixInt32Range(
         const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, prefix_seed);
         if (findStrongEntryLatin1Concat(object, prefix, digits, hash)) |index| {
             const entry = &object.collectionEntriesSlot().*[index];
-            const old_value = entry.value;
             entry.value = core.JSValue.int32(int_value);
-            old_value.free(rt);
             continue;
         }
 
@@ -757,7 +732,6 @@ pub fn mapSetLatin1PrefixInt32Range(
             .hash = hash,
             .hash_next = strong_no_entry,
         };
-        errdefer entry.destroy(rt);
         _ = try appendStrongEntryWithHash(rt, object, entry, hash);
         inserted = true;
     }

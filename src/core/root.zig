@@ -9,8 +9,6 @@
 
 pub const subsystem_name = "core_runtime";
 
-const builtin = @import("builtin");
-
 pub const value = @import("value.zig");
 pub const value_semantics = @import("value_semantics.zig");
 pub const value_format = @import("value_format.zig");
@@ -65,7 +63,6 @@ pub const Atom = atom.Atom;
 pub const AtomTable = atom.AtomTable;
 pub const ClassId = class.ClassId;
 pub const Shape = shape.Shape;
-pub const FunctionRecord = function.FunctionRecord;
 pub const FunctionBytecode = function_bytecode.FunctionBytecode;
 pub const ModuleRecord = module.ModuleRecord;
 pub const Object = object.Object;

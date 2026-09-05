@@ -12,7 +12,6 @@ const iterator_ops = @import("iterator_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const globals_mod = core.global_slots;
 const value_ops = @import("value_ops.zig");
-const call_runtime = @import("call_runtime.zig");
 const std = @import("std");
 
 pub const LogMode = enum { initial, again };
@@ -75,7 +74,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         14 => return core.JSValue.nullValue(),
         15 => {
             if (args.len < 1) return error.TypeError;
-            const string = stringFromValue(args[0]) orelse return error.TypeError;
+            const string = args[0].asStringBody() orelse return error.TypeError;
             return core.JSValue.int32(@intCast(string.len()));
         },
         16 => {
@@ -85,14 +84,12 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         17 => {
             if (args.len < 1) return error.TypeError;
-            return args[0].dup();
+            return args[0];
         },
         18 => {
             if (args.len < 1) return error.TypeError;
-            const char = stringFromValue(args[0]) orelse return error.TypeError;
+            const char = args[0].asStringBody() orelse return error.TypeError;
             const threshold = try core.string.String.createUtf8(rt, "\xF0\x9F\x99\x8F");
-            const threshold_value = threshold.value();
-            defer threshold_value.free(rt);
             const text = if (char.compare(threshold) < 0) "before" else "after";
             return try value_ops.createStringValue(rt, text);
         },
@@ -207,7 +204,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         64 => {
             if (args.len < 1) return error.TypeError;
             if (args[0].asInt32()) |value| return core.JSValue.boolean(value == 4 or value == 5 or value == 6);
-            const string = stringFromValue(args[0]) orelse return core.JSValue.boolean(false);
+            const string = args[0].asStringBody() orelse return core.JSValue.boolean(false);
             return core.JSValue.boolean(string.eqlBytes("a") or string.eqlBytes("b") or string.eqlBytes("c") or string.eqlBytes("x"));
         },
         21 => {
@@ -221,12 +218,10 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
             return core.JSValue.undefinedValue();
         },
         26 => {
-            var value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value.dup();
+            var value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value;
             if (value.isUndefined()) {
-                value.free(rt);
-                value = try getGlobalThisValue(rt, globals);
+                value = (try getGlobalThisObject(rt, globals)).value();
             }
-            defer value.free(rt);
             try appendToGlobalArray(rt, globals, "_this", value);
             return core.JSValue.undefinedValue();
         },
@@ -253,7 +248,6 @@ pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     const existing = try globals_mod.getByName(rt, globals, "log_str");
-    defer existing.free(rt);
     if (existing.isString()) try value_ops.appendRawString(rt, &buffer, existing);
     if (mode == .initial) try appendIntField(rt, &buffer, "a=", a);
     try appendIntField(rt, &buffer, "b=", b);
@@ -262,7 +256,6 @@ pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode
     try appendIntField(rt, &buffer, "x=", 10);
 
     const value = try value_ops.createStringValue(rt, buffer.items);
-    defer value.free(rt);
     try globals_mod.setExistingByName(rt, globals, "log_str", value);
 }
 
@@ -284,13 +277,11 @@ fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     const value = try object.getProperty(key);
-    defer value.free(rt);
     return value.asInt32() orelse error.TypeError;
 }
 
 fn incrementGlobalInt(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !void {
     const existing = try globals_mod.getByName(rt, globals, name);
-    defer existing.free(rt);
     const current = existing.asInt32() orelse return error.TypeError;
     try globals_mod.setExistingByName(rt, globals, name, core.JSValue.int32(current + 1));
 }
@@ -309,7 +300,6 @@ fn iteratorFactory(rt: *core.JSRuntime, shape: i32) !core.JSValue {
         else => return error.TypeError,
     };
     const next = try create(rt, next_kind, 0, 0, 0);
-    defer next.free(rt);
     try defineValueProperty(rt, iterator, "next", next);
 
     const return_kind: ?i32 = switch (shape) {
@@ -319,7 +309,6 @@ fn iteratorFactory(rt: *core.JSRuntime, shape: i32) !core.JSValue {
     };
     if (return_kind) |kind| {
         const return_fn = try create(rt, kind, 0, 0, 0);
-        defer return_fn.free(rt);
         try defineValueProperty(rt, iterator, "return", return_fn);
     }
 
@@ -329,14 +318,12 @@ fn iteratorFactory(rt: *core.JSRuntime, shape: i32) !core.JSValue {
 fn iteratorNextGlobalValue(rt: *core.JSRuntime, closure: *core.Object, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
     const value = try globals_mod.getByName(rt, globals, name);
-    defer value.free(rt);
     return iteratorResult(rt, value, false);
 }
 
 fn iteratorNextEmptyArray(rt: *core.JSRuntime, closure: *core.Object) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
     const value = try core.Object.createArray(rt, null);
-    defer value.value().free(rt);
     return iteratorResult(rt, value.value(), false);
 }
 
@@ -350,9 +337,7 @@ fn iteratorNextValueGetterThrows(rt: *core.JSRuntime, closure: *core.Object) !co
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, result.gcHeader());
     const getter = try create(rt, 12, 0, 0, 0);
-    defer getter.free(rt);
-    const value_key = try rt.internAtom("value");
-    defer rt.atoms.free(value_key);
+    const value_key = core.atom.ids.value;
     try result.defineOwnProperty(rt, value_key, core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true));
     try defineValueProperty(rt, result, "done", core.JSValue.boolean(false));
     return result.value();
@@ -381,21 +366,17 @@ test "closure iteratorResult roots direct function bytecode value while creating
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var result_value = core.JSValue.functionBytecode(&fb.header);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
+    const result_value = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
     const iterator_result_value = try iteratorResult(rt, result_value, false);
-    var iterator_result_alive = true;
-    defer if (iterator_result_alive) iterator_result_value.free(rt);
     const iterator_result = try expectObject(iterator_result_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -403,14 +384,9 @@ test "closure iteratorResult roots direct function bytecode value while creating
     defer rt.atoms.free(value_atom);
     {
         const stored = try iterator_result.getProperty(value_atom);
-        defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
 
-    iterator_result_value.free(rt);
-    iterator_result_alive = false;
-    result_value.free(rt);
-    result_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -425,7 +401,7 @@ fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8)
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
@@ -439,13 +415,11 @@ fn expectObjectPropertySame(rt: *core.JSRuntime, object: *core.Object, name: []c
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
     const stored = try object.getProperty(atom_id);
-    defer stored.free(rt);
     try std.testing.expect(stored.same(expected));
 }
 
-fn expectArrayIndexSame(rt: *core.JSRuntime, array: *core.Object, index: u32, expected: core.JSValue) !void {
+fn expectArrayIndexSame(_: *core.JSRuntime, array: *core.Object, index: u32, expected: core.JSValue) !void {
     const stored = try array.getProperty(core.atom.atomFromUInt32(index));
-    defer stored.free(rt);
     try std.testing.expect(stored.same(expected));
 }
 
@@ -459,18 +433,10 @@ test "appendRecordToGlobalArray roots direct function bytecode fields while crea
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
     };
-    var results_alive = true;
-    defer if (results_alive) globals[0].value.free(rt);
 
     const record_value = try createTestFunctionBytecodeValue(rt, "gc-closure-record-value-bytecode-symbol");
-    var record_value_alive = true;
-    defer if (record_value_alive) record_value.value.free(rt);
     const record_key = try createTestFunctionBytecodeValue(rt, "gc-closure-record-key-bytecode-symbol");
-    var record_key_alive = true;
-    defer if (record_key_alive) record_key.value.free(rt);
     const record_this = try createTestFunctionBytecodeValue(rt, "gc-closure-record-this-bytecode-symbol");
-    var record_this_alive = true;
-    defer if (record_this_alive) record_this.value.free(rt);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -484,21 +450,11 @@ test "appendRecordToGlobalArray roots direct function bytecode fields while crea
 
     {
         const stored_record_value = try results.getProperty(core.atom.atomFromUInt32(0));
-        defer stored_record_value.free(rt);
         const stored_record = try expectObject(stored_record_value);
         try expectObjectPropertySame(rt, stored_record, "value", record_value.value);
         try expectObjectPropertySame(rt, stored_record, "key", record_key.value);
         try expectObjectPropertySame(rt, stored_record, "thisArg", record_this.value);
     }
-
-    record_value.value.free(rt);
-    record_value_alive = false;
-    record_key.value.free(rt);
-    record_key_alive = false;
-    record_this.value.free(rt);
-    record_this_alive = false;
-    globals[0].value.free(rt);
-    results_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(record_value.symbol_atom) == null);
@@ -516,18 +472,10 @@ test "appendWeakMapAdderRecord roots direct function bytecode fields while creat
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
     };
-    var results_alive = true;
-    defer if (results_alive) globals[0].value.free(rt);
 
     const record_key = try createTestFunctionBytecodeValue(rt, "gc-closure-weakmap-record-key-bytecode-symbol");
-    var record_key_alive = true;
-    defer if (record_key_alive) record_key.value.free(rt);
     const record_value = try createTestFunctionBytecodeValue(rt, "gc-closure-weakmap-record-value-bytecode-symbol");
-    var record_value_alive = true;
-    defer if (record_value_alive) record_value.value.free(rt);
     const record_this = try createTestFunctionBytecodeValue(rt, "gc-closure-weakmap-record-this-bytecode-symbol");
-    var record_this_alive = true;
-    defer if (record_this_alive) record_this.value.free(rt);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -541,21 +489,11 @@ test "appendWeakMapAdderRecord roots direct function bytecode fields while creat
 
     {
         const stored_record_value = try results.getProperty(core.atom.atomFromUInt32(0));
-        defer stored_record_value.free(rt);
         const stored_record = try expectObject(stored_record_value);
         try expectObjectPropertySame(rt, stored_record, "_this", record_this.value);
         try expectObjectPropertySame(rt, stored_record, "key", record_key.value);
         try expectObjectPropertySame(rt, stored_record, "value", record_value.value);
     }
-
-    record_key.value.free(rt);
-    record_key_alive = false;
-    record_value.value.free(rt);
-    record_value_alive = false;
-    record_this.value.free(rt);
-    record_this_alive = false;
-    globals[0].value.free(rt);
-    results_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(record_key.symbol_atom) == null);
@@ -573,15 +511,9 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
     };
-    var results_alive = true;
-    defer if (results_alive) globals[0].value.free(rt);
 
     const pair_key = try createTestFunctionBytecodeValue(rt, "gc-closure-pair-key-bytecode-symbol");
-    var pair_key_alive = true;
-    defer if (pair_key_alive) pair_key.value.free(rt);
     const pair_value = try createTestFunctionBytecodeValue(rt, "gc-closure-pair-value-bytecode-symbol");
-    var pair_value_alive = true;
-    defer if (pair_value_alive) pair_value.value.free(rt);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -594,18 +526,10 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
 
     {
         const stored_pair_value = try results.getProperty(core.atom.atomFromUInt32(0));
-        defer stored_pair_value.free(rt);
         const stored_pair = try core.array.expectArray(stored_pair_value);
         try expectArrayIndexSame(rt, stored_pair, 0, pair_key.value);
         try expectArrayIndexSame(rt, stored_pair, 1, pair_value.value);
     }
-
-    pair_key.value.free(rt);
-    pair_key_alive = false;
-    pair_value.value.free(rt);
-    pair_value_alive = false;
-    globals[0].value.free(rt);
-    results_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(pair_key.symbol_atom) == null);
@@ -622,12 +546,8 @@ test "appendToGlobalArray roots direct function bytecode value while appending" 
     var globals = [_]globals_mod.Slot{
         .{ .name = results_name, .value = results.value() },
     };
-    var results_alive = true;
-    defer if (results_alive) globals[0].value.free(rt);
 
     const item = try createTestFunctionBytecodeValue(rt, "gc-closure-global-array-value-bytecode-symbol");
-    var item_alive = true;
-    defer if (item_alive) item.value.free(rt);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -638,11 +558,6 @@ test "appendToGlobalArray roots direct function bytecode value while appending" 
     try std.testing.expect(rt.atoms.name(item.symbol_atom) != null);
     try expectArrayIndexSame(rt, results, 0, item.value);
 
-    item.value.free(rt);
-    item_alive = false;
-    globals[0].value.free(rt);
-    results_alive = false;
-
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(item.symbol_atom) == null);
 }
@@ -652,13 +567,8 @@ test "appendArrayValue roots direct function bytecode value while appending" {
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
-    const array_value = array.value();
-    var array_alive = true;
-    defer if (array_alive) array_value.free(rt);
 
     const item = try createTestFunctionBytecodeValue(rt, "gc-closure-array-value-bytecode-symbol");
-    var item_alive = true;
-    defer if (item_alive) item.value.free(rt);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -668,11 +578,6 @@ test "appendArrayValue roots direct function bytecode value while appending" {
 
     try std.testing.expect(rt.atoms.name(item.symbol_atom) != null);
     try expectArrayIndexSame(rt, array, 0, item.value);
-
-    item.value.free(rt);
-    item_alive = false;
-    array_value.free(rt);
-    array_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(item.symbol_atom) == null);
@@ -696,39 +601,29 @@ fn arrayFromShape(rt: *core.JSRuntime, shape: i32) !core.JSValue {
         100 => try appendArrayValue(rt, array, core.JSValue.int32(0)),
         101 => {
             const a_value = try value_ops.createStringValue(rt, "a");
-            defer a_value.free(rt);
             const b_value = try value_ops.createStringValue(rt, "b");
-            defer b_value.free(rt);
             try appendArrayValue(rt, array, a_value);
             try appendArrayValue(rt, array, b_value);
         },
         102 => {
             const a_value = try value_ops.createStringValue(rt, "a");
-            defer a_value.free(rt);
             const b_value = try value_ops.createStringValue(rt, "b");
-            defer b_value.free(rt);
             const c_value = try value_ops.createStringValue(rt, "c");
-            defer c_value.free(rt);
             try appendArrayValue(rt, array, a_value);
             try appendArrayValue(rt, array, b_value);
             try appendArrayValue(rt, array, c_value);
         },
         103 => {
             const x_value = try value_ops.createStringValue(rt, "x");
-            defer x_value.free(rt);
             const b_value = try value_ops.createStringValue(rt, "b");
-            defer b_value.free(rt);
             try appendArrayValue(rt, array, x_value);
             try appendArrayValue(rt, array, b_value);
             try appendArrayValue(rt, array, b_value);
         },
         104 => {
             const x_value = try value_ops.createStringValue(rt, "x");
-            defer x_value.free(rt);
             const b_value = try value_ops.createStringValue(rt, "b");
-            defer b_value.free(rt);
             const c_value = try value_ops.createStringValue(rt, "c");
-            defer c_value.free(rt);
             try appendArrayValue(rt, array, x_value);
             try appendArrayValue(rt, array, b_value);
             try appendArrayValue(rt, array, c_value);
@@ -751,24 +646,20 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
 
 fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
     const map_value = try globals_mod.getByName(rt, globals, "map");
-    defer map_value.free(rt);
     const map_object = try expectObject(map_value);
     if (map_object.class_id == core.class.ids.weakmap) return setGlobalWeakMapString(rt, globals, map_object, key_int, bytes);
     if (map_object.class_id != core.class.ids.map) return error.TypeError;
     const key = core.JSValue.int32(key_int);
     const value = try value_ops.createStringValue(rt, bytes);
-    defer value.free(rt);
     for (map_object.collectionEntriesSlot().*) |*entry| {
         if (!entry.active) continue;
         if (entry.key.asInt32() == key_int) {
-            const next_value = value.dup();
-            const old_value = entry.value;
+            const next_value = value;
             entry.value = next_value;
-            old_value.free(rt);
             return;
         }
     }
-    try appendUnindexedCollectionEntryAndDefineSize(rt, map_object, .{ .key = key.dup(), .value = value.dup(), .active = true });
+    try appendUnindexedCollectionEntryAndDefineSize(rt, map_object, .{ .key = key, .value = value, .active = true });
 }
 
 fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_object: *core.Object, key_int: i32, bytes: []const u8) !void {
@@ -776,12 +667,9 @@ fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_
     const key_name = std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int}) catch unreachable;
     var key_value = try globals_mod.getByName(rt, globals, key_name);
     if (key_value.isUndefined()) {
-        key_value.free(rt);
         key_value = try getGlobalObjectProperty(rt, globals, key_name);
     }
-    defer key_value.free(rt);
     const value = try value_ops.createStringValue(rt, bytes);
-    defer value.free(rt);
     try core.collection.setWeakMapEntry(rt, map_object, key_value, value);
 }
 
@@ -795,7 +683,6 @@ fn appendRecordToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, n
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     const record_value = record.value();
-    defer record_value.free(rt);
     try defineValueProperty(rt, record, "value", rooted_value);
     try defineValueProperty(rt, record, "key", rooted_key);
     if (!rooted_this_arg.isUndefined()) try defineValueProperty(rt, record, "thisArg", rooted_this_arg);
@@ -812,7 +699,6 @@ fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, ke
 
     const record = try core.Object.create(rt, core.class.ids.object, null);
     const record_value = record.value();
-    defer record_value.free(rt);
     try defineValueProperty(rt, record, "_this", rooted_this_arg);
     try defineValueProperty(rt, record, "key", rooted_key);
     try defineValueProperty(rt, record, "value", rooted_value);
@@ -821,16 +707,13 @@ fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, ke
 
 fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
-    defer expects_value.free(rt);
     const expects = try core.array.expectArray(expects_value);
     if (expects.arrayLength() == 0) return error.JSException;
     const expected = try expects.getProperty(core.atom.atomFromUInt32(0));
-    defer expected.free(rt);
     if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.arrayLength()) : (index += 1) {
         const next = try expects.getProperty(core.atom.atomFromUInt32(index));
-        defer next.free(rt);
         try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
     }
     // Drop the now-duplicated tail: lower the dense extent (no-op when the
@@ -890,31 +773,26 @@ fn setDeleteInt(rt: *core.JSRuntime, set: *core.Object, value: i32) !void {
 
 fn appendUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
     const pending_entry = entry;
-    var entry_owned = true;
-    errdefer if (entry_owned) pending_entry.destroy(rt);
 
     const index = try object.appendCollectionEntryUnindexed(rt, pending_entry);
-    entry_owned = false;
     object.collectionActiveCountSlot().* += 1;
 
     var inserted = true;
-    errdefer if (inserted) rollbackLastUnindexedCollectionEntry(rt, object, index);
+    errdefer if (inserted) rollbackLastUnindexedCollectionEntry(object, index);
 
     object.clearCollectionIndex(rt);
     try defineIntProperty(rt, object, "size", @intCast(object.collectionActiveCount()));
     inserted = false;
 }
 
-fn rollbackLastUnindexedCollectionEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
+fn rollbackLastUnindexedCollectionEntry(object: *core.Object, index: usize) void {
     const entries_slot = object.collectionEntriesSlot();
     std.debug.assert(index + 1 == entries_slot.*.len);
     if (!entries_slot.*[index].active) return;
-    const removed = entries_slot.*[index];
     entries_slot.*[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
     entries_slot.* = entries_slot.*.ptr[0..index];
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
-    removed.destroy(rt);
 }
 
 fn removeUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
@@ -938,7 +816,6 @@ fn removeUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *cor
 
     try defineIntProperty(rt, object, "size", @intCast(object.collectionActiveCount()));
     committed = true;
-    removed.destroy(rt);
 }
 
 fn appendPairToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, key: core.JSValue, value: core.JSValue) !void {
@@ -950,7 +827,6 @@ fn appendPairToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
 
     const pair = try core.Object.createArray(rt, null);
     const pair_value = pair.value();
-    defer pair_value.free(rt);
     try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(rooted_key, true, true, true));
     try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(rooted_value, true, true, true));
     try appendToGlobalArray(rt, globals, name, pair_value);
@@ -964,10 +840,8 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
 
     var array_value = try globals_mod.getByName(rt, globals, name);
     if (array_value.isUndefined()) {
-        array_value.free(rt);
         array_value = try getGlobalObjectProperty(rt, globals, name);
     }
-    defer array_value.free(rt);
     const array = try core.array.expectArray(array_value);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
 }
@@ -979,13 +853,8 @@ fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
     return try global.getProperty(key);
 }
 
-fn getGlobalThisValue(rt: *core.JSRuntime, globals: []globals_mod.Slot) !core.JSValue {
-    return (try getGlobalThisObject(rt, globals)).value().dup();
-}
-
 fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.Object {
     const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    defer global_value.free(rt);
     const header = global_value.refHeader() orelse return error.TypeError;
     if (!global_value.isObject()) return error.TypeError;
     return core.Object.fromHeader(header);
@@ -1003,10 +872,6 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
 }
 
 const expectObject = core.value_semantics.expectObject;
-
-fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    return value.asStringBody();
-}
 
 fn appendIntField(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {
     var int_buf: [32]u8 = undefined;

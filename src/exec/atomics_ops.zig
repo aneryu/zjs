@@ -271,7 +271,6 @@ pub fn atomicsStore(
         try toBigIntValueForAtomics(ctx, output, global, value_arg, caller_function, caller_frame)
     else
         try toIntegerValueForAtomics(ctx, output, global, value_arg, caller_function, caller_frame);
-    errdefer stored_value.free(ctx.runtime);
     const bits = if (is_bigint)
         try bigintBitsForAtomics(ctx.runtime, stored_value)
     else
@@ -352,7 +351,6 @@ pub fn atomicsNotifyCount(
 ) !usize {
     if (args.len < 3 or args[2].isUndefined()) return std.math.maxInt(usize);
     const count_value = try toIntegerValueForAtomics(ctx, output, global, args[2], caller_function, caller_frame);
-    defer count_value.free(ctx.runtime);
     const count_number = value_ops.numberValue(count_value) orelse return 0;
     if (std.math.isNan(count_number) or count_number <= 0) return 0;
     if (!std.math.isFinite(count_number)) return std.math.maxInt(usize);
@@ -709,13 +707,12 @@ test "waitAsync finite deadline is driven by the owner host clock queue" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
-    defer promise.value().free(rt);
 
     const io = atomicsWaiterIo();
     const waiter = try rt.memory.create(AtomicsWaiter);
     waiter.* = .{
         .key = .{ .offset_or_ptr = @intFromPtr(promise) },
-        .promise = promise.value().dup(),
+        .promise = promise.value(),
         .realm = core.RealmRef.retain(ctx),
         .deadline = std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(1)),
     };
@@ -746,14 +743,13 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
-    defer promise.value().free(rt);
 
     const key = AtomicsWaiterKey{ .offset_or_ptr = @intFromPtr(promise) };
     const waiter = try rt.memory.create(AtomicsWaiter);
     waiter.* = .{
         .key = key,
         .completion = .notified,
-        .promise = promise.value().dup(),
+        .promise = promise.value(),
         .realm = core.RealmRef.retain(ctx),
     };
     promise_ops.atomicsLinkAsyncWaiter(waiter);
@@ -990,10 +986,8 @@ pub fn toNumberForAtomics(
     _ = caller_function;
     _ = caller_frame;
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     if (primitive.isBigInt()) return error.TypeError;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    defer number_value.free(ctx.runtime);
     return value_ops.numberValue(number_value) orelse std.math.nan(f64);
 }
 
@@ -1072,7 +1066,6 @@ pub fn toBigIntValueForAtomics(
     _ = caller_function;
     _ = caller_frame;
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     var big = try value_ops.toBigIntValue(ctx.runtime, primitive);
     defer big.deinit();
     return value_ops.createBigIntValue(ctx.runtime, big);
@@ -1087,7 +1080,6 @@ pub fn toBigIntBitsForAtomics(
     caller_frame: ?*frame_mod.Frame,
 ) !u64 {
     const bigint_value = try toBigIntValueForAtomics(ctx, output, global, value, caller_function, caller_frame);
-    defer bigint_value.free(ctx.runtime);
     return bigintBitsForAtomics(ctx.runtime, bigint_value);
 }
 
@@ -1111,7 +1103,6 @@ pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     const rt = ctx.runtime;
     rt.assertOwnerThread();
-    if (waiter.promise) |promise| promise.free(rt);
     atomicsReleaseWaiterKey(&waiter.key);
     waiter.realm.deinit();
     rt.memory.destroy(AtomicsWaiter, waiter);
@@ -1143,8 +1134,6 @@ pub fn atomicsRunAsyncWaiterCompletion(
     }
     const result = if (waiter.completion == .notified) "ok" else "timed-out";
     const result_value = try value_ops.createStringValue(ctx.runtime, result);
-    var result_value_owned = true;
-    errdefer if (result_value_owned) result_value.free(ctx.runtime);
     var prepared_job = jobs_mod.Job.initPromise(ctx, promise);
     var prepared_job_owned = true;
     errdefer if (prepared_job_owned) prepared_job.deinit();
@@ -1152,11 +1141,10 @@ pub fn atomicsRunAsyncWaiterCompletion(
     const result_slot = promise_object.promiseResultSlot();
 
     var reaction_arg_value: ?core.JSValue = null;
-    errdefer if (reaction_arg_value) |value| value.free(ctx.runtime);
     const reaction_arg_slot = promise_object.promiseReactionArgSlot();
     const needs_reaction_arg = promise_object.promiseReactionCallback() != null and promise_object.promiseReactionArg() == null;
     if (needs_reaction_arg) {
-        reaction_arg_value = result_value.dup();
+        reaction_arg_value = result_value;
     }
 
     if (promise_object.promiseReactionCallback() != null) {
@@ -1167,20 +1155,13 @@ pub fn atomicsRunAsyncWaiterCompletion(
         // drain early-return (promiseResult != null) and drop the chain after the
         // first reaction. The callback receives the settle value via the reaction
         // arg below; free the now-unused result_value.
-        result_value.free(ctx.runtime);
-        result_value_owned = false;
     } else {
-        const old_result = result_slot.*;
         result_slot.* = result_value;
-        result_value_owned = false;
         promise_object.promiseIsRejectedSlot().* = false;
-        if (old_result) |stored| stored.free(ctx.runtime);
     }
     if (reaction_arg_value) |value| {
-        const old_reaction_arg = reaction_arg_slot.*;
         reaction_arg_slot.* = value;
         reaction_arg_value = null;
-        if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
     ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
     prepared_job_owned = false;
@@ -1211,17 +1192,14 @@ pub fn atomicsWaitAsync(
     const current = atomicsReadBits(view, bytes);
     if (current != atomicsMaskBits(view, expected)) {
         const result = try value_ops.createStringValue(ctx.runtime, "not-equal");
-        defer result.free(ctx.runtime);
         return atomicsWaitAsyncResult(ctx, false, result);
     }
     if (timeout <= 0 and !std.math.isNan(timeout)) {
         const result = try value_ops.createStringValue(ctx.runtime, "timed-out");
-        defer result.free(ctx.runtime);
         return atomicsWaitAsyncResult(ctx, false, result);
     }
 
     const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
-    defer promise.free(ctx.runtime);
     if (objectFromValue(promise)) |promise_object| {
         promise_object.promiseAtomicsWaitAsyncSlot().* = true;
     }
@@ -1234,7 +1212,7 @@ pub fn atomicsWaitAsync(
     atomicsRetainWaiterKey(key);
     waiter.* = .{
         .key = key,
-        .promise = promise.dup(),
+        .promise = promise,
         .realm = core.RealmRef.retain(ctx),
         .deadline = deadline,
     };
@@ -1302,12 +1280,11 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
         }
         const promise = waiter.promise orelse continue;
         if (filled == buf.len) break;
-        buf[filled] = promise.dup();
+        buf[filled] = promise;
         filled += 1;
     }
     atomics_ops.atomics_waiter_mutex.unlock(io);
 
-    defer for (buf[0..filled]) |promise| promise.free(rt);
     for (buf[0..filled]) |*promise| try visitor.value(promise);
 }
 
@@ -1319,8 +1296,8 @@ pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.
 
     const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
-    try defineValueProperty(ctx.runtime, result, "async", core.JSValue.boolean(is_async));
-    try defineValueProperty(ctx.runtime, result, "value", rooted_value);
+    try defineValueProperty(ctx.runtime, result, core.atom.ids.async_, core.JSValue.boolean(is_async));
+    try defineValueProperty(ctx.runtime, result, core.atom.ids.value, rooted_value);
     return result.value();
 }
 
@@ -1334,21 +1311,17 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var result_payload = core.JSValue.functionBytecode(&fb.header);
-    var payload_alive = true;
-    defer if (payload_alive) result_payload.free(rt);
+    const result_payload = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
     const result_value = try atomicsWaitAsyncResult(ctx, true, result_payload);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
     const result = objectFromValue(result_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -1356,14 +1329,9 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     defer rt.atoms.free(value_key);
     {
         const stored = try result.getProperty(value_key);
-        defer stored.free(rt);
         try std.testing.expect(stored.same(result_payload));
     }
 
-    result_value.free(rt);
-    result_alive = false;
-    result_payload.free(rt);
-    payload_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }

@@ -17,7 +17,6 @@ pub const object_kind_tag: u8 = 0;
 pub const string_kind_tag: u8 = 6;
 
 pub const alloc_info_class_mask: u8 = 0x1f;
-pub const alloc_info_large_mask: u8 = 1 << 5;
 pub const alloc_info_heap_accounted_mask: u8 = 1 << 6;
 pub const alloc_info_standalone_mask: u8 = 1 << 7;
 

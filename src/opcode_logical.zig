@@ -20,8 +20,6 @@
 //! import bytecode.zig and nothing goes the other way, so a declaration
 //! that reached into the execution layer would close the loop.
 
-const std = @import("std");
-
 /// Mirror of `opcode.Format`. `bytecode.zig` asserts the two agree field for
 /// field; ownership moves here at G0.
 pub const Format = enum(u8) {

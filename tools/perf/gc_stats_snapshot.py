@@ -390,9 +390,22 @@ def parse_gc_stats(text: str) -> dict:
         r"^gc: marked-set census majors (?P<majors>\d+), headers (?P<headers>\d+), block headers (?P<block_headers>\d+), refcount-removed headers (?P<refcount_removed_headers>\d+)$",
         "marked-set census",
     )
+    # TGC S3-a §2.6 shadow audit. Optional: binaries older than S3-a do not
+    # print the row at all, so a missing match reads as zero and adds no
+    # validation of its own (the audit is expected non-zero until S3-b).
+    atom_audit_match = re.search(
+        r"^gc: atom audit missing-edge (?P<missing_edge>\d+), over-marked (?P<over_marked>\d+), entries (?P<entries>\d+)$",
+        text,
+        re.MULTILINE,
+    )
+    atom_audit = (
+        {key: int(value) for key, value in atom_audit_match.groupdict().items()}
+        if atom_audit_match is not None
+        else {"missing_edge": 0, "over_marked": 0, "entries": 0}
+    )
     marked_kinds = one_match(
         text,
-        r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)(?:, big-int (?P<big_int>\d+))?$",
+        r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)(?:, big-int (?P<big_int>\d+))?(?:, string (?P<string>\d+))?$",
         "marked-set kinds",
     )
     trace_classes = one_match(
@@ -531,13 +544,18 @@ def parse_gc_stats(text: str) -> dict:
         raise SnapshotError("marked kind partition does not add to headers")
     if marked["headers"] != sum(trace_classes.values()):
         raise SnapshotError("marked trace-class partition does not add to headers")
-    if marked["block_headers"] > marked_kinds["object"]:
-        raise SnapshotError("marked block headers exceed marked objects")
-    # Every gc.Header kind is tracer-owned since TGC S1; big-int is optional
-    # in the row so pre-S1 baseline binaries still parse.
+    # Since TGC S2 the string family also lives in block cells, so the block
+    # census covers both populations and cannot be held under objects alone.
+    if marked["block_headers"] > marked_kinds["object"] + marked_kinds.get("string", 0):
+        raise SnapshotError("marked block headers exceed marked block-cell kinds")
+    # Every gc.Header kind is tracer-owned since TGC S1/S2; big-int and string
+    # are optional in the row so pre-S1/pre-S2 baseline binaries still parse.
     expected_refcount_removed = sum(
         marked_kinds.get(key, 0)
-        for key in ("object", "function_bytecode", "var_ref", "module", "shape", "realm_context", "big_int")
+        for key in (
+            "object", "function_bytecode", "var_ref", "module", "shape",
+            "realm_context", "big_int", "string",
+        )
     )
     if marked["refcount_removed_headers"] != expected_refcount_removed:
         raise SnapshotError("refcount-removed marked partition is inconsistent")
@@ -610,6 +628,11 @@ def parse_gc_stats(text: str) -> dict:
             raise SnapshotError(f"{phase} phase-segment max exceeds total")
 
     return {
+        "atomAudit": {
+            "missingEdge": atom_audit["missing_edge"],
+            "overMarked": atom_audit["over_marked"],
+            "entries": atom_audit["entries"],
+        },
         "allocations": {
             "publications": allocation_shape["publications"],
             "payloadBytes": allocation_shape["payload_bytes"],
@@ -759,6 +782,9 @@ def parse_gc_stats(text: str) -> dict:
                 "realmContext": marked_kinds["realm_context"],
                 "module": marked_kinds["module"],
                 "shape": marked_kinds["shape"],
+                # Optional in the printed row (pre-S2 binaries omit it), so the
+                # JSON schema has to stay stable across baseline/candidate.
+                "string": marked_kinds.get("string", 0),
             },
             "byTraceClass": {
                 "ordinaryObject": trace_classes["ordinary_object"],

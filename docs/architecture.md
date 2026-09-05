@@ -144,7 +144,7 @@ File and function naming conventions in `exec/`:
 - Throw helpers: `throw<Kind>Message` is the generic kind-plus-message
   entry; `throw<Reason><Kind>` (e.g. `throwTdzReferenceError`) is a
   scenario-specific helper. Mechanism-level throws (`throwValue`,
-  `throwTop`, `throwStackOverflow`) carry no error-kind segment.
+  `throwTop`) carry no error-kind segment.
 - Fast-path names: `*ForFastPath` is an ingredient or precondition check
   **used by** a fast path; `*Fast` / `fast*` is the fast **variant of** the
   operation itself.

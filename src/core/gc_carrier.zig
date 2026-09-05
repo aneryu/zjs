@@ -147,10 +147,6 @@ pub const ExtentIdentityAuthority = struct {
         _ = self.records.fetchRemove(base) orelse return error.NotFound;
     }
 
-    pub fn removeForMutation(self: *ExtentIdentityAuthority, base: usize) bool {
-        return self.records.remove(base);
-    }
-
     pub fn verify(self: *const ExtentIdentityAuthority) ResolveError!void {
         if (self.next_generation == 0) return error.GenerationMismatch;
         var iterator = self.records.iterator();

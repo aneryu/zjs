@@ -210,46 +210,6 @@
       "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
     },
     {
-      "file": "src/core/function.zig",
-      "struct": "BoundRecord",
-      "field": "args",
-      "type": "[]JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/function.zig",
-      "struct": "BoundRecord",
-      "field": "target",
-      "type": "JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/function.zig",
-      "struct": "BoundRecord",
-      "field": "this_value",
-      "type": "JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/function.zig",
-      "struct": "BytecodeRecord",
-      "field": "constants",
-      "type": "[]JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/function.zig",
-      "struct": "FunctionRecord",
-      "field": "home_object",
-      "type": "JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
       "file": "src/core/generator_state.zig",
       "struct": "AsyncGeneratorRequest",
       "field": "promise",

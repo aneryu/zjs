@@ -167,3 +167,106 @@ runtime.zig 六个 +1 缓存（`single_byte_strings[128]` :1362、`empty_string`
 **待 owner 裁决**：消融余项（docs/gc-ablation-plan.md §6）；S2 翻开关后 rope 原地追加优化的替代判据（记账后定）。
 
 **分支/工作树**：main = a318014c；`gc/tgc-s2-20260903` = 8d2e5f11（已合入，可删）；三个 lane 分支与临时 worktree 已删除；`/home/aneryu/worktrees/gc-ablation` 与其他旧 worktree 未动。
+
+## 7. S2 在裁剪树上的收口（2026-09-04 上午，driver）
+
+**基线变化**：§6 交接后，owner 在主树上做了代码消融与裁剪（未提交，快照分支 `wip/s2-ablated-base` = 23385e95，−16,880/+2,786 非注释行）。裁剪把 S2 的开关**固化为真并删除了 rc 分支**：`gc.string_tracer_owned`、`RefCountHeader/StringHeader/string_rc_prefix_size/ref_count_offset_from_payload/string_prefix_init`、`String.retain/releaseFromHeader`、`refCountRemoved` 全部消失；`tracer_owned_first_tag` 固定为 `Tag.symbol`（value.zig:17）。同时超出 S2 范围做掉了完成计划 S3 的第 4/5 步：`JSValue.dup` 恒返回自身、`JSValue.free` 对所有 tag 为 no-op（value.zig:494-498），调用点已机械删除（`.dup()` 903→0、`.free(rt` 2966→1；`defer …free(` 残 37 处多为 allocator/atoms）。
+
+**被裁掉的 S2 相关机制**：rope 尾部累加器（`RopeTailState`/`appendRopeTail`，依赖 rc==1 的原地追加）连同 4 个测试一并删除，`ropeExclusivelyHeld/ropeShareCountAtMost` 也随之消失——§3 第三条风险（string-concat 退化）由 Stage 0 记账裁决。共删测试 27 个、新增 14 个（2496 → 2491）。§6 所列「开关开的第一处失败」及 §5.7 末段预告的失败类别已在裁剪中修复：症状为 `rt.atoms.name(symbol) == null` 的 71 个「roots direct symbol …」测试改用 `rt.takeSymbolValue`（创建者的 id 计数转为 JSValue 持有）。
+
+**门（裁剪树，开关固化）**：`zig build test` 2489/0（2 skip）；`test-gc-stress` 2485/0（6 skip）；`-Dzjs_gc_roots_diag=true` 2489/0；test262 script **0/49778**（passed 44584，reports/test262-s2）。Stage 0：见 7.1。
+
+**§6 三个 lane 未决点的处置**：
+- A 弱相位（`symbolBodyIfLive` 在 `.tracer_destroy` 期应读 mark；`weakref_kept_alive` 是否为根）→ 分支 `s2/weak-20260904`（Opus 子代理，worktree /home/aneryu/worktrees/s2-weak）。
+- B `appendRopeTail` 的 `rc > max_ref_count` → 随 rope 尾部一起被裁掉，无余项。
+- C extent 未进 `GcObjectIterator`、`extentContaining` 线性扫描（每个保守扫描字 × extent 数）→ 分支 `s2/extent-20260904`（Opus 子代理，worktree /home/aneryu/worktrees/s2-extent）。
+
+### 7.1 Stage 0 记账（2026-09-04，`.scratch/stage0/s2-flip-20260904-official/`，未含 7.3 的两个 lane 补丁）
+
+首跑卡在 gc-stats 快照的「marked kind partition does not add to headers」：marked-set kinds 行缺 `string` 项（S2-c 未做的 `--gc-stats` string 行）。修复：zjs.zig `dumpGcMarkFootprint` 加 `string {d}`；`gc_stats_snapshot.py` 正则可选组、`block_headers ≤ object + string`、refcount-removed 期望含 string、`byKind.string`；`stage0_screen.py` `compare_stats` 改为不对称容忍（候选多出的 leaf 按基线 0 计 drift，少 leaf 仍硬错）——冻结基线 JSON 是旧 schema 且不重生成。
+
+裁决 **STOP**（真实性能，非记账）：
+
+| workload | insn C/B | cycles C/B | minflt | maxrss | committed |
+|---|---:|---:|---:|---:|---:|
+| deltablue | 0.894 | 0.977 | 0.915 | 0.998 | 1.166 |
+| earley-boyer | 0.890 | 0.932 | 1.058 | 1.173 | 0.893 |
+| pdfjs | **111.9** | **275.4** | 13.08 | 9.65 | 35.8 |
+| raytrace | 0.898 | 0.929 | 0.967 | 0.991 | 1.023 |
+| regexp | **1.204** | **1.467** | 1.987 | 1.730 | 2.317 |
+| splay | **1.174** | **1.286** | 0.959 | 0.951 | 1.348 |
+
+硬漂移：minor 次数 deltablue 558→628、pdfjs 154→84、regexp 164→398、splay **5→689**（string 分配进了触发阈值，§3 第一条风险兑现）；splay deferred block runs 1691→2985。pdfjs 符号差 98% 落在 `MemoryAccount.createStringExtent`（+823k 采样，基线 0）；`heapBytes.live` 8.1MB→343MB、`blockHeap.committed` 23MB→823MB、forced major finishes 0→183。三个 rc 去除后的正向读数（deltablue/earley-boyer/raytrace insn −10%）是 dup/free 删除的红利。
+
+**归因（driver 读码）**：
+1. `Heap.findMediumRun`（gc_block_heap.zig:2485）对全部 superblock × 16 页位做 first-fit 线性扫描，heap 823MB ≈ 1.3 万 superblock ⇒ 每次 medium 分配扫 20 万页位，二次方——medium 在 S2 前零调用者，从未被负载打过。
+2. extent 只在 major 末清扫（`destroyCondemned(sweep_string_extents=true)` 仅 :2231 的 major 路径；minor :2128 传 false），pdfjs 的短命大字符串（>128B）在 rc 时代即时释放，现在要活到下一次 major，堆被撑到 forced major；regexp/splay 同族更轻。
+3. extent 曾被永久置 young 位并虚增 `young_count`（lane C 代理已修，见 7.3），对 minor 阈值的影响待合并后重测。
+
+### 7.2 S2-e 规格：extent 分配器索引 + young extent 进 minor（待实现，Opus 子代理）
+
+基线：主树合并 7.3 两补丁后的快照 `wip/s2-merged-base`。
+
+**(1) medium 分配器（gc_block_heap.zig）**：superblock 64KiB = 16 页；`Superblock` 加 `max_free_run: u8`（0..16，由 `page_bits` 重算：对 `~page_bits` 的 u16 掩码找最长连 1 段）与 `bucket_link` 双向索引；`Heap.medium_buckets: [17]列表`（下标 = max_free_run，存 superblock 索引；0 号桶 = 满块，不入桶）。`allocMedium(pages)`：从桶 `pages..16` 找首个非空桶（≤16 步）取一个 sb，在其 u16 掩码里用位运算找首个 ≥pages 的空闲段（16 位内 `@ctz` 循环，常数），置位后重算 `max_free_run` 并换桶；无桶命中才 `reserveSuperblock`。`freeMedium`：清位、重算、换桶；`max_free_run == 16`（整块空）的 sb 交给现有 decommit/释放策略（BH-20）。删 `findMediumRun`。测试：满/半满/碎片化三种形态各一次分配落点与桶迁移；`verifyHeapAccounting` 里加「每个 medium sb 的桶号 == 重算 max_free_run」校验。复杂度目标：分配与释放均 O(1)（不随 superblock 数增长），用 Debug 计数器在测试里断言「分配 10k 个 medium extent 期间扫描的 sb 数 ≤ 10k + 常数」。
+
+**(2) young extent 进 minor**：`Heap.young_extents: ArrayList(usize)`（base），`allocMedium/allocLarge` 追加；`Registry.markPublishedYoungClassified` 对 extent 恢复 `young = true`、`young_count += 1`（撤销 lane C 的「extent 不进 young 集」，改为「extent 进 young 集但不进 young 链/young block」）；minor 标记后（`:2128` 附近，`destroyCondemned(false)` 之后）新增 `string_mod.sweepYoungStringExtents(rt)`：遍历 `young_extents`，`extentIsMarked(base, epoch)` 者存活，否则 `destroyDeadStringExtent`；`clearYoungState` 对 `young_extents` 里的幸存者清 young 位并清空列表（晋升老年）。major 路径不变（`sweepStringExtents` 全表）。正确性依据：老对象→young extent 的写已由 `generationalBarrierValue` 记入 remembered set（`cycleMarkHeader` 含 string tag），minor 的 shade 对 standalone string 走 `extentSetMark`；extent 自身无出边（rope 永远是 cell）。`verifyMajorRetirementCommit` 的 young 计数校验要把 `young_extents.len` 计入。测试：分配一个 >128B 且无根的字符串 → 一次 minor 后 extent 表不再含它；有根/被老对象持有（经屏障）者存活；`young_count` 在 minor 后回落。
+
+**(3) 相邻 extent 的 one-past-end**（lane C 未决 1）：`forEachTraceCandidateAt` 对 `addr` 页对齐且 `addr == A.end == B.base` 的情形 visit 两者（照 block/arena 两臂的做法）。
+
+门：test / stress / diag 三门 + test262 script + Stage 0（对照 `.scratch/stage0/s2-flip-20260904-official`；目标：pdfjs/regexp/splay 的 cycles 与 insn 回到 ≤1.10，minor 次数行接受漂移但要解释）。
+
+### 7.3 两个 lane 的落地（2026-09-04 中午，已合入主树工作树）
+
+合并后主树四门：test 2497/0、gc-stress 2493/0、roots_diag 2497/0、test262 script 0/49778。Stage 0（`.scratch/stage0/s2-merged-20260904`）见 7.5。
+
+- A 弱相位（`s2/weak-20260904` = a363c7b5）：`symbolBodyIfLive/symbolBodyHeaderIfLive/symbolValueIfLive/symbolDescription` 加 `rt`，`.tracer_destroy` 期以 `headerMarked(body)` 为准（`bodyLiveForCurrentPhase`）；`weakRefDeref` 死目标不进 `[[KeptAlive]]`；`weakref_kept_alive` 已是根（runtime.zig:2231），无需补；5 个新测试（含一条无修复即红的白盒探针）。审计结论：in-tree 无 sweep 期到达路径，只有 embedder 的 `WeakPersistentValue.get` 回调理论可达。未决：`weakIdentityIsCurrentlyLive` 的 symbol 臂不查 body（弱壳时 `isAlive()` 与 `get()` 口径不一）；`keyIsMarked` 不认 `is_pinned`。
+- C extent（`s2/extent-20260904` = 4e0354d2 + b3b76a81）：`extent_pages` 页索引（每页一项 `{base,end}`，`page_shift` 单一来源在 gc_block_heap），探测 O(1)（Debug 实测 148ns，与 extent 数无关；旧线性 2048 个 extent 时 60µs）；插入失败整条回滚并计数、期间走精确线性回退；tombstone 按四分之一容量 rehash；`verifyExtentPageIndex` 接进 `verifyHeapAccounting`。`GcObjectIterator` 只对 `.all` 加 extent 段，`HeapAccountingIterator` 改为继承。**发现并修复真缺陷**：`markPublishedYoungClassified` 给 extent 置永久 young 位、`young_count` 虚高（无人退休）。未决：相邻 extent one-past-end 单赢家（→7.2(3)）；`liveCount(.string)` 口径含 extent。
+
+### 7.5 合并树 Stage 0（`.scratch/stage0/s2-merged-20260904`，含 7.3 两补丁）
+
+仍 **STOP**：pdfjs insn 109.2 / cycles 270.9；regexp 1.087 / 1.290；splay 1.182 / 1.304；deltablue 0.894 / 0.981；earley-boyer 0.891 / 0.942；raytrace 0.899 / 0.937。与 7.1 相比只有 regexp cycles 从 1.47 降到 1.29（extent 页索引把保守扫描的探测成本拿掉了），pdfjs 不变——证实 lane C 的 young 位修正与页索引都不是 pdfjs 的主因，主因是 7.1 归因的 (1)(2)，由 S2-e 解决后重测。
+
+### 7.6 S2-e 落地与 S2-f 规格（2026-09-04 下午）
+
+**S2-e 落地**（`s2/extent2-20260904` = 28a3f406..559b4a52，已 apply 进主树）：medium 分配器 17 桶（`Superblock.max_free_run` 截断到 16 = 桶号，双向桶链；superblock 实为 2MiB/512 页，`scanFreeRuns` 用 `@ctz` 按段步进）；`young_extents` + `sweepYoungStringExtents`（minor 的 `destroyCondemned(false)` 之后）+ `retireYoungStringExtents`（minor 晋升块与 `clearYoungState` 两处）+ `clearYoungExtentMarksStw`；**规格外必要修正**：`extentIsMarked` 的 `epoch != 0` 守卫在首个 major 前让 minor 把所有 extent 读成未标记 → 新生 extent 改带奇数哨兵 `extent_unmarked_epoch = 1`；one-past-end 双访问 `extentsContaining{inside, one_past_end}`。门 test 2504/0、stress 2500/0、diag 2504/0。pdfjs.fixed 快速自证（ReleaseFast，CPU19）：wall **836.9s → 12.9s**，对冻结参照 3.10s 的比值 273 → **4.19**；maxrss 925MB 不变（参照 95MB）；major 184→172、minor 28→96；`--gc-mark-footprint` 显示 172 次 major 累计 marked string 仅 63 万，即 331MB live 是「上次 major 后新分配未回收」而非可达。
+
+**S2-f 三根因（代理归因，driver 核实）**：
+1. **页粒度**：129..4095B 的字符串体全走 medium，每个至少占 1 页 4KiB；pdfjs 21.8M 次 below-large 分配里 8.8M 不被小类覆盖；micro：38 万个 320B 字符串 → committed 1.64GB。根因是 `gc_space.zig` 的 `measured_max_small_payload = 128` 是从 object-only 混合冻结的（§4.2 规则：几何类只保留到覆盖 p99 的那一级），S2 后的混合没重冻结；`classes` 现在是字面量表，几何生成器 `nextGeometricClass` 只在 `cutoffForCoverage` 里用。
+2. **medium superblock 从不归还**：`releaseFreeBlockPages`（BH-20）只走 classed 的 `free_blocks` 链；整块空的 medium sb 停在 16 号桶，committed 单调不降。
+3. **string 分配不驱动 GC 触发**：阈值边界只有 `JSRuntime.collectBeforeObjectAllocation`（qjs `js_trigger_gc(sizeof(JSObject))` 的镜像，memory.zig:97 注释），string 分配只 `creditAlloc` 不过边界；纯字符串循环 1.64GB / `young_count` 38 万 / 零次 GC。qjs 里 string 是 malloc+rc 不需要触发，tracing 下 string 是 GC 载体就必须触发。
+
+**S2-f 规格**（基线 = 主树 S2-e 合并后快照 `wip/s2e-merged-base`）：
+- (3) 先做：`String.createUninitialized` 与 `allocRopeNode`（string.zig）在块堆构建里于分配前调用 `rt.collectBeforeObjectAllocation(total_size)`（与 Object 同一边界，level-triggered 一次比较 + 冷尾）；`allocStringAlignedBytes` 里仅测试/force 模式的旧触发若因此冗余则删；测试：纯字符串循环（无对象分配）在阈值处触发 minor，`collection entries > 0`。
+- (1) 尺寸类重冻结：`classes` 改为 comptime 生成 = 线性 16..128 + `nextGeometricClass` 序列直到 `measured_max_small_payload`（160,192,240,304,384,480,608,768,960,1200,1504,1888,2368,2960,3712,…，`block_bytes/(class+8) ≥ 16` 封顶 ≈4088）；`classIndexForPayload` 对几何段用 comptime 建的 `[fine_bucket_count]u8` 查表（`(payload+15)/16` 索引）；`canAllocCellSize`/`accountedBodyBytesForRequest`/Block 几何（每类 cell 数、位图宽度）按 `class_count` 泛化，Object 的 comptime 特化路径与 codegen 不变（对照反汇编或至少 `zig build test -Dtest-filter=layout`）。冻结值：先用 `--gc-stats` 的 size histogram 跑六个固定负载 + pdfjs.fixed，取各自 p99 的最大值，按 `cutoffForCoverage` 规则定 `measured_max_small_payload`（预期落在 1–4KiB），把测得的直方图数字写进常量旁的注释；恢复一条「表按 §4.2 规则生成、不是 4KiB 硬编码」的测试（裁剪删掉了旧的）。`createStringCell` 的 `canAllocCellSize(total)` 自动放宽；rope 节点不受影响。
+- (2) medium 释放：major 末 `releaseFreeBlockPages` 同一时机加 `releaseEmptyMediumSuperblocks`：`max_free_run == 16 ∧ 512 页全空` 的 sb 释放（保留 1 个备用），**`superblocks` 数组不能移动元素**（`MediumExtent.super_index` 与 `extent_pages` 引用索引）→ 槽位置墓碑 + `free_superblock_slots` 空闲链，`reserveSuperblock` 先取空槽；`verifyMediumBuckets` 跳过墓碑。计入 `stats.committed_bytes` 与 decommit 统计行。
+- 门：`zig build test`；pdfjs.fixed 快速自证（wall / maxrss / committed，对照 S2-e 的 12.9s / 925MB）；合入主树后 driver 跑一次 Stage 0。
+
+### 7.7 S2-f 落地（2026-09-04 傍晚，`s2/f-20260904` = ddebf258/ca389b9d/15672998，已 apply 进主树）
+
+- (3) `String.createUninitialized`/`allocRopeNode` 在取裸指针前调 `rt.collectBeforeObjectAllocation(total)`；删零调用者 `allocStringAlignedBytes`；两条「不修即红」测试（纯 flat / 纯 rope 循环必须触发收集）。
+- (1) 直方图（ReleaseFast，各一次 fixed-work）：p99 deltablue 160 / earley-boyer 128 / raytrace 160 / regexp 3840 / splay 112 / pdfjs >4096（`over_fine` 饱和）；128 覆盖率 pdfjs 59.6%。冻结 `measured_max_small_payload = 3760`（几何封顶：`64Ki/(3760+8)=17 ≥ 16`）。表 comptime 生成 24 类：16..128 线性 + 160,192,240,288,352,432,528,656,816,1008,1248,1552,1936,2416,3008,3760；几何段 `classIndexForPayload` 查 comptime 表。**顺手修真缺陷**：`cutoffForCoverage` 搜索下界写成 `max_small_payload`（只能原样返回冻结值，旧冻结恰等于线性上限所以看不见）→ 改 `linear_max_bytes`。Object 路径 `allocCellFixedPtr` 反汇编前后 140 条指令一致，仅 `active[]` 字段位移变化。恢复「§4.2 规则、非 4KiB 硬编码」测试。
+- (2) `releaseEmptyMediumSuperblocks` 挂 `releaseFreeBlockPages` 尾部；`SuperblockKind.tombstone` + 侵入式空闲槽链，`reserveSuperblock` 返回槽索引、`unreserveSuperblock` 取代三处 `items.len -= 1` 回滚；页位图为「全空」权威；**测量倒逼加 idle 门** `medium_release_min_idle_ns = 1s`（无门时 pdfjs 归还 1711 sb/3.59GB 但 wall 5.84s→30.82s，纯抖动）；加门后七个负载零归还（medium sb 是稳态工作集）。新统计行 `medium_superblocks_released / bytes`。
+- 门 test 2507/0。pdfjs.fixed 自证：wall 12.9s → **6.01s**、maxrss 925MB → **107MB**（参照 3.10s / 95MB）、committed 823MB → 75MB、小类覆盖 59.6% → 88.7%、major/minor 172/96 → 942/631（触发边界生效，待 Stage 0 记账）。参考：deltablue 18.55s/9.9MB、raytrace 11.63s/82MB、regexp 5.19s/45MB、splay 2.92s/296MB。
+- 未决：idle 门 1s 还是 100ms（+3 sb/6MB，无 wall 代价）待 owner；`fine_bucket_limit = 4096` 让冻结规则在 pdfjs 上饱和，下次重冻结前先加大直方图分辨率；7.3 遗留三项未动。
+
+### 7.8 Stage 0（S2-f 合并树，`.scratch/stage0/s2f-20260904`）与 S2-g 规格
+
+| workload | insn | cycles | minflt | maxrss | committed |
+|---|---:|---:|---:|---:|---:|
+| deltablue | 0.901 | 0.986 | 0.856 | 0.897 | 1.077 |
+| earley-boyer | 0.892 | 0.934 | 1.045 | 1.268 | 0.933 |
+| pdfjs | **1.397** | **2.353** | 1.365 | 1.171 | 3.340 |
+| raytrace | 0.899 | 0.928 | 0.954 | 0.949 | 1.004 |
+| regexp | 0.987 | 0.987 | 4.765 | 3.511 | 2.445 |
+| splay | **1.213** | **1.341** | 0.747 | 0.738 | 1.036 |
+
+STOP: pdfjs cycles（275 → 2.35）。硬漂移：minor 次数 pdfjs 154→615、splay 5→781、regexp 164→508、deltablue 558→625；**pdfjs major 6→908**、minor STW 总 75ms→386ms；splay minor STW 4ms→582ms。符号差榜首 `Collector.traceHeader +1129`、`shadeExact +514`、`memcpy +507`、`Table.remove +433`——即 GC 频次本身。另：pdfjs `atomAudit.missingEdge = 2`（S3-a 审计在生产路径抓到两条，交 S3-roots lane）。
+
+**归因（driver 读码）**：`pollGC`（runtime.zig:3030-3040）在提供 minor 之前先算 `over_threshold = allocated_bytes > malloc_gc_threshold`，越线直接走 major——这是 earley-boyer「13,642 minor / 0 major」的修法。rc 时代 string 即时释放，`allocated_bytes` 基本只含老代；S2 后 young string 只在收集时释放，pdfjs 22.9GB 的 string 分配量对着 `2×live + 1.5MB ≈ 17MB` 的阈值每 17MB 就触发一次 major（22.9GB/17MB ≈ 1350，实测 908）。minor 触发是 `young_count ≥ 16K`（计数，gc.zig:242/3654），string 让它填得快 60×，但单次 minor 0.6-0.7ms 尚可，总量随 major 消失后再看。
+
+**S2-g 规格**（基线 `wip/s2f-merged-base`）：`pollGC` 的判定改为分代顺序——(1) 若 `over_threshold ∧ mode.acceptsMinor() ∧ shouldTryMinor()`（或 young 集非空）：先跑 minor（同现有路径，记账不变），然后**重新计算** `over_threshold = allocated_bytes > malloc_gc_threshold`；(2) 仍越线 → 现有 major 路径（保住 earley-boyer 修法：老代垃圾导致的越线在 minor 后依然越线）；(3) 未越线 → 返回 minor 的结果，且 `clearStaleAllocationThresholdRequest`。`collectBeforeObjectAllocation` 那条边界的 `requestGC(.allocation_threshold)` 不动（它只是登记请求，服务在 poll）。注释里把 earley-boyer 的理由改写成「minor 先行 + 二次判定」。测试：(a) 纯 string churn（live 小）跑到分配总量远超阈值，major 次数保持 0 或 ≤1、minor > 0；(b) earley-boyer 形态回归（老代持续增长、minor 回收极少）仍触发 major——用现有 earley-boyer 相关测试或构造「老对象链持续增长」；(c) `--gc-stats` 上 pdfjs.fixed 的 major 次数从 908 回到个位数或十位数，wall 与 maxrss 报数。门：`zig build test`；合入后 driver 跑 Stage 0。
+
+### 7.4 S3 余项
+
+
+裁剪后 S3 只剩 atom 表弱化（完成计划 §3 S3 第 1–3 步）：`DynamicAtom.str` 变弱、GC kind 加 `visitAtom` 边、编译作用域 root provider、major 末扫 `entries[]`、删 `atoms.dup/free`（现 229 / 1442 处）与 `ref_count`（atom.zig 29 处）。函数级规格另起 `docs/tracing-gc-s3-spec.md`（勘察进行中）。

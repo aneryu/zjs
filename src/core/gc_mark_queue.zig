@@ -28,10 +28,10 @@ pub const Segment = struct {
     older: ?*Segment = null,
     newer: ?*Segment = null,
     len: usize = 0,
-    items: [item_capacity]gc.FrontierSafeHeader = undefined,
+    items: [item_capacity]*gc.Header = undefined,
 
     pub const item_capacity =
-        (segment_bytes - 3 * @sizeOf(usize)) / @sizeOf(gc.FrontierSafeHeader);
+        (segment_bytes - 3 * @sizeOf(usize)) / @sizeOf(*gc.Header);
 };
 
 pub const entries_per_segment = Segment.item_capacity;
@@ -39,7 +39,6 @@ pub const entries_per_segment = Segment.item_capacity;
 comptime {
     std.debug.assert(@sizeOf(Segment) == segment_bytes);
     std.debug.assert(entries_per_segment > 1);
-    std.debug.assert(@sizeOf(gc.FrontierSafeHeader) == @sizeOf(*gc.Header));
 }
 
 pub const Failure = enum(u8) {
@@ -57,22 +56,6 @@ pub const PoolStats = struct {
     allocations: usize = 0,
     frees: usize = 0,
     allocation_failures: usize = 0,
-
-    pub fn activeBytes(self: PoolStats) usize {
-        return self.active_segments * segment_bytes;
-    }
-
-    pub fn cachedBytes(self: PoolStats) usize {
-        return self.cached_segments * segment_bytes;
-    }
-
-    pub fn peakActiveBytes(self: PoolStats) usize {
-        return self.peak_active_segments * segment_bytes;
-    }
-
-    pub fn peakOwnedBytes(self: PoolStats) usize {
-        return self.peak_owned_segments * segment_bytes;
-    }
 };
 
 /// One runtime's segment allocator and bounded recycle cache.
@@ -207,7 +190,7 @@ pub const MarkStack = struct {
         self.* = .{};
     }
 
-    pub inline fn push(self: *MarkStack, header: gc.FrontierSafeHeader) bool {
+    pub inline fn push(self: *MarkStack, header: *gc.Header) bool {
         var segment = self.top;
         if (segment == null or segment.?.len == entries_per_segment) {
             const fresh = (self.pool orelse return false).acquire() orelse return false;
@@ -223,7 +206,7 @@ pub const MarkStack = struct {
         return true;
     }
 
-    pub inline fn pop(self: *MarkStack) ?gc.FrontierSafeHeader {
+    pub inline fn pop(self: *MarkStack) ?*gc.Header {
         const segment = self.top orelse return null;
         std.debug.assert(segment.len != 0);
         segment.len -= 1;
@@ -234,17 +217,17 @@ pub const MarkStack = struct {
     }
 
     /// Pop and prefetch the next header across segment boundaries.
-    pub inline fn popPrefetch(self: *MarkStack) ?gc.FrontierSafeHeader {
+    pub inline fn popPrefetch(self: *MarkStack) ?*gc.Header {
         const segment = self.top orelse return null;
         std.debug.assert(segment.len != 0);
         segment.len -= 1;
         self.len -= 1;
         const result = segment.items[segment.len];
         if (segment.len != 0) {
-            @prefetch(segment.items[segment.len - 1].header(), .{ .rw = .read, .locality = 3, .cache = .data });
+            @prefetch(segment.items[segment.len - 1], .{ .rw = .read, .locality = 3, .cache = .data });
         } else if (segment.older) |older| {
             std.debug.assert(older.len != 0);
-            @prefetch(older.items[older.len - 1].header(), .{ .rw = .read, .locality = 3, .cache = .data });
+            @prefetch(older.items[older.len - 1], .{ .rw = .read, .locality = 3, .cache = .data });
         }
         if (segment.len == 0) self.releaseEmptyTop(segment);
         return result;
@@ -342,7 +325,7 @@ pub const Queue = struct {
     }
 
     /// Append one entry; the write barrier's push.
-    pub noinline fn push(self: *Queue, header: gc.FrontierSafeHeader) bool {
+    pub noinline fn push(self: *Queue, header: *gc.Header) bool {
         if (self.newest) |segment| {
             if (segment.len != entries_per_segment) {
                 segment.items[segment.len] = header;
@@ -376,7 +359,7 @@ pub const Queue = struct {
 
     /// Single-item pop from the newest end (tests and the barrier-queue
     /// remark helper).
-    pub fn pop(self: *Queue) ?gc.FrontierSafeHeader {
+    pub fn pop(self: *Queue) ?*gc.Header {
         const segment = self.newest orelse return null;
         segment.len -= 1;
         const result = segment.items[segment.len];

@@ -16,7 +16,6 @@ const module_graph = @import("module_graph.zig");
 const promise_ops = @import("promise_ops.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
-const value_ops = @import("value_ops.zig");
 
 pub const Step = enum { done, continue_loop };
 
@@ -102,18 +101,14 @@ pub noinline fn dynamicImport(
     frame: *frame_mod.Frame,
 ) !void {
     const options = try stack.pop();
-    defer options.free(ctx.runtime);
     const specifier = try stack.pop();
-    defer specifier.free(ctx.runtime);
 
     const prototype = promise_ops.promisePrototypeFromGlobal(ctx.runtime, global);
     const specifier_string = string_ops.toStringForAnnexB(ctx, output, global, specifier, function, frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-        errdefer rejected.free(ctx.runtime);
         try stack.pushOwned(rejected);
         return;
     };
-    defer specifier_string.free(ctx.runtime);
 
     // Mirror qjs js_dynamic_import (quickjs.c:31073): the specifier ToString
     // (above) plus options/with-attribute validation run synchronously; the
@@ -129,11 +124,9 @@ pub noinline fn dynamicImport(
     const referrer_path = ctx.runtime.atoms.name(function.scriptOrModule()) orelse "";
     const promise = module_graph.evaluateImportCall(ctx, output, global, prototype, referrer_path, specifier_string, options, function, frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
-        errdefer rejected.free(ctx.runtime);
         try stack.pushOwned(rejected);
         return;
     };
-    errdefer promise.free(ctx.runtime);
     try stack.pushOwned(promise);
 }
 

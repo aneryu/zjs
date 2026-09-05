@@ -75,7 +75,7 @@ pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Byteco
     // conservative stack scan can reach those children (the scan does not
     // chase malloc'd arrays), so a tracing collection during the run would
     // sweep them mid-execution (wide-fclosure autopsy, 2026-08-24). Root the
-    // cpool window for the duration of the run; default `rc` erases this.
+    // cpool window for the duration of the run.
     const rt = vm.ctx.runtime;
     var cpool_roots = [_]core.runtime.ValueRootSlice{.{ .borrowed = function.cpoolSlice() }};
     var fixture_frame = core.runtime.ValueRootFrame{ .slices = &cpool_roots };
@@ -85,14 +85,7 @@ pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Byteco
     return vm.run(execution_adapter.init(function));
 }
 
-/// Reclaim whatever the test has just dropped its last reference to.
-///
-/// Under refcounting the drop itself destroys, so a test can assert on
-/// `liveCount()`, heap stats or a finalizer having run the instant it releases.
-/// Under the tracer nothing is reclaimed until a collection runs, and a test
-/// that asserts the refcounting timing would only be asserting that RC is still
-/// doing the work -- which is the thing being removed. Interposing a collection
-/// keeps one test body meaningful in both builds.
+/// Reclaim whatever the test has made unreachable.
 ///
 /// The scan is `declared_only` (via `runObjectCycleRemoval`), so anything the
 /// test still holds must be named in a `rootValues`/`rootObjects` frame. That
@@ -101,27 +94,6 @@ pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Byteco
 /// rather than into a conservative-scan accident.
 pub fn reclaimNow(rt: *core.JSRuntime) void {
     _ = rt.runObjectCycleRemoval();
-}
-
-/// Assert a refcount that is the ownership record under refcounting.
-///
-/// Under the tracer the count is not maintained at all for the kinds it owns
-/// (`core.gc.refCountRemoved`), so there is no arithmetic left to check and the
-/// assertion is skipped rather than deleted -- the refcounting build still
-/// guards exactly what it always did. Every `gc.Header` kind is tracer-owned
-/// since S1 (only the string family, which has its own StringHeader, still
-/// counts), so for list headers this is always the skip.
-pub fn expectRefCount(expected: i32, header: *const core.gc.Header) !void {
-    if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return;
-    try std.testing.expectEqual(expected, core.gc.headerRefCount(header));
-}
-
-/// Snapshot helper for tests whose expected arithmetic is asserted through
-/// expectRefCount. Tracer-owned kinds deliberately have no count; return their
-/// historical birth value only so the skipped arithmetic remains well-typed.
-pub fn refCountSnapshot(header: *const core.gc.Header) i32 {
-    if (core.gc.refCountRemoved(header.metaConst().flags.kind)) return 1;
-    return core.gc.headerRefCount(header);
 }
 
 pub fn objectFromValue(value: core.JSValue) *core.Object {
@@ -160,7 +132,6 @@ pub fn expectPrints(source: []const u8, expected: []const u8) !void {
     var output_buffer: [8192]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(source, &output);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(expected, output.buffered());
@@ -272,22 +243,12 @@ const ExceptionInfo = struct {
         try engine.exec.value_ops.appendValueString(rt, &temp_list, value);
         return try allocator.dupe(u8, temp_list.items);
     }
-
-    pub fn getStack(self: ExceptionInfo, allocator: std.mem.Allocator) !?[]const u8 {
-        const rt = self.value.runtime orelse return error.InvalidEngineState;
-        const value = self.value.get();
-        if (!value.isObject()) return null;
-        const header = value.refHeader() orelse return null;
-        const object = core.Object.fromHeader(header);
-        return try getPropertyString(rt, object, "stack", allocator);
-    }
 };
 
 fn getPropertyString(rt: *core.JSRuntime, obj: *core.Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     const val = try obj.getProperty(key);
-    defer val.free(rt);
     if (!val.isString()) return null;
 
     var temp_list = std.ArrayList(u8).empty;
@@ -356,16 +317,8 @@ pub const TestEngine = struct {
         return self.evalMode(source_text, .script);
     }
 
-    pub fn evalHandle(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValueHandle {
-        return self.evalHandleWithOptions(source_text, .{});
-    }
-
     pub fn evalModule(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValue {
         return self.evalMode(source_text, .module);
-    }
-
-    pub fn evalModuleHandle(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValueHandle {
-        return self.evalHandleWithOptions(source_text, .{ .mode = .module });
     }
 
     pub fn evalMode(self: *TestEngine, source_text: []const u8, mode: core.EvalMode) RuntimeError!core.JSValue {
@@ -399,21 +352,12 @@ pub const TestEngine = struct {
         }) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
-    pub fn evalHandleWithOptions(self: *TestEngine, source_text: []const u8, options: EvalOptions) RuntimeError!core.JSValueHandle {
-        const value = try self.evalWithOptions(source_text, options);
-        return try core.JSValueHandle.init(self.runtime, value);
-    }
-
     pub fn createPersistentValue(self: *TestEngine, value: core.JSValue) !core.JSValueHandle {
         return self.runtime.createPersistentValue(value);
     }
 
     pub fn evalWithOutput(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer) RuntimeError!core.JSValue {
         return self.evalWithOptions(source_text, .{ .output = output });
-    }
-
-    pub fn evalWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode) RuntimeError!core.JSValue {
-        return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = "<eval>" });
     }
 
     pub fn evalFileWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8) RuntimeError!core.JSValue {
@@ -472,7 +416,6 @@ pub const TestEngine = struct {
             .finalizer = finalizer,
         });
         const function_value = try engine.core.function.nativeFunction(self.context, name, length);
-        errdefer function_value.free(self.runtime);
 
         const function_object = try engine.exec.property_ops.expectObject(function_value);
         function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
@@ -490,7 +433,6 @@ pub const TestEngine = struct {
     ) !void {
         const global_object = try engine.exec.zjs_vm.contextGlobal(self.context);
         const function_value = try self.createExternalHostFunctionValue(name, length, ptr, call, finalizer);
-        defer function_value.free(self.runtime);
 
         const property_name = try self.runtime.internAtom(name);
         defer self.runtime.atoms.free(property_name);
@@ -555,15 +497,12 @@ pub fn sharedTestEngine() *TestEngine {
         // remove user-added globals (`var x = ...`, `function f() {}`,
         // ...) without rebuilding the entire standard-globals
         // namespace.
-        const sentinel = eng.eval(";") catch unreachable;
-        sentinel.free(eng.runtime);
+        _ = eng.eval(";") catch unreachable;
         if (eng.context.hasException()) {
-            const thrown = eng.context.takeException();
-            thrown.free(eng.runtime);
+            _ = eng.context.takeException();
         }
         if (eng.context.hasUnhandledRejection()) {
-            const thrown = eng.context.takeUnhandledRejection();
-            thrown.free(eng.runtime);
+            _ = eng.context.takeUnhandledRejection();
         }
         if (eng.context.global) |g| {
             shared_engine_baseline_property_count = g.shape_ref.prop_count;
@@ -580,11 +519,11 @@ pub fn sharedTestEngine() *TestEngine {
             for (g.propertyEntries(), 0..) |entry, idx| {
                 // Dup the slot using its kind (read from the shape flags); the
                 // value cell is untagged so dup/destroy need the flags.
-                shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup(g.propFlagsAt(idx)) };
+                shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot };
                 if (g.propFlagsAt(idx).isVarRef()) {
                     const cell = entry.slot.var_ref;
                     shared_engine_baseline_var_refs.?[idx] = .{
-                        .value = cell.varRefValue().dup(),
+                        .value = cell.varRefValue(),
                         .is_lexical = cell.is_lexical,
                         .is_const = cell.varRefIsConstSlot().*,
                         .is_deletable = cell.varRefIsDeletableSlot().*,
@@ -640,25 +579,10 @@ pub fn deinitSharedTestEngine() void {
 
 fn releaseSharedEngineBaselineSnapshot(rt: *core.JSRuntime) void {
     if (shared_engine_baseline_var_refs) |var_refs| {
-        for (var_refs) |maybe_state| {
-            if (maybe_state) |state| state.value.free(rt);
-        }
         std.heap.page_allocator.free(var_refs);
         shared_engine_baseline_var_refs = null;
     }
     if (shared_engine_baseline_properties) |baselines| {
-        const baseline_shape_props = shared_engine_baseline_shape_props.?;
-        for (baselines, 0..) |base, idx| {
-            const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
-            // VARREF snapshot slots alias the live global's cell. `slot.dup`
-            // extra-retains that cell's value; drop the extra without
-            // `slot.destroy`, which would free the live cell value twice.
-            if (base_flags.isVarRef()) {
-                if (!base_flags.deleted) base.slot.var_ref.valueRef().free(rt);
-            } else {
-                base.slot.destroy(base_flags, rt);
-            }
-        }
         std.heap.page_allocator.free(baselines);
         shared_engine_baseline_properties = null;
     }
@@ -733,12 +657,10 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
     // Clear any exception still sitting on the context from a test
     // that returned via `try` without explicitly taking it.
     if (eng.context.hasException()) {
-        const thrown = eng.context.takeException();
-        thrown.free(eng.runtime);
+        _ = eng.context.takeException();
     }
     if (eng.context.hasUnhandledRejection()) {
-        const thrown = eng.context.takeUnhandledRejection();
-        thrown.free(eng.runtime);
+        _ = eng.context.takeUnhandledRejection();
     }
     // Drain pending jobs so the next test starts with an empty queue;
     // tests that schedule a promise via `Promise.resolve(...)` and
@@ -751,21 +673,18 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
         };
     }
     if (eng.context.hasException()) {
-        const thrown = eng.context.takeException();
-        thrown.free(eng.runtime);
+        _ = eng.context.takeException();
     }
     if (eng.context.hasUnhandledRejection()) {
-        const thrown = eng.context.takeUnhandledRejection();
-        thrown.free(eng.runtime);
+        _ = eng.context.takeUnhandledRejection();
     }
     engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(eng.context);
     if (eng.context.global) |global| {
         // Reset global lexical bindings (let / const) so the next
         // test can re-declare any name without triggering a
         // redeclaration SyntaxError.
-        if (eng.context.lexicals) |env| {
+        if (eng.context.lexicals) |_| {
             eng.context.lexicals = null;
-            env.value().free(eng.runtime);
         }
         // Suppress allocation-triggered GC for the whole property restore.
         // Restoring slots and shape flags is a multi-step swap that passes
@@ -786,38 +705,26 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
         }
 
         // Property compaction may have shifted live baseline entries and shrunk
-        // the global's value buffer. Restore capacity before destroying current
-        // entries, then rebuild both parallel arrays entirely from the snapshot.
+        // the global's value buffer. Restore capacity, then rebuild both
+        // parallel arrays entirely from the snapshot.
         // This also removes user-added globals without assuming baseline indices
         // survived a compacting delete.
         const baseline = shared_engine_baseline_property_count;
         global.reserveOwnPropertyCapacity(eng.runtime, baseline) catch unreachable;
 
-        // Destroy every current slot using the CURRENT shape flags before the
-        // baseline layout replaces them.
-        for (global.propertyEntries(), 0..) |entry, idx| {
-            entry.slot.destroy(global.propFlagsAt(idx), eng.runtime);
-        }
-
         // Restore baseline properties to their original states.
         if (shared_engine_baseline_properties) |baselines| {
-            // Restore baseline values, dupping with the BASELINE
-            // flags snapshotted alongside the baseline slots (1:1 by index).
-            const baseline_shape_props = shared_engine_baseline_shape_props.?;
             for (baselines, 0..) |base, idx| {
-                const base_flags = core.property.Flags.fromBits(baseline_shape_props[idx].flags);
                 if (shared_engine_baseline_var_refs.?[idx]) |state| {
                     // Restore the snapshot cell before publishing another ref
                     // to it in the rebuilt property array.
                     const cell = base.slot.var_ref;
-                    const old_value = cell.varRefValueSlot().*;
-                    cell.varRefValueSlot().* = state.value.dup();
+                    cell.varRefValueSlot().* = state.value;
                     cell.is_lexical = state.is_lexical;
                     cell.varRefIsConstSlot().* = state.is_const;
                     cell.varRefIsDeletableSlot().* = state.is_deletable;
-                    old_value.free(eng.runtime);
                 }
-                global.propertyEntry(idx).* = .{ .slot = base.slot.dup(base_flags) };
+                global.propertyEntry(idx).* = .{ .slot = base.slot };
             }
         }
 
@@ -834,29 +741,6 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
 }
 
 pub const vm_helpers = struct {
-    pub fn parseAndRun(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
-        const name = try rt.internAtom("test");
-        defer rt.atoms.free(name);
-        var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer function.deinit(rt);
-
-        var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.initWithRuntime(rt, &lex, &function);
-        defer state.deinit(rt);
-        try parser_core.parseExpr(&state);
-        try state.builderEmitOp(op.@"return");
-
-        // Run the FunctionDef-backed finalize pipeline so locals are lowered
-        // to get_loc / put_loc instead of falling back to global get_var /
-        // put_var.
-        try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
-
-        helpers.registerStandardGlobalsBare(rt);
-        var vm = engine.exec.Vm.init(ctx);
-        defer vm.deinit();
-        return helpers.runMutableVm(&vm, &function);
-    }
-
     pub fn parseAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
         defer rt.atoms.free(name);
@@ -871,43 +755,6 @@ pub const vm_helpers = struct {
         try state.builderEmitOp(op.@"return");
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
-
-        helpers.registerStandardGlobalsBare(rt);
-        var vm = engine.exec.Vm.init(ctx);
-        defer vm.deinit();
-        return helpers.runMutableVm(&vm, &function);
-    }
-
-    pub fn expectStringBytes(value: core.JSValue, expected: []const u8) !void {
-        try std.testing.expect(value.isString());
-        const string_value = value.asStringBody().?;
-        try std.testing.expect(string_value.eqlBytes(expected));
-    }
-
-    pub fn expectSingleCodeUnit(value: core.JSValue, expected: u16) !void {
-        try std.testing.expect(value.isString());
-        const string_value = value.asStringBody().?;
-        try std.testing.expectEqual(@as(usize, 1), string_value.len());
-        try std.testing.expectEqual(expected, string_value.codeUnitAt(0));
-    }
-
-    pub fn parseStmtAndRun(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
-        const name = try rt.internAtom("test");
-        defer rt.atoms.free(name);
-        var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer function.deinit(rt);
-
-        var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.initWithRuntime(rt, &lex, &function);
-        defer state.deinit(rt);
-
-        try state.enableEvalReturn();
-        while (state.token.val != engine.parser.token.TOK_EOF) {
-            try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-        }
-        try state.finalizeEvalReturn();
-
-        try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
         helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
@@ -949,7 +796,14 @@ pub const vm_helpers = struct {
 };
 
 pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
-    const key_identity = (try core.Object.weakIdentityFromValue(rt, key.value())) orelse unreachable;
+    return appendWeakCollectionEntryForValue(rt, collection, key.value(), value);
+}
+
+/// Same insertion, for weak keys that are not objects (symbols). The weak
+/// collection stores an identity, not a pointer, so the object entry point is
+/// just this one with `key.value()` already applied.
+pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.Object, key: core.JSValue, value: core.JSValue) !void {
+    const key_identity = (try core.Object.weakIdentityFromValue(rt, key)) orelse unreachable;
     rt.retainWeakIdentity(key_identity);
     errdefer rt.releaseWeakIdentity(key_identity);
     const entries_slot = collection.weakCollectionEntriesSlot();
@@ -963,7 +817,7 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
     errdefer refreshed_entries.* = refreshed_entries.*[0..index];
     refreshed_entries.*[index] = .{
         .key_identity = key_identity,
-        .value = value.dup(),
+        .value = value,
     };
     try rt.registerBorrowedReferenceHolder(collection);
 }

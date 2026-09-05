@@ -217,11 +217,8 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             if (ctx.classPrototypeObject(class_id) != null) return;
 
             const prototype = try core.Object.create(rt, core.class.ids.object, null);
-            const prototype_value = prototype.value();
-            errdefer prototype_value.free(rt);
             try installStaticProperties(ctx, prototype, class_id, installedRuntimeState(rt, class_id));
             try ctx.setClassPrototype(class_id, prototype);
-            prototype_value.free(rt);
         }
 
         fn installRuntime(rt: *core.JSRuntime) !void {
@@ -391,7 +388,6 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             }
             const Stub = MethodStub(entry);
             const function_value = try createMethodFunction(ctx, class_id, entry.name, callbackLength(entry.call), Stub.call);
-            defer function_value.free(ctx.runtimePtr());
 
             try key.defineDataProperty(ctx.runtimePtr(), prototype, core.Descriptor.data(function_value, true, false, true));
         }
@@ -462,7 +458,6 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
             const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
             const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, function_proto, name, length, 2);
-            errdefer function_value.free(rt);
             const function_object = try core.Object.expect(function_value);
 
             const external_id = try rt.registerExternalHostFunction(.{
@@ -899,17 +894,15 @@ test "JSObject payload explicit deinit releases persistent value roots" {
     const held_value = held.value();
     var handle = try rt.createPersistentValue(held_value);
     defer handle.deinit();
-    held_value.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 
     var deinit_count: usize = 0;
-    const value = try binding.new(.{
+    _ = try binding.new(.{
         .handle = handle,
         .deinit_count = &deinit_count,
     });
     handle = .{};
 
-    value.free(rt);
     // The payload's `deinit`, and with it the release of the persistent handle
     // the payload owns, runs during the object's teardown -- a collection
     // under the tracer rather than this release. Without it the handle
@@ -953,7 +946,6 @@ test "JSObject installs class and owns js external payload" {
     const payload = binding.payload(value).?;
     try std.testing.expectEqual(@as(u32, 42), payload.value);
 
-    value.free(rt);
     // The js-owned payload is freed by the object's teardown, which under the
     // tracer is a collection rather than this release. Nothing needs rooting:
     // the object is exactly what has to die, and `deinit_count` is a Zig
@@ -982,7 +974,6 @@ test "JSObject can wrap host-owned external payload" {
 
     var payload = Payload{ .value = 7 };
     const value = try binding.new(&payload);
-    defer value.free(rt);
 
     const stored = binding.payload(value).?;
     try std.testing.expect(stored == &payload);
@@ -1018,9 +1009,7 @@ test "JSObject class identity is independent from class name" {
     try std.testing.expect(binding_a.class_id != binding_b.class_id);
 
     const value_a = try binding_a.new(.{ .value = 1 });
-    defer value_a.free(rt);
     const value_b = try binding_b.new(.{ .value = 2 });
-    defer value_b.free(rt);
 
     try std.testing.expectEqual(@as(i32, 1), binding_a.payload(value_a).?.value);
     try std.testing.expectEqual(@as(i32, 2), binding_b.payload(value_b).?.value);
@@ -1056,9 +1045,7 @@ test "JSObject binding is realm-local even when runtime class is installed" {
     try std.testing.expect(binding_a.prototype() != binding_b.prototype());
 
     const value_a = try binding_a.new(.{ .value = 1 });
-    defer value_a.free(rt);
     const value_b = try binding_b.new(.{ .value = 2 });
-    defer value_b.free(rt);
 
     try std.testing.expectEqual(@as(i32, 1), binding_a.payload(value_a).?.value);
     try std.testing.expectEqual(@as(i32, 2), binding_b.payload(value_b).?.value);
@@ -1091,7 +1078,6 @@ test "JSObject owned binding explicitly retains its realm" {
 
     const value = try binding.new(.{ .value = 7 });
     try std.testing.expectEqual(@as(i32, 7), binding.payload(value).?.value);
-    value.free(rt);
 
     // Dropping the binding unpins the realm; whether the next collection
     // reclaims it depends on conservative residue in this frame (`value`),
@@ -1130,21 +1116,17 @@ test "JSObject prototype methods enforce realm-local binding" {
     const binding_b = try ObjectType.binding(ctx_b.core);
 
     const value_a = try binding_a.new(.{ .value = 10 });
-    defer value_a.free(rt);
     const value_b = try binding_b.new(.{ .value = 20 });
-    defer value_b.free(rt);
 
     const touch_key = try rt.internAtom("touch");
     defer rt.atoms.free(touch_key);
     const touch_a = try objectFromValue(value_a).?.getProperty(touch_key);
-    defer touch_a.free(rt);
 
     try std.testing.expectError(error.JSException, ctx_a.callFunction(touch_a, &.{}, .{ .this_value = value_b }));
     ctx_a.clearException();
     try std.testing.expectEqual(@as(i32, 20), binding_b.payload(value_b).?.value);
 
     const result = try ctx_a.callFunction(touch_a, &.{}, .{ .this_value = value_a });
-    defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 11), result.asInt32().?);
     try std.testing.expectEqual(@as(i32, 11), binding_a.payload(value_a).?.value);
 }
@@ -1202,7 +1184,6 @@ test "JSObject install does not export constructors to the global object" {
 
     const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{ .value = 1 });
-    defer value.free(rt);
     try std.testing.expectEqual(@as(i32, 1), binding.payload(value).?.value);
 }
 
@@ -1245,7 +1226,6 @@ test "JSObject inline_value stores payload in object allocation and finalizes sy
     try std.testing.expect(payload_start >= object_start + @sizeOf(core.Object));
     try std.testing.expect(payload_start + @sizeOf(Payload) <= object_end);
 
-    value.free(rt);
     // "Synchronously" names the relationship between teardown and the
     // finalizer, not between the release and the finalizer: an inline payload
     // is finalized inside the object's destruction with no deferral queue in
@@ -1282,7 +1262,6 @@ test "JSObject inline_value trace hook marks typed payload slots" {
     try ObjectType.install(ctx);
     const binding = try ObjectType.binding(ctx);
     const value = try binding.new(.{ .value_slot = core.JSValue.int32(7) });
-    defer value.free(rt);
     const object = objectFromValue(value).?;
     const payload = binding.payload(value).?;
 
@@ -1388,24 +1367,20 @@ test "JSObject installs prototype method with typed self and arguments" {
     try ObjectType.install(ctx.core);
     const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{ .total = 10 });
-    defer value.free(rt);
 
     const object = objectFromValue(value).?;
     const add_key = try rt.internAtom("add");
     defer rt.atoms.free(add_key);
     const add_value = try object.getProperty(add_key);
-    defer add_value.free(rt);
 
     const add_object = objectFromValue(add_value).?;
     const length_value = try add_object.getProperty(core.atom.ids.length);
-    defer length_value.free(rt);
     try std.testing.expectEqual(@as(i32, 2), length_value.asInt32().?);
 
     const result = try ctx.callFunction(add_value, &.{
         core.JSValue.int32(5),
         core.JSValue.boolean(true),
     }, .{ .this_value = value });
-    defer result.free(rt);
 
     try std.testing.expectEqual(@as(i32, 15), result.asInt32().?);
     try std.testing.expectEqual(@as(i32, 15), binding.payload(value).?.total);
@@ -1487,21 +1462,17 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     try ObjectType.install(ctx.core);
     const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{});
-    defer value.free(rt);
 
     const label = (try core.string.String.createUtf8(rt, "é")).value();
-    defer label.free(rt);
 
     const input_object = try core.Object.create(rt, core.class.ids.array_buffer, null);
     const input_value = input_object.value();
-    defer input_value.free(rt);
     const input_backing = try rt.memory.alloc(u8, 3);
     @memcpy(input_backing, &[_]u8{ 1, 2, 3 });
     try input_object.installByteStorage(rt, input_backing);
 
     const output_object = try core.Object.create(rt, core.class.ids.array_buffer, null);
     const output_value = output_object.value();
-    defer output_value.free(rt);
     const output_backing = try rt.memory.alloc(u8, 2);
     @memcpy(output_backing, &[_]u8{ 9, 9 });
     try output_object.installByteStorage(rt, output_backing);
@@ -1510,14 +1481,12 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     const mix_key = try rt.internAtom("mix");
     defer rt.atoms.free(mix_key);
     const mix_value = try object.getProperty(mix_key);
-    defer mix_value.free(rt);
 
     const result = try ctx.callFunction(mix_value, &.{
         label,
         input_value,
         output_value,
     }, .{ .this_value = value });
-    defer result.free(rt);
 
     const payload = binding.payload(value).?;
     try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
@@ -1535,7 +1504,6 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     });
     errdefer shared_store.release();
     const shared_output_value = try ctx.arrayBuffer(&shared_store);
-    defer shared_output_value.free(rt);
 
     const global = try ctx.globalObject();
     try std.testing.expectError(error.JSException, ctx.callFunction(mix_value, &.{
@@ -1543,23 +1511,20 @@ test "JSObject typed method borrows utf8 string and byte slices" {
         input_value,
         shared_output_value,
     }, .{ .this_value = value, .realm_global = global }));
-    var shared_exception = ctx.takeException();
-    defer shared_exception.free(rt);
+    const shared_exception = ctx.takeException();
     try expectErrorObjectProperty(ctx, shared_exception, "name", "TypeError");
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 
     const shared_view_object = try core.Object.create(rt, core.class.ids.object, null);
     const shared_view_value = shared_view_object.value();
-    defer shared_view_value.free(rt);
-    try shared_view_object.initTypedArrayView(rt, shared_output_value.dup(), 0, 1, 2, 2);
+    try shared_view_object.initTypedArrayView(rt, shared_output_value, 0, 1, 2, 2);
 
     try std.testing.expectError(error.JSException, ctx.callFunction(mix_value, &.{
         label,
         input_value,
         shared_view_value,
     }, .{ .this_value = value, .realm_global = global }));
-    var shared_view_exception = ctx.takeException();
-    defer shared_view_exception.free(rt);
+    const shared_view_exception = ctx.takeException();
     try expectErrorObjectProperty(ctx, shared_view_exception, "name", "TypeError");
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 }
@@ -1608,40 +1573,31 @@ test "JSObject typed method errors become pending JS exceptions" {
     const global = try ctx.globalObject();
     const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{});
-    defer value.free(rt);
 
     const object = objectFromValue(value).?;
     const narrow_value = try objectProperty(rt, object, "narrow");
-    defer narrow_value.free(rt);
     try std.testing.expectError(error.JSException, ctx.callFunction(narrow_value, &.{
         core.JSValue.int32(300),
     }, .{ .this_value = value, .realm_global = global }));
-    var range_exception = ctx.takeException();
-    defer range_exception.free(rt);
+    const range_exception = ctx.takeException();
     try expectErrorObjectProperty(ctx, range_exception, "name", "RangeError");
     try expectErrorObjectProperty(ctx, range_exception, "message", "");
 
     const custom_value = try objectProperty(rt, object, "failCustom");
-    defer custom_value.free(rt);
     try std.testing.expectError(error.JSException, ctx.callFunction(custom_value, &.{}, .{ .this_value = value, .realm_global = global }));
-    var custom_exception = ctx.takeException();
-    defer custom_exception.free(rt);
+    const custom_exception = ctx.takeException();
     try expectErrorObjectProperty(ctx, custom_exception, "name", "Error");
     try expectErrorObjectProperty(ctx, custom_exception, "message", "BindingCustomFailure");
 
     const type_value = try objectProperty(rt, object, "failType");
-    defer type_value.free(rt);
     try std.testing.expectError(error.JSException, ctx.callFunction(type_value, &.{}, .{ .this_value = value, .realm_global = global }));
-    var type_exception = ctx.takeException();
-    defer type_exception.free(rt);
+    const type_exception = ctx.takeException();
     try expectErrorObjectProperty(ctx, type_exception, "name", "TypeError");
     try expectErrorObjectProperty(ctx, type_exception, "message", "");
 
     const syntax_value = try objectProperty(rt, object, "failSyntax");
-    defer syntax_value.free(rt);
     try std.testing.expectError(error.JSException, ctx.callFunction(syntax_value, &.{}, .{ .this_value = value, .realm_global = global }));
-    var syntax_exception = ctx.takeException();
-    defer syntax_exception.free(rt);
+    const syntax_exception = ctx.takeException();
     try expectErrorObjectProperty(ctx, syntax_exception, "name", "SyntaxError");
     try expectErrorObjectProperty(ctx, syntax_exception, "message", "");
 }
@@ -1656,7 +1612,6 @@ fn expectErrorObjectProperty(ctx: *JSContext, value: core.JSValue, property_name
     const rt = ctx.runtimePtr();
     const object = objectFromValue(value) orelse return error.TypeError;
     const property_value = try objectProperty(rt, object, property_name);
-    defer property_value.free(rt);
     const bytes = try ctx.toOwnedUtf8(property_value, std.testing.allocator);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(expected, bytes);

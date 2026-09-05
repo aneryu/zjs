@@ -1450,12 +1450,6 @@ pub fn formatInt64(buf: []u8, value: i64) []const u8 {
     return buf[0..len];
 }
 
-pub fn formatDtoa(buf: []u8, value: f64, n_digits: i32, flags: i32) []const u8 {
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoaImpl(buf, value, 10, n_digits, flags, &tmp_mem);
-    return buf[0..len];
-}
-
 /// Upper bound on the byte length `formatRadix` will write for these
 /// arguments, so a caller can size its buffer instead of guessing. Radix 2
 /// with `EXP_DISABLED` runs past a thousand digits on a denormal, which is why

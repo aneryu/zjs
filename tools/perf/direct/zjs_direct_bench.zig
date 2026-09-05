@@ -1,12 +1,4 @@
 const std = @import("std");
-// Dossier variant identity. The A/B/C attribution candidates differ only by
-// this comptime option, and every artifact must be able to say which one
-// produced its numbers. It is read here rather than exposed through the zjs
-// CLI on purpose: adding a code path to the CLI perturbs the very binary the
-// process layer measures (21 symbols changed instruction counts in the
-// rejected --build-info approach), whereas the harness writes it once, outside
-// any timed window.
-const dossier_build_options = @import("dossier_options");
 
 const builtin = @import("builtin");
 const zjs = @import("zjs");
@@ -200,7 +192,7 @@ fn runDtoa(iterations: usize, warmup: usize) BenchResult {
         .ns_total = elapsed,
         .checksum = checksum,
         .fidelity = "true-direct",
-        .entry = "libs/number_format.formatDtoa",
+        .entry = "libs/number_format.formatNumber",
         .comparable = true,
         .checksum_comparable = true,
         .caliber_note = "radix-10 free format; stack buffer and dtoa temp state are inside each kernel call",
@@ -228,12 +220,7 @@ fn dtoaLoop(iterations: usize, initial_checksum: u64) u64 {
         const index: usize = @intCast(
             (checksum ^ @as(u64, @intCast(i))) % @as(u64, values.len),
         );
-        const text = number_format.formatDtoa(
-            &buffer,
-            values[index],
-            0,
-            number_format.JS_DTOA_FORMAT_FREE | number_format.JS_DTOA_EXP_AUTO,
-        );
+        const text = number_format.formatNumber(&buffer, values[index]) catch unreachable;
         checksum = mixBytes(checksum, text);
         checksum = mixByte(checksum, 0xff);
     }
@@ -396,12 +383,9 @@ fn runTypedArray(allocator: std.mem.Allocator, iterations: usize, warmup: usize)
     const rt = try core.JSRuntime.create(allocator);
     defer rt.destroy();
 
-    const buffer_value = try core.typed_array.createArrayBuffer(rt, 1024 * 4, null);
+    const buffer_value = try core.typed_array.arrayBufferConstructLength(rt, 1024 * 4, null, null);
     defer buffer_value.free(rt);
-    const buffer: *core.Object = @fieldParentPtr(
-        "header",
-        buffer_value.refHeader() orelse return error.ExpectedArrayBufferObject,
-    );
+    const buffer = core.Object.fromHeader(buffer_value.refHeader() orelse return error.ExpectedArrayBufferObject);
     const view_value = try core.typed_array.typedArrayConstructFullBuffer(
         rt,
         4,
@@ -411,10 +395,7 @@ fn runTypedArray(allocator: std.mem.Allocator, iterations: usize, warmup: usize)
         null,
     );
     defer view_value.free(rt);
-    const view: *core.Object = @fieldParentPtr(
-        "header",
-        view_value.refHeader() orelse return error.ExpectedTypedArrayObject,
-    );
+    const view = core.Object.fromHeader(view_value.refHeader() orelse return error.ExpectedTypedArrayObject);
     const backing = buffer.byteStorage();
     var index: u32 = 0;
     while (index < 1024) : (index += 1) {

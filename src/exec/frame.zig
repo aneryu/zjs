@@ -11,16 +11,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
-const atom = @import("../core/atom.zig");
-const Atom = atom.Atom;
 const core = @import("../core/root.zig");
 const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
 const open_bindings_mod = @import("open_bindings.zig");
-const stack_mod = @import("stack.zig");
-const value_slot = @import("value_slot.zig");
 
 pub const FrameSlab = struct {
     storage: []JSValue = &.{},
@@ -181,32 +177,13 @@ pub const CallBindingInputs = struct {
     new_target_value: JSValue,
 };
 
-pub const CallBindingValueMode = enum {
-    /// Retain a new frame-owned reference to the value.
-    dup,
-    /// Transfer an already-owned value into the frame.
-    take,
-    /// Keep a borrowed value rooted by the frame but do not release it.
-    borrow,
-};
-
-/// Whether a live frame must release a reference when the binding/storage is
-/// torn down. Keeping this as a type instead of a collection of unrelated
-/// booleans makes every transfer site state its ownership decision explicitly.
+/// Whether a frame owns storage that must be reclaimed or borrows storage
+/// rooted elsewhere.
 pub const Ownership = enum(u1) {
     borrowed,
     owned,
 };
 
-/// The ordinary frame's three independent ownership decisions. This is the
-/// execution-time counterpart of qjs's implicit call-frame contract:
-///
-/// - `this_value` may borrow a realm/lexical value or own a moved receiver;
-/// - `var_refs` may borrow the closure capture array or own retained cells;
-/// - `storage` borrows an arena window or owns a heap allocation.
-///
-/// One packed disposition replaces three booleans that previously had to stay
-/// synchronized with Entry's fast-teardown discriminator.
 /// How a frame reaches its `new.target`. qjs never stores one: it is a
 /// JS_CallInternal parameter that only `OP_special_object NEW_TARGET` reads
 /// (quickjs.c:17984), and JSStackFrame has no field for it (quickjs.c:405-417).
@@ -224,24 +201,15 @@ pub const NewTargetBinding = enum(u2) {
 };
 
 pub const OwnershipDisposition = packed struct(u8) {
-    this_value: Ownership = .owned,
-    current_function: Ownership = .owned,
     var_refs: Ownership = .owned,
     storage: Ownership = .borrowed,
-    /// Appended inside the former reserved tail so the established hot
-    /// this/function/var-ref/storage bit positions do not move.
     new_target: NewTargetBinding = .borrowed,
-    _reserved: u2 = 0,
+    _reserved: u4 = 0,
 };
 
 comptime {
     std.debug.assert(@sizeOf(OwnershipDisposition) == 1);
 }
-
-pub const CallBindingModes = struct {
-    this_value: CallBindingValueMode = .dup,
-    current_function: CallBindingValueMode = .dup,
-};
 
 /// `original_args` (a pre-mutation snapshot of the call arguments) is only
 /// observable through the unmapped arguments object and implicit derived
@@ -305,9 +273,9 @@ pub const Frame = struct {
     var_refs: []*core.VarRef = &.{},
     open_var_refs: []?*core.VarRef = &.{},
     storage_values: []JSValue = &.{},
-    /// Records whether `this_value`, `var_refs`, and `storage_values` are
-    /// borrowed or owned. A borrowed var-ref slice aliases the callee captures;
-    /// borrowed storage is an arena window. Teardown consults only this value.
+    /// Records ownership for resources whose teardown is still real: a
+    /// borrowed var-ref slice aliases the callee captures, while borrowed
+    /// storage is an arena window.
     ownership: OwnershipDisposition = .{},
     /// Lazily-allocated side-struct holding the cold per-frame state a plain
     /// inline call (fib, ordinary closures) never touches: `new.target` and the
@@ -329,35 +297,17 @@ pub const Frame = struct {
         return c;
     }
 
-    pub fn freeColdBox(self: *Frame, account: *memory.MemoryAccount) void {
-        if (self.cold) |c| {
-            std.debug.assert(self.ownership.new_target != .owned);
-            account.destroy(FrameCold, c);
-            self.cold = null;
-        }
-    }
-
-    /// Release the owned original-args snapshot VALUES and any explicitly
-    /// transferred constructor `new_target`, then free the box. Ordinary call
-    /// bindings keep borrowing `new_target`. Idempotent. `original_args`
-    /// VALUES must be released BEFORE the storage backing them is reclaimed —
-    /// call this before freeing `storage_values`.
-    pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+    /// Reset cold ownership metadata and free the box.
+    pub fn freeCold(self: *Frame, account: *memory.MemoryAccount) void {
         const c = self.cold orelse return;
-        releaseValueSliceNoReset(rt, c.original_args);
-        if (self.ownership.new_target == .owned) c.new_target.free(rt);
         self.ownership.new_target = .borrowed;
         account.destroy(FrameCold, c);
         self.cold = null;
     }
 
-    /// Release ONLY the storage-coupled cold state — the original-args snapshot
-    /// VALUES — resetting that field to its default while keeping the box and
-    /// its borrowed `new.target` binding.
-    pub fn releaseColdStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
-        _ = account;
+    /// Reset storage-coupled cold state while retaining the box.
+    pub fn releaseColdStorage(self: *Frame) void {
         const c = self.cold orelse return;
-        releaseValueSliceNoReset(rt, c.original_args);
         c.original_args = &.{};
     }
 
@@ -375,12 +325,9 @@ pub const Frame = struct {
     /// spread duplicates the callable into both operand slots, so the common
     /// case still resolves to the alias and drops the redundant reference
     /// instead of allocating a cold box for a value the frame already has.
-    pub fn takeConstructorNewTarget(self: *Frame, account: *memory.MemoryAccount, rt: anytype, value: JSValue) !void {
+    pub fn takeConstructorNewTarget(self: *Frame, account: *memory.MemoryAccount, value: JSValue) !void {
         std.debug.assert(self.ownership.new_target == .aliases_function);
-        if (value.same(self.current_function)) {
-            value.free(rt);
-            return;
-        }
+        if (value.same(self.current_function)) return;
         const c = try self.ensureCold(account);
         c.new_target = value;
         self.ownership.new_target = .owned;
@@ -409,10 +356,6 @@ pub const Frame = struct {
             .this_value = this_value,
             .current_function = current_function,
             .actual_arg_count = @intCast(actual_arg_count),
-            .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
-            },
         };
     }
 
@@ -421,9 +364,7 @@ pub const Frame = struct {
     /// unwinds. The two call bindings are borrowed from that same record, so an
     /// empty shell has no teardown work at all.
     pub inline fn isEmptyResidentExecutionShell(self: *const Frame) bool {
-        return self.ownership.this_value == .borrowed and
-            self.ownership.current_function == .borrowed and
-            self.ownership.storage == .borrowed and
+        return self.ownership.storage == .borrowed and
             self.storage_values.len == 0 and
             self.locals.len == 0 and
             self.args.len == 0 and
@@ -433,21 +374,12 @@ pub const Frame = struct {
     }
 
     pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !void {
-        errdefer self.releaseCallBindings(rt);
-        try self.initCallBindingValues(&rt.memory, inputs, .{});
-    }
-
-    pub fn initCallBindingValues(self: *Frame, account: *memory.MemoryAccount, inputs: CallBindingInputs, modes: CallBindingModes) !void {
-        // Allocate the only fallible part before retaining or taking any call
-        // binding. On OOM the caller must still own every input unchanged.
         const binding_cold = if (inputs.new_target_value.isUndefined())
             null
         else
-            try self.ensureCold(account);
-        self.this_value = bindCallValue(inputs.initial_this_value, modes.this_value);
-        self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
-        self.ownership.this_value = modeOwnership(modes.this_value);
-        self.ownership.current_function = modeOwnership(modes.current_function);
+            try self.ensureCold(&rt.memory);
+        self.this_value = inputs.initial_this_value;
+        self.current_function = inputs.current_function_value;
         if (binding_cold) |c| c.new_target = inputs.new_target_value;
     }
 
@@ -466,41 +398,11 @@ pub const Frame = struct {
         if (frame_arg_count > 0) {
             const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, windows.args);
             if (frame_arg_count > args.len) @memset(owned_args[args.len..], JSValue.undefinedValue());
-            for (args, 0..) |arg, idx| owned_args[idx] = arg.dup();
+            for (args, 0..) |arg, idx| owned_args[idx] = arg;
             self.args = owned_args;
         }
 
         try self.initOriginalArgsSnapshot(account, args, use_inline_storage, need_original_snapshot, windows.original_args);
-    }
-
-    /// Move `argc` call arguments from the operand stack into frame slots
-    /// without refcount duplication. Only writes undefined for slots where
-    /// `argc < arg_count`. Mirrors QuickJS `JS_CallInternal` arg setup.
-    pub fn initArgumentsFromStack(
-        self: *Frame,
-        account: *memory.MemoryAccount,
-        arena: ?*runtime.VmStackArena,
-        stack: *stack_mod.Stack,
-        argc: usize,
-        use_inline_storage: bool,
-        need_original_snapshot: bool,
-    ) !void {
-        self.actual_arg_count = @intCast(argc);
-        const frame_arg_count = @max(argc, @as(usize, @intCast(self.function.arg_count)));
-        if (frame_arg_count > 0) {
-            if (stack.len() < argc) return error.StackUnderflow;
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, null);
-            if (frame_arg_count > argc) @memset(owned_args[argc..], JSValue.undefinedValue());
-            var remaining = argc;
-            while (remaining > 0) {
-                remaining -= 1;
-                owned_args[remaining] = try stack.pop();
-            }
-            self.args = owned_args;
-        }
-        if (argc > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, self.args[0..argc], use_inline_storage, true, null);
-        }
     }
 
     /// Move already-owned argument values (extracted from a torn-down
@@ -591,7 +493,7 @@ pub const Frame = struct {
             _ = use_inline_storage;
             break :blk try self.allocOwnedStorage(account, args.len);
         };
-        for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
+        for (args, 0..) |arg, idx| original_args[idx] = arg;
         cold.original_args = original_args;
     }
 
@@ -619,65 +521,24 @@ pub const Frame = struct {
         return values;
     }
 
-    fn releaseCallBindings(self: *Frame, rt: *JSRuntime) void {
-        const this_value = self.this_value;
-        const current_function = self.current_function;
-        const this_value_ownership = self.ownership.this_value;
-        const current_function_ownership = self.ownership.current_function;
-        self.this_value = JSValue.undefinedValue();
-        self.current_function = JSValue.undefinedValue();
-        self.ownership.this_value = .owned;
-        self.ownership.current_function = .owned;
-        // Frees original-arguments cold state and the box.
-        self.freeCold(&rt.memory, rt);
-        if (this_value_ownership == .owned) this_value.free(rt);
-        if (current_function_ownership == .owned) current_function.free(rt);
-    }
-
     pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
-        const this_value = self.this_value;
-        const current_function = self.current_function;
-        const this_value_ownership = self.ownership.this_value;
-        const current_function_ownership = self.ownership.current_function;
         self.this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
-        self.ownership.this_value = .owned;
-        self.ownership.current_function = .owned;
-
-        if (this_value_ownership == .owned) this_value.free(rt);
-        if (current_function_ownership == .owned) current_function.free(rt);
 
         // releaseOwnedStorage frees the storage slices and clears the
         // storage-coupled original_args snapshot. Then free the cold box.
         self.releaseOwnedStorage(account, rt);
-        self.freeCold(account, rt);
+        self.freeCold(account);
     }
 
     pub inline fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
-        if (self.ownership.this_value == .owned) self.this_value.free(rt);
-        if (self.ownership.current_function == .owned) self.current_function.free(rt);
-
         if (self.open_var_refs.len != 0) self.closeOpenVarRefs(rt);
-
-        releaseValueSliceNoReset(rt, self.locals);
-        releaseValueSliceNoReset(rt, self.args);
-        // freeCold releases original_args VALUES before the storage backing them
-        // is freed below; it also frees the box.
-        if (self.cold != null) self.freeCold(account, rt);
-        // Borrowed var_refs alias the closure's captures (owned by the still-live
-        // function object); freeing them here would double-free on the next call.
-        // Owned slots release per cell (qjs free_var_ref, quickjs.c:16199).
-        if (self.ownership.var_refs == .owned) releaseCellSliceNoReset(rt, self.var_refs);
-
+        if (self.cold != null) self.freeCold(account);
         if (self.ownership.storage == .owned and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
     }
 
     pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         self.closeOpenVarRefs(rt);
-        const locals = self.locals;
-        const args = self.args;
-        // A borrowed var_refs aliases the closure captures (not owned here).
-        const var_refs: []*core.VarRef = if (self.ownership.var_refs == .borrowed) &.{} else self.var_refs;
         const storage_values = self.storage_values;
         const storage_ownership = self.ownership.storage;
 
@@ -689,13 +550,9 @@ pub const Frame = struct {
         self.storage_values = &.{};
         self.ownership.storage = .borrowed;
 
-        releaseValueSlice(rt, locals);
-        releaseValueSlice(rt, args);
-        releaseCellSliceNoReset(rt, var_refs);
-        // Frees original_args VALUES (which alias `storage_values`/the arena slab)
-        // before the storage backing is reclaimed below. Keeps the cold box and
-        // its borrowed new-target binding.
-        if (self.cold != null) self.releaseColdStorage(account, rt);
+        // Clear the snapshot before its storage backing is reclaimed. Keep the
+        // cold box and its borrowed new-target binding.
+        if (self.cold != null) self.releaseColdStorage();
 
         if (storage_ownership == .owned and storage_values.len != 0) account.free(JSValue, storage_values);
     }
@@ -727,7 +584,7 @@ pub const Frame = struct {
             if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
                 if (!cell.is_open or cell.pvalue != &self.locals[local_idx]) return error.InvalidBytecode;
             }
-            return cell.retain();
+            return cell;
         }
         const vd = self.function.varDefs()[local_idx];
         const cell = try core.VarRef.createOpen(rt, &self.locals[local_idx]);
@@ -735,7 +592,7 @@ pub const Frame = struct {
         cell.is_lexical = vd.isLexical();
         cell.is_function_name = vd.varKind() == .function_name;
         self.open_var_refs[index] = cell;
-        return cell.retain();
+        return cell;
     }
 
     pub fn captureArg(self: *Frame, rt: anytype, arg_idx: usize) !*core.VarRef {
@@ -752,11 +609,11 @@ pub const Frame = struct {
             if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
                 if (!cell.is_open or cell.pvalue != &self.args[arg_idx]) return error.InvalidBytecode;
             }
-            return cell.retain();
+            return cell;
         }
         const cell = try core.VarRef.createOpen(rt, &self.args[arg_idx]);
         self.open_var_refs[index] = cell;
-        return cell.retain();
+        return cell;
     }
 
     pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void {
@@ -808,45 +665,11 @@ pub const Frame = struct {
         self.open_var_refs = slots;
     }
 
-    pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
+    pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, index: usize, value: JSValue) !void {
         try growLocalsCapacity(account, self, index);
-        value_slot.replaceBorrowed(rt, &self.locals[index], value);
-    }
-
-    fn releaseValueSlice(rt: anytype, values: []JSValue) void {
-        for (values) |*slot| {
-            const value = slot.*;
-            slot.* = JSValue.undefinedValue();
-            value.free(rt);
-        }
-    }
-
-    inline fn releaseValueSliceNoReset(rt: anytype, values: []JSValue) void {
-        for (values) |value| {
-            value.free(rt);
-        }
-    }
-
-    /// Per-cell release for an owned var_refs slice (qjs frees each
-    /// `var_refs[i]` via free_var_ref at frame exit, quickjs.c:16199/20698).
-    /// The slice memory itself lives in the frame slab / storage_values.
-    inline fn releaseCellSliceNoReset(rt: anytype, cells: []*core.VarRef) void {
-        for (cells) |cell| {
-            cell.freeCell(rt);
-        }
+        self.locals[index] = value;
     }
 };
-
-fn bindCallValue(value: JSValue, mode: CallBindingValueMode) JSValue {
-    return switch (mode) {
-        .dup => value.dup(),
-        .take, .borrow => value,
-    };
-}
-
-fn modeOwnership(mode: CallBindingValueMode) Ownership {
-    return if (mode == .borrow) .borrowed else .owned;
-}
 
 test "Frame setLocal preserves inline locals while growing" {
     var rt = try JSRuntime.create(std.testing.allocator);
@@ -862,8 +685,8 @@ test "Frame setLocal preserves inline locals while growing" {
     var exec_frame = Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
 
-    try exec_frame.setLocal(&rt.memory, rt, 0, JSValue.int32(11));
-    try exec_frame.setLocal(&rt.memory, rt, 1, JSValue.int32(22));
+    try exec_frame.setLocal(&rt.memory, 0, JSValue.int32(11));
+    try exec_frame.setLocal(&rt.memory, 1, JSValue.int32(22));
 
     try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].asInt32());
@@ -902,14 +725,11 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     const old_len = frame.var_refs.len;
     const borrowed_cells = frame.ownership.var_refs == .borrowed;
     for (frame.var_refs, 0..) |cell, i| {
-        next[i] = if (borrowed_cells) cell.dupCell() else cell;
+        next[i] = if (borrowed_cells) cell else cell;
     }
     var filled: usize = old_len;
     errdefer {
-        if (borrowed_cells) {
-            for (next[0..old_len]) |cell| cell.freeCell(ctx.runtime);
-        }
-        for (next[old_len..filled]) |cell| cell.freeCell(ctx.runtime);
+        if (borrowed_cells) {}
     }
     while (filled < next_len) : (filled += 1) {
         next[filled] = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());

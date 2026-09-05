@@ -19,7 +19,6 @@ const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 
-const op = bytecode.opcode.op;
 const special_object_subtype = bytecode.opcode.special_object_subtype;
 
 pub const Step = enum { done, continue_loop };
@@ -31,7 +30,6 @@ pub noinline fn object(
 ) !void {
     const created = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     const value = created.value();
-    errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
 
@@ -45,7 +43,6 @@ pub noinline fn objectReserved2(
         object_ops.objectPrototypeFromGlobal(ctx.runtime, global),
     );
     const value = created.value();
-    errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
 
@@ -132,9 +129,7 @@ pub noinline fn arrayFrom(
         remaining -= 1;
         values[remaining] = try stack.pop();
     }
-    defer for (values) |value| value.free(ctx.runtime);
     const array = try core.array.constructLiteralWithPrototype(ctx.runtime, values, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer array.free(ctx.runtime);
     try stack.pushOwned(array);
 }
 
@@ -170,7 +165,6 @@ pub noinline fn defineField(
         } else |_| {}
     }
     var rooted_value = value;
-    defer value.free(ctx.runtime);
     var rooted_obj = obj;
     var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_obj });
     root_frame.activate(ctx.runtime);
@@ -219,9 +213,7 @@ pub noinline fn setProto(
     stack: *stack_mod.Stack,
 ) !void {
     const proto_value = try stack.pop();
-    defer proto_value.free(ctx.runtime);
     const obj = stack.peek() orelse return error.StackUnderflow;
-    defer obj.free(ctx.runtime);
     const object_value = try property_ops.expectObject(obj);
     if (proto_value.isNull()) {
         try object_value.setPrototype(ctx.runtime, null);
@@ -241,13 +233,10 @@ pub noinline fn defineArrayEl(
 ) !Step {
     const value = try stack.pop();
     var rooted_value = value;
-    defer value.free(ctx.runtime);
     const index = try stack.pop();
     var rooted_index = index;
-    defer index.free(ctx.runtime);
     const array_value = stack.peek() orelse return error.StackUnderflow;
     var rooted_array = array_value;
-    defer array_value.free(ctx.runtime);
 
     var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_index, &rooted_array });
     root_frame.activate(ctx.runtime);
@@ -272,12 +261,9 @@ pub fn appendSpreadValues(
     opc: u8,
 ) !void {
     const iterable = try stack.pop();
-    defer iterable.free(ctx.runtime);
     const index = try stack.pop();
-    defer index.free(ctx.runtime);
     _ = opc;
     const array_value = stack.peek() orelse return error.StackUnderflow;
-    defer array_value.free(ctx.runtime);
     const array = try property_ops.expectObject(array_value);
     const start_index = index.asInt32() orelse 0;
     // Faithful to qjs js_append_enumerate (quickjs.c:16814): resolve @@iterator
@@ -317,13 +303,10 @@ pub noinline fn copyDataProperties(
     const rt = ctx.runtime;
     const target_value = try stackValueFromTop(stack, mask & 3);
     var rooted_target_value = target_value;
-    defer target_value.free(rt);
     const source_value = try stackValueFromTop(stack, (mask >> 2) & 7);
     var rooted_source_value = source_value;
-    defer source_value.free(rt);
     const exclusion_value = try stackValueFromTop(stack, (mask >> 5) & 7);
     var rooted_exclusion_value = exclusion_value;
-    defer exclusion_value.free(rt);
 
     var root_frame = core.runtime.rootValues(.{
         &rooted_target_value,
@@ -393,7 +376,6 @@ pub noinline fn copyDataProperties(
                     const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
                         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
                     const desc = maybe_desc orelse break :blk false;
-                    defer desc.destroy(rt);
                     break :blk (desc.enumerable orelse false);
                 },
             };
@@ -403,7 +385,6 @@ pub noinline fn copyDataProperties(
             const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
             var rooted_value = value;
-            defer value.free(rt);
             var value_root_values = [_]core.runtime.ValueRootValue{
                 .{ .value = &rooted_value },
             };
@@ -425,12 +406,10 @@ pub noinline fn copyDataProperties(
         const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         const desc = maybe_desc orelse continue;
-        defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
         const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         var rooted_value = value;
-        defer value.free(rt);
         var value_root_frame = core.runtime.rootValues(.{&rooted_value});
         value_root_frame.activate(rt);
         defer value_root_frame.deactivate(rt);
@@ -464,7 +443,6 @@ pub noinline fn specialObject(
     frame.pc += 1;
     if (subtype == 0 or subtype == 1) {
         const arguments = try object_ops.frameArgumentsObjectForSpecialObject(ctx, global, frame, subtype);
-        errdefer arguments.free(ctx.runtime);
         try stack.pushOwned(arguments);
     } else if (subtype == 2) {
         try stack.push(frame.current_function);
@@ -480,12 +458,10 @@ pub noinline fn specialObject(
         try stack.pushOwned(core.JSValue.undefinedValue());
     } else if (subtype == special_object_subtype.import_meta) {
         const import_meta = try object_ops.importMetaObject(ctx, function);
-        errdefer import_meta.free(ctx.runtime);
         try stack.pushOwned(import_meta);
     } else if (subtype == special_object_subtype.var_object) {
         const var_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
         const value = var_object.value();
-        errdefer value.free(ctx.runtime);
         try stack.pushOwned(value);
     } else {
         try stack.pushOwned(core.JSValue.undefinedValue());
@@ -502,12 +478,10 @@ pub noinline fn getLength(
     catch_target: *?usize,
 ) !Step {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const length = object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    errdefer length.free(ctx.runtime);
     try stack.pushOwned(length);
     return .done;
 }
@@ -532,22 +506,18 @@ pub noinline fn rest(
     defer root_frame.deactivate(ctx.runtime);
 
     errdefer {
-        const failed_array = array_value;
         array_value = core.JSValue.undefinedValue();
-        failed_array.free(ctx.runtime);
     }
     var source_index: usize = first_arg_idx;
     while (source_index < frame.actual_arg_count and source_index < frame.args.len) : (source_index += 1) {
-        const value = frame.args[source_index].dup();
+        const value = frame.args[source_index];
         element_value = value;
         var value_owned = true;
         errdefer if (value_owned) {
             element_value = core.JSValue.undefinedValue();
-            value.free(ctx.runtime);
         };
         try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.arrayLength()), core.Descriptor.data(value, true, true, true));
         element_value = core.JSValue.undefinedValue();
-        value.free(ctx.runtime);
         value_owned = false;
     }
     try stack.pushOwned(array_value);
@@ -556,7 +526,7 @@ pub noinline fn rest(
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.len()) return error.StackUnderflow;
-    return stack.values[stack.len() - 1 - index_from_top].dup();
+    return stack.values[stack.len() - 1 - index_from_top];
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

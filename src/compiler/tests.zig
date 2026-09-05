@@ -210,21 +210,17 @@ fn compileAndRun(h: *V2Exec) !core.JSValue {
         .{ .realm = h.ctx },
     );
     const fb = &fb_slice[0];
-    var fb_value = core.JSValue.functionBytecode(&fb.header);
-    var fb_value_owned = true;
-    errdefer if (fb_value_owned) fb_value.free(h.rt);
+    const fb_value = core.JSValue.functionBytecode(&fb.header);
     h.installed_short_opcode = try installedFunctionHasShortOpcode(fb);
 
     const global = try zjs_vm.contextGlobal(h.ctx);
     // createRootBytecodeFunctionObject consumes the FB value on every path.
-    fb_value_owned = false;
     const root_fn = try object_ops.createRootBytecodeFunctionObject(
         h.ctx,
         global,
         fb_value,
         .root_global,
     );
-    defer root_fn.free(h.rt);
     const root_object = object_ops.objectFromValue(root_fn) orelse
         return error.InvalidBytecode;
 
@@ -3022,7 +3018,6 @@ fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     try h.init(src);
     defer h.deinit();
     const result = try compileAndRun(&h);
-    defer result.free(h.rt);
     try std.testing.expectEqual(expected, result.asInt32().?);
 }
 
@@ -3063,22 +3058,18 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
         .{ .realm = h.ctx },
     );
     const fb = &fb_slice[0];
-    var fb_value = core.JSValue.functionBytecode(&fb.header);
-    var fb_value_owned = true;
-    errdefer if (fb_value_owned) fb_value.free(h.rt);
+    const fb_value = core.JSValue.functionBytecode(&fb.header);
     for (want) |op_id| {
         try std.testing.expect((try countInstalledOpcode(fb, op_id)) >= 1);
     }
 
     const global = try zjs_vm.contextGlobal(h.ctx);
-    fb_value_owned = false;
     const root_fn = try object_ops.createRootBytecodeFunctionObject(
         h.ctx,
         global,
         fb_value,
         .root_global,
     );
-    defer root_fn.free(h.rt);
     const root_object = object_ops.objectFromValue(root_fn) orelse
         return error.InvalidBytecode;
     var stack = stack_mod.Stack.init(&h.rt.memory, h.ctx.stackLimit());
@@ -3100,7 +3091,6 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
         .direct_eval_vars_reach_global = true,
         .global_declarations_prevalidated = true,
     });
-    defer result.free(h.rt);
     try std.testing.expectEqual(expected, result.asInt32().?);
 }
 
@@ -3167,8 +3157,7 @@ test "no compiled program emits a reclaimed opcode id (R0 + F0a0)" {
             .{ .realm = h.ctx },
         );
         const fb = &fb_slice[0];
-        var fb_value = core.JSValue.functionBytecode(&fb.header);
-        defer fb_value.free(h.rt);
+        _ = core.JSValue.functionBytecode(&fb.header);
         for (0..256) |raw| {
             const id: u8 = @intCast(raw);
             if (opcode.physical.stateOf(id) != .reclaimed) continue;
@@ -3430,7 +3419,6 @@ test "compiler.s4: installed for loop matches the configured default layout" {
     try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
     defer h.deinit();
     const result = try compileAndRun(&h);
-    defer result.free(h.rt);
     try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
     // The production path lowers with `resolve_labels.default_layout`
     // (`-Dzjs_compiler_layout`), so assert against that declaration rather than
@@ -3493,8 +3481,7 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
         .{ .realm = h.ctx },
     );
     const fb = &fb_slice[0];
-    var fb_value = core.JSValue.functionBytecode(&fb.header);
-    defer fb_value.free(h.rt);
+    _ = core.JSValue.functionBytecode(&fb.header);
 
     try expectFunctionDefInertAfterEscape(&h.state.function_def);
 
@@ -3506,6 +3493,77 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
     // A recursive child count can only become non-zero after the root cpool
     // exposes a FunctionBytecode value.
     try std.testing.expect(owners.child_functions >= 1);
+}
+
+test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
+    // Identifiers only -- no string literals, no nested functions -- so the
+    // FunctionDef cpool stays empty and the forced major has nothing but atom
+    // state to answer for. Every name here is fresh, so the entries cannot be
+    // reached by any pre-existing shape, bytecode or module edge, and they are
+    // interned BEFORE the major opens, so black allocation cannot mark them
+    // either. Only the parse's `CompileAtomScope` can.
+    const source =
+        \\var zjsS3ParseScopeAlpha = 1;
+        \\var zjsS3ParseScopeBeta = 2;
+        \\var zjsS3ParseScopeGamma = zjsS3ParseScopeAlpha + zjsS3ParseScopeBeta;
+        \\zjsS3ParseScopeGamma.zjsS3ParseScopeDelta;
+    ;
+    const idents = [_][]const u8{
+        "zjsS3ParseScopeAlpha",
+        "zjsS3ParseScopeBeta",
+        "zjsS3ParseScopeGamma",
+        "zjsS3ParseScopeDelta",
+    };
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    standard_globals.configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const name_atom = try rt.atoms.internString("s3b-parse-scope");
+    defer rt.atoms.free(name_atom);
+    var function = bytecode_mod.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
+    defer function.deinit(rt);
+    var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
+    defer lex.deinit();
+
+    var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
+    defer state.deinit(rt);
+    try state.activateAtomScope();
+    state.function_def.is_global_var = true;
+    state.top_level_functions_as_children = true;
+    try state.beginProgramEmission();
+    try P.parseProgramStatements(
+        &state,
+        P.DeclMask{ .func = true, .func_with_label = true, .other = true },
+    );
+
+    // The parse is complete but nothing has been published: the ids live only
+    // in FunctionDef var tables and the Builder's atom-operand ledger, both
+    // plain `u32` arrays on the Zig heap that no scan can read.
+    _ = try rt.forceMajorGC(null);
+    var polls: usize = 0;
+    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+        std.debug.assert(polls < 100_000);
+        _ = rt.pollGC(null, .safepoint) catch break;
+    }
+    const epoch = rt.gc.block_heap.mark_epoch;
+
+    for (idents) |name| {
+        const id = try rt.atoms.internString(name);
+        defer rt.atoms.free(id);
+        const entry = &rt.atoms.entries[id - core.atom.first_dynamic_atom];
+        std.testing.expectEqual(epoch, entry.mark_epoch) catch |err| {
+            std.debug.print("unmarked parse-time atom: {s}\n", .{name});
+            return err;
+        };
+    }
+    // The shadow audit still names one entry in this runtime: `s3b-parse-scope`,
+    // the carrier name this test holds as a bare id on a non-GC `Bytecode`
+    // struct. That is an N-class native temporary (`AtomRootFrame`, S3-b's exec
+    // half), not a compile-scope miss -- every parse-time identifier above is
+    // marked.
 }
 
 test "compiler.p5: escaped atoms outlive compiler teardown" {
@@ -3550,7 +3608,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
             &state.function_def,
             .{ .realm = ctx },
         );
-        var fb_value = core.JSValue.functionBytecode(&fb_slice[0].header);
+        _ = core.JSValue.functionBytecode(&fb_slice[0].header);
         const after_compile = rt.atoms.refCount(probe).?;
         try std.testing.expect(after_compile > baseline);
 
@@ -3574,7 +3632,6 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         );
         try std.testing.expect(rt.atoms.name(probe) != null);
 
-        fb_value.free(rt);
         // The escaped refs are owned by the published FunctionBytecode and
         // come back when it is torn down; under the tracer that teardown is a
         // collection rather than this release. Nothing needs rooting -- the

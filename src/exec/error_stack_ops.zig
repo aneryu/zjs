@@ -21,14 +21,13 @@ const string_ops = @import("string_ops.zig");
 const buildCallSiteArray = array_ops.buildCallSiteArray;
 const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const defineDataPropertyByName = object_ops.defineDataPropertyByName;
+const defineDataPropertyByAtom = object_ops.defineDataPropertyByAtom;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
 
 pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
     _ = output;
     const sites = try buildCallSiteArray(ctx, global, null);
-    defer sites.free(ctx.runtime);
     try instance.setErrorStackSites(ctx.runtime, sites);
 }
 
@@ -46,15 +45,12 @@ pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
     if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
 
     if (try errorPrepareStackTrace(ctx.runtime, global)) |prepare| {
-        defer prepare.free(ctx.runtime);
         const sites = try buildCallSiteArray(ctx, global, skip_name);
-        defer sites.free(ctx.runtime);
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
         return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
             if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
-                const thrown_value = ctx.takeException();
-                thrown_value.free(ctx.runtime);
+                _ = ctx.takeException();
                 return core.JSValue.nullValue();
             }
             if (ctx.hasException()) ctx.clearException();
@@ -76,15 +72,12 @@ pub fn formatCapturedErrorStackValue(
     if (ctx.runtime.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
 
     if (try errorPrepareStackTrace(ctx.runtime, global)) |prepare| {
-        defer prepare.free(ctx.runtime);
-        const sites_arg = sites_value.dup();
-        defer sites_arg.free(ctx.runtime);
+        const sites_arg = sites_value;
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
         return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_arg }, null, null) catch |err| {
             if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
-                const thrown_value = ctx.takeException();
-                thrown_value.free(ctx.runtime);
+                _ = ctx.takeException();
                 return core.JSValue.nullValue();
             }
             if (ctx.hasException()) ctx.clearException();
@@ -119,7 +112,6 @@ pub fn throwParseSyntaxError(
     // `throwValue` has stored it the exception slot owns it (the final
     // `return error.SyntaxError` is the intended result, not a failure).
     defineParseErrorSurface(ctx, global, error_value, filename, line_num, col_num) catch |err| {
-        error_value.free(rt);
         return err;
     };
     _ = ctx.throwValue(error_value);
@@ -137,33 +129,26 @@ fn defineParseErrorSurface(
     const rt = ctx.runtime;
     const instance = property_ops.expectObject(error_value) catch return;
     const filename_value = try value_ops.createStringValue(rt, filename);
-    defer filename_value.free(rt);
-    try defineDataPropertyByName(rt, instance, "fileName", filename_value, true, false, true);
-    try defineDataPropertyByName(rt, instance, "lineNumber", core.JSValue.int32(line_num), true, false, true);
-    try defineDataPropertyByName(rt, instance, "columnNumber", core.JSValue.int32(col_num), true, false, true);
+    try defineDataPropertyByAtom(rt, instance, core.atom.ids.fileName, filename_value, true, false, true);
+    try defineDataPropertyByAtom(rt, instance, core.atom.ids.lineNumber, core.JSValue.int32(line_num), true, false, true);
+    try defineDataPropertyByAtom(rt, instance, core.atom.ids.columnNumber, core.JSValue.int32(col_num), true, false, true);
 
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.print(rt.memory.allocator, "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
     const frames_value = try buildErrorStackStringValue(ctx, global, null);
-    defer frames_value.free(rt);
     try value_ops.appendRawString(rt, &bytes, frames_value);
     const stack_value = try value_ops.createStringValue(rt, bytes.items);
-    defer stack_value.free(rt);
     try instance.setErrorStack(rt, stack_value);
 }
 
-pub fn errorPrepareStackTrace(rt: *core.JSRuntime, global: *core.Object) !?core.JSValue {
-    const error_key = try rt.internAtom("Error");
-    defer rt.atoms.free(error_key);
+pub fn errorPrepareStackTrace(_: *core.JSRuntime, global: *core.Object) !?core.JSValue {
+    const error_key = core.atom.ids.Error;
     const error_value = try global.getProperty(error_key);
-    defer error_value.free(rt);
     const error_object = property_ops.expectObject(error_value) catch return null;
-    const prepare_key = try rt.internAtom("prepareStackTrace");
-    defer rt.atoms.free(prepare_key);
+    const prepare_key = core.atom.ids.prepareStackTrace;
     const prepare = try error_object.getProperty(prepare_key);
     if (!isCallableValue(prepare)) {
-        prepare.free(rt);
         return null;
     }
     return prepare;
@@ -197,14 +182,11 @@ pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFram
     return value_ops.createStringValue(ctx.runtime, name);
 }
 
-pub fn errorStackTraceLimit(rt: *core.JSRuntime, global: *core.Object) usize {
-    const error_key = rt.internAtom("Error") catch return 10;
-    defer rt.atoms.free(error_key);
+pub fn errorStackTraceLimit(_: *core.JSRuntime, global: *core.Object) usize {
+    const error_key = core.atom.ids.Error;
     const error_object = global.getOwnDataObjectBorrowed(error_key) orelse return 10;
-    const limit_key = rt.internAtom("stackTraceLimit") catch return 10;
-    defer rt.atoms.free(limit_key);
+    const limit_key = core.atom.ids.stackTraceLimit;
     const limit_value = error_object.getOwnDataPropertyValue(limit_key) orelse return 10;
-    defer limit_value.free(rt);
     if (limit_value.isUndefined() or limit_value.isNull()) return 0;
     const number = value_ops.numberValue(limit_value) orelse return 10;
     if (!std.math.isFinite(number) or number <= 0) return 0;
@@ -263,10 +245,9 @@ pub fn errorStackGetter(
 ) !core.JSValue {
     const object = object_ops.objectFromValue(this_value) orelse return error.TypeError;
     if (object.class_id != core.class.ids.error_) return core.JSValue.undefinedValue();
-    if (object.errorStack(ctx.runtime)) |stack| return stack.dup();
+    if (object.errorStack(ctx.runtime)) |stack| return stack;
     if (object.errorStackSites(ctx.runtime)) |sites| {
         const stack = try error_stack_ops.formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount(ctx.runtime));
-        errdefer stack.free(ctx.runtime);
         try object.setErrorStack(ctx.runtime, stack);
         return stack;
     }
@@ -291,10 +272,8 @@ pub fn errorStackSetter(
         if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
     }
 
-    const stack_key = try ctx.runtime.internAtom("stack");
-    defer ctx.runtime.atoms.free(stack_key);
+    const stack_key = core.atom.ids.stack;
     const desc = try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, stack_key, caller_function, caller_frame);
-    defer if (desc) |item| item.destroy(ctx.runtime);
 
     if (desc == null) {
         const create_desc = core.Descriptor.data(value, true, true, true);
@@ -330,8 +309,7 @@ pub fn errorStackSetter(
     switch (own_desc.kind) {
         .accessor => {
             if (own_desc.setter.isUndefined()) return error.TypeError;
-            const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
-            result.free(ctx.runtime);
+            _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             return core.JSValue.undefinedValue();
         },
         .data, .generic => {
@@ -362,7 +340,6 @@ pub fn errorCaptureStackTrace(
         null;
     defer if (skip_name) |bytes| ctx.runtime.memory.allocator.free(bytes);
     const stack_value = try error_stack_ops.buildErrorStackValue(ctx, output, global, args[0], skip_name);
-    defer stack_value.free(ctx.runtime);
-    try object_ops.defineDataPropertyByName(ctx.runtime, target, "stack", stack_value, true, false, true);
+    try object_ops.defineDataPropertyByAtom(ctx.runtime, target, core.atom.ids.stack, stack_value, true, false, true);
     return core.JSValue.undefinedValue();
 }

@@ -721,11 +721,6 @@ const ExecState = struct {
         return value;
     }
 
-    inline fn readU16At(self: *const ExecState, comptime safety: ExecSafety, ptr: [*]const u8) !u16 {
-        try self.ensurePc(safety, ptr, 2);
-        return std.mem.readInt(u16, ptr[0..2], .little);
-    }
-
     inline fn readU16UncheckedAt(ptr: [*]const u8) u16 {
         return std.mem.readInt(u16, ptr[0..2], .little);
     }

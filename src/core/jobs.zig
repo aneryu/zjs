@@ -45,10 +45,8 @@ pub const PromiseReactionPayload = struct {
 
     /// Replace the job-owned handler input with an already-owned completion.
     /// Symbol values are refcounted, so the JSValue itself is the new root.
-    pub fn replaceValueOwned(self: *PromiseReactionPayload, runtime: *core.JSRuntime, value: core.JSValue) void {
-        const old = self.value;
+    pub fn replaceValueOwned(self: *PromiseReactionPayload, _: *core.JSRuntime, value: core.JSValue) void {
         self.value = value;
-        old.free(runtime);
     }
 };
 
@@ -70,10 +68,8 @@ pub const PromiseThenablePayload = struct {
     /// Store the abrupt completion produced by the one permitted invocation
     /// of the thenable. Retrying the job can now resume at rejection without
     /// invoking user code twice.
-    pub fn replaceCompletionOwned(self: *PromiseThenablePayload, runtime: *core.JSRuntime, value: core.JSValue) void {
-        const old = self.completion;
+    pub fn replaceCompletionOwned(self: *PromiseThenablePayload, _: *core.JSRuntime, value: core.JSValue) void {
         self.completion = value;
-        old.free(runtime);
     }
 };
 
@@ -157,7 +153,7 @@ pub const Job = struct {
         errdefer job.deinit();
         const payload = &job.payload.generic;
         for (args, 0..) |arg, index| {
-            payload.argv[index] = arg.dup();
+            payload.argv[index] = arg;
         }
         return job;
     }
@@ -166,7 +162,7 @@ pub const Job = struct {
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
-            .payload = .{ .promise = .{ .value = value.dup() } },
+            .payload = .{ .promise = .{ .value = value } },
         };
     }
 
@@ -196,8 +192,8 @@ pub const Job = struct {
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .promise_reaction = .{
-                .reaction = reaction.dup(),
-                .value = value.dup(),
+                .reaction = reaction,
+                .value = value,
                 .rejected = rejected,
             } },
         };
@@ -216,9 +212,9 @@ pub const Job = struct {
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .promise_thenable = .{
-                .target = target.dup(),
-                .thenable = thenable.dup(),
-                .then_function = then_function.dup(),
+                .target = target,
+                .thenable = thenable,
+                .then_function = then_function,
             } },
         };
     }
@@ -237,8 +233,8 @@ pub const Job = struct {
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
             .payload = .{ .promise_settlement = .{
-                .target = target.dup(),
-                .completion = completion.dup(),
+                .target = target,
+                .completion = completion,
                 .rejected = rejected,
             } },
         };
@@ -258,11 +254,11 @@ pub const Job = struct {
             .realm = core.RealmRef.retain(context),
             .payload = .{ .dynamic_import = .{
                 .runner = runner,
-                .resolve = resolve.dup(),
-                .reject = reject.dup(),
-                .basename = basename.dup(),
-                .specifier = specifier.dup(),
-                .attributes = attributes.dup(),
+                .resolve = resolve,
+                .reject = reject,
+                .basename = basename,
+                .specifier = specifier,
+                .attributes = attributes,
             } },
         };
     }
@@ -282,7 +278,7 @@ pub const Job = struct {
                 .runner = runner,
                 .destroyer = destroyer,
                 .waiter = waiter,
-                .promise = promise.dup(),
+                .promise = promise,
             } },
         };
     }
@@ -296,8 +292,8 @@ pub const Job = struct {
             .runtime = realm.runtime,
             .realm = core.RealmRef.retain(realm),
             .payload = .{ .finalization = .{
-                .callback = callback.dup(),
-                .held_value = held_value.dup(),
+                .callback = callback,
+                .held_value = held_value,
             } },
         };
     }
@@ -309,33 +305,17 @@ pub const Job = struct {
                 payload.argc = 0;
                 var index: usize = 0;
                 while (index < argc) : (index += 1) {
-                    const value = payload.argv[index];
                     payload.argv[index] = core.JSValue.undefinedValue();
-                    value.free(self.runtime);
                 }
             },
             .promise => |*payload| {
-                payload.value.free(self.runtime);
                 payload.value = core.JSValue.undefinedValue();
             },
             .promise_reaction => |*payload| {
-                payload.reaction.free(self.runtime);
-                payload.value.free(self.runtime);
                 payload.reaction = core.JSValue.undefinedValue();
                 payload.value = core.JSValue.undefinedValue();
             },
             .promise_thenable => |*payload| {
-                const values = [_]core.JSValue{
-                    payload.target,
-                    payload.thenable,
-                    payload.then_function,
-                    payload.resolving_resolve,
-                    payload.resolving_reject,
-                    payload.completion,
-                };
-                inline for (values) |value| {
-                    value.free(self.runtime);
-                }
                 payload.target = core.JSValue.undefinedValue();
                 payload.thenable = core.JSValue.undefinedValue();
                 payload.then_function = core.JSValue.undefinedValue();
@@ -344,16 +324,10 @@ pub const Job = struct {
                 payload.completion = core.JSValue.undefinedValue();
             },
             .promise_settlement => |*payload| {
-                payload.target.free(self.runtime);
-                payload.completion.free(self.runtime);
                 payload.target = core.JSValue.undefinedValue();
                 payload.completion = core.JSValue.undefinedValue();
             },
             .dynamic_import => |*payload| {
-                const values = [_]core.JSValue{ payload.resolve, payload.reject, payload.basename, payload.specifier, payload.attributes };
-                inline for (values) |value| {
-                    value.free(self.runtime);
-                }
                 payload.resolve = core.JSValue.undefinedValue();
                 payload.reject = core.JSValue.undefinedValue();
                 payload.basename = core.JSValue.undefinedValue();
@@ -361,13 +335,10 @@ pub const Job = struct {
                 payload.attributes = core.JSValue.undefinedValue();
             },
             .atomics_waiter => |*payload| {
-                payload.promise.free(self.runtime);
                 payload.promise = core.JSValue.undefinedValue();
                 payload.destroyer(payload.waiter);
             },
             .finalization => |*payload| {
-                payload.callback.free(self.runtime);
-                payload.held_value.free(self.runtime);
                 payload.callback = core.JSValue.undefinedValue();
                 payload.held_value = core.JSValue.undefinedValue();
             },
@@ -746,11 +717,8 @@ const std = @import("std");
 fn runGenericOneForTest(queue: *Queue) RunOneStatus {
     var job = queue.takeFirst() orelse return .empty;
     std.debug.assert(std.meta.activeTag(job.payload) == .generic);
-    const context = job.realm.borrow() orelse unreachable;
-    const runtime = context.runtime;
     const result = job.run();
     const status: RunOneStatus = if (result.isException()) .exception else .success;
-    result.free(runtime);
     job.deinit();
     return status;
 }
@@ -779,7 +747,6 @@ test "Queue runOne reports three states and preserves FIFO after exception" {
     try std.testing.expectEqual(@as(usize, 1), runtime.job_queue.jobs.len);
     try std.testing.expect(context.hasException());
     const exception = context.takeException();
-    defer exception.free(runtime);
     try std.testing.expectEqual(@as(?i32, 91), exception.asInt32());
 
     try std.testing.expectEqual(RunOneStatus.success, runGenericOneForTest(&runtime.job_queue));
@@ -792,28 +759,22 @@ test "Promise settlement continuation owns target and direct symbol completion" 
     const context = try core.JSContext.create(runtime);
     defer context.destroy();
 
-    const target = try core.Object.create(runtime, core.class.ids.promise, null);
-    var target_alive = true;
-    defer if (target_alive) target.value().free(runtime);
-    const symbol_atom = try runtime.atoms.newValueSymbol("promise-settlement-continuation-symbol");
-    const completion = try runtime.symbolValue(symbol_atom);
-    var completion_alive = true;
-    defer if (completion_alive) completion.free(runtime);
+    try runtime.job_queue.reserveEntries(1);
+    var reservation_live = true;
+    defer if (reservation_live) runtime.job_queue.releaseReservedEntries(1);
 
-    var job = Job.initPromiseSettlementNoFail(context, target.value(), completion, false);
-    var job_alive = true;
-    defer if (job_alive) job.deinit();
-    target.value().free(runtime);
-    target_alive = false;
-    completion.free(runtime);
-    completion_alive = false;
+    const target = try core.Object.create(runtime, core.class.ids.promise, null);
+    const symbol_atom = try runtime.atoms.newValueSymbol("promise-settlement-continuation-symbol");
+    const completion = try runtime.takeSymbolValue(symbol_atom);
+    runtime.job_queue.enqueueReserved(Job.initPromiseSettlementNoFail(context, target.value(), completion, false));
+    reservation_live = false;
 
     _ = runtime.runObjectCycleRemoval();
     try std.testing.expect(runtime.atoms.name(symbol_atom) != null);
-    try std.testing.expectEqual(symbol_atom, job.payload.promise_settlement.completion.asSymbolAtom().?);
+    try std.testing.expectEqual(symbol_atom, runtime.job_queue.jobs[0].payload.promise_settlement.completion.asSymbolAtom().?);
 
+    var job = runtime.job_queue.takeFirst().?;
     job.deinit();
-    job_alive = false;
     _ = runtime.runObjectCycleRemoval();
     try std.testing.expect(runtime.atoms.name(symbol_atom) == null);
 }
@@ -825,7 +786,6 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
     defer context.destroy();
 
     const observed = try core.Object.createArray(runtime, null);
-    defer observed.value().free(runtime);
 
     const TestJob = struct {
         fn append(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
@@ -862,11 +822,8 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 
     try std.testing.expectEqual(@as(u32, 3), observed.arrayLength());
     const first = try observed.getProperty(core.atom.atomFromUInt32(0));
-    defer first.free(runtime);
     const second = try observed.getProperty(core.atom.atomFromUInt32(1));
-    defer second.free(runtime);
     const third = try observed.getProperty(core.atom.atomFromUInt32(2));
-    defer third.free(runtime);
     try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
     try std.testing.expectEqual(@as(?i32, 3), third.asInt32());

@@ -166,12 +166,11 @@ fn directEvalOuterVarRefView(
 ) !*core.VarRef {
     _ = ctx;
     if (idx >= function.closureVar().len or idx >= frame.var_refs.len) return error.InvalidBytecode;
-    return frame.var_refs[idx].retain();
+    return frame.var_refs[idx];
 }
 
-fn ownedCellFromValue(rt: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
+fn ownedCellFromValue(_: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
     return core.VarRef.fromValue(owned) orelse {
-        owned.free(rt);
         return error.InvalidBytecode;
     };
 }
@@ -292,24 +291,13 @@ pub fn execDirectEval(
     if (argc != 0) args = try ctx.runtime.memory.alloc(core.JSValue, argc);
     defer if (args.len != 0) ctx.runtime.memory.free(core.JSValue, args);
 
-    var filled_start: usize = args.len;
-    errdefer {
-        var i = filled_start;
-        while (i < args.len) : (i += 1) args[i].free(ctx.runtime);
-    }
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
         args[remaining] = try stack.pop();
-        filled_start = remaining;
-    }
-    filled_start = args.len;
-    defer {
-        for (args) |arg| arg.free(ctx.runtime);
     }
 
     var func = try stack.pop();
-    defer func.free(ctx.runtime);
     var rooted_args = args;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &func },
@@ -339,7 +327,6 @@ pub fn execDirectEval(
             }
             return err;
         };
-    defer result.free(ctx.runtime);
     try stack.push(result);
     return .done;
 }
@@ -360,9 +347,7 @@ pub fn execApplyEval(
     caller_eval_global_var_bindings: bool,
 ) !ExecEvalResult {
     var arg_array = try stack.pop();
-    defer arg_array.free(ctx.runtime);
     var func = try stack.pop();
-    defer func.free(ctx.runtime);
     var value_roots = [_]core.runtime.ValueRootValue{
         .{ .value = &arg_array },
         .{ .value = &func },
@@ -393,7 +378,6 @@ pub fn execApplyEval(
             }
             return err;
         };
-    defer result.free(ctx.runtime);
     try stack.push(result);
     return .done;
 }
@@ -409,7 +393,7 @@ pub fn directEval(
     caller_eval_global_var_bindings: bool,
 ) !core.JSValue {
     if (args.len == 0) return core.JSValue.undefinedValue();
-    if (!args[0].isString()) return args[0].dup();
+    if (!args[0].isString()) return args[0];
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
     try appendSourceStringUtf8(ctx.runtime, &source, args[0]);
@@ -476,7 +460,6 @@ pub fn directEval(
         owned_function,
         .{ .custom = .{ .context = @ptrCast(&resolver_context), .resolve = resolveDirectEvalClosureCell } },
     );
-    defer eval_function_value.free(ctx.runtime);
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &eval_function_value },
     };
@@ -507,7 +490,6 @@ pub fn directEval(
         .is_eval_code = true,
         .global_declarations_prevalidated = true,
     });
-    errdefer result.free(ctx.runtime);
     return result;
 }
 

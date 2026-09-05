@@ -9,19 +9,14 @@ const frame_mod = @import("frame.zig");
 const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
-const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
-const builtin_glue = @import("builtin_glue.zig");
 const array_ops = @import("array_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
-const regexp_fastpath = @import("regexp_fastpath.zig");
-const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
 const objectFromValue = object_ops.objectFromValue;
 const readInt = call_runtime.readInt;
-const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 /// CLI STW does not list-link scalar Zig locals (`value_root_link_containers_only`).
 /// Values popped off the VM stack before a fallible intern/GC must therefore
@@ -48,55 +43,15 @@ fn PoppedWindow(comptime n: usize) type {
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const vm_property = @import("vm_property.zig");
-const BindingGet = vm_property.BindingGet;
-const BindingPut = vm_property.BindingPut;
-const DecodedFalseBranch = vm_property.DecodedFalseBranch;
-const GlobalBindingGet = vm_property.GlobalBindingGet;
-const GlobalBindingPut = vm_property.GlobalBindingPut;
-const LoopLimitGet = vm_property.LoopLimitGet;
 const Step = vm_property.Step;
-const atomAsciiText = vm_property.atomAsciiText;
-const atomStringValueForFastPath = vm_property.atomStringValueForFastPath;
-const bindingReadableBorrowed = vm_property.bindingReadableBorrowed;
-const bindingStoreWritableForFastPath = vm_property.bindingStoreWritableForFastPath;
-const decodeBindingGet = vm_property.decodeBindingGet;
-const decodeBindingPut = vm_property.decodeBindingPut;
-const decodeFalseBranch = vm_property.decodeFalseBranch;
-const decodeGlobalDataGet = vm_property.decodeGlobalDataGet;
-const decodeGlobalPut = vm_property.decodeGlobalPut;
-const decodeGotoTarget = vm_property.decodeGotoTarget;
-const decodeLocalGet = vm_property.decodeLocalGet;
-const decodeLocalPut = vm_property.decodeLocalPut;
-const decodeLoopLimitGet = vm_property.decodeLoopLimitGet;
-const decodeOptionalLocalCompletionTail = vm_property.decodeOptionalLocalCompletionTail;
-const decodeStringSliceConstLocalStore = vm_property.decodeStringSliceConstLocalStore;
-const fastArrayPrototypeMethodIsDefault = vm_property.fastArrayPrototypeMethodIsDefault;
 pub const fastDenseArrayElementValue = vm_property.fastDenseArrayElementValue;
 pub const fastMappedArgumentsElementValue = vm_property.fastMappedArgumentsElementValue;
 pub const fastArrayOwnIntElementValue = vm_property.fastArrayOwnIntElementValue;
 pub const fastArrayOwnIntElementSet = vm_property.fastArrayOwnIntElementSet;
-const fastRegExpPrototypeMethodIsDefault = vm_property.fastRegExpPrototypeMethodIsDefault;
-const finishUndefinedCallResult = vm_property.finishUndefinedCallResult;
-const frameHasVarRefBinding = vm_property.frameHasVarRefBinding;
-const immediateInt32Operand = vm_property.immediateInt32Operand;
-const isHostOutputFunctionValue = vm_property.isHostOutputFunctionValue;
-const loopLimitReadableInt32 = vm_property.loopLimitReadableInt32;
-const mathMinMaxInductionRangeSum = vm_property.mathMinMaxInductionRangeSum;
-const mathMinMaxPrimitive2 = vm_property.mathMinMaxPrimitive2;
-const sameBinding = vm_property.sameBinding;
-const slotValueBorrowed = vm_property.slotValueBorrowed;
-const storeBindingOwnedValue = vm_property.storeBindingOwnedValue;
-const storeLocalCompletionBorrowedValue = vm_property.storeLocalCompletionBorrowedValue;
-const storeStringSliceConstLocal = vm_property.storeStringSliceConstLocal;
-const stringFromCharCodeInt32Arg = vm_property.stringFromCharCodeInt32Arg;
-const varRefReadableBorrowed = vm_property.varRefReadableBorrowed;
 
 const functionOwnDataPropertyValueForFastPath = property_direct.functionOwnDataPropertyValueForFastPath;
-const functionOwnNativeBuiltinRefForFastPath = property_direct.functionOwnNativeBuiltinRefForFastPath;
 const dataPropertyValueForFastPath = property_direct.dataPropertyValueForFastPath;
-const globalOwnDataPropertyValue = property_direct.globalOwnDataPropertyValue;
 const ordinaryDataPropertyValueOrUndefinedForFastPath = property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath;
-const ownDataPropertyValueMaterializedForFastPath = property_direct.ownDataPropertyValueMaterializedForFastPath;
 const op = bytecode.opcode.op;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
@@ -110,9 +65,7 @@ pub fn toPropKey(
     frame: *frame_mod.Frame,
 ) !void {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const key = try object_ops.toPropertyKeyValue(ctx, output, global, value, function, frame);
-    errdefer key.free(ctx.runtime);
     try stack.pushOwned(key);
 }
 
@@ -147,26 +100,21 @@ pub noinline fn setName(
             frame.pc += 4;
             if (stack.len() == 0) return error.StackUnderflow;
             const value = try stackValueFromTop(stack, 0);
-            defer value.free(ctx.runtime);
             if (value.isObject()) {
                 const object = try property_ops.expectObject(value);
                 const name_value = try call_runtime.functionNameValueFromAtom(ctx.runtime, atom_id, null);
-                defer name_value.free(ctx.runtime);
                 try object_ops.defineFunctionNameProperty(ctx.runtime, object, name_value);
             }
         },
         op.set_name_computed => {
             if (stack.len() < 2) return error.StackUnderflow;
-            const value = stack.values[stack.len() - 1].dup();
-            defer value.free(ctx.runtime);
-            const key = stack.values[stack.len() - 2].dup();
-            defer key.free(ctx.runtime);
+            const value = stack.values[stack.len() - 1];
+            const key = stack.values[stack.len() - 2];
             if (value.isObject()) {
                 const object = try property_ops.expectObject(value);
                 const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
                 defer ctx.runtime.atoms.free(atom_id);
                 const name_value = try call_runtime.functionNameValueFromAtom(ctx.runtime, atom_id, null);
-                defer name_value.free(ctx.runtime);
                 try object_ops.defineFunctionNameProperty(ctx.runtime, object, name_value);
             }
         },
@@ -205,7 +153,6 @@ pub noinline fn field(
     catch_target: *?usize,
     opc: u8,
 ) align(16) !Step {
-    const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     switch (opc) {
@@ -213,7 +160,7 @@ pub noinline fn field(
             if (stack.len() == 0) return error.StackUnderflow;
             const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];
-            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)) |value| {
+            if (dataPropertyValueForFastPath(ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
@@ -236,7 +183,7 @@ pub noinline fn field(
                 replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
-            if (functionOwnDataPropertyValueForFastPath(ctx.runtime, receiver, atom_id)) |value| {
+            if (functionOwnDataPropertyValueForFastPath(receiver, atom_id)) |value| {
                 replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
@@ -246,19 +193,16 @@ pub noinline fn field(
             }
             stack.setLen(top_index);
             const obj = receiver;
-            defer obj.free(ctx.runtime);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            errdefer value.free(ctx.runtime);
             stack.pushOwnedAssumeCapacity(value);
         },
         op.get_field2, op.get_field2_call_method => {
             const obj = try stackValueFromTop(stack, 0);
-            defer obj.free(ctx.runtime);
-            if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
+            if (dataPropertyValueForFastPath(ctx.runtime, obj, atom_id)) |value| {
                 stack.pushAssumeCapacity(value);
                 return .done;
             }
@@ -273,7 +217,7 @@ pub noinline fn field(
                 stack.pushOwnedAssumeCapacity(value);
                 return .done;
             }
-            if (functionOwnDataPropertyValueForFastPath(ctx.runtime, obj, atom_id)) |value| {
+            if (functionOwnDataPropertyValueForFastPath(obj, atom_id)) |value| {
                 stack.pushOwnedAssumeCapacity(value);
                 return .done;
             }
@@ -286,15 +230,12 @@ pub noinline fn field(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
         op.put_field => {
             const value = try stack.pop();
             var value_consumed = false;
-            defer if (!value_consumed) value.free(ctx.runtime);
             const obj = try stack.pop();
-            defer obj.free(ctx.runtime);
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
             // Single-walk cold put (qjs OP_put_field's slow path is ONE call
             // into JS_SetPropertyInternal, quickjs.c:19188-19203 ->
@@ -320,12 +261,11 @@ pub noinline fn field(
                     .slow => {},
                 }
             }
-            const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+            _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            result.free(ctx.runtime);
         },
         else => unreachable,
     }
@@ -878,7 +818,7 @@ pub inline fn atomPropertyValueForFastPath(
 ) ?PropertyFastValue {
     if (objectFromValue(receiver)) |object| {
         if (object.class_id == core.class.ids.object or object.isArray() or object.isGlobal()) {
-            return switch (property_direct.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
+            return switch (property_direct.ordinaryDataPropertyLookup(rt, receiver, atom_id)) {
                 .value => |value| .{ .borrowed = value },
                 .getter => |getter| .{ .getter = getter },
                 .proxy => |proxy| .{ .proxy = proxy },
@@ -966,25 +906,23 @@ pub inline fn putFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom
 }
 
 inline fn replaceTopBorrowed(
-    rt: *core.JSRuntime,
+    _: *core.JSRuntime,
     stack: *stack_mod.Stack,
     index: usize,
-    old_value: core.JSValue,
-    new_value: core.JSValue,
-) void {
-    stack.values[index] = if (new_value.requiresRefCount()) new_value.dup() else new_value;
-    old_value.free(rt);
-}
-
-inline fn replaceTopOwned(
-    rt: *core.JSRuntime,
-    stack: *stack_mod.Stack,
-    index: usize,
-    old_value: core.JSValue,
+    _: core.JSValue,
     new_value: core.JSValue,
 ) void {
     stack.values[index] = new_value;
-    old_value.free(rt);
+}
+
+inline fn replaceTopOwned(
+    _: *core.JSRuntime,
+    stack: *stack_mod.Stack,
+    index: usize,
+    _: core.JSValue,
+    new_value: core.JSValue,
+) void {
+    stack.values[index] = new_value;
 }
 
 fn setArrayLengthForPutFieldFastPath(
@@ -1030,11 +968,8 @@ pub inline fn putArrayElementAfterFastMiss(
     catch_target: *?usize,
 ) !Step {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const key = try stack.pop();
-    defer key.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     var put_window: PoppedWindow(3) = .{};
     put_window.activate(ctx.runtime, .{ obj, key, value });
     defer put_window.deactivate(ctx.runtime);
@@ -1065,11 +1000,10 @@ pub inline fn putArrayElementAfterFastMiss(
             // key is already a tagged integer atom. No JSValue copy/string
             // conversion or dynamic atom ownership is needed.
             const atom_id = core.atom.atomFromUInt32(@intCast(index));
-            const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+            _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            result.free(ctx.runtime);
             return .done;
         }
     }
@@ -1077,7 +1011,6 @@ pub inline fn putArrayElementAfterFastMiss(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer key_value.free(ctx.runtime);
     // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
     // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish base
     // TypeError, so user key-coercion side effects fire first.
@@ -1097,11 +1030,10 @@ pub inline fn putArrayElementAfterFastMiss(
     }
     const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
     defer ctx.runtime.atoms.free(atom_id);
-    const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+    _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    result.free(ctx.runtime);
     return .done;
 }
 
@@ -1118,9 +1050,7 @@ pub noinline fn getArrayElement(
     switch (opc) {
         op.get_array_el => {
             const key = try stack.pop();
-            defer key.free(ctx.runtime);
             const obj = try stack.pop();
-            defer obj.free(ctx.runtime);
             var get_window: PoppedWindow(2) = .{};
             get_window.activate(ctx.runtime, .{ obj, key });
             defer get_window.deactivate(ctx.runtime);
@@ -1136,7 +1066,6 @@ pub noinline fn getArrayElement(
             // var-ref arm below could run. qjs JS_GetPropertyValue switches
             // on class_id first (quickjs.c:9047-9049).
             if (fastMappedArgumentsElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
@@ -1150,22 +1079,18 @@ pub noinline fn getArrayElement(
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
             if (fastDenseArrayElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
             if (fastTypedArrayElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
@@ -1178,14 +1103,11 @@ pub noinline fn getArrayElement(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
         op.get_array_el2 => {
             const key = try stackValueFromTop(stack, 0);
-            defer key.free(ctx.runtime);
             const obj = try stackValueFromTop(stack, 1);
-            defer obj.free(ctx.runtime);
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -1194,47 +1116,32 @@ pub noinline fn getArrayElement(
                 unreachable;
             }
             if (fastDenseArrayElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.len() - 1];
                 stack.values[stack.len() - 1] = value;
-                old_value.free(ctx.runtime);
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.len() - 1];
                 stack.values[stack.len() - 1] = value;
-                old_value.free(ctx.runtime);
                 return .done;
             }
             if (fastTypedArrayElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.len() - 1];
                 stack.values[stack.len() - 1] = value;
-                old_value.free(ctx.runtime);
                 return .done;
             }
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            defer key_value.free(ctx.runtime);
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            errdefer value.free(ctx.runtime);
-            const old_value = stack.values[stack.len() - 1];
             stack.values[stack.len() - 1] = value;
-            old_value.free(ctx.runtime);
         },
         op.get_array_el3 => {
             const key = try stackValueFromTop(stack, 0);
-            defer key.free(ctx.runtime);
             const obj = try stackValueFromTop(stack, 1);
-            defer obj.free(ctx.runtime);
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -1243,17 +1150,14 @@ pub noinline fn getArrayElement(
                 unreachable;
             }
             if (fastDenseArrayElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
             if (fastTypedArrayElementValue(obj, key)) |value| {
-                errdefer value.free(ctx.runtime);
                 try stack.pushOwned(value);
                 return .done;
             }
@@ -1261,19 +1165,13 @@ pub noinline fn getArrayElement(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            var key_value_owned = true;
-            defer if (key_value_owned) key_value.free(ctx.runtime);
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-            errdefer value.free(ctx.runtime);
-            const old_key = stack.values[stack.len() - 1];
             stack.values[stack.len() - 1] = key_value;
-            key_value_owned = false;
-            old_key.free(ctx.runtime);
             try stack.pushOwned(value);
         },
         else => unreachable,
@@ -1419,15 +1317,12 @@ fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom
     const lookup = proto.getOwnDataPropertyLookup(atom_id) orelse return null;
     const method = lookup.value;
     const function_object = objectFromValue(method) orelse {
-        method.free(rt);
         return null;
     };
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
-        method.free(rt);
         return null;
     };
     if (native_ref.domain != .regexp or native_ref.id != expected_id) {
-        method.free(rt);
         return null;
     }
     return method;
@@ -1442,15 +1337,12 @@ fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, 
     const lookup = proto.getOwnDataPropertyLookup(atom_id) orelse return null;
     const method = lookup.value;
     const function_object = objectFromValue(method) orelse {
-        method.free(rt);
         return null;
     };
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
-        method.free(rt);
         return null;
     };
     if (native_ref.domain != .collection or native_ref.id != expected_id) {
-        method.free(rt);
         return null;
     }
     return method;
@@ -1465,7 +1357,7 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
     const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
     if (unit <= 0x7f) {
         const cached = rt.cachedSingleByteString(@intCast(unit)) orelse return null;
-        return cached.value().dup();
+        return cached.value();
     }
     return null;
 }
@@ -1473,5 +1365,5 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.len()) return error.StackUnderflow;
-    return stack.values[stack.len() - 1 - index_from_top].dup();
+    return stack.values[stack.len() - 1 - index_from_top];
 }

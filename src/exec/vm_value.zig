@@ -19,8 +19,6 @@ const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
-const op = bytecode.opcode.op;
-
 pub const DropResult = union(enum) {
     value,
     catch_target: ?usize,
@@ -84,21 +82,19 @@ pub fn pushBoolean(stack: *stack_mod.Stack, value: bool) !void {
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value));
 }
 
-pub noinline fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub noinline fn pushConst(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
     const index = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const value = function.constantAt(index) orelse return error.TypeError;
-    defer value.free(ctx.runtime);
     stack.pushAssumeCapacity(value);
 }
 
-pub noinline fn pushConst8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub noinline fn pushConst8(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
     const index = function.byteCode()[frame.pc];
     frame.pc += 1;
     const value = function.constantAt(index) orelse return error.TypeError;
-    defer value.free(ctx.runtime);
     stack.pushAssumeCapacity(value);
 }
 
@@ -106,7 +102,6 @@ pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *c
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    errdefer value.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(value);
 }
 
@@ -114,24 +109,24 @@ pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack,
     const template_atom = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const name = ctx.runtime.atoms.name(template_atom) orelse return error.InvalidAtom;
+    try stack.reserveAdditional(1);
     const value = value: {
         const fresh_atom = try ctx.runtime.atoms.newSymbol(name, .private);
         errdefer ctx.runtime.atoms.free(fresh_atom);
         break :value try ctx.runtime.takeSymbolValue(fresh_atom);
     };
-    errdefer value.free(ctx.runtime);
-    try stack.pushOwned(value);
+    stack.pushOwnedAssumeCapacity(value);
 }
 
 pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    const value = (try ctx.runtime.emptyString()).value().dup();
-    errdefer value.free(ctx.runtime);
+    const value = (try ctx.runtime.emptyString()).value();
     stack.pushOwnedAssumeCapacity(value);
 }
 
 pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
-    if (adapterValueIsUninitialized(this_value)) return error.ReferenceError;
-    pushAdapterValue(stack, this_value);
+    const value = adapterValueBorrow(this_value);
+    if (value.isUninitialized()) return error.ReferenceError;
+    stack.pushAssumeCapacity(value);
 }
 
 pub noinline fn pushThisVm(
@@ -160,12 +155,10 @@ pub noinline fn pushThisVm(
 
 pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
-    var object_value = if (value.isObject())
-        value.dup()
+    const object_value = if (value.isObject())
+        value
     else
         try object_ops.primitiveObjectForAccess(ctx.runtime, global, value);
-    errdefer object_value.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(object_value);
 }
 
@@ -189,7 +182,6 @@ pub noinline fn toObjectVm(
 
 pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     // qjs `js_operator_typeof` returns a predefined atom and OP_typeof pushes
     // `JS_AtomToString` of it — a refcount dup of the interned atom string, not
     // a fresh allocation. The `typeof` result strings are all predefined string
@@ -213,19 +205,16 @@ pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     else
         core.atom.ids.type_object;
     const out = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    errdefer out.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(out);
 }
 
-pub noinline fn typeOfIsUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOfIsUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined() or value_ops.isHTMLDDA(value)));
 }
 
-pub noinline fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn typeOfIsFunction(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(rt);
     // Keep the short comparison opcode exactly aligned with `typeOf`: native
     // c_functions, external host functions, and callable proxies all report
     // "function", not only bytecode function objects.
@@ -237,31 +226,27 @@ pub noinline fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(is_func));
 }
 
-pub noinline fn logicalNot(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn logicalNot(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(!value_ops.isTruthy(value)));
 }
 
-pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
+pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const value = try stack.pop();
     if (forof_ops.isIteratorCatchMarker(value)) {
-        value.free(rt);
         return .value;
     }
     if (value.isCatchOffset()) {
         if ((value.asCatchOffset() orelse -1) == 0) {
-            value.free(rt);
             return .value;
         }
         const target = value.catchTarget();
         return .{ .catch_target = target };
     }
-    value.free(rt);
     return .value;
 }
 
-pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
+pub noinline fn nipCatch(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const ret_value = try stack.pop();
 
     while (stack.len() != 0) {
@@ -272,17 +257,13 @@ pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResu
                 .value
             else
                 .{ .catch_target = value.catchTarget() };
-            value.free(rt);
             stack.pushOwned(ret_value) catch |err| {
-                ret_value.free(rt);
                 return err;
             };
             return result;
         }
-        value.free(rt);
     }
 
-    ret_value.free(rt);
     return error.InvalidBytecode;
 }
 
@@ -302,11 +283,10 @@ pub fn swap(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn nip(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
+pub fn nip(_: *core.JSContext, stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 2);
     const top = try stack.pop();
-    const second = try stack.pop();
-    second.free(ctx.runtime);
+    _ = try stack.pop();
     stack.pushOwnedAssumeCapacity(top);
 }
 
@@ -483,26 +463,19 @@ pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub noinline fn isUndefinedOrNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isUndefinedOrNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined() or value.isNull()));
 }
 
-pub noinline fn isUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined()));
 }
 
-pub noinline fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn isNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isNull()));
-}
-
-fn pushAdapterValue(stack: *stack_mod.Stack, slot: core.JSValue) void {
-    stack.pushAssumeCapacity(adapterValueBorrow(slot));
 }
 
 fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
@@ -523,10 +496,6 @@ fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void
     for (expected, 0..) |value, index| {
         try std.testing.expectEqual(@as(?i32, value), stack.values[index].asInt32());
     }
-}
-
-fn adapterValueIsUninitialized(slot: core.JSValue) bool {
-    return adapterValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
@@ -587,12 +556,10 @@ test "function object lookup recognizes every bytecode function class" {
     };
     for (class_ids) |class_id| {
         const function_object = try core.Object.create(rt, class_id, null);
-        defer function_object.value().free(rt);
         try std.testing.expectEqual(function_object, functionObjectFromValue(function_object.value()).?);
     }
 
     const plain_object = try core.Object.create(rt, core.class.ids.object, null);
-    defer plain_object.value().free(rt);
     try std.testing.expect(functionObjectFromValue(plain_object.value()) == null);
 }
 
@@ -630,9 +597,7 @@ test "push private symbol creates a fresh runtime atom per execution" {
     var second_atom: core.Atom = undefined;
     {
         const second_value = try stack.pop();
-        defer second_value.free(rt);
         const first_value = try stack.pop();
-        defer first_value.free(rt);
         first_atom = first_value.asSymbolAtom().?;
         second_atom = second_value.asSymbolAtom().?;
 
@@ -645,6 +610,7 @@ test "push private symbol creates a fresh runtime atom per execution" {
         try std.testing.expectEqual(@as(usize, 3), countLivePrivateAtomsNamed(rt, template_name));
     }
 
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(first_atom) == null);
     try std.testing.expect(rt.atoms.name(second_atom) == null);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
@@ -763,7 +729,6 @@ test "push private symbol releases fresh atom on allocation failure" {
     frame.pc = 0;
     try pushPrivateSymbol(ctx, &stack, execution_function, &frame);
     const recovered = try stack.pop();
-    defer recovered.free(rt);
     const recovered_atom = recovered.asSymbolAtom().?;
     try std.testing.expect(recovered_atom != template_atom);
     try std.testing.expectEqualStrings(template_name, rt.atoms.name(recovered_atom).?);

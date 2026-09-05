@@ -35,7 +35,6 @@ pub const collection_adapter = @import("collection_adapter.zig");
 pub const collection_ops = @import("collection_ops.zig");
 pub const call_runtime = @import("call_runtime.zig");
 pub const async_generator = @import("async_generator.zig");
-pub const host_dispatch_stats = @import("host_dispatch_stats.zig");
 pub const string_ops = @import("string_ops.zig");
 pub const math_ops = @import("math_ops.zig");
 pub const json_ops = @import("json_ops.zig");
@@ -91,24 +90,15 @@ pub const Vm = struct {
         const owned_globals = self.globals;
         self.globals = &.{};
         for (owned_globals) |*slot| {
-            const value = slot.value;
             slot.value = core.JSValue.undefinedValue();
-            value.free(self.ctx.runtime);
         }
         if (owned_globals.len != 0) self.ctx.runtime.memory.free(globals_mod.Slot, owned_globals);
-        const old_global = self.global_object;
         self.global_object = null;
-        if (old_global) |global| global.value().free(self.ctx.runtime);
         self.stack.deinit(self.ctx.runtime);
     }
 
     pub fn run(self: *Vm, function: *const bytecode.FunctionBytecode) !core.JSValue {
         try self.stack.reserveAdditional(function.stack_size);
         return zjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
-    }
-
-    pub fn runWithVarRefs(self: *Vm, function: *const bytecode.FunctionBytecode, var_refs: []const *core.VarRef) !core.JSValue {
-        try self.stack.reserveAdditional(function.stack_size);
-        return zjs_vm.runWithOutputAndVarRefs(self.ctx, &self.stack, function, self.output, var_refs);
     }
 };

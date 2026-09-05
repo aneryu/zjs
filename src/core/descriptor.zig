@@ -1,11 +1,10 @@
 //! ECMAScript property descriptors at the Object internal-method boundary.
 //!
-//! Direct constructors store caller-supplied JSValues without retaining them;
-//! `fromSlot` instead returns owned duplicates, and `destroy` releases all
-//! present value/getter/setter fields. Presence bits distinguish absent from
-//! explicit `undefined`, matching QuickJS `JSPropertyDescriptor` near
-//! quickjs.c:1014. This compact core value type may be imported by higher
-//! layers but depends only on core property/value representations.
+//! Descriptors borrow their JSValue fields; tracing keeps the referenced heap
+//! values alive. Presence bits distinguish absent from explicit `undefined`,
+//! matching QuickJS `JSPropertyDescriptor` near quickjs.c:1014. This compact
+//! core value type may be imported by higher layers but depends only on core
+//! property/value representations.
 
 const property = @import("property.zig");
 const JSValue = @import("value.zig").JSValue;
@@ -64,7 +63,7 @@ pub const Descriptor = struct {
         return switch (flags.kind) {
             .data => .{
                 .kind = .data,
-                .value = slot.data.dup(),
+                .value = slot.data,
                 .value_present = true,
                 .writable = flags.writable,
                 .enumerable = flags.enumerable,
@@ -72,9 +71,9 @@ pub const Descriptor = struct {
             },
             .accessor => .{
                 .kind = .accessor,
-                .getter = slot.accessor.getterValue().dup(),
+                .getter = slot.accessor.getterValue(),
                 .getter_present = true,
-                .setter = slot.accessor.setterValue().dup(),
+                .setter = slot.accessor.setterValue(),
                 .setter_present = true,
                 .enumerable = flags.enumerable,
                 .configurable = flags.configurable,
@@ -83,7 +82,7 @@ pub const Descriptor = struct {
             // (qjs exposes global lexicals via *pr->u.var_ref->pvalue).
             .var_ref => .{
                 .kind = .data,
-                .value = slot.var_ref.varRefValue().dup(),
+                .value = slot.var_ref.varRefValue(),
                 .value_present = true,
                 .writable = !slot.var_ref.is_const,
                 .enumerable = flags.enumerable,
@@ -99,9 +98,7 @@ pub const Descriptor = struct {
         };
     }
 
-    pub fn destroy(self: Descriptor, rt: anytype) void {
-        self.value.free(rt);
-        self.getter.free(rt);
-        self.setter.free(rt);
-    }
+    /// Retained as a source-compatible no-op for embedders written against the
+    /// former reference-counted descriptor API.
+    pub fn destroy(_: Descriptor, _: anytype) void {}
 };

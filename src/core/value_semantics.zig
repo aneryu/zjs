@@ -11,7 +11,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const object = @import("object.zig");
-const string = @import("string.zig");
 const value_mod = @import("value.zig");
 
 const JSValue = value_mod.JSValue;

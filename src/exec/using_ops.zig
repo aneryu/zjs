@@ -30,11 +30,10 @@ pub const DisposalDisposition = enum {
     throw,
 };
 
-fn popOwnedOperands(rt: *core.JSRuntime, stack: *stack_mod.Stack, count: usize) !void {
+fn popOwnedOperands(_: *core.JSRuntime, stack: *stack_mod.Stack, count: usize) !void {
     var remaining = count;
     while (remaining != 0) : (remaining -= 1) {
-        const value = try stack.pop();
-        value.free(rt);
+        _ = try stack.pop();
     }
 }
 
@@ -194,14 +193,13 @@ fn addResourceWithHint(
     if (stack_len < 2) return error.StackUnderflow;
     const args = stack.values[stack_len - 2 .. stack_len];
 
-    const result = switch (hint) {
+    _ = switch (hint) {
         .sync => disposable_ops.usingAddSyncResource(ctx, output, global, args),
         .async => promise_ops.usingAddAsyncResource(ctx, output, global, args),
     } catch |err| {
         try popOwnedOperands(ctx.runtime, stack, 2);
         return routeRuntimeError(ctx, output, global, stack, frame, catch_target, err);
     };
-    result.free(ctx.runtime);
     try popOwnedOperands(ctx.runtime, stack, 2);
     return .done;
 }

@@ -8,21 +8,13 @@ const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 
 const call_runtime = @import("call_runtime.zig");
-const array_ops = @import("array_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const value_slot = @import("value_slot.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // slot-operation cluster).
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
-const globalLexicalHas = call_runtime.globalLexicalHas;
-const globalLexicalHasForGlobal = call_runtime.globalLexicalHasForGlobal;
-const globalLexicalValue = call_runtime.globalLexicalValue;
 const globalLexicalValueForGlobal = call_runtime.globalLexicalValueForGlobal;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
-const pushAdapterValue = array_ops.pushAdapterValue;
-const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
-const setGlobalLexicalValueForGlobal = call_runtime.setGlobalLexicalValueForGlobal;
 const throwTdzReferenceError = exception_ops.throwTdzReferenceError;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 
@@ -32,7 +24,7 @@ const op = bytecode.opcode.op;
 /// is the operand byte width (0 for short, 1 for u8, 2 for u16); the
 /// caller has already decoded the index, so we only need to advance pc.
 pub fn execGetLoc(
-    ctx: *core.JSContext,
+    _: *core.JSContext,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -40,7 +32,6 @@ pub fn execGetLoc(
     opc: u8,
 ) !void {
     frame.pc += consume;
-    _ = ctx;
     _ = opc;
     // No runtime bounds check: `resolve_variables` only emits get_loc with
     // idx < var_count, and `frame.locals` is sized to exactly var_count
@@ -48,11 +39,10 @@ pub fn execGetLoc(
     // every dispatched frame — the same trusted-compiler model as QuickJS's
     // bare `var_buf[idx]`. The stack is pre-sized (reserveEntryFrameCapacity),
     // so the push skips reserveAdditional, mirroring qjs's `*sp++`.
-    stack.pushOwnedAssumeCapacity(value_slot.loadOwned(&frame.locals[idx]));
+    stack.pushOwnedAssumeCapacity(frame.locals[idx]);
 }
 
 pub noinline fn execPutLoc(
-    ctx: *core.JSContext,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -63,11 +53,10 @@ pub noinline fn execPutLoc(
     _ = opc;
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = try stack.pop();
-    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
+    frame.locals[idx] = value;
 }
 
 pub fn execSetLoc(
-    ctx: *core.JSContext,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -80,11 +69,11 @@ pub fn execSetLoc(
     // set_loc leaves the operand on the stack; borrow it and let the
     // ValueSlot take exactly one retained reference.
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
-    value_slot.replaceBorrowed(ctx.runtime, &frame.locals[idx], value);
+    frame.locals[idx] = value;
 }
 
 pub fn execGetArg(
-    ctx: *core.JSContext,
+    _: *core.JSContext,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -97,13 +86,11 @@ pub fn execGetArg(
         try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     }
-    const owned = value_slot.loadOwned(&frame.args[idx]);
-    errdefer owned.free(ctx.runtime);
+    const owned = frame.args[idx];
     try stack.pushOwned(owned);
 }
 
 pub fn execPutArg(
-    ctx: *core.JSContext,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -114,11 +101,10 @@ pub fn execPutArg(
     _ = opc;
     if (idx >= frame.args.len) return error.InvalidBytecode;
     const value = try stack.pop();
-    value_slot.replaceOwned(ctx.runtime, &frame.args[idx], value);
+    frame.args[idx] = value;
 }
 
 pub fn execSetArg(
-    ctx: *core.JSContext,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -130,7 +116,7 @@ pub fn execSetArg(
     if (idx >= frame.args.len) return error.InvalidBytecode;
     // set_arg has the same non-consuming ownership contract as set_loc.
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
-    value_slot.replaceBorrowed(ctx.runtime, &frame.args[idx], value);
+    frame.args[idx] = value;
 }
 
 pub fn execGetVarRefMaybeTdz(
@@ -157,21 +143,18 @@ pub fn execGetVarRefMaybeTdz(
         if (is_global_decl_ref) {
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
                 if (lexical_value.isUninitialized()) {
-                    lexical_value.free(ctx.runtime);
                     const err = throwTdzReferenceError(ctx);
                     if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                         return true;
                     }
                     return err;
                 }
-                errdefer lexical_value.free(ctx.runtime);
                 try stack.pushOwned(lexical_value);
                 return false;
             }
         }
         if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) {
             const value = try global.getProperty(atom_id);
-            errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
             return false;
         }
@@ -227,7 +210,6 @@ pub fn execPutVarRef(
     if (opc == op.put_var_ref_check_init) {
         const current = cell.varRefValue();
         if (!current.isUninitialized()) {
-            value.free(ctx.runtime);
             _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| return err;
             unreachable;
         }
@@ -235,7 +217,6 @@ pub fn execPutVarRef(
     if (opc == op.put_var_ref_check) {
         const current = cell.varRefValue();
         if (current.isUninitialized()) {
-            value.free(ctx.runtime);
             return throwTdzReferenceError(ctx);
         }
     }
@@ -244,21 +225,17 @@ pub fn execPutVarRef(
     const capture_is_const = idx < function.closureVar().len and
         function.closureVar()[idx].isConst();
     if (cell.varRefIsFunctionNameSlot().* or capture_is_function_name) {
-        value.free(ctx.runtime);
         if (function.isStrictMode()) return error.TypeError;
         return;
     }
     if ((cell.varRefIsConstSlot().* or capture_is_const) and !constVarRefWriteAllowed(cell, opc)) {
-        value.free(ctx.runtime);
         _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
         return error.TypeError;
     }
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
-        assigned = adapterValueDup(value);
-        value.free(ctx.runtime);
+        assigned = adapterValueBorrow(value);
     }
-    errdefer assigned.free(ctx.runtime);
     cell.setVarRefValue(ctx.runtime, assigned);
 }
 
@@ -288,14 +265,7 @@ pub fn execSetVarRef(
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
     _ = opc;
     const value = stack.peek() orelse return error.StackUnderflow;
-    defer value.free(ctx.runtime);
-    replaceVarRefValueOwned(ctx, frame, idx, value.dup());
-}
-
-/// Owned value view of a JSValue Adapter slot. Frame locals and arguments do
-/// not use this Interface; they are always plain ValueSlots.
-pub fn adapterValueDup(slot: core.JSValue) core.JSValue {
-    return adapterValueBorrow(slot).dup();
+    replaceVarRefValueOwned(ctx, frame, idx, value);
 }
 
 pub fn adapterValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
@@ -325,8 +295,8 @@ pub fn adapterIsDeletedEvalBinding(slot: core.JSValue) bool {
     return cell.varRefValue().isUninitialized();
 }
 
-/// Replace an owned JSValue Adapter slot. Unlike `value_slot.replaceOwned`,
-/// this cold boundary accepts a VarRef handle on either side and preserves its
+/// Replace an owned JSValue Adapter slot. This cold boundary accepts a VarRef
+/// handle on either side and preserves its
 /// write-through semantics. It must not be used for frame locals or arguments.
 pub inline fn replaceAdapterOwned(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
     if (!slot.requiresRefCount() and !value.requiresRefCount()) {
@@ -339,16 +309,13 @@ pub inline fn replaceAdapterOwned(ctx: *core.JSContext, slot: *core.JSValue, val
 noinline fn replaceAdapterRefCounted(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
-        assigned = adapterValueDup(value);
-        value.free(ctx.runtime);
+        assigned = adapterValueBorrow(value);
     }
     if (varRefCellFromValue(slot.*)) |cell| {
         cell.setVarRefValue(ctx.runtime, assigned);
         return;
     }
-    const old_value = slot.*;
     slot.* = assigned;
-    old_value.free(ctx.runtime);
 }
 
 pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
@@ -393,8 +360,7 @@ pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JS
 pub inline fn replaceVarRefValueOwned(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) void {
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
-        assigned = adapterValueDup(value);
-        value.free(ctx.runtime);
+        assigned = adapterValueBorrow(value);
     }
     frame.var_refs[idx].setVarRefValue(ctx.runtime, assigned);
 }

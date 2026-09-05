@@ -374,7 +374,6 @@ pub const Entry = struct {
     stack: stack_mod.Stack,
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
-    profile_guard: vm_call.CallProfileGuard,
     /// Static teardown shape plus ownership of the optional synthetic native
     /// Function.call frame. Both fit in the byte that previously held the
     /// simple-teardown boolean, so ordinary calls clear native ownership while
@@ -561,22 +560,6 @@ pub const Entry = struct {
             self.frame.ownership.storage == .borrowed and self.stack.isArenaWindow();
     }
 
-    /// The synthetic native frame exists only for the transparent
-    /// Function.prototype.call forwarding path. Keep its full JSValue release
-    /// classifier out of every ordinary return instantiation; the hot caller
-    /// performs only the ownership-bit test.
-    noinline fn releaseNativeCaller(self: *Entry, rt: *core.JSRuntime) void {
-        std.debug.assert(self.teardown.has_native_caller);
-        std.debug.assert(!self.teardown.constructor_completion);
-        self.native_caller.free(rt);
-    }
-
-    noinline fn releaseConstructorFallback(self: *Entry, rt: *core.JSRuntime) void {
-        std.debug.assert(self.teardown.constructor_completion);
-        std.debug.assert(!self.teardown.has_native_caller);
-        self.native_caller.free(rt);
-    }
-
     /// Release this frame after its continuation has been moved out. This is
     /// the abrupt/tail-replacement teardown: an empty-layout frame may still
     /// have live operand values when an opcode throws, so it must retain the
@@ -642,26 +625,17 @@ pub const Entry = struct {
         std.debug.assert(self.teardown.simple);
         std.debug.assert(!self.teardown.has_native_caller);
         std.debug.assert(frame.cold == null);
-        std.debug.assert(frame.ownership.current_function == .owned);
         std.debug.assert(frame.ownership.storage == .borrowed);
         std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
         std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
         std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
-        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-        frame.current_function.freeObjectAssumeObject(rt);
         rt.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
     /// Exact-args twin of `deinitEmptyLeafInline`: identical narrow normal-
-    /// return epilogue plus the caller-region args release — qjs OP_call's
-    /// post-return `for(i = -1; i < call_argc; i++) JS_FreeValue(ctx,
-    /// call_argv[i])` (quickjs.c:18229-18232) collapsed into the callee
-    /// teardown that runs at the same point on this path. The args window
-    /// borrows the caller's operand slots above the retreated top, so only
-    /// the VALUES are released; the backing region is reused by the caller's
-    /// next push. Only the normal-return arm may use this: abrupt completion
-    /// keeps general teardown (live operand values, cold state).
+    /// return epilogue. The args window borrows the caller's operand slots
+    /// above the retreated top; the backing region is reused by the caller's
+    /// next push. Only the normal-return arm may use this.
     ///
     /// Capture leaves (O2) publish the same teardown bit: their frame is the
     /// zero-arg member of this family (args window empty — the release loop
@@ -674,7 +648,6 @@ pub const Entry = struct {
         std.debug.assert(self.teardown.exact_args_leaf and !self.teardown.empty_leaf);
         std.debug.assert(!self.teardown.has_native_caller);
         std.debug.assert(frame.cold == null);
-        std.debug.assert(frame.ownership.current_function == .owned);
         std.debug.assert(frame.ownership.storage == .borrowed);
         std.debug.assert(frame.locals.len == 0);
         std.debug.assert(frame.args.len == frame.function.arg_count);
@@ -685,24 +658,11 @@ pub const Entry = struct {
         std.debug.assert(frame.ownership.var_refs == .borrowed);
         std.debug.assert(frame.open_var_refs.len == 0);
         std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
-        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-        frame.current_function.freeObjectAssumeObject(rt);
-        for (frame.args) |v| v.free(rt);
         rt.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
     /// Forwarded-leaf twin of `deinitEmptyLeafInline` (O3): identical narrow
-    /// normal-return epilogue plus the owned synthetic native `call` frame
-    /// release. The forwarding adapter proved `native_caller` is a callable
-    /// object (its record's `forwards_call` gate), so the release skips the
-    /// full JSValue classifier exactly like the callable itself — qjs frees
-    /// both the argument buffer entry for the target and the native frame's
-    /// func_obj with plain object decrements on the same return edge
-    /// (js_call_c_function done:, quickjs.c:18229-18232). Only the
-    /// normal-return arm may use this: abrupt completion keeps general
-    /// teardown, whose established cold `releaseNativeCaller` handles the
-    /// same ownership.
+    /// normal-return epilogue for the synthetic native `call` frame.
     inline fn deinitForwardedLeafInline(self: *Entry, rt: *core.JSRuntime) void {
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
@@ -710,29 +670,23 @@ pub const Entry = struct {
         std.debug.assert(!self.teardown.exact_args_leaf);
         std.debug.assert(self.teardown.has_native_caller);
         std.debug.assert(frame.cold == null);
-        std.debug.assert(frame.ownership.current_function == .owned);
         std.debug.assert(frame.ownership.storage == .borrowed);
         std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
         std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
         std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
-        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-        frame.current_function.freeObjectAssumeObject(rt);
-        self.native_caller.freeObjectAssumeObject(rt);
         rt.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
     /// Straight-line qjs `done:` epilogue for the common arena-backed frame.
     inline fn deinitSimple(self: *Entry, ctx: *core.JSContext) void {
         self.deinitSimpleResources(ctx);
         ctx.runtime.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
-    /// Release every resource in a simple frame except the VM-stack watermark
-    /// and profiling restore record. Tail replacement retains the caller's
-    /// alloca-shaped arena window until the final callee completes, exactly as
-    /// QuickJS's nested JS_CallInternal frames remain live.
+    /// Release every resource in a simple frame except the VM-stack watermark.
+    /// Tail replacement retains the caller's alloca-shaped arena window until
+    /// the final callee completes, exactly as QuickJS's nested JS_CallInternal
+    /// frames remain live.
     inline fn deinitSimpleResources(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         const frame = &self.frame;
@@ -742,19 +696,7 @@ pub const Entry = struct {
         // R-A1: do not read `frame.open_var_refs` — the hot exact constructor
         // does not publish that slice. FB count is the publication truth;
         // a non-zero count means Slow/Impl wrote a live window.
-        // The read has to happen before `current_function` is released: for a
-        // function whose object holds the last reference to its bytecode (a
-        // dynamic `Function(...)` call is the reachable case), that release
-        // destroys the FB this line reads.
         if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
-        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-        if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-        if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
-        // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
-        const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
-        for (live_values) |v| v.free(rt);
-        for (frame.args) |v| v.free(rt);
-        if (self.teardown.constructor_completion) self.releaseConstructorFallback(rt);
     }
 
     /// `deinitSimpleResources` for a frame `isOrdinaryReturn` already cleared.
@@ -769,14 +711,7 @@ pub const Entry = struct {
         std.debug.assert(self.canUseSimpleTeardown());
         std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
         std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
-        // Bytecode read first: releasing `current_function` can destroy the FB.
         if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
-        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-        if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-        // qjs done: close var refs first, then free local_buf..sp (quickjs.c:20701-20706).
-        const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
-        for (live_values) |v| v.free(rt);
-        for (frame.args) |v| v.free(rt);
     }
 
     /// `deinitReturned` for a plain completion. The leaf routing is gone -- the
@@ -789,7 +724,6 @@ pub const Entry = struct {
         if (self.canUseSimpleTeardown()) {
             self.deinitOrdinarySimpleResources(ctx);
             ctx.runtime.vm_stack.restore(self.arena_mark);
-            self.profile_guard.deinit();
             return;
         }
         self.deinitGeneral(ctx);
@@ -825,21 +759,12 @@ pub const Entry = struct {
             const frame = &self.frame;
             std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
             std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values);
-            // Bytecode read first: releasing `current_function` can destroy the FB.
             if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
-            if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
-            if (frame.ownership.current_function == .owned) frame.current_function.free(rt);
-            // qjs done: close var refs first, then free local_buf..sp
-            // (quickjs.c:20701-20706).
-            const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
-            for (live_values) |v| v.free(rt);
-            for (frame.args) |v| v.free(rt);
         } else {
             self.stack.deinit(rt);
             self.frame.deinitInlineCall(&rt.memory, rt);
         }
         rt.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
@@ -847,21 +772,18 @@ pub const Entry = struct {
     fn deinitGeneral(self: *Entry, ctx: *core.JSContext) void {
         self.deinitGeneralResources(ctx);
         ctx.runtime.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
     fn deinitGeneralResources(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
-        if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
         self.stack.deinit(rt);
         self.frame.deinitInlineCall(&rt.memory, rt);
-        if (self.teardown.constructor_completion) self.releaseConstructorFallback(rt);
     }
 
     /// Successful tail replacement has already built and linked the target
     /// frame above this caller. Release the caller's values and heap-owned
-    /// storage without rewinding the shared arena or restoring its profiling
-    /// activation: both records are transferred to the replacement Entry.
+    /// storage without rewinding the shared arena; that watermark is
+    /// transferred to the replacement Entry.
     inline fn deinitForTailReplacement(self: *Entry, ctx: *core.JSContext) void {
         if (self.teardown.empty_leaf or self.teardown.exact_args_leaf or
             self.isForwardedLeaf())
@@ -874,8 +796,7 @@ pub const Entry = struct {
 };
 
 comptime {
-    const base_size: usize = 256;
-    const expected_size = base_size + @sizeOf(vm_call.CallProfileGuard);
+    const expected_size: usize = 256;
     if (@sizeOf(Entry) != expected_size) @compileError(std.fmt.comptimePrint(
         "inline Entry layout drifted: expected {d} bytes, found {d}",
         .{ expected_size, @sizeOf(Entry) },
@@ -1614,7 +1535,6 @@ pub const Machine = struct {
         const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{ .simple = true };
-        entry.profile_guard = vm_call.enterCallProfile(rt);
 
         comptime std.debug.assert(!move_args or method_receiver);
         comptime std.debug.assert(!constructor_this or (method_receiver and !move_args and !strict_this));
@@ -1678,7 +1598,6 @@ pub const Machine = struct {
             .open_var_refs = open_var_refs,
             .storage_values = &.{},
             .ownership = .{
-                .this_value = if (method_receiver and !constructor_this) .owned else .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = .borrowed,
             },
@@ -1785,8 +1704,6 @@ pub const Machine = struct {
         // Whole-byte assignment also clears the native-caller ownership bit
         // left by any prior occupant of this reusable Entry slot.
         entry.teardown = .{ .simple = true };
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         // `move_args` makes the source variant compile-time fixed: ordinary
         // calls borrow/move out of their caller stack region, while Proxy
@@ -1898,7 +1815,7 @@ pub const Machine = struct {
         // failable point, preserving the source-restoration errdefer above.
         const cold: ?*frame_mod.Frame.FrameCold = if (snapshot_count == 0) null else blk: {
             const box = try rt.memory.create(frame_mod.Frame.FrameCold);
-            for (args, 0..) |arg, index| original_args[index] = arg.dup();
+            for (args, 0..) |arg, index| original_args[index] = arg;
             box.* = .{ .original_args = original_args };
             break :blk box;
         };
@@ -1944,7 +1861,6 @@ pub const Machine = struct {
                 // after this returns (no failable step in between), and
                 // constructor completion / abrupt teardown releases it there.
                 // Written `.borrowed` once instead of the retired owned→flip.
-                .this_value = if (method_receiver and !constructor_this) .owned else .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -2089,7 +2005,6 @@ pub const Machine = struct {
         entry.frame.var_refs = captures;
         entry.frame.open_var_refs = open_var_refs;
         entry.frame.ownership = .{
-            .this_value = if (method_receiver) .owned else .borrowed,
             .var_refs = if (captures.len > 0) .borrowed else .owned,
             .storage = .borrowed,
         };
@@ -2237,8 +2152,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -2299,8 +2212,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -2356,8 +2267,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -2470,7 +2379,6 @@ pub const Machine = struct {
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
@@ -2547,7 +2455,6 @@ pub const Machine = struct {
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
                 .var_refs = .borrowed,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -2614,7 +2521,6 @@ pub const Machine = struct {
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
-                .this_value = if (method_receiver) .owned else .borrowed,
                 .var_refs = .borrowed,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -2695,7 +2601,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishEmptyLeafFrame(leaf_this, rt, entry, global, function, region_start, carve.window, false, planned_stack_bytes, resume_pc);
     }
@@ -2749,7 +2654,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishExactArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
     }
@@ -2805,7 +2709,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishCaptureLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, carve.window, false, planned_stack_bytes, resume_pc);
     }
@@ -2814,7 +2717,7 @@ pub const Machine = struct {
     /// Machine shares the zero-copy arg move (`initArgumentsMoved`), this-boxing
     /// and arena carve — NOT the dup-heavy
     /// `callFunctionBytecodeModeState` path.
-    /// The caller owns depth accounting (enterInlineCallDepth / enterCallDepth)
+    /// The caller owns depth accounting (enterInlineCallDepthMode / enterCallDepth)
     /// and any push/pop bookkeeping; on error every partially-initialized
     /// resource is released via the errdefers below.
     pub noinline fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
@@ -2824,8 +2727,6 @@ pub const Machine = struct {
         const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{};
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         const callable_slot = sourceCallableSlot(source);
         const frame_var_refs: []const *core.VarRef = target.captureSlice();
@@ -2867,25 +2768,14 @@ pub const Machine = struct {
 
         // Bind the frame values INLINE — qjs's JS_CallInternal sets cur_func /
         // this / new_target directly rather than threading a 14-field
-        // CallBindingInputs descriptor through initCallBindingValues. This is
-        // the common-path equivalent; ownership flags must mirror the old
-        // bindCallValue/modeOwnsValue result EXACTLY (Frame.deinit frees by
-        // these flags, and the frame.deinit errdefer above covers a later
-        // failure):
-        //   current_function .take -> owns the callable's transferred ref
-        //   new_target keeps Frame.init's absent cold-state default
-        //   this .borrow, unless taken raw from the receiver slot (method call)
-        //   -> then .take/owned. Lazy materialization updates this slot once.
-        // `takeSourceSlot` nulls the source slot so the popped stack region
-        // never double-frees the value (the leak guard the method-call comment
-        // below describes).
+        // CallBindingInputs descriptor through initCallBindings. The frame
+        // stores the two traced values directly; `takeSourceSlot` clears a
+        // retired operand slot so it cannot remain a stale conservative root.
         entry.frame.current_function = takeSourceSlot(callable_slot);
         if (take_receiver_as_this) {
             entry.frame.this_value = takeSourceSlot(receiver_slot.?);
-            entry.frame.ownership.this_value = .owned;
         } else {
             entry.frame.this_value = effective_this;
-            entry.frame.ownership.this_value = .borrowed;
         }
 
         const argc = sourceArgCount(source);
@@ -3005,8 +2895,6 @@ pub const Machine = struct {
         const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{ .simple = true };
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         const frame_arg_count: usize = @intCast(function.arg_count);
         const var_count: usize = function.var_count;
@@ -3058,8 +2946,6 @@ pub const Machine = struct {
             .open_var_refs = open_var_refs,
             .storage_values = if (storage_on_heap) slab_values else &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -3146,10 +3032,8 @@ pub const Machine = struct {
         freeSourceSlot(rt, &source.values[@intFromBool(source.metadata.has_receiver)]);
     }
 
-    inline fn freeSourceSlot(rt: *core.JSRuntime, slot: *core.JSValue) void {
-        const value = slot.*;
+    inline fn freeSourceSlot(_: *core.JSRuntime, slot: *core.JSValue) void {
         slot.* = core.JSValue.undefinedValue();
-        value.free(rt);
     }
 
     /// Push a plain inline call whose raw source is `[callable, args...]`.
@@ -3352,11 +3236,6 @@ pub const Machine = struct {
             }
         } else {
             setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
-            // General setup took the receiver `.owned` (its method arm); move
-            // to the same write-once `.borrowed` the simple variants publish,
-            // BEFORE the fallback slot takes ownership below.
-            std.debug.assert(entry.frame.ownership.this_value == .owned);
-            entry.frame.ownership.this_value = .borrowed;
         }
         errdefer entry.deinit(self.ctx);
 
@@ -3378,7 +3257,7 @@ pub const Machine = struct {
         // heap-allocating a cold box on every `new`.
         entry.frame.ownership.new_target = .aliases_function;
         if (owned_new_target) |value| {
-            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
+            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, value);
         }
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
 
@@ -3427,7 +3306,7 @@ pub const Machine = struct {
 
         entry.frame.ownership.new_target = .aliases_function;
         if (owned_new_target) |value| {
-            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, self.ctx.runtime, value);
+            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, value);
         }
         std.debug.assert(entry.frame.this_value.isUninitialized());
         entry.native_caller = core.JSValue.undefinedValue();
@@ -3583,7 +3462,6 @@ pub const Machine = struct {
         entry.return_action = .native_boundary;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         entry.frame = .{
             .function = function,
@@ -3594,8 +3472,6 @@ pub const Machine = struct {
             .locals = carve.window[0..0],
             .storage_values = &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .storage = .borrowed,
             },
         };
@@ -3662,14 +3538,13 @@ pub const Machine = struct {
             @memcpy(frame_args[0..copied_arg_count], moved_args[0..copied_arg_count]);
             @memset(moved_args[0..copied_arg_count], core.JSValue.undefinedValue());
         } else {
-            for (args[0..copied_arg_count], 0..) |arg, arg_index| frame_args[arg_index] = arg.dup();
+            for (args[0..copied_arg_count], 0..) |arg, arg_index| frame_args[arg_index] = arg;
         }
         @memset(frame_args[copied_arg_count..], core.JSValue.undefinedValue());
         const captures = target.captureSlice();
         entry.return_action = .native_boundary;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         entry.frame = .{
             .function = function,
@@ -3682,8 +3557,6 @@ pub const Machine = struct {
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = .borrowed,
             },
@@ -3785,7 +3658,6 @@ pub const Machine = struct {
         entry.return_action = .native_boundary;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         entry.frame = .{
             .function = function,
@@ -3799,8 +3671,6 @@ pub const Machine = struct {
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = .borrowed,
             },
@@ -3907,8 +3777,6 @@ pub const Machine = struct {
         entry.return_action = .native_boundary;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(self.ctx.runtime);
-        errdefer entry.profile_guard.deinit();
 
         const rt = self.ctx.runtime;
         const frame_arg_count: usize = @intCast(function.arg_count);
@@ -3935,7 +3803,7 @@ pub const Machine = struct {
             @memcpy(frame_args[0..copied_arg_count], moved_args[0..copied_arg_count]);
             @memset(moved_args[0..copied_arg_count], core.JSValue.undefinedValue());
         } else {
-            for (args[0..copied_arg_count], 0..) |arg, index| frame_args[index] = arg.dup();
+            for (args[0..copied_arg_count], 0..) |arg, index| frame_args[index] = arg;
         }
         @memset(frame_args[copied_arg_count..], core.JSValue.undefinedValue());
         const captures = target.captureSlice();
@@ -3950,8 +3818,6 @@ pub const Machine = struct {
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = if (storage_on_heap) slab_values else &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -4005,8 +3871,6 @@ pub const Machine = struct {
         entry.return_action = .native_boundary;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         const stack_count = @as(usize, function.stack_size) + 1;
         var storage_on_heap = false;
@@ -4032,8 +3896,6 @@ pub const Machine = struct {
             .locals = stack_window[0..0],
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
@@ -4072,8 +3934,6 @@ pub const Machine = struct {
             .simple = true,
             .special_return = true,
         };
-        entry.profile_guard = vm_call.enterCallProfile(rt);
-        errdefer entry.profile_guard.deinit();
 
         const actual_arg_count = args.len;
         const frame_arg_count = frame_mod.frameArgCount(function, actual_arg_count);
@@ -4131,7 +3991,7 @@ pub const Machine = struct {
         // therefore remain untouched on every setup failure.
         const cold: ?*frame_mod.Frame.FrameCold = if (snapshot_count == 0) null else blk: {
             const box = try rt.memory.create(frame_mod.Frame.FrameCold);
-            for (args, 0..) |arg, index| original_args[index] = arg.dup();
+            for (args, 0..) |arg, index| original_args[index] = arg;
             box.* = .{ .original_args = original_args };
             break :blk box;
         };
@@ -4140,7 +4000,7 @@ pub const Machine = struct {
             @memcpy(frame_args[0..actual_arg_count], moved_args);
             @memset(moved_args, core.JSValue.undefinedValue());
         } else {
-            for (args, 0..) |arg, index| frame_args[index] = arg.dup();
+            for (args, 0..) |arg, index| frame_args[index] = arg;
         }
         @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
 
@@ -4156,8 +4016,6 @@ pub const Machine = struct {
             .open_var_refs = open_var_refs,
             .storage_values = if (storage_on_heap) slab_values else &.{},
             .ownership = .{
-                .this_value = .borrowed,
-                .current_function = .borrowed,
                 .var_refs = if (captures.len > 0) .borrowed else .owned,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
@@ -4310,7 +4168,6 @@ pub const Machine = struct {
         entry.return_action = .for_of_next;
         entry.continuation_payload = depth;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishBorrowedIteratorFrame(entry, function, captures, iterator_record, carve.window, frame_arg_count, var_count);
     }
@@ -4375,8 +4232,6 @@ pub const Machine = struct {
         frame.open_var_refs = &.{};
         frame.storage_values = &.{};
         frame.ownership = .{
-            .this_value = .borrowed,
-            .current_function = .borrowed,
             .var_refs = if (captures.len > 0) .borrowed else .owned,
             .storage = .borrowed,
         };
@@ -4425,7 +4280,6 @@ pub const Machine = struct {
             .planned_stack_bytes = @intCast(vm_call.bytecodeLeafFrameAllocaSize(function)),
             .storage_values = &.{},
             .ownership = .{
-                .this_value = .borrowed,
                 .storage = .borrowed,
             },
         };
@@ -4491,7 +4345,6 @@ pub const Machine = struct {
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
-        entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishForwardedEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window);
     }
@@ -4568,7 +4421,6 @@ pub const Machine = struct {
         caller_stack.setLen(region_base);
         // `moved` now owns the call region (the receiver and callable plus any
         // args not yet transferred into the new frame).
-        defer for (moved) |value| value.free(rt);
 
         // Keep inherited logical units occupied while replacing the physical
         // Entry. The prepared target temporarily occupies the next slot, but
@@ -4598,8 +4450,8 @@ pub const Machine = struct {
             ArgsSource.initMoved(moved, has_receiver),
         );
         // From here through publication there are no fallible operations.
-        // Fold the caller's continuation, arena watermark and profiling
-        // restore level into the target before retiring its values.
+        // Fold the caller's continuation and arena watermark into the target
+        // before retiring its values.
         var continuation = dying.takeContinuation();
         entry.adoptContinuation(&continuation);
         // Generic setup leaves the dead native-caller slot unspecified, and the
@@ -4624,7 +4476,6 @@ pub const Machine = struct {
             },
         }
         entry.arena_mark = dying_arena_mark;
-        entry.profile_guard.adoptRetiredCaller(dying.profile_guard);
 
         dying.deinitForTailReplacement(self.ctx);
         entry.prev = dying_prev;
@@ -4923,7 +4774,6 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .constructor);
         std.debug.assert(dying.continuation_payload == 0);
-        const rt = self.ctx.runtime;
         const fallback = dying.native_caller;
         if (!fallback.isUndefined()) {
             call_runtime.noteConstructorAllocation(dying.frame.function, fallback);
@@ -4944,10 +4794,8 @@ pub const Machine = struct {
         self.top = dying.prev;
         if (fallback.isUndefined()) return result;
         if (result.isObject()) {
-            fallback.free(rt);
             return result;
         }
-        result.free(rt);
         return fallback;
     }
 

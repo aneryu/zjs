@@ -56,7 +56,6 @@ pub const opcode = struct {
     /// Phase-1 scope operand flag: the LHS reference has already selected its
     /// environment, so the fallback put must resolve only the static chain.
     pub const scope_no_dynamic_env_flag: u16 = 0x8000;
-    pub const scope_no_dynamic_env_max_level: u16 = 0x7ffe;
 
     /// One row of opcode metadata (QuickJS `JSOpCode`).
     pub const Info = struct {
@@ -718,10 +717,6 @@ pub const opcode = struct {
         n_push: u8,
         format: Format,
         kind: Kind,
-
-        pub fn stackDelta(self: Metadata) i16 {
-            return @as(i16, self.n_push) - @as(i16, self.n_pop);
-        }
     };
 
     pub const special_object_subtype = struct {
@@ -732,13 +727,6 @@ pub const opcode = struct {
         pub const home_object: u8 = 4;
         pub const var_object: u8 = 5;
         pub const import_meta: u8 = 6;
-        pub const null_proto: u8 = 7;
-        pub const dstr_get: u8 = 8;
-        pub const dstr_elide: u8 = 9;
-        pub const dstr_rest: u8 = 10;
-        pub const dstr_obj_rest: u8 = 11;
-        pub const dstr_close: u8 = 12;
-        pub const dstr_require_iterator: u8 = 13;
     };
 
     /// Final-view lookup, for bytecode after `resolve_labels`: ids in the
@@ -829,19 +817,9 @@ pub const opcode = struct {
         return if (finalInfo(op_id)) |info| info.n_pop else 0;
     }
 
-    /// Stack pop count in phase-1 streams.
-    pub fn nPopOfPhase1(op_id: u8) u8 {
-        return if (phase1Info(op_id)) |info| info.n_pop else 0;
-    }
-
     /// Stack push count in final-form bytecode.
     pub fn nPushOf(op_id: u8) u8 {
         return if (finalInfo(op_id)) |info| info.n_push else 0;
-    }
-
-    /// Stack push count in phase-1 streams.
-    pub fn nPushOfPhase1(op_id: u8) u8 {
-        return if (phase1Info(op_id)) |info| info.n_push else 0;
     }
 
     /// F0a0 (§11.7 D9): the physical half of the declaration source — a
@@ -2839,21 +2817,20 @@ pub const constant = struct {
     const JSValue = @import("core/value.zig").JSValue;
 
     fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        _ = atoms;
-        return value.dup();
+        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
+        return value;
     }
 
     fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        _ = atoms;
+        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
         return value;
     }
 
     fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
-        _ = atoms;
         // A constant-pool BigInt that never reached a published
         // FunctionBytecode is still reserved: nothing else will free it.
         if (bigint_mod.BigInt.destroyIfReservedValue(rt, value)) return;
-        value.free(rt);
+        if (value.asSymbolAtom()) |atom_id| atoms.free(atom_id);
     }
 
     pub const Pool = struct {
@@ -2900,7 +2877,7 @@ pub const constant = struct {
 
         pub fn get(self: Pool, index: usize) ?JSValue {
             if (index >= self.values.len) return null;
-            return self.values[index].dup();
+            return self.values[index];
         }
     };
 };
@@ -2925,7 +2902,7 @@ pub const debug = struct {
             return .{
                 .memory = account,
                 .atoms = atoms,
-                .filename = atoms.dup(filename),
+                .filename = atoms.dupForHolder(filename),
             };
         }
 
@@ -3831,30 +3808,17 @@ pub const function_bytecode = struct {
             assignBit(&self.flag_byte18, byte18_runtime_strict_mask, flags.runtime_strict_mode);
         }
 
-        pub inline fn setFunctionKind(self: *FunctionBytecodeImpl, kind: FunctionKind) void {
-            self.flag_byte17 = (self.flag_byte17 & ~byte17_func_kind_mask) |
-                (@as(u8, @intFromEnum(kind)) << byte17_func_kind_shift);
-        }
         pub inline fn functionKind(self: *const FunctionBytecodeImpl) FunctionKind {
             return @enumFromInt((self.flag_byte17 & byte17_func_kind_mask) >> byte17_func_kind_shift);
         }
-        pub inline fn setHasPrototype(self: *FunctionBytecodeImpl, value: bool) void {
-            assignBit(&self.flag_byte17, byte17_has_prototype_mask, value);
-        }
         pub inline fn hasPrototype(self: *const FunctionBytecodeImpl) bool {
             return bit(self.flag_byte17, byte17_has_prototype_mask);
-        }
-        pub inline fn setHasSimpleParameterList(self: *FunctionBytecodeImpl, value: bool) void {
-            assignBit(&self.flag_byte17, byte17_simple_parameters_mask, value);
         }
         pub inline fn hasSimpleParameterList(self: *const FunctionBytecodeImpl) bool {
             return bit(self.flag_byte17, byte17_simple_parameters_mask);
         }
         pub inline fn isDerivedClassConstructor(self: *const FunctionBytecodeImpl) bool {
             return bit(self.flag_byte17, byte17_derived_constructor_mask);
-        }
-        pub inline fn setIsDerivedClassConstructor(self: *FunctionBytecodeImpl, value: bool) void {
-            assignBit(&self.flag_byte17, byte17_derived_constructor_mask, value);
         }
         pub inline fn needHomeObject(self: *const FunctionBytecodeImpl) bool {
             return bit(self.flag_byte17, byte17_need_home_object_mask);
@@ -4008,7 +3972,7 @@ pub const function_bytecode = struct {
         pub inline fn constantAt(self: *const FunctionBytecodeImpl, index: usize) ?JSValue {
             const values = self.cpoolSlice();
             if (index >= values.len) return null;
-            return values[index].dup();
+            return values[index];
         }
         pub inline fn funcName(self: *const FunctionBytecodeImpl) atom.Atom {
             return self.func_name;
@@ -4263,13 +4227,13 @@ pub const function_bytecode = struct {
             fb.stack_size = options.stack_size;
             fb.var_ref_count = options.var_ref_count;
 
-            fb.func_name = rt.atoms.dup(options.name);
+            fb.func_name = rt.atoms.dupForHolder(options.name);
             if (options.has_debug) {
                 const dbg = fb.debugInfoMut().?;
-                dbg.filename = rt.atoms.dup(if (options.filename == atom.null_atom) options.name else options.filename);
+                dbg.filename = rt.atoms.dupForHolder(if (options.filename == atom.null_atom) options.name else options.filename);
             }
             if (options.script_or_module != atom.null_atom) {
-                fb.hotExtensionRequiredMut().script_or_module = rt.atoms.dup(options.script_or_module);
+                fb.hotExtensionRequiredMut().script_or_module = rt.atoms.dupForHolder(options.script_or_module);
             }
             if (options.realm) |realm| fb.realm = context.RealmRef.retain(realm);
             dupBytecodeAtoms(byte_code, &rt.atoms);
@@ -4408,7 +4372,6 @@ pub const function_bytecode = struct {
             const debug_ptr = self.debugInfoMut();
             const byte_code = layout_value.byteCodeSliceMut(self);
             const vardefs = layout_value.vardefsSliceMut(self);
-            const cpool = layout_value.cpoolSliceMut(self);
             const closure_var = layout_value.closureVarSliceMut(self);
 
             // Small-inline CallerState lives in the hot pad and is found via
@@ -4430,11 +4393,6 @@ pub const function_bytecode = struct {
             // values are released before closure-name atoms and before Realm.
             self.cpool = null;
             self.cpool_count = 0;
-            for (cpool) |*slot| {
-                const value = slot.*;
-                slot.* = JSValue.undefinedValue();
-                value.free(rt);
-            }
 
             // closure_var sized by `closure_var_count`. The former separate
             // `var_ref_names` name array was a redundant mirror of
@@ -4723,21 +4681,20 @@ pub const function_def = struct {
     const compiler = @import("compiler/root.zig");
 
     fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        _ = atoms;
-        return value.dup();
+        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
+        return value;
     }
 
     fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
-        _ = atoms;
+        if (value.asSymbolAtom()) |atom_id| _ = atoms.dup(atom_id);
         return value;
     }
 
     fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
-        _ = atoms;
         // A constant-pool BigInt that never reached a published
         // FunctionBytecode is still reserved: nothing else will free it.
         if (bigint_mod.BigInt.destroyIfReservedValue(rt, value)) return;
-        value.free(rt);
+        if (value.asSymbolAtom()) |atom_id| atoms.free(atom_id);
     }
 
     pub const FunctionKind = function_bytecode_mod.FunctionKind;
@@ -4938,10 +4895,8 @@ pub const function_def = struct {
         super_allowed: bool = false,
         arguments_allowed: bool = false,
         is_derived_class_constructor: bool = false,
-        in_function_body: bool = false,
         need_home_object: bool = false,
         use_short_opcodes: bool = false,
-        has_await: bool = false,
         is_indirect_eval: bool = false,
         /// QuickJS reaches `var_object_test` (qjs:32973) only from binding-walk
         /// events: a `<with>` row on the current chain (qjs:33037-33042), the
@@ -5055,9 +5010,6 @@ pub const function_def = struct {
         source_loc_slots: []pipeline_pc2line.SourceLocSlot = &.{},
         source_loc_capacity: usize = 0,
         source_loc_count: i32 = 0,
-        line_number_last: i32 = 0,
-        line_number_last_pc: i32 = 0,
-        col_number_last: i32 = 0,
 
         // pc2line table
         filename: atom.Atom,
@@ -5648,21 +5600,6 @@ pub const function_def = struct {
             std.debug.assert(used < self.atom_operands_capacity);
             self.atom_operands = self.atom_operands.ptr[0 .. used + 1];
             self.atom_operands[used] = self.atoms.dup(atom_id);
-        }
-
-        /// Append an atom reference whose ownership is transferred by the
-        /// caller.  Used by parser get_lvalue/put_lvalue when the retained
-        /// operand of a removed getter becomes the operand of its setter.
-        pub fn appendAtomOperandOwned(self: *FunctionDefImpl, atom_id: atom.Atom) !void {
-            const tail = try growSliceBy(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity, 1);
-            tail[0] = atom_id;
-        }
-
-        pub fn appendAtomOperandOwnedAssumeCapacity(self: *FunctionDefImpl, atom_id: atom.Atom) void {
-            const used = self.atom_operands.len;
-            std.debug.assert(used < self.atom_operands_capacity);
-            self.atom_operands = self.atom_operands.ptr[0 .. used + 1];
-            self.atom_operands[used] = atom_id;
         }
 
         /// Remove the final operand entry without releasing its atom.  The
@@ -6348,9 +6285,6 @@ pub const binding_rules = struct {
 
     const EVAL_SCOPE_HEAD_BIAS: i32 = -function_bytecode.arg_scope_end;
     const atom_var_object: atom.Atom = atom.ids.var_object; // "<var>"
-    const exact_scope_binding_index_threshold: usize = 64;
-    const ExactScopeBindingIndex = std.AutoHashMapUnmanaged(u64, u16);
-
     const ScopeOperand = struct {
         level: i16,
         no_dynamic_env: bool,
@@ -6438,15 +6372,6 @@ pub const binding_rules = struct {
         /// actual parent miss upgrades it to `.tree` before ancestor links are
         /// consumed.
         scope_link_proof: ScopeLinkProof = .none,
-        /// Immutable sizing/write-pass accelerator built only after topology
-        /// analysis has appended every demand-created local. The linked scope
-        /// chain remains authoritative for outer-scope, with, and argument-
-        /// environment ordering.
-        exact_scope_bindings: ExactScopeBindingIndex = .empty,
-        exact_scope_binding_var_count: ?usize = null,
-        exact_scope_binding_scope_count: ?usize = null,
-        exact_scope_binding_topology_fingerprint: ?u64 = null,
-
         pub fn init(function: *bytecode_function.Bytecode) JSContext {
             return .{
                 .function = function,
@@ -6490,121 +6415,6 @@ pub const binding_rules = struct {
                 maybe_parent = parent.parent;
             }
             self.scope_link_proof = .tree;
-        }
-
-        fn exactScopeBindingKey(scope_level: i32, atom_id: atom.Atom) ?u64 {
-            if (scope_level < 0) return null;
-            return (@as(u64, @intCast(scope_level)) << 32) | atom_id;
-        }
-
-        fn mixExactScopeTopologyFingerprint(fingerprint: *u64, value: anytype) void {
-            var stable_value = value;
-            fingerprint.* = std.hash.Wyhash.hash(fingerprint.*, std.mem.asBytes(&stable_value));
-        }
-
-        /// Snapshot every field which can change exact-scope lookup order.
-        /// Validation runs before the lowered buffers are published, so a
-        /// future post-index topology write fails closed instead of committing
-        /// output produced from stale cached indices.
-        fn exactScopeTopologyFingerprint(fd: *const function_def_mod.FunctionDef) u64 {
-            var fingerprint: u64 = 0;
-            mixExactScopeTopologyFingerprint(&fingerprint, fd.scopes.len);
-            mixExactScopeTopologyFingerprint(&fingerprint, fd.vars.len);
-            for (fd.scopes) |scope| {
-                mixExactScopeTopologyFingerprint(&fingerprint, scope.first);
-            }
-            for (fd.vars) |vd| {
-                mixExactScopeTopologyFingerprint(&fingerprint, vd.var_name);
-                mixExactScopeTopologyFingerprint(&fingerprint, vd.scope_level);
-                mixExactScopeTopologyFingerprint(&fingerprint, vd.scope_next);
-            }
-            return fingerprint;
-        }
-
-        fn prepareExactScopeBindingIndex(self: *JSContext) Error!void {
-            const fd = self.function_def orelse return;
-            if (fd.vars.len < exact_scope_binding_index_threshold) return;
-            if (fd.vars.len > std.math.maxInt(u16)) return error.BytecodeOverflow;
-            errdefer self.deinitExactScopeBindingIndex();
-            try self.exact_scope_bindings.ensureTotalCapacity(
-                self.memory.allocator,
-                @intCast(fd.vars.len),
-            );
-
-            // Index only the exact-scope prefix rooted at each authoritative
-            // scopes[].first chain. An inherited head belongs to an outer
-            // scope, and scope-0 pseudo/function rows appended with appendVar
-            // are intentionally absent from this chain. The first matching
-            // row is the newest declaration and must win on duplicates.
-            for (fd.scopes, 0..) |scope, scope_index| {
-                var index = scope.first;
-                var visited: usize = 0;
-                while (index >= 0) {
-                    if (@as(usize, @intCast(index)) >= fd.vars.len or visited >= fd.vars.len) {
-                        return error.InvalidBytecode;
-                    }
-                    visited += 1;
-                    const local_index: usize = @intCast(index);
-                    const vd = fd.vars[local_index];
-                    if (vd.scope_level != @as(i32, @intCast(scope_index))) break;
-                    const key = exactScopeBindingKey(vd.scope_level, vd.var_name).?;
-                    if (!self.exact_scope_bindings.contains(key)) {
-                        self.exact_scope_bindings.putAssumeCapacity(key, @intCast(local_index));
-                    }
-                    index = vd.scope_next;
-                }
-            }
-            self.exact_scope_binding_var_count = fd.vars.len;
-            self.exact_scope_binding_scope_count = fd.scopes.len;
-            self.exact_scope_binding_topology_fingerprint = exactScopeTopologyFingerprint(fd);
-        }
-
-        fn deinitExactScopeBindingIndex(self: *JSContext) void {
-            self.exact_scope_bindings.deinit(self.memory.allocator);
-            self.exact_scope_bindings = .empty;
-            self.exact_scope_binding_var_count = null;
-            self.exact_scope_binding_scope_count = null;
-            self.exact_scope_binding_topology_fingerprint = null;
-        }
-
-        fn exactScopeBinding(
-            self: *const JSContext,
-            fd: *const function_def_mod.FunctionDef,
-            atom_id: atom.Atom,
-            scope_level: i32,
-        ) ?u16 {
-            const indexed_var_count = self.exact_scope_binding_var_count orelse return null;
-            const indexed_scope_count = self.exact_scope_binding_scope_count orelse return null;
-            // A future post-topology append must never consult stale indices.
-            // The caller falls back to the semantic linked-chain path and run()
-            // also rejects any topology drift before publishing output.
-            if (fd.vars.len != indexed_var_count or fd.scopes.len != indexed_scope_count) return null;
-            if (scope_level < 0 or @as(usize, @intCast(scope_level)) >= fd.scopes.len) return null;
-            const head = fd.scopes[@intCast(scope_level)].first;
-            if (head < 0 or @as(usize, @intCast(head)) >= fd.vars.len) return null;
-            // An empty scope inherits its parent's head. Such a scope must use
-            // the full chain so nearest-binding and ARG_SCOPE_END semantics
-            // remain solely defined by the existing representation.
-            if (fd.vars[@intCast(head)].scope_level != scope_level) return null;
-            const key = exactScopeBindingKey(scope_level, atom_id) orelse return null;
-            const index = self.exact_scope_bindings.get(key) orelse return null;
-            if (index >= fd.vars.len) return null;
-            const vd = fd.vars[index];
-            if (vd.scope_level != scope_level or vd.var_name != atom_id) return null;
-            return index;
-        }
-
-        fn validateExactScopeBindingVersion(self: *const JSContext) Error!void {
-            const indexed_var_count = self.exact_scope_binding_var_count orelse return;
-            const indexed_scope_count = self.exact_scope_binding_scope_count orelse return error.InvalidBytecode;
-            const indexed_fingerprint = self.exact_scope_binding_topology_fingerprint orelse return error.InvalidBytecode;
-            const fd = self.function_def orelse return error.NoFunctionDef;
-            if (fd.vars.len != indexed_var_count or
-                fd.scopes.len != indexed_scope_count or
-                exactScopeTopologyFingerprint(fd) != indexed_fingerprint)
-            {
-                return error.InvalidBytecode;
-            }
         }
     };
 
@@ -7493,7 +7303,6 @@ pub const binding_rules = struct {
     /// directly; losing it here used to make V2 walk the same chain again on
     /// every miss merely to decide whether formal arguments are visible.
     inline fn resolveScopeVarLookupImpl(
-        comptime use_exact_scope_index: bool,
         comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
         atom_id: u32,
@@ -7501,9 +7310,6 @@ pub const binding_rules = struct {
     ) ScopeVarLookup {
         const fd = ctx.function_def orelse return .{};
         if (scope_level < 0 or @as(usize, @intCast(scope_level)) >= fd.scopes.len) return .{};
-        if (comptime use_exact_scope_index) {
-            if (ctx.exactScopeBinding(fd, atom_id, scope_level)) |idx| return .{ .local = idx };
-        }
         if (comptime trust_final_scope_links) std.debug.assert(ctx.scope_link_proof != .none);
         var idx = fd.scopes[@intCast(scope_level)].first;
         var visited: usize = 0;
@@ -7531,14 +7337,12 @@ pub const binding_rules = struct {
     }
 
     inline fn resolveScopeVarImpl(
-        comptime use_exact_scope_index: bool,
         comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
         atom_id: u32,
         scope_level: i32,
     ) ?u16 {
         return resolveScopeVarLookupImpl(
-            use_exact_scope_index,
             trust_final_scope_links,
             ctx,
             atom_id,
@@ -7547,7 +7351,7 @@ pub const binding_rules = struct {
     }
 
     inline fn resolveScopeVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
-        return resolveScopeVarImpl(true, false, ctx, atom_id, scope_level);
+        return resolveScopeVarImpl(false, ctx, atom_id, scope_level);
     }
 
     const LocalOrArg = union(enum) {
@@ -7567,7 +7371,6 @@ pub const binding_rules = struct {
     };
 
     inline fn resolveLocalOrArgImpl(
-        comptime use_exact_scope_index: bool,
         comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
         atom_id: u32,
@@ -7575,7 +7378,6 @@ pub const binding_rules = struct {
     ) ?LocalOrArg {
         const fd = ctx.function_def orelse return null;
         const lookup = resolveScopeVarLookupImpl(
-            use_exact_scope_index,
             trust_final_scope_links,
             ctx,
             atom_id,
@@ -7598,7 +7400,7 @@ pub const binding_rules = struct {
     }
 
     inline fn resolveLocalOrArg(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?LocalOrArg {
-        return resolveLocalOrArgImpl(true, false, ctx, atom_id, scope_level);
+        return resolveLocalOrArgImpl(false, ctx, atom_id, scope_level);
     }
 
     const EvalVarObjectProbe = union(enum) {
@@ -8995,7 +8797,6 @@ pub const binding_rules = struct {
     /// row is appended in child-finalization/bytecode encounter order.  The
     /// returned identity is the row that the same QuickJS walk just selected.
     inline fn resolveBindingTopologyResultImpl(
-        comptime use_exact_scope_index: bool,
         comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
@@ -9003,7 +8804,6 @@ pub const binding_rules = struct {
     ) Error!ScopeVarBinding {
         if (scope_level >= 0) {
             if (resolveLocalOrArgImpl(
-                use_exact_scope_index,
                 trust_final_scope_links,
                 ctx,
                 atom_id,
@@ -9023,21 +8823,19 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
-        return resolveBindingTopologyResultImpl(true, false, ctx, atom_id, scope_level);
+        return resolveBindingTopologyResultImpl(false, ctx, atom_id, scope_level);
     }
 
     /// Complete the binding classification needed by ordinary scope-var
     /// lowering. Module lexical precedence and sloppy-eval locals are action
     /// semantics, so normalize them once here rather than in a later lookup.
     fn resolveScopeVarBindingTopologyImpl(
-        comptime use_exact_scope_index: bool,
         comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
         const discovered = try resolveBindingTopologyResultImpl(
-            use_exact_scope_index,
             trust_final_scope_links,
             ctx,
             atom_id,
@@ -9068,7 +8866,7 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
-        return resolveScopeVarBindingTopologyImpl(true, false, ctx, atom_id, scope_level);
+        return resolveScopeVarBindingTopologyImpl(false, ctx, atom_id, scope_level);
     }
 
     const ScopeVarBindingKind = enum(u8) {
@@ -9155,7 +8953,6 @@ pub const binding_rules = struct {
     };
 
     inline fn resolveScopeVarPlanImpl(
-        comptime use_exact_scope_index: bool,
         comptime trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
@@ -9165,7 +8962,7 @@ pub const binding_rules = struct {
         const discovered = try @call(
             .always_inline,
             resolveBindingTopologyResultImpl,
-            .{ use_exact_scope_index, trust_final_scope_links, ctx, atom_id, scope_level },
+            .{ trust_final_scope_links, ctx, atom_id, scope_level },
         );
         const binding: ScopeVarBinding = if (scope_level < 0)
             .{ .global = try ensureGlobalClosureVar(ctx, atom_id) }
@@ -9197,7 +8994,7 @@ pub const binding_rules = struct {
         scope_level: i32,
         op_id: u8,
     ) Error!ResolvedScopeVarPlan {
-        return resolveScopeVarPlanImpl(true, false, ctx, atom_id, scope_level, op_id);
+        return resolveScopeVarPlanImpl(false, ctx, atom_id, scope_level, op_id);
     }
 
     inline fn resolveScopeVarPlanV2(
@@ -9206,7 +9003,7 @@ pub const binding_rules = struct {
         scope_level: i32,
         op_id: u8,
     ) Error!ResolvedScopeVarPlan {
-        return resolveScopeVarPlanImpl(false, true, ctx, atom_id, scope_level, op_id);
+        return resolveScopeVarPlanImpl(true, ctx, atom_id, scope_level, op_id);
     }
 
     fn resolveBindingTopology(ctx: *JSContext, atom_id: atom.Atom, scope_level: i32) Error!void {
@@ -9214,7 +9011,7 @@ pub const binding_rules = struct {
     }
 
     inline fn resolveBindingTopologyV2(ctx: *JSContext, atom_id: atom.Atom, scope_level: i32) Error!void {
-        _ = try resolveBindingTopologyResultImpl(false, true, ctx, atom_id, scope_level);
+        _ = try resolveBindingTopologyResultImpl(true, ctx, atom_id, scope_level);
     }
 
     inline fn resolveScopeVarBindingTopologyV2(
@@ -9222,7 +9019,7 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
         scope_level: i32,
     ) Error!ScopeVarBinding {
-        return resolveScopeVarBindingTopologyImpl(false, true, ctx, atom_id, scope_level);
+        return resolveScopeVarBindingTopologyImpl(true, ctx, atom_id, scope_level);
     }
 
     const PrivateBindingOwner = struct {
@@ -9387,7 +9184,6 @@ pub const binding_rules = struct {
         pub const writeEvalVarObjectProbeAccessor = binding_rules.writeEvalVarObjectProbeAccessor;
         pub const localWithProbeIteratorInit = LocalWithProbeIterator.init;
         pub const localWithProbeIteratorNext = LocalWithProbeIterator.next;
-        pub const closureDynamicEnvProbeIteratorInit = ClosureDynamicEnvProbeIterator.init;
         pub const closureDynamicEnvProbeIteratorInitResolved = binding_rules.closureDynamicEnvProbeIteratorInitResolved;
         pub const closureDynamicEnvProbeIteratorNext = ClosureDynamicEnvProbeIterator.next;
         pub const staticBindingStopsDynamicEnvProbes = binding_rules.staticBindingStopsDynamicEnvProbes;
@@ -9834,11 +9630,6 @@ pub const pipeline_stack_size = struct {
         if (bytecode[catch_idx] != opcode.op.@"catch") level += 1;
         if (catch_level == level) return catch_pos_tab[catch_idx];
         return catch_pos;
-    }
-
-    fn relTarget(pos: u32, operand_offset: u32, diff: i32) u32 {
-        const base: i64 = @as(i64, pos) + @as(i64, operand_offset);
-        return @intCast(base + diff);
     }
 
     test "stack_size: empty bytecode is reachable falloff" {
@@ -10775,6 +10566,7 @@ pub const pipeline_finalize = struct {
 
         for (fd.cpool, cpool) |*source, *out| {
             out.* = source.*;
+            if (source.*.asSymbolAtom()) |atom_id| fd.atoms.free(atom_id);
             source.* = JSValue.undefinedValue();
         }
         fd.cpool_count = 0;
@@ -11032,7 +10824,7 @@ pub const pipeline_finalize = struct {
         }
         for (fd.vars, 0..) |v, idx| {
             vardefs[idx] = fb_mod.BytecodeVarDef.fromCompile(v, v.scope_next);
-            vardefs[idx].var_name = function.atoms.dup(v.var_name);
+            vardefs[idx].var_name = function.atoms.dupForHolder(v.var_name);
             initialized += 1;
         }
         function.vardefs = vardefs;
@@ -11055,7 +10847,7 @@ pub const pipeline_finalize = struct {
         }
         for (fd.args, argdefs) |arg, *out| {
             out.* = fb_mod.BytecodeVarDef.fromCompile(arg, arg.scope_next);
-            out.var_name = function.atoms.dup(arg.var_name);
+            out.var_name = function.atoms.dupForHolder(arg.var_name);
             initialized += 1;
         }
         function.argdefs = argdefs;
@@ -11086,9 +10878,9 @@ pub const pipeline_finalize = struct {
             function.memory.free(fb_mod.BytecodeClosureVar, closure_var);
         }
         for (fd.closure_var, 0..) |cv, idx| {
-            names[idx] = fd.atoms.dup(cv.var_name);
+            names[idx] = fd.atoms.dupForHolder(cv.var_name);
             closure_var[idx] = cv;
-            closure_var[idx].var_name = fd.atoms.dup(cv.var_name);
+            closure_var[idx].var_name = fd.atoms.dupForHolder(cv.var_name);
             initialized += 1;
             initialized_closure += 1;
         }
@@ -11139,12 +10931,11 @@ pub const pipeline_finalize = struct {
             const fb_slice = try createFunctionBytecodeAfterChildren(current, compile_context, disasm_enabled);
             const fb = &fb_slice[0];
             const value = JSValue.functionBytecode(&fb.header);
-            var value_owned = true;
-            errdefer if (value_owned) value.free(rt);
             const old_value = parent.cpool[idx];
             parent.cpool[idx] = value;
-            value_owned = false;
-            old_value.free(rt);
+            if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {
+                if (old_value.asSymbolAtom()) |atom_id| parent.atoms.free(atom_id);
+            }
         }
     }
 
@@ -11248,12 +11039,6 @@ const function_mod = struct {
         } else if (items.len != 0) {
             mem.free(atom.Atom, items);
         }
-    }
-
-    fn freeOwnedSlice(comptime T: type, mem: *memory.MemoryAccount, slot: *[]T) void {
-        const items = slot.*;
-        slot.* = &.{};
-        if (items.len != 0) mem.free(T, items);
     }
 
     pub const Flags = packed struct(u16) {
@@ -11655,31 +11440,6 @@ const function_mod = struct {
             tail[0] = .{ .pc = pc, .line_num = line_num, .col_num = col_num };
         }
 
-        /// Remap source slots after final layout and discard entries that no
-        /// longer precede an emitted opcode. QuickJS only calls
-        /// `add_pc2line_info` before live output instructions; line markers in
-        /// an unreachable suffix update its scanner state but do not create a
-        /// pc2line record at bytecode end. Compact in place so this remains
-        /// allocation-free at the resolve_labels commit boundary.
-        pub fn remapSourceLocsBeforeEnd(
-            self: *BytecodeImpl,
-            old_to_new_pc: []const usize,
-            new_code_len: usize,
-        ) void {
-            if (self.source_loc_slots.len == 0) return;
-            var write_index: usize = 0;
-            for (self.source_loc_slots) |slot| {
-                var remapped = slot;
-                if (slot.pc < old_to_new_pc.len) {
-                    remapped.pc = @intCast(old_to_new_pc[slot.pc]);
-                }
-                if (@as(usize, remapped.pc) >= new_code_len) continue;
-                self.source_loc_slots[write_index] = remapped;
-                write_index += 1;
-            }
-            self.source_loc_slots = self.source_loc_slots.ptr[0..write_index];
-        }
-
         /// Root-bytecode counterpart of FunctionDef.truncateSourceLocs.
         pub fn truncateSourceLocs(self: *BytecodeImpl, target_len: usize) void {
             std.debug.assert(target_len <= self.source_loc_slots.len);
@@ -11769,19 +11529,6 @@ const function_mod = struct {
             std.debug.assert(used < self.atom_operands_capacity);
             self.atom_operands = self.atom_operands.ptr[0 .. used + 1];
             self.atom_operands[used] = self.atoms.dup(atom_id);
-        }
-
-        /// Root-bytecode counterpart of FunctionDef.appendAtomOperandOwned.
-        pub fn retainAtomOperandOwned(self: *BytecodeImpl, atom_id: atom.Atom) !void {
-            const tail = try growSliceBy(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity, 1);
-            tail[0] = atom_id;
-        }
-
-        pub fn retainAtomOperandOwnedAssumeCapacity(self: *BytecodeImpl, atom_id: atom.Atom) void {
-            const used = self.atom_operands.len;
-            std.debug.assert(used < self.atom_operands_capacity);
-            self.atom_operands = self.atom_operands.ptr[0 .. used + 1];
-            self.atom_operands[used] = atom_id;
         }
 
         /// Root-bytecode counterpart of FunctionDef.takeLastAtomOperand.
@@ -12079,17 +11826,6 @@ pub const dump = struct {
         /// When true, also dump the raw bytes of each instruction.
         show_raw_bytes: bool = false,
     };
-
-    /// Walk `bc.code` and emit a one-instruction-per-line listing into
-    /// `writer`. Unknown opcode ids are printed as `?<id>` and the walker
-    /// advances by 1 byte so the dump is robust to malformed input.
-    pub fn dumpBytecode(
-        writer: *std.Io.Writer,
-        bc: *const function_mod.Bytecode,
-        opts: Options,
-    ) !void {
-        return dumpArtifact(writer, bc.atoms, bc.name, bc.arg_count, bc.var_count, bc.stack_size, bc.code, bc.constants.values.len, opts);
-    }
 
     /// Dump the canonical finalized execution record directly. The atom table
     /// is supplied by the owning Runtime; FunctionBytecode intentionally does

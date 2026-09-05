@@ -42,13 +42,6 @@ pub fn element(name: []const u8) ?Element {
     return null;
 }
 
-pub fn elementFromKind(kind: u8) ?Element {
-    for (concrete) |entry| {
-        if (entry.element.kind == kind) return entry.element;
-    }
-    return null;
-}
-
 pub fn nameFromKind(kind: u8) ?[]const u8 {
     for (concrete) |entry| {
         if (entry.element.kind == kind) return entry.name;
@@ -72,5 +65,4 @@ test "typed array concrete names map to stable element sizes and kinds" {
     try testing.expect(isConcrete("Float64Array"));
     try testing.expect(!isConcrete("TypedArray"));
     try testing.expect(element("ArrayBuffer") == null);
-    try testing.expect(elementFromKind(0) == null);
 }

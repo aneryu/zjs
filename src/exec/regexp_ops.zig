@@ -58,17 +58,6 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
-    const id = prototypeMethodId(name) orelse return null;
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.to_string),
-        @intFromEnum(PrototypeMethod.test_),
-        @intFromEnum(PrototypeMethod.exec),
-        => decodePrototypeMethodId(id),
-        else => null,
-    };
-}
-
 pub fn decodePrototypeMethodId(id: u32) ?u32 {
     return switch (id) {
         @intFromEnum(PrototypeMethod.to_string) => 1,
@@ -274,9 +263,7 @@ fn regexpCall(
             // global; observable calls receive it through `callable_realm`.
             const active_global = callable_global orelse return error.TypeError;
             const pattern = if (args.len >= 1) args[0] else try createStringValue(rt, "");
-            defer if (args.len < 1) pattern.free(rt);
             const flags = if (args.len >= 2) args[1] else try createStringValue(rt, "");
-            defer if (args.len < 2) flags.free(rt);
             return constructWithPrototypeInRealm(rt, active_global, pattern, flags, host_call.new_target);
         }
         const active_global = callable_global orelse return error.TypeError;
@@ -343,7 +330,6 @@ fn regexpFlagsAccessorCall(
             host_call.caller_function,
             host_call.caller_frame,
         );
-        defer value.free(native_ctx.runtime);
         if (coercion_ops.valueTruthy(value)) {
             str[count] = flag_char;
             count += 1;
@@ -483,7 +469,6 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
     if (flags.isUndefined()) {
         if (regexpObjectFromValue(pattern)) |regexp_object| {
             const source_val = try getInternalSource(regexp_object);
-            defer source_val.free(rt);
             const bytecode = regexp_object.regexpCompiledBytecode();
             if (bytecode.len == 0) return error.TypeError;
             return constructCompiled(rt, realm_global, source_val, bytecode, prototype);
@@ -495,9 +480,6 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
     var root_frame = core.runtime.rootValues(.{ &source_val, &flags_val });
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
-
-    defer source_val.free(rt);
-    defer flags_val.free(rt);
 
     const pattern_object = regexpObjectFromValue(pattern);
     source_val = if (pattern_object) |regexp_object|
@@ -521,7 +503,7 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
 }
 
 fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    if (value.isString()) return value.dup();
+    if (value.isString()) return value;
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, value);
@@ -637,16 +619,10 @@ test "constructCompiled roots string source while creating regexp object" {
     defer rt.setGCThreshold(old_threshold);
 
     const regexp_value = try constructCompiled(rt, null, source_value, compiled.bytecode, null);
-    var regexp_alive = true;
-    defer if (regexp_alive) regexp_value.free(rt);
     const regexp = regexpObjectFromValue(regexp_value) orelse return error.TypeError;
 
     try std.testing.expect(regexp.regexpSource().?.same(source_value));
     try std.testing.expect(regexp.regexpCompiledBytecode().len != 0);
-
-    regexp_value.free(rt);
-    regexp_alive = false;
-    source_value.free(rt);
 }
 
 /// Pattern/flags early-error validation lives in `libs/regexp.zig`
@@ -813,7 +789,6 @@ fn isUnicodeSyntaxEscape(ch: u8) bool {
 // scanClassForDescendingRange / hasUnicodeClassEscapeRange / invalidUnicodeEscape)
 // keep a single source of truth in core.
 pub const classMatchesUtf16Unit = core.regexp.classMatchesUtf16Unit;
-const ClassRangeAtom = core.regexp.ClassRangeAtom;
 const readClassRangeAtom = core.regexp.readClassRangeAtom;
 const isCharacterClassEscape = core.regexp.isCharacterClassEscape;
 const consumeUnicodePropertyEscape = core.regexp.consumeUnicodePropertyEscape;
@@ -998,7 +973,6 @@ pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u
     const object = try expectRegExpObject(object_value);
     if (std.mem.eql(u8, name, "source")) {
         const source = try getInternalSource(object);
-        defer source.free(rt);
         return escapedSource(rt, source);
     }
     const flag_bits = try regexpFlagBits(object);
@@ -1012,7 +986,7 @@ pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u
 }
 
 fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
-    if (regexpSourceCanReturnRaw(source)) return source.dup();
+    if (regexpSourceCanReturnRaw(source)) return source;
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, source);
@@ -1110,7 +1084,6 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
 
 fn toString(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     const source = try getInternalSource(object);
-    defer source.free(rt);
     const flag_bits = try regexpFlagBits(object);
 
     var buffer = std.ArrayList(u8).empty;
@@ -1152,7 +1125,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     // string. RegExp `flags` reaches this case for every flagless receiver, so
     // allocating a fresh zero-length body here adds an alloc/free pair to
     // `@@split` before the sticky flag is appended.
-    if (bytes.len == 0) return (try rt.emptyString()).value().dup();
+    if (bytes.len == 0) return (try rt.emptyString()).value();
     const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
@@ -1161,7 +1134,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 }
 
 fn getInternalSource(object: *core.Object) !core.JSValue {
-    return (object.regexpSource() orelse return error.TypeError).dup();
+    return (object.regexpSource() orelse return error.TypeError);
 }
 
 fn getInternalFlags(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {

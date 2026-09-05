@@ -84,7 +84,6 @@ pub fn callDateStaticBody(
 /// body through the table (the spec captures `t` before coercing setter args).
 fn captureDateValueMs(ctx: *core.JSContext, this_value: core.JSValue) !f64 {
     const captured_value = try callDateBody(ctx, this_value, 1, &.{});
-    defer captured_value.free(ctx.runtime);
     return value_ops.numberValue(captured_value) orelse std.math.nan(f64);
 }
 
@@ -141,7 +140,6 @@ pub fn dateSetYear(
     const captured_ms = try captureDateValueMs(ctx, this_value);
     const year_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const year_value = try coercion_ops.toNumberForDateMethod(ctx, output, global, year_input, caller_function, caller_frame);
-    defer year_value.free(ctx.runtime);
     const year_number = value_ops.numberValue(year_value) orelse std.math.nan(f64);
     return try callDateSetYearWithCapturedMs(ctx, this_value, captured_ms, year_number);
 }
@@ -159,7 +157,6 @@ pub fn dateSetTime(
     if (object.class_id != core.class.ids.date) return null;
     const time_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const time_value = try coercion_ops.toNumberForDateMethod(ctx, output, global, time_input, caller_function, caller_frame);
-    defer time_value.free(ctx.runtime);
     return try callDateBody(ctx, this_value, 24, &.{time_value});
 }
 
@@ -177,9 +174,6 @@ pub fn dateStaticCall(
     if (method_id != 1) return null;
     var coerced_args: [7]core.JSValue = undefined;
     var coerced_len: usize = 0;
-    defer {
-        for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
-    }
     while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
@@ -217,9 +211,6 @@ pub fn dateCapturedSetterCall(
     };
     var coerced_args: [4]core.JSValue = undefined;
     var coerced_len: usize = 0;
-    defer {
-        for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
-    }
     while (coerced_len < args.len and coerced_len < field_count) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
@@ -240,16 +231,13 @@ pub fn dateToJsonCall(
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
 
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, this_value);
-    defer primitive.free(ctx.runtime);
     if (primitive.isNumber()) {
         const number = value_ops.numberValue(primitive) orelse std.math.nan(f64);
         if (!std.math.isFinite(number)) return core.JSValue.nullValue();
     }
 
-    const key = try ctx.runtime.internAtom("toISOString");
-    defer ctx.runtime.atoms.free(key);
+    const key = core.atom.ids.toISOString;
     const method = try object_ops.getValueProperty(ctx, output, global, this_value, key, caller_function, caller_frame);
-    defer method.free(ctx.runtime);
     if (!call_runtime.isCallableValue(method)) return error.TypeError;
     return try call_runtime.callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
@@ -267,33 +255,26 @@ pub fn dateConstructWithPrototype(
         if (object_ops.objectFromValue(args[0])) |object| {
             if (object.class_id == core.class.ids.date) {
                 const time_value = try callDateBody(ctx, args[0], 1, &.{});
-                defer time_value.free(ctx.runtime);
                 return constructDateRecord(ctx, prototype, &.{time_value});
             }
 
             const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
-            defer primitive.free(ctx.runtime);
             if (primitive.isString()) return constructDateRecord(ctx, prototype, &.{primitive});
             // JS_ToFloat64Free on a bigint primitive throws (qjs
             // js_date_constructor single-arg branch).
             if (primitive.isBigInt()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
             const number = try value_ops.toNumberValue(ctx.runtime, primitive);
-            defer number.free(ctx.runtime);
             return constructDateRecord(ctx, prototype, &.{number});
         }
 
         if (args[0].isString()) return constructDateRecord(ctx, prototype, args);
         if (args[0].isBigInt()) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
         const number = try value_ops.toNumberValue(ctx.runtime, args[0]);
-        defer number.free(ctx.runtime);
         return constructDateRecord(ctx, prototype, &.{number});
     }
 
     var coerced_args: [7]core.JSValue = undefined;
     var coerced_len: usize = 0;
-    defer {
-        for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
-    }
     while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
     }
@@ -340,11 +321,11 @@ fn dateOrdinaryToPrimitive(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (string_first) {
-        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
-        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, core.atom.ids.toString, caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, core.atom.ids.valueOf, caller_function, caller_frame)) |primitive| return primitive;
     } else {
-        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
-        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, core.atom.ids.valueOf, caller_function, caller_frame)) |primitive| return primitive;
+        if (try object_ops.callObjectToPrimitiveMethod(ctx, output, global, receiver, core.atom.ids.toString, caller_function, caller_frame)) |primitive| return primitive;
     }
     return error.TypeError;
 }
@@ -539,9 +520,6 @@ fn dateCall(
         const active_global = callable_global orelse return error.TypeError;
         var coerced_args: [7]core.JSValue = undefined;
         var coerced_len: usize = 0;
-        defer {
-            for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
-        }
         while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
             coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, active_global, args[coerced_len], null, null);
         }
@@ -557,7 +535,6 @@ fn dateCall(
         const active_global = callable_global orelse return error.TypeError;
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const string_value = try string_ops.toStringForAnnexB(ctx, output, active_global, input, caller_function, caller_frame);
-        defer string_value.free(ctx.runtime);
         return core.JSValue.float64(try parseDateString(ctx.runtime, string_value));
     }
     if (decodeExtendedPrototypeMethodId(id)) |method_id| {
@@ -631,9 +608,6 @@ fn dateExtendedPrototypeCall(
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
         var coerced_args: [4]core.JSValue = undefined;
         var coerced_len: usize = 0;
-        defer {
-            for (coerced_args[0..coerced_len]) |value| value.free(rt);
-        }
         const coerce_count = @min(args.len, span.end - span.first);
         while (coerced_len < coerce_count) : (coerced_len += 1) {
             coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
@@ -948,7 +922,6 @@ fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     if (input.isString()) return core.JSValue.float64(try parseDateString(rt, input));
     if (input.isObject()) return core.JSValue.float64(std.math.nan(f64));
     const string_value = try value_ops.toStringValue(rt, input);
-    defer string_value.free(rt);
     return core.JSValue.float64(try parseDateString(rt, string_value));
 }
 
@@ -1761,11 +1734,9 @@ fn expectDateObject(value: core.JSValue) !*core.Object {
     return object;
 }
 
-fn setDateValue(rt: *core.JSRuntime, object: *core.Object, ms: f64) !void {
+fn setDateValue(_: *core.JSRuntime, object: *core.Object, ms: f64) !void {
     const slot = object.objectDataSlot();
-    const old_value = slot.*;
     slot.* = core.JSValue.float64(ms);
-    if (old_value) |stored| stored.free(rt);
 }
 
 fn dateValue(object: *const core.Object) !f64 {

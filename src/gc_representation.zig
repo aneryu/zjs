@@ -9,22 +9,14 @@ const zjs = @import("zjs");
 const core = zjs.core;
 const gc = core.gc;
 
-fn boolText(value: bool) []const u8 {
-    return if (value) "yes" else "no";
-}
-
 fn kindContract(comptime kind: gc.GcKind) []const u8 {
-    const heap_descriptor = gc.refKindDescriptor(kind);
     const descriptor = gc.representationKindDescriptor(kind);
     return std.fmt.comptimePrint(
-        "kind.{s} tag={d} prefix={s} allocation={s} registry={s} rc={s}\n",
+        "kind.{s} tag={d} allocation={s} registry=yes\n",
         .{
             @tagName(kind),
             @intFromEnum(kind),
-            @tagName(descriptor.prefix),
             @tagName(descriptor.allocation),
-            boolText(heap_descriptor.cycle_candidate),
-            @tagName(descriptor.ref_count),
         },
     );
 }
@@ -73,12 +65,12 @@ fn shapeLayout() []const u8 {
 
 fn stringLayouts() []const u8 {
     return std.fmt.comptimePrint(
-        "string_flat size={d} align={d} rc_prefix={d} len_meta={d} hash_meta={d} atom_id={d} fam={d}\n" ++
-            "string_rope size={d} align={d} rc_prefix={d} left={d} right={d} rt={d} len={d} depth={d} wide={d} flags={d}\n",
+        "string_flat size={d} align={d} metadata_prefix={d} len_meta={d} hash_meta={d} atom_id={d} fam={d}\n" ++
+            "string_rope size={d} align={d} metadata_prefix={d} left={d} right={d} rt={d} len={d} depth={d} wide={d}\n",
         .{
-            @sizeOf(core.string.String),                @alignOf(core.string.String),              core.gc.string_prefix_size,              @offsetOf(core.string.String, "len_meta"), @offsetOf(core.string.String, "hash_meta"), @offsetOf(core.string.String, "atom_id"), @sizeOf(core.string.String),
-            @sizeOf(core.string.StringRope),            @alignOf(core.string.StringRope),          core.string.StringRope.rc_prefix_size,      @offsetOf(core.string.StringRope, "left"), @offsetOf(core.string.StringRope, "right"), @offsetOf(core.string.StringRope, "rt"),  @offsetOf(core.string.StringRope, "len"),
-            @offsetOf(core.string.StringRope, "depth"), @offsetOf(core.string.StringRope, "wide"), @offsetOf(core.string.StringRope, "flags"),
+            @sizeOf(core.string.String),                @alignOf(core.string.String),              core.gc.string_prefix_size,                  @offsetOf(core.string.String, "len_meta"), @offsetOf(core.string.String, "hash_meta"), @offsetOf(core.string.String, "atom_id"), @sizeOf(core.string.String),
+            @sizeOf(core.string.StringRope),            @alignOf(core.string.StringRope),          core.string.StringRope.metadata_prefix_size, @offsetOf(core.string.StringRope, "left"), @offsetOf(core.string.StringRope, "right"), @offsetOf(core.string.StringRope, "rt"),  @offsetOf(core.string.StringRope, "len"),
+            @offsetOf(core.string.StringRope, "depth"), @offsetOf(core.string.StringRope, "wide"),
         },
     );
 }
@@ -112,7 +104,7 @@ fn activeHeaderLayout() []const u8 {
 }
 
 fn lifetimeSemantics() []const u8 {
-    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/reserved:u8 for trace carriers; Shape/Realm RC lives in body; BigInt keeps i32 rc\n";
+    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/reserved:u8 for all carriers\n";
 }
 
 pub const snapshot_text =
@@ -123,16 +115,13 @@ pub const snapshot_text =
     metadataLayout() ++
     activeHeaderLayout() ++
     std.fmt.comptimePrint(
-        "StringHeader size={d} rc_payload_delta=-{d}\n" ++
-            "AllocInfo class_mask=0x{x:0>2} large=0x{x:0>2} accounted=0x{x:0>2} standalone=0x{x:0>2}\n" ++
+        "AllocInfo class_mask=0x{x:0>2} reserved=0x{x:0>2} accounted=0x{x:0>2} standalone=0x{x:0>2}\n" ++
             "BlockFlags kind_mask=0x07 mark=0x08 young=0x10 finalizing=0x20 pinned=0x40 cycle_visited=0x80\n" ++
             "carrier block_cell_class=0x{x:0>2} slab_class_range=0..{d} standalone_class=0\n" ++
             "free_cell link_mask=0x{x:0>8} poison=0x{x:0>8} encoded_word=poison|(next&link_mask)\n",
         .{
-            @sizeOf(gc.StringHeader),
-            gc.ref_count_offset_from_payload,
             gc.representation.alloc_info_class_mask,
-            gc.representation.alloc_info_large_mask,
+            @as(u8, @bitCast(gc.AllocInfo{ .reserved = true })),
             gc.representation.alloc_info_heap_accounted_mask,
             gc.representation.alloc_info_standalone_mask,
             gc.representation.block_cell_size_class,
@@ -144,7 +133,7 @@ pub const snapshot_text =
     "\n[field-semantics]\n" ++
     "size_class block-cell=cell-index; slab=allocator-block-index; standalone=encoded-heap-bytes-after-publication\n" ++
     "alloc_info.block_size_idx block-cell=0x1f; slab=0..30; standalone=0\n" ++
-    "alloc_info.large valid-only-when heap_accounted; logical space class independent of physical carrier\n" ++
+    "alloc_info.reserved unused\n" ++
     "alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell\n" ++
     "flags.kind valid for Metadata kinds; string uses JSValue tag; its Metadata prefix keeps the count in the lifetime tail\n" ++
     "flags.mark/young/finalizing/pinned/cycle_visited valid for registry kinds only\n" ++

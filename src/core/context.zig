@@ -360,11 +360,6 @@ pub const RealmPublicationState = enum {
 pub const UnhandledRejectionEntry = struct {
     promise: JSValue = JSValue.undefinedValue(),
     reason: JSValue = JSValue.undefinedValue(),
-
-    pub fn deinit(self: UnhandledRejectionEntry, rt: *JSRuntime) void {
-        self.promise.free(rt);
-        self.reason.free(rt);
-    }
 };
 
 pub const JSContext = struct {
@@ -523,7 +518,7 @@ pub const JSContext = struct {
         // If a later step fails, createWithPublication still raw-frees via
         // destroyRuntime (initialized=false). Unlink first so gc.deinit
         // cannot destroyFromHeader the same cell.
-        errdefer rt.gc.unlinkObject(&self.header);
+        errdefer rt.gc.unlinkObjectWithBytes(&self.header, @sizeOf(JSContext));
         rt.linkConstructingContext(self);
         errdefer rt.unlinkConstructingContext(self);
         // Host create-ref is a root (gc-invariants.md). Membership on
@@ -546,14 +541,6 @@ pub const JSContext = struct {
         self.runtime.unlinkConstructingContext(self);
         self.publication_state = .live;
         self.runtime.linkContext(self);
-    }
-
-    /// Checked publication boundary for embedders that cannot statically prove
-    /// the Runtime owner thread. Engine bootstrap uses the asserting form above
-    /// so this contract error does not widen JavaScript execution errors.
-    pub fn publishLiveChecked(self: *JSContext) !void {
-        try self.runtime.requireOwnerThread();
-        return self.publishLive();
     }
 
     pub fn finishConstruction(self: *JSContext) !void {
@@ -666,9 +653,7 @@ pub const JSContext = struct {
         const using_inline = self.usingInlineClassPrototypes();
         self.class_prototypes = &.{};
         for (class_prototypes) |*slot| {
-            const value = slot.*;
             slot.* = JSValue.nullValue();
-            value.free(rt);
         }
         if (!using_inline and class_prototypes.len != 0) {
             rt.memory.free(JSValue, class_prototypes);
@@ -701,24 +686,20 @@ pub const JSContext = struct {
 
     pub fn setClassPrototype(self: *JSContext, class_id: class.ClassId, prototype: *Object) !void {
         const slot = try self.ensureClassPrototypeSlot(class_id);
-        const old = slot.*;
-        slot.* = prototype.value().dup();
+        slot.* = prototype.value();
         // A realm fills these lazily: `%ArrayIteratorPrototype%` is built the
         // first time a `for...of` needs it, which can be arbitrarily long after
         // the realm itself went old. Once the host create-ref is consumed the
         // realm is a heap object, not a root, so the minor's sticky mark stops
         // the trace at it and the fresh prototype is condemned.
         self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
-        old.free(self.runtime);
     }
 
     pub fn clearClassPrototype(self: *JSContext, class_id: class.ClassId) void {
         self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return;
-        const old = self.class_prototypes[index];
         self.class_prototypes[index] = JSValue.nullValue();
-        old.free(self.runtime);
     }
 
     pub fn classPrototypeObject(self: *JSContext, class_id: class.ClassId) ?*Object {
@@ -735,10 +716,8 @@ pub const JSContext = struct {
         self.runtime.assertOwnerThread();
         std.debug.assert(kind != .count);
         const slot = &self.native_error_prototypes[@intFromEnum(kind)];
-        const old = slot.*;
-        slot.* = prototype.value().dup();
+        slot.* = prototype.value();
         self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
-        old.free(self.runtime);
     }
 
     pub fn nativeErrorPrototypeObject(self: *JSContext, kind: NativeErrorKind) ?*Object {
@@ -824,29 +803,20 @@ pub const JSContext = struct {
     }
 
     fn clearIntrinsicBootstrapValues(self: *JSContext) void {
-        const rt = self.runtime;
-        const old_eval = self.eval_function;
         self.eval_function = JSValue.nullValue();
-        old_eval.free(rt);
-        if (self.cached_function_proto) |prototype| prototype.value().free(rt);
         self.cached_function_proto = null;
-        if (self.cached_promise_proto) |prototype| prototype.value().free(rt);
         self.cached_promise_proto = null;
         for (&self.cached_values) |*slot| {
-            if (slot.*) |value| value.free(rt);
             slot.* = null;
         }
         for (&self.native_error_prototypes) |*slot| {
-            const value = slot.*;
             slot.* = JSValue.nullValue();
-            value.free(rt);
         }
         self.releaseInitialShape(&self.array_shape);
         self.releaseInitialShape(&self.arguments_shape);
         self.releaseInitialShape(&self.mapped_arguments_shape);
         self.releaseInitialShape(&self.regexp_shape);
         self.releaseInitialShape(&self.regexp_result_shape);
-        if (self.preallocated_oom_error) |value| value.free(rt);
         self.preallocated_oom_error = null;
     }
 
@@ -863,9 +833,7 @@ pub const JSContext = struct {
         self.clearIntrinsicBootstrapValues();
         const builtin_count = @min(self.class_prototypes.len, @as(usize, @intCast(class.ids.init_count)));
         for (self.class_prototypes[0..builtin_count]) |*slot| {
-            const value = slot.*;
             slot.* = JSValue.nullValue();
-            value.free(self.runtime);
         }
         if (self.publication_state == .constructing) self.construction_complete = false;
     }
@@ -884,15 +852,11 @@ pub const JSContext = struct {
         self.publication_state = .finalizing;
         // Drop Realm -> ModuleRecord base refs before releasing globals and
         // intrinsics: module records may themselves own values in this Realm.
-        self.modules.deinit(rt);
+        self.modules.deinit();
         self.host_event_loop = null;
         self.clearUnhandledRejection();
-        const old_lexicals = self.lexicals;
         self.lexicals = null;
-        const old_global = self.global;
         self.global = null;
-        if (old_lexicals) |lexicals| lexicals.value().free(rt);
-        if (old_global) |global| global.value().free(rt);
         self.clearIntrinsicBootstrapValues();
         if (self.regexp_legacy_statics) |legacy| {
             legacy.destroy(rt);
@@ -940,7 +904,7 @@ pub const JSContext = struct {
         rt.assertOwnerThread();
         const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
         self.deinitResources();
-        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) {
+        if (rt.gc.phase == .tracer_destroy) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -1075,11 +1039,9 @@ pub const JSContext = struct {
     }
 
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
-        const old = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
         self.runtime.current_exception_uncatchable = false;
         self.runtime.current_exception_out_of_memory = false;
-        old.free(self.runtime);
         self.runtime.current_exception = value;
         return JSValue.exception();
     }
@@ -1119,11 +1081,9 @@ pub const JSContext = struct {
     }
 
     pub fn clearException(self: *JSContext) void {
-        const old = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
         self.runtime.current_exception_uncatchable = false;
         self.runtime.current_exception_out_of_memory = false;
-        old.free(self.runtime);
     }
 
     pub fn recordUnhandledRejection(self: *JSContext, value: JSValue) void {
@@ -1144,7 +1104,7 @@ pub const JSContext = struct {
         }
         self.appendUnhandledRejection(promise, value) catch return;
         if (!self.hasException()) {
-            _ = self.throwValue(value.dup());
+            _ = self.throwValue(value);
         }
     }
 
@@ -1163,8 +1123,8 @@ pub const JSContext = struct {
         }
         self.unhandled_rejections = self.unhandled_rejections.ptr[0 .. index + 1];
         self.unhandled_rejections[index] = .{
-            .promise = if (promise) |promise_value| promise_value.dup() else JSValue.undefinedValue(),
-            .reason = value.dup(),
+            .promise = if (promise) |promise_value| promise_value else JSValue.undefinedValue(),
+            .reason = value,
         };
     }
 
@@ -1176,7 +1136,6 @@ pub const JSContext = struct {
         const entries = self.unhandled_rejections;
         for (entries, 0..) |entry, index| {
             if (!entry.promise.same(promise_value)) continue;
-            entry.deinit(self.runtime);
             const old_len = entries.len;
             if (index + 1 < old_len) {
                 @memmove(entries[index .. old_len - 1], entries[index + 1 .. old_len]);
@@ -1201,7 +1160,6 @@ pub const JSContext = struct {
             @memmove(entries[0 .. entries.len - 1], entries[1..entries.len]);
         }
         self.unhandled_rejections = entries[0 .. entries.len - 1];
-        entry.promise.free(self.runtime);
         return entry.reason;
     }
 
@@ -1211,7 +1169,6 @@ pub const JSContext = struct {
         const capacity = self.unhandled_rejections_capacity;
         self.unhandled_rejections = &.{};
         self.unhandled_rejections_capacity = 0;
-        for (entries) |entry| entry.deinit(rt);
         if (capacity != 0) rt.memory.free(UnhandledRejectionEntry, entries.ptr[0..capacity]);
     }
 
@@ -1301,35 +1258,34 @@ pub const JSContext = struct {
         for (frames) |frame| {
             self.runtime.atoms.free(frame.function_name);
             self.runtime.atoms.free(frame.filename);
-            frame.function_value.free(self.runtime);
         }
         if (frames.len != 0) self.runtime.memory.free(BacktraceFrame, frames);
     }
 
     fn dupBacktraceFrame(self: *JSContext, frame: BacktraceFrame) BacktraceFrame {
         return .{
-            .function_name = self.runtime.atoms.dup(frame.function_name),
-            .filename = self.runtime.atoms.dup(frame.filename),
+            .function_name = self.runtime.atoms.dupForHolder(frame.function_name),
+            .filename = self.runtime.atoms.dupForHolder(frame.filename),
             .line_num = frame.line_num,
             .col_num = frame.col_num,
             .pc = frame.currentPc(),
             .location_data = frame.location_data,
             .location_resolver = frame.location_resolver,
-            .function_value = if (frame.function_value.isObject()) frame.function_value.dup() else JSValue.undefinedValue(),
+            .function_value = if (frame.function_value.isObject()) frame.function_value else JSValue.undefinedValue(),
             .is_native = frame.is_native,
         };
     }
 
     fn dupActiveBacktraceFrameFromSnapshot(self: *JSContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame {
         return .{
-            .function_name = self.runtime.atoms.dup(snapshot.function_name),
-            .filename = self.runtime.atoms.dup(snapshot.filename),
+            .function_name = self.runtime.atoms.dupForHolder(snapshot.function_name),
+            .filename = self.runtime.atoms.dupForHolder(snapshot.filename),
             .line_num = snapshot.line_num,
             .col_num = snapshot.col_num,
             .pc = snapshot.pc,
             .location_data = snapshot.location_data,
             .location_resolver = snapshot.location_resolver,
-            .function_value = if (snapshot.function_value.isObject()) snapshot.function_value.dup() else JSValue.undefinedValue(),
+            .function_value = if (snapshot.function_value.isObject()) snapshot.function_value else JSValue.undefinedValue(),
             .is_native = snapshot.is_native,
         };
     }
@@ -1358,10 +1314,10 @@ pub const JSContext = struct {
             self.runtime.backtrace_capacity = next_capacity;
             if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
         }
-        const stored_function_value = if (function_value.isObject()) function_value.dup() else JSValue.undefinedValue();
+        const stored_function_value = if (function_value.isObject()) function_value else JSValue.undefinedValue();
         self.runtime.backtrace_frames.ptr[self.runtime.backtrace_frames.len] = .{
-            .function_name = self.runtime.atoms.dup(function_name),
-            .filename = self.runtime.atoms.dup(filename),
+            .function_name = self.runtime.atoms.dupForHolder(function_name),
+            .filename = self.runtime.atoms.dupForHolder(filename),
             .line_num = line_num,
             .col_num = col_num,
             .location_data = location_data,
@@ -1378,7 +1334,6 @@ pub const JSContext = struct {
         self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0..idx];
         self.runtime.atoms.free(entry.function_name);
         self.runtime.atoms.free(entry.filename);
-        entry.function_value.free(self.runtime);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {

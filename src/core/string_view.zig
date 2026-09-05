@@ -134,7 +134,7 @@ pub fn JSString(comptime Value: type) type {
                     while (index < utf16.len) {
                         const unit = utf16[index];
                         if (!cesu8 and unicode.isHighSurrogateUnit(unit) and index + 1 < utf16.len and unicode.isLowSurrogateUnit(utf16[index + 1])) {
-                            const cp = surrogatePairCodePoint(unit, utf16[index + 1]);
+                            const cp: u32 = @intCast(unicode.codePointFromSurrogatePair(unit, utf16[index + 1]));
                             offset += writeUtf8CodePoint(out[offset..], cp);
                             index += 2;
                             continue;
@@ -205,10 +205,6 @@ fn writeUtf8CodePoint(out: []u8, code_point: u32) usize {
     return 4;
 }
 
-fn surrogatePairCodePoint(high: u16, low: u16) u32 {
-    return @intCast(unicode.codePointFromSurrogatePair(high, low));
-}
-
 test "JSValue.asString views latin1 units without allocation" {
     const core = @import("root.zig");
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -216,7 +212,6 @@ test "JSValue.asString views latin1 units without allocation" {
 
     const str = try core.string.String.createUtf8(rt, "hello");
     const value = str.value();
-    defer value.free(rt);
 
     const view = value.asString().?;
     try std.testing.expectEqual(value, view.value());
@@ -234,13 +229,11 @@ test "JSString.units views an eager substring copy" {
 
     const parent = try core.string.String.createUtf8(rt, "prefix-needle-suffix");
     const parent_value = parent.value();
-    defer parent_value.free(rt);
 
     // Substrings eager-copy (QuickJS `js_sub_string`): the result owns its own
     // exact-size buffer rather than borrowing a window into the parent.
     const slice = try core.string.String.createSlice(rt, parent, "prefix-".len, "needle".len);
     const slice_value = slice.value();
-    defer slice_value.free(rt);
 
     const parent_units = parent_value.asString().?.units().?.latin1;
     const slice_units = slice_value.asString().?.units().?.latin1;
@@ -260,7 +253,6 @@ test "JSString converts utf16 surrogate pairs to owned utf8" {
 
     const str = try core.string.String.createUtf16(rt, &.{ 0xd83d, 0xde00 });
     const value = str.value();
-    defer value.free(rt);
 
     const view = value.asString().?;
     const utf8 = try view.toOwnedUtf8(std.testing.allocator);
@@ -275,7 +267,6 @@ test "JSString CString CESU-8 mode preserves surrogate code units" {
 
     const str = try core.string.String.createUtf16(rt, &.{ 0xd83d, 0xde00 });
     const value = str.value();
-    defer value.free(rt);
 
     var cesu8 = try core.JSValue.String.Utf8.fromValueCesu8(std.testing.allocator, value, true);
     defer cesu8.deinit();
@@ -290,7 +281,6 @@ test "JSString.Utf8 borrows latin1 ascii without allocation" {
 
     const str = try core.string.String.createUtf8(rt, "ascii/path.txt");
     const value = str.value();
-    defer value.free(rt);
 
     const view = value.asString().?;
     const units = view.units().?.latin1;
@@ -309,7 +299,6 @@ test "JSString.Utf8 transcodes latin1 non-ascii through scratch allocator" {
 
     const str = try core.string.String.createUtf8(rt, "é");
     const value = str.value();
-    defer value.free(rt);
 
     const view = value.asString().?;
     try std.testing.expectEqual(@as(u8, 0xe9), view.units().?.latin1[0]);
@@ -327,7 +316,6 @@ test "JSString.Utf8 transcodes utf16 through scratch allocator" {
 
     const str = try core.string.String.createUtf16(rt, &.{ 0x0100, 0xd83d, 0xde00 });
     const value = str.value();
-    defer value.free(rt);
 
     const view = value.asString().?;
     var utf8 = try core.JSValue.String.Utf8.init(std.testing.allocator, view);

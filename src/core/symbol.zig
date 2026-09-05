@@ -14,10 +14,10 @@ const atom = @import("atom.zig");
 
 /// Returns the description string of `symbol`, or null when the symbol has no
 /// description.
-pub fn description(atoms: *atom.AtomTable, symbol: atom.Atom) ?[]const u8 {
-    const kind = atoms.kind(symbol) orelse return null;
+pub fn description(rt: *const core.JSRuntime, symbol: atom.Atom) ?[]const u8 {
+    const kind = rt.atoms.kind(symbol) orelse return null;
     if (!atom.isPublicSymbolKind(kind) and kind != .private) return null;
-    return atoms.symbolDescription(symbol);
+    return rt.atoms.symbolDescription(rt, symbol);
 }
 
 /// Returns the global-registry key of `symbol` (the string passed to

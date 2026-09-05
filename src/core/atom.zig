@@ -8,6 +8,7 @@
 //! quickjs.c:583-599 and atom-table operations nearby. This core module may be
 //! consumed by higher layers but never imports exec or binding.
 
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
@@ -79,7 +80,6 @@ pub const ids = struct {
     pub const type_bigint: Atom = 143;
     pub const arguments: Atom = 78;
     pub const caller: Atom = 80;
-    pub const eval_code: Atom = 81;
     pub const ret: Atom = 82;
     pub const var_object: Atom = 83;
     pub const arg_var_object: Atom = 84;
@@ -104,7 +104,6 @@ pub const ids = struct {
     pub const WeakMap: Atom = 186;
     pub const WeakSet: Atom = 187;
     pub const Private_brand: Atom = 216;
-    pub const Symbol_toPrimitive: Atom = 217;
     pub const Symbol_iterator: Atom = 218;
     pub const Symbol_asyncIterator: Atom = 229;
     pub const Symbol_asyncDispose: Atom = 230;
@@ -117,6 +116,116 @@ pub const ids = struct {
     pub const zjs_last_registry_extra_name: Atom = 586;
     pub const scriptArgs: Atom = 626;
     pub const zjs_last_startup_name: Atom = 656;
+
+    // Property-key constants for the S3 predefined migration. Every name below is
+    // a `.string` predefined atom, so `isConst` short-circuits dup/free: holding one
+    // costs nothing and needs no release.
+    pub const return_: Atom = 6;  // "return"
+    pub const delete: Atom = 9;
+    pub const throw: Atom = 23;
+    pub const with: Atom = 29;
+    pub const keys: Atom = 48;
+    pub const size: Atom = 49;
+    pub const message: Atom = 51;
+    pub const cause: Atom = 52;
+    pub const errors: Atom = 53;
+    pub const stack: Atom = 54;
+    pub const toString: Atom = 56;
+    pub const toLocaleString: Atom = 57;
+    pub const valueOf: Atom = 58;
+    pub const configurable: Atom = 62;
+    pub const writable: Atom = 63;
+    pub const enumerable: Atom = 64;
+    pub const set: Atom = 67;
+    pub const __proto__: Atom = 69;
+    pub const index: Atom = 88;
+    pub const input: Atom = 89;
+    pub const join: Atom = 92;
+    pub const construct: Atom = 95;
+    pub const getPrototypeOf: Atom = 96;
+    pub const setPrototypeOf: Atom = 97;
+    pub const isExtensible: Atom = 98;
+    pub const preventExtensions: Atom = 99;
+    pub const has: Atom = 100;
+    pub const deleteProperty: Atom = 101;
+    pub const defineProperty: Atom = 102;
+    pub const getOwnPropertyDescriptor: Atom = 103;
+    pub const ownKeys: Atom = 104;
+    pub const add: Atom = 105;
+    pub const next: Atom = 107;
+    pub const values: Atom = 108;
+    pub const global: Atom = 111;
+    pub const raw: Atom = 113;
+    pub const then: Atom = 130;
+    pub const resolve: Atom = 131;
+    pub const reject: Atom = 132;
+    pub const promise: Atom = 133;
+    pub const proxy: Atom = 134;
+    pub const revoke: Atom = 135;
+    pub const status: Atom = 140;
+    pub const reason: Atom = 141;
+    pub const globalThis: Atom = 142;
+    pub const maxByteLength: Atom = 148;
+    pub const Math: Atom = 159;
+    pub const JSON: Atom = 160;
+    pub const RegExp: Atom = 165;
+    pub const ArrayBuffer: Atom = 166;
+    pub const Uint8Array: Atom = 170;
+    pub const Promise: Atom = 199;
+    pub const SyntaxError: Atom = 210;
+    pub const InternalError: Atom = 213;
+    pub const DOMException: Atom = 214;
+    pub const forEach: Atom = 290;
+    pub const toISOString: Atom = 364;
+    pub const Reflect: Atom = 365;
+    pub const Atomics: Atom = 366;
+    pub const escape: Atom = 376;
+    pub const AggregateError: Atom = 421;
+    pub const clear: Atom = 467;
+    pub const entries: Atom = 475;
+    pub const fromBase64: Atom = 480;
+    pub const getOrInsert: Atom = 492;
+    pub const getOrInsertComputed: Atom = 493;
+    pub const stackTraceLimit: Atom = 614;
+    pub const disposed: Atom = 651;
+    pub const disposeAsync: Atom = 653;
+    pub const alphabet: Atom = 657;
+    pub const lastChunkHandling: Atom = 658;
+    pub const omitPadding: Atom = 659;
+    pub const padding: Atom = 660;
+    pub const mode: Atom = 661;
+    pub const prepareStackTrace: Atom = 662;
+    pub const type_: Atom = 663;  // "type"
+    pub const userAgent: Atom = 664;
+    pub const E: Atom = 665;
+    pub const LN10: Atom = 666;
+    pub const LN2: Atom = 667;
+    pub const LOG2E: Atom = 668;
+    pub const LOG10E: Atom = 669;
+    pub const PI: Atom = 670;
+    pub const SQRT1_2: Atom = 671;
+    pub const SQRT2: Atom = 672;
+    pub const k: Atom = 673;
+    pub const mapfn: Atom = 674;
+    pub const this_arg: Atom = 675;
+    pub const iter: Atom = 676;
+    pub const items: Atom = 677;
+    pub const len: Atom = 678;
+    pub const phase: Atom = 679;
+    pub const state: Atom = 680;
+    pub const pending: Atom = 681;
+    pub const rejected: Atom = 682;
+    pub const fileName: Atom = 683;
+    pub const lineNumber: Atom = 684;
+    pub const columnNumber: Atom = 685;
+    pub const code: Atom = 686;
+    pub const error_: Atom = 687;  // "error"
+    pub const suppressed: Atom = 688;
+    pub const url: Atom = 689;
+    pub const main: Atom = 690;
+    pub const read: Atom = 691;
+    pub const written: Atom = 692;
+    pub const zjs_last_predefined_key_name: Atom = 692;
 };
 
 pub const last_keyword = ids.await;
@@ -781,6 +890,45 @@ pub const predefined_atoms = [_]PredefinedAtom{
     .{ .id = 654, .name = "allKeyed" },
     .{ .id = 655, .name = "allSettledKeyed" },
     .{ .id = 656, .name = "immutable" },
+    // S3 predefined migration: literal property keys that native builtins used
+    // to intern per call (`rt.internAtom("...")` + `defer atoms.free`). Predefined
+    // ids are process-stable and refcount-free, the way qjs spells `JS_ATOM_xxx`.
+    .{ .id = 657, .name = "alphabet" },
+    .{ .id = 658, .name = "lastChunkHandling" },
+    .{ .id = 659, .name = "omitPadding" },
+    .{ .id = 660, .name = "padding" },
+    .{ .id = 661, .name = "mode" },
+    .{ .id = 662, .name = "prepareStackTrace" },
+    .{ .id = 663, .name = "type" },
+    .{ .id = 664, .name = "userAgent" },
+    .{ .id = 665, .name = "E" },
+    .{ .id = 666, .name = "LN10" },
+    .{ .id = 667, .name = "LN2" },
+    .{ .id = 668, .name = "LOG2E" },
+    .{ .id = 669, .name = "LOG10E" },
+    .{ .id = 670, .name = "PI" },
+    .{ .id = 671, .name = "SQRT1_2" },
+    .{ .id = 672, .name = "SQRT2" },
+    .{ .id = 673, .name = "k" },
+    .{ .id = 674, .name = "mapfn" },
+    .{ .id = 675, .name = "this_arg" },
+    .{ .id = 676, .name = "iter" },
+    .{ .id = 677, .name = "items" },
+    .{ .id = 678, .name = "len" },
+    .{ .id = 679, .name = "phase" },
+    .{ .id = 680, .name = "state" },
+    .{ .id = 681, .name = "pending" },
+    .{ .id = 682, .name = "rejected" },
+    .{ .id = 683, .name = "fileName" },
+    .{ .id = 684, .name = "lineNumber" },
+    .{ .id = 685, .name = "columnNumber" },
+    .{ .id = 686, .name = "code" },
+    .{ .id = 687, .name = "error" },
+    .{ .id = 688, .name = "suppressed" },
+    .{ .id = 689, .name = "url" },
+    .{ .id = 690, .name = "main" },
+    .{ .id = 691, .name = "read" },
+    .{ .id = 692, .name = "written" },
 };
 
 comptime {
@@ -789,8 +937,9 @@ comptime {
     std.debug.assert(null_atom == 0);
     std.debug.assert(tagged_int_bit == @as(Atom, 1) << 31);
     std.debug.assert(max_int_atom == tagged_int_bit - 1);
-    std.debug.assert(predefined_count == 656);
-    std.debug.assert(ids.zjs_last_startup_name == predefined_count);
+    std.debug.assert(predefined_count == 692);
+    std.debug.assert(ids.zjs_last_startup_name == 656);
+    std.debug.assert(ids.zjs_last_predefined_key_name == predefined_count);
     // Legacy-function gates compare `caller`/`arguments` by id, the way qjs
     // compares against JS_ATOM_caller. Pin both to the table so a renumbering
     // fails the build instead of silently turning those gates into no-ops.
@@ -834,7 +983,7 @@ const predefined_private_map = blk: {
 // hash lookup. Keep the immutable predefined half in static storage, but use
 // the same hash as `string_index`: a miss must not linearly compare every
 // predefined spelling of the same length before probing the dynamic table.
-// 640 string atoms in 2048 buckets leave the table at 31.25% load.
+// 676 string atoms in 2048 buckets leave the table at 33.0% load.
 const predefined_string_hash_capacity = 2048;
 const predefined_string_hash_mask = predefined_string_hash_capacity - 1;
 const predefined_string_hash_table = blk: {
@@ -888,21 +1037,26 @@ pub const DynamicAtom = struct {
     hash_next: Atom = null_atom,
     kind: AtomKind,
     ref_count: usize,
-    gc_managed_symbol: bool = false,
+    /// TGC S3 (`docs/tracing-gc-s3-spec.md` §2.1). Last major mark epoch that
+    /// reached this entry through a `visitAtom` edge, a root, the insertion
+    /// barrier or black allocation; `Heap.mark_epoch` is even and non-zero, so
+    /// `0` reads as "never marked". The final spec folds this into the word
+    /// `ref_count` vacates -- S3-a keeps both so the switch can stay off and
+    /// the audit can compare the two answers.
+    mark_epoch: u64 = 0,
+    /// Epoch this entry was interned in (`internDynamic`). An atom born inside
+    /// an open marking window cannot have been reached by the trace that
+    /// started before it existed, so it is live for that cycle by construction.
+    born_epoch: u64 = 0,
+    /// P-class explicit host pins (`PropNameID.internStatic` / `release`).
+    /// Counted alongside `ref_count` in S3-a; it becomes the only host-side
+    /// count once `ref_count` goes away.
+    host_pins: u32 = 0,
     registry_managed_symbol: bool = false,
     weakref_count: usize = 0,
     no_symbol_description: bool = false,
 
-    // TGC S2 ownership rule for value-symbol entries (`isValueSymbolKind`),
-    // selected by `gc.string_tracer_owned`:
-    //
-    // Switch off (string family refcounted): the entry's count and the JS
-    // holders of the symbol body share one number, the body's rc word.
-    // `ensureSymbolBody` moves `ref_count` into `body.header().rc`, and
-    // `dup`/`free` bump the body rc whenever a body exists. A body reaching
-    // rc 0 is the atom's death (`onSymbolBodyZeroRef`).
-    //
-    // Switch on (string family tracer-owned): `ref_count` counts ONLY the
+    // For value-symbol entries (`isValueSymbolKind`), `ref_count` counts ONLY
     // holders that hold the atom BY ID -- shape property keys, bytecode
     // atom operands, native `atoms.dup` callers. Holders that hold the
     // symbol AS A JSVALUE are tracked by the collector's mark of the body
@@ -933,18 +1087,11 @@ pub const DynamicAtom = struct {
     // entry is rooted), so it needs only `weakref_count` to choose between
     // the weak shell and `finalizeDeadEntry`.
     pub fn strongRefCount(self: DynamicAtom) usize {
-        if (comptime gc.string_tracer_owned) return self.ref_count;
-        if (isValueSymbolKind(self.kind)) {
-            if (self.str) |body| return @intCast(body.header().rc);
-        }
         return self.ref_count;
     }
 
     pub fn isLive(self: DynamicAtom) bool {
-        if (comptime gc.string_tracer_owned) {
-            return self.ref_count != 0 or (isValueSymbolKind(self.kind) and self.str != null);
-        }
-        return self.strongRefCount() != 0;
+        return self.ref_count != 0 or (isValueSymbolKind(self.kind) and self.str != null);
     }
 
     pub fn hasLiveValue(self: DynamicAtom) bool {
@@ -1105,9 +1252,22 @@ pub const AtomTable = struct {
     /// predefined symbol bodies, indexed by `id - 1`. Predefined ids are never
     /// recycled, so entries here are released only by `releaseCachedStrings`.
     predefined_str: [predefined_count]?*string.String = @splat(null),
+    /// TGC S3: back-pointer to the owning runtime, installed by `JSRuntime`
+    /// after its address is stable. Null for the standalone tables the
+    /// compiler/parser fixtures build, which have no collector at all; every
+    /// S3 seam degrades to a no-op in that case.
+    owner_runtime: ?*runtime_mod.JSRuntime = null,
+    /// TGC S3 §2.2: innermost active `CompileAtomScope`. Non-null only while a
+    /// compile is in flight; every intern/dup entry point notes into it so the
+    /// front end's plain-`u32` atom fields have an interval root.
+    compile_scope: ?*CompileAtomScope = null,
+    /// `sweepDead` audit readings (`--gc-stats`, `docs/tracing-gc-s3-spec.md`
+    /// §2.6). `missing_edge` is the one that matters: rc says the entry is
+    /// held, the trace never reached it. `over_marked` is informational.
+    atom_audit_missing_edge: usize = 0,
+    atom_audit_over_marked: usize = 0,
 
-    /// TGC S2 (until S3 weakens the table): a table-owned string body is a
-    /// strong root while the string family is tracer-owned, but only for
+    /// A table-owned string body is a strong root only for
     /// entries some holder still names BY ID (`ref_count > 0`; see the
     /// ownership rule on `DynamicAtom`). A value-symbol body whose entry
     /// has `ref_count == 0` is held by JS values alone, so it lives or dies
@@ -1116,13 +1276,19 @@ pub const AtomTable = struct {
     /// (`finalizeDeadEntry`). Predefined bodies are never recycled and are
     /// always rooted.
     pub fn traceRoots(self: *AtomTable, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        if (comptime !gc.string_tracer_owned) return;
         for (self.predefined_str) |cached| {
             if (cached) |body| try visitor.constValue(JSValue.string(body.header()));
         }
-        for (self.entries) |entry| {
-            if (entry.ref_count == 0) continue;
-            if (entry.str) |body| try visitor.constValue(JSValue.string(body.header()));
+        // TGC S3: this is the rc-era root. With `gc.atom_tracer_owned` off it
+        // MUST stay -- it is the only thing keeping a cached body alive, and
+        // S3-a's contract is bit-for-bit unchanged liveness. Flipping the
+        // switch retires it: §2.2's holder edges and §2.4's sweep take over,
+        // and a body held by JS alone lives or dies by its own mark.
+        if (comptime !gc.atom_tracer_owned) {
+            for (self.entries) |entry| {
+                if (entry.ref_count == 0) continue;
+                if (entry.str) |body| try visitor.constValue(JSValue.string(body.header()));
+            }
         }
     }
     pub fn init(account: *memory.MemoryAccount) AtomTable {
@@ -1151,35 +1317,23 @@ pub const AtomTable = struct {
         if (backing.len != 0) account.free(DynamicAtom, backing);
     }
 
-    /// Drop ordinary cached atom strings and predefined symbol bodies before
-    /// the GC registry teardown. Dynamic value-symbol bodies are deliberately
-    /// left live here: their string-header rc is the atom's strong-ref count,
-    /// not a separate table-cache reference, and shapes destroyed by
-    /// `gc.Registry.deinit` can still own such atoms.
-    ///
-    /// TGC S2 (tracer-owned strings): the table holds no counted reference,
-    /// so this only clears the root slots. Every body (value symbols
-    /// included: `free` no longer touches the body under the switch) is
+    /// Drop cached atom strings and predefined symbol bodies before GC
+    /// registry teardown. This clears the table's trace roots. Every body is
     /// unbound here while its memory is still valid, so the back-pointer can
     /// be cleared and no teardown handshake will find a dynamic atom id on a
     /// cell; `gc.deinit` reclaims the memory wholesale.
-    pub fn releaseCachedStrings(self: *AtomTable, rt: anytype) void {
+    pub fn releaseCachedStrings(self: *AtomTable) void {
         for (&self.predefined_str) |*slot| {
-            if (slot.*) |cached| {
+            if (slot.* != null) {
                 slot.* = null;
                 // Predefined ids are never recycled, so the weak
                 // back-pointer can stay valid on the string.
-                releaseBody(rt, cached);
             }
         }
         for (self.entries) |*entry| {
             if (entry.str) |cached| {
-                if (comptime !gc.string_tracer_owned) {
-                    if (isValueSymbolKind(entry.kind)) continue;
-                }
                 entry.str = null;
                 cached.atom_id = string.String.no_atom_id;
-                releaseBody(rt, cached);
             }
         }
     }
@@ -1193,15 +1347,11 @@ pub const AtomTable = struct {
     /// TGC S2 (tracer-owned strings): `gc.deinit` has already freed every
     /// string cell, so the slot is nulled without dereferencing the body
     /// (`releaseCachedStrings` normally leaves nothing here).
-    pub fn releaseValueSymbolBodiesAfterGc(self: *AtomTable, rt: anytype) void {
+    pub fn releaseValueSymbolBodiesAfterGc(self: *AtomTable) void {
         for (self.entries) |*entry| {
             if (!isValueSymbolKind(entry.kind)) continue;
-            const body = entry.str orelse continue;
+            if (entry.str == null) continue;
             entry.str = null;
-            if (comptime gc.string_tracer_owned) continue;
-            body.atom_id = string.String.no_atom_id;
-            body.header().rc = 1;
-            gc.release(rt, body.header());
         }
     }
 
@@ -1348,6 +1498,12 @@ pub const AtomTable = struct {
     }
 
     pub fn internString(self: *AtomTable, bytes: []const u8) !Atom {
+        const id = try self.internStringInner(bytes);
+        self.noteCompileScope(id);
+        return id;
+    }
+
+    fn internStringInner(self: *AtomTable, bytes: []const u8) !Atom {
         // Match JS_NewAtomLen's digit gate: integer atoms do not need a
         // string hash at all (quickjs.c:3465 `is_digit(*str)`).
         if (parseArrayIndex(bytes)) |n| return atomFromUInt32(n);
@@ -1362,20 +1518,20 @@ pub const AtomTable = struct {
             entry.ref_count += 1;
             return found;
         }
-        return self.internDynamic(bytes, .string, true, false, false, hash);
+        return self.internDynamic(bytes, .string, true, false, hash);
     }
 
     pub fn newSymbol(self: *AtomTable, description: []const u8, atom_kind: AtomKind) !Atom {
         std.debug.assert(atom_kind == .symbol or atom_kind == .private);
-        return self.internDynamic(description, atom_kind, false, false, false, 0);
+        return self.internDynamic(description, atom_kind, false, false, 0);
     }
 
     pub fn newValueSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internDynamic(description, .symbol, false, true, false, 0);
+        return self.internDynamic(description, .symbol, false, false, 0);
     }
 
     pub fn newValueSymbolNoDescription(self: *AtomTable) !Atom {
-        return self.internDynamic("", .symbol, false, true, true, 0);
+        return self.internDynamic("", .symbol, false, true, 0);
     }
 
     pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
@@ -1383,6 +1539,12 @@ pub const AtomTable = struct {
     }
 
     pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
+        const id = try self.internGlobalSymbolInner(description);
+        self.noteCompileScope(id);
+        return id;
+    }
+
+    fn internGlobalSymbolInner(self: *AtomTable, description: []const u8) !Atom {
         try self.ensureAtomHash();
         const hash = spellingHash(description, .global_symbol);
         const found = self.findAtom(description, .global_symbol, hash);
@@ -1392,10 +1554,16 @@ pub const AtomTable = struct {
             self.retainValueSymbolEntry(entry);
             return found;
         }
-        return self.internDynamic(description, .global_symbol, true, false, false, hash);
+        return self.internDynamic(description, .global_symbol, true, false, hash);
     }
 
     pub fn internRegisteredValueSymbol(self: *AtomTable, description: []const u8) !Atom {
+        const id = try self.internRegisteredValueSymbolInner(description);
+        self.noteCompileScope(id);
+        return id;
+    }
+
+    fn internRegisteredValueSymbolInner(self: *AtomTable, description: []const u8) !Atom {
         try self.ensureAtomHash();
         const hash = spellingHash(description, .global_symbol);
         const found = self.findAtom(description, .global_symbol, hash);
@@ -1408,7 +1576,7 @@ pub const AtomTable = struct {
             }
             return found;
         }
-        const id = try self.internDynamic(description, .global_symbol, true, false, false, hash);
+        const id = try self.internDynamic(description, .global_symbol, true, false, hash);
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         return id;
@@ -1422,7 +1590,167 @@ pub const AtomTable = struct {
         return self.findAtom(entry.bytes, .global_symbol, entry.hash) == atom_id;
     }
 
+    // ---- TGC S3-a: tracing infrastructure (docs/tracing-gc-s3-spec.md) ----
+    //
+    // Everything below runs unconditionally. Only `sweepDead`'s verdict is
+    // gated on `gc.atom_tracer_owned`; with the switch off it reports instead
+    // of retiring, so the marks are a shadow answer that can be compared
+    // against `ref_count` before anyone's liveness depends on them.
+
+    /// This runtime's current major mark epoch. `Heap.mark_epoch` is even and
+    /// becomes non-zero at the first major, so the `0` a table without a
+    /// runtime (compiler/parser fixtures) reports can never match a stamp.
+    inline fn traceEpoch(self: *const AtomTable) u64 {
+        const rt = self.owner_runtime orelse return 0;
+        return if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
+    }
+
+    /// §2.2, the table half of `Collector.visitAtom`: stamp `id` with this
+    /// major's epoch and hand back the symbol body the caller must shade.
+    /// Predefined and tagged-int atoms are not entries and never die, so they
+    /// short-circuit; a re-visit in the same epoch short-circuits too, which
+    /// is what keeps the shape/bytecode edge walks from re-shading a body per
+    /// property.
+    ///
+    /// A holder naming a VALUE SYMBOL by id must be able to re-materialize the
+    /// body (`getOwnPropertySymbols` hands out the JSValue), so the id edge
+    /// keeps the body alive. A string atom's `str` is a droppable cache and is
+    /// deliberately not shaded.
+    pub fn markAtomAtEpoch(self: *AtomTable, id: Atom, epoch: u64) ?*string.String {
+        if (id == null_atom or isConst(id) or isTaggedInt(id)) return null;
+        const entry = self.findDynamic(id) orelse return null;
+        if (entry.mark_epoch == epoch) return null;
+        entry.mark_epoch = epoch;
+        if (!isValueSymbolKind(entry.kind)) return null;
+        return entry.str;
+    }
+
+    /// §2.3 Dijkstra insertion barrier. Storing an atom id into an already
+    /// published holder during an open marking window can hide it from the
+    /// trace (white holder -> black holder id migration), so the store shades
+    /// it. Outside a marking window this is one relaxed byte load.
+    pub inline fn shadeAtomIfMarking(self: *AtomTable, id: Atom) void {
+        if (comptime !gc.concurrent_enabled) return;
+        const rt = self.owner_runtime orelse return;
+        if (rt.gc.concurrent.markingActive()) {
+            @branchHint(.unlikely);
+            self.shadeAtomBarrierSlow(rt, id);
+        }
+    }
+
+    noinline fn shadeAtomBarrierSlow(self: *AtomTable, rt: *runtime_mod.JSRuntime, id: Atom) void {
+        const epoch = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
+        if (self.markAtomAtEpoch(id, epoch)) |body| rt.gc.shadeCellForAtomBarrier(body.header());
+    }
+
+    /// §2.3 black allocation: an atom interned inside an open marking window
+    /// cannot have been reachable from the roots that window snapshotted, so
+    /// it is live for this cycle by construction.
+    fn stampBirthEpoch(self: *AtomTable, entry: *DynamicAtom) void {
+        const epoch = self.traceEpoch();
+        entry.born_epoch = epoch;
+        entry.host_pins = 0;
+        entry.mark_epoch = 0;
+        if (comptime gc.concurrent_enabled) {
+            const rt = self.owner_runtime orelse return;
+            if (rt.gc.concurrent.markingActive()) entry.mark_epoch = epoch;
+        }
+    }
+
+    /// §2.2 compile scope: record `id` in the innermost active
+    /// `CompileAtomScope`. One nullable load outside a compile.
+    pub inline fn noteCompileScope(self: *AtomTable, id: Atom) void {
+        if (self.compile_scope) |scope| {
+            @branchHint(.unlikely);
+            scope.note(id);
+        }
+    }
+
+    /// §2.5 host pin (`PropNameID.internStatic` / `release`). Parallel to the
+    /// `ref_count` the same ABI call still takes in S3-a.
+    pub fn pinForHost(self: *AtomTable, id: Atom) void {
+        if (isConst(id) or isTaggedInt(id)) return;
+        const entry = self.findDynamic(id) orelse return;
+        entry.host_pins +|= 1;
+    }
+
+    pub fn unpinForHost(self: *AtomTable, id: Atom) void {
+        if (isConst(id) or isTaggedInt(id)) return;
+        const entry = self.findDynamic(id) orelse return;
+        entry.host_pins -|= 1;
+    }
+
+    /// §2.4. Called from both major paths after the string bodies have been
+    /// swept, so `entry.str` is either null or a marked cell.
+    ///
+    /// With `gc.atom_tracer_owned` off this is the §2.6 shadow audit: it
+    /// compares the trace's answer against `ref_count` and never changes an
+    /// entry. `missing edge` (rc holds it, the trace never reached it) is the
+    /// reading that must fall to zero before the switch can flip; S3-a is
+    /// expected to report a non-zero one, because the compile-scope provider
+    /// and the native temporaries are S3-b's work.
+    pub fn sweepDead(self: *AtomTable, rt: *runtime_mod.JSRuntime, epoch: u64) void {
+        var printed: usize = 0;
+        var idx: EntryIndex = 0;
+        while (idx < self.entries.len) : (idx += 1) {
+            const entry = &self.entries[idx];
+            if (!entry.slotOccupied()) continue;
+            const body_marked = if (entry.str) |body| rt.gc.headerMarked(body.header()) else false;
+            const stamped = entry.mark_epoch == epoch or
+                entry.born_epoch == epoch or
+                entry.host_pins != 0;
+            const live = stamped or body_marked;
+            if (comptime gc.atom_tracer_owned) {
+                if (live) continue;
+                if (entry.weakref_count != 0) {
+                    // WeakRef'd symbol: keep the shell so `symbolValueIfLive`
+                    // can report the death, exactly as `onSymbolBodyDead` does.
+                    self.unindexEntry(idx);
+                    if (entry.str) |cached| {
+                        entry.str = null;
+                        cached.atom_id = string.String.no_atom_id;
+                    }
+                    entry.ref_count = 0;
+                    continue;
+                }
+                self.finalizeDeadEntry(idx);
+                continue;
+            }
+            // While the switch is off `traceRoots` still roots every cached
+            // body of an `ref_count > 0` entry, so `body_marked` would answer
+            // "live" for exactly the entries the audit is trying to catch --
+            // it is circular for string atoms. A VALUE SYMBOL's body is
+            // genuinely reachable from JS values, so it keeps its vote.
+            const audit_live = stamped or (body_marked and isValueSymbolKind(entry.kind));
+            if (entry.ref_count > 0 and !audit_live) {
+                self.atom_audit_missing_edge += 1;
+                if (comptime builtin.mode == .Debug) {
+                    if (printed < audit_print_limit) {
+                        printed += 1;
+                        std.debug.print(
+                            "gc: ATOM AUDIT missing edge id={d} kind={s} bytes={s}\n",
+                            .{ entry.id, @tagName(entry.kind), entry.bytes },
+                        );
+                    }
+                }
+                continue;
+            }
+            // Informational mirror: the trace kept an entry rc had already
+            // let go. Value symbols do this legitimately (the body is the
+            // identity), so they are not counted.
+            if (entry.ref_count == 0 and audit_live and !isValueSymbolKind(entry.kind)) {
+                self.atom_audit_over_marked += 1;
+            }
+        }
+    }
+
     pub fn dup(self: *AtomTable, atom: Atom) Atom {
+        const id = self.dupInner(atom);
+        self.noteCompileScope(id);
+        return id;
+    }
+
+    fn dupInner(self: *AtomTable, atom: Atom) Atom {
         if (isConst(atom) or isTaggedInt(atom)) return atom;
         if (self.findDynamic(atom)) |entry| {
             std.debug.assert(entry.hasLiveValue());
@@ -1435,29 +1763,34 @@ pub const AtomTable = struct {
         return atom;
     }
 
+    /// TGC S3 §2.3: `dup` at a store into a GC-visible HOLDER (a shape's
+    /// property key, a module's metadata, a FunctionBytecode's names, a
+    /// backtrace frame, the class table). The rc arm is bit-for-bit `dup`; the
+    /// added half is the Dijkstra insertion barrier, which is what keeps an id
+    /// migrating between holders from hiding behind an already-black one.
+    ///
+    /// Spelled as its own name rather than folded into `dup` so the holder
+    /// sites stay greppable while `ref_count` is still around, and so the ~500
+    /// native temporaries that also call `dup` keep paying nothing.
+    pub fn dupForHolder(self: *AtomTable, atom: Atom) Atom {
+        const result = self.dup(atom);
+        self.shadeAtomIfMarking(atom);
+        return result;
+    }
+
     pub fn free(self: *AtomTable, atom: Atom) void {
         if (isConst(atom) or isTaggedInt(atom)) return;
         const idx = dynamicEntryIndex(atom) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
-        if (comptime !gc.string_tracer_owned) {
-            if (isValueSymbolKind(entry.kind)) {
-                if (entry.str) |body| {
-                    gc.release(self.runtime.?, body.header());
-                    return;
-                }
-            }
-        }
         std.debug.assert(entry.ref_count > 0);
         entry.ref_count -= 1;
         if (entry.ref_count == 0) {
-            // TGC S2: a value symbol whose body still exists may be held by
+            // A value symbol whose body still exists may be held by
             // JS values the count does not see; the sweep retires it
             // (`onSymbolBodyDead`). No body means no JS holder is possible.
-            if (comptime gc.string_tracer_owned) {
-                if (isValueSymbolKind(entry.kind) and entry.str != null) return;
-            }
-            self.finalizeDeadEntry(@intCast(idx), null);
+            if (isValueSymbolKind(entry.kind) and entry.str != null) return;
+            self.finalizeDeadEntry(@intCast(idx));
         }
     }
 
@@ -1546,14 +1879,14 @@ pub const AtomTable = struct {
     /// description and first-materialization behavior.
     pub inline fn toStringValueForPush(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
         if (atom_id > null_atom and atom_id < first_dynamic_atom) {
-            if (self.predefined_str[atom_id - 1]) |cached| return cached.value().dup();
+            if (self.predefined_str[atom_id - 1]) |cached| return cached.value();
         }
         if (atom_id >= first_dynamic_atom and atom_id < tagged_int_bit) {
             const idx: usize = @intCast(atom_id - first_dynamic_atom);
             if (idx < self.entries.len) {
                 const entry = &self.entries[idx];
                 if (entry.kind == .string) {
-                    if (entry.str) |cached| return cached.value().dup();
+                    if (entry.str) |cached| return cached.value();
                 }
             }
         }
@@ -1566,10 +1899,10 @@ pub const AtomTable = struct {
             const text = std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)}) catch unreachable;
             if (text.len == 1 and text[0] <= 0x7f) {
                 const cached = (try rt.singleByteString(text[0])).?;
-                return cached.value().dup();
+                return cached.value();
             }
             const cached = try rt.recentAtomString(atom_id, text);
-            return cached.value().dup();
+            return cached.value();
         }
         if (atom_id == null_atom) return JSValue.undefinedValue();
 
@@ -1582,18 +1915,17 @@ pub const AtomTable = struct {
             const text = predefined.name;
             if (text.len == 1 and text[0] <= 0x7f) {
                 const cached = (try rt.singleByteString(text[0])).?;
-                return cached.value().dup();
+                return cached.value();
             }
             if (predefined.kind != .string) {
                 const created = try string.String.createUtf8(rt, text);
                 return created.value();
             }
             const slot = &self.predefined_str[atom_id - 1];
-            if (slot.*) |cached| return cached.value().dup();
+            if (slot.*) |cached| return cached.value();
             const created = try string.String.createUtf8(rt, text);
             created.atom_id = atom_id;
             slot.* = created;
-            retainBody(created);
             return created.value();
         }
 
@@ -1610,19 +1942,17 @@ pub const AtomTable = struct {
             // repeating this findDynamic hash walk per OP_push_atom_value.
             if (entry.kind == .string and entry.str == null) {
                 entry.str = cached;
-                retainBody(cached);
                 if (cached.atom_id == string.String.no_atom_id) cached.atom_id = atom_id;
             }
-            return cached.value().dup();
+            return cached.value();
         }
         if (entry.kind != .string) {
             const created = try string.String.createUtf8(rt, text);
             return created.value();
         }
-        if (entry.str) |cached| return cached.value().dup();
+        if (entry.str) |cached| return cached.value();
         const created = try string.String.createUtf8(rt, text);
         entry.str = created;
-        retainBody(created);
         created.atom_id = atom_id;
         return created.value();
     }
@@ -1664,54 +1994,39 @@ pub const AtomTable = struct {
             const slot = &self.predefined_str[atom_id - 1];
             if (slot.* == null) {
                 slot.* = s;
-                retainBody(s);
             }
             return;
         }
         const entry = self.findDynamic(atom_id) orelse return;
         if (!entry.isLive() or entry.kind != .string or entry.str != null) return;
         entry.str = s;
-        retainBody(s);
         s.atom_id = atom_id;
     }
 
-    /// JSValue for an atom the caller keeps holding BY ID. TGC S2: the value
-    /// is an uncounted (mark-tracked) reference; the caller's ID count is
-    /// untouched.
+    /// JSValue for an atom the caller keeps holding BY ID. The value is an
+    /// uncounted mark-tracked reference; the caller's ID count is untouched.
     pub fn symbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
         const body = try self.ensureSymbolBody(rt, atom_id);
         const hdr = body.header();
-        if (comptime gc.string_tracer_owned) return JSValue.symbol(hdr);
-        if (hdr.rc == 0) {
-            hdr.rc = 1;
-        } else {
-            gc.retain(hdr);
-        }
         return JSValue.symbol(hdr);
     }
 
     /// JSValue in exchange for the caller's ID reference (the creation path:
-    /// `newSymbolValue`, private names). TGC S2: the ID count is given back
+    /// `newSymbolValue`, private names). The ID count is given back
     /// here, so a freshly created symbol leaves `ref_count == 0` and is kept
     /// alive by its JS holders alone. Predefined symbols carry no count.
     pub fn takeSymbolValue(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
         const body = try self.ensureSymbolBody(rt, atom_id);
         const hdr = body.header();
-        if (comptime gc.string_tracer_owned) {
-            if (self.findDynamic(atom_id)) |entry| {
-                std.debug.assert(entry.ref_count > 0);
-                entry.ref_count -= 1;
-            }
-            return JSValue.symbol(hdr);
+        if (self.findDynamic(atom_id)) |entry| {
+            std.debug.assert(entry.ref_count > 0);
+            entry.ref_count -= 1;
         }
-        if (hdr.rc == 0) hdr.rc = 1;
         return JSValue.symbol(hdr);
     }
 
-    pub fn symbolValueIfLive(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !JSValue {
-        const body = self.symbolBodyIfLive(atom_id) orelse return JSValue.undefinedValue();
-        _ = rt;
-        retainBody(body);
+    pub fn symbolValueIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) JSValue {
+        const body = self.symbolBodyIfLive(rt, atom_id) orelse return JSValue.undefinedValue();
         return JSValue.symbol(body.header());
     }
 
@@ -1723,7 +2038,7 @@ pub const AtomTable = struct {
         entry.weakref_count += 1;
     }
 
-    pub fn releaseSymbolWeakRef(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) void {
+    pub fn releaseSymbolWeakRef(self: *AtomTable, _: *JSRuntime, atom_id: Atom) void {
         if (isConst(atom_id) or isTaggedInt(atom_id)) return;
         const idx = dynamicEntryIndex(atom_id) orelse return;
         if (idx >= self.entries.len) return;
@@ -1731,65 +2046,66 @@ pub const AtomTable = struct {
         if (!isValueSymbolKind(entry.kind)) return;
         std.debug.assert(entry.weakref_count > 0);
         entry.weakref_count -= 1;
-        if (comptime gc.string_tracer_owned) {
-            // Only a weak shell (body already swept, no ID holder) is
-            // finalized here; a live body is the sweep's business.
-            if (entry.weakref_count == 0 and entry.str == null and entry.ref_count == 0) {
-                self.finalizeDeadEntry(@intCast(idx), null);
-            }
-            return;
-        }
-        if (entry.weakref_count == 0 and entry.strongRefCount() == 0) {
-            if (entry.str) |body| {
-                if (body.header().rc == 0) {
-                    self.finalizeDeadEntry(@intCast(idx), body);
-                    string.String.destroyWeakSymbolBody(rt, body);
-                }
-            }
+        // Only a weak shell (body already swept, no ID holder) is finalized
+        // here; a live body is the sweep's business.
+        if (entry.weakref_count == 0 and entry.str == null and entry.ref_count == 0) {
+            self.finalizeDeadEntry(@intCast(idx));
         }
     }
 
-    /// Refcounted-string handshake (`String.destroyFromHeader`): the body's
-    /// rc reached zero. TGC S2 replaces it with the sweep-time
-    /// `onSymbolBodyDead`; under the switch JSValue release never destroys
-    /// a string, so this path must not be reached.
-    pub fn onSymbolBodyZeroRef(self: *AtomTable, rt: *JSRuntime, atom_id: Atom, body: *string.String) bool {
-        _ = rt;
-        std.debug.assert(!gc.string_tracer_owned);
-        if (isConst(atom_id) or isTaggedInt(atom_id)) return false;
-        const idx = dynamicEntryIndex(atom_id) orelse return false;
-        if (idx >= self.entries.len) return false;
-        const entry = &self.entries[idx];
-        if (!isValueSymbolKind(entry.kind) or entry.str != body) return false;
-        if (entry.weakref_count != 0) {
-            self.unindexEntry(@intCast(idx));
-            entry.ref_count = 0;
-            return true;
-        }
-        self.finalizeDeadEntry(@intCast(idx), body);
-        return false;
-    }
-
-    pub fn symbolDescription(self: *AtomTable, symbol: Atom) ?[]const u8 {
-        const body = self.symbolBodyIfLive(symbol) orelse return null;
+    pub fn symbolDescription(self: *const AtomTable, rt: *const JSRuntime, symbol: Atom) ?[]const u8 {
+        const body = self.symbolBodyIfLive(rt, symbol) orelse return null;
         if (body.isSymbolNoDescription()) return null;
         return self.name(symbol);
     }
 
-    fn symbolBodyIfLive(self: *AtomTable, atom_id: Atom) ?*string.String {
+    /// GC weak-key liveness query. The atom id is only an identity; under
+    /// tracing the symbol body's mark, not table membership, decides whether
+    /// a WeakRef/WeakMap key survived the current trace.
+    pub fn symbolBodyHeaderIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*gc.GCObjectHeader {
+        const body = self.symbolBodyIfLive(rt, atom_id) orelse return null;
+        return @ptrCast(@alignCast(body));
+    }
+
+    /// TGC S2 §6 lane A: `entry.str` is the mutator's liveness authority, but
+    /// only outside the sweep. Once the collector has entered
+    /// `.tracer_destroy` the trace has already decided who lives, and the
+    /// unbinding handshake (`onSymbolBodyDead`) has not necessarily reached
+    /// this entry yet -- so a body that is condemned but not yet destroyed is
+    /// still bound. Reporting it as live there hands a doomed symbol back to a
+    /// destructor-time observer (WeakRef deref / weak-persistent get /
+    /// description), which either resurrects it or reads a recycled cell one
+    /// step later. The mark is the only authority that is correct in both
+    /// windows, so consult it exactly in the window where the binding is not.
+    ///
+    /// This mirrors what the object side does with `headerIsHusk` in
+    /// `liveObjectFromWeakIdentity`, one step earlier: the husk bit only
+    /// appears once teardown has actually stripped the object, whereas the
+    /// mark is already false for the whole condemned set.
+    fn bodyLiveForCurrentPhase(rt: *const JSRuntime, body: *string.String) bool {
+        if (rt.gc.phase != .tracer_destroy) return true;
+        return rt.gc.headerMarked(body.header());
+    }
+
+    fn symbolBodyIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*string.String {
         if (atom_id == null_atom or isTaggedInt(atom_id)) return null;
         if (isConst(atom_id)) {
             const pre = predefined_atoms[atom_id - 1];
             if (!isValueSymbolKind(pre.kind)) return null;
-            return self.predefined_str[atom_id - 1];
+            // Predefined bodies are unconditional trace roots (`traceRoots`),
+            // so they are marked whenever a sweep is running; the phase test
+            // rides along rather than special-casing them.
+            const body = self.predefined_str[atom_id - 1] orelse return null;
+            if (!bodyLiveForCurrentPhase(rt, body)) return null;
+            return body;
         }
         const entry = self.findDynamicConst(atom_id) orelse return null;
         if (!isValueSymbolKind(entry.kind)) return null;
         const body = entry.str orelse return null;
-        // TGC S2: a body that is still bound is live until the sweep
-        // handshake unbinds it (weak shell) or retires the entry.
-        if (comptime gc.string_tracer_owned) return body;
-        if (body.header().rc == 0) return null;
+        // A body that is still bound is live until the sweep
+        // handshake unbinds it (weak shell) or retires the entry --
+        // except inside the sweep itself, where the mark decides.
+        if (!bodyLiveForCurrentPhase(rt, body)) return null;
         return body;
     }
 
@@ -1808,40 +2124,12 @@ pub const AtomTable = struct {
         const entry = self.findDynamic(atom_id) orelse return error.InvalidAtom;
         if (!entry.hasLiveValue() or !isValueSymbolKind(entry.kind)) return error.InvalidAtom;
         if (entry.str) |cached| return cached;
-        if (comptime gc.string_tracer_owned) {
-            // The entry keeps its ID count; the body is a tracer-owned cell
-            // whose rc word is never consulted. The caller's count (>= 1,
-            // `hasLiveValue` above) also keeps the entry out of any death
-            // path while the allocation may run a collection.
-            const body = if (entry.no_symbol_description)
-                try string.String.createSymbolNoDescription(rt)
-            else
-                try string.String.createUtf8(rt, entry.bytes);
-            body.atom_id = atom_id;
-            entry.str = body;
-            return body;
-        }
-        const protect_gc_managed_symbol = entry.kind == .symbol and entry.gc_managed_symbol;
-        if (protect_gc_managed_symbol) entry.ref_count += 1;
-        errdefer if (protect_gc_managed_symbol) {
-            std.debug.assert(entry.ref_count > 0);
-            entry.ref_count -= 1;
-        };
+        // The entry keeps its ID count while allocation may run a collection.
         const body = if (entry.no_symbol_description)
             try string.String.createSymbolNoDescription(rt)
         else
             try string.String.createUtf8(rt, entry.bytes);
-        var transferred_refs = entry.ref_count;
-        if (protect_gc_managed_symbol) {
-            // The body allocation can run forced GC. The temporary ref above
-            // keeps the unique symbol atom out of the unrooted-symbol sweep
-            // until the atom-owned ref is transferred into the body.
-            std.debug.assert(transferred_refs >= 2);
-            transferred_refs -= 2;
-        }
         body.atom_id = atom_id;
-        body.header().rc = @intCast(transferred_refs);
-        entry.ref_count = 0;
         entry.str = body;
         return body;
     }
@@ -1851,7 +2139,13 @@ pub const AtomTable = struct {
     /// `index_entry` caller has just proved the atom is absent, mirroring
     /// `__JS_NewAtom`, where the create path is the fall-through of the same
     /// function that did the chain walk (quickjs.c:3196-3320).
-    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
+    fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
+        const id = try self.internDynamicInner(bytes, atom_kind, index_entry, no_symbol_description, lookup_hash);
+        self.noteCompileScope(id);
+        return id;
+    }
+
+    fn internDynamicInner(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
         std.debug.assert(!index_entry or atom_kind == .string or atom_kind == .global_symbol);
         std.debug.assert(!index_entry or self.atom_hash.len != 0);
 
@@ -1874,10 +2168,10 @@ pub const AtomTable = struct {
             entry.bytes = owned;
             entry.kind = atom_kind;
             entry.ref_count = 1;
-            entry.gc_managed_symbol = atom_kind == .symbol and gc_managed_symbol;
             entry.registry_managed_symbol = false;
             entry.weakref_count = 0;
             entry.no_symbol_description = no_symbol_description;
+            self.stampBirthEpoch(entry);
             errdefer {
                 // Exact inverse of the pop above: the slot goes back on the
                 // free-list head it came from. It deliberately does not enter
@@ -1905,10 +2199,10 @@ pub const AtomTable = struct {
             .bytes = owned,
             .kind = atom_kind,
             .ref_count = 1,
-            .gc_managed_symbol = atom_kind == .symbol and gc_managed_symbol,
             .no_symbol_description = no_symbol_description,
         });
         errdefer self.entries = self.entries[0..idx];
+        self.stampBirthEpoch(&self.entries[idx]);
         if (index_entry) self.indexEntry(idx, lookup_hash);
         if (atom_kind == .private and id < self.first_private_dynamic_atom) {
             self.first_private_dynamic_atom = id;
@@ -1963,16 +2257,13 @@ pub const AtomTable = struct {
         }
     }
 
-    fn finalizeDeadEntry(self: *AtomTable, idx: EntryIndex, destroying_body: ?*string.String) void {
+    fn finalizeDeadEntry(self: *AtomTable, idx: EntryIndex) void {
         const entry = &self.entries[idx];
         self.unindexEntry(idx);
         if (entry.str) |cached| {
             entry.str = null;
             std.debug.assert(cached.atom_id == entry.id);
             cached.atom_id = string.String.no_atom_id;
-            if (destroying_body == null or destroying_body.? != cached) {
-                releaseBody(self.runtime.?, cached);
-            }
         }
         const bytes = entry.bytes;
         entry.bytes = &.{};
@@ -1981,7 +2272,12 @@ pub const AtomTable = struct {
         entry.weakref_count = 0;
         entry.no_symbol_description = false;
         entry.registry_managed_symbol = false;
-        entry.gc_managed_symbol = false;
+        // A recycled slot must not inherit the previous tenant's TGC S3
+        // stamps; `internDynamic` re-stamps on the way out, this closes the
+        // window where a dead slot still reads "marked this epoch".
+        entry.mark_epoch = 0;
+        entry.born_epoch = 0;
+        entry.host_pins = 0;
         // Recycle the slot: nobody holds the id anymore, so the next
         // intern may rebind it. See `internDynamic` for the pop side.
         //
@@ -2007,30 +2303,7 @@ pub const AtomTable = struct {
     fn retainValueSymbolEntry(self: *AtomTable, entry: *DynamicAtom) void {
         _ = self;
         std.debug.assert(isValueSymbolKind(entry.kind));
-        if (comptime !gc.string_tracer_owned) {
-            if (entry.str) |body| {
-                std.debug.assert(body.header().rc > 0);
-                gc.retain(body.header());
-                return;
-            }
-        }
         entry.ref_count += 1;
-    }
-
-    /// The table's own reference on a bound body. Counted only while the
-    /// string family is refcounted; under `gc.string_tracer_owned` the body
-    /// is kept alive by `traceRoots` and its rc word is never touched
-    /// (`gc.release` on a `StringHeader` is NOT a no-op -- it routes to
-    /// `String.releaseFromHeader` -- so both directions are guarded here
-    /// rather than at the call sites).
-    inline fn retainBody(body: *string.String) void {
-        if (comptime gc.string_tracer_owned) return;
-        gc.retain(body.header());
-    }
-
-    inline fn releaseBody(rt: anytype, body: *string.String) void {
-        if (comptime gc.string_tracer_owned) return;
-        gc.release(rt, body.header());
     }
 
     fn findDynamic(self: *AtomTable, atom: Atom) ?*DynamicAtom {
@@ -2045,20 +2318,25 @@ pub const AtomTable = struct {
         return &self.entries[idx];
     }
 
-    /// Sweep-time twin of `onSymbolBodyZeroRef` (TGC S2 §5.7 "atom
-    /// handshake"): the tracer found symbol body `body` unmarked and
+    /// TGC S2 §5.7 atom handshake: the tracer found symbol body `body` unmarked and
     /// `String.destroyCellFromHeader` is about to recycle its cell, so the
     /// entry must stop naming it. Same outcome as the rc-zero path -- a
     /// WeakRef'd entry stays as a weak shell (unindexed, `str = null`, so
     /// `symbolValueIfLive` reports it dead), anything else is finalized --
-    /// but no refcount is read or written and no release is issued:
-    /// `finalizeDeadEntry` skips `gc.release` for `destroying_body == body`.
+    /// with no retain/release transition.
     pub fn onSymbolBodyDead(self: *AtomTable, atom_id: Atom, body: *string.String) void {
         std.debug.assert(!isConst(atom_id) and !isTaggedInt(atom_id));
         const idx = dynamicEntryIndex(atom_id) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
         if (!isValueSymbolKind(entry.kind)) {
+            if (comptime gc.atom_tracer_owned) {
+                // TGC S3 §2.4: once the tracer owns atom liveness the entry no
+                // longer roots its cached body, so losing that cache is a
+                // legal event -- drop the binding instead of asserting it away.
+                if (entry.str == body) entry.str = null;
+                return;
+            }
             // A string-kind atom body is rooted by its entry for as long as
             // the entry lives, so a condemned body can only be a stale
             // back-pointer, never the entry's own `str`.
@@ -2072,9 +2350,162 @@ pub const AtomTable = struct {
             entry.ref_count = 0;
             return;
         }
-        self.finalizeDeadEntry(@intCast(idx), body);
+        self.finalizeDeadEntry(@intCast(idx));
     }
 };
+
+/// TGC S3 §2.2 "编译作用域 provider" (K/L/M): a precise root for every atom id
+/// the compile front end is holding in plain `u32` fields.
+///
+/// The parser/lexer/compiler chain (lexer token -> `FunctionDef` -> builder ->
+/// `resolve_variables`/`resolve_labels` -> published `FunctionBytecode`) parks
+/// atom ids in Zig-heap structs that the conservative stack scan cannot read
+/// as roots and that carry no tracer edge until the `FunctionBytecode` is
+/// published. Under `gc.atom_tracer_owned` a major inside a compile would
+/// retire them mid-flight. This scope is the interval root: every id the
+/// compile OBTAINS is recorded (including ids that already existed -- an atom
+/// whose only other holder dies during the compile must not be swept), and the
+/// registered provider reports the whole list on every trace.
+///
+/// Recording is ambient: `AtomTable.compile_scope` points at the innermost
+/// active scope and every intern/dup entry point notes into it, so the ~267
+/// compile-side call sites need no signature change and none can be missed.
+/// Scopes nest (direct eval, sub-parse); each one registers its own provider,
+/// so an inner scope's death cannot orphan an outer scope's ids.
+///
+/// `rt == null` (the standalone `AtomTable` the parser/compiler fixtures build,
+/// which has no collector at all) degrades to record-only: no registration, no
+/// provider, and the list is still kept so the type behaves identically.
+pub const CompileAtomScope = struct {
+    /// Power of two; `note` masks with `recent_slots - 1`.
+    const recent_slots: Atom = 64;
+
+    rt: ?*runtime_mod.JSRuntime,
+    table: *AtomTable,
+    allocator: std.mem.Allocator,
+    ids: std.ArrayListUnmanaged(Atom) = .empty,
+    /// Ambient chain: the scope that was installed on the table when this one
+    /// activated. Restored on `deinit`.
+    prev: ?*CompileAtomScope = null,
+    active: bool = false,
+    registered: bool = false,
+    /// Direct-mapped "already in `ids`" filter. A compile re-obtains the same
+    /// identifier constantly (every `get_field`, every scope-var resolution),
+    /// so without a filter a large file appends millions of entries. A hit is
+    /// exact -- the slot only ever holds an id this scope really appended --
+    /// so a miss costs a duplicate list entry, never a missing root.
+    /// Measured: the 1.2 MB `typescript-compiler.js` records 27,875 ids
+    /// (~112 KB) for one compile, roughly 2x its distinct-identifier count.
+    recent: [recent_slots]Atom = @splat(null_atom),
+
+    /// Build a detached scope. `activate` must run once the scope sits at its
+    /// final address -- the provider stores `&self`, so a scope that is still
+    /// going to be moved (e.g. a `State` returned by value) must not register
+    /// yet. Mirrors `ReplaceMatchRoots.activate` in exec/string_ops.zig.
+    pub fn init(table: *AtomTable) CompileAtomScope {
+        const rt = table.owner_runtime;
+        return .{
+            .rt = rt,
+            .table = table,
+            .allocator = if (rt) |r| r.memory.persistent_allocator else table.memory.persistent_allocator,
+        };
+    }
+
+    fn traceRootsThunk(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        const self: *CompileAtomScope = @ptrCast(@alignCast(context));
+        for (self.ids.items) |id| try visitor.atomRoot(id);
+    }
+
+    fn provider(self: *CompileAtomScope) runtime_mod.RootProvider {
+        return .{ .context = @ptrCast(self), .trace = traceRootsThunk };
+    }
+
+    /// Install as the innermost ambient scope and (when there is a runtime)
+    /// register the root provider.
+    pub fn activate(self: *CompileAtomScope) !void {
+        std.debug.assert(!self.active);
+        if (self.rt) |rt| {
+            if (comptime runtime_mod.value_root_frames_enabled) {
+                try rt.registerRootProvider(self.provider());
+                self.registered = true;
+            }
+        }
+        self.prev = self.table.compile_scope;
+        self.table.compile_scope = self;
+        self.active = true;
+    }
+
+    pub fn deinit(self: *CompileAtomScope) void {
+        if (self.active) {
+            // Scopes are strictly stack-disciplined; anything else means a
+            // caller leaked one.
+            std.debug.assert(self.table.compile_scope == self);
+            self.table.compile_scope = self.prev;
+            self.prev = null;
+            self.active = false;
+        }
+        if (self.registered) {
+            self.rt.?.unregisterRootProvider(self.provider());
+            self.registered = false;
+        }
+        self.ids.deinit(self.allocator);
+        self.ids = .empty;
+        self.recent = @splat(null_atom);
+    }
+
+    /// Record an id the compile obtained. Predefined and tagged-int ids are
+    /// not table entries and can never be retired, so they are dropped here
+    /// rather than growing the list.
+    pub fn note(self: *CompileAtomScope, id: Atom) void {
+        if (id == null_atom or isConst(id) or isTaggedInt(id)) return;
+        const slot = id & (recent_slots - 1);
+        if (self.recent[slot] == id) return;
+        self.ids.append(self.allocator, id) catch {
+            // A root list that cannot grow must not silently drop a root.
+            // Pin the id for the rest of the runtime instead: over-retention
+            // is the only safe direction, and this is an OOM-only path.
+            self.table.pinForHost(id);
+            return;
+        };
+        self.recent[slot] = id;
+    }
+
+    /// Explicit form of the ambient recording, for a call site that wants the
+    /// scope spelled out. The symbol family (`newSymbol`/`internSymbol`, the
+    /// parser's private names) needs no wrapper: those entry points note into
+    /// the ambient scope like every other one.
+    pub fn intern(self: *CompileAtomScope, bytes: []const u8) !Atom {
+        const id = try self.table.internString(bytes);
+        self.note(id);
+        return id;
+    }
+
+    pub fn dup(self: *CompileAtomScope, id: Atom) Atom {
+        const out = self.table.dup(id);
+        self.note(out);
+        return out;
+    }
+};
+
+/// Per-`sweepDead` cap on the Debug audit spew; the counter keeps the total.
+const audit_print_limit: usize = 32;
+
+/// TGC S3 §2.2: the comptime shell every `traceChildEdges` uses to report an
+/// atom edge. A visitor without a `visitAtom` decl (the cycle-collector mark
+/// visitor, the census walkers, the minor audit) skips silently, exactly like
+/// `callVisitShape` does.
+pub inline fn callVisitAtom(vis: anytype, id: Atom) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "visitAtom")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.visitAtom)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.visitAtom(id);
+        } else {
+            vis.visitAtom(id);
+        }
+    }
+}
 
 fn dynamicEntryIndex(atom: Atom) ?usize {
     if (atom < first_dynamic_atom or isTaggedInt(atom)) return null;
@@ -2097,6 +2528,16 @@ pub fn atomFromUInt32(n: u32) Atom {
 pub fn atomToUInt32(atom: Atom) u32 {
     std.debug.assert(isTaggedInt(atom));
     return atom & ~tagged_int_bit;
+}
+
+/// Spelling of a predefined atom. The bytes live in comptime storage, so the
+/// slice needs no allocation, outlives every runtime, and cannot be invalidated
+/// by a collection -- the property of `ids.*` constants that lets a helper take
+/// the atom and still recover the name qjs would have passed around as a
+/// `const char *`.
+pub fn predefinedName(id: Atom) []const u8 {
+    std.debug.assert(id != null_atom and id < first_dynamic_atom);
+    return predefined_atoms[id - 1].name;
 }
 
 pub fn predefinedById(id: Atom) ?PredefinedAtom {

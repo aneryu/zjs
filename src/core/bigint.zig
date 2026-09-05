@@ -104,11 +104,6 @@ pub const BigInt = struct {
         return self.limbs_ptr.?[0..self.len];
     }
 
-    pub inline fn limbsMut(self: *BigInt) []Limb {
-        if (self.len == 0) return &.{};
-        return self.limbs_ptr.?[0..self.len];
-    }
-
     /// The whole allocated window, including limbs above `len`. Only a
     /// constructor writing a fresh result has business here.
     pub inline fn capacitySliceMut(self: *BigInt) []Limb {
@@ -396,34 +391,6 @@ pub const BigInt = struct {
         self.publishInline(len, lhs.negative() != rhs.negative());
         self.register(rt);
         return self;
-    }
-
-    // ---- mutation ----------------------------------------------------------
-
-    /// In-place add for a uniquely-referenced external BigInt.
-    ///
-    /// `addInPlace` may reallocate, move the limb pointer, change the length or
-    /// the sign, and may leave the value empty. Inline storage survives none of
-    /// that, since its limbs sit inside this object's own block, so this
-    /// asserts external storage and callers route inline values to a fresh
-    /// result instead. The adopt runs on the error path too, so a failed grow
-    /// cannot leave the wrapper holding a stale pointer.
-    pub fn addInPlaceExternal(self: *BigInt, other: libs.bigint.BigInt) !void {
-        std.debug.assert(!self.flags.inline_storage);
-        var owned = self.externalOwnedValue();
-        defer self.initExternalFromOwned(owned);
-        try owned.addInPlace(other);
-    }
-
-    /// The owning library value for external storage. Never call this on inline
-    /// storage: the returned value's `deinit` would free into the FAM tail.
-    fn externalOwnedValue(self: *BigInt) libs.bigint.BigInt {
-        std.debug.assert(!self.flags.inline_storage);
-        return .{
-            .negative = self.flags.negative,
-            .limbs = if (self.capacity == 0) &.{} else self.limbs_ptr.?[0..self.capacity],
-            .allocator = self.allocator,
-        };
     }
 
     // ---- destruction -------------------------------------------------------

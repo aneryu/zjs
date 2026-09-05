@@ -34,27 +34,16 @@ pub const target_supported = switch (builtin.cpu.arch) {
 
 comptime {
     // A reclaiming tracer that cannot scan the native stack will free objects
-    // whose only reference is a machine word. Degrading to precise-only on an
-    // unimplemented ABI is not a lighter configuration, it is an unsound one,
-    // and it used to happen silently: `spillRegistersAndScan` set
-    // `metrics.supported = false` and returned, so no gate went red. Refuse at
-    // build time instead. The shadow tracer is exempt because it never
-    // reclaims -- there a missing root is a census discrepancy, which is
-    // exactly what the shadow build exists to report.
+    // whose only reference is a machine word. Refuse unsupported builds rather
+    // than silently degrading to an unsound precise-only scan.
     if (!target_supported) {
         @compileError("the tracing collector needs a conservative stack scanner for this target; " ++
-            "see `missing_abis` below. Reclaiming without one frees natively-held objects.");
+            "supported targets are aarch64-linux/macos and x86_64-linux/macos/windows");
     }
 }
 
-pub const missing_abis = [_][]const u8{
-    "aarch64-windows",
-};
-
 pub const Metrics = struct {
-    supported: bool = target_supported,
     candidates: usize = 0,
-    validated_hits: usize = 0,
 };
 
 const SpillImage = switch (builtin.cpu.arch) {
@@ -273,15 +262,10 @@ fn scanWords(
     shade_ctx: *anyopaque,
 ) void {
     var addr = std.mem.alignForward(usize, lo, @sizeOf(usize));
-    // Account the fixed word range once. Keeping both counters in the loop
-    // forced two diagnostic read-modify-writes for every native-stack word --
-    // once to this scan's Metrics and once inside `forEachTraceCandidateAt` to the
-    // registry's cumulative Stats. The callback may alias arbitrary runtime
-    // state, so the compiler cannot safely hoist those writes on its own.
+    // Account the fixed word range once rather than updating the metric for
+    // every native-stack word.
     const candidates = if (hi > addr) (hi - addr) / @sizeOf(usize) else 0;
     metrics.candidates += candidates;
-    rt.gc.address_registry.stats.lookup_calls += candidates;
-    var validated_hits: usize = 0;
     while (addr + @sizeOf(usize) <= hi) : (addr += @sizeOf(usize)) {
         const word = @as(*const usize, @ptrFromInt(addr)).*;
         if (comptime gc.roots_diag_enabled) {
@@ -294,11 +278,8 @@ fn scanWords(
         // meant, and the registry cannot tell; shading both is the only safe
         // reading. String and rope hits are still discarded -- they are
         // refcount-owned and the tracer does not sweep them.
-        const hits = rt.gc.address_registry.forEachTraceCandidateAt(word, scan_filter, shade_ctx, shade);
-        if (hits != 0) validated_hits += 1;
+        _ = rt.gc.address_registry.forEachTraceCandidateAt(word, scan_filter, shade_ctx, shade);
     }
-    metrics.validated_hits += validated_hits;
-    rt.gc.address_registry.stats.lookup_hits += validated_hits;
 }
 
 pub fn spillRegistersAndScan(
@@ -307,10 +288,7 @@ pub fn spillRegistersAndScan(
     shade: *const fn (*anyopaque, *gc.Header) void,
     shade_ctx: *anyopaque,
 ) void {
-    if (comptime !target_supported) {
-        metrics.supported = false;
-        return;
-    }
+    if (comptime !target_supported) unreachable;
     comptime std.debug.assert(gc.address_registry_enabled);
     // The filter must be current before any word is dismissed by it; arenas
     // and standalone allocations may have appeared since the last scan.
@@ -561,10 +539,6 @@ pub const RootsDiagCensus = struct {
     }
 };
 
-test "conservative scanner is enabled on this ABI" {
-    try std.testing.expect(target_supported);
-}
-
 test "spillRegistersAndScan covers a non-empty stack range" {
     const rt = try JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -574,6 +548,5 @@ test "spillRegistersAndScan covers a non-empty stack range" {
     }.f;
     var ctx: u8 = 0;
     spillRegistersAndScan(rt, &metrics, shade, &ctx);
-    try std.testing.expect(metrics.supported);
     try std.testing.expect(metrics.candidates > 0);
 }

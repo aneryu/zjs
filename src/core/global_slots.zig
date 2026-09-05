@@ -19,8 +19,14 @@ pub const Slot = struct {
 pub fn getByName(rt: *runtime.JSRuntime, slots: []const Slot, name: []const u8) !value.JSValue {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
+    return getByAtom(slots, atom_id);
+}
+
+/// Atom-keyed form. Engine callers look up spellings that are predefined
+/// (`globalThis`), so they hold an `atom.ids.*` constant and never intern.
+pub fn getByAtom(slots: []const Slot, atom_id: atom.Atom) value.JSValue {
     for (slots) |slot| {
-        if (slot.name == atom_id) return slot.value.dup();
+        if (slot.name == atom_id) return slot.value;
     }
     return value.JSValue.undefinedValue();
 }
@@ -30,10 +36,8 @@ pub fn setExistingByName(rt: *runtime.JSRuntime, slots: []Slot, name: []const u8
     defer rt.atoms.free(atom_id);
     for (slots) |*slot| {
         if (slot.name == atom_id) {
-            const duplicated = next_value.dup();
-            const old_value = slot.value;
+            const duplicated = next_value;
             slot.value = duplicated;
-            old_value.free(rt);
             return;
         }
     }

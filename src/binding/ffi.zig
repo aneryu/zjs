@@ -1277,11 +1277,9 @@ test "FFI prop name descriptors validate and resolve to interned PropNameID" {
     try std.testing.expectEqualStrings("beta", resolved.ids[1].debugName(rt).?);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    const object_value = object.value();
-    defer object_value.free(rt);
+    _ = object.value();
     try resolved.ids[0].defineDataProperty(rt, object, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
     const stored = try resolved.ids[0].getProperty(object);
-    defer stored.free(rt);
     try std.testing.expectEqual(@as(i32, 42), stored.asInt32().?);
 }
 

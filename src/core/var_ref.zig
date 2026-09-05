@@ -71,42 +71,11 @@ pub const VarRef = struct {
         return self;
     }
 
-    /// qjs `free_var_ref` (quickjs.c:6164-6183): null-safe rc--, and at zero
-    /// unlink + free the owned value + `js_free_rt`. Callers that already
-    /// wrap a cell as `JSValue.object` still reach `destroyFromHeader` through
-    /// `gc.destroyVarRefNow`; this typed entry is the function-finalizer loop
-    /// shape (`js_bytecode_function_finalizer` qjs:6253-6256).
-    ///
-    /// It is deliberately a no-op, and it is deliberately still here.
-    ///
-    /// The tracer owns cells outright: `destroyCondemned` frees them in the
-    /// same ordered pass as everything else, so the count is not maintained
-    /// and a release must not touch it -- a function object dying in the sweep
-    /// releases captures whose cells are already condemned, which would
-    /// underflow a word nothing reads. The refcounting body this used to have
-    /// (rc--, phase gates, unlink, destroy) went with the rc collector.
-    ///
-    /// What survives is the SHAPE: `retain`/`release` is the ownership
-    /// protocol the binding-identity owners are written against, and
-    /// `destroyOptionalVarRefCellSlice` keeps qjs's finalizer loop
-    /// (`js_bytecode_function_finalizer`, quickjs.c:6253-6256). An empty
-    /// release costs nothing after inlining, whereas deleting one half of a
-    /// retain/release pair leaves an asymmetry every future owner has to
-    /// rediscover.
-    pub fn freeVarRef(rt: anytype, var_ref: ?*VarRef) void {
-        _ = rt;
-        _ = var_ref;
-    }
-
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
-        // Closed cells own their binding value. Open cells own only the parked
-        // generator whose frame backs pvalue; both live in the same field.
-        self.value.free(rt);
-        // Cycle removal: keep the struct alive for the Pass-B drain so a sibling
-        // still decref-ing this var_ref does not read freed memory (qjs defers
-        // non-value GC types to gc_zero_ref_count_list, quickjs.c:6790).
-        if (gc.phaseIsTwoPassTeardown(rt.gc.phase)) {
+        // Keep the struct alive for Pass B while other condemned carriers may
+        // still hold raw cell pointers.
+        if (rt.gc.phase == .tracer_destroy) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -121,13 +90,11 @@ pub const VarRef = struct {
     /// Runtime teardown keeps VarRef structs alive until objects and bytecode
     /// have released their cell pointers. Drop the cell-owned value first,
     /// while every referenced GC object is still structurally valid.
-    pub fn prepareForRuntimeDeinit(rt: anytype, header: *gc.Header) void {
+    pub fn prepareForRuntimeDeinit(_: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
-        const old_value = self.value;
         self.value = JSValue.undefinedValue();
         self.pvalue = &self.value;
         self.is_open = false;
-        old_value.free(rt);
     }
 
     pub fn valueRef(self: *VarRef) JSValue {
@@ -138,33 +105,6 @@ pub const VarRef = struct {
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .var_ref) return null;
         return @alignCast(@fieldParentPtr("header", header));
-    }
-
-    /// Slot-typed retain: rc++ on the cell and return it — the qjs
-    /// `JSVarRef*` copy `js_rc(var_ref)->ref_count++` (js_closure2,
-    /// quickjs.c:17322-17324). Routed through `valueRef().dup()` so the
-    /// refcount/profiling behavior is bit-identical to the pre-typed
-    /// `slot.dup()` on the cell's JSValue form.
-    pub inline fn dupCell(self: *VarRef) *VarRef {
-        _ = self.valueRef().dup();
-        return self;
-    }
-
-    /// Typed retain Interface used by binding-identity owners.
-    pub inline fn retain(self: *VarRef) *VarRef {
-        return self.dupCell();
-    }
-
-    /// Slot-typed release — qjs `free_var_ref` (quickjs.c:6164-6183): rc--,
-    /// destroy at 0. Typed so the function-finalizer loop does not wrap each
-    /// cell as `JSValue.object` and bounce through the generic free path.
-    pub inline fn freeCell(self: *VarRef, rt: anytype) void {
-        freeVarRef(rt, self);
-    }
-
-    /// Typed release Interface used by binding-identity owners.
-    pub inline fn release(self: *VarRef, rt: anytype) void {
-        self.freeCell(rt);
     }
 
     /// Attach the GC owner of an open cell's parked frame.
@@ -181,7 +121,7 @@ pub const VarRef = struct {
             std.debug.assert(self.value.same(owner));
             return;
         }
-        self.value = owner.dup();
+        self.value = owner;
         // An open cell adopting its parked-frame owner is the same kind of
         // store as `close`: a traced object gaining an edge.
         rt.gc.generationalBarrier(&self.header, owner.cycleMarkHeader());
@@ -189,8 +129,7 @@ pub const VarRef = struct {
 
     pub fn close(self: *VarRef, rt: anytype) void {
         if (!self.is_open) return;
-        const closed_value = self.pvalue.*.dup();
-        const open_owner = self.value;
+        const closed_value = self.pvalue.*;
         self.value = closed_value;
         // Closing copies the binding out of the dying frame and into the cell,
         // which is a store into a traced object exactly like `setVarRefValue`
@@ -199,7 +138,6 @@ pub const VarRef = struct {
         rt.gc.generationalBarrier(&self.header, closed_value.cycleMarkHeader());
         self.pvalue = &self.value;
         self.is_open = false;
-        open_owner.free(rt);
     }
 
     pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) void {
@@ -213,7 +151,6 @@ pub const VarRef = struct {
         if (comptime builtin.mode == .Debug) {
             std.debug.assert(fromValue(next_value) == null);
         }
-        const old_value = self.pvalue.*;
         self.pvalue.* = next_value;
         // A closure cell is a traced object owning one value slot, so storing
         // a fresh value into a long-lived cell is an old-to-young edge the
@@ -222,7 +159,6 @@ pub const VarRef = struct {
         // owner recorded here is always the cell itself, which is what the
         // remembered set re-traces.
         rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
-        old_value.free(rt);
     }
 
     pub fn varRefValueSlot(self: *VarRef) *JSValue {

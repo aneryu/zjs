@@ -333,19 +333,16 @@ fn ensureModuleCaptureCells(
                     closure,
                 );
                 object.replaceModuleCaptureSlotOwned(
-                    ctx.runtime,
                     index,
                     cell,
                 ) catch |err| {
-                    cell.freeCell(ctx.runtime);
                     return err;
                 };
             },
             .module_decl => {
                 if (slots[index] != null) continue;
                 const cell = try createModuleDeclarationCell(ctx, closure);
-                object.replaceModuleCaptureSlotOwned(ctx.runtime, index, cell) catch |err| {
-                    cell.freeCell(ctx.runtime);
+                object.replaceModuleCaptureSlotOwned(index, cell) catch |err| {
                     return err;
                 };
             },
@@ -382,12 +379,9 @@ fn ensureModuleFunction(
         return error.InvalidBytecode;
     if (!function.isModule() or function.realmContext() != ctx) return error.InvalidBytecode;
     const object = try object_ops.createModuleBytecodeFunctionShell(ctx, function);
-    var shell_owned = true;
-    errdefer if (shell_owned) object.value().free(ctx.runtime);
 
     const owned_bytecode = record.takeFuncObjectValueNoFail();
     record.adoptFuncObjectValueNoFail(ctx.runtime, object.value());
-    shell_owned = false;
     object.setFunctionBytecodeValue(ctx.runtime, owned_bytecode) catch unreachable;
     try ensureModuleCaptureCells(ctx, object, function);
     return object;
@@ -588,11 +582,9 @@ fn wireModuleImports(state: *LinkState, record: *core.module.ModuleRecord) !void
         const binding = try expectResolvedExport(state, dependency, entry.import_name);
         const owned_cell = try importBindingCell(state.ctx, binding);
         object.replaceModuleCaptureSlotOwned(
-            state.ctx.runtime,
             entry.var_idx,
             owned_cell,
         ) catch |err| {
-            owned_cell.freeCell(state.ctx.runtime);
             return err;
         };
     }
@@ -605,15 +597,12 @@ fn importBindingCell(
     switch (binding.entry) {
         .local_export => {
             const cell = bindingCell(binding) orelse return error.InvalidBytecode;
-            return cell.dupCell();
+            return cell;
         },
         .namespace_export => {
             const target = try namespaceBindingTarget(binding);
             const namespace = try moduleNamespaceValueForRecord(ctx, target);
-            var namespace_owned = true;
-            errdefer if (namespace_owned) namespace.free(ctx.runtime);
             const cell = try core.VarRef.createClosed(ctx.runtime, namespace);
-            namespace_owned = false;
             return cell;
         },
     }
@@ -640,7 +629,7 @@ fn retainLocalExports(
         const cell = slots[entry.var_idx] orelse return error.InvalidBytecode;
         record.publishRetainedExportCellNoFail(
             @intCast(index),
-            cell.valueRef().dup(),
+            cell.valueRef(),
         );
     }
 }
@@ -670,7 +659,6 @@ fn rollbackRecordLinkArtifacts(
         if (index >= slots.len) continue;
         switch (closure.closureType()) {
             .module_import => object.clearModuleImportCaptureSlot(
-                ctx.runtime,
                 index,
             ) catch unreachable,
             .module_decl => if (slots[index]) |cell| {
@@ -698,7 +686,7 @@ pub fn runModuleDeclarationInstantiation(
     var stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit());
     defer stack.deinit(ctx.runtime);
     try stack.reserveAdditional(function.stack_size);
-    const result = try @import("zjs_vm.zig").runWithCallEnv(.{
+    _ = try @import("zjs_vm.zig").runWithCallEnv(.{
         .ctx = ctx,
         .stack = &stack,
         .function = function,
@@ -708,7 +696,6 @@ pub fn runModuleDeclarationInstantiation(
         .current_function_value = record.funcObjectValue(),
         .global_declarations_prevalidated = true,
     });
-    result.free(ctx.runtime);
 }
 
 pub fn runModuleEvaluationStep(
@@ -772,6 +759,11 @@ fn resolvedRequestAtomForParsed(
 ) !core.Atom {
     const resolved = try resolvedRequestAtom(runtime, request_atom, referrer_path);
     errdefer runtime.atoms.free(resolved);
+    // TGC S3 §4 class B: the resolved specifier is a bare id held across the
+    // tagged-name formatting allocation below.
+    var resolved_roots = core.runtime.rootAtoms(.{&resolved});
+    resolved_roots.activate(runtime);
+    defer resolved_roots.deactivate(runtime);
     const kind = syntheticKindForRequestIndex(runtime, parsed, request_index) orelse return resolved;
     if (kind == .none) return resolved;
     const resolved_name = runtime.atoms.name(resolved) orelse return error.InvalidAtom;
@@ -816,15 +808,12 @@ fn moduleNamespaceValueForRecord(
     if (record.registry != &ctx.modules) return error.ModuleNotFound;
     if (!record.requestsResolved()) return error.ModuleNotFound;
     const cached = record.moduleNamespaceValue();
-    if (!cached.isUndefined()) return cached.dup();
+    if (!cached.isUndefined()) return cached;
 
     const object = try core.Object.create(ctx.runtime, core.class.ids.module_ns, null);
-    var object_owned = true;
-    errdefer if (object_owned) object.value().free(ctx.runtime);
     try initializeCanonicalModuleNamespace(ctx, record, object);
     record.publishModuleNamespaceNoFail(ctx.runtime, object.value());
-    object_owned = false;
-    return record.moduleNamespaceValue().dup();
+    return record.moduleNamespaceValue();
 }
 
 fn initializeCanonicalModuleNamespace(
@@ -857,7 +846,7 @@ fn initializeCanonicalModuleNamespace(
                     try object.defineModuleVarRefProperty(
                         ctx.runtime,
                         export_name,
-                        cell.dupCell(),
+                        cell,
                     );
                 } else {
                     try object.defineModuleAutoInitProperty(
@@ -888,7 +877,6 @@ fn defineCanonicalModuleNamespaceToStringTag(
         return error.InvalidAtom;
     const tag_string = try core.string.String.createUtf8(ctx.runtime, "Module");
     const tag_value = tag_string.value();
-    defer tag_value.free(ctx.runtime);
     try object.defineOwnProperty(
         ctx.runtime,
         tag_atom,
@@ -1016,6 +1004,10 @@ fn preloadFileModuleGraphInnerMode(
     try appendTrackedPath(allocator, seen, path);
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: held across compilation of the module source.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
 
     const existing_record = context.modules.find(module_name);
     if (existing_record) |existing| {
@@ -1145,8 +1137,7 @@ fn syntheticKindForRequestIndex(
     record: *const bytecode.module.Record,
     request_index: u32,
 ) ?core.module.SyntheticKind {
-    const type_atom = runtime.internAtom("type") catch return null;
-    defer runtime.atoms.free(type_atom);
+    const type_atom = core.atom.ids.type_;
     for (record.import_attributes) |entry| {
         if (entry.request_index != request_index or entry.key != type_atom) continue;
         const value = runtime.atoms.name(entry.value) orelse return null;
@@ -1212,6 +1203,10 @@ fn preloadSyntheticFileModuleTracked(
     const runtime = ctx.runtime;
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
+    // TGC S3 §4 class B: held across the synthetic record build.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(runtime);
+    defer module_name_roots.deactivate(runtime);
     if (ctx.modules.find(module_name)) |existing| {
         if (existing.synthetic_kind != kind) return error.InvalidBytecode;
         if (!existing.requestsResolved()) existing.markRequestsResolvedNoFail();
@@ -1280,7 +1275,6 @@ pub fn initializeSyntheticFileModule(
         .none => unreachable,
         .json => blk: {
             const string = try core.string.String.createUtf8(ctx.runtime, source_text);
-            defer string.value().free(ctx.runtime);
             // Route JSON-module parsing through the internal record table
             // (JSON.parse, no reviver) so exec carries no compile-time JSON
             // knowledge. The input is a freshly built string, so the method's
@@ -1307,7 +1301,6 @@ pub fn initializeSyntheticFileModule(
         .text => (try core.string.String.createUtf8(ctx.runtime, source_text)).value(),
         .bytes => try syntheticBytesModuleValue(ctx, global, source_text),
     };
-    errdefer value.free(ctx.runtime);
     try setModuleBinding(ctx, record, atom_default, value);
     return true;
 }
@@ -1339,7 +1332,6 @@ fn setModuleBinding(ctx: *core.JSContext, record: *core.module.ModuleRecord, nam
 
 fn syntheticBytesModuleValue(ctx: *core.JSContext, global: *core.Object, source_text: []const u8) !core.JSValue {
     const value = try array_ops.createUint8ArrayFromBytes(ctx.runtime, global, source_text);
-    errdefer value.free(ctx.runtime);
     const object = try array_ops.expectUint8ArrayObject(value);
     const buffer_value = object.typedArrayBuffer() orelse return error.TypeError;
     const buffer = try property_ops.expectObject(buffer_value);

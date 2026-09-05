@@ -154,12 +154,7 @@ pub fn build(b: *std.Build) void {
     const expect_config_debug = config.pinnedExpectedConfig(b, config_expect_override, config_settings, .Debug);
     const expect_config_fast = config.pinnedExpectedConfig(b, config_expect_override, config_settings, .ReleaseFast);
 
-    // Separate options object for the dossier harnesses. Reusing engine_options
-    // here would register the same generated file under two module names
-    // (the harnesses already receive it transitively via internal_fast_mod).
     const zjs_dossier_layout_pad = b.option(usize, "zjs_dossier_layout_pad", "Dossier-only layout-lineage pad slot count (0 = no effect)") orelse 0;
-    const dossier_options = b.addOptions();
-    dossier_options.addOption(usize, "zjs_dossier_layout_pad", zjs_dossier_layout_pad);
     // One options shape for every engine-bearing module; the only field that
     // varies between them is `zjs_expect_config`, because that is the one
     // field whose correct value depends on the artifact's own optimize mode.
@@ -190,7 +185,6 @@ pub fn build(b: *std.Build) void {
         .expect_config = expect_config,
         .expect_config_debug = expect_config_debug,
         .expect_config_fast = expect_config_fast,
-        .dossier_options = dossier_options,
         .engine_options = engine_options,
         .engine_options_fast = engine_options_fast,
         .engine_options_dev = engine_options_dev,

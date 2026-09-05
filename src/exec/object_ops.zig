@@ -25,7 +25,6 @@ const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const value_ops = @import("value_ops.zig");
-const vm_value = @import("vm_value.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
@@ -41,25 +40,19 @@ const error_stack_ops = @import("error_stack_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const property_direct = @import("property_direct.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
-const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
-const value_slot = @import("value_slot.zig");
 
 pub const Step = enum { done, continue_loop };
 
 // --- Dynamically gathered call_runtime aliases (excluding local definitions) ---
 const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
 const DynamicFunctionKind = function_ops.DynamicFunctionKind;
-const IntegrityLevel = call_runtime.IntegrityLevel;
 const LengthIndexAtom = array_ops.LengthIndexAtom;
 const RegExpMatch = string_ops.RegExpMatch;
-const ValueSliceRoot = array_ops.ValueSliceRoot;
 
-const addCollectionEntriesFromArray = array_ops.addCollectionEntriesFromArray;
 const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
 const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
-const anchoredBinaryPropertyMatches = string_ops.anchoredBinaryPropertyMatches;
 const appendDecodedRegExpGroupName = regexp_fastpath.appendDecodedRegExpGroupName;
 const appendOwnedAtom = core.atom.appendOwnedAtom;
 const arrayLengthAssignmentValue = array_ops.arrayLengthAssignmentValue;
@@ -74,18 +67,12 @@ const callAccessorSetter = call_runtime.callAccessorSetter;
 const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
 const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const captureErrorStack = error_stack_ops.captureErrorStack;
-const closeIteratorForFromEntriesAbrupt = iterator_ops.closeIteratorForFromEntriesAbrupt;
 const createArrayFromArgs = array_ops.createArrayFromArgs;
-const createIteratorResult = iterator_ops.createIteratorResult;
 const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
-const createRegExpMatchArrayFromValue = string_ops.createRegExpMatchArrayFromValue;
-const createStringFromByteUnits = string_ops.createStringFromByteUnits;
 const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
-const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
-const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
 const functionConstructorFromGlobal = builtin_glue.functionConstructorFromGlobal;
 const functionNameValueFromAtom = call_runtime.functionNameValueFromAtom;
@@ -95,7 +82,6 @@ const functionRuntimeStrict = call_runtime.functionRuntimeStrict;
 const getFastStringPrimitiveDataProperty = string_ops.getFastStringPrimitiveDataProperty;
 const getStringIndexValue = string_ops.getStringIndexValue;
 const importMetaUrlValue = module_mod.importMetaUrlValue;
-const isBlockedByUnscopables = call_runtime.isBlockedByUnscopables;
 const isCallableValue = call_runtime.isCallableValue;
 const isConstructorLike = call_runtime.isConstructorLike;
 const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
@@ -105,27 +91,22 @@ const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
 const bigIntPrototypeToString = string_ops.bigIntPrototypeToString;
 const createArrayDataOrTypedArrayElement = array_ops.createArrayDataOrTypedArrayElement;
 const defineToStringTag = iterator_ops.defineToStringTag;
-const iteratorCloseValue = iterator_ops.iteratorCloseValue;
 const objectEntryArrayValue = array_ops.objectEntryArrayValue;
 const regExpAutoInitBuiltinMatches = string_ops.regExpAutoInitBuiltinMatches;
 const regExpNativeBuiltinMatches = string_ops.regExpNativeBuiltinMatches;
-const readUtf16CodePoint = string_ops.readUtf16CodePoint;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
-const regExpFlagsContain = regexp_fastpath.regExpFlagsContain;
 const rejectModuleNamespaceSuperSet = promise_ops.rejectModuleNamespaceSuperSet;
 const runGeneratorParameterInit = call_runtime.runGeneratorParameterInit;
 const setFailureShouldThrow = call_runtime.setFailureShouldThrow;
 const setMappedArgumentsValue = call_runtime.setMappedArgumentsValue;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
-const stringSliceValue = string_ops.stringSliceValue;
 const throwPrivateBrandTypeError = call_runtime.throwPrivateBrandTypeError;
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const throwSetFailureTypeError = call_runtime.throwSetFailureTypeError;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
-const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
 const toPrimitiveForString = string_ops.toPrimitiveForString;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
 const typedArrayCanonicalGet = array_ops.typedArrayCanonicalGet;
@@ -137,7 +118,6 @@ const typedArrayDefineOwnPropertyVm = array_ops.typedArrayDefineOwnPropertyVm;
 const typedArrayOwnKeys = array_ops.typedArrayOwnKeys;
 const typedArrayPrototypeSet = array_ops.typedArrayPrototypeSet;
 const valueTruthy = coercion_ops.valueTruthy;
-const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     // Use the realm-cached `%Object.prototype%` (O(1) array index, like QuickJS's
@@ -238,19 +218,12 @@ pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, f
     const current = frame.this_value;
     if (current.isObject()) return current;
     if (current.isUndefined() or current.isNull()) {
-        if (frame.ownership.this_value == .owned) {
-            current.free(ctx.runtime);
-            frame.this_value = global.value().dup();
-        } else {
-            frame.this_value = global.value();
-        }
+        frame.this_value = global.value();
         return frame.this_value;
     }
 
     const boxed = try primitiveObjectForAccess(ctx.runtime, global, current);
-    if (frame.ownership.this_value == .owned) current.free(ctx.runtime);
     frame.this_value = boxed;
-    frame.ownership.this_value = .owned;
     return boxed;
 }
 
@@ -262,27 +235,23 @@ pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !
     try installGeneratorPrototypeProperties(rt, global, object);
     const value = object.value();
     object_raw_owned = false;
-    defer value.free(rt);
     try storeRealmValue(rt, global, .generator_prototype, value);
     return object;
 }
 
 pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *core.Object, object: *core.Object) !void {
     const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
-    const next_atom = try rt.internAtom("next");
-    defer rt.atoms.free(next_atom);
+    const next_atom = core.atom.ids.next;
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 1);
-    defer next.free(rt);
     const next_object = property_ops.expectObject(next) catch return error.TypeError;
     next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
     try next_object.addGeneratorNextFunction(rt);
     try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, true, false, true));
-    try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, "return", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
-    try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, "throw", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, core.atom.ids.return_, 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, core.atom.ids.throw, 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
 
     const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
-    defer tag.free(rt);
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
 }
 
@@ -290,10 +259,7 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     if (cachedRealmObject(rt, global, .generator_function_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
-    var object_value_owned = true;
-    errdefer if (object_value_owned) object_value.free(rt);
     const constructor = try core.function.nativeFunctionForGlobal(rt, global, "GeneratorFunction", 1);
-    defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
@@ -305,8 +271,6 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     try generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, false, false, true));
     try defineToStringTag(rt, object, "GeneratorFunction");
     try storeRealmValue(rt, global, .generator_function_prototype, object_value);
-    object_value_owned = false;
-    object_value.free(rt);
     return object;
 }
 
@@ -321,7 +285,6 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
 fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_bytecode.BytecodeClosureVar) !*core.VarRef {
     const cell_value = try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name);
     return core.VarRef.fromValue(cell_value) orelse {
-        cell_value.free(ctx.runtime);
         return error.InvalidBytecode;
     };
 }
@@ -399,9 +362,8 @@ pub const ClosureCaptureSource = union(enum) {
     custom: ClosureCellResolver,
 };
 
-fn ownedClosureCell(rt: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
+fn ownedClosureCell(_: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
     return core.VarRef.fromValue(owned) orelse {
-        owned.free(rt);
         return error.InvalidBytecode;
     };
 }
@@ -452,16 +414,16 @@ inline fn resolveNestedClosureCell(
         .arg => try frame.captureArg(ctx.runtime, cv.var_idx),
         .ref => blk: {
             std.debug.assert(cv.var_idx < frame.var_refs.len);
-            break :blk frame.var_refs[cv.var_idx].retain();
+            break :blk frame.var_refs[cv.var_idx];
         },
         .global_ref => blk: {
             std.debug.assert(cv.var_idx < frame.var_refs.len);
-            break :blk frame.var_refs[cv.var_idx].retain();
+            break :blk frame.var_refs[cv.var_idx];
         },
         .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
         .module_decl, .module_import => blk: {
             try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
-            break :blk frame.var_refs[cv.var_idx].retain();
+            break :blk frame.var_refs[cv.var_idx];
         },
     };
 }
@@ -517,7 +479,6 @@ fn createBytecodeFunctionObjectInternal(
     capture_source: ClosureCaptureSource,
 ) HostError!core.JSValue {
     var rooted_value = value;
-    defer rooted_value.free(ctx.runtime);
     if (!rooted_value.isFunctionBytecode()) return error.InvalidBytecode;
     var root_frame = core.runtime.rootValues(.{&rooted_value});
     root_frame.activate(ctx.runtime);
@@ -628,7 +589,6 @@ fn installOrdinaryFunctionPrototype(
     errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, prototype.gcHeader());
     const prototype_value = prototype.value();
     prototype_raw_owned = false;
-    defer prototype_value.free(ctx.runtime);
     try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, false));
 }
 
@@ -645,7 +605,6 @@ pub fn createBytecodeFunctionObject(
         core.atom.ids.empty_string,
         .{ .nested_frame = frame },
     );
-    errdefer object_value.free(ctx.runtime);
     try installOrdinaryFunctionPrototype(ctx, global, object_value);
     return object_value;
 }
@@ -685,7 +644,6 @@ pub fn createRootBytecodeFunctionObject(
         core.atom.ids.empty_string,
         capture_source,
     );
-    errdefer object_value.free(ctx.runtime);
     try installOrdinaryFunctionPrototype(ctx, global, object_value);
     return object_value;
 }
@@ -703,7 +661,7 @@ pub fn constructPrimitiveWrapperWithPrototype(
 
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
     return object.value();
 }
 
@@ -716,19 +674,14 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.symbolValue(symbol_atom);
+    const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const wrapper_value = try constructPrimitiveWrapperWithPrototype(rt, core.class.ids.symbol, null, symbol_value);
-    var wrapper_alive = true;
-    defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectDataSlot().* orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    wrapper_value.free(rt);
-    wrapper_alive = false;
-    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -760,29 +713,23 @@ pub fn aggregateErrorConstructWithPrototype(
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    defer cause_val.free(rt);
-
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
-    errdefer instance_value.free(rt);
 
     // No own `name` property: it lives on the per-class prototype only
     // (qjs js_error_constructor quickjs.c:41441 defines message/cause/errors).
 
     if (rooted_args.len >= 2 and !rooted_args[1].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[1], caller_function, caller_frame);
-        defer message.free(rt);
-        try defineDataPropertyByName(rt, instance, "message", message, true, false, true);
+        try defineDataPropertyByAtom(rt, instance, core.atom.ids.message, message, true, false, true);
     }
 
     if (rooted_args.len >= 3 and rooted_args[2].isObject()) {
-        const cause_key = try rt.internAtom("cause");
-        defer rt.atoms.free(cause_key);
+        const cause_key = core.atom.ids.cause;
         const options = try property_ops.expectObject(rooted_args[2]);
         if (try hasValueProperty(ctx, output, global, rooted_args[2], options, cause_key, caller_function, caller_frame)) {
             cause_val = try getValueProperty(ctx, output, global, rooted_args[2], cause_key, caller_function, caller_frame);
-            try defineDataPropertyByName(rt, instance, "cause", cause_val, true, false, true);
-            cause_val.free(rt);
+            try defineDataPropertyByAtom(rt, instance, core.atom.ids.cause, cause_val, true, false, true);
             cause_val = core.JSValue.undefinedValue();
         }
     }
@@ -790,8 +737,7 @@ pub fn aggregateErrorConstructWithPrototype(
     const errors_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
     const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, errors_value, caller_function, caller_frame);
     const errors_array_value = errors_array.value();
-    defer errors_array_value.free(rt);
-    try defineDataPropertyByName(rt, instance, "errors", errors_array_value, true, false, true);
+    try defineDataPropertyByAtom(rt, instance, core.atom.ids.errors, errors_array_value, true, false, true);
 
     try captureErrorStack(ctx, output, global, instance);
 
@@ -806,11 +752,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     const global = try zjs_vm.contextGlobal(ctx);
 
     const errors_source = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    var errors_source_alive = true;
-    defer if (errors_source_alive) errors_source.value().free(rt);
     const options = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    var options_alive = true;
-    defer if (options_alive) options.value().free(rt);
 
     const error_value = try rt.newSymbolValue("gc-aggregate-error-item-symbol");
     const error_atom = error_value.asSymbolAtom().?;
@@ -819,7 +761,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     try errors_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(error_value, true, true, true));
     errors_source.setArrayLength(1);
     try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
-    try defineDataPropertyByName(rt, options, "cause", cause_value, true, false, true);
+    try defineDataPropertyByAtom(rt, options, core.atom.ids.cause, cause_value, true, false, true);
 
     const args = [_]core.JSValue{
         errors_source.value(),
@@ -833,8 +775,6 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     defer ctx.runtime.formatting_error_stack = false;
 
     const aggregate_value = try aggregateErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
-    var aggregate_alive = true;
-    defer if (aggregate_alive) aggregate_value.free(rt);
     const aggregate = objectFromValue(aggregate_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(error_atom) != null);
@@ -845,25 +785,14 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     defer rt.atoms.free(cause_key);
     {
         const stored_errors_value = try aggregate.getProperty(errors_key);
-        defer stored_errors_value.free(rt);
         const stored_errors = objectFromValue(stored_errors_value) orelse return error.TypeError;
         const stored_error = try stored_errors.getProperty(core.atom.atomFromUInt32(0));
-        defer stored_error.free(rt);
         try std.testing.expect(stored_error.same(error_value));
 
         const stored_cause = try aggregate.getProperty(cause_key);
-        defer stored_cause.free(rt);
         try std.testing.expect(stored_cause.same(cause_value));
     }
 
-    aggregate_value.free(rt);
-    aggregate_alive = false;
-    error_value.free(rt);
-    cause_value.free(rt);
-    errors_source.value().free(rt);
-    errors_source_alive = false;
-    options.value().free(rt);
-    options_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
@@ -893,19 +822,17 @@ pub fn suppressedErrorConstructWithPrototype(
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
-    errdefer instance_value.free(rt);
 
     if (rooted_args.len >= 3 and !rooted_args[2].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[2], caller_function, caller_frame);
-        defer message.free(rt);
-        try defineDataPropertyByName(rt, instance, "message", message, true, false, true);
+        try defineDataPropertyByAtom(rt, instance, core.atom.ids.message, message, true, false, true);
     }
 
     const error_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
-    try defineDataPropertyByName(rt, instance, "error", error_value, true, false, true);
+    try defineDataPropertyByAtom(rt, instance, core.atom.ids.error_, error_value, true, false, true);
 
     const suppressed_value = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
-    try defineDataPropertyByName(rt, instance, "suppressed", suppressed_value, true, false, true);
+    try defineDataPropertyByAtom(rt, instance, core.atom.ids.suppressed, suppressed_value, true, false, true);
 
     try captureErrorStack(ctx, output, global, instance);
 
@@ -918,12 +845,11 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
 
     const error_atom = try rt.atoms.newValueSymbol("gc-suppressed-error-value-symbol");
-    const error_arg = try rt.symbolValue(error_atom);
+    const error_arg = try rt.takeSymbolValue(error_atom);
     const suppressed_atom = try rt.atoms.newValueSymbol("gc-suppressed-error-suppressed-symbol");
-    const suppressed_arg = try rt.symbolValue(suppressed_atom);
+    const suppressed_arg = try rt.takeSymbolValue(suppressed_atom);
     const args = [_]core.JSValue{
         error_arg,
         suppressed_arg,
@@ -934,8 +860,6 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
     defer rt.setGCThreshold(old_threshold);
 
     const error_value = try suppressedErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
-    var error_alive = true;
-    defer if (error_alive) error_value.free(rt);
     const object = objectFromValue(error_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(error_atom) != null);
@@ -946,17 +870,11 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
     defer rt.atoms.free(suppressed_key);
     {
         const stored_error = try object.getProperty(error_key);
-        defer stored_error.free(rt);
         const stored_suppressed = try object.getProperty(suppressed_key);
-        defer stored_suppressed.free(rt);
         try std.testing.expect(stored_error.same(error_arg));
         try std.testing.expect(stored_suppressed.same(suppressed_arg));
     }
 
-    error_value.free(rt);
-    error_alive = false;
-    error_arg.free(rt);
-    suppressed_arg.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(suppressed_atom) == null);
@@ -1000,11 +918,8 @@ pub fn errorConstructWithPrototype(
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    defer cause_val.free(rt);
-
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
-    errdefer instance_value.free(rt);
 
     // No own `name` property: it lives on the per-class prototype only, so
     // patching `X.prototype.name` reflects on existing instances and a
@@ -1014,18 +929,15 @@ pub fn errorConstructWithPrototype(
 
     if (rooted_args.len >= 1 and !rooted_args[0].isUndefined()) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[0], caller_function, caller_frame);
-        defer message.free(rt);
-        try defineDataPropertyByName(rt, instance, "message", message, true, false, true);
+        try defineDataPropertyByAtom(rt, instance, core.atom.ids.message, message, true, false, true);
     }
 
     if (rooted_args.len >= 2 and rooted_args[1].isObject()) {
-        const cause_key = try rt.internAtom("cause");
-        defer rt.atoms.free(cause_key);
+        const cause_key = core.atom.ids.cause;
         const options = try property_ops.expectObject(rooted_args[1]);
         if (try hasValueProperty(ctx, output, global, rooted_args[1], options, cause_key, caller_function, caller_frame)) {
             cause_val = try getValueProperty(ctx, output, global, rooted_args[1], cause_key, caller_function, caller_frame);
-            try defineDataPropertyByName(rt, instance, "cause", cause_val, true, false, true);
-            cause_val.free(rt);
+            try defineDataPropertyByAtom(rt, instance, core.atom.ids.cause, cause_val, true, false, true);
             cause_val = core.JSValue.undefinedValue();
         }
     }
@@ -1043,12 +955,10 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
     const global = try zjs_vm.contextGlobal(ctx);
 
     const options = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    var options_alive = true;
-    defer if (options_alive) options.value().free(rt);
 
     const cause_atom = try rt.atoms.newValueSymbol("gc-error-cause-symbol");
-    const cause_value = try rt.symbolValue(cause_atom);
-    try defineDataPropertyByName(rt, options, "cause", cause_value, true, false, true);
+    const cause_value = try rt.takeSymbolValue(cause_atom);
+    try defineDataPropertyByAtom(rt, options, core.atom.ids.cause, cause_value, true, false, true);
     const args = [_]core.JSValue{
         core.JSValue.undefinedValue(),
         options.value(),
@@ -1060,8 +970,6 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
     defer ctx.runtime.formatting_error_stack = false;
 
     const error_value = try errorConstructWithPrototype(ctx, null, global, "Error", null, &args, null, null);
-    var error_alive = true;
-    defer if (error_alive) error_value.free(rt);
     const object = objectFromValue(error_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(cause_atom) != null);
@@ -1069,15 +977,9 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
     defer rt.atoms.free(cause_key);
     {
         const stored_cause = try object.getProperty(cause_key);
-        defer stored_cause.free(rt);
         try std.testing.expect(stored_cause.same(cause_value));
     }
 
-    error_value.free(rt);
-    error_alive = false;
-    cause_value.free(rt);
-    options.value().free(rt);
-    options_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
 }
@@ -1090,9 +992,7 @@ pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: c
         core.JSValue.nullValue()
     else
         try value_ops.createStringValue(ctx.runtime, ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>");
-    defer filename.free(ctx.runtime);
     const function_name_value = try callSiteFunctionNameValue(ctx, entry);
-    defer function_name_value.free(ctx.runtime);
     try object.setCallSiteMetadata(
         ctx.runtime,
         filename,
@@ -1129,28 +1029,25 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
         .{ .name = "isNative", .id = .callsite_is_native },
     };
     for (methods) |method| {
-        try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
+        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
     }
     try defineToStringTag(rt, prototype, "CallSite");
 
     const prototype_value = prototype.value();
     prototype_raw_owned = false;
-    defer prototype_value.free(rt);
     try storeRealmValue(rt, global, .callsite_prototype, prototype_value);
     return prototype;
 }
 
-pub fn defineDataPropertyByName(
+pub fn defineDataPropertyByAtom(
     rt: *core.JSRuntime,
     object: *core.Object,
-    name: []const u8,
+    key: core.Atom,
     value: core.JSValue,
     writable: bool,
     enumerable: bool,
     configurable: bool,
 ) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, writable, enumerable, configurable));
 }
 
@@ -1218,22 +1115,6 @@ pub fn regExpIsStandard(rt: *core.JSRuntime, object: *core.Object) bool {
     return true;
 }
 
-pub fn regExpExecPropertyIsDefault(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    rx: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !bool {
-    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return false;
-    const exec_value = try getValueProperty(ctx, output, global, rx, exec_atom, caller_function, caller_frame);
-    defer exec_value.free(ctx.runtime);
-    const exec_object = objectFromValue(exec_value) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(exec_object.nativeFunctionId()) orelse return false;
-    return native_ref.domain == .regexp and native_ref.id == @intFromEnum(method_ids.regexp.PrototypeMethod.exec);
-}
-
 pub fn setValuePropertyStrict(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1251,7 +1132,6 @@ pub fn setValuePropertyStrict(
         return;
     }
     const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
-    defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
     if (core.object.isTypedArrayObject(object)) {
         if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value_to_set)) return;
     }
@@ -1273,85 +1153,9 @@ pub fn setValuePropertyStrict(
 
 pub fn regExpPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?OwnedPrototype {
     const constructor_value = regExpConstructorFromGlobal(rt, global) catch return null;
-    defer constructor_value.free(rt);
     const constructor = objectFromValue(constructor_value) orelse return null;
     const prototype = constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
     return OwnedPrototype.fromObject(prototype);
-}
-
-pub fn isSameRealmRegExpPrototypeGetter(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, getter_value: core.JSValue) !bool {
-    var resolved_prototype = regExpPrototypeFromGlobal(rt, global) orelse return false;
-    defer resolved_prototype.deinit(rt);
-    const regexp_proto = resolved_prototype.object() orelse return false;
-    if (object != regexp_proto) return false;
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    const desc = (try regexp_proto.getOwnProperty(rt, key)) orelse return false;
-    defer desc.destroy(rt);
-    if (desc.kind != .accessor) return false;
-    return sameObjectIdentity(desc.getter, getter_value);
-}
-
-pub fn objectHasRegExpInternalSlots(object: *core.Object) bool {
-    if (object.class_id != core.class.ids.regexp) return false;
-    return object.regexpSource() != null and object.regexpCompiledBytecode().len != 0;
-}
-
-pub const PropertyEscapePattern = struct {
-    name: []const u8,
-    positive: bool,
-};
-
-pub fn propertyEscapePattern(source: []const u8) ?PropertyEscapePattern {
-    const positive_prefix = "\\p{";
-    const negative_prefix = "\\P{";
-    var prefix_len: usize = undefined;
-    var positive: bool = undefined;
-    if (std.mem.startsWith(u8, source, positive_prefix)) {
-        prefix_len = positive_prefix.len;
-        positive = true;
-    } else if (std.mem.startsWith(u8, source, negative_prefix)) {
-        prefix_len = negative_prefix.len;
-        positive = false;
-    } else {
-        return null;
-    }
-    if (source.len <= prefix_len or source[source.len - 1] != '}') return null;
-    const name = source[prefix_len .. source.len - 1];
-    if (!isRuntimeSupportedBinaryPropertyName(name)) return null;
-    return .{ .name = name, .positive = positive };
-}
-
-pub fn unicodePropertyOnlyClassSource(source: []const u8) bool {
-    const body = unicodePropertyOnlyClassBody(source) orelse return false;
-    var index: usize = 0;
-    var saw_escape = false;
-    while (index < body.len) {
-        _ = readUnicodePropertyClassEscape(body, &index) orelse return false;
-        saw_escape = true;
-    }
-    return saw_escape;
-}
-
-pub fn unicodePropertyOnlyClassBody(source: []const u8) ?[]const u8 {
-    if (source.len < 3 or source[0] != '[' or source[source.len - 1] != ']') return null;
-    const body = source[1 .. source.len - 1];
-    if (body.len == 0 or body[0] == '^') return null;
-    return body;
-}
-
-pub fn readUnicodePropertyClassEscape(body: []const u8, index: *usize) ?PropertyEscapePattern {
-    if (index.* >= body.len or body[index.*] != '\\') return null;
-    const start = index.*;
-    index.* += 1;
-    if (index.* >= body.len or (body[index.*] != 'p' and body[index.*] != 'P')) return null;
-    index.* += 1;
-    if (index.* >= body.len or body[index.*] != '{') return null;
-    index.* += 1;
-    while (index.* < body.len and body[index.*] != '}') : (index.* += 1) {}
-    if (index.* >= body.len or body[index.*] != '}') return null;
-    index.* += 1;
-    return propertyEscapePattern(body[start..index.*]);
 }
 
 pub fn datePrototypeMethod(
@@ -1389,25 +1193,6 @@ pub fn datePrototypeMethod(
     return result orelse throwTypeErrorMessage(ctx, global, "not a Date object");
 }
 
-pub fn anchoredBinaryPropertyName(source: []const u8) ?[]const u8 {
-    const positive_prefix = "^\\p{";
-    const negative_prefix = "^\\P{";
-    const prefix_len: usize = if (std.mem.startsWith(u8, source, positive_prefix))
-        positive_prefix.len
-    else if (std.mem.startsWith(u8, source, negative_prefix))
-        negative_prefix.len
-    else
-        return null;
-    const suffix = "}+$";
-    if (!std.mem.endsWith(u8, source, suffix)) return null;
-    if (source.len <= prefix_len + suffix.len) return null;
-    return source[prefix_len .. source.len - suffix.len];
-}
-
-pub fn isRuntimeSupportedBinaryPropertyName(name: []const u8) bool {
-    return regexp_properties.isSupportedUnicodePropertyExpression(name);
-}
-
 pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, writable: bool, enumerable: bool, configurable: bool) !void {
     try object.defineOwnNonIndexPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, writable, enumerable, configurable));
 }
@@ -1431,6 +1216,11 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         defer rt.atoms.free(atom);
+        // TGC S3 §4 class B: bare group-name id held across the property
+        // define (and, in the indices form, a fresh pair object).
+        var group_atom_roots = core.runtime.rootAtoms(.{&atom});
+        group_atom_roots.activate(rt);
+        defer group_atom_roots.deactivate(rt);
         // Duplicate named groups share one property; the participating
         // (matched) capture wins, an unset duplicate must not overwrite it.
         if (capture.undefined and groups.hasOwnProperty(atom)) continue;
@@ -1438,85 +1228,11 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
             core.JSValue.undefinedValue()
         else
             try createRegExpIndexPair(rt, global, capture.start, capture.start + capture.len);
-        defer value.free(rt);
         try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
     }
     const groups_value = groups.value();
     groups_raw_owned = false;
-    defer groups_value.free(rt);
     try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
-}
-
-pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !void {
-    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-    if (!found.has_named_captures) {
-        try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
-        return;
-    }
-
-    const groups = try core.Object.create(rt, core.class.ids.object, null);
-    var groups_raw_owned = true;
-    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, groups.gcHeader());
-    var capture_index: usize = 0;
-    while (capture_index < found.capture_count) : (capture_index += 1) {
-        const name = found.captureNameAt(capture_index) orelse continue;
-        const capture = found.captureAt(capture_index);
-        var decoded_name = std.ArrayList(u8).empty;
-        defer decoded_name.deinit(rt.memory.allocator);
-        try appendDecodedRegExpGroupName(rt, &decoded_name, name);
-        const atom = try rt.internAtom(decoded_name.items);
-        defer rt.atoms.free(atom);
-        // Duplicate named groups share one property; the participating
-        // (matched) capture wins, an unset duplicate must not overwrite it.
-        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
-        const value = if (capture.undefined)
-            core.JSValue.undefinedValue()
-        else
-            value_ops.createStringValue(rt, input_bytes[capture.start .. capture.start + capture.len]) catch |err| switch (err) {
-                error.InvalidUtf8 => try createStringFromByteUnits(rt, input_bytes[capture.start .. capture.start + capture.len]),
-                else => return err,
-            };
-        defer value.free(rt);
-        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
-    }
-    const groups_value = groups.value();
-    groups_raw_owned = false;
-    defer groups_value.free(rt);
-    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
-}
-
-pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Object, input_value: core.JSValue, found: *const RegExpMatch) !void {
-    const groups_value = try createRegExpGroupsValueFromValue(rt, input_value, found);
-    defer groups_value.free(rt);
-    const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
-}
-
-pub fn createRegExpGroupsValueFromValue(rt: *core.JSRuntime, input_value: core.JSValue, found: *const RegExpMatch) !core.JSValue {
-    if (!found.has_named_captures) return core.JSValue.undefinedValue();
-
-    const groups = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, groups.gcHeader());
-    var capture_index: usize = 0;
-    while (capture_index < found.capture_count) : (capture_index += 1) {
-        const name = found.captureNameAt(capture_index) orelse continue;
-        const capture = found.captureAt(capture_index);
-        var decoded_name = std.ArrayList(u8).empty;
-        defer decoded_name.deinit(rt.memory.allocator);
-        try appendDecodedRegExpGroupName(rt, &decoded_name, name);
-        const atom = try rt.internAtom(decoded_name.items);
-        defer rt.atoms.free(atom);
-        // Duplicate named groups share one property; the participating
-        // (matched) capture wins, an unset duplicate must not overwrite it.
-        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
-        const value = if (capture.undefined)
-            core.JSValue.undefinedValue()
-        else
-            try stringSliceValue(rt, input_value, capture.start, capture.len);
-        defer value.free(rt);
-        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
-    }
-    return groups.value();
 }
 
 // The RegExp result already owns one value for every capture. Reuse those
@@ -1542,6 +1258,11 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         defer rt.atoms.free(atom);
+        // TGC S3 §4 class B: bare group-name id held across the property
+        // define (and, in the indices form, a fresh pair object).
+        var group_atom_roots = core.runtime.rootAtoms(.{&atom});
+        group_atom_roots.activate(rt);
+        defer group_atom_roots.deactivate(rt);
         // Duplicate named groups share one property; the participating
         // (matched) capture wins, an unset duplicate must not overwrite it.
         if (capture.undefined and groups.hasOwnProperty(atom)) continue;
@@ -1590,7 +1311,6 @@ pub fn primitivePrototypeMethod(
         else => {},
     }
     const primitive = primitivePrototypeThisValue(rt, this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object, class_tag);
-    defer primitive.free(rt);
     return switch (method_tag) {
         1 => if (class_tag == 1) blk: {
             // `Number.prototype.toString` body lives in `number_ops.zig`;
@@ -1604,7 +1324,7 @@ pub fn primitivePrototypeMethod(
             bigIntPrototypeToString(ctx, output, global, primitive, args, caller_function, caller_frame)
         else
             value_ops.toStringValue(rt, primitive),
-        2 => primitive.dup(),
+        2 => primitive,
         else => error.TypeError,
     };
 }
@@ -1624,7 +1344,6 @@ fn symbolConstructorCall(
         if (args.len >= 1 and !args[0].isUndefined()) {
             if (args[0].isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
             const string_value = try string_ops.toStringForAnnexB(ctx, output, global, args[0], null, null);
-            defer string_value.free(rt);
             var buffer = std.ArrayList(u8).empty;
             errdefer buffer.deinit(rt.memory.allocator);
             try value_ops.appendRawString(rt, &buffer, string_value);
@@ -1640,23 +1359,21 @@ fn symbolConstructorCall(
 /// Symbol wrapper object and returns its description string (or undefined).
 fn symbolDescriptionValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
     const primitive = try symbolPrimitiveValue(rt, this_value);
-    defer primitive.free(rt);
     const atom_id = primitive.asSymbolAtom() orelse return error.TypeError;
-    const desc = core.symbol.description(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
+    const desc = core.symbol.description(rt, atom_id) orelse return core.JSValue.undefinedValue();
     return value_ops.createStringValue(rt, desc);
 }
 
 /// `Symbol.prototype[Symbol.toPrimitive]`: returns the wrapped symbol
 /// primitive; throws TypeError for any other receiver.
-fn symbolPrimitiveValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
-    if (this_value.isSymbol()) return this_value.dup();
+fn symbolPrimitiveValue(_: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
+    if (this_value.isSymbol()) return this_value;
     if (!this_value.isObject()) return error.TypeError;
     const header = this_value.refHeader() orelse return error.TypeError;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.symbol) return error.TypeError;
-    const primitive = (object.objectData() orelse return error.TypeError).dup();
+    const primitive = (object.objectData() orelse return error.TypeError);
     if (!primitive.isSymbol()) {
-        primitive.free(rt);
         return error.TypeError;
     }
     return primitive;
@@ -1726,11 +1443,11 @@ pub fn numberPrototypeMethod(
 }
 
 pub fn primitivePrototypeThisValue(rt: *core.JSRuntime, value: core.JSValue, class_tag: i32) !core.JSValue {
-    if (class_tag == 1 and value.isNumber()) return value.dup();
-    if (class_tag == 2 and value.asBool() != null) return value.dup();
-    if (class_tag == 3 and value.isBigInt()) return value.dup();
-    if (class_tag == 4 and value.isSymbol()) return value.dup();
-    if (class_tag == 5 and value.isString()) return value.dup();
+    if (class_tag == 1 and value.isNumber()) return value;
+    if (class_tag == 2 and value.asBool() != null) return value;
+    if (class_tag == 3 and value.isBigInt()) return value;
+    if (class_tag == 4 and value.isSymbol()) return value;
+    if (class_tag == 5 and value.isString()) return value;
     if (!value.isObject()) return error.TypeError;
     const object = try property_ops.expectObject(value);
     const matches = switch (class_tag) {
@@ -1742,9 +1459,9 @@ pub fn primitivePrototypeThisValue(rt: *core.JSRuntime, value: core.JSValue, cla
         else => false,
     };
     if (!matches) return error.TypeError;
-    if (class_tag == 5) return (object.objectData() orelse return error.TypeError).dup();
+    if (class_tag == 5) return (object.objectData() orelse return error.TypeError);
     _ = rt;
-    return (object.objectData() orelse return error.TypeError).dup();
+    return (object.objectData() orelse return error.TypeError);
 }
 
 pub fn defineErrorStackDataProperty(
@@ -1824,7 +1541,7 @@ pub fn constructFinalizationRegistryWithPrototype(
 
     const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype);
     errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
-    try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), rooted_cleanup_callback.dup());
+    try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), rooted_cleanup_callback);
     return instance.value();
 }
 
@@ -1844,14 +1561,12 @@ pub fn constructCollectionWithPrototypeFromVm(
     const construct_id = core.host_function.builtin_method_id_lookup.collection.constructIdForKind(kind) orelse return error.TypeError;
     const collection_construct_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = construct_id };
     const collection_value = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, collection_construct_ref, prototype, &.{}, null, null)) orelse return error.TypeError;
-    errdefer collection_value.free(ctx.runtime);
     if (args.len == 0 or args[0].isUndefined() or args[0].isNull()) return collection_value;
 
     const adder_name: []const u8 = if (kind == 1 or kind == 3) "set" else "add";
     const adder_key = try ctx.runtime.internAtom(adder_name);
     defer ctx.runtime.atoms.free(adder_key);
     const adder = try getValueProperty(ctx, output, global, collection_value, adder_key, null, null);
-    defer adder.free(ctx.runtime);
     if (!isCallableValue(adder)) return error.TypeError;
 
     // The dense array read used to be selected here, on `isArray()` alone, so
@@ -1876,17 +1591,15 @@ pub const OwnedPrototype = struct {
     value: core.JSValue,
 
     pub fn fromObject(prototype: ?*core.Object) OwnedPrototype {
-        return .{ .value = if (prototype) |prototype_object| prototype_object.value().dup() else core.JSValue.nullValue() };
+        return .{ .value = if (prototype) |prototype_object| prototype_object.value() else core.JSValue.nullValue() };
     }
 
     pub fn object(self: OwnedPrototype) ?*core.Object {
         return objectFromValue(self.value);
     }
 
-    pub fn deinit(self: *OwnedPrototype, rt: *core.JSRuntime) void {
-        const value = self.value;
+    pub fn deinit(self: *OwnedPrototype, _: *core.JSRuntime) void {
         self.value = core.JSValue.undefinedValue();
-        value.free(rt);
     }
 };
 
@@ -1897,7 +1610,6 @@ pub fn constructorPrototypeObject(rt: *core.JSRuntime, constructor: core.JSValue
     }
     const prototype_value = try property_ops.getPropertyValue(rt, constructor, core.atom.ids.prototype);
     if (prototype_value.isObject()) return .{ .value = prototype_value };
-    prototype_value.free(rt);
     return OwnedPrototype.fromObject(null);
 }
 
@@ -1912,7 +1624,6 @@ pub fn dynamicFunctionNewTargetPrototype(
 ) !OwnedPrototype {
     const prototype_value = try getValueProperty(ctx, output, global, new_target, core.atom.ids.prototype, caller_function, caller_frame);
     if (prototype_value.isObject()) return .{ .value = prototype_value };
-    prototype_value.free(ctx.runtime);
     const fallback_realm = try functionRealmContext(ctx, new_target);
     const class_id = switch (kind) {
         .normal => core.class.ids.bytecode_function,
@@ -2025,7 +1736,10 @@ pub fn propertyAtomFromLengthIndex(rt: *core.JSRuntime, index: usize) !LengthInd
     if (index <= core.atom.max_int_atom) return .{ .atom = core.atom.atomFromUInt32(@intCast(index)), .owned = false };
     const name = try std.fmt.allocPrint(rt.memory.allocator, "{d}", .{index});
     defer rt.memory.allocator.free(name);
-    return .{ .atom = try rt.internAtom(name), .owned = true };
+    const id = try rt.internAtom(name);
+    // TGC S3 §2.2 root G; see `LengthIndexAtom`. Paired with `deinit`.
+    rt.atoms.pinForHost(id);
+    return .{ .atom = id, .owned = true };
 }
 
 pub fn createDataPropertyOrThrow(
@@ -2065,13 +1779,10 @@ pub fn objectGetPrototypeOfStep(
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const target = objectFromValue(target_value) orelse return error.TypeError;
     const handler_value = object.proxyHandler().?;
-    const trap_key = try ctx.runtime.internAtom("getPrototypeOf");
-    defer ctx.runtime.atoms.free(trap_key);
+    const trap_key = core.atom.ids.getPrototypeOf;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     const result_proto = if (result.isNull()) null else objectFromValue(result) orelse return error.TypeError;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
         const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
@@ -2090,24 +1801,21 @@ pub fn objectGetPrototypeOfValue(
 ) !core.JSValue {
     if (!object.isProxy()) {
         if (isThrowTypeErrorIntrinsicObject(object)) {
-            if (object.getPrototype()) |prototype| return prototype.value().dup();
-            if (functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global)) |prototype| return prototype.value().dup();
+            if (object.getPrototype()) |prototype| return prototype.value();
+            if (functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global)) |prototype| return prototype.value();
             return core.JSValue.nullValue();
         }
-        if (object.getPrototype()) |prototype| return prototype.value().dup();
+        if (object.getPrototype()) |prototype| return prototype.value();
         return core.JSValue.nullValue();
     }
     if (object.proxyHandler() == null) return error.TypeError;
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const target = objectFromValue(target_value) orelse return error.TypeError;
     const handler_value = object.proxyHandler().?;
-    const trap_key = try ctx.runtime.internAtom("getPrototypeOf");
-    defer ctx.runtime.atoms.free(trap_key);
+    const trap_key = core.atom.ids.getPrototypeOf;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return objectGetPrototypeOfValue(ctx, output, global, target, caller_function, caller_frame);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    errdefer result.free(ctx.runtime);
     if (!result.isNull() and objectFromValue(result) == null) return error.TypeError;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
         const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
@@ -2130,10 +1838,9 @@ pub fn destructuringObjectRest(
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
     var source_value = if (args[0].isObject())
-        args[0].dup()
+        args[0]
     else
         try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer source_value.free(ctx.runtime);
     const source = try property_ops.expectObject(source_value);
 
     var out_value = core.JSValue.undefinedValue();
@@ -2141,7 +1848,6 @@ pub fn destructuringObjectRest(
     var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
-    defer value.free(ctx.runtime);
 
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
@@ -2153,11 +1859,9 @@ pub fn destructuringObjectRest(
         if (source.class_id == core.class.ids.string and key == core.atom.ids.length) continue;
         if (try objectRestKeyExcluded(ctx, args[1..], key)) continue;
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
-        defer desc.destroy(ctx.runtime);
         if (desc.enumerable != true) continue;
         value = getValueProperty(ctx, output, global, args[0], key, null, null) catch |err| return err;
         try out.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(value, true, true, true));
-        value.free(ctx.runtime);
         value = core.JSValue.undefinedValue();
     }
     return out_value;
@@ -2171,14 +1875,11 @@ test "destructuringObjectRest roots direct symbol values while creating rest obj
     const global = try zjs_vm.contextGlobal(ctx);
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    var source_alive = true;
-    defer if (source_alive) source.value().free(rt);
     const key = try rt.internAtom("kept");
     defer rt.atoms.free(key);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-object-rest-symbol");
-    const symbol_value = try rt.symbolValue(symbol_atom);
+    const symbol_value = try rt.takeSymbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
-    symbol_value.free(rt);
 
     const args = [_]core.JSValue{source.value()};
     const old_threshold = rt.gcThreshold();
@@ -2186,21 +1887,14 @@ test "destructuringObjectRest roots direct symbol values while creating rest obj
     defer rt.setGCThreshold(old_threshold);
 
     const rest_value = try destructuringObjectRest(ctx, null, global, &args);
-    var rest_alive = true;
-    defer if (rest_alive) rest_value.free(rt);
     const rest = try property_ops.expectObject(rest_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
         const stored = try rest.getProperty(key);
-        defer stored.free(rt);
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    rest_value.free(rt);
-    rest_alive = false;
-    source.value().free(rt);
-    source_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2219,28 +1913,36 @@ pub fn objectRestOwnKeys(
     }
     const target_value = source.proxyTarget() orelse return source.ownKeys(ctx.runtime);
     const handler_value = source.proxyHandler() orelse return error.TypeError;
-    const own_keys_atom = try ctx.runtime.internAtom("ownKeys");
-    defer ctx.runtime.atoms.free(own_keys_atom);
+    const own_keys_atom = core.atom.ids.ownKeys;
     const trap = try getValueProperty(ctx, output, global, handler_value, own_keys_atom, null, null);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         const target = try property_ops.expectObject(target_value);
         return objectRestOwnKeys(ctx, output, global, target);
     }
-    const trap_result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
-    defer trap_result.free(ctx.runtime);
+    var trap_result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
     _ = try property_ops.expectObject(trap_result);
+    // TGC S3 §4 class V: `key_value` is only ever reachable through
+    // `trap_result`, and `propertyKeyAtom` below derives the atom's liveness
+    // from that value's string/symbol body -- so both need a real root.
+    var key_value = core.JSValue.undefinedValue();
+    var trap_roots = core.runtime.rootValues(.{ &trap_result, &key_value });
+    trap_roots.activate(ctx.runtime);
+    defer trap_roots.deactivate(ctx.runtime);
     var out: []core.Atom = &.{};
     errdefer core.Object.freeKeys(ctx.runtime, out);
+    // TGC S3 §4 class B: the accumulated ids sit in a native []Atom while the
+    // trap result is read key by key, which re-enters JS every iteration.
+    var out_roots = core.runtime.rootAtomList(&out);
+    out_roots.activate(ctx.runtime);
+    defer out_roots.deactivate(ctx.runtime);
     const length_value = try getValueProperty(ctx, output, global, trap_result, core.atom.ids.length, null, null);
-    defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
     var index: usize = 0;
     while (index < length) : (index += 1) {
         const index_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer index_key.deinit(ctx.runtime);
-        const key_value = try getValueProperty(ctx, output, global, trap_result, index_key.atom, null, null);
-        defer key_value.free(ctx.runtime);
+        key_value = try getValueProperty(ctx, output, global, trap_result, index_key.atom, null, null);
+        defer key_value = core.JSValue.undefinedValue();
         if (!key_value.isString() and !key_value.isSymbol()) return error.TypeError;
         const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
         errdefer ctx.runtime.atoms.free(atom_id);
@@ -2280,7 +1982,7 @@ pub fn importMetaObject(
     function: *const bytecode.FunctionBytecode,
 ) !core.JSValue {
     const record = ctx.modules.find(function.scriptOrModule()) orelse return error.ModuleNotFound;
-    if (record.import_meta) |value| return value.dup();
+    if (record.import_meta) |value| return value;
 
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
@@ -2289,11 +1991,10 @@ pub fn importMetaObject(
     // ToPrimitive fell through to %Object.prototype%.toString and
     // import(import.meta) stringified instead of rejecting with TypeError.
     const url = try importMetaUrlValue(ctx.runtime, record);
-    defer url.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "url", url);
-    try defineValueProperty(ctx.runtime, object, "main", core.JSValue.boolean(record.import_meta_main));
+    try defineValueProperty(ctx.runtime, object, core.atom.ids.url, url);
+    try defineValueProperty(ctx.runtime, object, core.atom.ids.main, core.JSValue.boolean(record.import_meta_main));
     const value = object.value();
-    record.import_meta = value.dup();
+    record.import_meta = value;
     // The record is created when the module is loaded; `import.meta` is built
     // the first time the module body evaluates the expression, which can be
     // arbitrarily later. `ModuleRecord.setEvalException` already barriers its
@@ -2320,7 +2021,6 @@ pub fn createGeneratorObject(
     var rooted_current = current_function_value;
     var rooted_this = this_value;
     var rooted_boxed_this = core.JSValue.undefinedValue();
-    defer rooted_boxed_this.free(ctx.runtime);
 
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_func },
@@ -2401,7 +2101,7 @@ pub fn createGeneratorObject(
     // normal calls save the closure object, while internal calls save the raw
     // FunctionBytecode. Both own the FB that owns its RealmContext.
     const saved_current = if (rooted_current.isObject() or rooted_current.isFunctionBytecode()) rooted_current else rooted_func;
-    object.setGeneratorCurrentFunction(ctx.runtime, saved_current.dup());
+    object.setGeneratorCurrentFunction(ctx.runtime, saved_current);
     const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
     const effective_this = if (!fb_runtime_strict) blk: {
         if (rooted_this.isUndefined() or rooted_this.isNull()) break :blk global.value();
@@ -2411,12 +2111,12 @@ pub fn createGeneratorObject(
         }
         break :blk rooted_this;
     } else rooted_this;
-    object.setGeneratorThis(ctx.runtime, effective_this.dup());
+    object.setGeneratorThis(ctx.runtime, effective_this);
     // Every generator gets one resident frame at creation. Canonical bytecode
     // parks at OP_initial_yield; markerless internal fixtures park at pc 0.
     // qjs's async_func_init likewise has no separate deferred args/captures
     // owner.
-    const init_result = try runGeneratorParameterInit(
+    _ = try runGeneratorParameterInit(
         ctx,
         fb,
         nested,
@@ -2431,7 +2131,6 @@ pub fn createGeneratorObject(
         call_entry_ctx,
         call_entry_global,
     );
-    init_result.free(ctx.runtime);
 
     var resolved_prototype = generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async) catch OwnedPrototype.fromObject(null);
     defer resolved_prototype.deinit(ctx.runtime);
@@ -2451,7 +2150,6 @@ pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, funct
     if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return OwnedPrototype.fromObject(prototype);
     const prototype_value = try function_object.getProperty(core.atom.ids.prototype);
     if (prototype_value.isObject()) return .{ .value = prototype_value };
-    prototype_value.free(rt);
     return OwnedPrototype.fromObject(fallback);
 }
 
@@ -2522,22 +2220,18 @@ pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) 
     const proto = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global));
     var proto_raw_owned = true;
     errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, proto.gcHeader());
-    try defineNativeDataMethod(rt, global, proto, "next", 0);
-    try tagIteratorWrapPrototypeMethod(rt, global, proto, "next", 1);
-    try defineNativeDataMethod(rt, global, proto, "return", 0);
-    try tagIteratorWrapPrototypeMethod(rt, global, proto, "return", 2);
+    try defineNativeDataMethod(rt, global, proto, core.atom.ids.next, 0);
+    try tagIteratorWrapPrototypeMethod(rt, global, proto, core.atom.ids.next, 1);
+    try defineNativeDataMethod(rt, global, proto, core.atom.ids.return_, 0);
+    try tagIteratorWrapPrototypeMethod(rt, global, proto, core.atom.ids.return_, 2);
     const value = proto.value();
     proto_raw_owned = false;
-    defer value.free(rt);
     try storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, value);
     return proto;
 }
 
-pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object, name: []const u8, method_id: i32) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
+pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object, key: core.Atom, method_id: i32) !void {
     const method = try proto.getProperty(key);
-    defer method.free(rt);
     const method_object = objectFromValue(method) orelse return;
     (try method_object.functionIteratorWrapMethodSlot(rt)).* = @intCast(method_id);
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
@@ -2584,7 +2278,7 @@ noinline fn createMappedArgumentsObject(
     const entries = [_]core.property.Entry{
         .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
         .{ .slot = .{ .data = iterator_value } },
-        .{ .slot = .{ .data = frame.current_function.dup() } },
+        .{ .slot = .{ .data = frame.current_function } },
     };
     const object = try core.Object.createArgumentsFromShape(
         ctx.runtime,
@@ -2603,8 +2297,7 @@ noinline fn createMappedArgumentsObject(
         refs[index] = try frame.captureArg(ctx.runtime, index);
     }
     while (index < args.len) : (index += 1) {
-        const initial = value_slot.loadOwned(&args[index]);
-        errdefer initial.free(ctx.runtime);
+        const initial = args[index];
         refs[index] = try core.VarRef.createClosed(ctx.runtime, initial);
     }
     return object.value();
@@ -2621,7 +2314,7 @@ fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core
     // caller-supplied global): fall back to the lookup path.
     if (ctx.global == global) {
         if (ctx.cached_values[@intFromEnum(core.object.RealmValueSlot.array_prototype_values)]) |cached| {
-            return cached.dup();
+            return cached;
         }
     }
     return (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
@@ -2662,7 +2355,6 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
         // transfers into the object (destroyed by the shape's accessor flags
         // on a failed construction).
         const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
-        defer thrower.free(ctx.runtime);
         const iterator_value = try argumentsIteratorValueOwned(ctx, global);
         const entries = [_]core.property.Entry{
             .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
@@ -2676,7 +2368,7 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
     var dense_elements: []core.JSValue = &.{};
     if (args.len != 0) {
         dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
-        for (args, 0..) |_, index| dense_elements[index] = value_slot.loadOwned(&args[index]);
+        for (args, 0..) |_, index| dense_elements[index] = args[index];
     }
     object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);
     return object.value();
@@ -2750,7 +2442,7 @@ pub fn toPropertyKeyValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!value.isObject()) return value.dup();
+    if (!value.isObject()) return value;
     return toPrimitiveForString(ctx, output, global, value, caller_function, caller_frame);
 }
 
@@ -2763,7 +2455,6 @@ pub fn toPropertyKeyAtom(
     caller_frame: ?*frame_mod.Frame,
 ) !core.Atom {
     const key_value = try toPropertyKeyValue(ctx, output, global, value, caller_function, caller_frame);
-    defer key_value.free(ctx.runtime);
     return property_ops.propertyKeyAtom(ctx.runtime, key_value);
 }
 
@@ -2772,20 +2463,16 @@ pub fn callObjectToPrimitiveMethod(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    name: []const u8,
+    atom_id: core.Atom,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const atom_id = try ctx.runtime.internAtom(name);
-    defer ctx.runtime.atoms.free(atom_id);
     const object = try property_ops.expectObject(receiver);
     const method = try getMethodPropertyForOrdinaryToPrimitive(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
-    defer method.free(ctx.runtime);
     if (method.isUndefined() or method.isNull()) return null;
     if (!isCallableValue(method)) return null;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, method, &.{}, caller_function, caller_frame);
     if (result.isObject()) {
-        result.free(ctx.runtime);
         return null;
     }
     return result;
@@ -2803,9 +2490,8 @@ pub fn getMethodPropertyForOrdinaryToPrimitive(
 ) !core.JSValue {
     if (object.proxyTarget() != null) return getProxyProperty(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
     if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
-            .data => return desc.value.dup(),
+            .data => return desc.value,
             .accessor => {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
                 return callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
@@ -2977,9 +2663,8 @@ noinline fn functionCallerArgumentsProperty(
     // on every function object pay an atom-table name lookup plus two memcmps.
     if (atom_id != core.atom.ids.caller and atom_id != core.atom.ids.arguments) return null;
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |own_desc| {
-        defer own_desc.destroy(ctx.runtime);
         switch (own_desc.kind) {
-            .data => return own_desc.value.dup(),
+            .data => return own_desc.value,
             .generic => return core.JSValue.undefinedValue(),
             .accessor => {
                 if (own_desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -3016,9 +2701,8 @@ noinline fn getPrivateValueProperty(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
-            .data => return desc.value.dup(),
+            .data => return desc.value,
             .generic => return error.TypeError,
             .accessor => {
                 if (desc.getter.isUndefined()) return error.TypeError;
@@ -3041,7 +2725,6 @@ pub fn setPrivateValueProperty(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
             .data => {
                 if (!(desc.writable orelse false)) return error.TypeError;
@@ -3051,8 +2734,7 @@ pub fn setPrivateValueProperty(
             .generic => return error.TypeError,
             .accessor => {
                 if (desc.setter.isUndefined()) return error.TypeError;
-                const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
-                result.free(ctx.runtime);
+                _ = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
                 return;
             },
         }
@@ -3085,7 +2767,7 @@ pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) 
     if (object.hasExoticMethods()) return null;
     if (object.findProperty(atom_id)) |index| {
         return switch (object.propKindAt(index)) {
-            .data => object.propertyEntry(index).*.slot.data.dup(),
+            .data => object.propertyEntry(index).*.slot.data,
             .auto_init => try object.getProperty(atom_id),
             .var_ref, .accessor => null,
         };
@@ -3108,9 +2790,8 @@ pub fn getValuePropertyWithReceiver(
     while (current) |object| : (current = object.getPrototype()) {
         if (object.proxyTarget() != null) return getProxyProperty(ctx, output, global, receiver_value, object, atom_id, caller_function, caller_frame);
         if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-            defer desc.destroy(ctx.runtime);
             switch (desc.kind) {
-                .data => return desc.value.dup(),
+                .data => return desc.value,
                 .generic => return core.JSValue.undefinedValue(),
                 .accessor => {
                     if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -3137,7 +2818,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     if (rooted_primitive.isString()) {
         const object = try core.Object.create(rt, core.class.ids.string, prototype);
         errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-        try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
+        try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
         const string_value = rooted_primitive.asStringBody() orelse return error.TypeError;
         try string_value.ensureFlat(rt);
         var index: u32 = 0;
@@ -3159,7 +2840,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         return error.TypeError;
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
     return object.value();
 }
 
@@ -3169,9 +2850,6 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     const symbol_constructor = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_prototype = try core.Object.create(rt, core.class.ids.object, null);
     defer {
-        symbol_prototype.value().free(rt);
-        symbol_constructor.value().free(rt);
-        global.value().free(rt);
         rt.destroy();
     }
 
@@ -3193,19 +2871,14 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const symbol_value = try rt.symbolValue(symbol_atom);
+    const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const wrapper_value = try primitiveObjectForAccess(rt, global, symbol_value);
-    var wrapper_alive = true;
-    defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    wrapper_value.free(rt);
-    wrapper_alive = false;
-    symbol_value.free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -3250,7 +2923,6 @@ pub fn setValuePropertyWithThrow(
     if (!object_value.isObject()) {
         if (object_value.isNull() or object_value.isUndefined()) return error.TypeError;
         const boxed_value = try primitiveObjectForAccess(ctx.runtime, global, object_value);
-        defer boxed_value.free(ctx.runtime);
         const boxed = try property_ops.expectObject(boxed_value);
         const succeeded = try ordinarySetWithReceiver(ctx, output, global, boxed_value, boxed, object_value, atom_id, value, caller_function, caller_frame);
         if (!succeeded and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
@@ -3271,7 +2943,6 @@ pub fn setValuePropertyWithThrow(
     }
     if (object.isArray() and atom_id == core.atom.ids.length) {
         const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
-        defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
         object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
             error.InvalidLength => return error.RangeError,
             error.ReadOnly => {
@@ -3324,7 +2995,6 @@ pub fn setValuePropertyWithThrow(
     }
     if (ctx.runtime.atoms.kind(atom_id) == .private) return error.TypeError;
     const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
-    defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
     object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
         error.InvalidLength => return error.RangeError,
         error.ReadOnly => {
@@ -3362,15 +3032,13 @@ pub fn setWithOwnDescriptor(
     switch (own_desc.kind) {
         .accessor => {
             if (own_desc.setter.isUndefined()) return false;
-            const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver_value, own_desc.setter, &.{value}, caller_function, caller_frame);
-            result.free(ctx.runtime);
+            _ = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             return true;
         },
         .data, .generic => {
             if (own_desc.kind == .data and own_desc.writable == false) return false;
             const receiver = objectFromValue(receiver_value) orelse return false;
             const receiver_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, atom_id, caller_function, caller_frame);
-            defer if (receiver_desc) |desc| desc.destroy(ctx.runtime);
             if (receiver_desc) |desc| {
                 if (desc.kind == .accessor) return false;
                 if (desc.kind == .data and desc.writable == false) return false;
@@ -3424,7 +3092,6 @@ pub fn definePropertyWithKind(
     if (args.len < 3) return error.TypeError;
     const desc_object = property_ops.expectObject(args[2]) catch return error.TypeError;
     const desc = try descriptorFromObject(ctx, output, global, args[2], desc_object, object, atom_id, caller_function, caller_frame);
-    defer desc.destroy(ctx.runtime);
     const defined = if (object.proxyTarget() != null)
         proxyDefineOwnProperty(ctx, output, global, object, atom_id, desc, caller_function, caller_frame) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => {
@@ -3454,7 +3121,7 @@ pub fn definePropertyWithKind(
         return error.TypeError;
     }
     if (kind == 2) return core.JSValue.boolean(true);
-    return args[0].dup();
+    return args[0];
 }
 
 pub const PendingPropertyDescriptor = struct {
@@ -3463,7 +3130,6 @@ pub const PendingPropertyDescriptor = struct {
 
     pub fn destroy(self: PendingPropertyDescriptor, rt: *core.JSRuntime) void {
         rt.atoms.free(self.atom_id);
-        self.desc.destroy(rt);
     }
 };
 
@@ -3479,8 +3145,7 @@ pub fn objectEnumerableOwnPropertiesCall(
     if (args.len < 1) return error.TypeError;
     if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
 
-    var object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer object_value.free(ctx.runtime);
+    var object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const keys = try objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
@@ -3490,7 +3155,6 @@ pub fn objectEnumerableOwnPropertiesCall(
     var out_value = out.value();
 
     var element = core.JSValue.undefinedValue();
-    defer element.free(ctx.runtime);
 
     var root_frame = core.runtime.rootValues(.{ &object_value, &out_value, &element });
     root_frame.activate(ctx.runtime);
@@ -3499,7 +3163,6 @@ pub fn objectEnumerableOwnPropertiesCall(
     for (keys) |key| {
         if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
-        defer desc.destroy(ctx.runtime);
         if (desc.enumerable != true) continue;
 
         element = switch (mode) {
@@ -3508,11 +3171,9 @@ pub fn objectEnumerableOwnPropertiesCall(
             .entries => try objectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
         };
         errdefer {
-            element.free(ctx.runtime);
             element = core.JSValue.undefinedValue();
         }
         try createDataPropertyOrThrow(ctx, output, global, out_value, out, core.atom.atomFromUInt32(out.arrayLength()), element, caller_function, caller_frame);
-        element.free(ctx.runtime);
         element = core.JSValue.undefinedValue();
     }
     return out_value;
@@ -3527,8 +3188,7 @@ pub fn objectProtoGetterCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
+    const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     return objectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
 }
@@ -3546,8 +3206,7 @@ pub fn objectProtoSetterCall(
     if (!prototype_value.isNull() and objectFromValue(prototype_value) == null) return core.JSValue.undefinedValue();
     if (objectFromValue(this_value) == null) return core.JSValue.undefinedValue();
     var args = [_]core.JSValue{ this_value, prototype_value };
-    if (try objectSetPrototypeOfCall(ctx, output, global, &args, caller_function, caller_frame)) |value| {
-        value.free(ctx.runtime);
+    if (try objectSetPrototypeOfCall(ctx, output, global, &args, caller_function, caller_frame)) |_| {
         return core.JSValue.undefinedValue();
     }
     return core.JSValue.undefinedValue();
@@ -3567,14 +3226,11 @@ pub fn objectIsExtensibleCall(
     const proxy_target_value = object.proxyTarget() orelse return core.JSValue.boolean(object.isExtensible());
     const target = objectFromValue(proxy_target_value) orelse return error.TypeError;
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_key = try ctx.runtime.internAtom("isExtensible");
-    defer ctx.runtime.atoms.free(trap_key);
+    const trap_key = core.atom.ids.isExtensible;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return core.JSValue.boolean(try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame));
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{proxy_target_value}, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     const extensible = valueTruthy(result);
     if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
     return core.JSValue.boolean(extensible);
@@ -3594,11 +3250,11 @@ pub fn objectSetPrototypeOfCall(
         null
     else
         objectFromValue(args[1]) orelse return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return args[0].dup();
+    const object = objectFromValue(args[0]) orelse return args[0];
     if (object.proxyTarget() == null and objectHasImmutablePrototype(ctx.runtime, object) and object.getPrototype() != prototype) return error.TypeError;
     if (object.proxyTarget() != null) {
         if (!try proxyAwareSetPrototypeOf(ctx, output, global, object, prototype, caller_function, caller_frame)) return error.TypeError;
-        return args[0].dup();
+        return args[0];
     }
     object.setPrototype(ctx.runtime, prototype) catch |err| switch (err) {
         // Throw via the callee realm's global (threaded in as `global`) so a
@@ -3609,7 +3265,7 @@ pub fn objectSetPrototypeOfCall(
         error.NotExtensible => return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "prototype is not extensible")),
         else => return err,
     };
-    return args[0].dup();
+    return args[0];
 }
 
 pub fn reflectSetPrototypeOfCall(
@@ -3648,7 +3304,6 @@ pub fn reflectConstructPrototypeVm(
 ) !OwnedPrototype {
     const prototype_value = try getValueProperty(ctx, output, global, new_target, core.atom.ids.prototype, caller_function, caller_frame);
     if (prototype_value.isObject()) return .{ .value = prototype_value };
-    prototype_value.free(ctx.runtime);
     const fallback_realm = try functionRealmContext(ctx, new_target);
     if (constructorClassPrototypeId(target_name)) |class_id| {
         return OwnedPrototype.fromObject(fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
@@ -3697,7 +3352,6 @@ pub fn reflectGetOwnPropertyDescriptorCall(
     defer ctx.runtime.atoms.free(atom_id);
     var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
     try call_mod.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, atom_id, &desc);
-    defer desc.destroy(ctx.runtime);
     return try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
 }
 
@@ -3725,14 +3379,14 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     if (desc.kind == .data and desc.value_present) {
-        try defineValueProperty(rt, object, "value", desc_value);
+        try defineValueProperty(rt, object, core.atom.ids.value, desc_value);
     } else if (desc.kind == .accessor) {
-        if (desc.getter_present) try defineValueProperty(rt, object, "get", desc_getter);
-        if (desc.setter_present) try defineValueProperty(rt, object, "set", desc_setter);
+        if (desc.getter_present) try defineValueProperty(rt, object, core.atom.ids.get, desc_getter);
+        if (desc.setter_present) try defineValueProperty(rt, object, core.atom.ids.set, desc_setter);
     }
-    if (desc.writable) |writable| try defineValueProperty(rt, object, "writable", core.JSValue.boolean(writable));
-    if (desc.enumerable) |enumerable| try defineValueProperty(rt, object, "enumerable", core.JSValue.boolean(enumerable));
-    if (desc.configurable) |configurable| try defineValueProperty(rt, object, "configurable", core.JSValue.boolean(configurable));
+    if (desc.writable) |writable| try defineValueProperty(rt, object, core.atom.ids.writable, core.JSValue.boolean(writable));
+    if (desc.enumerable) |enumerable| try defineValueProperty(rt, object, core.atom.ids.enumerable, core.JSValue.boolean(enumerable));
+    if (desc.configurable) |configurable| try defineValueProperty(rt, object, core.atom.ids.configurable, core.JSValue.boolean(configurable));
     return object.value();
 }
 
@@ -3741,19 +3395,16 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var desc_value = core.JSValue.functionBytecode(&fb.header);
-    var desc_value_alive = true;
-    defer if (desc_value_alive) desc_value.free(rt);
+    const desc_value = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -3764,8 +3415,6 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
         global,
         core.Descriptor.data(desc_value, true, true, true),
     );
-    var descriptor_alive = true;
-    defer if (descriptor_alive) descriptor_value.free(rt);
     const descriptor = objectFromValue(descriptor_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -3773,14 +3422,9 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     defer rt.atoms.free(value_key);
     {
         const stored = try descriptor.getProperty(value_key);
-        defer stored.free(rt);
         try std.testing.expect(stored.same(desc_value));
     }
 
-    descriptor_value.free(rt);
-    descriptor_alive = false;
-    desc_value.free(rt);
-    desc_value_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -3796,41 +3440,31 @@ pub fn descriptorFromObject(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.Descriptor {
-    const value_key = try ctx.runtime.internAtom("value");
-    defer ctx.runtime.atoms.free(value_key);
-    const writable_key = try ctx.runtime.internAtom("writable");
-    defer ctx.runtime.atoms.free(writable_key);
-    const get_key = try ctx.runtime.internAtom("get");
-    defer ctx.runtime.atoms.free(get_key);
-    const set_key = try ctx.runtime.internAtom("set");
-    defer ctx.runtime.atoms.free(set_key);
-    const enumerable_key = try ctx.runtime.internAtom("enumerable");
-    defer ctx.runtime.atoms.free(enumerable_key);
-    const configurable_key = try ctx.runtime.internAtom("configurable");
-    defer ctx.runtime.atoms.free(configurable_key);
+    const value_key = core.atom.ids.value;
+    const writable_key = core.atom.ids.writable;
+    const get_key = core.atom.ids.get;
+    const set_key = core.atom.ids.set;
+    const enumerable_key = core.atom.ids.enumerable;
+    const configurable_key = core.atom.ids.configurable;
 
     const enumerable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, enumerable_key, caller_function, caller_frame);
     const configurable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, configurable_key, caller_function, caller_frame);
 
     const has_value = try hasValueProperty(ctx, output, global, desc_value, desc_object, value_key, null, null);
     var data_value: ?core.JSValue = null;
-    errdefer if (data_value) |stored| stored.free(ctx.runtime);
     if (has_value) data_value = try getValueProperty(ctx, output, global, desc_value, value_key, caller_function, caller_frame);
 
     const has_writable = try hasValueProperty(ctx, output, global, desc_value, desc_object, writable_key, null, null);
     const writable = if (has_writable) blk: {
         const writable_value = try getValueProperty(ctx, output, global, desc_value, writable_key, caller_function, caller_frame);
-        defer writable_value.free(ctx.runtime);
         break :blk valueTruthy(writable_value);
     } else null;
 
     const has_get = try hasValueProperty(ctx, output, global, desc_value, desc_object, get_key, null, null);
     var getter_value: ?core.JSValue = null;
-    errdefer if (getter_value) |stored| stored.free(ctx.runtime);
     if (has_get) {
         const value = try getValueProperty(ctx, output, global, desc_value, get_key, caller_function, caller_frame);
         if (!value.isUndefined() and !isCallableValue(value)) {
-            value.free(ctx.runtime);
             return error.TypeError;
         }
         getter_value = value;
@@ -3838,11 +3472,9 @@ pub fn descriptorFromObject(
 
     const has_set = try hasValueProperty(ctx, output, global, desc_value, desc_object, set_key, null, null);
     var setter_value: ?core.JSValue = null;
-    errdefer if (setter_value) |stored| stored.free(ctx.runtime);
     if (has_set) {
         const value = try getValueProperty(ctx, output, global, desc_value, set_key, caller_function, caller_frame);
         if (!value.isUndefined() and !isCallableValue(value)) {
-            value.free(ctx.runtime);
             return error.TypeError;
         }
         setter_value = value;
@@ -3867,10 +3499,8 @@ pub fn descriptorFromObject(
     if (has_value or has_writable) {
         var value = data_value orelse core.JSValue.undefinedValue();
         data_value = null;
-        errdefer value.free(ctx.runtime);
         if (has_value and target.isArray() and atom_id == core.atom.ids.length and !value.isNumber()) {
             const coerced = try arrayLengthDefineValue(ctx, output, global, value);
-            value.free(ctx.runtime);
             value = coerced;
         }
         return .{
@@ -3897,7 +3527,6 @@ pub fn optionalBoolDescriptorProperty(
 ) !?bool {
     if (!try hasValueProperty(ctx, output, global, desc_value, desc_object, atom_id, null, null)) return null;
     const value = try getValueProperty(ctx, output, global, desc_value, atom_id, caller_function, caller_frame);
-    defer value.free(ctx.runtime);
     return valueTruthy(value);
 }
 
@@ -3921,10 +3550,9 @@ inline fn getPropertyValueFromObjectChain(
         const shape_lookup = prototype.findOwnPropertySlotTrusted(atom_id);
         if (shape_lookup) |lookup| {
             switch (lookup.flags.kind) {
-                .data => return lookup.entry.slot.data.dup(),
+                .data => return lookup.entry.slot.data,
                 .accessor => {
-                    const getter = lookup.entry.slot.accessor.getterValue().dup();
-                    defer getter.free(ctx.runtime);
+                    const getter = lookup.entry.slot.accessor.getterValue();
                     if (getter.isUndefined()) return core.JSValue.undefinedValue();
                     return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, getter, &.{}, caller_function, caller_frame);
                 },
@@ -3967,9 +3595,8 @@ noinline fn getSlowPropertyValueFromObject(
         if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
     }
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
-            .data => return desc.value.dup(),
+            .data => return desc.value,
             .generic => return core.JSValue.undefinedValue(),
             .accessor => {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -3993,13 +3620,12 @@ pub fn getSuperPropertyValue(
     var current: ?*core.Object = prototype;
     while (current) |object| {
         if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
-            defer desc.destroy(ctx.runtime);
             switch (desc.kind) {
                 .accessor => {
                     if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
                     return callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
                 },
-                .data => return desc.value.dup(),
+                .data => return desc.value,
                 .generic => {},
             }
         }
@@ -4027,7 +3653,6 @@ pub fn setSuperPropertyValue(
 ) !void {
     const throw_on_set_failure = setFailureShouldThrow(caller_function);
     if (try findPropertyDescriptor(ctx.runtime, prototype, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
             .accessor => {
                 if (desc.setter.isUndefined()) {
@@ -4036,8 +3661,7 @@ pub fn setSuperPropertyValue(
                     if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
                     return;
                 }
-                const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
-                result.free(ctx.runtime);
+                _ = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
                 return;
             },
             .data => {
@@ -4048,16 +3672,14 @@ pub fn setSuperPropertyValue(
                     return;
                 }
                 if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
-                const result = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
-                result.free(ctx.runtime);
+                _ = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
                 return;
             },
             .generic => {},
         }
     }
     if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
-    const result = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
-    result.free(ctx.runtime);
+    _ = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
 }
 
 pub fn findPropertyDescriptor(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.Descriptor {
@@ -4086,17 +3708,13 @@ pub fn hasPropertyForWith(
     const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, false, caller_function, caller_frame);
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const has_atom = try ctx.runtime.internAtom("has");
-    defer ctx.runtime.atoms.free(has_atom);
+    const has_atom = core.atom.ids.has;
     const trap = try getValueProperty(ctx, output, global, handler_value, has_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         return hasPropertyForWith(ctx, output, global, target_value, atom_id, caller_function, caller_frame);
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
 }
 
@@ -4114,17 +3732,13 @@ pub fn hasValueProperty(
     const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, false, caller_function, caller_frame);
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const has_atom = try ctx.runtime.internAtom("has");
-    defer ctx.runtime.atoms.free(has_atom);
+    const has_atom = core.atom.ids.has;
     const trap = try getValueProperty(ctx, output, global, handler_value, has_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         return hasValueProperty(ctx, output, global, target_value, target, atom_id, caller_function, caller_frame);
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
 }
 
@@ -4202,17 +3816,13 @@ pub fn deleteValueProperty(
     };
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const delete_atom = try ctx.runtime.internAtom("deleteProperty");
-    defer ctx.runtime.atoms.free(delete_atom);
+    const delete_atom = core.atom.ids.deleteProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, delete_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         return deleteValueProperty(ctx, output, global, target_value, target, atom_id, caller_function, caller_frame);
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     // js_proxy_delete_property (quickjs.c:51157): the target desc is read via
     // JS_GetOwnPropertyInternal (exotic — a nested-proxy target fires its own
@@ -4220,29 +3830,24 @@ pub fn deleteValueProperty(
     // consulted via JS_IsExtensible (exotic — the target's isExtensible trap
     // DOES fire here, unlike js_proxy_has).
     if (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame)) |desc| {
-        defer desc.destroy(ctx.runtime);
         if (desc.configurable == false) return error.TypeError;
         if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
     }
     return true;
 }
 
-pub fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
+pub fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: core.JSValue) !void {
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
 pub fn defineFunctionNameProperty(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !void {
     if (try objectHasNonEmptyName(rt, object)) return;
-    const key = try rt.internAtom("name");
-    defer rt.atoms.free(key);
+    const key = core.atom.ids.name;
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, false, false, true));
 }
 
 pub fn objectHasNonEmptyName(rt: *core.JSRuntime, object: *core.Object) !bool {
     const existing = (try object.getOwnProperty(rt, core.atom.ids.name)) orelse return false;
-    defer existing.destroy(rt);
     if (existing.kind != .data or !existing.value.isString()) return false;
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -4288,13 +3893,12 @@ pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
 // --- Combined from class.zig ---
 
 pub noinline fn getSuper(
-    ctx: *core.JSContext,
+    _: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
 ) !void {
     const source_from_stack = stack.len() != 0;
-    const source = if (source_from_stack) try stack.pop() else frame.current_function.dup();
-    defer source.free(ctx.runtime);
+    const source = if (source_from_stack) try stack.pop() else frame.current_function;
     const function_object = property_ops.expectObject(source) catch {
         try stack.pushOwned(core.JSValue.undefinedValue());
         return;
@@ -4332,11 +3936,8 @@ pub noinline fn getSuperValue(
     catch_target: *?usize,
 ) !Step {
     const prop_value = try stack.pop();
-    defer prop_value.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
-    defer receiver.free(ctx.runtime);
     if (slot_ops.adapterValueIsUninitialized(receiver)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
@@ -4356,7 +3957,6 @@ pub noinline fn getSuperValue(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    defer value.free(ctx.runtime);
     try stack.push(value);
     return .done;
 }
@@ -4371,13 +3971,9 @@ pub noinline fn putSuperValue(
     catch_target: *?usize,
 ) !Step {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const prop_value = try stack.pop();
-    defer prop_value.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
-    defer receiver.free(ctx.runtime);
     if (slot_ops.adapterValueIsUninitialized(receiver)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
@@ -4404,9 +4000,7 @@ pub noinline fn setHomeObject(
     stack: *stack_mod.Stack,
 ) !void {
     const func_value = try stackValueFromTop(stack, 0);
-    defer func_value.free(ctx.runtime);
     const home_value = try stackValueFromTop(stack, 1);
-    defer home_value.free(ctx.runtime);
     if (func_value.isObject() and home_value.isObject()) {
         const func_object = try property_ops.expectObject(func_value);
         try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
@@ -4415,10 +4009,8 @@ pub noinline fn setHomeObject(
 
 pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (stack.len() < 2) return error.StackUnderflow;
-    const obj = stack.values[stack.len() - 2].dup();
-    defer obj.free(ctx.runtime);
-    const func = stack.values[stack.len() - 1].dup();
-    defer func.free(ctx.runtime);
+    const obj = stack.values[stack.len() - 2];
+    const func = stack.values[stack.len() - 1];
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
 
@@ -4455,10 +4047,8 @@ pub noinline fn checkBrandVm(
 pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const home_value = try stack.pop();
     var rooted_home = home_value;
-    defer home_value.free(ctx.runtime);
     const obj = try stack.pop();
     var rooted_obj = obj;
-    defer obj.free(ctx.runtime);
     var root_frame = core.runtime.rootValues(.{ &rooted_home, &rooted_obj });
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
@@ -4503,9 +4093,7 @@ pub fn privateIn(
     frame: *frame_mod.Frame,
 ) !void {
     const key = try stack.pop();
-    defer key.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     if (!obj.isObject()) {
         _ = try throwTypeErrorMessage(ctx, global, "invalid 'in' operand");
         return;
@@ -4551,25 +4139,16 @@ pub noinline fn defineClass(
     const flags = function.byteCode()[frame.pc + 4];
     frame.pc += 5;
     var ctor_source = try stack.pop();
-    defer ctor_source.free(ctx.runtime);
     var parent_value = try stack.pop();
-    defer parent_value.free(ctx.runtime);
     var saved_class_binding = core.JSValue.undefinedValue();
     var saved_class_binding_active = false;
-    defer if (saved_class_binding_active) saved_class_binding.free(ctx.runtime);
     var superclass_value = core.JSValue.undefinedValue();
     var superclass_value_active = false;
-    defer if (superclass_value_active) superclass_value.free(ctx.runtime);
     var ctor = core.JSValue.undefinedValue();
-    defer ctor.free(ctx.runtime);
     var computed_key = core.JSValue.undefinedValue();
-    defer computed_key.free(ctx.runtime);
     var name_value = core.JSValue.undefinedValue();
-    defer name_value.free(ctx.runtime);
     var superclass_proto = core.JSValue.undefinedValue();
-    defer superclass_proto.free(ctx.runtime);
     var proto_value = core.JSValue.undefinedValue();
-    defer proto_value.free(ctx.runtime);
     var root_frame = core.runtime.rootValues(.{
         &ctor_source,
         &parent_value,
@@ -4611,9 +4190,7 @@ pub noinline fn defineClass(
         defer ctx.runtime.atoms.free(name_atom);
         name_value = try functionNameValueFromAtom(ctx.runtime, name_atom, null);
         try defineFunctionNameProperty(ctx.runtime, ctor_object, name_value);
-        name_value.free(ctx.runtime);
         name_value = core.JSValue.undefinedValue();
-        computed_key.free(ctx.runtime);
         computed_key = core.JSValue.undefinedValue();
     }
     var proto_parent: ?*core.Object = objectPrototypeFromGlobal(ctx.runtime, global);
@@ -4684,9 +4261,7 @@ pub noinline fn defineMethodComputed(
     const flags = function.byteCode()[frame.pc];
     frame.pc += 1;
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const key_value = try stack.pop();
-    defer key_value.free(ctx.runtime);
     const atom_id = toPropertyKeyAtom(ctx, output, global, key_value, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -4707,12 +4282,10 @@ fn defineObjectMethod(
 ) !void {
     if (stack.len() < 2) {
         const maybe_object = stack.peek() orelse return error.StackUnderflow;
-        defer maybe_object.free(rt);
         _ = property_ops.expectObject(maybe_object) catch return error.StackUnderflow;
         return;
     }
     const value = try stack.pop();
-    defer value.free(rt);
     try defineObjectMethodValue(rt, stack, atom_id, value, flags);
 }
 
@@ -4725,14 +4298,10 @@ fn defineObjectMethodValue(
 ) !void {
     const obj = stack.peek() orelse return error.StackUnderflow;
     var rooted_obj = obj;
-    defer obj.free(rt);
     var rooted_value = value;
     var name_value = core.JSValue.undefinedValue();
-    defer name_value.free(rt);
     var getter = core.JSValue.undefinedValue();
-    defer getter.free(rt);
     var setter = core.JSValue.undefinedValue();
-    defer setter.free(rt);
     var root_frame = core.runtime.rootValues(.{
         &rooted_obj,
         &rooted_value,
@@ -4755,16 +4324,14 @@ fn defineObjectMethodValue(
         };
         name_value = try functionNameValueFromAtom(rt, atom_id, prefix);
         try defineFunctionNameProperty(rt, function_object, name_value);
-        name_value.free(rt);
         name_value = core.JSValue.undefinedValue();
     }
     const enumerable = (flags & 4) != 0;
     if ((flags & 3) == 1 or (flags & 3) == 2) {
         if (try object.getOwnProperty(rt, atom_id)) |existing| {
-            defer existing.destroy(rt);
             if (existing.kind == .accessor) {
-                getter = existing.getter.dup();
-                setter = existing.setter.dup();
+                getter = existing.getter;
+                setter = existing.setter;
             }
         }
         const desc = if ((flags & 3) == 1)
@@ -4775,9 +4342,7 @@ fn defineObjectMethodValue(
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             else => return err,
         };
-        getter.free(rt);
         getter = core.JSValue.undefinedValue();
-        setter.free(rt);
         setter = core.JSValue.undefinedValue();
         return;
     }
@@ -4790,12 +4355,11 @@ fn defineObjectMethodValue(
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.len()) return error.StackUnderflow;
-    return stack.values[stack.len() - 1 - index_from_top].dup();
+    return stack.values[stack.len() - 1 - index_from_top];
 }
 
 fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
     if (try home.getOwnProperty(rt, core.atom.ids.Private_brand)) |desc| {
-        defer desc.destroy(rt);
         if (desc.value.asSymbolAtom()) |brand_atom| return brand_atom;
         return error.TypeError;
     }
@@ -4804,7 +4368,6 @@ fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
     const brand_atom = try rt.atoms.newSymbol(name, .private);
     defer rt.atoms.free(brand_atom);
     const brand_value = try rt.symbolValue(brand_atom);
-    defer brand_value.free(rt);
     try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(brand_value, true, true, true));
     return brand_atom;
 }
@@ -4814,7 +4377,6 @@ fn hasPrivateBrand(rt: *core.JSRuntime, obj: core.JSValue, func: core.JSValue) !
     const func_object = try property_ops.expectObject(func);
     const home = func_object.functionHomeObject() orelse return error.TypeError;
     const desc = (try home.getOwnProperty(rt, core.atom.ids.Private_brand)) orelse return error.TypeError;
-    defer desc.destroy(rt);
     const brand_atom = desc.value.asSymbolAtom() orelse return error.TypeError;
     return object.hasOwnProperty(brand_atom);
 }
@@ -4831,7 +4393,6 @@ test "private brand atom is released with home object" {
     const brand_atom = try ensureHomeObjectBrand(rt, home);
     try std.testing.expectEqual(core.atom.AtomKind.private, rt.atoms.kind(brand_atom).?);
 
-    home.value().free(rt);
     // The brand Atom is owned by the home object and comes back when the home
     // object is torn down; under the tracer that is a collection rather than
     // the last release. Nothing here needs rooting -- `home` is the thing that
@@ -4845,7 +4406,6 @@ test "private brand creation does not allocate atom for non-extensible home obje
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
-    defer home.value().free(rt);
     home.preventExtensions();
     const before_entries = rt.atoms.entries.len;
 
@@ -4868,25 +4428,17 @@ pub fn proxySetTrapForErrorStackSetter(
 ) !bool {
     const target_value = receiver.proxyTarget() orelse return false;
     const handler_value = receiver.proxyHandler() orelse return error.TypeError;
-    const set_atom = try ctx.runtime.internAtom("set");
-    defer ctx.runtime.atoms.free(set_atom);
+    const set_atom = core.atom.ids.set;
     const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return false;
     if (!isCallableValue(trap)) return error.TypeError;
 
     const key_value = try proxyTrapKeyValue(ctx.runtime, stack_key);
-    defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return error.TypeError;
     const target = try property_ops.expectObject(target_value);
     try validateProxySetResult(ctx, output, global, target, stack_key, value, caller_function, caller_frame);
     return true;
-}
-
-pub fn isRevokedProxy(object: *core.Object) bool {
-    return object.isProxy() and object.proxyHandler() == null;
 }
 
 pub fn proxyCreateDataPropertyOrThrow(
@@ -4903,10 +4455,8 @@ pub fn proxyCreateDataPropertyOrThrow(
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const target = property_ops.expectObject(target_value) catch return error.TypeError;
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const trap_atom = try ctx.runtime.internAtom("defineProperty");
-    defer ctx.runtime.atoms.free(trap_atom);
+    const trap_atom = core.atom.ids.defineProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true)) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
@@ -4917,16 +4467,13 @@ pub fn proxyCreateDataPropertyOrThrow(
     if (!isCallableValue(trap)) return error.TypeError;
 
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const desc_object = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
     const desc_value = desc_object.value();
-    defer desc_value.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, desc_object, "value", value);
-    try defineValueProperty(ctx.runtime, desc_object, "writable", core.JSValue.boolean(true));
-    try defineValueProperty(ctx.runtime, desc_object, "enumerable", core.JSValue.boolean(true));
-    try defineValueProperty(ctx.runtime, desc_object, "configurable", core.JSValue.boolean(true));
+    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.value, value);
+    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.writable, core.JSValue.boolean(true));
+    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.enumerable, core.JSValue.boolean(true));
+    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.configurable, core.JSValue.boolean(true));
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!value_ops.isTruthy(result)) return error.TypeError;
     _ = receiver_value;
 }
@@ -4963,7 +4510,6 @@ pub fn validateProxyOwnKeysResult(
     for (target_keys) |target_key| {
         if (source.proxyHandler() == null) return error.TypeError; // revoked proxy
         const desc = (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, target_key, null, null)) orelse continue;
-        defer desc.destroy(rt);
         if (desc.configurable == false or !target_extensible) {
             const idx = for (result_keys, 0..) |result_key, i| {
                 if (result_key == target_key) break i;
@@ -4994,20 +4540,15 @@ pub fn proxyAwareOwnPropertyDescriptor(
     const target_value = source.proxyTarget() orelse return error.TypeError;
     const target = try property_ops.expectObject(target_value);
     const handler_value = source.proxyHandler() orelse return error.TypeError;
-    const trap_atom = try ctx.runtime.internAtom("getOwnPropertyDescriptor");
-    defer ctx.runtime.atoms.free(trap_atom);
+    const trap_atom = core.atom.ids.getOwnPropertyDescriptor;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         return try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
     }
     if (!isCallableValue(trap)) return error.TypeError;
     const key_value = try proxyTrapKeyValue(ctx.runtime, key);
-    defer key_value.free(ctx.runtime);
     const desc_value = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
-    defer desc_value.free(ctx.runtime);
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
-    defer if (target_desc) |item| item.destroy(ctx.runtime);
     const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
     if (desc_value.isUndefined()) {
         if (target_desc) |item| {
@@ -5016,10 +4557,8 @@ pub fn proxyAwareOwnPropertyDescriptor(
         return null;
     }
     const desc_object = property_ops.expectObject(desc_value) catch return error.TypeError;
-    var result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
-    errdefer result_desc.destroy(ctx.runtime);
-    var complete_desc = try completeProxyDescriptor(ctx.runtime, result_desc);
-    errdefer complete_desc.destroy(ctx.runtime);
+    const result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
+    const complete_desc = try completeProxyDescriptor(ctx.runtime, result_desc);
     if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, complete_desc)) return error.TypeError;
     if (complete_desc.configurable == false) {
         if (target_desc) |item| {
@@ -5029,7 +4568,6 @@ pub fn proxyAwareOwnPropertyDescriptor(
             return error.TypeError;
         }
     }
-    result_desc.destroy(ctx.runtime);
     return complete_desc;
 }
 
@@ -5057,9 +4595,7 @@ pub fn proxyAwareExistsOwnProperty(
         return source.existsOwnProperty(ctx.runtime, key);
     }
     // Proxy: keep the full-descriptor path so the trap still fires.
-    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, caller_function, caller_frame) orelse return false;
-    desc.destroy(ctx.runtime);
-    return true;
+    return (try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, caller_function, caller_frame)) != null;
 }
 
 pub fn proxyAwareIsExtensible(
@@ -5074,14 +4610,11 @@ pub fn proxyAwareIsExtensible(
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = try ctx.runtime.internAtom("isExtensible");
-    defer ctx.runtime.atoms.free(trap_atom);
+    const trap_atom = core.atom.ids.isExtensible;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     const extensible = valueTruthy(result);
     if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
     return extensible;
@@ -5101,14 +4634,11 @@ pub fn proxyAwarePreventExtensions(
     };
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = try ctx.runtime.internAtom("preventExtensions");
-    defer ctx.runtime.atoms.free(trap_atom);
+    const trap_atom = core.atom.ids.preventExtensions;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return proxyAwarePreventExtensions(ctx, output, global, target, caller_function, caller_frame);
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     if (try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
     return true;
@@ -5132,15 +4662,12 @@ pub fn proxyAwareSetPrototypeOf(
     };
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = try ctx.runtime.internAtom("setPrototypeOf");
-    defer ctx.runtime.atoms.free(trap_atom);
+    const trap_atom = core.atom.ids.setPrototypeOf;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     const proto_value = if (prototype) |proto| proto.value() else core.JSValue.nullValue();
     if (trap.isUndefined() or trap.isNull()) return proxyAwareSetPrototypeOf(ctx, output, global, target, prototype, caller_function, caller_frame);
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, proto_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
         const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
@@ -5153,14 +4680,14 @@ pub fn completeProxyDescriptor(rt: *core.JSRuntime, desc: core.Descriptor) !core
     _ = rt;
     return switch (desc.kind) {
         .generic, .data => core.Descriptor.data(
-            if (desc.value_present) desc.value.dup() else core.JSValue.undefinedValue(),
+            if (desc.value_present) desc.value else core.JSValue.undefinedValue(),
             desc.writable orelse false,
             desc.enumerable orelse false,
             desc.configurable orelse false,
         ),
         .accessor => core.Descriptor.accessor(
-            if (desc.getter_present) desc.getter.dup() else core.JSValue.undefinedValue(),
-            if (desc.setter_present) desc.setter.dup() else core.JSValue.undefinedValue(),
+            if (desc.getter_present) desc.getter else core.JSValue.undefinedValue(),
+            if (desc.setter_present) desc.setter else core.JSValue.undefinedValue(),
             desc.enumerable orelse false,
             desc.configurable orelse false,
         ),
@@ -5218,16 +4745,13 @@ pub fn callProxyApply(
     // realm where the error eventually surfaces.
     const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
     const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
-    const apply_atom = try ctx.runtime.internAtom("apply");
-    defer ctx.runtime.atoms.free(apply_atom);
+    const apply_atom = core.atom.ids.apply;
     const trap = try getValueProperty(ctx, output, global, handler_value, apply_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_value, target_value, args, caller_function, caller_frame);
     }
     if (!isCallableValue(trap)) return error.TypeError;
     const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
-    defer arg_array.free(ctx.runtime);
     return callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, this_value, arg_array }, caller_function, caller_frame);
 }
 
@@ -5245,10 +4769,8 @@ pub fn constructProxy(
     if (!(try proxyTargetIsConstructor(ctx, proxy_value))) return error.TypeError;
     const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
     const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
-    const construct_atom = try ctx.runtime.internAtom("construct");
-    defer ctx.runtime.atoms.free(construct_atom);
+    const construct_atom = core.atom.ids.construct;
     const trap = try getValueProperty(ctx, output, global, handler_value, construct_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         // A proxy without a construct trap forwards the original new.target.
         // Re-enter the ordinary constructor boundary instead of flattening a
@@ -5259,10 +4781,8 @@ pub fn constructProxy(
     }
     if (!isCallableValue(trap)) return error.TypeError;
     const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
-    defer arg_array.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, arg_array, new_target_value }, caller_function, caller_frame);
     if (!result.isObject()) {
-        result.free(ctx.runtime);
         return error.TypeError;
     }
     return result;
@@ -5278,26 +4798,21 @@ pub fn getProxyProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    const target_value = (proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy")).dup();
-    defer target_value.free(ctx.runtime);
-    const handler_value = (proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy")).dup();
-    defer handler_value.free(ctx.runtime);
+    const target_value = (proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy"));
+    const handler_value = (proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy"));
     const trap = if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, handler_value, core.atom.ids.get)) |borrowed|
-        if (borrowed.requiresRefCount()) borrowed.dup() else borrowed
+        borrowed
     else
         try getValueProperty(ctx, output, global, handler_value, core.atom.ids.get, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     const target = try property_ops.expectObject(target_value);
     if (trap.isUndefined() or trap.isNull()) {
         if (property_direct.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, target_value, atom_id)) |borrowed| {
-            return if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
+            return borrowed;
         }
         return getValuePropertyWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, caller_function, caller_frame);
     }
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, receiver_value }, caller_function, caller_frame);
-    errdefer result.free(ctx.runtime);
     try validateProxyGetResult(ctx, output, global, target, atom_id, result, caller_function, caller_frame);
     return result;
 }
@@ -5318,7 +4833,6 @@ pub fn validateProxyGetResult(
         .slow => {},
     }
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame) orelse return;
-    defer target_desc.destroy(ctx.runtime);
     if (target_desc.configurable != false) return;
     switch (target_desc.kind) {
         .data => {
@@ -5363,10 +4877,7 @@ pub fn firstProxyInPrototypeSetPath(rt: *core.JSRuntime, object: *core.Object, a
     var current = object.getPrototype();
     while (current) |prototype| : (current = prototype.getPrototype()) {
         if (prototype.proxyTarget() != null) return prototype;
-        if (try prototype.getOwnProperty(rt, atom_id)) |desc| {
-            desc.destroy(rt);
-            return null;
-        }
+        if (try prototype.getOwnProperty(rt, atom_id) != null) return null;
     }
     return null;
 }
@@ -5384,19 +4895,15 @@ pub fn proxySetValueProperty(
 ) HostError!bool {
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const set_atom = try ctx.runtime.internAtom("set");
-    defer ctx.runtime.atoms.free(set_atom);
+    const set_atom = core.atom.ids.set;
     const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         const target = try property_ops.expectObject(target_value);
         return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
     }
     if (!isCallableValue(trap)) return error.TypeError;
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     const target = try property_ops.expectObject(target_value);
     try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
@@ -5414,7 +4921,6 @@ pub fn validateProxySetResult(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame) orelse return;
-    defer target_desc.destroy(ctx.runtime);
     if (target_desc.configurable != false) return;
     switch (target_desc.kind) {
         .data => {
@@ -5448,22 +4954,16 @@ pub fn proxyDefineValueForReflectSet(
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
     key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
 
-    const get_desc_atom = try ctx.runtime.internAtom("getOwnPropertyDescriptor");
-    defer ctx.runtime.atoms.free(get_desc_atom);
+    const get_desc_atom = core.atom.ids.getOwnPropertyDescriptor;
     const get_desc = try getValueProperty(ctx, output, global, handler_value, get_desc_atom, caller_function, caller_frame);
-    defer get_desc.free(ctx.runtime);
     if (!get_desc.isUndefined() and !get_desc.isNull()) {
         if (!isCallableValue(get_desc)) return error.TypeError;
-        const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, get_desc, &.{ target_value, key_value }, caller_function, caller_frame);
-        result.free(ctx.runtime);
+        _ = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, get_desc, &.{ target_value, key_value }, caller_function, caller_frame);
     }
 
-    const define_atom = try ctx.runtime.internAtom("defineProperty");
-    defer ctx.runtime.atoms.free(define_atom);
+    const define_atom = core.atom.ids.defineProperty;
     const define = try getValueProperty(ctx, output, global, handler_value, define_atom, caller_function, caller_frame);
-    defer define.free(ctx.runtime);
     if (define.isUndefined() or define.isNull()) {
         const target = try property_ops.expectObject(target_value);
         target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, true, true, true)) catch |err| switch (err) {
@@ -5476,10 +4976,8 @@ pub fn proxyDefineValueForReflectSet(
     if (!isCallableValue(define)) return error.TypeError;
     const desc_object = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
     desc_value = desc_object.value();
-    defer desc_value.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, desc_object, "value", rooted_value);
+    try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.value, rooted_value);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, define, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return error.TypeError;
     _ = receiver_value;
 }
@@ -5504,10 +5002,8 @@ pub fn proxyDefineOwnProperty(
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
     const target = property_ops.expectObject(target_value) catch return error.TypeError;
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const trap_atom = try ctx.runtime.internAtom("defineProperty");
-    defer ctx.runtime.atoms.free(trap_atom);
+    const trap_atom = core.atom.ids.defineProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
         if (target.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, target, atom_id, desc, caller_function, caller_frame);
         target.defineOwnProperty(ctx.runtime, atom_id, desc) catch |err| switch (err) {
@@ -5519,14 +5015,10 @@ pub fn proxyDefineOwnProperty(
     }
     if (!isCallableValue(trap)) return error.TypeError;
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
     const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
-    defer desc_value.free(ctx.runtime);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (!valueTruthy(result)) return false;
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame);
-    defer if (target_desc) |item| item.destroy(ctx.runtime);
     // js_proxy_define_own_property (quickjs.c:51060) reads the raw
     // p->extensible flag of the target (no JS_IsExtensible call — a
     // nested-proxy target does NOT fire its isExtensible trap here).
@@ -5563,7 +5055,6 @@ pub fn validateProxyHasResult(
     // while extensibility is the raw p->extensible flag (NOT JS_IsExtensible:
     // no isExtensible trap fires here).
     if (try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame)) |desc| {
-        defer desc.destroy(ctx.runtime);
         if (desc.configurable == false) return error.TypeError;
         if (!target.isExtensible()) return error.TypeError;
     }

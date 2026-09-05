@@ -7,7 +7,6 @@
 //! has no QuickJS ownership counterpart and may be consumed by exec/binding;
 //! as core it cannot import parser/exec/runtime/binding.
 
-const std = @import("std");
 const platform_clock = @import("../platform_clock.zig");
 
 pub const max_opcode_count = 256;

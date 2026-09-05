@@ -51,13 +51,12 @@ pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, gen
 
 // Hot return-path passthrough: a non-derived-ctor frame returns the value verbatim.
 // Inlined so the per-return arm pays no call (it was ~1% of fib as a separate fn).
-pub inline fn finishFunctionReturn(ctx: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
+pub inline fn finishFunctionReturn(_: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
     if (!frame.function.isDerivedClassConstructor()) return value;
     if (value.isObject()) return value;
-    defer value.free(ctx.runtime);
     if (!value.isUndefined()) return error.DerivedConstructorReturn;
-    if (adapterValueIsUninitialized(frame.this_value)) return error.DerivedThisUninitialized;
-    return adapterValueDup(frame.this_value);
+    if (adapterValueBorrow(frame.this_value).isUninitialized()) return error.DerivedThisUninitialized;
+    return adapterValueBorrow(frame.this_value);
 }
 
 pub fn jump32(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) void {
@@ -78,24 +77,22 @@ pub fn jump8(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
+pub fn branch32(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
     const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const truthy = value.asBool() orelse value_ops.isTruthy(value);
     if (truthy == branch_if_true) {
         frame.pc = relativePc(operand_pc, diff);
     }
 }
 
-pub fn branch8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
+pub fn branch8(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
     const diff: i8 = @bitCast(function.byteCode()[frame.pc]);
     frame.pc += 1;
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const truthy = value.asBool() orelse value_ops.isTruthy(value);
     if (truthy == branch_if_true) {
         frame.pc = relativePc(operand_pc, diff);
@@ -111,8 +108,6 @@ pub noinline fn throwTop(
     catch_target: *?usize,
 ) !ThrowResult {
     const value = try stack.pop();
-    var value_owned = true;
-    errdefer if (value_owned) value.free(ctx.runtime);
     try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
     try stack.reserveAdditional(1);
     if (catch_target.* == null) {
@@ -123,13 +118,11 @@ pub noinline fn throwTop(
     if (catch_target.*) |target| {
         const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
         stack.pushOwnedAssumeCapacity(value);
-        value_owned = false;
         frame.pc = target;
         catch_target.* = restored;
         return .handled;
     }
     _ = ctx.throwValue(value);
-    value_owned = false;
     return error.JSException;
 }
 
@@ -234,9 +227,8 @@ pub fn gosub(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn ret(ctx: *core.JSContext, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
+pub fn ret(_: *core.JSContext, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
     const target = try stack.pop();
-    defer target.free(ctx.runtime);
     const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
     if (pc_i32 < 0) return error.InvalidBytecode;
     const pc: usize = @intCast(pc_i32);
@@ -244,14 +236,8 @@ pub fn ret(ctx: *core.JSContext, function: *const bytecode.FunctionBytecode, fra
     frame.pc = pc;
 }
 
-pub fn nop() void {}
-
 fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
-}
-
-fn adapterValueDup(slot: core.JSValue) core.JSValue {
-    return adapterValueBorrow(slot).dup();
 }
 
 fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
@@ -261,10 +247,6 @@ fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
         std.debug.assert(varRefCellFromValue(value) == null);
     }
     return value;
-}
-
-fn adapterValueIsUninitialized(slot: core.JSValue) bool {
-    return adapterValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {

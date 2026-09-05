@@ -93,26 +93,23 @@ pub const EventLoop = struct {
         }
         const rt = self.context.runtimePtr();
         // `len` counts initialized handlers, but allocation used the full
-        // capacity slice: deinit live elements, then free ptr[0..capacity].
+        // capacity slice, so free ptr[0..capacity].
         const timers = self.timers;
         const timers_capacity = self.timers_capacity;
         self.timers = &.{};
         self.timers_capacity = 0;
-        for (timers) |timer| timer.deinit(rt);
         if (timers_capacity != 0) rt.memory.free(Timer, timers.ptr[0..timers_capacity]);
 
         const rw_handlers = self.rw_handlers;
         const rw_handlers_capacity = self.rw_handlers_capacity;
         self.rw_handlers = &.{};
         self.rw_handlers_capacity = 0;
-        for (rw_handlers) |handler| handler.deinit(rt);
         if (rw_handlers_capacity != 0) rt.memory.free(RwHandler, rw_handlers.ptr[0..rw_handlers_capacity]);
 
         const signal_handlers = self.signal_handlers;
         const signal_handlers_capacity = self.signal_handlers_capacity;
         self.signal_handlers = &.{};
         self.signal_handlers_capacity = 0;
-        for (signal_handlers) |handler| handler.deinit(rt);
         if (signal_handlers_capacity != 0) rt.memory.free(SignalHandler, signal_handlers.ptr[0..signal_handlers_capacity]);
         self.realm.deinit();
     }
@@ -197,7 +194,6 @@ pub const EventLoop = struct {
     fn removeTimerAt(self: *EventLoop, ctx: *core.JSContext, index: usize) void {
         std.debug.assert(index < self.timers.len);
         const old_len = self.timers.len;
-        const removed = self.timers[index];
         if (index + 1 < old_len) {
             @memmove(self.timers[index .. old_len - 1], self.timers[index + 1 .. old_len]);
         }
@@ -208,7 +204,6 @@ pub const EventLoop = struct {
             self.timers_capacity = 0;
             ctx.runtimePtr().memory.free(Timer, old_timers);
         }
-        removed.deinit(ctx.runtimePtr());
     }
 
     fn runNextTimer(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
@@ -221,8 +216,7 @@ pub const EventLoop = struct {
                 next_delay = @min(next_delay, timer.timeout_ms - now);
                 continue;
             }
-            var callback = timer.callback.dup();
-            defer callback.free(rt);
+            const callback = timer.callback;
             // A one-shot timer leaves the EventLoop RootProvider before call
             // dispatch reaches its pre-invocation interrupt/GC poll. Publish
             // the detached callback as a native window; scalar root scopes
@@ -249,8 +243,7 @@ pub const EventLoop = struct {
                     return true;
                 }
             }
-            const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
-            call_result.free(rt);
+            _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
             if (repeats and !self.timerExists(timer_id)) return true;
             return true;
         }
@@ -293,10 +286,9 @@ pub const EventLoop = struct {
     }
 
     fn setRwHandler(self: *EventLoop, ctx: *core.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
-        const rt = ctx.runtimePtr();
         for (self.rw_handlers) |*handler| {
             if (handler.fd != fd) continue;
-            handler.setCallback(rt, write_handler, callback);
+            handler.setCallback(write_handler, callback);
             return;
         }
         const index = self.rw_handlers.len;
@@ -304,7 +296,7 @@ pub const EventLoop = struct {
         var handler = RwHandler{
             .fd = fd,
         };
-        handler.setCallback(rt, write_handler, callback);
+        handler.setCallback(write_handler, callback);
         self.rw_handlers = self.rw_handlers.ptr[0 .. index + 1];
         self.rw_handlers[index] = handler;
     }
@@ -313,7 +305,7 @@ pub const EventLoop = struct {
         var index: usize = 0;
         while (index < self.rw_handlers.len) : (index += 1) {
             if (self.rw_handlers[index].fd != fd) continue;
-            self.rw_handlers[index].clearCallback(ctx.runtimePtr(), write_handler);
+            self.rw_handlers[index].clearCallback(write_handler);
             if (self.rw_handlers[index].read_callback.isNull() and self.rw_handlers[index].write_callback.isNull()) {
                 self.removeRwHandlerAt(ctx, index);
             }
@@ -324,7 +316,6 @@ pub const EventLoop = struct {
     fn removeRwHandlerAt(self: *EventLoop, ctx: *core.JSContext, index: usize) void {
         std.debug.assert(index < self.rw_handlers.len);
         const old_len = self.rw_handlers.len;
-        const removed = self.rw_handlers[index];
         if (index + 1 < old_len) {
             @memmove(self.rw_handlers[index .. old_len - 1], self.rw_handlers[index + 1 .. old_len]);
         }
@@ -335,7 +326,6 @@ pub const EventLoop = struct {
             self.rw_handlers_capacity = 0;
             ctx.runtimePtr().memory.free(RwHandler, old_handlers);
         }
-        removed.deinit(ctx.runtimePtr());
     }
 
     fn runNextRwHandler(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
@@ -378,10 +368,8 @@ pub const EventLoop = struct {
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return false;
         if (windows_api.WaitForSingleObject(handle, timeout_ms) != windows_api.wait_object_0) return false;
 
-        const retained_callback = callback.dup();
-        defer retained_callback.free(rt);
-        const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), retained_callback, &.{}, null, null);
-        call_result.free(rt);
+        const retained_callback = callback;
+        _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), retained_callback, &.{}, null, null);
         return true;
     }
 
@@ -432,17 +420,13 @@ pub const EventLoop = struct {
                 if (self.rw_handlers[handler_index].fd != pollfd.fd) continue;
                 const handler = self.rw_handlers[handler_index];
                 if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.isNull()) {
-                    const callback = handler.read_callback.dup();
-                    defer callback.free(rt);
-                    const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
-                    call_result.free(rt);
+                    const callback = handler.read_callback;
+                    _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
                     return true;
                 }
                 if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.isNull()) {
-                    const callback = handler.write_callback.dup();
-                    defer callback.free(rt);
-                    const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
-                    call_result.free(rt);
+                    const callback = handler.write_callback;
+                    _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
                     return true;
                 }
             }
@@ -468,10 +452,9 @@ pub const EventLoop = struct {
     }
 
     fn setSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, callback: zjs.JSValue) !void {
-        const rt = ctx.runtimePtr();
         for (self.signal_handlers) |*handler| {
             if (handler.sig != sig) continue;
-            handler.setCallback(rt, callback);
+            handler.setCallback(callback);
             _ = signal(@intCast(sig), @intFromPtr(&osSignalHandler));
             return;
         }
@@ -499,7 +482,6 @@ pub const EventLoop = struct {
     fn removeSignalHandlerAt(self: *EventLoop, ctx: *core.JSContext, index: usize) void {
         std.debug.assert(index < self.signal_handlers.len);
         const old_len = self.signal_handlers.len;
-        const removed = self.signal_handlers[index];
         if (index + 1 < old_len) {
             @memmove(self.signal_handlers[index .. old_len - 1], self.signal_handlers[index + 1 .. old_len]);
         }
@@ -510,20 +492,17 @@ pub const EventLoop = struct {
             self.signal_handlers_capacity = 0;
             ctx.runtimePtr().memory.free(SignalHandler, old_handlers);
         }
-        removed.deinit(ctx.runtimePtr());
     }
 
     fn runNextSignalHandler(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
         if (os_pending_signals == 0) return false;
-        const rt = ctx.runtimePtr();
+        _ = ctx.runtimePtr();
         for (self.signal_handlers) |handler| {
             const mask = @as(u64, 1) << @intCast(handler.sig);
             if ((os_pending_signals & mask) == 0) continue;
             os_pending_signals &= ~mask;
-            const callback = handler.callback.dup();
-            defer callback.free(rt);
-            const call_result = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
-            call_result.free(rt);
+            const callback = handler.callback;
+            _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
             return true;
         }
         return false;
@@ -547,15 +526,11 @@ const Timer = struct {
     fn init(id: i64, callback: zjs.JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) Timer {
         return .{
             .id = id,
-            .callback = callback.dup(),
+            .callback = callback,
             .timeout_ms = timeout_ms,
             .delay_ms = delay_ms,
             .repeats = repeats,
         };
-    }
-
-    fn deinit(self: Timer, rt: *zjs.JSRuntime) void {
-        self.callback.free(rt);
     }
 
     fn traceRoots(self: *Timer, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
@@ -568,24 +543,14 @@ const RwHandler = struct {
     read_callback: zjs.JSValue = zjs.JSValue.nullValue(),
     write_callback: zjs.JSValue = zjs.JSValue.nullValue(),
 
-    fn deinit(self: RwHandler, rt: *zjs.JSRuntime) void {
-        self.read_callback.free(rt);
-        self.write_callback.free(rt);
+    fn setCallback(self: *RwHandler, write_handler: bool, callback: zjs.JSValue) void {
+        const slot = if (write_handler) &self.write_callback else &self.read_callback;
+        slot.* = callback;
     }
 
-    fn setCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool, callback: zjs.JSValue) void {
-        const next_callback = callback.dup();
+    fn clearCallback(self: *RwHandler, write_handler: bool) void {
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
-        const old_callback = slot.*;
-        slot.* = next_callback;
-        old_callback.free(rt);
-    }
-
-    fn clearCallback(self: *RwHandler, rt: *zjs.JSRuntime, write_handler: bool) void {
-        const slot = if (write_handler) &self.write_callback else &self.read_callback;
-        const old_callback = slot.*;
         slot.* = zjs.JSValue.nullValue();
-        old_callback.free(rt);
     }
 
     fn traceRoots(self: *RwHandler, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
@@ -601,19 +566,12 @@ const SignalHandler = struct {
     fn init(sig: u32, callback: zjs.JSValue) SignalHandler {
         return .{
             .sig = sig,
-            .callback = callback.dup(),
+            .callback = callback,
         };
     }
 
-    fn deinit(self: SignalHandler, rt: *zjs.JSRuntime) void {
-        self.callback.free(rt);
-    }
-
-    fn setCallback(self: *SignalHandler, rt: *zjs.JSRuntime, callback: zjs.JSValue) void {
-        const next_callback = callback.dup();
-        const old_callback = self.callback;
-        self.callback = next_callback;
-        old_callback.free(rt);
+    fn setCallback(self: *SignalHandler, callback: zjs.JSValue) void {
+        self.callback = callback;
     }
 
     fn traceRoots(self: *SignalHandler, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
@@ -741,7 +699,6 @@ test "EventLoop drains queued JS callbacks" {
         \\globalThis.__zjs_runtime_event_loop_hit = 0;
         \\(() => { globalThis.__zjs_runtime_event_loop_hit = 7; })
     , .{});
-    defer callback.free(rt);
 
     try exec.call_runtime.enqueuePendingMicrotask(ctx.core, callback);
 
@@ -749,7 +706,6 @@ test "EventLoop drains queued JS callbacks" {
     try std.testing.expect(!result.hasPendingError());
 
     const hit = try ctx.eval("globalThis.__zjs_runtime_event_loop_hit;", .{});
-    defer hit.free(rt);
     try std.testing.expectEqual(@as(?i32, 7), hit.asInt32());
 }
 
@@ -883,25 +839,21 @@ test "EventLoop keeps host-held unique symbol atoms until release" {
     defer loop.deinit();
 
     const timer_symbol = try rt.atoms.newValueSymbol("gc-event-loop-timer-symbol");
-    const timer_value = try rt.symbolValue(timer_symbol);
+    const timer_value = try rt.takeSymbolValue(timer_symbol);
     try loop.enqueueTimer(ctx.core, 1, timer_value, 0, false);
-    timer_value.free(rt);
 
     const rw_read_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-read-symbol");
     const rw_write_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-write-symbol");
-    const rw_read_value = try rt.symbolValue(rw_read_symbol);
+    const rw_read_value = try rt.takeSymbolValue(rw_read_symbol);
     try loop.setRwHandler(ctx.core, 1, false, rw_read_value);
-    rw_read_value.free(rt);
-    const rw_write_value = try rt.symbolValue(rw_write_symbol);
+    const rw_write_value = try rt.takeSymbolValue(rw_write_symbol);
     try loop.setRwHandler(ctx.core, 1, true, rw_write_value);
-    rw_write_value.free(rt);
 
     try loop.ensureSignalHandlerCapacity(ctx.core, 1);
     loop.signal_handlers = loop.signal_handlers.ptr[0..1];
     const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
-    const signal_value = try rt.symbolValue(signal_symbol);
+    const signal_value = try rt.takeSymbolValue(signal_symbol);
     loop.signal_handlers[0] = SignalHandler.init(2, signal_value);
-    signal_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(timer_symbol) != null);
@@ -989,13 +941,11 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var callback = zjs.JSValue.functionBytecode(&fb.header);
-    var callback_alive = true;
-    defer if (callback_alive) callback.free(rt);
+    const callback = zjs.JSValue.functionBytecode(&fb.header);
 
     try loop.enqueueTimer(ctx.core, 1, callback, 0, false);
     const old_threshold = rt.gcThreshold();
@@ -1005,8 +955,6 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    callback.free(rt);
-    callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }

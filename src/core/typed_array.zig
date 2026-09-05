@@ -43,14 +43,12 @@ const value_format = @import("value_format.zig");
 const value_semantics = @import("value_semantics.zig");
 
 const bignum = @import("../libs/bigint.zig");
-const unicode = @import("../libs/unicode.zig");
 
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const Object = object.Object;
 const Atom = atom.Atom;
 const Descriptor = descriptor.Descriptor;
-const DynamicImportError = @import("context.zig").DynamicImportError;
 
 const AppendStringError = value_string.AppendStringError;
 
@@ -60,7 +58,7 @@ const AppendStringError = value_string.AppendStringError;
 /// `new_array_buffer` bytecode.
 pub fn arrayBufferConstruct(rt: *JSRuntime, length_value: JSValue) !JSValue {
     const byte_length = try toIndexUsize(rt, length_value);
-    return createArrayBuffer(rt, byte_length, null);
+    return createArrayBufferWithPrototype(rt, byte_length, null, null);
 }
 
 pub fn arrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*Object) !JSValue {
@@ -99,10 +97,6 @@ pub fn sharedArrayBufferFromStore(
     obj.installSharedByteStorage(rt, store);
     obj.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return obj.value();
-}
-
-pub fn createArrayBuffer(rt: *JSRuntime, byte_length: usize, max_byte_length: ?usize) !JSValue {
-    return createArrayBufferWithPrototype(rt, byte_length, max_byte_length, null);
 }
 
 pub fn createArrayBufferWithPrototype(rt: *JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*Object) !JSValue {
@@ -147,7 +141,6 @@ pub fn arrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start: usize
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     const length = if (end > start) end - start else 0;
     const out = try createArrayBufferWithPrototype(rt, length, null, buffer.getPrototype());
-    errdefer out.free(rt);
     const out_object = try expectArrayBufferObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
     return out;
@@ -170,7 +163,6 @@ pub fn arrayBufferSliceToImmutableRange(rt: *JSRuntime, buffer_value: JSValue, s
     if (buffer.byteStorage().len < end) return error.RangeError;
     const length = if (end > start) end - start else 0;
     const out = try createArrayBufferWithPrototype(rt, length, null, buffer.getPrototype());
-    errdefer out.free(rt);
     const out_object = try expectArrayBufferOnlyObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
     try object.markArrayBufferImmutable(rt, out_object);
@@ -198,12 +190,10 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
         }
     }
     const out = try createArrayBufferWithPrototype(rt, new_length, if (fixed_length) null else buffer.arrayBufferMaxByteLength(), buffer.getPrototype());
-    errdefer out.free(rt);
     const out_object = try expectArrayBufferObject(out);
     const copy_len = @min(buffer.byteStorage().len, new_length);
     if (copy_len != 0) @memcpy(out_object.byteStorage()[0..copy_len], buffer.byteStorage()[0..copy_len]);
-    const detached = try detachArrayBuffer(rt, buffer.value());
-    detached.free(rt);
+    _ = try detachArrayBuffer(rt, buffer.value());
     return out;
 }
 
@@ -218,13 +208,11 @@ pub fn arrayBufferTransferToImmutableLength(rt: *JSRuntime, buffer_value: JSValu
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     const out = try createArrayBufferWithPrototype(rt, new_length, null, buffer.getPrototype());
-    errdefer out.free(rt);
     const out_object = try expectArrayBufferOnlyObject(out);
     const copy_len = @min(buffer.byteStorage().len, new_length);
     if (copy_len != 0) @memcpy(out_object.byteStorage()[0..copy_len], buffer.byteStorage()[0..copy_len]);
     try object.markArrayBufferImmutable(rt, out_object);
-    const detached = try detachArrayBuffer(rt, buffer.value());
-    detached.free(rt);
+    _ = try detachArrayBuffer(rt, buffer.value());
     return out;
 }
 
@@ -240,7 +228,6 @@ pub fn sharedArrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start:
     const buffer = try expectSharedArrayBufferObject(buffer_value);
     const length = if (end > start) end - start else 0;
     const out = try sharedArrayBufferConstructLength(rt, length, null, buffer.getPrototype());
-    errdefer out.free(rt);
     const out_object = try expectSharedArrayBufferObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
     return out;
@@ -386,17 +373,16 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
     } else null;
     const obj = try createTypedArrayInstance(rt, kind, prototype);
     errdefer Object.destroyFromHeader(rt, obj.gcHeader());
-    try obj.initTypedArrayView(rt, buffer.value().dup(), byte_offset, element_size, fixed_length, kind);
+    try obj.initTypedArrayView(rt, buffer.value(), byte_offset, element_size, fixed_length, kind);
     return obj.value();
 }
 
 pub fn typedArrayConstructFullBuffer(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue {
-    return typedArrayConstructFullBufferOwned(rt, element_size, kind, buffer_value.dup(), buffer, prototype);
+    return typedArrayConstructFullBufferOwned(rt, element_size, kind, buffer_value, buffer, prototype);
 }
 
 pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue {
     var owned_buffer_value = buffer_value;
-    errdefer owned_buffer_value.free(rt);
     if (element_size == 0) return error.TypeError;
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (buffer.arrayBufferMaxByteLength() != null) return error.TypeError;
@@ -434,7 +420,7 @@ pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Obj
     if (view_length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
     try obj.initTypedArrayView(
         rt,
-        buffer.value().dup(),
+        buffer.value(),
         byte_offset,
         0,
         @intCast(view_length),

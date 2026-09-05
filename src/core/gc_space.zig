@@ -1,155 +1,136 @@
-//! Size-class generation and publication histogram for Stage 4 spaces
+//! Size classes and publication histogram for the 64 KiB block heap
 //! (tracing-gc-design.md §4.2 / §4.3).
-//!
-//! This module does not allocate 64 KiB blocks. It classifies the compatibility
-//! heap's published sizes so the later block allocator has a measured table:
-//! 16-byte classes through 128, then a ~1.25 geometric series, each class
-//! holding at least 16 cells in a future 64 KiB block. The maximum small class
-//! is taken from a publication histogram, not a hard-coded 4 KiB cutoff.
-//! Default production `rc` does not import this file.
 
-/// Future block size used only to enforce the 16-cell rule. Not an allocator.
-pub const future_block_bytes: usize = 64 * 1024;
+const gc_representation = @import("gc_representation_constants.zig");
+
+const block_bytes: usize = 64 * 1024;
 pub const min_cells_per_block: usize = 16;
 
 /// §4.3 large-object dedicated mapping floor. This is a space boundary, not
 /// the small-class cutoff.
 pub const large_min_bytes: usize = 64 * 1024;
 
-/// 8-byte GC metadata prefix that occupies a cell with the payload.
-pub const metadata_prefix_size: usize = 8;
-
 pub const min_class_bytes: usize = 16;
-pub const linear_limit_bytes: usize = 128;
-pub const linear_step_bytes: usize = 16;
-pub const geometric_num: usize = 5;
-pub const geometric_den: usize = 4;
 
 /// Coverage target used to freeze `measured_max_small_payload`. Linear classes
 /// through 128 always remain; geometric classes are kept only when this
 /// percentile of sub-64 KiB publications sits above 128.
 pub const coverage_hundredths: usize = 99;
 
-/// Smallest generated class that covers `coverage_hundredths` of sub-64 KiB
-/// publications in the mixed TestEngine bootstrap + JS workload (frozen by
-/// `src/tests/core.zig` "size-class table matches measured publication
-/// histogram"): p50=64, p95=96, p99=128. Linear table through 128 is enough;
-/// geometric classes stay in `generateAllFittingClasses` for a later histogram.
-/// Not 4 KiB.
-pub const measured_max_small_payload: usize = 128;
+/// Largest linear class. Below this the series is one class per 16 bytes; the
+/// geometric series (`nextGeometricClass`) takes over above it.
+pub const linear_max_bytes: usize = 128;
+const linear_class_count: usize = linear_max_bytes / min_class_bytes;
 
-pub const Space = enum {
-    small,
-    medium,
-    large,
-};
+/// Smallest class that covers `coverage_hundredths` of sub-64 KiB publications
+/// in the frozen mixed workload, per the `cutoffForCoverage` rule. Not 4 KiB,
+/// and not a round number: it is the last member of `nextGeometricClass`'s
+/// series that still fits `min_cells_per_block` cells in a 64 KiB block
+/// (`block_bytes / (3760 + 8) = 17`; the successor 4688 would fit only 13).
+///
+/// TGC S2-f measurement (2026-09-04, ReleaseFast, `--gc-stats` allocation
+/// histogram, one fixed-work run each on CPU19). The pre-S2 freeze at 128 was
+/// taken from an OBJECT-ONLY publication mix; string bodies became collector
+/// carriers in S2, and the p99 moved by more than an order of magnitude:
+///
+///   workload      below-large pubs   p50   p95     p99    covered by 128
+///   deltablue          19,981,642     64   160     160    18,208,272 (91.1%)
+///   earley-boyer      255,036,828     48    96     128   255,035,896 (100.0%)
+///   raytrace           90,423,361     96    96     160    88,547,848 (97.9%)
+///   regexp              8,713,114     48    64   3,840     8,519,276 (97.8%)
+///   splay              25,132,439     64    96     112    25,132,333 (100.0%)
+///   pdfjs (zoo)        21,806,898     96  >4096  >4096    12,989,640 (59.6%)
+///   pdfjs.fixed        21,806,899     96  >4096  >4096    12,989,639 (59.6%)
+///
+/// `>4096` is the histogram's `over_fine` answer (`fine_bucket_limit`): more
+/// than 5% of pdfjs's sub-64 KiB publications are larger than 4 KiB, so its
+/// p99 is above every class this geometry can hold. The rule
+/// (`cutoffForCoverage`, max p99 over the set) therefore saturates at the
+/// geometric cap, 3760. That is the intended answer, not a fallback: pdfjs
+/// paid a whole 4 KiB page for each of its 8.8M 129..4095-byte string bodies.
+pub const measured_max_small_payload: usize = 3760;
 
-pub fn cellBytes(payload: usize) usize {
-    return payload + metadata_prefix_size;
-}
-
-pub fn cellsPerFutureBlock(payload: usize) usize {
-    const cell = cellBytes(payload);
-    if (cell == 0) return 0;
-    return future_block_bytes / cell;
-}
-
-pub fn payloadFitsSmallRule(payload: usize) bool {
-    return payload >= min_class_bytes and cellsPerFutureBlock(payload) >= min_cells_per_block;
-}
-
-fn nextGeometricPayload(prev: usize) usize {
-    // Round *5/4 to nearest, then down to 16 so the series stays in ~1.20–1.25
-    // (160→192 = 1.20, 192→240 = 1.25) instead of align-up jumping 160→208.
-    const scaled = prev * geometric_num;
-    const rounded = (scaled + geometric_den / 2) / geometric_den;
-    var next = rounded / linear_step_bytes * linear_step_bytes;
-    if (next <= prev) next = prev + linear_step_bytes;
+fn nextGeometricClass(prev: usize) usize {
+    // Round *5/4 to nearest, then down to 16 so the series stays in ~1.20-1.25
+    // (160->192 = 1.20, 192->240 = 1.25) instead of align-up jumping 160->208.
+    const scaled = prev * 5;
+    const rounded = (scaled + 2) / 4;
+    var next = rounded / min_class_bytes * min_class_bytes;
+    if (next <= prev) next = prev + min_class_bytes;
     return next;
 }
 
-fn appendClass(buf: []usize, n: *usize, payload: usize) bool {
-    if (!payloadFitsSmallRule(payload)) return false;
-    if (n.* >= buf.len) return false;
-    buf[n.*] = payload;
-    n.* += 1;
-    return true;
-}
-
-/// Every class the 16-cell rule allows, ignoring the histogram cutoff.
-pub fn generateAllFittingClasses(buf: []usize) usize {
-    var n: usize = 0;
-    var payload: usize = min_class_bytes;
-    while (payload <= linear_limit_bytes) : (payload += linear_step_bytes) {
-        if (!appendClass(buf, &n, payload)) break;
+/// The §4.2 rule, evaluated at comptime instead of transcribed: linear
+/// 16..`linear_max_bytes`, then `nextGeometricClass` up to the frozen cutoff,
+/// with the same `min_cells_per_block` geometry stop `cutoffForCoverage` uses.
+/// Nothing here is a literal table; changing `measured_max_small_payload`
+/// regenerates the classes, the index table and every `[class_count]` array.
+const generated_class_count: usize = blk: {
+    var count: usize = linear_class_count;
+    var class: usize = linear_max_bytes;
+    while (class < measured_max_small_payload) {
+        const next = nextGeometricClass(class);
+        if (block_bytes / (next + gc_representation.metadata_size) < min_cells_per_block) break;
+        class = next;
+        count += 1;
     }
-    if (n == 0) return 0;
-    while (true) {
-        const next = nextGeometricPayload(buf[n - 1]);
-        if (!appendClass(buf, &n, next)) break;
-    }
-    return n;
-}
-
-pub fn generateMeasuredClasses(buf: []usize) usize {
-    const all = generateAllFittingClasses(buf);
-    var n: usize = 0;
-    while (n < all and buf[n] <= measured_max_small_payload) : (n += 1) {}
-    return n;
-}
-
-pub const class_count = blk: {
-    @setEvalBranchQuota(1000);
-    var buf: [48]usize = undefined;
-    break :blk generateMeasuredClasses(&buf);
+    break :blk count;
 };
 
-pub const classes: [class_count]usize = blk: {
-    @setEvalBranchQuota(1000);
-    var buf: [48]usize = undefined;
-    const n = generateMeasuredClasses(&buf);
-    var out: [class_count]usize = undefined;
-    for (buf[0..n], 0..) |c, i| out[i] = c;
+pub const classes: [generated_class_count]usize = blk: {
+    var out: [generated_class_count]usize = undefined;
+    var i: usize = 0;
+    while (i < linear_class_count) : (i += 1) out[i] = (i + 1) * min_class_bytes;
+    var class: usize = linear_max_bytes;
+    while (i < generated_class_count) : (i += 1) {
+        class = nextGeometricClass(class);
+        out[i] = class;
+    }
+    break :blk out;
+};
+pub const class_count = classes.len;
+pub const max_small_payload = classes[classes.len - 1];
+
+comptime {
+    // The freeze must name a member of the generated series, otherwise
+    // `max_small_payload` and `measured_max_small_payload` silently disagree
+    // and `cutoffForCoverage` can never return the frozen value.
+    if (max_small_payload != measured_max_small_payload)
+        @compileError("measured_max_small_payload is not a generated class");
+    // Every class is a whole number of 16-byte steps: the geometric index
+    // table below is keyed on that step, and `blockGeometry` assumes cells of
+    // a class tile the block without sub-16-byte remainders.
+    for (classes) |class| {
+        if (class % min_class_bytes != 0) @compileError("class is not a multiple of min_class_bytes");
+    }
+}
+
+/// Geometric-segment lookup, one entry per 16-byte step above
+/// `linear_max_bytes`. The linear segment keeps its two-instruction
+/// arithmetic (Object's cell size lives there and its class index is a
+/// comptime constant anyway); above 128 the series is irregular, so a table
+/// is the only branch-free answer.
+const geometric_class_index: [(max_small_payload - linear_max_bytes) / min_class_bytes]u8 = blk: {
+    @setEvalBranchQuota(8 * (max_small_payload / min_class_bytes) * class_count);
+    var out: [(max_small_payload - linear_max_bytes) / min_class_bytes]u8 = undefined;
+    var step: usize = 0;
+    while (step < out.len) : (step += 1) {
+        // Steps map payloads `linear_max + 16*step + 1 ..= linear_max + 16*(step+1)`.
+        const payload = linear_max_bytes + (step + 1) * min_class_bytes;
+        var idx: usize = linear_class_count;
+        while (classes[idx] < payload) idx += 1;
+        out[step] = @intCast(idx);
+    }
     break :blk out;
 };
 
-pub const max_small_payload: usize = if (class_count == 0) 0 else classes[class_count - 1];
-
-pub fn classifyPayload(payload: usize) Space {
-    if (payload >= large_min_bytes) return .large;
-    if (payload > max_small_payload) return .medium;
-    return .small;
-}
-
-/// True when `classes` is exactly the linear series
-/// `min_class_bytes, 2*min_class_bytes, ...` -- which it is today (16..128
-/// step 16), and which makes the class index pure arithmetic.
-pub const classes_are_linear: bool = blk: {
-    if (class_count == 0) break :blk false;
-    for (classes, 0..) |c, i| {
-        if (c != min_class_bytes * (i + 1)) break :blk false;
-    }
-    break :blk true;
-};
-
 pub fn classIndexForPayload(payload: usize) ?usize {
-    if (classifyPayload(payload) != .small) return null;
-    // The scan below is O(class_count) and ran on every single object
-    // allocation: the size is a comptime constant at each call site, but it
-    // reaches the block heap through a function pointer, so the constant is
-    // re-resolved at run time. earley-boyer allocates 255 M objects and the
-    // scan showed up as most of a 5% profile entry. With a linear class
-    // series the answer is one shift.
-    if (comptime classes_are_linear) {
-        const step = min_class_bytes;
-        if (payload <= step) return 0;
-        return (payload + step - 1) / step - 1;
+    if (payload <= linear_max_bytes) {
+        if (payload <= min_class_bytes) return 0;
+        return (payload + min_class_bytes - 1) / min_class_bytes - 1;
     }
-    var i: usize = 0;
-    while (i < classes.len) : (i += 1) {
-        if (classes[i] >= payload) return i;
-    }
-    return classes.len - 1;
+    if (payload > max_small_payload) return null;
+    return geometric_class_index[(payload - 1) / min_class_bytes - linear_class_count];
 }
 
 pub const fine_bucket_step: usize = 16;
@@ -188,24 +169,16 @@ pub const Histogram = struct {
         if (slots2) self.slots2_object_publications +|= 1;
     }
 
-    pub fn percentilePayload(self: Histogram, hundredths: usize) usize {
-        return percentileOf(self.total, hundredths, self.buckets, self.over_fine, self.large);
-    }
-
     /// pNN of publications that are not already in the dedicated large space.
     pub fn percentilePayloadBelowLarge(self: Histogram, hundredths: usize) usize {
         const pop = self.total -| self.large;
-        return percentileOf(pop, hundredths, self.buckets, self.over_fine, 0);
+        return percentileOf(pop, hundredths, self.buckets, self.over_fine);
     }
 
     pub fn coveredByMaxSmall(self: Histogram) usize {
-        return coveredBy(self, max_small_payload);
-    }
-
-    pub fn coveredBy(self: Histogram, cutoff: usize) usize {
         if (self.total == 0) return 0;
         var seen: usize = 0;
-        const cutoff_idx = (cutoff + fine_bucket_step - 1) / fine_bucket_step;
+        const cutoff_idx = (max_small_payload + fine_bucket_step - 1) / fine_bucket_step;
         const last = @min(cutoff_idx, self.buckets.len);
         for (self.buckets[0..last]) |count| seen += count;
         return seen;
@@ -221,7 +194,6 @@ fn percentileOf(
     hundredths: usize,
     buckets: [fine_bucket_count]usize,
     over_fine: usize,
-    large: usize,
 ) usize {
     if (pop == 0) return 0;
     const target = (pop * hundredths + 99) / 100;
@@ -231,26 +203,27 @@ fn percentileOf(
         if (seen >= target) return (idx + 1) * fine_bucket_step;
     }
     if (seen + over_fine >= target) return large_min_bytes - 1;
-    _ = large;
     return large_min_bytes;
 }
 
-pub fn snapToGeneratedClass(payload: usize) usize {
-    var buf: [48]usize = undefined;
-    const n = generateAllFittingClasses(&buf);
-    if (n == 0) return 0;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (buf[i] >= payload) return buf[i];
-    }
-    return buf[n - 1];
-}
-
 /// Smallest generated class that covers `hundredths` of sub-64 KiB publications,
-/// floored at the linear table (128). This is how `measured_max_small_payload`
-/// is derived; the constant is frozen from a recorded mix, not 4 KiB.
+/// floored at the linear table (`linear_max_bytes`). This is how
+/// `measured_max_small_payload` is derived; the constant is frozen from a
+/// recorded mix, not 4 KiB.
+///
+/// The floor is the LINEAR table, not the current freeze: a rule that starts
+/// from `max_small_payload` can only ever return the frozen value back, which
+/// makes it useless both as a freeze procedure and as a test oracle. S2-f
+/// found it that way (the old freeze happened to equal `linear_max_bytes`, so
+/// the two floors coincided and the defect was invisible).
 pub fn cutoffForCoverage(hist: Histogram, hundredths: usize) usize {
     const p = hist.percentilePayloadBelowLarge(hundredths);
-    const need = @max(linear_limit_bytes, p);
-    return snapToGeneratedClass(need);
+    const need = @max(linear_max_bytes, p);
+    var class = linear_max_bytes;
+    while (class < need) {
+        const next = nextGeometricClass(class);
+        if (block_bytes / (next + gc_representation.metadata_size) < min_cells_per_block) break;
+        class = next;
+    }
+    return class;
 }

@@ -16,7 +16,6 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const value_slot = @import("value_slot.zig");
 
 const op = bytecode.opcode.op;
 
@@ -30,9 +29,7 @@ pub fn binary(
     global: *core.Object,
 ) !void {
     const rhs = try stack.pop();
-    defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
-    defer lhs.free(ctx.runtime);
     // The two pops above guarantee capacity for one push, and none of the
     // fast legs below run user code that could touch the operand stack in
     // between — mirror qjs js_add_slow/js_binary_arith_slow writing the
@@ -62,20 +59,15 @@ pub fn binary(
     }
     const result = if (binop == op.add) blk: {
         const lhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, lhs);
-        defer lhs_primitive.free(ctx.runtime);
         const rhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
-        defer rhs_primitive.free(ctx.runtime);
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else if (isBitwiseBinaryOp(binop) or isNumericBinaryOp(binop)) blk: {
         const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-        defer lhs_primitive.free(ctx.runtime);
         if (lhs_primitive.isSymbol()) return error.TypeError;
         const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-        defer rhs_primitive.free(ctx.runtime);
         if (rhs_primitive.isSymbol()) return error.TypeError;
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else try value_ops.binary(ctx.runtime, binop, lhs, rhs);
-    errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
 
@@ -103,9 +95,7 @@ pub fn compare(
     global: *core.Object,
 ) !void {
     const rhs = try stack.pop();
-    defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
-    defer lhs.free(ctx.runtime);
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             const result = switch (cmp) {
@@ -139,15 +129,12 @@ pub fn compare(
         op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
         else => blk: {
             const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-            defer lhs_primitive.free(ctx.runtime);
             if (lhs_primitive.isSymbol()) return error.TypeError;
             const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-            defer rhs_primitive.free(ctx.runtime);
             if (rhs_primitive.isSymbol()) return error.TypeError;
             break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
         },
     };
-    errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
 
@@ -191,8 +178,6 @@ pub fn compareAt(
     lhs: core.JSValue,
     rhs: core.JSValue,
 ) !core.JSValue {
-    defer rhs.free(ctx.runtime);
-    defer lhs.free(ctx.runtime);
     // Number fast path — qjs js_relational_slow's `float64_compare` (both operands
     // already numeric ⇒ ToPrimitive is a no-op, so compare the doubles directly).
     // Covers the float-vs-int `x < n` that misses opCompare's both-int32 arm every
@@ -237,10 +222,8 @@ pub fn compareAt(
             // ToPrimitive path (valueOf/toString can run user code).
             if (lhs.isObject() or rhs.isObject()) {
                 const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-                defer lhs_primitive.free(ctx.runtime);
                 if (lhs_primitive.isSymbol()) return error.TypeError;
                 const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-                defer rhs_primitive.free(ctx.runtime);
                 if (rhs_primitive.isSymbol()) return error.TypeError;
                 break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
             }
@@ -258,7 +241,6 @@ pub fn unary(
     global: *core.Object,
 ) !void {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
 
     const result: core.JSValue = blk: {
         if (value.asInt32()) |int_value| {
@@ -275,13 +257,11 @@ pub fn unary(
         }
         if (opcode_id == op.neg or opcode_id == op.to_number or opcode_id == op.inc or opcode_id == op.dec) {
             const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-            defer primitive.free(ctx.runtime);
             if (primitive.isSymbol()) return error.TypeError;
             break :blk try value_ops.unary(ctx.runtime, opcode_id, primitive);
         }
         break :blk try value_ops.unary(ctx.runtime, opcode_id, value);
     };
-    errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
 
@@ -308,11 +288,8 @@ pub fn bitNot(
     global: *core.Object,
 ) !void {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     const result = try value_ops.unary(ctx.runtime, op.not, primitive);
-    errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
 }
 
@@ -339,7 +316,6 @@ pub fn postUpdate(
     global: *core.Object,
 ) !void {
     const old = try stack.pop();
-    defer old.free(ctx.runtime);
     if (old.asInt32()) |old_int| {
         const updated = switch (opcode_id) {
             op.post_inc => fastInt32Add(old_int, 1),
@@ -358,12 +334,9 @@ pub fn postUpdate(
         }
     }
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, old);
-    defer primitive.free(ctx.runtime);
     if (primitive.isSymbol()) return error.TypeError;
-    const numeric_old = if (primitive.isBigInt()) primitive.dup() else try value_ops.toNumberValue(ctx.runtime, primitive);
-    defer numeric_old.free(ctx.runtime);
+    const numeric_old = if (primitive.isBigInt()) primitive else try value_ops.toNumberValue(ctx.runtime, primitive);
     const updated = try value_ops.unary(ctx.runtime, opcode_id, numeric_old);
-    defer updated.free(ctx.runtime);
     try stack.push(numeric_old);
     try stack.push(updated);
 }
@@ -397,15 +370,14 @@ pub fn updateLocal(
     frame.pc += 1;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
-    const value = value_slot.loadOwned(&frame.locals[idx]);
-    defer value.free(ctx.runtime);
+    const value = frame.locals[idx];
     if (value.asInt32()) |int_value| {
         const updated = switch (opcode_id) {
             op.inc_loc => fastInt32Add(int_value, 1),
             op.dec_loc => fastInt32Sub(int_value, 1),
             else => unreachable,
         };
-        value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+        frame.locals[idx] = updated;
         return;
     }
     if (value.asShortBigInt()) |bigint_value| {
@@ -415,12 +387,11 @@ pub fn updateLocal(
             else => unreachable,
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
-            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+            frame.locals[idx] = updated;
             return;
         }
     }
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     if (primitive.isSymbol()) return error.TypeError;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
@@ -428,7 +399,7 @@ pub fn updateLocal(
         else => unreachable,
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
-    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+    frame.locals[idx] = updated;
 }
 
 pub noinline fn updateLocalVm(
@@ -472,7 +443,7 @@ pub fn updateLocalAt(
             op.dec_loc => fastInt32Sub(int_value, 1),
             else => unreachable,
         };
-        value_slot.replaceOwned(ctx.runtime, slot, updated);
+        slot.* = updated;
         return;
     }
     // Float64 fast path — qjs js_unary_arith_slow's `if (FLOAT64) goto handle_float64`
@@ -484,7 +455,7 @@ pub fn updateLocalAt(
             op.dec_loc => d - 1,
             else => unreachable,
         };
-        value_slot.replaceOwned(ctx.runtime, slot, core.JSValue.float64(updated));
+        slot.* = core.JSValue.float64(updated);
         return;
     }
     if (cur.asShortBigInt()) |bigint_value| {
@@ -494,17 +465,15 @@ pub fn updateLocalAt(
             else => unreachable,
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
-            value_slot.replaceOwned(ctx.runtime, slot, updated);
+            slot.* = updated;
             return;
         }
     }
     // Object / heap-bigint slow path: take an owned copy so user coercion
     // (valueOf) cannot free the accumulator underneath us (qjs OP_inc_loc's
     // `op1 = JS_DupValue(op1)`).
-    const value = value_slot.loadOwned(slot);
-    defer value.free(ctx.runtime);
+    const value = slot.*;
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
     if (primitive.isSymbol()) return error.TypeError;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
@@ -512,7 +481,7 @@ pub fn updateLocalAt(
         else => unreachable,
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
-    value_slot.replaceOwned(ctx.runtime, slot, updated);
+    slot.* = updated;
 }
 
 pub fn addLocal(
@@ -546,18 +515,18 @@ pub fn addLocal(
 
     // Dup the local so user coercion (Symbol.toPrimitive/valueOf) cannot free it
     // underneath us. lhs is owned and is CONSUMED by the slow path below.
-    const lhs = value_slot.loadOwned(&frame.locals[idx]);
+    const lhs = frame.locals[idx];
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
-            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+            frame.locals[idx] = updated;
             return; // both int32 — non-refcounted, nothing to free
         }
     }
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
-                value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+                frame.locals[idx] = updated;
                 return; // both short big ints — non-refcounted, nothing to free
             }
         }
@@ -568,12 +537,9 @@ pub fn addLocal(
     // hot float case both are non-objects, so each call passes the value straight
     // through — one fewer live JSValue temporary per operand than a borrowing dup.
     const lhs_primitive = coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
-        rhs.free(ctx.runtime);
         return err;
     };
-    defer lhs_primitive.free(ctx.runtime);
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
-    defer rhs_primitive.free(ctx.runtime);
 
     // js_add_slow general path: two JS_TAG_INT operands take the int32 path
     // (overflow→float); any float operand falls to ToFloat64 + bare __JS_NewFloat64
@@ -588,15 +554,15 @@ pub fn addLocal(
             // then copies temp→slot, a SIMD round-trip every iteration. Two direct
             // stores keep the result in registers to the slot.
             if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
-                value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value_ops.numberToValue(sum));
+                frame.locals[idx] = value_ops.numberToValue(sum);
             } else {
-                value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], core.JSValue.float64(sum));
+                frame.locals[idx] = core.JSValue.float64(sum);
             }
             return;
         }
     }
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
-    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+    frame.locals[idx] = updated;
 }
 
 /// String-accumulator branch of `addLocal`, outlined so its JSValue temporaries
@@ -610,35 +576,20 @@ noinline fn addLocalString(
     idx: u16,
     rhs: core.JSValue,
 ) !void {
-    const lhs = value_slot.loadOwned(&frame.locals[idx]);
-    defer lhs.free(ctx.runtime);
+    const lhs = frame.locals[idx];
 
     // qjs:19766-19767 OP_add_loc string arm requires BOTH `*pv` and `op2`
     // already JS_TAG_STRING; object operands go to js_add_slow (qjs:19778).
     // Structurally impossible to in-place-append after user toString.
     if (rhs.isString()) {
-        defer rhs.free(ctx.runtime);
-        // QuickJS OP_add_loc appends into the binding's string storage when the
-        // accumulator is unshared. Whether the binding is a raw local or a VarRef
-        // cell, it owns one string reference and `lhs` owns the second. Captured
-        // closures share the cell rather than duplicating its string; an actual
-        // independent string snapshot raises rc above 2 and makes the append bail.
-        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, 2)) {
-            return;
-        }
-        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs)) |rope_val| {
-            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], rope_val);
-            return;
-        }
         const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
-        value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+        frame.locals[idx] = updated;
         return;
     }
 
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
-    defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
-    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
+    frame.locals[idx] = updated;
 }
 
 pub noinline fn addLocalVm(
@@ -686,43 +637,40 @@ pub fn addLocalAt(
         return addLocalStringAt(ctx, output, global, slot, rhs);
     }
 
-    const lhs = value_slot.loadOwned(slot);
+    const lhs = slot.*;
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
-            value_slot.replaceOwned(ctx.runtime, slot, fastInt32Add(lhs_int, rhs_int));
+            slot.* = fastInt32Add(lhs_int, rhs_int);
             return; // both int32 — non-refcounted, nothing to free
         }
     }
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
-                value_slot.replaceOwned(ctx.runtime, slot, updated);
+                slot.* = updated;
                 return; // both short big ints — non-refcounted, nothing to free
             }
         }
     }
 
     const lhs_primitive = coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, lhs) catch |err| {
-        rhs.free(ctx.runtime);
         return err;
     };
-    defer lhs_primitive.free(ctx.runtime);
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
-    defer rhs_primitive.free(ctx.runtime);
 
     if (value_ops.numberValue(lhs_primitive)) |d1| {
         if (value_ops.numberValue(rhs_primitive)) |d2| {
             const sum = d1 + d2;
             if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
-                value_slot.replaceOwned(ctx.runtime, slot, value_ops.numberToValue(sum));
+                slot.* = value_ops.numberToValue(sum);
             } else {
-                value_slot.replaceOwned(ctx.runtime, slot, core.JSValue.float64(sum));
+                slot.* = core.JSValue.float64(sum);
             }
             return;
         }
     }
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
-    value_slot.replaceOwned(ctx.runtime, slot, updated);
+    slot.* = updated;
 }
 
 /// `addLocalString`'s slot-pointer analog (see `addLocalAt`).
@@ -733,29 +681,19 @@ noinline fn addLocalStringAt(
     slot: *core.JSValue,
     rhs: core.JSValue,
 ) !void {
-    const lhs = value_slot.loadOwned(slot);
-    defer lhs.free(ctx.runtime);
+    const lhs = slot.*;
 
     // qjs:19766-19767 OP_add_loc string arm requires BOTH `*pv` and `op2`
     // already JS_TAG_STRING; object operands go to js_add_slow (qjs:19778).
     if (rhs.isString()) {
-        defer rhs.free(ctx.runtime);
-        if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, 2)) {
-            return;
-        }
-        if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs)) |rope_val| {
-            value_slot.replaceOwned(ctx.runtime, slot, rope_val);
-            return;
-        }
         const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
-        value_slot.replaceOwned(ctx.runtime, slot, updated);
+        slot.* = updated;
         return;
     }
 
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
-    defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
-    value_slot.replaceOwned(ctx.runtime, slot, updated);
+    slot.* = updated;
 }
 
 pub fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
@@ -846,26 +784,22 @@ fn looseEqualOp(
 
     if (lhs.isNumber() and rhs.isString()) {
         const number_rhs = try value_ops.toNumberValue(ctx.runtime, rhs);
-        defer number_rhs.free(ctx.runtime);
         return looseEqualSameNumberTypes(lhs, number_rhs);
     }
     if (lhs.isString() and rhs.isNumber()) {
         const number_lhs = try value_ops.toNumberValue(ctx.runtime, lhs);
-        defer number_lhs.free(ctx.runtime);
         return looseEqualSameNumberTypes(number_lhs, rhs);
     }
     if (lhs.isBigInt() and rhs.isString()) {
         var rhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, rhs) catch return false;
         defer rhs_bigint.deinit();
         const rhs_value = try value_ops.createBigIntValue(ctx.runtime, rhs_bigint);
-        defer rhs_value.free(ctx.runtime);
         return value_ops.strictEqual(lhs, rhs_value).asBool().?;
     }
     if (lhs.isString() and rhs.isBigInt()) {
         var lhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, lhs) catch return false;
         defer lhs_bigint.deinit();
         const lhs_value = try value_ops.createBigIntValue(ctx.runtime, lhs_bigint);
-        defer lhs_value.free(ctx.runtime);
         return value_ops.strictEqual(lhs_value, rhs).asBool().?;
     }
     if (lhs.isBool()) {
@@ -886,12 +820,10 @@ fn looseEqualOp(
     }
     if (isLoosePrimitiveForObject(lhs) and rhs.isObject()) {
         const primitive_rhs = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
-        defer primitive_rhs.free(ctx.runtime);
         return looseEqualOp(ctx, output, global, lhs, primitive_rhs, depth + 1);
     }
     if (lhs.isObject() and isLoosePrimitiveForObject(rhs)) {
         const primitive_lhs = try coercion_ops.toPrimitiveForAddition(ctx, output, global, lhs);
-        defer primitive_lhs.free(ctx.runtime);
         return looseEqualOp(ctx, output, global, primitive_lhs, rhs, depth + 1);
     }
     return false;

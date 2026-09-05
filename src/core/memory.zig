@@ -103,10 +103,15 @@ const slab_alloc_prefetch: bool = true;
 /// for the next `js_trigger_gc`. Recording a request per allocation adds no
 /// scheduling information those boundaries cannot recompute.
 ///
+/// TGC S2-f (3) adds the one deliberate divergence: string bodies are
+/// collector carriers under the tracer, not malloc+refcount as in qjs, so
+/// `String.createUninitialized` / `allocRopeNode` cross the SAME
+/// `collectBeforeObjectAllocation` boundary. That is still one boundary
+/// function, not a per-allocation trigger.
+///
 /// Test builds inject probes through `trigger_gc_fn` to observe allocation
 /// events, and force-GC builds must still collect before every allocation, so
-/// those comptime modes retain the full per-allocation trigger. This is the
-/// same rule that already governs `JSRuntime.allocStringAlignedBytes`.
+/// those comptime modes retain the full per-allocation trigger.
 pub const allocation_gc_trigger_enabled: bool = builtin.is_test or force_gc_on_allocation_enabled;
 
 /// qjs `MALLOC_OVERHEAD` (quickjs.c:59-62): 0 on Apple, 8 elsewhere.
@@ -291,11 +296,6 @@ pub const SmallObjectSlab = struct {
         return block_sizes[class] - block_header_size;
     }
 
-    pub inline fn alloc(self: *SmallObjectSlab, backing: std.mem.Allocator, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
-        const index = classIndex(byte_count, alignment).?;
-        return self.allocAtIndex(backing, index, true);
-    }
-
     /// `stamp_class` = the block will hold a raw (non-GC) payload, so record
     /// its class index in the header for `headerClassIndex` on the free side.
     /// GC objects skip the pop-time stamp only because initGcPrefix immediately
@@ -339,11 +339,6 @@ pub const SmallObjectSlab = struct {
             self.removeFreeArena(index, arena);
         }
         return userData(header);
-    }
-
-    pub inline fn free(self: *SmallObjectSlab, backing: std.mem.Allocator, bytes: []u8, alignment: std.mem.Alignment) void {
-        const index = classIndex(bytes.len, alignment).?;
-        self.freeAtIndex(&backing, bytes.ptr, index);
     }
 
     /// `backing` is taken by pointer so the hot free path materializes only an
@@ -627,13 +622,6 @@ pub const SmallObjectSlab = struct {
         arena.free_next = null;
         arena.free_prev = null;
     }
-
-    fn debugArenaCount(self: SmallObjectSlab, index: usize) usize {
-        var count: usize = 0;
-        var arena = self.arenas[index];
-        while (arena) |node| : (arena = node.next) count += 1;
-        return count;
-    }
 };
 
 pub const MemoryAccount = struct {
@@ -914,7 +902,7 @@ pub const MemoryAccount = struct {
         // GC objects are allocated singly. Slab-backed objects reuse the slab's
         // existing 8-byte block header for their metadata; persistent/over-
         // aligned allocations keep the standalone prefix.
-        const is_gc = comptime isGcObject(T);
+        const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         if (comptime is_gc) std.debug.assert(count == 1);
         // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566):
         // limit check + block pop + single-scalar ledger bump. Arena refill and
@@ -958,7 +946,7 @@ pub const MemoryAccount = struct {
     /// and the slab-disabled/standalone-prefix routes. Re-running the limit
     /// check (and, on refill, the GC trigger request) here is idempotent.
     noinline fn allocInternalSlow(self: *MemoryAccount, comptime T: type, count: usize, comptime trigger_gc: bool) ![]T {
-        const is_gc = comptime isGcObject(T);
+        const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         if (comptime is_gc) std.debug.assert(count == 1);
         const payload_bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
@@ -988,7 +976,7 @@ pub const MemoryAccount = struct {
     pub fn free(self: *MemoryAccount, comptime T: type, slice: []T) void {
         if (slice.len == 0) return;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(slice.ptr));
-        const is_gc = comptime isGcObject(T);
+        const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         // GC objects are allocated singly (`allocInternal` asserts count == 1),
         // so their payload size is comptime-known here.
         if (comptime is_gc) std.debug.assert(slice.len == 1);
@@ -1161,24 +1149,6 @@ pub const MemoryAccount = struct {
     /// allocations overlay it on the slab block header; other allocations
     /// reserve a standalone prefix. MUST equal `@sizeOf(gc.Metadata)`.
     const gc_prefix_size: usize = gc_representation.metadata_size;
-
-    /// A GC object is any tagged struct whose handle is either its body start
-    /// (Object) or its first compact successor field (every other tracing
-    /// kind). Object is selected by its stable kind tag: terminal layout M
-    /// deliberately gives it no syntactic `header` field to misuse.
-    /// This module stays below gc.zig, so it recognizes the structural ABI
-    /// instead of importing the selected Header alias.
-    inline fn isGcObject(comptime T: type) bool {
-        if (@typeInfo(T) != .@"struct") return false;
-        if (!@hasDecl(T, "gc_kind_tag")) return false;
-        if (T.gc_kind_tag == gc_representation.object_kind_tag) return true;
-        if (!@hasField(T, "header")) return false;
-        if (@offsetOf(T, "header") != 0) return false;
-        const H = @FieldType(T, "header");
-        if (@typeInfo(H) != .@"struct" or !@hasField(H, "next_non_object")) return false;
-        return (@hasField(H, "prev") and @sizeOf(H) == 16) or
-            (!@hasField(H, "prev") and @sizeOf(H) == 8);
-    }
 
     /// Total leading bytes reserved before a GC object so that (a) the 8-byte
     /// `Metadata` lands at `objectPtr - 8` (where `BlockHeader.meta()` looks) and
@@ -1415,7 +1385,7 @@ pub const MemoryAccount = struct {
         comptime prepare_nonblock: ?NonBlockObjectPrepare,
     ) !*T {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
-        const is_gc = comptime isGcObject(T);
+        const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         const payload_size = comptime @sizeOf(T) + fam_bytes;
         // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566);
         // everything else (arena refill, slab-disabled, standalone prefix,
@@ -1490,7 +1460,7 @@ pub const MemoryAccount = struct {
     /// and the slab-disabled/standalone-prefix routes. Re-running the limit
     /// check (and, on refill, the GC trigger request) here is idempotent.
     noinline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, comptime trigger_gc: bool) !*T {
-        const is_gc = comptime isGcObject(T);
+        const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         const payload_size = comptime @sizeOf(T) + fam_bytes;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(payload_size, alignment) else null;
@@ -1532,11 +1502,11 @@ pub const MemoryAccount = struct {
     }
 
     /// `destroyWithFam` for a flexible-array size the caller knows at compile
-    /// time; the comptime twin of `createConstFamNoTrigger`. Keeps the slab
+    /// time. Keeps the slab
     /// class index and the block-cell debit constant on the destroy hot path.
     pub fn destroyConstFam(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize, ptr: *T) void {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
-        const is_gc = comptime isGcObject(T);
+        const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         const payload_size = comptime @sizeOf(T) + fam_bytes;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const bytes_ptr: [*]u8 = @ptrCast(ptr);
@@ -1601,7 +1571,7 @@ pub const MemoryAccount = struct {
     /// Initial-shape path: `fam_bytes` is a comptime constant so the slab
     /// class is folded (qjs `js_new_shape2.constprop` folds `get_shape_size`).
     pub inline fn createWithFamComptime(self: *MemoryAccount, comptime T: type, comptime fam_bytes: usize) !*T {
-        comptime std.debug.assert(isGcObject(T));
+        comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
         const payload_bytes: usize = @sizeOf(T) + fam_bytes;
         const alignment = comptime gcAlignment(T);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
@@ -1651,7 +1621,7 @@ pub const MemoryAccount = struct {
         prepare_context: ?*anyopaque,
         comptime prepare_nonblock: ?NonBlockObjectPrepare,
     ) !*T {
-        comptime std.debug.assert(isGcObject(T));
+        comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
         // Shape-sized trailing Object storage must stay on the collector's
@@ -1670,13 +1640,13 @@ pub const MemoryAccount = struct {
                     if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
                     if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
                     if ((heap.allocCell(gc_prefix_size + payload_bytes) catch null)) |cell| {
-                        initGcPrefixBlockCell(T, cell.ptr);
+                        initGcPrefixBlockCell(T, cell);
                         self.creditAlloc(prospective_accounted, null);
                         if (comptime block_tracking_enabled) {
-                            self.recordBlockGcAllocation(@intFromPtr(cell.ptr) + gc_prefix_size, prospective_accounted);
+                            self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, prospective_accounted);
                         }
-                        self.noteAllocDiagnostics(true, 1, prospective_accounted, @intFromPtr(cell.ptr) + gc_prefix_size);
-                        return @ptrFromInt(@intFromPtr(cell.ptr) + gc_prefix_size);
+                        self.noteAllocDiagnostics(true, 1, prospective_accounted, @intFromPtr(cell) + gc_prefix_size);
+                        return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
                     }
                 }
                 if (comptime prepare_nonblock) |prepare| {
@@ -1769,7 +1739,7 @@ pub const MemoryAccount = struct {
     /// The slab arm trusts the header class (qjs `__js_free`, quickjs.c:1614)
     /// and does not re-run `classIndex` on the requested length.
     pub fn destroyWithFam(self: *MemoryAccount, comptime T: type, ptr: *T, fam_bytes: usize) void {
-        comptime std.debug.assert(isGcObject(T));
+        comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
         const payload_bytes = @sizeOf(T) + fam_bytes;
         const alignment = comptime gcAlignment(T);
@@ -1844,14 +1814,14 @@ pub const MemoryAccount = struct {
         try self.checkAllocation(accounted);
         if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
         const cell = (try heap.allocCell(total_bytes)) orelse return null;
-        std.mem.writeInt(u16, cell.ptr[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, gc_representation.string_kind_tag) << 8), .little);
-        @as(*align(4) u32, @ptrCast(@alignCast(cell.ptr + 4))).* = 0;
+        std.mem.writeInt(u16, cell[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, gc_representation.string_kind_tag) << 8), .little);
+        @as(*align(4) u32, @ptrCast(@alignCast(cell + 4))).* = 0;
         self.creditAlloc(accounted, null);
         if (comptime block_tracking_enabled) {
-            self.recordBlockGcAllocation(@intFromPtr(cell.ptr) + gc_prefix_size, accounted);
+            self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, accounted);
         }
-        self.noteAllocDiagnostics(false, 1, total_bytes - gc_prefix_size, @intFromPtr(cell.ptr) + gc_prefix_size);
-        return cell.ptr;
+        self.noteAllocDiagnostics(false, 1, total_bytes - gc_prefix_size, @intFromPtr(cell) + gc_prefix_size);
+        return cell;
     }
 
     /// Return a string-family block cell (see `createStringCell`). `payload`
@@ -2097,38 +2067,6 @@ pub const MemoryAccount = struct {
     }
 };
 
-comptime {
-    // Keep the carrier component slots auditable even when a void field or a
-    // one-byte probe could otherwise disappear into existing padding.  The
-    // base is 736 bytes without tracing's two independent pointer slots;
-    // every authority contribution is then priced by its own unconditional
-    // type-size pin in gc_carrier.zig.
-    // 27 -> 26: the test-only carrier injection selector left with the
-    // mutation harness (ablation batch 3f).
-    if (@typeInfo(MemoryAccount).@"struct".fields.len != 26) {
-        @compileError("MemoryAccount field set changed");
-    }
-    const base_budget: usize = 736 +
-        (if (cycle_envelope_tracking_available) @sizeOf(?*usize) else 0) +
-        (if (block_heap_enabled) @sizeOf(?*gc_block_heap.Heap) else 0);
-    const expected_budget = base_budget +
-        (if (block_heap_enabled and extent_identity_enabled)
-            @sizeOf(gc_carrier.ExtentIdentityAuthority)
-        else
-            0) +
-        (if (block_heap_enabled and lifecycle_state_enabled)
-            @sizeOf(gc_carrier.ExtentLifecycleAuthority)
-        else
-            0) +
-        (if (heap_accounting_oracle_enabled)
-            @sizeOf(?*gc_carrier.HeapAccountingOracle)
-        else
-            0);
-    if (@sizeOf(MemoryAccount) != expected_budget) {
-        @compileError("MemoryAccount carrier component footprint budget changed");
-    }
-}
-
 test "aligned byte allocations charge their slab class" {
     // Pins `allocAlignedBytesInternal`'s slab routing to the account contract.
     // The tracing arm hoists the classification out of `rawAlloc` and carries
@@ -2162,39 +2100,42 @@ test "small object slab releases an empty arena immediately" {
     var slab: SmallObjectSlab = .{};
     defer slab.deinit(std.testing.allocator);
 
-    const alloc = try slab.alloc(std.testing.allocator, 64, .@"8");
+    const backing = std.testing.allocator;
     const index = SmallObjectSlab.classIndex(64, .@"8").?;
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+    const alloc = try slab.allocAtIndex(backing, index, true);
+    try std.testing.expect(slab.arenas[index] != null);
 
-    slab.free(std.testing.allocator, alloc[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+    slab.freeAtIndex(&backing, alloc, index);
+    try std.testing.expect(slab.arenas[index] == null);
 
-    const next = try slab.alloc(std.testing.allocator, 64, .@"8");
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
-    slab.free(std.testing.allocator, next[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+    const next = try slab.allocAtIndex(backing, index, true);
+    try std.testing.expect(slab.arenas[index] != null);
+    slab.freeAtIndex(&backing, next, index);
+    try std.testing.expect(slab.arenas[index] == null);
 }
 
 test "small object slab releases excess empty arenas" {
     var slab: SmallObjectSlab = .{};
     defer slab.deinit(std.testing.allocator);
 
+    const backing = std.testing.allocator;
     const index = SmallObjectSlab.classIndex(64, .@"8").?;
     var allocations: [SmallObjectSlab.arena_size / 16][*]u8 = undefined;
-    allocations[0] = try slab.alloc(std.testing.allocator, 64, .@"8");
+    allocations[0] = try slab.allocAtIndex(backing, index, true);
     const first_arena_capacity: usize = slab.arenas[index].?.block_count;
     for (allocations[1 .. first_arena_capacity + 1]) |*slot| {
-        slot.* = try slab.alloc(std.testing.allocator, 64, .@"8");
+        slot.* = try slab.allocAtIndex(backing, index, true);
     }
-    try std.testing.expectEqual(@as(usize, 2), slab.debugArenaCount(index));
+    try std.testing.expect(slab.arenas[index].?.next != null);
 
     for (allocations[0..first_arena_capacity]) |allocation| {
-        slab.free(std.testing.allocator, allocation[0..64], .@"8");
+        slab.freeAtIndex(&backing, allocation, index);
     }
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+    try std.testing.expect(slab.arenas[index] != null);
+    try std.testing.expect(slab.arenas[index].?.next == null);
 
-    slab.free(std.testing.allocator, allocations[first_arena_capacity][0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+    slab.freeAtIndex(&backing, allocations[first_arena_capacity], index);
+    try std.testing.expect(slab.arenas[index] == null);
 }
 
 test "small slab GC allocation reuses allocator header for metadata" {

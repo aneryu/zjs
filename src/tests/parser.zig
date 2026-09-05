@@ -11,7 +11,6 @@ const op = zjs.bytecode.opcode.op;
 
 const t = zjs.parser.token;
 const QjsLexer = zjs.parser.Lexer;
-const ParserNamespace = zjs.parser.Parser;
 const parser_core = zjs.parser.Parser;
 const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
@@ -1715,7 +1714,6 @@ test "F4: number literal with non-integer value lowers to push_const" {
     try std.testing.expectEqual(op.push_const8, fn_bc.code[0]);
     const idx = readConstIndexAtOpcode(fn_bc.code, 0);
     const value = fn_bc.constants.get(idx).?;
-    defer value.free(env.rt);
     try std.testing.expectApproxEqAbs(@as(f64, 3.5), value.asFloat64().?, 0.0001);
 }
 
@@ -1729,7 +1727,6 @@ test "F4: large bigint literal lowers to constant pool value" {
     try std.testing.expectEqual(op.push_const8, fn_bc.code[0]);
     const idx = readConstIndexAtOpcode(fn_bc.code, 0);
     const value = fn_bc.constants.get(idx).?;
-    defer value.free(env.rt);
     try std.testing.expect(value.isBigInt());
 }
 
@@ -1764,7 +1761,6 @@ test "W5: signed bigint-i32 neg matches QuickJS final bytecode boundaries" {
         try expectOpcodeSequence(fn_bc.code, &.{ op.push_const8, op.neg });
         try std.testing.expectEqual(@as(usize, 1), fn_bc.cpoolSlice().len);
         const constant = fn_bc.constantAt(readConstIndexAtOpcode(fn_bc.code, 0)).?;
-        defer constant.free(env.rt);
         try std.testing.expect(constant.isBigInt());
     }
 
@@ -1838,13 +1834,11 @@ test "F4: regexp literal stores pattern then parse-time bytecode in the constant
     try std.testing.expectEqual(@as(u32, 0), pattern_index);
     try std.testing.expectEqual(@as(u32, 1), compiled_index);
 
-    const pattern_value = constants[pattern_index].dup();
-    defer pattern_value.free(env.rt);
+    const pattern_value = constants[pattern_index];
     const pattern_string = pattern_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(pattern_string.eqlBytes("a+"));
 
-    const compiled_value = constants[compiled_index].dup();
-    defer compiled_value.free(env.rt);
+    const compiled_value = constants[compiled_index];
     const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(!compiled_string.isWide());
 
@@ -9820,16 +9814,6 @@ fn expectAtomOperandName(rt: *core.JSRuntime, function: anytype, expected: []con
     return error.TestExpectedEqual;
 }
 
-fn expectNoLiveDynamicAtom(rt: *core.JSRuntime, kind: core.atom.AtomKind, bytes: []const u8) !void {
-    for (rt.atoms.entries) |entry| {
-        if (!entry.isLive() or entry.kind != kind) continue;
-        if (std.mem.eql(u8, entry.bytes, bytes)) {
-            std.debug.print("\n=== LEAKED ATOM FOUND: '{s}' kind={s} ref_count={d} ===\n", .{ entry.bytes, @tagName(entry.kind), entry.ref_count });
-        }
-        try std.testing.expect(!std.mem.eql(u8, entry.bytes, bytes));
-    }
-}
-
 test "syntax error deinit balances empty message allocation" {
     var account = core.memory.MemoryAccount.init(std.testing.allocator);
     var atoms = core.atom.AtomTable.init(&account);
@@ -10166,7 +10150,6 @@ test "canonical root ownership moves out of parser Result exactly once" {
 
     const owned = parsed.takeFunctionBytecodeValue() orelse return error.TestExpectedEqual;
     var owned_alive = true;
-    defer if (owned_alive) owned.free(rt);
     try std.testing.expect(owned.isFunctionBytecode());
     try std.testing.expectEqual(borrowed_header, owned.objectHeader().?);
     try std.testing.expect(parsed.functionBytecode() == null);
@@ -10174,7 +10157,6 @@ test "canonical root ownership moves out of parser Result exactly once" {
     parsed.deinit();
     parsed_alive = false;
     try std.testing.expectEqual(op.return_undef, borrowed.byteCode()[borrowed.byteCode().len - 1]);
-    owned.free(rt);
     owned_alive = false;
 }
 
@@ -10192,7 +10174,7 @@ test "canonical module artifact ownership moves out of parser Result exactly onc
 
     var artifact = parsed.takeModuleArtifact() orelse return error.TestExpectedEqual;
     var artifact_alive = true;
-    defer if (artifact_alive) artifact.deinit(rt);
+    defer if (artifact_alive) artifact.deinit();
     try std.testing.expect(artifact.function_bytecode == borrowed_root);
     try std.testing.expect(artifact.function_bytecode.isModule());
     try std.testing.expectEqual(@as(usize, 1), artifact.record.requests.len);
@@ -10204,7 +10186,7 @@ test "canonical module artifact ownership moves out of parser Result exactly onc
     parsed.deinit();
     parsed_alive = false;
     try std.testing.expect(artifact.function_bytecode.isModule());
-    artifact.deinit(rt);
+    artifact.deinit();
     artifact_alive = false;
 }
 
@@ -10283,13 +10265,11 @@ test "canonical root and child independently keep their compile realm alive" {
     const child = findFunctionConstantNamed(&parsed, rt, "child") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(realm, root.realmContext());
     try std.testing.expectEqual(realm, child.realmContext());
-    try helpers.expectRefCount(3, &realm.header);
 
     // Drop the facade/public owner. The two finalized FBs must each keep their
     // own QuickJS-style JS_DupContext edge until their individual teardown.
     realm.destroy();
     realm_alive = false;
-    try helpers.expectRefCount(2, &realm.header);
     try std.testing.expectEqual(realm, root.realmContext());
     try std.testing.expectEqual(realm, child.realmContext());
 
@@ -12808,7 +12788,6 @@ test "bytecode constants retain values through Phase 4 structures" {
     const text = try core.string.String.createAscii(rt, "hello");
     const value = text.value();
     const const_index = try function_bc.addConstant(value);
-    value.free(rt);
 
     try std.testing.expectEqual(@as(u32, 0), const_index);
     try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
@@ -13696,17 +13675,6 @@ pub const phase_ownership = struct {
         try std.testing.expectEqual(@as(usize, 0), snapshot.reloc.discarded);
         try std.testing.expectEqual(@as(usize, 0), snapshot.source.discarded);
         try std.testing.expectEqual(@as(usize, 0), snapshot.source.committed);
-    }
-
-    pub fn expectB2(b1: Snapshot, b2: Snapshot) !void {
-        try expectCommon(b2);
-        try std.testing.expectEqual(@as(usize, 0), b2.reloc.pending_fixups);
-        try std.testing.expect(b2.reloc.outstanding <= b1.reloc.created);
-        try std.testing.expectEqual(
-            b1.reloc.created,
-            b2.reloc.outstanding + b2.reloc.discarded,
-        );
-        try expectSourceFromB1(b1, b2);
     }
 
     pub fn expectB3(b1: Snapshot, b3: Snapshot) !void {

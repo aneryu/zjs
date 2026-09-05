@@ -109,7 +109,6 @@ fn uriCall(
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
         );
-        defer string_value.free(ctx.runtime);
         return uriBody(ctx, global, mode, string_value);
     }
     // Bare-runtime primitive path (no realm global for specific URIError text).
@@ -259,7 +258,7 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
         // QuickJS-compatible `\uXXXX` widening for non-ASCII utf16 units.
         if (try stringInputValue(input)) |string_value| {
             if (stringDataFromValue(string_value)) |string_data| {
-                if (!stringDataContainsPercent(string_data)) return string_value.dup();
+                if (!stringDataContainsPercent(string_data)) return string_value;
                 try string_data.ensureFlat(rt);
                 switch (string_data.resolveData()) {
                     // The stack-buffer fast path is ASCII-only; any non-ASCII
@@ -299,7 +298,6 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
         // Coerced (non-string) inputs decode through the same faithful
         // unit-level walk over the real string content.
         const coerced = try core.string.String.createUtf8(rt, bytes.items);
-        defer coerced.value().free(rt);
         try coerced.ensureFlat(rt);
         return switch (coerced.resolveData()) {
             .latin1 => |latin1| decodeUriUnits(u8, ctx, global, latin1, mode == 4),
@@ -376,7 +374,7 @@ fn decodeAsciiBytes(ctx: *core.JSContext, global: ?*core.Object, bytes: []const 
 fn decodeSingleFourByteEscape(rt: *core.JSRuntime, bytes: []const u8) !?core.JSValue {
     const units = try decodeSingleFourByteEscapeUnitsFromAscii(bytes) orelse return null;
     const cached = try rt.recentTwoUnitString(units.high, units.low);
-    return cached.value().dup();
+    return cached.value();
 }
 
 pub fn escape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {

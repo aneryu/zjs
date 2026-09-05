@@ -333,7 +333,6 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
     mutable[2] = 9;
     try std.testing.expectEqual(@as(u8, 9), backing[2]);
 
-    value.free(rt);
     // The transferred store is released when the ArrayBuffer is torn down --
     // a collection under the tracer rather than this release. `backing` is
     // host memory, not a heap reference, so only the buffer object needs to
@@ -369,7 +368,6 @@ test "JSBytes.Store ArrayBuffer detach releases owned bytes immediately" {
     });
 
     const value = try ctx.arrayBuffer(&store);
-    defer value.free(rt);
     const object = testObjectFromValue(core.JSValue, value).?;
     object.detachByteStorage(rt);
     try std.testing.expectEqual(@as(usize, 1), state.calls);
@@ -420,7 +418,6 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     try std.testing.expect(after_detach.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 12, 9, 10 }, after_detach.slice());
 
-    value.free(rt);
     // A shared store survives detach and is released only with the
     // SharedArrayBuffer itself, which under the tracer means a collection
     // rather than this release. Nothing here needs rooting -- the buffer
@@ -436,7 +433,6 @@ test "JSBytes views ArrayBuffer storage without copying" {
 
     const object = try @import("object.zig").Object.create(rt, @import("class.zig").ids.array_buffer, null);
     const value = object.value();
-    defer value.free(rt);
     const backing = try rt.memory.alloc(u8, 4);
     const initial = [_]u8{ 1, 2, 3, 4 };
     @memcpy(backing, &initial);
@@ -463,7 +459,6 @@ test "JSBytes views TypedArray byte range without copying" {
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     const backing = try rt.memory.alloc(u8, 6);
     const initial = [_]u8{ 0, 1, 2, 3, 4, 5 };
     @memcpy(backing, &initial);
@@ -471,8 +466,7 @@ test "JSBytes views TypedArray byte range without copying" {
 
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
-    defer view_value.free(rt);
-    try view.initTypedArrayView(rt, buffer_value.dup(), 2, 2, 2, 2);
+    try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, 2);
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqualSlices(u8, &.{ 2, 3, 4, 5 }, bytes.slice());
@@ -490,7 +484,6 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     // 7 bytes is NOT a multiple of the Uint16Array element size (2). A
     // length-tracking view starting at offset 1 sees 6 trailing bytes, which is
     // exactly 3 u16 elements (6 bytes) — the 7th byte is an unaddressable partial
@@ -504,8 +497,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
 
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
-    defer view_value.free(rt);
-    try view.initTypedArrayView(rt, buffer_value.dup(), 1, 2, null, 5);
+    try view.initTypedArrayView(rt, buffer_value, 1, 2, null, 5);
 
     const bytes = try view_value.asBytes(undefined);
     // 6 bytes (3 elements), floored from the 6 trailing bytes — already aligned
@@ -523,7 +515,6 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     // 5 bytes, offset 0, element_size 2: 5 % 2 == 1, so the borrow length must be
     // floored to 4 (2 elements), NOT the raw remaining 5.
     const backing = try rt.memory.alloc(u8, 5);
@@ -533,8 +524,7 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
 
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
-    defer view_value.free(rt);
-    try view.initTypedArrayView(rt, buffer_value.dup(), 0, 2, null, 5);
+    try view.initTypedArrayView(rt, buffer_value, 0, 2, null, 5);
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqual(@as(usize, 4), bytes.len);
@@ -550,7 +540,6 @@ test "JSBytes views DataView byte range without copying" {
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     const backing = try rt.memory.alloc(u8, 5);
     const initial = [_]u8{ 10, 11, 12, 13, 14 };
     @memcpy(backing, &initial);
@@ -558,8 +547,7 @@ test "JSBytes views DataView byte range without copying" {
 
     const view = try Object.create(rt, class_ids.dataview, null);
     const view_value = view.value();
-    defer view_value.free(rt);
-    try view.initTypedArrayView(rt, buffer_value.dup(), 1, 0, 3, 0);
+    try view.initTypedArrayView(rt, buffer_value, 1, 0, 3, 0);
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13 }, bytes.slice());
@@ -574,7 +562,6 @@ test "JSBytes views length-tracking DataView to end of buffer" {
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     const backing = try rt.memory.alloc(u8, 5);
     @memcpy(backing, &[_]u8{ 10, 11, 12, 13, 14 });
     try buffer.installByteStorage(rt, backing);
@@ -582,8 +569,7 @@ test "JSBytes views length-tracking DataView to end of buffer" {
 
     const view = try Object.create(rt, class_ids.dataview, null);
     const view_value = view.value();
-    defer view_value.free(rt);
-    try view.initTypedArrayView(rt, buffer_value.dup(), 2, 0, null, 1);
+    try view.initTypedArrayView(rt, buffer_value, 2, 0, null, 1);
 
     // A length-tracking DataView spans to the end of the buffer (byte-addressed,
     // so no element-size flooring): 5 - 2 = 3 trailing bytes.

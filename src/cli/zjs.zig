@@ -202,7 +202,6 @@ fn runFileModule(
 
 pub fn main(init: std.process.Init) !void {
     const total_start = platform_clock.monotonicNanos();
-    setupHostDispatchStatsExitDump(init.environ_map);
     setupV2OracleReportExitDump(init.environ_map);
     const allocator = init.gpa;
     const arena = init.arena.allocator();
@@ -389,7 +388,6 @@ pub fn main(init: std.process.Init) !void {
         while (true) {
             const exception = takePendingRejectionOrException(&runtime);
             try printUnhandledRejectionTo(stderr, &runtime, exception);
-            exception.free(runtime.runtime);
             if (!runtime.context.hasUnhandledRejection()) break;
         }
         std.process.exit(1);
@@ -410,6 +408,7 @@ pub fn main(init: std.process.Init) !void {
             engine.core.runtime.settlePendingDestructionForGateStats(runtime.runtime);
         }
         try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats(), &runtime.runtime.gc);
+        try dumpAtomAuditStats(&stdout_writer.interface, runtime.runtime);
         try dumpGcPauses(&stdout_writer.interface, runtime.runtime.gcPauseDistribution());
         if (comptime engine.core.gc.space_model_enabled) {
             try dumpGcSpaceStats(&stdout_writer.interface, &runtime.runtime.gc);
@@ -524,7 +523,7 @@ fn runIncludeFiles(runtime: *Runtime, options: RuntimeOptions, output: *std.Io.W
         const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
         defer allocator.free(source);
         const mode = detectFileMode(path, source, .script);
-        const result = if (mode == .module)
+        _ = if (mode == .module)
             try runFileModule(runtime.context, source, output, path, io, allocator, max_source_size)
         else
             try runtime.context.eval(source, .{
@@ -535,7 +534,6 @@ fn runIncludeFiles(runtime: *Runtime, options: RuntimeOptions, output: *std.Io.W
                 .runtime_strict = false,
                 .discard_script_result = true,
             });
-        result.free(runtime.runtime);
     }
 }
 
@@ -822,7 +820,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
     const st = registry.generation.stats;
     try writer.print("gc: generation current young {d}, remembered owners {d}\n", .{
         st.young_count,
-        registry.generation.rememberedOwnerCount(),
+        registry.generation.remembered.count(),
     });
     try writer.print("gc: minor collections {d}, reclaimed {d}, promoted-by-minor {d}, promoted-all {d}, remembered without young {d}, remembered drops {d}, suspensions {d}\n", .{
         st.minor_collections,
@@ -916,9 +914,9 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
                 cs.envelope_max_threshold_bytes,
                 cs.envelope_max_begin_bytes,
                 cs.envelope_max_peak_bytes,
-                engine.core.gc.concurrent.envelopeBeginOverThresholdMillionths(cs),
-                engine.core.gc.concurrent.envelopePeakOverThresholdMillionths(cs),
-                engine.core.gc.concurrent.envelopePeakOverStartMillionths(cs),
+                engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes),
+                engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes),
+                engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes),
                 cs.forced_finishes,
             },
         );
@@ -962,6 +960,10 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
         try writer.print(
             "gc: block heap page returns cumulative decommitted {d}, recommitted {d}\n",
             .{ st.decommitted_bytes, st.recommitted_bytes },
+        );
+        try writer.print(
+            "gc: block heap medium superblocks returned {d}, bytes {d}\n",
+            .{ st.medium_superblocks_released, st.medium_superblock_bytes_released },
         );
         try writer.print(
             "gc: block heap decommit checks {d}, released blocks cumulative {d}, current bytes {d}, max batch bytes {d}\n",
@@ -1031,7 +1033,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
         .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
     );
     try writer.print(
-        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}\n",
+        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}, string {d}\n",
         .{
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
@@ -1040,6 +1042,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)],
         },
     );
     try writer.print(
@@ -1126,6 +1129,19 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engi
     try writer.print("gc: weak refs current {d}, finalizer queue current {d}\n", .{
         stats.weak_ref_count,
         stats.finalizer_queue_length,
+    });
+}
+
+/// TGC S3 §2.6 shadow audit. `missing-edge` counts entries `ref_count` kept
+/// alive that no `visitAtom` edge, root, barrier or black allocation reached
+/// -- the reading that must be 0 before `gc.atom_tracer_owned` can flip.
+/// `over-marked` is the informational mirror. `entries` is the dynamic atom
+/// table's slot count, so the two are readable as a rate.
+fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
+    try writer.print("gc: atom audit missing-edge {d}, over-marked {d}, entries {d}\n", .{
+        rt.atoms.atom_audit_missing_edge,
+        rt.atoms.atom_audit_over_marked,
+        rt.atoms.entries.len,
     });
 }
 
@@ -1277,62 +1293,9 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         if (entry.value.* == 0) continue;
         try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
     }
-
-    try dumpHostDispatchStats(output);
-}
-
-const host_dispatch_stats = engine.exec.host_dispatch_stats;
-
-/// Per-site hit table for the legacy string-name dispatch branches in
-/// `call.zig`. Only available (and only printed) when built with
-/// `-Dzjs_enable_opcode_profile=true`.
-fn dumpHostDispatchStats(output: *std.Io.Writer) !void {
-    if (comptime !host_dispatch_stats.enabled) return;
-    const counts = host_dispatch_stats.snapshot();
-    var order: [host_dispatch_stats.site_count]u16 = undefined;
-    for (&order, 0..) |*slot, index| slot.* = @intCast(index);
-    std.sort.heap(u16, &order, @as([]const u64, &counts), struct {
-        fn lessThan(c: []const u64, lhs: u16, rhs: u16) bool {
-            if (c[lhs] != c[rhs]) return c[lhs] > c[rhs];
-            return lhs < rhs;
-        }
-    }.lessThan);
-    var zero_count: usize = 0;
-    try output.print("\nHOST DISPATCH SITE                                                HITS\n", .{});
-    for (order) |index| {
-        if (counts[index] == 0) {
-            zero_count += 1;
-            continue;
-        }
-        try output.print("{s:<60} {d:>9}\n", .{ host_dispatch_stats.tagName(index), counts[index] });
-    }
-    try output.print("dispatch sites with zero hits: {d}/{d}\n", .{ zero_count, host_dispatch_stats.site_count });
 }
 
 extern "c" fn atexit(callback: *const fn () callconv(.c) void) c_int;
-
-var host_dispatch_stats_path_buf: [512:0]u8 = undefined;
-var host_dispatch_stats_path_len: usize = 0;
-
-/// When built with `-Dzjs_enable_opcode_profile=true` and
-/// `ZJS_HOST_DISPATCH_STATS_FILE` is set, append per-site dispatch hit counts
-/// to that file when the process exits (the explicit `std.process.exit` calls
-/// skip defers, so this uses libc `atexit`).
-fn setupHostDispatchStatsExitDump(environ_map: *std.process.Environ.Map) void {
-    if (comptime !host_dispatch_stats.enabled) return;
-    const path = environ_map.get("ZJS_HOST_DISPATCH_STATS_FILE") orelse return;
-    if (path.len == 0 or path.len >= host_dispatch_stats_path_buf.len) return;
-    @memcpy(host_dispatch_stats_path_buf[0..path.len], path);
-    host_dispatch_stats_path_buf[path.len] = 0;
-    host_dispatch_stats_path_len = path.len;
-    _ = atexit(writeHostDispatchStatsAtExit);
-}
-
-fn writeHostDispatchStatsAtExit() callconv(.c) void {
-    if (comptime !host_dispatch_stats.enabled) return;
-    if (host_dispatch_stats_path_len == 0) return;
-    host_dispatch_stats.appendToFile(&host_dispatch_stats_path_buf);
-}
 
 fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void {
     if (comptime !engine.compiler.oracle_report_enabled) return;
@@ -1370,7 +1333,6 @@ fn printEvaluationError(io: std.Io, runtime: *Runtime, err: anyerror) !void {
     const stderr = &stderr_writer.interface;
     if (runtime.context.hasException() or runtime.context.hasUnhandledRejection()) {
         const thrown = runtime.context.takePendingException();
-        defer thrown.free(runtime.runtime);
         if (try printExceptionValue(stderr, runtime, thrown)) return;
     }
     try stderr.print("zjs: evaluation failed: ", .{});

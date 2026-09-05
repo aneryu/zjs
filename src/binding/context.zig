@@ -271,6 +271,11 @@ pub const JSContext = struct {
         const object = try Object.expect(target);
         const key = try self.core.runtime.internAtom(property_name);
         defer self.core.runtime.atoms.free(key);
+        // TGC S3 §4 class B: `key` is a bare id held across a define that can
+        // allocate a shape and collect.
+        var key_roots = core.runtime.rootAtoms(.{&key});
+        key_roots.activate(self.core.runtime);
+        defer key_roots.deactivate(self.core.runtime);
         try object.defineOwnProperty(self.core.runtime, key, Descriptor.data(val, options.writable, options.enumerable, options.configurable));
     }
 
@@ -328,7 +333,7 @@ pub const JSContext = struct {
     pub fn createString(self: *JSContext, bytes_data: []const u8) !JSValue {
         if (bytes_data.len == 0) {
             const cached = try self.core.runtime.emptyString();
-            return cached.value().dup();
+            return cached.value();
         }
         const created = if (string.isAsciiBytes(bytes_data))
             try string.String.createAscii(self.core.runtime, bytes_data)
@@ -345,6 +350,10 @@ pub const JSContext = struct {
     pub fn getProperty(self: *JSContext, val: JSValue, property_name: []const u8) !JSValue {
         const key = try self.core.runtime.internAtom(property_name);
         defer self.core.runtime.atoms.free(key);
+        // TGC S3 §4 class B: the getter below can run a JS accessor.
+        var key_roots = core.runtime.rootAtoms(.{&key});
+        key_roots.activate(self.core.runtime);
+        defer key_roots.deactivate(self.core.runtime);
         return self.getPropertyAtom(val, key);
     }
 
@@ -361,6 +370,10 @@ pub const JSContext = struct {
     pub fn deleteProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
         const key = try self.core.runtime.internAtom(property_name);
         defer self.core.runtime.atoms.free(key);
+        // TGC S3 §4 class B: delete can reach a proxy trap.
+        var key_roots = core.runtime.rootAtoms(.{&key});
+        key_roots.activate(self.core.runtime);
+        defer key_roots.deactivate(self.core.runtime);
         return self.deletePropertyAtom(val, key, .{});
     }
 
@@ -377,6 +390,10 @@ pub const JSContext = struct {
     pub fn hasOwnProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
         const key = try self.core.runtime.internAtom(property_name);
         defer self.core.runtime.atoms.free(key);
+        // TGC S3 §4 class B: hasOwn can reach a proxy trap.
+        var key_roots = core.runtime.rootAtoms(.{&key});
+        key_roots.activate(self.core.runtime);
+        defer key_roots.deactivate(self.core.runtime);
         return self.hasOwnPropertyAtom(val, key, .{});
     }
 
@@ -407,7 +424,6 @@ pub const JSContext = struct {
 
     pub fn toOwnedUtf8(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
         const string_value = try self.toString(val);
-        defer string_value.free(self.core.runtime);
         const string_view = string_value.asString() orelse return error.TypeError;
         return string_view.toOwnedUtf8(allocator);
     }
@@ -415,10 +431,8 @@ pub const JSContext = struct {
     pub fn toNumber(self: *JSContext, val: JSValue) !f64 {
         const global = try self.globalObject();
         const primitive = try exec.coercion_ops.toPrimitiveForNumber(self.core, null, global, val);
-        defer primitive.free(self.core.runtime);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try exec.value_ops.toNumberValue(self.core.runtime, primitive);
-        defer number_value.free(self.core.runtime);
         return number_value.asNumber() orelse std.math.nan(f64);
     }
 
@@ -480,10 +494,7 @@ pub const JSContext = struct {
 
     pub fn throwError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
         const error_value = try self.createError(name, message, options);
-        var error_value_owned = true;
-        errdefer if (error_value_owned) error_value.free(self.core.runtime);
         _ = self.throwValue(error_value);
-        error_value_owned = false;
         return error.JSException;
     }
 
@@ -513,12 +524,11 @@ pub const JSContext = struct {
     }
 
     pub fn realmGlobal(self: *JSContext, realm: JSValue) !JSValue {
-        return try self.getProperty(realm, "global");
+        return try self.getPropertyAtom(realm, atom.ids.global);
     }
 
     pub fn realmGlobalObject(self: *JSContext, realm: JSValue) !*Object {
         const global_value = try self.realmGlobal(realm);
-        defer global_value.free(self.core.runtime);
         return Object.expect(global_value);
     }
 
@@ -539,9 +549,7 @@ pub const JSContext = struct {
     }
 
     fn hasOwnPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {
-        var desc = (try self.ownPropertyDescriptorAtom(val, property_name, options)) orelse return false;
-        defer desc.destroy(self.core.runtime);
-        return true;
+        return (try self.ownPropertyDescriptorAtom(val, property_name, options)) != null;
     }
 
     fn deletePropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {
@@ -555,11 +563,10 @@ pub const JSContext = struct {
         const global = options.realm_global orelse try self.globalObject();
         var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(self.core, options.output, global, object, property_name, null, null) orelse {
             if (object.isGlobal() and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
-                return Descriptor.data(object.value().dup(), true, false, true);
+                return Descriptor.data(object.value(), true, false, true);
             }
             return null;
         };
-        errdefer desc.destroy(self.core.runtime);
         try exec.call.materializeMappedArgumentsDescriptorValueForVm(self.core.runtime, object, property_name, &desc);
         return desc;
     }
@@ -660,10 +667,13 @@ pub const JSContext = struct {
         const rt = self.core.runtime;
         const global_object = try self.globalObject();
         const function_value = try self.createExternalFunction(name, length, ptr, call, finalizer, .{ .realm_global = global_object });
-        defer function_value.free(rt);
 
         const property_name = try rt.internAtom(name);
         defer rt.atoms.free(property_name);
+        // TGC S3 §4 class B.
+        var name_roots = core.runtime.rootAtoms(.{&property_name});
+        name_roots.activate(rt);
+        defer name_roots.deactivate(rt);
         try global_object.defineOwnProperty(rt, property_name, Descriptor.data(function_value, true, false, true));
     }
 
@@ -682,7 +692,6 @@ pub const JSContext = struct {
         const function_proto = realm.cached_function_proto orelse return error.InvalidEngineState;
         const function_capacity: usize = 2 + @as(usize, @intFromBool(options.with_prototype));
         const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, function_capacity);
-        errdefer function_value.free(rt);
 
         const function_object = try Object.expect(function_value);
         if (options.with_prototype) {
@@ -690,7 +699,6 @@ pub const JSContext = struct {
             const object_proto = try Object.expect(object_proto_value);
             const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, object_proto, 1);
             const prototype_value = prototype.value();
-            defer prototype_value.free(rt);
             try prototype.defineOwnPropertyAssumingNew(rt, atom.ids.constructor, Descriptor.data(function_value, true, false, true));
             try function_object.defineOwnPropertyAssumingNew(rt, atom.ids.prototype, Descriptor.data(prototype_value, true, false, false));
         }
@@ -715,9 +723,9 @@ pub const JSContext = struct {
             const header = exc.refHeader() orelse return error.InvalidEngineState;
             const object = Object.fromHeader(header);
 
-            const name_opt = try getPropertyString(rt, object, "name", allocator);
+            const name_opt = try getPropertyString(rt, object, atom.ids.name, allocator);
             errdefer if (name_opt) |n| allocator.free(n);
-            const msg_opt = try getPropertyString(rt, object, "message", allocator);
+            const msg_opt = try getPropertyString(rt, object, atom.ids.message, allocator);
             errdefer if (msg_opt) |m| allocator.free(m);
 
             if (name_opt) |name| {
@@ -741,8 +749,7 @@ pub const JSContext = struct {
     pub fn formatExceptionStack(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) !?[]const u8 {
         const rt = self.core.runtime;
         if (!exc.isObject()) return null;
-        const val = try self.getProperty(exc, "stack");
-        defer val.free(rt);
+        const val = try self.getPropertyAtom(exc, atom.ids.stack);
         if (!val.isString()) return null;
 
         var temp_list = std.ArrayList(u8).empty;
@@ -752,11 +759,8 @@ pub const JSContext = struct {
     }
 };
 
-fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
+fn getPropertyString(rt: *JSRuntime, obj: *Object, key: atom.Atom, allocator: std.mem.Allocator) !?[]const u8 {
     const val = try obj.getProperty(key);
-    defer val.free(rt);
     if (!val.isString()) return null;
 
     var temp_list = std.ArrayList(u8).empty;
@@ -784,10 +788,8 @@ test "JSContext.toString performs ECMAScript ToString instead of tag assertion" 
 
     var wrapper = JSContext.borrowCore(ctx);
     const object = try wrapper.eval("({ toString() { return 'semantic-string'; } })", .{});
-    defer object.free(rt);
     try std.testing.expect(object.asString() == null);
 
     const converted = try wrapper.toString(object);
-    defer converted.free(rt);
     try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().?.latin1);
 }

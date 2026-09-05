@@ -169,19 +169,6 @@ pub const host = struct {
     ) !value.Value {
         return zjs_exec.call.evalGlobalScriptSource(ctx.core, output, global, source, filename);
     }
-
-    fn evalGlobalScriptValueCore(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: *CoreObject,
-        source_value: value.Value,
-        filename: []const u8,
-    ) !value.Value {
-        if (!source_value.isString()) return error.TypeError;
-        const source = try value.toOwnedString(ctx.runtimePtr(), source_value);
-        defer ctx.runtimePtr().memory.allocator.free(source);
-        return evalGlobalScriptSourceCore(ctx, output, global, source, filename);
-    }
 };
 
 pub const object = struct {
@@ -283,18 +270,15 @@ pub const object = struct {
             errdefer if (bytes_owned) rt.memory.free(u8, bytes);
 
             if (bytes.len > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
-            const buffer_proto = try constructorPrototypeObject(rt, global, "ArrayBuffer");
+            const buffer_proto = try constructorPrototypeObjectByAtom(rt, global, zjs_core.atom.ids.ArrayBuffer);
             const buffer_value = try zjs_exec.buffer_ops.arrayBufferConstructLength(rt, 0, null, optionalToCore(buffer_proto));
-            var buffer_owned = true;
-            errdefer if (buffer_owned) buffer_value.free(rt);
 
             const buffer = fromValue(buffer_value) orelse return error.TypeError;
             const buffer_core = toCore(buffer);
             try buffer_core.installByteStorage(rt, bytes);
             bytes_owned = false;
 
-            const typed_array_proto = try constructorPrototypeObject(rt, global, "Uint8Array");
-            buffer_owned = false;
+            const typed_array_proto = try constructorPrototypeObjectByAtom(rt, global, zjs_core.atom.ids.Uint8Array);
             return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer_core, optionalToCore(typed_array_proto));
         }
 
@@ -611,7 +595,6 @@ pub const object = struct {
     pub fn getOwnIndexPropertyValue(rt: *JSRuntime, obj: *Object, index: u32) !?value.Value {
         const desc = (try toCore(obj).getOwnProperty(rt, atomFromUInt32(index))) orelse return null;
         if (!desc.value_present) {
-            desc.destroy(rt);
             return null;
         }
         return desc.value;
@@ -643,13 +626,11 @@ pub const object = struct {
 
     pub fn defineStringProperty(rt: *JSRuntime, obj: *Object, name: []const u8, bytes: []const u8) !void {
         const string_value = try value.createString(rt, bytes);
-        defer string_value.free(rt);
         try defineValueProperty(rt, obj, name, string_value);
     }
 
     pub fn defineHiddenStringProperty(rt: *JSRuntime, obj: *Object, name: []const u8, bytes: []const u8) !void {
         const string_value = try value.createString(rt, bytes);
-        defer string_value.free(rt);
         try defineHiddenValueProperty(rt, obj, name, string_value);
     }
 
@@ -669,22 +650,16 @@ pub const object = struct {
 
         const rt = ctx.runtimePtr();
         const global = fromCore(try ctx.globalObject());
-        const array_prototype = cachedArrayPrototype(rt, global) orelse try constructorPrototypeObject(rt, global, "Array");
+        const array_prototype = cachedArrayPrototype(rt, global) orelse try constructorPrototypeObjectByAtom(rt, global, zjs_core.atom.ids.Array);
         const array = fromCore(try CoreObject.createArrayWithOwnPropertyCapacity(rt, optionalToCore(array_prototype), items.len));
         const array_value = toValue(array);
-        errdefer array_value.free(rt);
         const array_core = toCore(array);
         for (items, 0..) |item, index| {
             const item_value = try value.createString(rt, item);
-            array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item_value, true, true, true)) catch |err| {
-                item_value.free(rt);
-                return err;
-            };
-            item_value.free(rt);
+            try array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item_value, true, true, true));
         }
         array_core.setArrayLength(@intCast(items.len));
         try defineValueProperty(rt, global, name, array_value);
-        array_value.free(rt);
     }
 
     fn cachedArrayPrototype(rt: *JSRuntime, global: *Object) ?*Object {
@@ -704,11 +679,17 @@ pub const object = struct {
     pub fn constructorPrototypeObject(rt: *JSRuntime, global: *Object, name: []const u8) !?*Object {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
+        return constructorPrototypeObjectByAtom(rt, global, key);
+    }
+
+    /// Same lookup keyed by an atom. Internal callers name standard constructors,
+    /// so they pass a predefined `atom.ids.*` constant and pay no intern at all.
+    /// Not part of the public surface: the bytes-taking form above stays the
+    /// embedder entry point.
+    fn constructorPrototypeObjectByAtom(_: *JSRuntime, global: *Object, key: zjs_core.Atom) !?*Object {
         const constructor_value = try toCore(global).getProperty(key);
-        defer constructor_value.free(rt);
         const constructor = coreFromValue(constructor_value) orelse return null;
         const prototype_value = try constructor.getProperty(zjs_core.atom.ids.prototype);
-        defer prototype_value.free(rt);
         return fromValue(prototype_value);
     }
 
@@ -727,17 +708,14 @@ test "public object appendArrayValue maintains array length once" {
     defer rt.destroy();
 
     const array = try object.createArray(rt, null);
-    const array_value = object.toValue(array);
-    defer array_value.free(rt);
+    _ = object.toValue(array);
 
     try object.appendArrayValue(rt, array, value.int32(1));
     try object.appendArrayValue(rt, array, value.int32(2));
 
     try std.testing.expectEqual(@as(u32, 2), object.arrayLength(array));
     const first = (try object.getOwnIndexPropertyValue(rt, array, 0)).?;
-    defer first.free(rt);
     const second = (try object.getOwnIndexPropertyValue(rt, array, 1)).?;
-    defer second.free(rt);
     try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
 }
@@ -763,7 +741,6 @@ test "public host defineScriptArgs materializes empty array on first read" {
         \\delete globalThis.scriptArgs &&
         \\!("scriptArgs" in globalThis);
     , .{});
-    defer result.free(rt);
     try std.testing.expectEqual(true, result.asBool().?);
 }
 
@@ -775,7 +752,6 @@ test "public Buffer helpers create and copy Uint8Array bytes" {
 
     const global = try context.globalObject(ctx);
     const value_from_copy = try object.Buffer.createUint8ArrayFromBytes(rt, global, "abc");
-    defer value_from_copy.free(rt);
     const typed_array = object.fromValue(value_from_copy).?;
     const copied = try object.Buffer.ownedBytesFromObject(rt, typed_array);
     defer rt.memory.allocator.free(copied);
@@ -784,7 +760,6 @@ test "public Buffer helpers create and copy Uint8Array bytes" {
     const owned = try rt.memory.alloc(u8, 3);
     @memcpy(owned, "xyz");
     const value_from_owned = try object.Buffer.createUint8ArrayFromOwnedBytes(rt, global, owned);
-    defer value_from_owned.free(rt);
     const owned_typed_array = object.fromValue(value_from_owned).?;
     const copied_owned = try object.Buffer.ownedBytesFromObject(rt, owned_typed_array);
     defer rt.memory.allocator.free(copied_owned);
@@ -803,12 +778,10 @@ test "public callable predicate recognizes every bytecode function class" {
     };
     for (class_ids) |class_id| {
         const function_object = try CoreObject.create(rt, class_id, null);
-        defer function_object.value().free(rt);
         try std.testing.expect(object.isCallableValue(function_object.value()));
     }
 
     const plain_object = try CoreObject.create(rt, zjs_core.class.ids.object, null);
-    defer plain_object.value().free(rt);
     try std.testing.expect(!object.isCallableValue(plain_object.value()));
 }
 
@@ -821,19 +794,16 @@ test "public object isArray brands real arrays only" {
     // A genuine Array is branded true.
     const array = try object.createArray(rt, null);
     const array_value = object.toValue(array);
-    defer array_value.free(rt);
     try std.testing.expect(object.isArray(array_value));
 
     // A plain object is NOT an array.
     const plain = try object.createPlain(rt);
     const plain_value = object.toValue(plain);
-    defer plain_value.free(rt);
     try std.testing.expect(!object.isArray(plain_value));
 
     // A TypedArray (Uint8Array) is an object but NOT an Array brand.
     const global = try context.globalObject(ctx);
     const typed = try object.Buffer.createUint8ArrayFromBytes(rt, global, "abc");
-    defer typed.free(rt);
     try std.testing.expect(!object.isArray(typed));
 
     // Non-object primitives are never arrays.
@@ -850,7 +820,6 @@ test "public Buffer borrowBytes views ArrayBuffer live store without copying" {
     const global = try context.globalObject(ctx);
     // A Uint8Array over a fresh ArrayBuffer; borrow the ArrayBuffer itself.
     const ta_val = try object.Buffer.createUint8ArrayFromBytes(rt, global, &.{ 1, 2, 3, 4 });
-    defer ta_val.free(rt);
     const ta = object.fromValue(ta_val).?;
 
     // Borrowing the TypedArray gives a typed_array kind with offset 0, len 4.
@@ -879,15 +848,13 @@ test "public Buffer borrowBytes carries TypedArray byte offset and length" {
     const class_ids = zjs_core.class.ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     const backing = try rt.memory.alloc(u8, 6);
     @memcpy(backing, &[_]u8{ 0, 1, 2, 3, 4, 5 });
     try buffer.installByteStorage(rt, backing);
 
     const view = try Object.create(rt, class_ids.object, null);
-    const view_value = view.value();
-    defer view_value.free(rt);
-    try view.initTypedArrayView(rt, buffer_value.dup(), 2, 2, 2, 2);
+    _ = view.value();
+    try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, 2);
 
     const borrow = try object.Buffer.borrowBytes(rt, object.fromCore(view));
     try std.testing.expectEqual(object.Buffer.BorrowKind.typed_array, borrow.kind);
@@ -904,7 +871,6 @@ test "public Buffer borrowBytes detach is rejected up front" {
 
     const global = try context.globalObject(ctx);
     const ta_val = try object.Buffer.createUint8ArrayFromBytes(rt, global, &.{ 7, 8 });
-    defer ta_val.free(rt);
     const ta = object.fromValue(ta_val).?;
 
     // Take an initial borrow, then detach the backing buffer.
@@ -928,7 +894,6 @@ test "public Buffer borrowBytes resize invalidates the old pointer" {
     const class_ids = zjs_core.class.ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
     const backing = try rt.memory.alloc(u8, 4);
     @memcpy(backing, &[_]u8{ 1, 2, 3, 4 });
     try buffer.installByteStorage(rt, backing);
@@ -954,8 +919,7 @@ test "public Buffer borrowBytes immutable ArrayBuffer denies sliceMut" {
     const Object = zjs_core.Object;
     const class_ids = zjs_core.class.ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
-    const buffer_value = buffer.value();
-    defer buffer_value.free(rt);
+    _ = buffer.value();
     const backing = try rt.memory.alloc(u8, 3);
     @memcpy(backing, &[_]u8{ 1, 2, 3 });
     try buffer.installByteStorage(rt, backing);
@@ -975,7 +939,6 @@ test "public Buffer borrowBytesReadonly carries no mutable pointer" {
 
     const global = try context.globalObject(ctx);
     const ta_val = try object.Buffer.createUint8ArrayFromBytes(rt, global, &.{ 1, 2, 3, 4 });
-    defer ta_val.free(rt);
     const ta = object.fromValue(ta_val).?;
 
     const ro = try object.Buffer.borrowBytesReadonly(rt, ta);
@@ -1004,7 +967,6 @@ test "public Buffer pinForBorrow keeps source alive and releases cleanly" {
 
     const global = try context.globalObject(ctx);
     const ta_val = try object.Buffer.createUint8ArrayFromBytes(rt, global, &.{ 5, 6, 7 });
-    defer ta_val.free(rt);
     const ta = object.fromValue(ta_val).?;
 
     const baseline = rt.persistentRootCountForTest();
@@ -1077,14 +1039,6 @@ pub const module = struct {
     ) !value.Value {
         return module_graph.evalFileModuleGraphWithHostHooks(ctx.runtimePtr(), ctx.core, source_text, output, filename, host_hooks, allocator);
     }
-
-    fn moduleResolutionError(err: anyerror) anyerror {
-        return switch (err) {
-            error.ModuleNotFound => error.ModuleNotFound,
-            error.PermissionDenied => error.PermissionDenied,
-            else => err,
-        };
-    }
 };
 
 pub const job = struct {
@@ -1130,7 +1084,6 @@ test "public job drain honors budget and reports the real remaining FIFO" {
     defer ctx.destroy();
 
     const observed = try zjs_core.Object.createArray(rt, null);
-    defer observed.value().free(rt);
     const TestJob = struct {
         fn append(core_ctx: *zjs_core.JSContext, args: []const zjs_core.JSValue) zjs_core.JSValue {
             const array = zjs_core.Object.expect(args[0]) catch return core_ctx.throwValue(zjs_core.JSValue.int32(-1));
@@ -1187,7 +1140,6 @@ test "public job drain stops at the first exception and leaves the tail queued" 
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expect(ctx.core.hasException());
     const exception = ctx.core.takeException();
-    defer exception.free(rt);
     try std.testing.expectEqual(@as(?i32, 73), exception.asInt32());
 
     const tail = try job.drain(ctx, .{});

@@ -10,11 +10,6 @@ pub const diagnostics = struct {
         column: u32 = 1,
     };
 
-    pub const Range = struct {
-        start: Position,
-        end: Position,
-    };
-
     pub const SyntaxError = struct {
         memory: *memory.MemoryAccount,
         atoms: *atom.AtomTable,
@@ -522,11 +517,9 @@ pub const parser_core = struct {
     pub const ParseFlags = packed struct(u32) {
         in_accepted: bool = false,
         pow_allowed: bool = false,
-        arrow_func: bool = false,
-        trailing_comma_ok: bool = false,
         result_needed: bool = true,
         yield_forbidden: bool = false,
-        _padding: u26 = 0,
+        _padding: u28 = 0,
 
         pub const default = ParseFlags{ .in_accepted = true };
     };
@@ -694,23 +687,6 @@ pub const parser_core = struct {
         dynamic_import,
     };
 
-    /// Class element kind. Mirrors QuickJS class element types.
-    pub const ClassElementKind = enum {
-        field,
-        method,
-        getter,
-        setter,
-        static_field,
-        static_method,
-        static_getter,
-        static_setter,
-        private_field,
-        private_method,
-        private_getter,
-        private_setter,
-        static_block,
-    };
-
     /// Ephemeral handle for QuickJS's trailing OP_set_class_name marker.
     /// The marker stores the byte-distance back to define_class; this handle
     /// additionally records the compact atom-ledger row captured at emission
@@ -872,6 +848,16 @@ pub const parser_core = struct {
         /// `vars` / `scopes` layout is populated correctly.
         function_def: function_def_mod.FunctionDef,
 
+        /// TGC S3-b §2.2: interval root for every atom this parse obtains.
+        /// Detached at construction because `initRootEmitter` returns the
+        /// `State` by value -- the provider stores `&self`, so registration
+        /// waits for `activateAtomScope`, which the owner calls once the
+        /// state sits at its final address (the `ReplaceMatchRoots.activate`
+        /// convention). A state that never activates records nothing and
+        /// costs nothing; production compiles are additionally covered by the
+        /// outer scope `compile_entry.compile` opens.
+        atom_scope: atom_module.CompileAtomScope,
+
         /// Ephemeral declaration-conflict indices keyed by the FunctionDef
         /// being parsed. They accelerate only parser-time collision queries
         /// and are never transferred into FunctionBytecode.
@@ -945,6 +931,7 @@ pub const parser_core = struct {
                 .function = function,
                 .token = undefined,
                 .function_def = function_def_mod.FunctionDef.init(function.memory, function.atoms, function.name),
+                .atom_scope = atom_module.CompileAtomScope.init(function.atoms),
                 .emit_to_function_def = emit_root_to_function_def,
             };
             errdefer state.function_def.deinitInitFailure();
@@ -1073,6 +1060,16 @@ pub const parser_core = struct {
             self.truncateClassPrivateBoundNames(0);
             self.class_private_bound_names.deinit(self.function.memory.allocator);
             self.function_def.deinit(rt);
+            // Last: the scope has to outlive every teardown step above, all of
+            // which can still hand atom ids back to the table.
+            self.atom_scope.deinit();
+        }
+
+        /// TGC S3-b: register this parse's atom-root provider. Must be called
+        /// exactly once, after the `State` reached its final address and
+        /// before the first token is consumed by a caller-driven parse step.
+        pub fn activateAtomScope(self: *State) Error!void {
+            self.atom_scope.activate() catch return error.OutOfMemory;
         }
 
         fn setCurrentNamespaceAtom(self: *State, atom_id: ?Atom) void {
@@ -1401,12 +1398,6 @@ pub const parser_core = struct {
             try self.pushScopeIdentity();
             errdefer self.popScopeIdentity();
             self.curFunc().body_scope = self.scope_level;
-        }
-
-        /// Function bodies remain the current scope through finalization, just
-        /// as in QuickJS. There is no body leave event or identity pop.
-        pub fn finishFunctionBody(self: *State) void {
-            _ = self;
         }
 
         /// Mirror `pop_scope` (`quickjs.c:23532`): restore the parent
@@ -1824,21 +1815,6 @@ pub const parser_core = struct {
         /// (quickjs.c:24352-24360). At the body scope every global_vars entry
         /// satisfies is_child_scope(hf->scope_level, fd->scope_level), so the
         /// check degenerates to find_global_var.
-        fn atGlobalLexicalBodyScope(self: *State) bool {
-            return self.atProgramBodyScope() and
-                !self.top_level_lexical_as_module_ref and
-                (!self.is_eval or self.eval_global_var_bindings);
-        }
-
-        fn lexicalBodyDeclarationConflictsWithGlobalVar(self: *State, name: Atom) bool {
-            if (!self.atProgramBodyScope()) return false;
-            if (self.atGlobalLexicalBodyScope()) return self.findGlobalVar(name);
-            return self.is_eval and
-                !self.eval_global_var_bindings and
-                !self.eval_in_parameter_initializer and
-                self.findGlobalVar(name);
-        }
-
         fn ensureFunctionScopeVar(self: *State, name: Atom) Error!u16 {
             if (self.findFunctionScopeVar(name)) |idx| return idx;
             // Annex-B's create_func_var path calls add_var directly and thus
@@ -2876,14 +2852,6 @@ pub const parser_core = struct {
             }
         }
 
-        fn appendOwnedAtomOperandAssumeCapacity(self: *State, atom_id: Atom) void {
-            if (self.emit_to_function_def) {
-                self.curFunc().appendAtomOperandOwnedAssumeCapacity(atom_id);
-            } else {
-                self.function.retainAtomOperandOwnedAssumeCapacity(atom_id);
-            }
-        }
-
         fn emitOpcodeBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
             const opcode_pos = self.currentCodeLen();
             self.appendBytesNoSourceAssumeCapacity(bytes);
@@ -2900,10 +2868,6 @@ pub const parser_core = struct {
             // positions are emitted explicitly by the grammar productions
             // that own one (quickjs.c:23852-23870).
             try self.emitOpcodeBytesNoSource(&[_]u8{op_id});
-        }
-
-        fn emitOpAt(self: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
-            try self.appendBytesAt(&[_]u8{op_id}, line_num, col_num);
         }
 
         fn emitOpNoSource(self: *State, op_id: u8) Error!void {
@@ -2954,13 +2918,6 @@ pub const parser_core = struct {
             bytes[0] = op_id;
             std.mem.writeInt(u32, bytes[1..5], val, .little);
             try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
-        fn emitOpU32At(self: *State, op_id: u8, val: u32, line_num: u32, col_num: u32) Error!void {
-            var bytes: [5]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], val, .little);
-            try self.appendBytesAt(&bytes, line_num, col_num);
         }
 
         /// O(source) scan preserved as the exact fallback when the line-start
@@ -3040,12 +2997,6 @@ pub const parser_core = struct {
             try self.appendBytesNoSource(&bytes);
             self.last_opcode_source_offset = source_offset;
             return true;
-        }
-
-        fn currentSourcePosition(self: *State) SourcePosition {
-            const loc_line = if (self.last_token_line_num >= self.token.line_num) self.last_token_line_num else self.token.line_num;
-            const loc_col = if (loc_line == self.last_token_line_num) self.last_token_col_num else self.token.col_num;
-            return .{ .line_num = loc_line, .col_num = loc_col };
         }
 
         fn emitFClosure8(self: *State, idx: u8) Error!void {
@@ -3138,39 +3089,8 @@ pub const parser_core = struct {
             try self.emitOpcodeBytesNoSource(&bytes);
         }
 
-        fn appendOwnedAtomOperand(self: *State, atom_id: Atom) Error!void {
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperandOwned(atom_id);
-            } else {
-                try self.function.retainAtomOperandOwned(atom_id);
-            }
-        }
-
-        fn takeLastAtomOperand(self: *State) Error!Atom {
-            if (self.currentAtomOperandLen() == 0) return Error.ParserInvariant;
-            return if (self.emit_to_function_def)
-                self.curFunc().takeLastAtomOperand()
-            else
-                self.function.takeLastAtomOperand();
-        }
-
         // ---- Temporary scope opcode helpers ----
         // These emit scope_* opcodes that will be lowered by resolve_variables.
-
-        fn emitOpAtomU16(self: *State, op_id: u8, atom_id: Atom, u16_val: u16) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperand(atom_id);
-            } else {
-                try self.function.retainAtomOperand(atom_id);
-            }
-            var bytes: [7]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-            std.mem.writeInt(u16, bytes[5..7], u16_val, .little);
-            try self.emitOpcodeBytesNoSource(&bytes);
-        }
 
         fn emitOpAtomU16NoSource(self: *State, op_id: u8, atom_id: Atom, u16_val: u16) Error!void {
             const snapshot = self.takeEmissionSnapshot();
@@ -3202,42 +3122,12 @@ pub const parser_core = struct {
             try self.emitOpcodeBytesNoSource(&bytes);
         }
 
-        fn emitOpAtomLabelU8(self: *State, op_id: u8, atom_id: Atom, label: u32, u8_val: u8) Error!usize {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperand(atom_id);
-            } else {
-                try self.function.retainAtomOperand(atom_id);
-            }
-            var bytes: [10]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-            std.mem.writeInt(u32, bytes[5..9], label, .little);
-            bytes[9] = u8_val;
-            const loc = self.currentSourcePosition();
-            _ = try self.emitSourcePosAndLoc(loc.line_num, loc.col_num);
-            const label_offset = self.currentCodeLen() + 5;
-            try self.emitOpcodeBytesNoSource(&bytes);
-            self.noteEmittedLabelOperand(label);
-            return label_offset;
-        }
-
         fn emitScopeGetVar(self: *State, atom_id: Atom) Error!void {
             try self.ensureClosureVar(atom_id);
             if (self.emit_phase1_temp) {
                 // qjs resolve_scope_var consumes the same atom+scope temp
                 // family (quickjs.c:33036-33052).
                 try Emitter.opAtomU16(self, opcode.op.scope_get_var, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
-            }
-        }
-
-        fn emitScopeGetRef(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16(self, opcode.op.scope_get_ref, atom_id, @intCast(self.scope_level));
             } else {
                 try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
             }
@@ -3267,14 +3157,6 @@ pub const parser_core = struct {
                 try Emitter.opAtomU16NoSource(self, opcode.op.scope_put_var, atom_id, @intCast(self.scope_level));
             } else {
                 try self.emitGlobalVarOpNoSource(opcode.op.put_var, atom_id);
-            }
-        }
-
-        fn emitScopeDeleteVar(self: *State, atom_id: Atom) Error!void {
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16(self, opcode.op.scope_delete_var, atom_id, @intCast(self.scope_level));
-            } else {
-                try Emitter.opAtom(self, opcode.op.delete_var, atom_id);
             }
         }
 
@@ -3749,21 +3631,6 @@ pub const parser_core = struct {
             std.mem.writeInt(u32, self.currentCode()[opcode_pos + 1 ..][0..4], idx, .little);
         }
 
-        fn emitPushConstOwned(self: *State, value: JSValue) Error!void {
-            var value_owned = true;
-            errdefer if (value_owned) value.free(self.runtime.?);
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            try self.emitOpU32(opcode.op.push_const, 0);
-            const opcode_pos: usize = @intCast(self.curFunc().last_opcode_pos);
-            const idx = if (self.emit_to_function_def or self.top_level_functions_as_children)
-                try self.curFunc().appendCpoolOwned(value)
-            else
-                try self.function.constants.appendOwned(value);
-            value_owned = false;
-            std.mem.writeInt(u32, self.currentCode()[opcode_pos + 1 ..][0..4], idx, .little);
-        }
-
         fn emitBigIntLiteral(self: *State, text: []const u8, negate: bool) Error!void {
             if (parseBigIntI32(text, negate)) |small| {
                 try Emitter.opI32(self, opcode.op.push_bigint_i32, small);
@@ -3797,11 +3664,6 @@ pub const parser_core = struct {
             errdefer if (big_owned) big.destroyWithAccount(self.function.memory);
             try Emitter.pushConstOwned(self, big.valueRef());
             big_owned = false;
-        }
-
-        fn appendBytes(self: *State, bytes: []const u8) Error!void {
-            const loc = self.currentSourcePosition();
-            try self.appendBytesAt(bytes, loc.line_num, loc.col_num);
         }
 
         fn invalidateLastOpcode(self: *State) void {
@@ -5046,16 +4908,6 @@ pub const parser_core = struct {
         }
     }
 
-    fn isNonLexicalBinding(s: *State, atom_id: Atom) bool {
-        for (s.curFunc().closure_var) |cv| {
-            if (cv.var_name == atom_id) return !cv.isLexical();
-        }
-        for (s.curFunc().vars) |v| {
-            if (v.var_name == atom_id) return !v.is_lexical;
-        }
-        return s.emit_to_function_def;
-    }
-
     fn hasKnownBinding(s: *State, atom_id: Atom) bool {
         for (s.curFunc().closure_var) |cv| {
             if (cv.var_name == atom_id) return true;
@@ -5121,13 +4973,6 @@ pub const parser_core = struct {
         // instance and static initializers now use that real function
         // boundary, and arrows inherit its entry contract.
         return !s.curFunc().arguments_allowed;
-    }
-
-    fn atomListContains(list: []const Atom, atom_id: Atom) bool {
-        for (list) |item| {
-            if (item == atom_id) return true;
-        }
-        return false;
     }
 
     fn appendRetainedAtom(list: *std.ArrayList(Atom), allocator: std.mem.Allocator, atoms: *atom_module.AtomTable, atom_id: Atom) Error!void {
@@ -5920,60 +5765,6 @@ pub const parser_core = struct {
     /// The pseudo getter is immediately followed by the raw shared-label
     /// marker, so delete consumes label identity directly without collecting
     /// exits or recognising an emitted byte signature.
-    fn rewriteOptionalChainDelete(s: *State, pos: usize) Error!void {
-        var code = s.currentCode();
-        const field_form = code[pos] == opcode.op.get_field_opt_chain;
-        const getter_size: usize = if (field_form) 5 else 1;
-        const raw_label_pos = pos + getter_size;
-        if (raw_label_pos + 5 != code.len or code[raw_label_pos] != opcode.op.label) {
-            return Error.ParserInvariant;
-        }
-        const optional_label = ParserLabelRef{
-            .id = std.mem.readInt(u32, code[raw_label_pos + 1 ..][0..4], .little),
-        };
-        if (optional_label.id == 0 or optional_label.id >= opcode.op.parser_label_tag) return Error.ParserInvariant;
-
-        if (field_form) {
-            const atom_id: Atom = std.mem.readInt(u32, code[pos + 1 ..][0..4], .little);
-            if (atomNameIsPrivate(s, atom_id)) {
-                // Baseline private transport uses an ordinary field opcode.
-                // Preserve QJS's observable `delete this?.#x` no-op: both the
-                // accessed and short-circuit paths discard one value and true.
-                try s.reserveEmission(2, 0);
-                code = s.currentCode();
-                code[pos] = opcode.op.get_field;
-                s.invalidateLastOpcode();
-                emitOpNoSourceAssumeCapacity(s, opcode.op.drop);
-                emitOpNoSourceAssumeCapacity(s, opcode.op.push_true);
-                return;
-            }
-        }
-
-        // Field form keeps its five-byte atom operand; indexed form removes
-        // the one-byte getter. Both then emit the exact QJS two-label bridge.
-        try s.reserveEmission(if (field_form) 13 else 12, 0);
-        const next_label = newParserLabel(s);
-        code = s.currentCode();
-        if (field_form) {
-            code[pos] = opcode.op.push_atom_value;
-            s.truncateCode(raw_label_pos) catch unreachable;
-        } else {
-            s.truncateCode(pos) catch unreachable;
-        }
-        emitOpNoSourceAssumeCapacity(s, opcode.op.delete);
-        emitGotoParserLabelNoSourceAssumeCapacity(s, next_label);
-        emitParserLabelNoSourceAssumeCapacity(s, optional_label);
-        emitOpNoSourceAssumeCapacity(s, opcode.op.drop);
-        emitOpNoSourceAssumeCapacity(s, opcode.op.push_true);
-        emitParserLabelNoSourceAssumeCapacity(s, next_label);
-    }
-
-    fn isMemberStart(k: tok.TokenKind) bool {
-        return k == @as(tok.TokenKind, @intCast('.')) or
-            k == @as(tok.TokenKind, @intCast('[')) or
-            k == @as(tok.TokenKind, @intCast('('));
-    }
-
     const CallReferenceKind = enum {
         plain,
         method,
@@ -6118,17 +5909,6 @@ pub const parser_core = struct {
             },
         }
         if (prepared.kind == .direct_eval) try s.markDirectEvalCall();
-    }
-
-    fn emitPlainCallFromStack(s: *State, shape: CallArgsShape) Error!void {
-        switch (shape) {
-            .direct => |argc| try emitterOpU16(s, opcode.op.call, argc),
-            .applied => {
-                try Emitter.op(s, opcode.op.undefined);
-                try Emitter.op(s, opcode.op.swap);
-                try Emitter.opU16(s, opcode.op.apply, 0);
-            },
-        }
     }
 
     /// `js_parse_postfix_expr` (`quickjs.c:26176`). Wraps `parseLhsExpr`
@@ -6589,7 +6369,6 @@ pub const parser_core = struct {
         if (first_part == .no_substitution) {
             if (s.runtime) |rt| {
                 var builder = try TaggedTemplateObjectBuilder.init(rt);
-                defer builder.deinit();
                 try builder.addPart(s.token.payload.str.bytes, s.token.payload.str.raw_bytes, s.token.payload.str.cooked_invalid);
                 try builder.finish();
                 try Emitter.pushConst(s, builder.template_value);
@@ -6607,7 +6386,6 @@ pub const parser_core = struct {
         }
 
         var template_builder = if (s.runtime) |rt| try TaggedTemplateObjectBuilder.init(rt) else null;
-        defer if (template_builder) |*builder| builder.deinit();
         if (template_builder) |*builder| {
             try Emitter.pushConst(s, builder.template_value);
         } else {
@@ -7102,8 +6880,7 @@ pub const parser_core = struct {
             errdefer core.Object.destroyFromHeader(rt, raw_array.gcHeader());
 
             const raw_value = raw_array.value();
-            const raw_atom = try rt.internAtom("raw");
-            defer rt.atoms.free(raw_atom);
+            const raw_atom = atom_module.ids.raw;
             template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, false, false, false)) catch return Error.ParserInvariant;
             return .{
                 .rt = rt,
@@ -7112,11 +6889,6 @@ pub const parser_core = struct {
                 .template_object = template_object,
                 .raw_array = raw_array,
             };
-        }
-
-        fn deinit(self: *TaggedTemplateObjectBuilder) void {
-            self.template_value.free(self.rt);
-            self.raw_value.free(self.rt);
         }
 
         fn addPart(
@@ -7129,7 +6901,6 @@ pub const parser_core = struct {
                 const cooked = core.string.String.createUtf8(self.rt, cooked_bytes) catch return Error.InvalidUtf8;
                 break :blk cooked.value();
             };
-            defer cooked_value.free(self.rt);
             self.template_object.defineOwnProperty(
                 self.rt,
                 core.atom.atomFromUInt32(self.depth),
@@ -7138,7 +6909,6 @@ pub const parser_core = struct {
 
             const raw = core.string.String.createUtf8(self.rt, raw_bytes) catch return Error.InvalidUtf8;
             const raw_value = raw.value();
-            defer raw_value.free(self.rt);
             self.raw_array.defineOwnProperty(
                 self.rt,
                 core.atom.atomFromUInt32(self.depth),
@@ -7738,10 +7508,6 @@ pub const parser_core = struct {
         }
     };
 
-    fn isCurrentFunctionExpressionName(s: *State, atom_id: Atom) bool {
-        return if (s.function_expr_name_binding) |name| name == atom_id else false;
-    }
-
     fn emitObjectMethodFunction(s: *State, name: ?Atom, func_kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
         const entry_fields: FunctionEntryFields = .{
             .pending_function_name = true,
@@ -7970,9 +7736,6 @@ pub const parser_core = struct {
         fn newPhysLabel(s: *State, label: *PhysLabel) Error!void {
             label.id = try emitterNewLabel(s);
         }
-        fn jumpPhys(s: *State, op_id: u8, label: *PhysLabel) Error!void {
-            return emitterJump(s, op_id, label.id);
-        }
         fn jumpPhysNoSource(s: *State, op_id: u8, label: *PhysLabel) Error!void {
             return emitterJumpNoSource(s, op_id, label.id);
         }
@@ -8004,23 +7767,17 @@ pub const parser_core = struct {
         inline fn opU32(s: *State, op_id: u8, val: u32) Error!void {
             return emitterOpU32(s, op_id, val);
         }
-        inline fn opU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
-            return emitterOpU32NoSource(s, op_id, val);
-        }
         inline fn opI32(s: *State, op_id: u8, val: i32) Error!void {
             return emitterOpI32(s, op_id, val);
         }
         inline fn opAtom(s: *State, op_id: u8, atom_id: Atom) Error!void {
             return emitterAtomOpOwned(s, op_id, s.function.atoms.dup(atom_id));
         }
-        inline fn opAtomNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
-            return emitterAtomOpOwnedNoSource(s, op_id, s.function.atoms.dup(atom_id));
-        }
         inline fn opAtomU8(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
             return emitterAtomOpU8Owned(s, op_id, s.function.atoms.dup(atom_id), val);
         }
         inline fn opAtomU16(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-            return emitterAtomOpU16Owned(s, op_id, s.function.atoms.dup(atom_id), val);
+            return s.builderEmitAtomOpU16Owned(op_id, s.function.atoms.dup(atom_id), val) catch |err| mapBuilderError(err);
         }
         inline fn opAtomU16NoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
             return emitterAtomOpU16OwnedNoSource(s, op_id, s.function.atoms.dup(atom_id), val);
@@ -8124,21 +7881,10 @@ pub const parser_core = struct {
         s.activeBuilder().emitScopeRefOpOwned(op_id, atom_id, label, scope) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 ledger take-back for the getter rewind.
-    fn emitterTakeLastAtomOwned(s: *State) Error!Atom {
-        return s.activeBuilder().takeLastAtomOwned() catch |err| mapBuilderError(err);
-    }
-
     /// v2 mirror of `State.emitOpAtomU8` — ownership of `atom_id` (one
     /// retain) transfers into the builder ledger (marker'd).
     fn emitterAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
         s.builderEmitAtomOpU8Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
-    }
-
-    /// v2 mirror of `State.emitOpAtomU16` — owned atom plus scope/u16
-    /// immediate, with the current source marker.
-    fn emitterAtomOpU16Owned(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
-        s.builderEmitAtomOpU16Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU8` (marker'd).
@@ -8187,11 +7933,9 @@ pub const parser_core = struct {
     }
 
     /// Owned-value variant of emitterPushConst. Ownership transfers only after
-    /// the cpool append succeeds; every earlier failure frees the caller value
-    /// and rolls the Builder back to its complete pre-emission snapshot.
+    /// the cpool append succeeds; every earlier failure rolls the Builder back
+    /// to its complete pre-emission snapshot.
     fn emitterPushConstOwned(s: *State, value: JSValue) Error!void {
-        var value_owned = true;
-        errdefer if (value_owned) value.free(s.runtime.?);
         const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
@@ -8201,7 +7945,6 @@ pub const parser_core = struct {
             try s.curFunc().appendCpoolOwned(value)
         else
             try s.function.constants.appendOwned(value);
-        value_owned = false;
         std.mem.writeInt(u32, v2b.code[opcode_pos + 1 ..][0..4], idx, .little);
     }
 
@@ -8288,14 +8031,6 @@ pub const parser_core = struct {
         builder: compiler.LabelId,
     };
 
-    fn newParserLabel(s: *State) ParserLabelRef {
-        const count = s.currentParserLabelCount();
-        std.debug.assert(count < opcode.op.parser_label_tag - 1);
-        const id = count + 1; // zero remains the legacy anonymous boundary marker
-        s.setParserLabelCount(id);
-        return .{ .id = id };
-    }
-
     fn emitParserLabelJump(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
         if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.ParserInvariant;
         var bytes: [5]u8 = undefined;
@@ -8314,23 +8049,6 @@ pub const parser_core = struct {
         s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
     }
 
-    fn emitParserLabelJumpNoSourceAssumeCapacity(s: *State, op_id: u8, label: ParserLabelRef) void {
-        std.debug.assert(opcode.formatOf(op_id) == .label and op_id != opcode.op.label);
-        var bytes: [5]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
-        s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
-        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
-    }
-
-    fn emitGotoParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
-        try emitParserLabelJumpNoSource(s, opcode.op.goto, label);
-    }
-
-    fn emitGotoParserLabelNoSourceAssumeCapacity(s: *State, label: ParserLabelRef) void {
-        emitParserLabelJumpNoSourceAssumeCapacity(s, opcode.op.goto, label);
-    }
-
     /// Raw labels preserve the preceding real opcode as call/delete
     /// provenance. Normal labels additionally invalidate it at the merge.
     fn emitParserLabelRawNoSource(s: *State, label: ParserLabelRef) Error!void {
@@ -8342,42 +8060,14 @@ pub const parser_core = struct {
         try s.appendBytesNoSource(&bytes);
     }
 
-    fn emitParserLabelRawNoSourceAssumeCapacity(s: *State, label: ParserLabelRef) void {
-        var bytes: [5]u8 = undefined;
-        bytes[0] = opcode.op.label;
-        std.mem.writeInt(u32, bytes[1..5], label.id, .little);
-        s.appendBytesNoSourceAssumeCapacity(&bytes);
-    }
-
     fn emitParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
         try emitParserLabelRawNoSource(s, label);
-        s.invalidateLastOpcode();
-    }
-
-    fn emitParserLabelNoSourceAssumeCapacity(s: *State, label: ParserLabelRef) void {
-        emitParserLabelRawNoSourceAssumeCapacity(s, label);
         s.invalidateLastOpcode();
     }
 
     /// Emit a jump opcode whose target is already known (for backward jumps,
     /// e.g. while-loop continue or for-loop back edge). `resolve_labels`
     /// lowers these to relative `goto8`/`goto16`.
-    fn emitBackwardJump(s: *State, op_id: u8, target: u32) Error!void {
-        var bytes: [5]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], target, .little);
-        try s.emitOpcodeBytesNoSource(&bytes);
-        s.noteEmittedLabelOperand(target);
-    }
-
-    fn emitBackwardJumpNoSource(s: *State, op_id: u8, target: u32) Error!void {
-        var bytes: [5]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], target, .little);
-        try s.emitOpcodeBytesNoSource(&bytes);
-        s.noteEmittedLabelOperand(target);
-    }
-
     const ParserPhaseInstruction = struct {
         size: u8,
         is_temp: bool = false,
@@ -8513,11 +8203,6 @@ pub const parser_core = struct {
         std.debug.assert(atom_index == atoms.len);
     }
 
-    fn rebaseMovedBytecodeLabels(code: []u8, atoms: []const Atom, old_base: usize, new_base: usize) Error!void {
-        try validateMovedBytecodeLabels(code, atoms, old_base, new_base);
-        rebaseMovedBytecodeLabelsAssumeValidated(code, atoms, old_base, new_base);
-    }
-
     fn pushBreakFrame(s: *State) Error!void {
         try s.break_frame_lens.append(s.function.memory.allocator, s.break_fixups.items.len);
         try s.continue_frame_lens.append(s.function.memory.allocator, s.continue_fixups.items.len);
@@ -8612,11 +8297,6 @@ pub const parser_core = struct {
         }
     }
 
-    fn emitCatchMarkerDropsToDepth(s: *State, target_depth: u32) Error!void {
-        var current_depth = s.active_catch_marker_depth;
-        try emitCatchMarkerDropsFromDepth(s, &current_depth, target_depth);
-    }
-
     fn emitUsingDisposesForCatchMarkerDepth(s: *State, depth: u32) Error!void {
         var i = s.using_block_frames.items.len;
         while (i != 0) {
@@ -8649,21 +8329,6 @@ pub const parser_core = struct {
         for (s.continue_frame_cleanup_drops.items) |*drops| {
             if (drops.* != shared_iterator_close_marker and drops.* != direct_iterator_close_marker and drops.* > 0) drops.* -= 1;
         }
-    }
-
-    fn emitActiveIteratorCloses(s: *State) Error!void {
-        var index = s.break_frame_cleanup_drops.items.len;
-        while (index != 0) {
-            index -= 1;
-            try emitCrossFrameCleanup(s, s.break_frame_cleanup_drops.items[index]);
-        }
-    }
-
-    fn hasActiveIteratorCloses(s: *State) bool {
-        for (s.break_frame_cleanup_drops.items) |drops| {
-            if (drops != 0) return true;
-        }
-        return false;
     }
 
     fn expressionStatementKeepsCompletion(s: *const State) bool {
@@ -8783,14 +8448,6 @@ pub const parser_core = struct {
         if (isLiveCode(s)) try s.emitReturnUndefined();
     }
 
-    fn lastOpcode(code: []const u8, atoms: []const Atom) ?u8 {
-        return lastParserPhaseOpcode(code, atoms, false);
-    }
-
-    fn lastNonCleanupOpcode(code: []const u8, atoms: []const Atom) ?u8 {
-        return lastParserPhaseOpcode(code, atoms, true);
-    }
-
     fn lastParserPhaseOpcode(code: []const u8, atoms: []const Atom, skip_cleanup: bool) ?u8 {
         var pc: usize = 0;
         var atom_index: usize = 0;
@@ -8869,47 +8526,14 @@ pub const parser_core = struct {
     /// Statement-local variant used by `isLiveCode`. Tagged parser labels may
     /// name handlers emitted later and therefore are not incoming edges to the
     /// current merge; already-patched absolute loop/branch exits are.
-    fn hasAbsoluteJumpToCurrentEnd(code: []const u8, atoms: []const Atom) bool {
-        const tail_start = trailingCleanupStart(code, atoms);
-        var pc: usize = 0;
-        var atom_index: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
-            const size: usize = instr.size;
-            if (size == 0 or pc + size > code.len) return true;
-            if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
-                const target = std.mem.readInt(u32, code[offset..][0..4], .little);
-                if ((target & opcode.op.parser_label_tag) == 0 and target >= tail_start) return true;
-            }
-            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += size;
-        }
-        return false;
-    }
-
     /// Straight-line liveness only: does the fall-through path need an
     /// implicit `return_undef`? Jump-to-end reachability is the caller's
     /// separate `hasJumpToCurrentEnd` OR — a body whose last real op is a
     /// terminator can still be entered at its end by a finished-construct
     /// jump (if/else arm, break), and that path needs a landing terminator.
     /// Summary-backed equivalent of `functionNeedsImplicitReturn`.
-    fn flowNeedsImplicitReturn(ft: *const bytecode.FlowTailSummary) bool {
-        const op_id = ft.last_non_cleanup_op orelse return true;
-        return switch (op_id) {
-            opcode.op.@"return",
-            opcode.op.return_undef,
-            opcode.op.return_async,
-            opcode.op.tail_call,
-            opcode.op.tail_call_method,
-            opcode.op.throw,
-            => false,
-            else => true,
-        };
-    }
-
     pub fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
-        const op_id = lastNonCleanupOpcode(code, atoms) orelse return true;
+        const op_id = lastParserPhaseOpcode(code, atoms, true) orelse return true;
         return switch (op_id) {
             opcode.op.@"return",
             opcode.op.return_undef,
@@ -9377,7 +9001,6 @@ pub const parser_core = struct {
         errdefer s.popScopeIdentity();
         try parseDirectives(s);
         try parseBlockContentsAfterOpen(s);
-        s.finishFunctionBody();
     }
 
     /// Mirror the directive-prologue portion of `js_parse_directives`
@@ -10939,21 +10562,6 @@ pub const parser_core = struct {
         };
     }
 
-    fn controlTargetCrossesFinallyBody(s: *State, target: FinallyControlTarget, frame_index: usize) Error!bool {
-        const frame = s.finally_body_control_frames.items[frame_index];
-        if (target.label_atom) |atom_id| {
-            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.ParserInvariant;
-            if (target.kind == .@"continue" and !s.label_frames.items[label_frame_index].allow_continue) {
-                return Error.ParserInvariant;
-            }
-            return label_frame_index < frame.label_depth;
-        }
-        return switch (target.kind) {
-            .@"break" => s.break_frame_lens.items.len <= frame.break_depth,
-            .@"continue" => s.continue_frame_lens.items.len <= frame.continue_depth,
-        };
-    }
-
     /// Parse the syntactic finalizer once. Its BlockEnv is the ordered seam
     /// used by return/control walkers to discard the completion and gosub PC
     /// only when an abrupt completion crosses out of this body.
@@ -11165,26 +10773,6 @@ pub const parser_core = struct {
         }
     }
 
-    fn emitCapturedControlThroughFinally(s: *State, target: FinallyControlTarget) Error!bool {
-        var frame_index = s.return_finally_frames.items.len;
-        while (frame_index != 0) {
-            frame_index -= 1;
-            if (try controlTargetCrossesFinallyFrame(s, target, frame_index)) {
-                try emitControlThroughFinally(s, target);
-                return true;
-            }
-        }
-        var body_index = s.finally_body_control_frames.items.len;
-        while (body_index != 0) {
-            body_index -= 1;
-            if (try controlTargetCrossesFinallyBody(s, target, body_index)) {
-                try emitControlThroughFinally(s, target);
-                return true;
-            }
-        }
-        return false;
-    }
-
     const ResolvedFinallyControlTarget = struct {
         depth: usize,
         catch_marker_depth: u32,
@@ -11377,30 +10965,6 @@ pub const parser_core = struct {
 
     fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
         try s.publishParserLabelTarget(operand_offset, target);
-    }
-
-    fn patchAbsoluteTarget(s: *State, operand_offset: usize) Error!void {
-        try s.publishParserLabelTarget(operand_offset, @intCast(s.currentCodeLen()));
-        s.invalidateLastOpcode();
-    }
-
-    fn relocateMovedJumpTargets(code: []u8, old_start: usize, new_start: usize) Error!void {
-        if (new_start == old_start) return;
-        const old_end = old_start + code.len;
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size: usize = @intCast(opcode.sizeOf(op_id));
-            if (size == 0 or pc + size > code.len) return;
-            if (op_id == opcode.op.if_false or op_id == opcode.op.if_true or op_id == opcode.op.goto) {
-                const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (target >= old_start and target <= old_end) {
-                    const shifted = new_start + (@as(usize, @intCast(target)) - old_start);
-                    std.mem.writeInt(u32, code[pc + 1 ..][0..4], @intCast(shifted), .little);
-                }
-            }
-            pc += size;
-        }
     }
 
     /// Mirror `js_parse_var` (`quickjs.c:27847`).
@@ -11970,98 +11534,6 @@ pub const parser_core = struct {
             pushed_for_scope = false;
         }
     }
-    fn arrayPatternContainsNestedBindingPattern(s: *State) Error!bool {
-        const snapshot = try takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        try s.expectToken('[');
-        var depth: usize = 0;
-        while (true) {
-            const k = s.peekKind();
-            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
-            if (depth == 0 and k == ']') return false;
-            if (depth == 0 and (k == '[' or k == '{')) return true;
-            if (depth == 0 and k == tok.TOK_ELLIPSIS) {
-                try s.advance();
-                const rest_target = s.peekKind();
-                if (rest_target == '[' or rest_target == '{') return true;
-                continue;
-            }
-            if (k == '[' or k == '{' or k == '(') depth += 1;
-            if (k == ']' or k == '}' or k == ')') {
-                if (depth == 0) return false;
-                depth -= 1;
-            }
-            try s.advance();
-        }
-    }
-
-    fn arrayPatternContainsNestedAssignmentPattern(s: *State) Error!bool {
-        const snapshot = try takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        try s.expectToken('[');
-        while (s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
-            if (s.peekKind() == ',') {
-                try s.advance();
-                continue;
-            }
-            var is_rest = false;
-            if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                is_rest = true;
-                try s.advance();
-            }
-            if (s.peekKind() == '[') return true;
-            if (s.peekKind() == '{') {
-                try skipBalancedPatternElement(s);
-                if (s.peekKind() == '.' or s.peekKind() == '[') return false;
-                return true;
-            }
-            if (s.peekKind() == tok.TOK_THIS) return true;
-            if (is_rest) return false;
-            while (s.peekKind() != ',' and s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
-                if (s.peekKind() == '=') {
-                    try skipInitializerInBindingPattern(s);
-                    break;
-                }
-                try s.advance();
-            }
-            if (s.peekKind() == ',') try s.advance();
-        }
-        if (s.peekKind() == tok.TOK_EOF) return s.failUnexpectedToken();
-        return false;
-    }
-
-    fn skipBalancedPatternElement(s: *State) Error!void {
-        var depth: usize = 0;
-        while (true) {
-            const k = s.peekKind();
-            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
-            if (k == '[' or k == '{' or k == '(') depth += 1;
-            if (k == ']' or k == '}' or k == ')') {
-                if (depth == 0) return;
-                depth -= 1;
-                try s.advance();
-                if (depth == 0) return;
-                continue;
-            }
-            try s.advance();
-        }
-    }
-
-    fn skipInitializerInBindingPattern(s: *State) Error!void {
-        var depth: usize = 0;
-        while (true) {
-            const k = s.peekKind();
-            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
-            if (depth == 0 and (k == ',' or k == ']' or k == '}')) return;
-            if (k == '[' or k == '{' or k == '(') depth += 1;
-            if (k == ']' or k == '}' or k == ')') {
-                if (depth == 0) return;
-                depth -= 1;
-            }
-            try s.advance();
-        }
-    }
-
     /// Parse function declaration
     /// Mirrors `js_parse_function_decl` in quickjs.c:36388
     fn parseFunctionDecl(s: *State, func_kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
@@ -12231,12 +11703,6 @@ pub const parser_core = struct {
         s.pending_function_is_decl = true;
         s.pending_function_export_default = true;
         try parseFunctionParamsAndBody(s, actual_kind, source_start);
-    }
-
-    /// Parse function parameters and body
-    /// Shared by function declarations, expressions, and methods
-    fn deinitParserList(comptime T: type, s: *State, list: *std.ArrayList(T)) void {
-        list.deinit(s.function.memory.allocator);
     }
 
     fn appendOwnedParserAtom(s: *State, list: *std.ArrayList(Atom), atom_id: Atom) Error!void {
@@ -13503,7 +12969,6 @@ pub const parser_core = struct {
             try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
             // qjs arrow expression body (quickjs.c:31831-31834): terminate with return_async or return.
             try Emitter.op(s, if (is_async) opcode.op.return_async else opcode.op.@"return");
-            s.finishFunctionBody();
         }
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
@@ -13537,8 +13002,6 @@ pub const parser_core = struct {
             try Emitter.opAtom(s, opcode.op.set_name, atom_module.null_atom);
         }
     }
-
-    const DestructuringKind = enum { array, object };
 
     const PatternBindingMode = struct {
         define_type: State.DefineVarType,
@@ -14551,10 +14014,6 @@ pub const parser_core = struct {
             if (vars[i].var_name == atom_id and vars[i].scope_level == s.scope_level) return @intCast(i);
         }
         return null;
-    }
-
-    fn appendTempLocal(s: *State) Error!u16 {
-        return try appendAnonymousTempLocal(s);
     }
 
     fn appendAnonymousTempLocal(s: *State) Error!u16 {
@@ -16870,9 +16329,8 @@ pub const compile_entry = struct {
         function_bytecode: *bytecode.FunctionBytecode,
         record: bytecode.module.Record,
 
-        pub fn deinit(self: *ModuleArtifactImpl, runtime: *JSRuntime) void {
+        pub fn deinit(self: *ModuleArtifactImpl) void {
             self.record.deinit();
-            JSValue.functionBytecode(&self.function_bytecode.header).free(runtime);
         }
     };
 
@@ -16886,7 +16344,6 @@ pub const compile_entry = struct {
     };
 
     const ResultImpl = struct {
-        runtime: *JSRuntime,
         artifact: RootArtifactImpl = .none,
         mode: ModeImpl,
         parse_path: CompilePathImpl = .normal,
@@ -16897,11 +16354,10 @@ pub const compile_entry = struct {
         pub fn deinit(self: *ResultImpl) void {
             if (self.syntax_error) |*err| err.deinit();
             switch (self.artifact) {
-                .none => {},
-                .function_bytecode => |fb| JSValue.functionBytecode(&fb.header).free(self.runtime),
+                .none, .function_bytecode => {},
                 .module => |owned| {
                     var artifact = owned;
-                    artifact.deinit(self.runtime);
+                    artifact.deinit();
                 },
             }
             self.artifact = .none;
@@ -17135,21 +16591,6 @@ pub const compile_entry = struct {
         return function;
     }
 
-    fn atomStrongRefTotal(rt: *const JSRuntime) usize {
-        var total: usize = 0;
-        for (rt.atoms.entries) |entry| total +|= entry.strongRefCount();
-        return total;
-    }
-
-    fn modeName(mode: ModeImpl) []const u8 {
-        return switch (mode) {
-            .script => "script",
-            .module => "module",
-            .eval_direct => "eval_direct",
-            .eval_indirect => "eval_indirect",
-        };
-    }
-
     pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
         const rt = compile_context.realm.runtime;
         var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
@@ -17159,6 +16600,17 @@ pub const compile_entry = struct {
         const original_allocator = rt.memory.allocator;
         rt.memory.allocator = arena.allocator();
         defer rt.memory.allocator = original_allocator;
+
+        // TGC S3-b §2.2: interval root for every atom the front end obtains.
+        // The whole chain -- filename atom, lexer tokens, FunctionDef tables,
+        // builder/resolve_* passes, up to the published FunctionBytecode --
+        // parks its ids in plain `u32` fields no scan can see, so the scope is
+        // opened here (before the first intern) and closed only after the
+        // artifact that carries its own tracer edges exists. Recording is
+        // ambient (`AtomTable.compile_scope`), so no call site changes.
+        var atom_scope = atom.CompileAtomScope.init(&rt.atoms);
+        defer atom_scope.deinit();
+        try atom_scope.activate();
 
         const filename_atom = try rt.internAtom(options.filename);
         defer rt.atoms.free(filename_atom);
@@ -17174,7 +16626,6 @@ pub const compile_entry = struct {
         if (lexer_mod.shouldStrip(options.source_kind, options.filename)) {
             if (try lexer_mod.findUnsupportedTypeScriptSyntax(rt.memory.allocator, source)) |unsupported| {
                 var result = ResultImpl{
-                    .runtime = rt,
                     .mode = options.mode,
                     .direct_eval = options.mode == .eval_direct,
                 };
@@ -17206,7 +16657,6 @@ pub const compile_entry = struct {
             // qjs:libregexp.c:1391/2411 and quickjs.c:22836 js_parse_error "stack overflow"
             error.StackOverflow => {
                 var result = ResultImpl{
-                    .runtime = rt,
                     .mode = options.mode,
                     .direct_eval = options.mode == .eval_direct,
                 };
@@ -17223,7 +16673,6 @@ pub const compile_entry = struct {
             },
             else => {
                 var result = ResultImpl{
-                    .runtime = rt,
                     .mode = options.mode,
                     .direct_eval = options.mode == .eval_direct,
                 };
@@ -17241,11 +16690,7 @@ pub const compile_entry = struct {
                 return result;
             },
         };
-        var canonical_root_owned = true;
-        errdefer if (canonical_root_owned) JSValue.functionBytecode(&canonical_root.header).free(rt);
-
         var result = ResultImpl{
-            .runtime = rt,
             .mode = options.mode,
             .direct_eval = options.mode == .eval_direct,
             .features = features,
@@ -17260,7 +16705,6 @@ pub const compile_entry = struct {
         } else {
             result.artifact = .{ .function_bytecode = canonical_root };
         }
-        canonical_root_owned = false;
         function.deinit(rt);
         function_owned = false;
         arena.deinit();
@@ -17290,6 +16734,8 @@ pub const compile_entry = struct {
         }
         var state = try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
         defer state.deinit(rt);
+        // TGC S3-b: the parse's own interval root, nested inside `compile`'s.
+        try state.activateAtomScope();
         errdefer pending_diagnostic.* = state.pending_diagnostic;
         state.is_strict = options.mode == .module or effective_strict;
         // QuickJS creates the root program FunctionDef as eval bytecode for all

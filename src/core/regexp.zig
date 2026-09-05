@@ -217,22 +217,14 @@ pub fn isCharacterClassEscape(byte: u8) bool {
 
 fn characterClassEscapeUnitMatches(byte: u8, unit: u16) ?bool {
     return switch (byte) {
-        'd' => isAsciiDigitUnit(unit),
-        'D' => !isAsciiDigitUnit(unit),
+        'd' => unicode.isAsciiDigitUnit(unit),
+        'D' => !unicode.isAsciiDigitUnit(unit),
         's' => unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit),
         'S' => !unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit),
-        'w' => isAsciiWordUnit(unit),
-        'W' => !isAsciiWordUnit(unit),
+        'w' => unicode.isAsciiWordUnit(unit),
+        'W' => !unicode.isAsciiWordUnit(unit),
         else => null,
     };
-}
-
-fn isAsciiDigitUnit(unit: u16) bool {
-    return unicode.isAsciiDigitUnit(unit);
-}
-
-fn isAsciiWordUnit(unit: u16) bool {
-    return unicode.isAsciiWordUnit(unit);
 }
 
 /// Advances `index` past a `\p{...}` / `\P{...}` Unicode-property escape,

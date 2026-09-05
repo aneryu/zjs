@@ -11,7 +11,6 @@
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const core_array = @import("../core/array.zig");
-const unicode = @import("../libs/unicode.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
@@ -100,16 +99,6 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "values")) return @intFromEnum(PrototypeMethod.values);
     if (std.mem.eql(u8, name, "entries")) return @intFromEnum(PrototypeMethod.entries);
     return null;
-}
-
-// Pure native-id -> legacy-id mapping relocated to engine core
-// (`core/host_function.zig`, next to `builtin_method_ids.array`) in Phase
-// 6b-3c; re-exported here so the dispatch/install side keeps the original name.
-pub const decodePrototypeMethodId = core.host_function.builtin_method_id_lookup.array.decodePrototypeMethodId;
-
-pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
-    const native_id = prototypeMethodId(name) orelse return null;
-    return decodePrototypeMethodId(native_id);
 }
 
 /// Most Array records use `arrayCall`, which switches on the per-record `magic`
@@ -598,7 +587,6 @@ pub fn join(rt: *core.JSRuntime, array_value: core.JSValue, separator_value: cor
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.appendSlice(rt.memory.allocator, separator.items);
         const item = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         if (!item.isUndefined() and !item.isNull()) try appendValueString(rt, &buffer, item);
     }
     return createStringValue(rt, buffer.items);
@@ -707,7 +695,7 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
     const prototype = try expectObject(prototype_value);
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, prototype);
     errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
-    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), receiver.dup());
+    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), receiver);
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = @intFromEnum(kind);
     return iterator.value();
@@ -720,15 +708,12 @@ test "realm-aware primitive array iterator reuses the final realm prototype" {
     defer realm.destroy();
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
-    defer prototype.value().free(rt);
     const prototype_slot: usize = core.class.ids.array_iterator;
-    realm.class_prototypes[prototype_slot] = prototype.value().dup();
+    realm.class_prototypes[prototype_slot] = prototype.value();
 
     const array = try core.Object.createArray(rt, null);
-    defer array.value().free(rt);
     try std.testing.expectError(error.InvalidBuiltinRegistry, methodCall(rt, array.value(), 17, &.{}));
     const iterator_value = try methodCallInRealm(realm, array.value(), 17, &.{});
-    defer iterator_value.free(rt);
     const iterator = try expectObject(iterator_value);
 
     try std.testing.expectEqual(prototype, iterator.getPrototype().?);
@@ -761,7 +746,6 @@ fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kin
             const pair = try core.Object.createArray(rt, null);
             errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
             const value = if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index));
-            defer value.free(rt);
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value, true, true, true));
             break :blk pair.value();
@@ -773,9 +757,7 @@ fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kin
 /// arm carries no realm handle, so the result has no prototype — the live
 /// array iterator runs through `iterator_ops.arrayIteratorNext`, which does.
 fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
-    var rooted_value = value;
-    defer rooted_value.free(rt);
-    return iterator_ops.createIteratorResult(rt, null, rooted_value, done);
+    return iterator_ops.createIteratorResult(rt, null, value, done);
 }
 
 test "array iteratorResult roots direct function bytecode value while creating result" {
@@ -786,34 +768,25 @@ test "array iteratorResult roots direct function bytecode value while creating r
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var result_value = core.JSValue.functionBytecode(&fb.header);
-    var result_alive = true;
-    defer if (result_alive) result_value.free(rt);
+    const result_value = core.JSValue.functionBytecode(&fb.header);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const iterator_result_value = try iteratorResult(rt, result_value.dup(), false);
-    var iterator_result_alive = true;
-    defer if (iterator_result_alive) iterator_result_value.free(rt);
+    const iterator_result_value = try iteratorResult(rt, result_value, false);
     const iterator_result = objectFromValue(iterator_result_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
         const stored = try iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
-        defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
 
-    iterator_result_value.free(rt);
-    iterator_result_alive = false;
-    result_value.free(rt);
-    result_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -824,8 +797,6 @@ test "array splice roots direct function bytecode insert values while creating r
 
     const array = try core.Object.createArray(rt, null);
     const array_value = array.value();
-    var array_alive = true;
-    defer if (array_alive) array_value.free(rt);
 
     const first_fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var first_fb_published = false;
@@ -845,12 +816,8 @@ test "array splice roots direct function bytecode insert values while creating r
     second_fb.publishFixtureNoFail(rt);
     second_fb_published = true;
 
-    var first_value = core.JSValue.functionBytecode(&first_fb.header);
-    var first_alive = true;
-    defer if (first_alive) first_value.free(rt);
-    var second_value = core.JSValue.functionBytecode(&second_fb.header);
-    var second_alive = true;
-    defer if (second_alive) second_value.free(rt);
+    const first_value = core.JSValue.functionBytecode(&first_fb.header);
+    const second_value = core.JSValue.functionBytecode(&second_fb.header);
     const args = [_]core.JSValue{
         core.JSValue.int32(0),
         core.JSValue.int32(0),
@@ -862,29 +829,16 @@ test "array splice roots direct function bytecode insert values while creating r
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const removed_value = try splice(rt, array_value, &args);
-    var removed_alive = true;
-    defer if (removed_alive) removed_value.free(rt);
+    _ = try splice(rt, array_value, &args);
 
     try std.testing.expect(rt.atoms.name(first_symbol) != null);
     try std.testing.expect(rt.atoms.name(second_symbol) != null);
     {
         const stored_first = try array.getProperty(core.atom.atomFromUInt32(0));
-        defer stored_first.free(rt);
         try std.testing.expect(stored_first.same(first_value));
         const stored_second = try array.getProperty(core.atom.atomFromUInt32(1));
-        defer stored_second.free(rt);
         try std.testing.expect(stored_second.same(second_value));
     }
-
-    removed_value.free(rt);
-    removed_alive = false;
-    first_value.free(rt);
-    first_alive = false;
-    second_value.free(rt);
-    second_alive = false;
-    array_value.free(rt);
-    array_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(first_symbol) == null);
@@ -899,13 +853,11 @@ test "array constructWithPrototype roots direct function bytecode elements while
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var element_value = core.JSValue.functionBytecode(&fb.header);
-    var element_alive = true;
-    defer if (element_alive) element_value.free(rt);
+    const element_value = core.JSValue.functionBytecode(&fb.header);
     const values = [_]core.JSValue{element_value};
 
     const old_threshold = rt.gcThreshold();
@@ -913,21 +865,13 @@ test "array constructWithPrototype roots direct function bytecode elements while
     defer rt.setGCThreshold(old_threshold);
 
     const array_value = try constructWithPrototype(rt, &values, null);
-    var array_alive = true;
-    defer if (array_alive) array_value.free(rt);
     const array = try expectArray(array_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
         const stored = try array.getProperty(core.atom.atomFromUInt32(0));
-        defer stored.free(rt);
         try std.testing.expect(stored.same(element_value));
     }
-
-    array_value.free(rt);
-    array_alive = false;
-    element_value.free(rt);
-    element_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -939,20 +883,16 @@ test "array concat roots direct function bytecode argument while creating output
 
     const receiver = try core.Object.createArray(rt, null);
     const receiver_value = receiver.value();
-    var receiver_alive = true;
-    defer if (receiver_alive) receiver_value.free(rt);
 
     const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var arg_value = core.JSValue.functionBytecode(&fb.header);
-    var arg_alive = true;
-    defer if (arg_alive) arg_value.free(rt);
+    const arg_value = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{arg_value};
 
     const old_threshold = rt.gcThreshold();
@@ -960,23 +900,13 @@ test "array concat roots direct function bytecode argument while creating output
     defer rt.setGCThreshold(old_threshold);
 
     const out_value = try concat(rt, receiver_value, &args);
-    var out_alive = true;
-    defer if (out_alive) out_value.free(rt);
     const out = try expectArray(out_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
         const stored = try out.getProperty(core.atom.atomFromUInt32(0));
-        defer stored.free(rt);
         try std.testing.expect(stored.same(arg_value));
     }
-
-    out_value.free(rt);
-    out_alive = false;
-    arg_value.free(rt);
-    arg_alive = false;
-    receiver_value.free(rt);
-    receiver_alive = false;
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -990,7 +920,6 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         if (item.asInt32()) |n| {
             if (@mod(n, 2) == 0) {
                 try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
@@ -1001,37 +930,34 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     return out.value();
 }
 
-fn reduceSum(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
+fn reduceSum(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var sum: i32 = 0;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         sum += item.asInt32() orelse 0;
     }
     return core.JSValue.int32(sum);
 }
 
-fn someEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
+fn someEven(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var found = false;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         if (item.asInt32()) |n| found = found or @mod(n, 2) == 0;
     }
     return core.JSValue.boolean(found);
 }
 
-fn everyPositive(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
+fn everyPositive(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     var ok = true;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         if ((item.asInt32() orelse 0) <= 0) ok = false;
     }
     return core.JSValue.boolean(ok);
@@ -1073,7 +999,6 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         if (valuesEqual(item, needle)) {
             found_index = @intCast(index);
             if (mode != .last) break;
@@ -1119,7 +1044,6 @@ fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSVal
     var index: u32 = @intCast(start);
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
         out_index += 1;
     }
@@ -1141,11 +1065,9 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     var i: u32 = 0;
     while (i < delete_count) : (i += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(start + i));
-        defer item.free(rt);
         try removed.defineOwnProperty(rt, core.atom.atomFromUInt32(i), core.Descriptor.data(item, true, true, true));
     }
     const tail = try array.getProperty(core.atom.atomFromUInt32(start + delete_count));
-    defer tail.free(rt);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start), core.Descriptor.data(insert_a, true, true, true));
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 1), core.Descriptor.data(insert_b, true, true, true));
     if (!tail.isUndefined()) try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 2), core.Descriptor.data(tail, true, true, true));
@@ -1193,7 +1115,7 @@ fn rewriteReversedPair(
 /// (`quickjs.c:42497-42547`) for ordinary arrays.
 fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
-    if (array.arrayLength() <= 1) return array_value.dup();
+    if (array.arrayLength() <= 1) return array_value;
 
     var lower: u32 = 0;
     var upper: u32 = array.arrayLength() - 1;
@@ -1204,9 +1126,7 @@ fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
         const lower_key = core.atom.atomFromUInt32(lower);
         const upper_key = core.atom.atomFromUInt32(upper);
         const lower_value = try array.getProperty(lower_key);
-        defer lower_value.free(rt);
         const upper_value = try array.getProperty(upper_key);
-        defer upper_value.free(rt);
 
         if (comptime core.runtime.value_root_frames_enabled) {
             // Delete drops the heap edges; CLI STW does not list-link scalar
@@ -1221,7 +1141,7 @@ fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
             try rewriteReversedPair(rt, array, lower_key, upper_key, lower_value, upper_value);
         }
     }
-    return array_value.dup();
+    return array_value;
 }
 
 const SortEntry = struct {
@@ -1239,7 +1159,6 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     var entries = std.ArrayList(SortEntry).empty;
     defer {
         for (entries.items) |entry| {
-            entry.value.free(rt);
             rt.memory.allocator.free(entry.key);
         }
         entries.deinit(rt.memory.allocator);
@@ -1249,11 +1168,8 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     while (index < array.arrayLength()) : (index += 1) {
         const value = try array.getProperty(core.atom.atomFromUInt32(index));
         if (value.isUndefined()) {
-            value.free(rt);
             continue;
         }
-        var value_owned = true;
-        errdefer if (value_owned) value.free(rt);
 
         var key_buffer = std.ArrayList(u8).empty;
         defer key_buffer.deinit(rt.memory.allocator);
@@ -1263,7 +1179,6 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
         errdefer if (key_owned) rt.memory.allocator.free(key);
 
         try entries.append(rt.memory.allocator, .{ .value = value, .key = key });
-        value_owned = false;
         key_owned = false;
     }
 
@@ -1282,11 +1197,11 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     // the in-flight JSValues until they are redefined onto the array.
     if (comptime core.runtime.value_root_frames_enabled) {
         try rewriteSortedArrayRooted(rt, array, entries.items);
-        return array_value.dup();
+        return array_value;
     }
 
     try rewriteSortedArray(rt, array, entries.items);
-    return array_value.dup();
+    return array_value;
 }
 
 fn rewriteSortedArray(rt: *core.JSRuntime, array: *core.Object, entries: []const SortEntry) !void {
@@ -1352,7 +1267,6 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {
                 const item = try object.getProperty(core.atom.atomFromUInt32(index));
-                defer item.free(rt);
                 if (!item.isUndefined()) {
                     try out.defineOwnProperty(rt, core.atom.atomFromUInt32(next_index.*), core.Descriptor.data(item, true, true, true));
                 }
@@ -1383,7 +1297,6 @@ fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) !u32 {
     if (object.isArray()) return object.arrayLength();
     if (buffer_ops.isTypedArrayObject(object)) return buffer_ops.typedArrayLength(rt, object) catch 0;
     const length = try object.getProperty(core.atom.ids.length);
-    defer length.free(rt);
     return @intCast(length.asInt32() orelse 0);
 }
 

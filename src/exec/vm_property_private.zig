@@ -42,12 +42,9 @@ pub fn getPrivateField(
     frame: *frame_mod.Frame,
 ) !void {
     const key = try stack.pop();
-    defer key.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     const atom_id = try privateFieldAtom(ctx, global, frame, obj, key);
     const value = try object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
-    errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
 
@@ -76,14 +73,10 @@ pub fn putPrivateField(
     frame: *frame_mod.Frame,
 ) !void {
     const key = try stack.pop();
-    defer key.free(ctx.runtime);
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const obj = try stack.pop();
-    defer obj.free(ctx.runtime);
     const atom_id = try privateFieldAtom(ctx, global, frame, obj, key);
-    const result = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
-    result.free(ctx.runtime);
+    _ = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
 }
 
 pub noinline fn putPrivateFieldVm(
@@ -111,11 +104,8 @@ pub fn definePrivateField(
     frame: *frame_mod.Frame,
 ) !void {
     const value = try stack.pop();
-    defer value.free(ctx.runtime);
     const key = try stack.pop();
-    defer key.free(ctx.runtime);
     const obj = stack.peek() orelse return error.StackUnderflow;
-    defer obj.free(ctx.runtime);
     const atom_id = try privateFieldAtom(ctx, global, frame, obj, key);
     const object = try property_ops.expectObject(obj);
     try object_ops.defineClassFieldDataProperty(ctx.runtime, object, atom_id, value);

@@ -2,9 +2,6 @@
 const std = @import("std");
 const NameList = @import("run_test262_names.zig").NameList;
 const BoundedFeatureOverrides = @import("run_test262_options.zig").BoundedFeatureOverrides;
-pub const Error = error{
-    ConfigParse,
-};
 
 pub const LoadedConfig = struct {
     testdir: ?[]const u8 = null,

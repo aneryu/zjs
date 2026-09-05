@@ -20,11 +20,9 @@ pub const ExceptionSlot = struct {
         self.value = value;
     }
 
-    pub fn clear(self: *ExceptionSlot, rt: anytype) void {
+    pub fn clear(self: *ExceptionSlot, _: anytype) void {
         if (self.hasException()) {
-            const old_value = self.value;
             self.value = JSValue.uninitialized();
-            old_value.free(rt);
         }
     }
 

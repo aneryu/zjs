@@ -94,7 +94,6 @@ fn jsonRawJsonCall(
     std.debug.assert(realm.realm == host_call.ctx);
     const value = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
     var owned_input: ?core.JSValue = null;
-    defer if (owned_input) |input| input.free(host_call.ctx.runtime);
     const input = if (!value.isString()) input: {
         owned_input = try string_ops.toStringForAnnexB(host_call.ctx, host_call.output, realm.global, value, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
         break :input owned_input.?;
@@ -156,8 +155,12 @@ pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValu
 
     if (rooted_value.isUndefined()) return core.JSValue.undefinedValue();
 
-    const property_list = try stringifyPropertyList(rt, rooted_replacer);
+    var property_list = try stringifyPropertyList(rt, rooted_replacer);
     defer freePropertyList(rt, property_list);
+    // TGC S3 §4 class B: a native []Atom held across toJSON/replacer calls.
+    var property_list_roots = core.runtime.rootAtomList(&property_list);
+    property_list_roots.activate(rt);
+    defer property_list_roots.deactivate(rt);
     var gap = try stringifyGap(rt, rooted_space);
     defer gap.deinit(rt.memory.allocator);
     const options = StringifyOptions{ .property_list = property_list, .has_property_list = isArrayObject(rooted_replacer), .gap = gap.items };
@@ -200,9 +203,7 @@ pub const JsonParseWithRecord = struct {
 
     fn deinit(self: *JsonParseWithRecord, rt: *core.JSRuntime) void {
         self.record.deinit(rt);
-        const owned = self.value;
         self.value = core.JSValue.undefinedValue();
-        owned.free(rt);
     }
 };
 
@@ -230,7 +231,6 @@ pub fn parseWithRecord(rt: *core.JSRuntime, global: ?*core.Object, value: core.J
     defer bytes.deinit(rt.memory.allocator);
     try appendJsonInputString(rt, &bytes, rooted_value);
     const text = try core.string.String.createUtf8(rt, bytes.items);
-    defer text.value().free(rt);
     try text.ensureFlat(rt);
     return switch (text.resolveData()) {
         .latin1 => |latin1| jsonParseFullWithRecord(u8, rt, global, latin1),
@@ -245,7 +245,6 @@ fn jsonParseFullWithRecord(comptime T: type, rt: *core.JSRuntime, global: ?*core
     const value = try parser.parseValueRecord(&record);
     errdefer {
         record.deinit(rt);
-        value.free(rt);
     }
     parser.skipWhitespace();
     if (parser.index != parser.units.len) return error.SyntaxError;
@@ -256,7 +255,6 @@ fn jsonParseFullWithRecord(comptime T: type, rt: *core.JSRuntime, global: ?*core
 /// parse its code units through the same faithful walk.
 fn jsonParseFullFromBytes(rt: *core.JSRuntime, global: ?*core.Object, bytes: []const u8) !core.JSValue {
     const text = try core.string.String.createUtf8(rt, bytes);
-    defer text.value().free(rt);
     try text.ensureFlat(rt);
     return switch (text.resolveData()) {
         .latin1 => |latin1| jsonParseFull(u8, rt, global, latin1),
@@ -275,7 +273,6 @@ fn jsonParseFull(comptime T: type, rt: *core.JSRuntime, global: ?*core.Object, u
     var parser = JsonUnitParser(T){ .rt = rt, .global = global, .units = units };
     parser.skipWhitespace();
     const value = try parser.parseValue();
-    errdefer value.free(rt);
     parser.skipWhitespace();
     if (parser.index != parser.units.len) return error.SyntaxError;
     return value;
@@ -350,16 +347,13 @@ const JsonParseRecord = union(enum) {
     fn deinit(self: *JsonParseRecord, rt: *core.JSRuntime) void {
         switch (self.*) {
             .primitive => |*p| {
-                p.value.free(rt);
                 if (p.source.len != 0) rt.memory.allocator.free(p.source);
             },
             .array => |*a| {
-                a.value.free(rt);
                 for (a.elements) |*element| element.deinit(rt);
                 rt.memory.allocator.free(a.elements);
             },
             .object => |*o| {
-                o.value.free(rt);
                 for (o.entries) |*entry| {
                     rt.atoms.free(entry.atom);
                     entry.record.deinit(rt);
@@ -460,9 +454,8 @@ fn JsonUnitParser(comptime T: type) type {
             // the code units [start, index); for strings this includes the
             // enclosing quotes, matching qjs's s->token.ptr..s->buf_ptr.
             if (record) |slot| {
-                errdefer value.free(self.rt);
                 const source = try self.recordSourceSpan(start, self.index);
-                slot.* = .{ .primitive = .{ .value = value.dup(), .source = source } };
+                slot.* = .{ .primitive = .{ .value = value, .source = source } };
             }
             return value;
         }
@@ -492,9 +485,7 @@ fn JsonUnitParser(comptime T: type) type {
             root_frame.activate(self.rt);
             defer root_frame.deactivate(self.rt);
             errdefer {
-                const failed = object_value;
                 object_value = core.JSValue.undefinedValue();
-                failed.free(self.rt);
             }
             // json_parse_record_init_obj (quickjs.c:49508): the object record
             // caches the object value plus one entry per key OCCURRENCE (dup keys
@@ -510,7 +501,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.skipWhitespace();
             if (self.peek() == @as(T, '}')) {
                 self.index += 1;
-                if (record) |slot| slot.* = .{ .object = .{ .value = object_value.dup(), .entries = try entries.toOwnedSlice(self.rt.memory.allocator) } };
+                if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try entries.toOwnedSlice(self.rt.memory.allocator) } };
                 return object_value;
             }
             while (true) {
@@ -518,13 +509,17 @@ fn JsonUnitParser(comptime T: type) type {
                 if (self.peek() != @as(T, '"')) return error.SyntaxError;
                 const key_atom = try self.parseKeyAtom();
                 defer self.rt.atoms.free(key_atom);
+                // TGC S3 §4 class B: the key is a bare id held across the
+                // recursive value parse, which allocates freely.
+                var key_atom_roots = core.runtime.rootAtoms(.{&key_atom});
+                key_atom_roots.activate(self.rt);
+                defer key_atom_roots.deactivate(self.rt);
                 self.skipWhitespace();
                 if (self.peek() != @as(T, ':')) return error.SyntaxError;
                 self.index += 1;
                 var child_slot_storage: JsonParseRecord = undefined;
                 const child_slot: ?*JsonParseRecord = if (record != null) &child_slot_storage else null;
                 const child = try self.parseValueRecord(child_slot);
-                defer child.free(self.rt);
                 // Append the record entry BEFORE defineOwnProperty so any later
                 // failure is covered by the `entries` errdefer (no orphaned
                 // child_slot_storage). A dup key adds a separate entry
@@ -540,7 +535,7 @@ fn JsonUnitParser(comptime T: type) type {
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == '}') {
                     self.index += 1;
-                    if (record) |slot| slot.* = .{ .object = .{ .value = object_value.dup(), .entries = try entries.toOwnedSlice(self.rt.memory.allocator) } };
+                    if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try entries.toOwnedSlice(self.rt.memory.allocator) } };
                     return object_value;
                 }
                 if (next != ',') return error.SyntaxError;
@@ -556,11 +551,6 @@ fn JsonUnitParser(comptime T: type) type {
             var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
             root_frame.activate(self.rt);
             defer root_frame.deactivate(self.rt);
-            errdefer {
-                const failed = object_value;
-                object_value = core.JSValue.undefinedValue();
-                failed.free(self.rt);
-            }
             // json_parse_record_init_array (quickjs.c:49571): one element record
             // per array slot, in order.
             var elements = std.ArrayList(JsonParseRecord).empty;
@@ -571,7 +561,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.skipWhitespace();
             if (self.peek() == @as(T, ']')) {
                 self.index += 1;
-                if (record) |slot| slot.* = .{ .array = .{ .value = object_value.dup(), .elements = try elements.toOwnedSlice(self.rt.memory.allocator) } };
+                if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try elements.toOwnedSlice(self.rt.memory.allocator) } };
                 return object_value;
             }
             var index: u32 = 0;
@@ -579,7 +569,6 @@ fn JsonUnitParser(comptime T: type) type {
                 var child_slot_storage: JsonParseRecord = undefined;
                 const child_slot: ?*JsonParseRecord = if (record != null) &child_slot_storage else null;
                 const child = try self.parseValueRecord(child_slot);
-                defer child.free(self.rt);
                 // Append the element record BEFORE storing into the array so any
                 // later failure is covered by the `elements` errdefer.
                 if (child_slot) |slot| {
@@ -599,7 +588,7 @@ fn JsonUnitParser(comptime T: type) type {
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == ']') {
                     self.index += 1;
-                    if (record) |slot| slot.* = .{ .array = .{ .value = object_value.dup(), .elements = try elements.toOwnedSlice(self.rt.memory.allocator) } };
+                    if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try elements.toOwnedSlice(self.rt.memory.allocator) } };
                     return object_value;
                 }
                 if (next != ',') return error.SyntaxError;
@@ -794,23 +783,12 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 
     {
         const validated = try jsonParseFullFromBytes(rt, null, bytes.items);
-        defer validated.free(rt);
         if (validated.isObject()) return error.SyntaxError;
     }
 
     const object = try core.Object.create(rt, core.class.ids.raw_json, null);
     object_value = object.value();
-    errdefer {
-        const failed_object = object_value;
-        object_value = core.JSValue.undefinedValue();
-        failed_object.free(rt);
-    }
     text = try createJsonStringValue(rt, bytes.items);
-    defer {
-        const owned_text = text;
-        text = core.JSValue.undefinedValue();
-        owned_text.free(rt);
-    }
     try defineData(rt, object, core.atom.ids.rawJSON, text, true);
     try object.seal(rt);
     return object_value;
@@ -875,13 +853,11 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         const object_value = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.raw_json) {
             raw = try object_value.getProperty(core.atom.ids.rawJSON);
-            defer raw.free(rt);
             try core.string.appendValueUtf8(rt, buffer, raw);
         } else if (isCallableJsonOmittedObject(object_value)) {
             try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
         } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.string or object_value.class_id == core.class.ids.boolean) {
             primitive = try primitiveValue(rt, object_value) orelse core.JSValue.undefinedValue();
-            defer primitive.free(rt);
             try appendJsonValue(rt, buffer, primitive, array_slot, stack, options, depth);
         } else if (object_value.isArray()) {
             try appendJsonArray(rt, buffer, object_value, stack, options, depth);
@@ -907,7 +883,6 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
             try appendIndent(rt, buffer, options.gap, depth + 1);
         }
         const value = try object.getDenseArrayElementValue(index) orelse object.getProperty(core.atom.atomFromUInt32(index));
-        defer value.free(rt);
         var rooted_value = value;
         var root_frame = core.runtime.rootValues(.{&rooted_value});
         root_frame.activate(rt);
@@ -934,7 +909,6 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
     for (keys) |key| {
         if (rt.atoms.isPublicSymbol(key)) continue;
         const value = try object.getOwnDataPropertyValue(key) orelse object.getProperty(key);
-        defer value.free(rt);
         var rooted_value = value;
         var root_frame = core.runtime.rootValues(.{&rooted_value});
         root_frame.activate(rt);
@@ -974,10 +948,8 @@ const SimpleJsonParser = struct {
             error.UnsupportedSimpleJson => return null,
             else => return err,
         };
-        errdefer value.free(self.rt);
         self.skipWhitespace();
         if (self.index != self.bytes.len) {
-            value.free(self.rt);
             return null;
         }
         return value;
@@ -1021,9 +993,7 @@ const SimpleJsonParser = struct {
         root_frame.activate(self.rt);
         defer root_frame.deactivate(self.rt);
         errdefer {
-            const failed_object = object_value;
             object_value = core.JSValue.undefinedValue();
-            failed_object.free(self.rt);
         }
         if (self.consumeByte('}')) return object_value;
 
@@ -1033,10 +1003,13 @@ const SimpleJsonParser = struct {
             const key_text = try self.parseSimpleStringBytes();
             const key = try self.rt.internAtom(key_text);
             defer self.rt.atoms.free(key);
+            // TGC S3 §4 class B.
+            var key_roots = core.runtime.rootAtoms(.{&key});
+            key_roots.activate(self.rt);
+            defer key_roots.deactivate(self.rt);
             self.skipWhitespace();
             self.expectByte(':') catch return error.UnsupportedSimpleJson;
-            var item_value = try self.parseValue();
-            defer item_value.free(self.rt);
+            const item_value = try self.parseValue();
             var root_item = item_value;
             var item_roots = [_]core.runtime.ValueRootValue{
                 .{ .value = &root_item },
@@ -1060,18 +1033,12 @@ const SimpleJsonParser = struct {
         var root_frame = core.runtime.rootValues(.{&object_value});
         root_frame.activate(self.rt);
         defer root_frame.deactivate(self.rt);
-        errdefer {
-            const failed_object = object_value;
-            object_value = core.JSValue.undefinedValue();
-            failed_object.free(self.rt);
-        }
         self.skipWhitespace();
         if (self.consumeByte(']')) return object_value;
 
         var index: u32 = 0;
         while (true) {
-            var item_value = try self.parseValue();
-            defer item_value.free(self.rt);
+            const item_value = try self.parseValue();
             var root_item = item_value;
             var item_root_frame = core.runtime.rootValues(.{&root_item});
             item_root_frame.activate(self.rt);
@@ -1167,89 +1134,13 @@ test "simple JSON parser uses shared ASCII digit classification for integers" {
     defer rt.destroy();
 
     const int_value = (try parseSimpleJsonValue(rt, null, "12345")).?;
-    defer int_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 12345), int_value.asInt32());
 
     const zero_value = (try parseSimpleJsonValue(rt, null, "0")).?;
-    defer zero_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 0), zero_value.asInt32());
 
     try std.testing.expect((try parseSimpleJsonValue(rt, null, "01")) == null);
     try std.testing.expect((try parseSimpleJsonValue(rt, null, "1.5")) == null);
-}
-
-fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.Value) !core.JSValue {
-    return switch (value) {
-        .null => core.JSValue.nullValue(),
-        .bool => |bool_value| core.JSValue.boolean(bool_value),
-        .integer => |int_value| if (int_value >= std.math.minInt(i32) and int_value <= std.math.maxInt(i32))
-            core.JSValue.int32(@intCast(int_value))
-        else
-            core.JSValue.float64(@floatFromInt(int_value)),
-        .float => |float_value| core.JSValue.float64(float_value),
-        .number_string => |text| core.JSValue.float64(std.fmt.parseFloat(f64, text) catch std.math.nan(f64)),
-        .string => |text| try createJsonStringValue(rt, text),
-        .array => |array| blk: {
-            const object = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-            var object_value = object.value();
-            var root_values = [_]core.runtime.ValueRootValue{
-                .{ .value = &object_value },
-            };
-            var root_frame = core.runtime.ValueRootFrame{
-                .values = &root_values,
-            };
-            root_frame.activate(rt);
-            defer root_frame.deactivate(rt);
-            errdefer {
-                const failed_object = object_value;
-                object_value = core.JSValue.undefinedValue();
-                failed_object.free(rt);
-            }
-            try object.reserveDenseArrayElements(rt, @intCast(array.items.len));
-            for (array.items, 0..) |item, index| {
-                const item_value = try valueFromStdJson(rt, global, item);
-                defer item_value.free(rt);
-                var rooted_item = item_value;
-                var item_roots = [_]core.runtime.ValueRootValue{
-                    .{ .value = &rooted_item },
-                };
-                var item_root_frame = core.runtime.ValueRootFrame{
-                    .values = &item_roots,
-                };
-                item_root_frame.activate(rt);
-                defer item_root_frame.deactivate(rt);
-                if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), item_value)) continue;
-                try object.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(item_value, true, true, true));
-            }
-            break :blk object_value;
-        },
-        .object => |object_map| blk: {
-            const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-            var object_value = object.value();
-            var root_frame = core.runtime.rootValues(.{&object_value});
-            root_frame.activate(rt);
-            defer root_frame.deactivate(rt);
-            errdefer {
-                const failed_object = object_value;
-                object_value = core.JSValue.undefinedValue();
-                failed_object.free(rt);
-            }
-            try object.reserveOwnPropertyCapacityAssumingPlain(rt, object_map.count());
-            var iterator = object_map.iterator();
-            while (iterator.next()) |entry| {
-                const key = try rt.internAtom(entry.key_ptr.*);
-                defer rt.atoms.free(key);
-                const item_value = try valueFromStdJson(rt, global, entry.value_ptr.*);
-                defer item_value.free(rt);
-                var rooted_item = item_value;
-                var item_root_frame = core.runtime.rootValues(.{&rooted_item});
-                item_root_frame.activate(rt);
-                defer item_root_frame.deactivate(rt);
-                try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(item_value, true, true, true));
-            }
-            break :blk object_value;
-        },
-    };
 }
 
 fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
@@ -1317,12 +1208,10 @@ test "JSON callable omission recognizes every bytecode function class" {
     };
     for (class_ids) |class_id| {
         const function_object = try core.Object.create(rt, class_id, null);
-        defer function_object.value().free(rt);
         try std.testing.expect(isCallableJsonOmittedObject(function_object));
     }
 
     const plain_object = try core.Object.create(rt, core.class.ids.object, null);
-    defer plain_object.value().free(rt);
     try std.testing.expect(!isCallableJsonOmittedObject(plain_object));
 }
 
@@ -1349,10 +1238,14 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
         for (list.items) |atom| rt.atoms.free(atom);
         list.deinit(rt.memory.allocator);
     }
+    // TGC S3 §4 class B: the accumulated ids live in a native array across
+    // `getProperty`, which can reach a JS accessor.
+    var list_roots = core.runtime.rootAtomList(&list.items);
+    list_roots.activate(rt);
+    defer list_roots.deactivate(rt);
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         const item = try object.getProperty(core.atom.atomFromUInt32(index));
-        defer item.free(rt);
         var rooted_item = item;
         var item_root_frame = core.runtime.rootValues(.{&rooted_item});
         item_root_frame.activate(rt);
@@ -1403,7 +1296,6 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.string and object.class_id != core.class.ids.number) return null;
     primitive = try primitiveValue(rt, object) orelse return null;
-    defer primitive.free(rt);
     return try stringifyPropertyListAtom(rt, primitive);
 }
 
@@ -1425,7 +1317,6 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
         const object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.number) {
             primitive = try primitiveValue(rt, object) orelse break :blk null;
-            defer primitive.free(rt);
             break :blk primitive.asInt32() orelse primitive.asFloat64();
         }
         break :blk null;
@@ -1443,7 +1334,6 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
         const object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.string) {
             primitive = try primitiveValue(rt, object) orelse return out;
-            defer primitive.free(rt);
             try core.string.appendValueUtf8(rt, &out, primitive);
         }
     }
@@ -1454,14 +1344,14 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
 fn primitiveValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
     _ = rt;
     if (object.class_id == core.class.ids.string) {
-        if (object.objectData()) |value| return value.dup();
+        if (object.objectData()) |value| return value;
     }
     switch (object.class_id) {
         core.class.ids.number,
         core.class.ids.boolean,
         core.class.ids.big_int,
         core.class.ids.symbol,
-        => return if (object.objectData()) |value| value.dup() else null,
+        => return if (object.objectData()) |value| value else null,
         else => return null,
     }
 }
@@ -1521,7 +1411,6 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
         const header = rooted_value.refHeader() orelse return error.TypeError;
         const object = core.Object.fromHeader(header);
         primitive = try primitiveValue(rt, object) orelse return error.TypeError;
-        defer primitive.free(rt);
         return appendJsonInputString(rt, buffer, primitive);
     }
     return error.TypeError;
@@ -1591,13 +1480,7 @@ pub fn jsonParseCall(
     defer root_frame.deactivate(ctx.runtime);
 
     text = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
-    defer {
-        const owned_text = text;
-        text = core.JSValue.undefinedValue();
-        owned_text.free(ctx.runtime);
-    }
 
-    // No reviver: plain parse (may take the record-less simple fast path).
     if (!call_runtime.isCallableValue(reviver)) {
         return try parse(ctx.runtime, global, text);
     }
@@ -1613,11 +1496,6 @@ pub fn jsonParseCall(
     defer parse_result.record.deinit(ctx.runtime);
     parsed = parse_result.value;
     parse_result.value = core.JSValue.undefinedValue();
-    errdefer {
-        const owned_parsed = parsed;
-        parsed = core.JSValue.undefinedValue();
-        owned_parsed.free(ctx.runtime);
-    }
 
     // Root every cached record value for the duration of the walk (qjs keeps
     // them alive via the ref-counted JSONParseRecord.value fields).
@@ -1635,17 +1513,9 @@ pub fn jsonParseCall(
 
     const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
-    defer {
-        const owned_holder = holder_value;
-        holder_value = core.JSValue.undefinedValue();
-        owned_holder.free(ctx.runtime);
-    }
-    const root_key = try ctx.runtime.internAtom("");
-    defer ctx.runtime.atoms.free(root_key);
+    const root_key = core.atom.ids.empty_string;
     try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(parsed, true, true, true));
-    const stored_parsed = parsed;
     parsed = core.JSValue.undefinedValue();
-    stored_parsed.free(ctx.runtime);
 
     var reviver_call = call_runtime.SyncInternalCallSite.init(
         ctx,
@@ -1666,19 +1536,16 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
 
     const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-parse-input-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var input = core.JSValue.functionBytecode(&fb.header);
-    var input_alive = true;
-    defer if (input_alive) input.free(rt);
+    const input = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{input};
 
     const old_threshold = rt.gcThreshold();
@@ -1688,8 +1555,6 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     try std.testing.expectError(error.SyntaxError, jsonParseCall(ctx, null, global, &args, null, null));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    input.free(rt);
-    input_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -1732,16 +1597,10 @@ pub fn jsonInternalizeProperty(
     // ONE [[Get]] per property (val = JS_GetProperty(holder, name),
     // quickjs.c:49722).
     value = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
-    defer {
-        const owned_value = value;
-        value = core.JSValue.undefinedValue();
-        owned_value.free(ctx.runtime);
-    }
 
     // Same-value guard (quickjs.c:49740): if the current value no longer matches
     // the value recorded at parse time (mutation-during-walk, or a duplicate key
     // whose recorded first-occurrence value differs from the last-wins value),
-    // drop the record so this subtree gets no source attribution.
     var active_record = record;
     if (active_record) |rec| {
         if (!rec.recordValue().sameValue(value)) active_record = null;
@@ -1750,7 +1609,6 @@ pub fn jsonInternalizeProperty(
     if (object_ops.objectFromValue(value)) |object| {
         if (try core.array.isArrayValue(value)) {
             const length_value = try object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
-            defer length_value.free(ctx.runtime);
             const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
             var index: usize = 0;
             while (index < length) : (index += 1) {
@@ -1776,7 +1634,6 @@ pub fn jsonInternalizeProperty(
             for (keys) |child_key| {
                 if (ctx.runtime.atoms.isPublicSymbol(child_key)) continue;
                 const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, child_key) orelse continue;
-                defer desc.destroy(ctx.runtime);
                 if (desc.enumerable != true) continue;
                 try enumerable_keys.append(ctx.runtime.memory.allocator, child_key);
             }
@@ -1788,26 +1645,11 @@ pub fn jsonInternalizeProperty(
     }
 
     key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
-    defer {
-        const owned_key = key_value;
-        key_value = core.JSValue.undefinedValue();
-        owned_key.free(ctx.runtime);
-    }
     // context.source only for primitives with a surviving record
     // (quickjs.c:49784: the source branch is in the `else` of JS_IsObject(val)).
     const primitive_record: ?*const JsonParseRecord = if (object_ops.objectFromValue(value) == null) active_record else null;
     context_value = try jsonReviverContext(ctx.runtime, global, primitive_record);
-    defer {
-        const owned_context = context_value;
-        context_value = core.JSValue.undefinedValue();
-        owned_context.free(ctx.runtime);
-    }
     const result = try reviver_call.callWithThis(rooted_holder_value, &.{ key_value, value, context_value });
-    if (result.same(value) or result.same(key_value) or result.same(rooted_holder_value)) {
-        const duplicated = result.dup();
-        result.free(ctx.runtime);
-        return duplicated;
-    }
     return result;
 }
 
@@ -1835,11 +1677,6 @@ pub fn jsonInternalizeChild(
     defer root_frame.deactivate(ctx.runtime);
 
     revived = try jsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, reviver_call, record, caller_function, caller_frame);
-    defer {
-        const owned_revived = revived;
-        revived = core.JSValue.undefinedValue();
-        owned_revived.free(ctx.runtime);
-    }
     if (revived.isUndefined()) {
         _ = try object_ops.deleteValueProperty(ctx, output, global, rooted_holder_value, holder, key, caller_function, caller_frame);
     } else {
@@ -1847,7 +1684,6 @@ pub fn jsonInternalizeChild(
     }
 }
 
-/// Build the reviver `context` argument (quickjs.c:49746 JS_NewObject +
 /// 49784-49792 the primitive source branch). `record` is non-null only for a
 /// primitive value whose parse-time value survived the same-value guard; in
 /// that case `context.source` is created from the recorded source span.
@@ -1860,20 +1696,10 @@ fn jsonReviverContext(rt: *core.JSRuntime, global: *core.Object, record: ?*const
 
     const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
     object_value = object.value();
-    errdefer {
-        const failed_object = object_value;
-        object_value = core.JSValue.undefinedValue();
-        failed_object.free(rt);
-    }
     if (record) |rec| {
         switch (rec.*) {
             .primitive => |p| {
                 source_value = try value_ops.createStringValue(rt, p.source);
-                defer {
-                    const owned_source = source_value;
-                    source_value = core.JSValue.undefinedValue();
-                    owned_source.free(rt);
-                }
                 try object.defineOwnProperty(rt, core.atom.ids.source, core.Descriptor.data(source_value, true, true, true));
             },
             else => {},
@@ -1959,13 +1785,7 @@ pub fn jsonStringifyCall(
 
     const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
-    defer {
-        const owned_holder = holder_value;
-        holder_value = core.JSValue.undefinedValue();
-        owned_holder.free(ctx.runtime);
-    }
-    const root_key = try ctx.runtime.internAtom("");
-    defer ctx.runtime.atoms.free(root_key);
+    const root_key = core.atom.ids.empty_string;
     try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(value, true, true, true));
 
     var buffer = std.ArrayList(u8).empty;
@@ -1984,19 +1804,16 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
 
     const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var fb_published = false;
     errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-stringify-value-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    var value = core.JSValue.functionBytecode(&fb.header);
-    var value_alive = true;
-    defer if (value_alive) value.free(rt);
+    const value = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{
         value,
         core.JSValue.undefinedValue(),
@@ -2010,15 +1827,12 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     const maybe_result = try jsonStringifyCall(ctx, null, global, &args, null, null);
     try std.testing.expect(maybe_result != null);
     const result = maybe_result.?;
-    defer result.free(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try core.string.appendValueUtf8(rt, &bytes, result);
     try std.testing.expectEqualStrings("null", bytes.items);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    value.free(rt);
-    value_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2224,7 +2038,6 @@ pub fn jsonStringifyPropertyList(
     }
 
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, core.atom.ids.length, caller_function, caller_frame);
-    defer length_value.free(ctx.runtime);
     const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
 
     var index: usize = 0;
@@ -2232,11 +2045,6 @@ pub fn jsonStringifyPropertyList(
         const index_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
         defer deinitLengthIndexAtom(ctx.runtime, index_key);
         item = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, index_key.atom, caller_function, caller_frame);
-        defer {
-            const owned_item = item;
-            item = core.JSValue.undefinedValue();
-            owned_item.free(ctx.runtime);
-        }
         const atom = try jsonStringifyPropertyListAtom(ctx, output, global, item, caller_function, caller_frame) orelse continue;
         if (jsonAtomListContains(list.items, atom)) {
             ctx.runtime.atoms.free(atom);
@@ -2272,11 +2080,6 @@ fn jsonStringifyPropertyListAtom(
     if (!needs_string) return null;
 
     string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
-    defer {
-        const owned_string = string_value;
-        string_value = core.JSValue.undefinedValue();
-        owned_string.free(ctx.runtime);
-    }
     const string_object = string_value.asStringBody().?;
     return try string_object.internAtom(ctx.runtime);
 }
@@ -2319,33 +2122,13 @@ pub fn jsonStringifyGap(
         if (object_ops.objectFromValue(rooted_space)) |object| {
             if (object.class_id == core.class.ids.number) {
                 primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rooted_space);
-                defer {
-                    const owned_primitive = primitive;
-                    primitive = core.JSValue.undefinedValue();
-                    owned_primitive.free(ctx.runtime);
-                }
                 number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-                defer {
-                    const owned_number = number_value;
-                    number_value = core.JSValue.undefinedValue();
-                    owned_number.free(ctx.runtime);
-                }
                 return jsonStringifyGap(ctx, output, global, number_value, caller_function, caller_frame);
             } else if (object.class_id == core.class.ids.string) {
                 string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_space, caller_function, caller_frame);
-                defer {
-                    const owned_string = string_value;
-                    string_value = core.JSValue.undefinedValue();
-                    owned_string.free(ctx.runtime);
-                }
                 return jsonStringifyGap(ctx, output, global, string_value, caller_function, caller_frame);
             } else if (object.class_id == core.class.ids.boolean) {
                 primitive = try jsonPrimitiveWrapperValue(ctx.runtime, object) orelse return out;
-                defer {
-                    const owned_primitive = primitive;
-                    primitive = core.JSValue.undefinedValue();
-                    owned_primitive.free(ctx.runtime);
-                }
                 return jsonStringifyGap(ctx, output, global, primitive, caller_function, caller_frame);
             }
         }
@@ -2434,38 +2217,19 @@ pub fn jsonSerializeProperty(
     defer root_frame.deactivate(ctx.runtime);
 
     value = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
-    defer {
-        const owned_value = value;
-        value = core.JSValue.undefinedValue();
-        owned_value.free(ctx.runtime);
-    }
     key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
-    defer {
-        const owned_key = key_value;
-        key_value = core.JSValue.undefinedValue();
-        owned_key.free(ctx.runtime);
-    }
 
     if (object_ops.objectFromValue(value) != null or value.isBigInt()) {
         to_json = try object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.toJSON, caller_function, caller_frame);
-        defer {
-            const owned_to_json = to_json;
-            to_json = core.JSValue.undefinedValue();
-            owned_to_json.free(ctx.runtime);
-        }
         if (call_runtime.isCallableValue(to_json)) {
             const next = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, to_json, &.{key_value}, caller_function, caller_frame);
-            const old_value = value;
             value = next;
-            old_value.free(ctx.runtime);
         }
     }
 
     if (options.replacer_call) |replacer_call| {
         const next = try replacer_call.callWithThis(rooted_holder_value, &.{ key_value, value });
-        const old_value = value;
         value = next;
-        old_value.free(ctx.runtime);
     }
 
     _ = holder;
@@ -2523,11 +2287,6 @@ pub fn jsonAppendValue(
     } else if (object_ops.objectFromValue(rooted_value)) |object| {
         if (object.class_id == core.class.ids.raw_json) {
             raw = try object.getProperty(core.atom.ids.rawJSON);
-            defer {
-                const owned_raw = raw;
-                raw = core.JSValue.undefinedValue();
-                owned_raw.free(ctx.runtime);
-            }
             var raw_bytes = std.ArrayList(u8).empty;
             defer raw_bytes.deinit(ctx.runtime.memory.allocator);
             try core.string.appendValueUtf8(ctx.runtime, &raw_bytes, raw);
@@ -2536,41 +2295,16 @@ pub fn jsonAppendValue(
             try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
         } else if (object.class_id == core.class.ids.number) {
             primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rooted_value);
-            defer {
-                const owned_primitive = primitive;
-                primitive = core.JSValue.undefinedValue();
-                owned_primitive.free(ctx.runtime);
-            }
             number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-            defer {
-                const owned_number = number_value;
-                number_value = core.JSValue.undefinedValue();
-                owned_number.free(ctx.runtime);
-            }
             try jsonAppendValue(ctx, output, global, buffer, number_value, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.string) {
             string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
-            defer {
-                const owned_string = string_value;
-                string_value = core.JSValue.undefinedValue();
-                owned_string.free(ctx.runtime);
-            }
             try jsonAppendValue(ctx, output, global, buffer, string_value, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.boolean) {
             primitive = try jsonPrimitiveWrapperValue(ctx.runtime, object) orelse core.JSValue.undefinedValue();
-            defer {
-                const owned_primitive = primitive;
-                primitive = core.JSValue.undefinedValue();
-                owned_primitive.free(ctx.runtime);
-            }
             try jsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.big_int) {
             primitive = coercion_ops.primitiveWrapperStoredValue(ctx.runtime, rooted_value) orelse return error.TypeError;
-            defer {
-                const owned_primitive = primitive;
-                primitive = core.JSValue.undefinedValue();
-                owned_primitive.free(ctx.runtime);
-            }
             try jsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (try core.array.isArrayValue(rooted_value)) {
             try jsonAppendArray(ctx, output, global, buffer, rooted_value, object, stack, options, depth, caller_function, caller_frame);
@@ -2604,7 +2338,6 @@ pub fn jsonAppendArray(
     try stack.append(ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
-    defer length_value.free(ctx.runtime);
     const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
     try buffer.append(ctx.runtime.memory.allocator, '[');
     var index: usize = 0;
@@ -2655,7 +2388,6 @@ pub fn jsonAppendObject(
         for (owned_keys) |key| {
             if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
             const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
-            defer desc.destroy(ctx.runtime);
             if (desc.enumerable == true) try enumerable_keys.append(ctx.runtime.memory.allocator, key);
         }
     }
@@ -2691,14 +2423,14 @@ pub fn jsonAppendObject(
 pub fn jsonPrimitiveWrapperValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
     _ = rt;
     if (object.class_id == core.class.ids.string) {
-        if (object.objectData()) |stored| return stored.dup();
+        if (object.objectData()) |stored| return stored;
     }
     switch (object.class_id) {
         core.class.ids.number,
         core.class.ids.boolean,
         core.class.ids.big_int,
         core.class.ids.symbol,
-        => return if (object.objectData()) |stored| stored.dup() else null,
+        => return if (object.objectData()) |stored| stored else null,
         else => return null,
     }
 }

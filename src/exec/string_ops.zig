@@ -11,7 +11,6 @@
 
 const std = @import("std");
 
-const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
@@ -42,13 +41,10 @@ const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const RegExpCapture = call_runtime.RegExpCapture;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
 const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
 const appendCallSiteFileName = error_stack_ops.appendCallSiteFileName;
 const appendCallSiteFunctionName = error_stack_ops.appendCallSiteFunctionName;
 const appendNamedCaptureSubstitution = regexp_fastpath.appendNamedCaptureSubstitution;
-const appendRegExpFlags = regexp_fastpath.appendRegExpFlags;
-const appendRegExpSource = regexp_fastpath.appendRegExpSource;
 const arrayFirstIndexStart = array_ops.arrayFirstIndexStart;
 const arrayLastIndexStart = array_ops.arrayLastIndexStart;
 const arrayMethodTypedArrayLength = array_ops.arrayMethodTypedArrayLength;
@@ -69,271 +65,28 @@ const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
 const createIteratorResult = iterator_ops.createIteratorResult;
 const createRegExpIndicesArray = array_ops.createRegExpIndicesArray;
 const defineFreshNonIndexDataProperty = object_ops.defineFreshNonIndexDataProperty;
-const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
-const defineRegExpGroupsProperty = object_ops.defineRegExpGroupsProperty;
-const defineRegExpGroupsPropertyFromValue = object_ops.defineRegExpGroupsPropertyFromValue;
 const populateRegExpGroupsFromCaptureValues = object_ops.populateRegExpGroupsFromCaptureValues;
 const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
 const getIteratorMethod = call_runtime.getIteratorMethod;
 const getValueProperty = object_ops.getValueProperty;
 const hasValueProperty = object_ops.hasValueProperty;
-const isAdlamScriptExtensionsName = call_runtime.isAdlamScriptExtensionsName;
-const isArabicScriptExtensionsName = call_runtime.isArabicScriptExtensionsName;
-const isArmenianScriptExtensionsName = call_runtime.isArmenianScriptExtensionsName;
 const isArrayPrototypeRecord = array_ops.isArrayPrototypeRecord;
-const isAvestanScriptExtensionsName = call_runtime.isAvestanScriptExtensionsName;
-const isBengaliScriptExtensionsName = call_runtime.isBengaliScriptExtensionsName;
-const isBopomofoScriptExtensionsName = call_runtime.isBopomofoScriptExtensionsName;
-const isBugineseScriptExtensionsName = call_runtime.isBugineseScriptExtensionsName;
 const isCallableValue = call_runtime.isCallableValue;
-const isCarianScriptExtensionsName = call_runtime.isCarianScriptExtensionsName;
-const isCaucasianAlbanianScriptExtensionsName = call_runtime.isCaucasianAlbanianScriptExtensionsName;
-const isChakmaScriptExtensionsName = call_runtime.isChakmaScriptExtensionsName;
-const isCherokeeScriptExtensionsName = call_runtime.isCherokeeScriptExtensionsName;
-const isCommonScriptExtensionsName = call_runtime.isCommonScriptExtensionsName;
-const isControlGeneralCategoryName = call_runtime.isControlGeneralCategoryName;
-const isCopticScriptExtensionsName = call_runtime.isCopticScriptExtensionsName;
-const isCopticScriptName = call_runtime.isCopticScriptName;
-const isCypriotScriptExtensionsName = call_runtime.isCypriotScriptExtensionsName;
-const isCyrillicScriptExtensionsName = call_runtime.isCyrillicScriptExtensionsName;
-const isDecimalNumberGeneralCategoryName = call_runtime.isDecimalNumberGeneralCategoryName;
-const isDevanagariScriptExtensionsName = call_runtime.isDevanagariScriptExtensionsName;
-const isDograScriptExtensionsName = call_runtime.isDograScriptExtensionsName;
-const isDuployanScriptExtensionsName = call_runtime.isDuployanScriptExtensionsName;
-const isElbasanScriptExtensionsName = call_runtime.isElbasanScriptExtensionsName;
-const isEthiopicScriptExtensionsName = call_runtime.isEthiopicScriptExtensionsName;
-const isGarayScriptExtensionsName = call_runtime.isGarayScriptExtensionsName;
-const isGeorgianScriptExtensionsName = call_runtime.isGeorgianScriptExtensionsName;
-const isGlagoliticScriptExtensionsName = call_runtime.isGlagoliticScriptExtensionsName;
-const isGothicScriptExtensionsName = call_runtime.isGothicScriptExtensionsName;
-const isGranthaScriptExtensionsName = call_runtime.isGranthaScriptExtensionsName;
-const isGraphemeBaseName = call_runtime.isGraphemeBaseName;
-const isGreekScriptExtensionsName = call_runtime.isGreekScriptExtensionsName;
-const isGujaratiScriptExtensionsName = call_runtime.isGujaratiScriptExtensionsName;
-const isGunjalaGondiScriptExtensionsName = call_runtime.isGunjalaGondiScriptExtensionsName;
-const isGurmukhiScriptExtensionsName = call_runtime.isGurmukhiScriptExtensionsName;
-const isHanScriptExtensionsName = call_runtime.isHanScriptExtensionsName;
-const isHanScriptName = call_runtime.isHanScriptName;
-const isHangulScriptExtensionsName = call_runtime.isHangulScriptExtensionsName;
-const isHanifiRohingyaScriptExtensionsName = call_runtime.isHanifiRohingyaScriptExtensionsName;
-const isHanunooScriptExtensionsName = call_runtime.isHanunooScriptExtensionsName;
-const isHebrewScriptExtensionsName = call_runtime.isHebrewScriptExtensionsName;
-const isHiraganaScriptExtensionsName = call_runtime.isHiraganaScriptExtensionsName;
-const isIdContinueName = call_runtime.isIdContinueName;
-const isImperialAramaicScriptExtensionsName = call_runtime.isImperialAramaicScriptExtensionsName;
-const isInheritedScriptExtensionsName = call_runtime.isInheritedScriptExtensionsName;
-const isInheritedScriptName = call_runtime.isInheritedScriptName;
-const isJavaneseScriptExtensionsName = call_runtime.isJavaneseScriptExtensionsName;
-const isKaithiScriptExtensionsName = call_runtime.isKaithiScriptExtensionsName;
-const isKannadaScriptExtensionsName = call_runtime.isKannadaScriptExtensionsName;
-const isKatakanaScriptExtensionsName = call_runtime.isKatakanaScriptExtensionsName;
-const isKawiScriptExtensionsName = call_runtime.isKawiScriptExtensionsName;
-const isKayahLiScriptExtensionsName = call_runtime.isKayahLiScriptExtensionsName;
-const isKhojkiScriptExtensionsName = call_runtime.isKhojkiScriptExtensionsName;
-const isKhudawadiScriptExtensionsName = call_runtime.isKhudawadiScriptExtensionsName;
-const isKiratRaiScriptName = call_runtime.isKiratRaiScriptName;
-const isLaoScriptExtensionsName = call_runtime.isLaoScriptExtensionsName;
-const isLatinScriptExtensionsName = call_runtime.isLatinScriptExtensionsName;
-const isLetterGeneralCategoryName = call_runtime.isLetterGeneralCategoryName;
-const isLimbuScriptExtensionsName = call_runtime.isLimbuScriptExtensionsName;
-const isLinearAScriptExtensionsName = call_runtime.isLinearAScriptExtensionsName;
-const isLinearBScriptExtensionsName = call_runtime.isLinearBScriptExtensionsName;
-const isLisuScriptExtensionsName = call_runtime.isLisuScriptExtensionsName;
-const isLycianScriptExtensionsName = call_runtime.isLycianScriptExtensionsName;
-const isLydianScriptExtensionsName = call_runtime.isLydianScriptExtensionsName;
-const isMahajaniScriptExtensionsName = call_runtime.isMahajaniScriptExtensionsName;
-const isMalayalamScriptExtensionsName = call_runtime.isMalayalamScriptExtensionsName;
-const isMandaicScriptExtensionsName = call_runtime.isMandaicScriptExtensionsName;
-const isManichaeanScriptExtensionsName = call_runtime.isManichaeanScriptExtensionsName;
-const isMarkGeneralCategoryName = call_runtime.isMarkGeneralCategoryName;
-const isMasaramGondiScriptExtensionsName = call_runtime.isMasaramGondiScriptExtensionsName;
-const isMedefaidrinScriptExtensionsName = call_runtime.isMedefaidrinScriptExtensionsName;
-const isMeeteiMayekScriptExtensionsName = call_runtime.isMeeteiMayekScriptExtensionsName;
-const isMendeKikakuiScriptExtensionsName = call_runtime.isMendeKikakuiScriptExtensionsName;
-const isMeroiticCursiveScriptExtensionsName = call_runtime.isMeroiticCursiveScriptExtensionsName;
-const isMeroiticHieroglyphsScriptExtensionsName = call_runtime.isMeroiticHieroglyphsScriptExtensionsName;
-const isMiaoScriptExtensionsName = call_runtime.isMiaoScriptExtensionsName;
-const isMiaoScriptName = call_runtime.isMiaoScriptName;
-const isModiScriptExtensionsName = call_runtime.isModiScriptExtensionsName;
-const isMongolianScriptExtensionsName = call_runtime.isMongolianScriptExtensionsName;
-const isMroScriptExtensionsName = call_runtime.isMroScriptExtensionsName;
-const isMultaniScriptExtensionsName = call_runtime.isMultaniScriptExtensionsName;
-const isMyanmarScriptExtensionsName = call_runtime.isMyanmarScriptExtensionsName;
-const isNabataeanScriptExtensionsName = call_runtime.isNabataeanScriptExtensionsName;
-const isNagMundariScriptExtensionsName = call_runtime.isNagMundariScriptExtensionsName;
-const isNandinagariScriptExtensionsName = call_runtime.isNandinagariScriptExtensionsName;
-const isNandinagariScriptName = call_runtime.isNandinagariScriptName;
-const isNewTaiLueScriptExtensionsName = call_runtime.isNewTaiLueScriptExtensionsName;
-const isNewTaiLueScriptName = call_runtime.isNewTaiLueScriptName;
-const isNewaScriptExtensionsName = call_runtime.isNewaScriptExtensionsName;
-const isNewaScriptName = call_runtime.isNewaScriptName;
-const isNkoScriptExtensionsName = call_runtime.isNkoScriptExtensionsName;
-const isNkoScriptName = call_runtime.isNkoScriptName;
-const isNumberCategoryName = call_runtime.isNumberCategoryName;
-const isNushuScriptExtensionsName = call_runtime.isNushuScriptExtensionsName;
-const isNushuScriptName = call_runtime.isNushuScriptName;
-const isNyiakengPuachueHmongScriptExtensionsName = call_runtime.isNyiakengPuachueHmongScriptExtensionsName;
-const isNyiakengPuachueHmongScriptName = call_runtime.isNyiakengPuachueHmongScriptName;
-const isOghamScriptExtensionsName = call_runtime.isOghamScriptExtensionsName;
-const isOghamScriptName = call_runtime.isOghamScriptName;
-const isOlChikiScriptExtensionsName = call_runtime.isOlChikiScriptExtensionsName;
-const isOlChikiScriptName = call_runtime.isOlChikiScriptName;
-const isOlOnalScriptExtensionsName = call_runtime.isOlOnalScriptExtensionsName;
-const isOlOnalScriptName = call_runtime.isOlOnalScriptName;
-const isOldHungarianScriptExtensionsName = call_runtime.isOldHungarianScriptExtensionsName;
-const isOldHungarianScriptName = call_runtime.isOldHungarianScriptName;
-const isOldItalicScriptExtensionsName = call_runtime.isOldItalicScriptExtensionsName;
-const isOldItalicScriptName = call_runtime.isOldItalicScriptName;
-const isOldNorthArabianScriptExtensionsName = call_runtime.isOldNorthArabianScriptExtensionsName;
-const isOldNorthArabianScriptName = call_runtime.isOldNorthArabianScriptName;
-const isOldPermicScriptExtensionsName = call_runtime.isOldPermicScriptExtensionsName;
-const isOldPermicScriptName = call_runtime.isOldPermicScriptName;
-const isOldPersianScriptExtensionsName = call_runtime.isOldPersianScriptExtensionsName;
-const isOldPersianScriptName = call_runtime.isOldPersianScriptName;
-const isOldSogdianScriptExtensionsName = call_runtime.isOldSogdianScriptExtensionsName;
-const isOldSogdianScriptName = call_runtime.isOldSogdianScriptName;
-const isOldSouthArabianScriptExtensionsName = call_runtime.isOldSouthArabianScriptExtensionsName;
-const isOldSouthArabianScriptName = call_runtime.isOldSouthArabianScriptName;
-const isOldTurkicScriptExtensionsName = call_runtime.isOldTurkicScriptExtensionsName;
-const isOldTurkicScriptName = call_runtime.isOldTurkicScriptName;
-const isOldUyghurScriptExtensionsName = call_runtime.isOldUyghurScriptExtensionsName;
-const isOldUyghurScriptName = call_runtime.isOldUyghurScriptName;
-const isOriyaScriptExtensionsName = call_runtime.isOriyaScriptExtensionsName;
-const isOriyaScriptName = call_runtime.isOriyaScriptName;
-const isOsageScriptExtensionsName = call_runtime.isOsageScriptExtensionsName;
-const isOsageScriptName = call_runtime.isOsageScriptName;
-const isOsmanyaScriptExtensionsName = call_runtime.isOsmanyaScriptExtensionsName;
-const isOsmanyaScriptName = call_runtime.isOsmanyaScriptName;
-const isOtherGeneralCategoryName = call_runtime.isOtherGeneralCategoryName;
-const isOtherLetterGeneralCategoryName = call_runtime.isOtherLetterGeneralCategoryName;
-const isPahawhHmongScriptExtensionsName = call_runtime.isPahawhHmongScriptExtensionsName;
-const isPahawhHmongScriptName = call_runtime.isPahawhHmongScriptName;
-const isPalmyreneScriptExtensionsName = call_runtime.isPalmyreneScriptExtensionsName;
-const isPalmyreneScriptName = call_runtime.isPalmyreneScriptName;
-const isPauCinHauScriptExtensionsName = call_runtime.isPauCinHauScriptExtensionsName;
-const isPauCinHauScriptName = call_runtime.isPauCinHauScriptName;
-const isPhagsPaScriptExtensionsName = call_runtime.isPhagsPaScriptExtensionsName;
-const isPhagsPaScriptName = call_runtime.isPhagsPaScriptName;
-const isPhoenicianScriptExtensionsName = call_runtime.isPhoenicianScriptExtensionsName;
-const isPhoenicianScriptName = call_runtime.isPhoenicianScriptName;
-const isPsalterPahlaviScriptExtensionsName = call_runtime.isPsalterPahlaviScriptExtensionsName;
-const isPsalterPahlaviScriptName = call_runtime.isPsalterPahlaviScriptName;
-const isPunctuationGeneralCategoryName = call_runtime.isPunctuationGeneralCategoryName;
-const isRegExpLineTerminator = regexp_fastpath.isRegExpLineTerminator;
 const isRegExpObservable = regexp_fastpath.isRegExpObservable;
 const isRegExpValue = regexp_fastpath.isRegExpValue;
-const isRejangScriptExtensionsName = call_runtime.isRejangScriptExtensionsName;
-const isRejangScriptName = call_runtime.isRejangScriptName;
-const isRunicScriptExtensionsName = call_runtime.isRunicScriptExtensionsName;
-const isRunicScriptName = call_runtime.isRunicScriptName;
-const isSamaritanScriptExtensionsName = call_runtime.isSamaritanScriptExtensionsName;
-const isSamaritanScriptName = call_runtime.isSamaritanScriptName;
-const isSaurashtraScriptExtensionsName = call_runtime.isSaurashtraScriptExtensionsName;
-const isSaurashtraScriptName = call_runtime.isSaurashtraScriptName;
-const isSharadaScriptExtensionsName = call_runtime.isSharadaScriptExtensionsName;
-const isSharadaScriptName = call_runtime.isSharadaScriptName;
-const isShavianScriptExtensionsName = call_runtime.isShavianScriptExtensionsName;
-const isShavianScriptName = call_runtime.isShavianScriptName;
-const isSiddhamScriptExtensionsName = call_runtime.isSiddhamScriptExtensionsName;
-const isSiddhamScriptName = call_runtime.isSiddhamScriptName;
-const isSideticScriptExtensionsName = call_runtime.isSideticScriptExtensionsName;
-const isSideticScriptName = call_runtime.isSideticScriptName;
-const isSignWritingScriptExtensionsName = call_runtime.isSignWritingScriptExtensionsName;
-const isSignWritingScriptName = call_runtime.isSignWritingScriptName;
-const isSinhalaScriptExtensionsName = call_runtime.isSinhalaScriptExtensionsName;
-const isSinhalaScriptName = call_runtime.isSinhalaScriptName;
-const isSogdianScriptExtensionsName = call_runtime.isSogdianScriptExtensionsName;
-const isSogdianScriptName = call_runtime.isSogdianScriptName;
-const isSoraSompengScriptExtensionsName = call_runtime.isSoraSompengScriptExtensionsName;
-const isSoraSompengScriptName = call_runtime.isSoraSompengScriptName;
-const isSoyomboScriptExtensionsName = call_runtime.isSoyomboScriptExtensionsName;
-const isSoyomboScriptName = call_runtime.isSoyomboScriptName;
-const isSundaneseScriptExtensionsName = call_runtime.isSundaneseScriptExtensionsName;
-const isSundaneseScriptName = call_runtime.isSundaneseScriptName;
-const isSunuwarScriptExtensionsName = call_runtime.isSunuwarScriptExtensionsName;
-const isSunuwarScriptName = call_runtime.isSunuwarScriptName;
-const isSylotiNagriScriptExtensionsName = call_runtime.isSylotiNagriScriptExtensionsName;
-const isSylotiNagriScriptName = call_runtime.isSylotiNagriScriptName;
-const isSymbolGeneralCategoryName = call_runtime.isSymbolGeneralCategoryName;
-const isSyriacScriptExtensionsName = call_runtime.isSyriacScriptExtensionsName;
-const isSyriacScriptName = call_runtime.isSyriacScriptName;
-const isTagalogScriptExtensionsName = call_runtime.isTagalogScriptExtensionsName;
-const isTagalogScriptName = call_runtime.isTagalogScriptName;
-const isTagbanwaScriptExtensionsName = call_runtime.isTagbanwaScriptExtensionsName;
-const isTagbanwaScriptName = call_runtime.isTagbanwaScriptName;
-const isTaiLeScriptExtensionsName = call_runtime.isTaiLeScriptExtensionsName;
-const isTaiLeScriptName = call_runtime.isTaiLeScriptName;
-const isTaiThamScriptExtensionsName = call_runtime.isTaiThamScriptExtensionsName;
-const isTaiThamScriptName = call_runtime.isTaiThamScriptName;
-const isTaiVietScriptExtensionsName = call_runtime.isTaiVietScriptExtensionsName;
-const isTaiVietScriptName = call_runtime.isTaiVietScriptName;
-const isTaiYoScriptExtensionsName = call_runtime.isTaiYoScriptExtensionsName;
-const isTaiYoScriptName = call_runtime.isTaiYoScriptName;
-const isTakriScriptExtensionsName = call_runtime.isTakriScriptExtensionsName;
-const isTakriScriptName = call_runtime.isTakriScriptName;
-const isTamilScriptExtensionsName = call_runtime.isTamilScriptExtensionsName;
-const isTamilScriptName = call_runtime.isTamilScriptName;
-const isTangsaScriptExtensionsName = call_runtime.isTangsaScriptExtensionsName;
-const isTangsaScriptName = call_runtime.isTangsaScriptName;
-const isTangutScriptExtensionsName = call_runtime.isTangutScriptExtensionsName;
-const isTangutScriptName = call_runtime.isTangutScriptName;
-const isTeluguScriptExtensionsName = call_runtime.isTeluguScriptExtensionsName;
-const isTeluguScriptName = call_runtime.isTeluguScriptName;
-const isThaanaScriptExtensionsName = call_runtime.isThaanaScriptExtensionsName;
-const isThaanaScriptName = call_runtime.isThaanaScriptName;
-const isThaiScriptExtensionsName = call_runtime.isThaiScriptExtensionsName;
-const isThaiScriptName = call_runtime.isThaiScriptName;
-const isTibetanScriptExtensionsName = call_runtime.isTibetanScriptExtensionsName;
-const isTibetanScriptName = call_runtime.isTibetanScriptName;
-const isTifinaghScriptExtensionsName = call_runtime.isTifinaghScriptExtensionsName;
-const isTifinaghScriptName = call_runtime.isTifinaghScriptName;
-const isTirhutaScriptExtensionsName = call_runtime.isTirhutaScriptExtensionsName;
-const isTirhutaScriptName = call_runtime.isTirhutaScriptName;
-const isTodhriScriptExtensionsName = call_runtime.isTodhriScriptExtensionsName;
-const isTodhriScriptName = call_runtime.isTodhriScriptName;
-const isTolongSikiScriptExtensionsName = call_runtime.isTolongSikiScriptExtensionsName;
-const isTolongSikiScriptName = call_runtime.isTolongSikiScriptName;
-const isTotoScriptExtensionsName = call_runtime.isTotoScriptExtensionsName;
-const isTotoScriptName = call_runtime.isTotoScriptName;
-const isTuluTigalariScriptExtensionsName = call_runtime.isTuluTigalariScriptExtensionsName;
-const isTuluTigalariScriptName = call_runtime.isTuluTigalariScriptName;
 const isTypedArrayPrototypeMethod = array_ops.isTypedArrayPrototypeMethod;
-const isUgariticScriptExtensionsName = call_runtime.isUgariticScriptExtensionsName;
-const isUgariticScriptName = call_runtime.isUgariticScriptName;
-const isUnassignedGeneralCategoryName = call_runtime.isUnassignedGeneralCategoryName;
-const isUppercaseLetterGeneralCategoryName = call_runtime.isUppercaseLetterGeneralCategoryName;
-const isVaiScriptExtensionsName = call_runtime.isVaiScriptExtensionsName;
-const isVaiScriptName = call_runtime.isVaiScriptName;
-const isVithkuqiScriptExtensionsName = call_runtime.isVithkuqiScriptExtensionsName;
-const isVithkuqiScriptName = call_runtime.isVithkuqiScriptName;
-const isWanchoScriptExtensionsName = call_runtime.isWanchoScriptExtensionsName;
-const isWanchoScriptName = call_runtime.isWanchoScriptName;
-const isWarangCitiScriptExtensionsName = call_runtime.isWarangCitiScriptExtensionsName;
-const isWarangCitiScriptName = call_runtime.isWarangCitiScriptName;
-const isXidContinueName = call_runtime.isXidContinueName;
-const isYezidiScriptExtensionsName = call_runtime.isYezidiScriptExtensionsName;
-const isYezidiScriptName = call_runtime.isYezidiScriptName;
-const isYiScriptExtensionsName = call_runtime.isYiScriptExtensionsName;
-const isYiScriptName = call_runtime.isYiScriptName;
-const isZanabazarSquareScriptExtensionsName = call_runtime.isZanabazarSquareScriptExtensionsName;
-const isZanabazarSquareScriptName = call_runtime.isZanabazarSquareScriptName;
 const lengthIndexValue = array_ops.lengthIndexValue;
 const objectFromValue = object_ops.objectFromValue;
 const ownDataOrAutoInitPropertyValue = object_ops.ownDataOrAutoInitPropertyValue;
 const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
 const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
-const propertyEscapePattern = object_ops.propertyEscapePattern;
 const proxyTargetIsCallableObject = object_ops.proxyTargetIsCallableObject;
 const arrayLastIndexSparseLarge = array_ops.arrayLastIndexSparseLarge;
 const iteratorPrototype = object_ops.iteratorPrototype;
 const regExpConstructCall = regexp_fastpath.regExpConstructCall;
 const regExpExecGeneric = regexp_fastpath.regExpExecGeneric;
 const regExpSpeciesConstructor = regexp_fastpath.regExpSpeciesConstructor;
-const readUnicodePropertyClassEscape = object_ops.readUnicodePropertyClassEscape;
-const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
-const regExpExecPropertyIsDefault = object_ops.regExpExecPropertyIsDefault;
 const regExpFlagsAreFullUnicode = regexp_fastpath.regExpFlagsAreFullUnicode;
-const regexpInternalFlagsContain = regexp_fastpath.regexpInternalFlagsContain;
 const setRegExpLastIndexZero = regexp_fastpath.setRegExpLastIndexZero;
 const setValueProperty = object_ops.setValueProperty;
 const setValuePropertyStrict = object_ops.setValuePropertyStrict;
@@ -347,9 +100,6 @@ const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
 const toUint16CodeUnit = coercion_ops.toUint16CodeUnit;
 const toUint32Number = coercion_ops.toUint32Number;
 const uint32NumberValue = coercion_ops.uint32NumberValue;
-const unicodePropertyOnlyClassBody = object_ops.unicodePropertyOnlyClassBody;
-const unicodePropertyOnlyClassSource = object_ops.unicodePropertyOnlyClassSource;
-const updateRegExpLegacyStaticsNoCaptures = regexp_fastpath.updateRegExpLegacyStaticsNoCaptures;
 const valueTruthy = coercion_ops.valueTruthy;
 const valuesStrictEqual = value_ops.valuesStrictEqual;
 
@@ -364,14 +114,13 @@ pub fn toStringForAnnexB(
     // qjs `JS_ToString` on a symbol throws TypeError "cannot convert symbol to
     // string" (JS_ToStringInternal quickjs.c:13632).
     if (value.isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
-    if (value.isString()) return value.dup();
+    if (value.isString()) return value;
     const primitive = if (value.isObject())
         try toPrimitiveForString(ctx, output, global, value, caller_function, caller_frame)
     else
-        value.dup();
-    defer primitive.free(ctx.runtime);
+        value;
     if (primitive.isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
-    if (primitive.isString()) return primitive.dup();
+    if (primitive.isString()) return primitive;
     return value_ops.toStringValue(ctx.runtime, primitive);
 }
 
@@ -404,21 +153,18 @@ pub fn toPrimitiveForString(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!value.isObject()) return value.dup();
+    if (!value.isObject()) return value;
     const symbol_to_primitive = (comptime core.atom.predefinedId("Symbol.toPrimitive", .symbol)) orelse
         return toOrdinaryPrimitiveString(ctx, output, global, value, caller_function, caller_frame);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, caller_function, caller_frame);
-    defer method.free(ctx.runtime);
     if (!method.isUndefined() and !method.isNull()) {
         // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
         // object return value throws "toPrimitive" (quickjs.c:11104).
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "string");
-        defer hint.free(ctx.runtime);
         const primitive = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
         if (primitive.isObject()) {
-            primitive.free(ctx.runtime);
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
         }
         return primitive;
@@ -434,8 +180,8 @@ pub fn toOrdinaryPrimitiveString(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", caller_function, caller_frame)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "valueOf", caller_function, caller_frame)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, caller_function, caller_frame)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, caller_function, caller_frame)) |primitive| return primitive;
     // JS_ToPrimitiveInternal (quickjs.c:11131): no primitive from toString/valueOf.
     return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
@@ -481,7 +227,6 @@ pub fn stringConstructWithPrototype(
         try value_ops.createStringValue(ctx.runtime, "")
     else
         try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     return (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, string_construct_ref, prototype, &.{string_value}, caller_function, caller_frame)) orelse error.TypeError;
 }
 
@@ -501,17 +246,12 @@ pub fn stringConcat(
     const part_count = try std.math.add(usize, args.len, 1);
     if (part_count <= qjs_concat_direct_part_limit) {
         var parts: [qjs_concat_direct_part_limit]QjsConcatPart = undefined;
-        var initialized_parts: usize = 0;
-        defer {
-            for (parts[0..initialized_parts]) |part| part.value.free(ctx.runtime);
-        }
 
         var direct_latin1 = true;
         var total_len: usize = 0;
 
         const receiver_string = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
         parts[0] = .{ .value = receiver_string };
-        initialized_parts = 1;
         if (concatLatin1Part(receiver_string)) |bytes| {
             parts[0].latin1 = bytes;
             total_len = try concatAddLength(total_len, bytes.len);
@@ -523,7 +263,6 @@ pub fn stringConcat(
             const arg_string = try toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
             const part_index = index + 1;
             parts[part_index] = .{ .value = arg_string };
-            initialized_parts = part_index + 1;
             if (direct_latin1) {
                 if (concatLatin1Part(arg_string)) |bytes| {
                     parts[part_index].latin1 = bytes;
@@ -535,7 +274,7 @@ pub fn stringConcat(
         }
 
         if (direct_latin1) {
-            if (total_len == 0) return (try ctx.runtime.emptyString()).value().dup();
+            if (total_len == 0) return (try ctx.runtime.emptyString()).value();
 
             var byte_parts: [qjs_concat_direct_part_limit][]const u8 = undefined;
             for (parts[0..part_count], 0..) |part, index| byte_parts[index] = part.latin1;
@@ -563,7 +302,6 @@ fn stringConcatSlow(
     const rt = ctx.runtime;
     var values = std.ArrayList(core.JSValue).empty;
     defer {
-        for (values.items) |value| value.free(rt);
         values.deinit(rt.memory.allocator);
     }
     try values.ensureTotalCapacity(rt.memory.allocator, args.len + 1);
@@ -592,7 +330,7 @@ fn stringConcatSlow(
         }
         resolved.appendAssumeCapacity(data);
     }
-    if (total == 0) return (try rt.emptyString()).value().dup();
+    if (total == 0) return (try rt.emptyString()).value();
     return (try core.string.String.createResolvedParts(rt, resolved.items, total, wide)).value();
 }
 
@@ -619,7 +357,7 @@ fn stringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPart)
         }
         resolved[index] = data;
     }
-    if (total == 0) return (try rt.emptyString()).value().dup();
+    if (total == 0) return (try rt.emptyString()).value();
     return (try core.string.String.createResolvedParts(rt, resolved[0..parts.len], total, wide)).value();
 }
 
@@ -681,11 +419,9 @@ noinline fn stringReplaceCore(
             if (try isRegExpObservable(ctx, output, global, search_input, caller_function, caller_frame)) {
                 const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
                 const flags = try getValueProperty(ctx, output, global, search_input, flags_atom, caller_function, caller_frame);
-                defer flags.free(ctx.runtime);
                 if (flags.isNull() or flags.isUndefined())
                     return throwTypeErrorMessage(ctx, global, "cannot convert to object");
                 const flags_string = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
-                defer flags_string.free(ctx.runtime);
                 var bytes = std.ArrayList(u8).empty;
                 defer bytes.deinit(ctx.runtime.memory.allocator);
                 try value_ops.appendRawString(ctx.runtime, &bytes, flags_string);
@@ -697,9 +433,7 @@ noinline fn stringReplaceCore(
     }
 
     const source_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer source_value.free(ctx.runtime);
     const search_value = try toStringForAnnexB(ctx, output, global, search_input, caller_function, caller_frame);
-    defer search_value.free(ctx.runtime);
     const functional_replace = isCallableValue(replacement_input);
     var replacement_call: ?SyncInternalCallSite = if (functional_replace)
         SyncInternalCallSite.init(
@@ -717,7 +451,6 @@ noinline fn stringReplaceCore(
         core.JSValue.undefinedValue()
     else
         try toStringForAnnexB(ctx, output, global, replacement_input, caller_function, caller_frame);
-    defer if (!functional_replace) replacement_text.free(ctx.runtime);
 
     const sp = source_value.asStringBody() orelse return error.TypeError;
     try sp.ensureFlat(ctx.runtime);
@@ -744,7 +477,7 @@ noinline fn stringReplaceCore(
             break :blk end_of_last_match + 1;
         } else stringIndexOfData(sp_data, search_data, end_of_last_match);
         const pos = maybe_pos orelse {
-            if (is_first) return source_value.dup();
+            if (is_first) return source_value;
             break;
         };
 
@@ -752,9 +485,7 @@ noinline fn stringReplaceCore(
 
         if (functional_replace) {
             const call_result = try replacement_call.?.call(&.{ search_value, core.JSValue.int32(@intCast(pos)), source_value });
-            defer call_result.free(ctx.runtime);
             const repl_str = try toStringForAnnexB(ctx, output, global, call_result, caller_function, caller_frame);
-            defer repl_str.free(ctx.runtime);
             try b.appendStringValue(ctx.runtime, repl_str);
         } else {
             try appendSubstitutionStringSearch(&b, ctx.runtime, search_value, sp_data, pos, search_len, rep_data.?);
@@ -865,7 +596,6 @@ pub fn callStringReplaceMethod(
     if (!search_value.isObject()) return null;
     const replace_atom = (comptime core.atom.predefinedId("Symbol.replace", .symbol)) orelse return error.TypeError;
     const replacer = try getValueProperty(ctx, output, global, search_value, replace_atom, caller_function, caller_frame);
-    defer replacer.free(ctx.runtime);
     if (replacer.isUndefined() or replacer.isNull()) return null;
     if (!isCallableValue(replacer)) return error.TypeError;
     const replace_args = [_]core.JSValue{ this_value, replace_value };
@@ -936,7 +666,6 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     while (index < length) : (index += 1) {
         if (index > std.math.maxInt(u32)) break;
         const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
-        defer site_value.free(ctx.runtime);
         const site = objectFromValue(site_value) orelse continue;
         if (!site.isCallSite(ctx.runtime)) continue;
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
@@ -974,9 +703,7 @@ pub fn stringFromCodePoint(
     defer units.deinit(ctx.runtime.memory.allocator);
     for (args) |value| {
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-        defer primitive.free(ctx.runtime);
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-        defer number_value.free(ctx.runtime);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
         // js_string_fromCodePoint (quickjs.c:45361): out-of-range/non-integer
         // code point -> RangeError "invalid code point".
@@ -999,17 +726,12 @@ pub fn stringRaw(
 ) !core.JSValue {
     const template_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const cooked = try toObjectForStringRaw(ctx, global, template_value);
-    defer cooked.free(ctx.runtime);
 
-    const raw_atom = try ctx.runtime.internAtom("raw");
-    defer ctx.runtime.atoms.free(raw_atom);
+    const raw_atom = core.atom.ids.raw;
     const raw_candidate = try getValueProperty(ctx, output, global, cooked, raw_atom, caller_function, caller_frame);
-    defer raw_candidate.free(ctx.runtime);
     const raw = try toObjectForStringRaw(ctx, global, raw_candidate);
-    defer raw.free(ctx.runtime);
 
     const length_value = try getValueProperty(ctx, output, global, raw, core.atom.ids.length, caller_function, caller_frame);
-    defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
 
     var out = std.ArrayList(u16).empty;
@@ -1019,14 +741,11 @@ pub fn stringRaw(
     while (index < length) : (index += 1) {
         if (index > std.math.maxInt(u32)) return error.RangeError;
         const raw_part = try getValueProperty(ctx, output, global, raw, core.atom.atomFromUInt32(@intCast(index)), caller_function, caller_frame);
-        defer raw_part.free(ctx.runtime);
         const raw_string = try toStringForAnnexB(ctx, output, global, raw_part, caller_function, caller_frame);
-        defer raw_string.free(ctx.runtime);
         try appendStringValueUnits(ctx.runtime, &out, raw_string);
 
         if (index + 1 < length and index + 1 < args.len) {
             const substitution = try toStringForAnnexB(ctx, output, global, args[index + 1], caller_function, caller_frame);
-            defer substitution.free(ctx.runtime);
             try appendStringValueUnits(ctx.runtime, &out, substitution);
         }
     }
@@ -1038,7 +757,7 @@ pub fn toObjectForStringRaw(ctx: *core.JSContext, global: *core.Object, value: c
     // JS_ToObject on undefined/null (js_string_raw -> quickjs.c:39916) throws
     // TypeError "cannot convert to object".
     if (value.isNull() or value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
-    if (objectFromValue(value)) |_| return value.dup();
+    if (objectFromValue(value)) |_| return value;
     return primitiveObjectForAccess(ctx.runtime, global, value);
 }
 
@@ -1053,7 +772,7 @@ pub fn stringFromCharCode(
             const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
             if (unit <= 0xff) {
                 const byte: u8 = @intCast(unit);
-                if (try ctx.runtime.singleByteString(byte)) |cached| return cached.value().dup();
+                if (try ctx.runtime.singleByteString(byte)) |cached| return cached.value();
                 return (try core.string.String.createAscii(ctx.runtime, &.{byte})).value();
             }
             return (try core.string.String.createUtf16(ctx.runtime, &.{unit})).value();
@@ -1066,7 +785,7 @@ pub fn stringFromCharCode(
                     @intCast(@as(u32, @bitCast(first_code)) & 0xffff),
                     @intCast(@as(u32, @bitCast(second_code)) & 0xffff),
                 );
-                return cached.value().dup();
+                return cached.value();
             }
         }
     }
@@ -1075,10 +794,8 @@ pub fn stringFromCharCode(
     defer if (units.len != 0) ctx.runtime.memory.free(u16, units);
     for (args, 0..) |value, index| {
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-        defer primitive.free(ctx.runtime);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-        defer number_value.free(ctx.runtime);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
         units[index] = toUint16CodeUnit(number);
     }
@@ -1109,15 +826,11 @@ pub fn regExpToString(
 
     const source_atom = core.atom.ids.source;
     const source_value = try getValueProperty(ctx, output, global, this_value, source_atom, caller_function, caller_frame);
-    defer source_value.free(ctx.runtime);
     const source_string = try toStringForAnnexB(ctx, output, global, source_value, caller_function, caller_frame);
-    defer source_string.free(ctx.runtime);
 
     const flags_atom = comptime core.atom.predefinedId("flags", .string).?;
     const flags_value = try getValueProperty(ctx, output, global, this_value, flags_atom, caller_function, caller_frame);
-    defer flags_value.free(ctx.runtime);
     const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
-    defer flags_string.free(ctx.runtime);
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
@@ -1128,17 +841,9 @@ pub fn regExpToString(
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn latin1StringSlice(value: core.JSValue) ?[]const u8 {
-    const string_object = value.asStringBody() orelse return null;
-    return switch (string_object.resolveData()) {
-        .latin1 => |bytes| bytes,
-        .utf16 => null,
-    };
-}
-
 pub fn regexpInternalStringValue(rt: *core.JSRuntime, object: *core.Object, source: bool) !core.JSValue {
     if (source) {
-        return (object.regexpSource() orelse return error.TypeError).dup();
+        return (object.regexpSource() orelse return error.TypeError);
     }
     return regexp_adapter.flagsStringValueFromBytecode(rt, object.regexpCompiledBytecode());
 }
@@ -1155,7 +860,6 @@ pub fn regExpSymbolSearch(
     if (!this_value.isObject()) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     return try regExpSymbolSearchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
 }
 
@@ -1171,7 +875,6 @@ pub fn regExpSymbolMatch(
     if (!this_value.isObject()) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     return try regExpSymbolMatchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
 }
 
@@ -1187,37 +890,25 @@ pub fn regExpSymbolMatchAll(
     if (!this_value.isObject()) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     const constructor_value = try regExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
-    defer constructor_value.free(ctx.runtime);
 
     const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
     const flags_value = try getValueProperty(ctx, output, global, this_value, flags_atom, caller_function, caller_frame);
-    defer flags_value.free(ctx.runtime);
     const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
-    defer flags_string.free(ctx.runtime);
 
     const construct_args = [_]core.JSValue{ this_value, flags_string };
     const matcher = try constructValueOrBytecode(ctx, output, global, constructor_value, &construct_args, caller_function, caller_frame);
-    var matcher_owned = true;
-    errdefer if (matcher_owned) matcher.free(ctx.runtime);
 
     const last_index_value = try getValueProperty(ctx, output, global, this_value, core.atom.ids.lastIndex, caller_function, caller_frame);
-    defer last_index_value.free(ctx.runtime);
     const last_index = try toLengthIndex(ctx, output, global, last_index_value);
     try setValuePropertyStrict(ctx, output, global, matcher, core.atom.ids.lastIndex, uint32NumberValue(toUint32Number(@floatFromInt(last_index))), caller_function, caller_frame);
 
     const prototype = try regExpStringIteratorPrototype(ctx.runtime, global);
-    var prototype_owned = true;
-    errdefer if (prototype_owned) prototype.value().free(ctx.runtime);
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.regexp_string_iterator, prototype);
-    prototype.value().free(ctx.runtime);
-    prototype_owned = false;
     errdefer core.Object.destroyFromHeader(ctx.runtime, iterator.gcHeader());
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), matcher);
-    matcher_owned = false;
-    try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorDataSlot(), string_value.dup());
+    try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorDataSlot(), string_value);
     const global_flag = try stringValueContainsByte(ctx.runtime, flags_string, 'g');
     const unicode_flag = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
     iterator.iteratorKindSlot().* = (if (global_flag) @as(u8, 1) else 0) | (if (unicode_flag) @as(u8, 2) else 0);
@@ -1237,23 +928,19 @@ pub fn stringMatchAll(
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const match_all_atom = (comptime core.atom.predefinedId("Symbol.matchAll", .symbol)) orelse return error.TypeError;
     if (!regexp.isUndefined() and !regexp.isNull() and regexp.isObject()) {
         const matcher = try getValueProperty(ctx, output, global, regexp, match_all_atom, caller_function, caller_frame);
-        defer matcher.free(ctx.runtime);
         if (try isRegExpObservable(ctx, output, global, regexp, caller_function, caller_frame)) {
             // check_regexp_g_flag (quickjs.c:45819/45829): undefined/null flags
             // -> "cannot convert to object"; missing 'g' -> "regexp must have the 'g' flag".
             const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
             const flags_value = try getValueProperty(ctx, output, global, regexp, flags_atom, caller_function, caller_frame);
-            defer flags_value.free(ctx.runtime);
             if (flags_value.isUndefined() or flags_value.isNull())
                 return throwTypeErrorMessage(ctx, global, "cannot convert to object");
             const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
-            defer flags_string.free(ctx.runtime);
             if (!try stringValueContainsByte(ctx.runtime, flags_string, 'g'))
                 return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
         }
@@ -1263,12 +950,9 @@ pub fn stringMatchAll(
     }
 
     const flags = try value_ops.createStringValue(ctx.runtime, "g");
-    defer flags.free(ctx.runtime);
     const regexp_args = [_]core.JSValue{ regexp, flags };
     const matcher = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, ctx.classPrototypeObject(core.class.ids.regexp), &regexp_args, caller_function, caller_frame)) orelse return error.TypeError;
-    defer matcher.free(ctx.runtime);
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
-    defer match_all.free(ctx.runtime);
     if (match_all.isUndefined() or match_all.isNull()) return error.TypeError;
     return callValueOrBytecodeRoot(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
 }
@@ -1277,7 +961,6 @@ pub fn regExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) 
     const proto = try iteratorPrototype(rt, global, "RegExp String Iterator");
     errdefer core.Object.destroyFromHeader(rt, proto.gcHeader());
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 0);
-    defer next.free(rt);
     try proto.defineOwnProperty(rt, (comptime core.atom.predefinedId("next", .string)).?, core.Descriptor.data(next, true, false, true));
     return proto;
 }
@@ -1294,7 +977,6 @@ pub fn regExpSymbolReplace(
     if (!this_value.isObject()) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     const replace_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     return try regExpSymbolReplaceGeneric(ctx, output, global, this_value, string_value, replace_value, caller_function, caller_frame);
 }
@@ -1311,23 +993,17 @@ pub fn regExpSymbolSplit(
     if (!this_value.isObject()) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     const constructor_value = try regExpSpeciesConstructor(ctx, output, global, this_value, caller_function, caller_frame);
-    defer constructor_value.free(ctx.runtime);
     const flags_string = try regExpSplitFlags(ctx, output, global, this_value, caller_function, caller_frame);
-    defer flags_string.free(ctx.runtime);
     const construct_args = [_]core.JSValue{ this_value, flags_string };
     const splitter = try constructValueOrBytecode(ctx, output, global, constructor_value, &construct_args, caller_function, caller_frame);
-    defer splitter.free(ctx.runtime);
 
     var limit_value = core.JSValue.undefinedValue();
     if (args.len >= 2 and !args[1].isUndefined()) {
         const primitive = try toPrimitiveForNumber(ctx, output, global, args[1]);
-        defer primitive.free(ctx.runtime);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-        defer number_value.free(ctx.runtime);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
         limit_value = uint32NumberValue(toUint32Number(number));
     }
@@ -1392,7 +1068,6 @@ pub fn regExpSymbolSplitGeneric(
 
     if (input_len == 0) {
         const result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
-        defer result.free(ctx.runtime);
         if (result.isNull()) try defineSplitValueElement(ctx.runtime, out, out_index, string_value);
         return out.value();
     }
@@ -1402,14 +1077,12 @@ pub fn regExpSymbolSplitGeneric(
     while (pos < input_len) {
         try setValuePropertyStrict(ctx, output, global, splitter, core.atom.ids.lastIndex, core.JSValue.int32(@intCast(pos)), caller_function, caller_frame);
         const result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
-        defer result.free(ctx.runtime);
         if (result.isNull()) {
             pos = advanceStringIndexBody(string_body, pos, unicode_matching);
             continue;
         }
 
         const end_value = try getValueProperty(ctx, output, global, splitter, core.atom.ids.lastIndex, caller_function, caller_frame);
-        defer end_value.free(ctx.runtime);
         var end = try toLengthIndex(ctx, output, global, end_value);
         if (end > input_len) end = input_len;
         if (end == start) {
@@ -1423,7 +1096,6 @@ pub fn regExpSymbolSplitGeneric(
         start = end;
 
         const length_value = try getValueProperty(ctx, output, global, result, core.atom.ids.length, caller_function, caller_frame);
-        defer length_value.free(ctx.runtime);
         const capture_limit = try toLengthIndex(ctx, output, global, length_value);
         var capture_index: usize = 1;
         while (capture_index < capture_limit) : (capture_index += 1) {
@@ -1469,16 +1141,13 @@ pub fn regExpSymbolSearchGeneric(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const previous = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
-    defer previous.free(ctx.runtime);
     if (!previous.sameValue(core.JSValue.int32(0))) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
     }
 
     const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
 
     const current = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
-    defer current.free(ctx.runtime);
     if (!current.sameValue(previous)) {
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, previous, caller_function, caller_frame);
     }
@@ -1499,7 +1168,6 @@ pub fn regExpSymbolMatchGeneric(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const flags_string = try getRegExpFlagsString(ctx, output, global, rx, caller_function, caller_frame);
-    defer flags_string.free(ctx.runtime);
 
     if (!stringValueContainsUnitByte(flags_string, 'g')) {
         return regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
@@ -1513,17 +1181,14 @@ pub fn regExpSymbolMatchGeneric(
     var count: u32 = 0;
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
-        defer result.free(ctx.runtime);
         if (result.isNull()) break;
         const zero_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
         const match_string = if (zero_value.isString())
             zero_value
         else blk: {
             const coerced = toStringForAnnexB(ctx, output, global, zero_value, caller_function, caller_frame) catch |err| {
-                zero_value.free(ctx.runtime);
                 return err;
             };
-            zero_value.free(ctx.runtime);
             break :blk coerced;
         };
         const is_empty = isEmptyStringValue(ctx.runtime, match_string);
@@ -1531,7 +1196,6 @@ pub fn regExpSymbolMatchGeneric(
         count += 1;
         if (is_empty) {
             const last_index = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
-            defer last_index.free(ctx.runtime);
             const next = try advanceStringIndexNumber(ctx, output, global, string_value, last_index, full_unicode);
             try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, next, caller_function, caller_frame);
         }
@@ -1623,7 +1287,6 @@ pub fn regExpSymbolReplaceGeneric(
         core.JSValue.undefinedValue()
     else
         try toStringForAnnexB(ctx, output, global, replace_value, caller_function, caller_frame);
-    defer if (!functional_replace) replacement_string.free(ctx.runtime);
 
     // Standard-regexp fast path (QuickJS js_is_standard_regexp -> js_regexp_replace),
     // probed BEFORE observing the flags getter -- exactly like QuickJS. The guard
@@ -1642,7 +1305,6 @@ pub fn regExpSymbolReplaceGeneric(
     }
 
     const flags_string = try getRegExpFlagsStringForReplace(ctx, output, global, rx, caller_function, caller_frame);
-    defer flags_string.free(ctx.runtime);
     const is_global = try stringValueContainsByte(ctx.runtime, flags_string, 'g');
     const full_unicode = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
     if (is_global) {
@@ -1661,11 +1323,9 @@ pub fn regExpSymbolReplaceGeneric(
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
         if (result.isNull()) {
-            result.free(ctx.runtime);
             break;
         }
         if (!result.isObject()) {
-            result.free(ctx.runtime);
             return error.TypeError;
         }
         const match = try captureReplaceMatch(ctx, output, global, result, string_value, caller_function, caller_frame);
@@ -1673,12 +1333,11 @@ pub fn regExpSymbolReplaceGeneric(
         if (!is_global) break;
         if (isEmptyStringValue(ctx.runtime, match.matched)) {
             const last_index = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
-            defer last_index.free(ctx.runtime);
             const next = try advanceStringIndexNumber(ctx, output, global, string_value, last_index, full_unicode);
             try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, next, caller_function, caller_frame);
         }
     }
-    if (matches.items.len == 0) return string_value.dup();
+    if (matches.items.len == 0) return string_value;
 
     const replacement_is_empty = !functional_replace and (try stringLengthIndex(ctx.runtime, replacement_string) == 0);
     const replacement_is_literal = !functional_replace and !replacement_is_empty and !stringValueContainsUnitByte(replacement_string, '$');
@@ -1701,10 +1360,9 @@ pub fn regExpSymbolReplaceGeneric(
         else if (replacement_is_empty and match.groups.isUndefined())
             core.JSValue.undefinedValue()
         else if (replacement_is_literal and match.groups.isUndefined())
-            replacement_string.dup()
+            replacement_string
         else
             try getSubstitutionString(ctx, output, global, match, string_value, replacement_string, caller_function, caller_frame);
-        defer replacement.free(ctx.runtime);
         if (!replacement_is_empty) try appendStringValueUnits(ctx.runtime, &out, replacement);
         next_source_position = @min(source_units.items.len, position + matched_len);
     }
@@ -1892,7 +1550,6 @@ pub fn getRegExpFlagsString(
 ) !core.JSValue {
     const flags_atom = comptime core.atom.predefinedId("flags", .string).?;
     const flags_value = try getValueProperty(ctx, output, global, rx, flags_atom, caller_function, caller_frame);
-    defer flags_value.free(ctx.runtime);
     return toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
 }
 
@@ -1905,21 +1562,15 @@ pub fn captureReplaceMatch(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !ReplaceMatch {
-    errdefer result.free(ctx.runtime);
     const matched_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
-    errdefer matched_value.free(ctx.runtime);
     const matched = try toStringForAnnexB(ctx, output, global, matched_value, caller_function, caller_frame);
-    matched_value.free(ctx.runtime);
-    errdefer matched.free(ctx.runtime);
 
     const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
     const index_value = try getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
-    defer index_value.free(ctx.runtime);
     const string_len = try stringLengthIndex(ctx.runtime, string_value);
     const index = @min(try toLengthIndex(ctx, output, global, index_value), string_len);
 
     const length_value = try getValueProperty(ctx, output, global, result, core.atom.ids.length, caller_function, caller_frame);
-    defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
     const capture_count = if (length == 0) 0 else length - 1;
     var captures: []core.JSValue = &.{};
@@ -1933,7 +1584,6 @@ pub fn captureReplaceMatch(
         var initialized: usize = 0;
         errdefer {
             for (captures[0..initialized]) |*capture| {
-                capture.free(ctx.runtime);
                 capture.* = core.JSValue.undefinedValue();
             }
             rooted_captures = &.{};
@@ -1945,26 +1595,19 @@ pub fn captureReplaceMatch(
             rooted_captures = captures[0..initialized];
             if (!captures[capture_index].isUndefined()) {
                 const capture_string = try toStringForAnnexB(ctx, output, global, captures[capture_index], caller_function, caller_frame);
-                const old_capture = captures[capture_index];
                 captures[capture_index] = capture_string;
-                old_capture.free(ctx.runtime);
             }
         }
     }
 
     const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     const groups = try getValueProperty(ctx, output, global, result, groups_atom, caller_function, caller_frame);
-    errdefer groups.free(ctx.runtime);
     return .{ .result = result, .matched = matched, .index = index, .captures = captures, .groups = groups };
 }
 
 pub fn freeReplaceMatches(rt: *core.JSRuntime, matches: []ReplaceMatch) void {
     for (matches) |match| {
-        match.result.free(rt);
-        match.matched.free(rt);
-        for (match.captures) |capture| capture.free(rt);
         if (match.captures.len != 0) rt.memory.free(core.JSValue, match.captures);
-        match.groups.free(rt);
     }
 }
 
@@ -1988,7 +1631,6 @@ pub fn callReplaceFunction(
     args[2 + match.captures.len] = string_value;
     if (!match.groups.isUndefined()) args[3 + match.captures.len] = match.groups;
     const result = try replacer_call.call(args);
-    defer result.free(ctx.runtime);
     return toStringForAnnexB(ctx, output, global, result, caller_function, caller_frame);
 }
 
@@ -2007,10 +1649,9 @@ pub fn getSubstitutionString(
     else if (match.groups.isNull())
         return error.TypeError
     else if (match.groups.isObject())
-        match.groups.dup()
+        match.groups
     else
         try primitiveObjectForAccess(ctx.runtime, global, match.groups);
-    defer if (!named_captures.isUndefined()) named_captures.free(ctx.runtime);
 
     var source = std.ArrayList(u16).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
@@ -2231,7 +1872,7 @@ pub fn replaceRegExpLegacySlot(rt: *core.JSRuntime, owner: *core.Object, slot: *
     if (slot.*) |old| {
         if (old.same(value)) return;
     }
-    const next_value = value.dup();
+    const next_value = value;
     try owner.setOptionalValueSlot(rt, slot, next_value);
 }
 
@@ -2239,67 +1880,6 @@ pub fn stringAtomId(value: core.JSValue) ?core.Atom {
     const string_value = value.asStringBody() orelse return null;
     if (string_value.atom_id == core.string.String.no_atom_id) return null;
     return string_value.atom_id;
-}
-
-pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
-    const parsed = propertyEscapePattern(source) orelse return null;
-    const string_object = string_value.asStringBody() orelse return null;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            var index = start_index;
-            while (index < bytes.len) {
-                const code_point: u21 = bytes[index];
-                if (binaryPropertyCodePointMatches(parsed.name, code_point) == parsed.positive) return .{ .index = index, .len = 1 };
-                if (sticky) break;
-                index += 1;
-            }
-        },
-        .utf16 => |units| {
-            var index = start_index;
-            while (index < units.len) {
-                var next = index;
-                const code_point = readUtf16CodePoint(units, &next);
-                if (binaryPropertyCodePointMatches(parsed.name, code_point) == parsed.positive) return .{ .index = index, .len = next - index };
-                if (sticky) break;
-                index = next;
-            }
-        },
-    }
-    return null;
-}
-
-pub fn findUnicodePropertyOnlyClassMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
-    if (!unicodePropertyOnlyClassSource(source)) return null;
-    const string_object = string_value.asStringBody() orelse return null;
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            var index = start_index;
-            while (index < bytes.len) : (index += 1) {
-                if (unicodePropertyOnlyClassCodePointMatches(source, bytes[index])) return .{ .index = index, .len = 1 };
-                if (sticky) break;
-            }
-        },
-        .utf16 => |units| {
-            var index = start_index;
-            while (index < units.len) {
-                const match_start = index;
-                const code_point = readUtf16CodePoint(units, &index);
-                if (unicodePropertyOnlyClassCodePointMatches(source, code_point)) return .{ .index = match_start, .len = index - match_start };
-                if (sticky) break;
-            }
-        },
-    }
-    return null;
-}
-
-pub fn unicodePropertyOnlyClassCodePointMatches(source: []const u8, code_point: u21) bool {
-    const body = unicodePropertyOnlyClassBody(source) orelse return false;
-    var index: usize = 0;
-    while (index < body.len) {
-        const parsed = readUnicodePropertyClassEscape(body, &index) orelse return false;
-        if (binaryPropertyCodePointMatches(parsed.name, code_point) == parsed.positive) return true;
-    }
-    return false;
 }
 
 /// Route a reused String method *body* through the record table's
@@ -2398,7 +1978,6 @@ pub fn stringPrototypeMethod(
         return stringNumericArgsMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     return callStringBody(ctx, string_value, method_id, args) catch |err| switch (err) {
         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
         error.InvalidLength => return throwRangeErrorMessage(ctx, global, "invalid string length"),
@@ -2437,7 +2016,6 @@ pub fn stringSearchPositionMethod(
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (method_id == 5 or method_id == 6 or method_id == 7) {
@@ -2447,7 +2025,6 @@ pub fn stringSearchPositionMethod(
             return throwTypeErrorMessage(ctx, global, "regexp not supported");
     }
     const search_value = try toStringForAnnexB(ctx, output, global, search_input, caller_function, caller_frame);
-    defer search_value.free(ctx.runtime);
 
     var coerced: [2]core.JSValue = .{ search_value, core.JSValue.undefinedValue() };
     var count: usize = 1;
@@ -2456,10 +2033,8 @@ pub fn stringSearchPositionMethod(
             coerced[1] = core.JSValue.undefinedValue();
         } else {
             const primitive = try toPrimitiveForNumber(ctx, output, global, args[1]);
-            defer primitive.free(ctx.runtime);
             if (primitive.isBigInt()) return error.TypeError;
             const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-            defer number_value.free(ctx.runtime);
             coerced[1] = value_ops.numberToValue(value_ops.numberValue(number_value) orelse std.math.nan(f64));
         }
         count = 2;
@@ -2504,7 +2079,6 @@ pub fn stringSearch(
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, regexp, "Symbol.search", caller_function, caller_frame)) |value| return value;
     return try stringRegExpCreateAndInvoke(ctx, output, global, string_value, regexp, "Symbol.search", caller_function, caller_frame);
 }
@@ -2518,13 +2092,11 @@ pub fn stringIteratorCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    var string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    errdefer string_value.free(ctx.runtime);
+    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     const prototype = try stringIteratorPrototypeFromContext(ctx, global);
     const object = try core.Object.create(ctx.runtime, core.class.ids.string_iterator, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     try object.setOptionalValueSlot(ctx.runtime, object.iteratorTargetSlot(), string_value);
-    string_value = core.JSValue.undefinedValue();
     object.iteratorIndexSlot().* = 0;
     return object.value();
 }
@@ -2538,18 +2110,17 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
 
     const object = try iteratorPrototype(ctx.runtime, global, "String Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
-    try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, global, object, "next", 0, core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, global, object, core.atom.ids.next, 0, core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
 
     // %StringIteratorPrototype% inherits @@iterator from %IteratorPrototype%.
     // An own copy would fail the ES6 String iterator prototype-chain test.
 
     if (slot < ctx.class_prototypes.len) {
         const value = object.value();
-        ctx.class_prototypes[slot] = value.dup();
+        ctx.class_prototypes[slot] = value;
         // Raw slot store, not `setClassPrototype`: see the same barrier on the
         // Array-iterator prototype in iterator_ops.
         ctx.runtime.gc.generationalBarrier(&ctx.header, object.gcHeader());
-        value.free(ctx.runtime);
     }
     return object;
 }
@@ -2570,7 +2141,6 @@ pub fn stringMatch(
     // only performs ToString after that lookup falls through.
     if (try callStringWellKnownMethod(ctx, output, global, this_value, regexp, "Symbol.match", caller_function, caller_frame)) |value| return value;
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     return try stringRegExpCreateAndInvoke(ctx, output, global, string_value, regexp, "Symbol.match", caller_function, caller_frame);
 }
 
@@ -2585,20 +2155,18 @@ pub fn stringRegExpCreateAndInvoke(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const constructor = if (global.cachedRealmValue(ctx.runtime, .regexp_constructor)) |stored|
-        stored.dup()
+        stored
     else blk: {
         // Embedder fallback when the realm has not published %RegExp%.
         const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
         break :blk try global.getProperty(regexp_key);
     };
-    defer constructor.free(ctx.runtime);
     // String.prototype.match/search fallback is spec RegExpCreate(P, undefined):
     // RegExpAlloc + RegExpInitialize, which ToStrings a non-RegExp pattern.
     // Going through the constructor would also run IsRegExp and Get @@match
     // a second time (kangax Proxy.get.String.match/search require exactly
     // [@@match|@@search, @@toPrimitive]).
     var owned_pattern: ?core.JSValue = null;
-    defer if (owned_pattern) |value| value.free(ctx.runtime);
     var pattern = regexp;
     if (pattern.isObject() and !isRegExpValue(pattern)) {
         const pattern_string = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
@@ -2606,7 +2174,6 @@ pub fn stringRegExpCreateAndInvoke(
         pattern = pattern_string;
     }
     const rx = try regExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{pattern}, caller_function, caller_frame);
-    defer rx.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
     // Mirrors js_string_match (quickjs.c:45881): the tail is
     // JS_InvokeFree(ctx, rx, atom, 1, &S) which throws TypeError when the
@@ -2629,7 +2196,6 @@ pub fn callStringWellKnownMethod(
     if (!candidate.isObject()) return null;
     const symbol_atom = core.atom.predefinedId(symbol_name, .symbol) orelse return error.TypeError;
     const method = try getValueProperty(ctx, output, global, candidate, symbol_atom, caller_function, caller_frame);
-    defer method.free(ctx.runtime);
     if (method.isUndefined() or method.isNull()) return null;
     if (!isCallableValue(method)) return error.TypeError;
     const method_args = [_]core.JSValue{this_value};
@@ -2651,7 +2217,6 @@ pub fn stringSplit(
     if (separator.isObject()) {
         const split_atom = (comptime core.atom.predefinedId("Symbol.split", .symbol)) orelse return error.TypeError;
         const splitter = try getValueProperty(ctx, output, global, separator, split_atom, caller_function, caller_frame);
-        defer splitter.free(ctx.runtime);
         if (!splitter.isUndefined() and !splitter.isNull()) {
             if (!isCallableValue(splitter)) return error.TypeError;
             const split_limit = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -2661,27 +2226,17 @@ pub fn stringSplit(
     }
 
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
     if (args.len == 0) return stringSplitBuiltinArray(ctx, global, string_value, &.{});
 
     var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     var count: usize = 1;
-    var free_separator = false;
-    var free_limit = false;
-    defer {
-        if (free_separator) coerced[0].free(ctx.runtime);
-        if (free_limit) coerced[1].free(ctx.runtime);
-    }
 
     if (args.len >= 2 and !args[1].isUndefined()) {
         const primitive = try toPrimitiveForNumber(ctx, output, global, args[1]);
-        defer primitive.free(ctx.runtime);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-        defer number_value.free(ctx.runtime);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
         coerced[1] = uint32NumberValue(toUint32Number(number));
-        free_limit = false;
         count = 2;
     } else if (args.len >= 2) {
         coerced[1] = core.JSValue.undefinedValue();
@@ -2695,7 +2250,6 @@ pub fn stringSplit(
         coerced[0] = core.JSValue.undefinedValue();
     } else {
         coerced[0] = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
-        free_separator = true;
     }
 
     return stringSplitBuiltinArray(ctx, global, string_value, coerced[0..count]);
@@ -2708,7 +2262,6 @@ pub fn stringSplitBuiltinArray(
     args: []const core.JSValue,
 ) !core.JSValue {
     const result = try callStringBody(ctx, string_value, string_id_lookup.legacy_split_method_id, args);
-    errdefer result.free(ctx.runtime);
     if (objectFromValue(result)) |object| {
         if (object.isArray() and object.getPrototype() == null) {
             if (arrayPrototypeFromGlobal(ctx.runtime, global)) |prototype| {
@@ -2727,53 +2280,6 @@ pub fn surrogatePairFromCodePoint(code_point: u21) unicode_lib.SurrogatePair {
     return unicode_lib.surrogatePairFromCodePoint(code_point);
 }
 
-pub fn anchoredBinaryPropertyMatches(source: []const u8, string_value: core.JSValue) bool {
-    const string_object = string_value.asStringBody() orelse return false;
-    const name = anchoredBinaryPropertyName(source) orelse return false;
-    const positive = std.mem.startsWith(u8, source, "^\\p{");
-    return anchoredCodePointPredicateMatches(string_object, positive, name);
-}
-
-pub fn binaryPropertyCodePointMatches(name: []const u8, code_point: u21) bool {
-    return regexp_properties.isUnicodePropertyMatches(code_point, name);
-}
-
-pub fn anchoredCodePointPredicateMatches(
-    string_object: *core.string.String,
-    positive: bool,
-    name: []const u8,
-) bool {
-    switch (string_object.resolveData()) {
-        .latin1 => |bytes| {
-            if (bytes.len == 0) return false;
-            for (bytes) |byte| {
-                if (regexp_properties.isUnicodePropertyMatches(byte, name) != positive) return false;
-            }
-            return true;
-        },
-        .utf16 => |units| {
-            if (units.len == 0) return false;
-            var index: usize = 0;
-            while (index < units.len) {
-                if (regexp_properties.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
-            }
-            return true;
-        },
-    }
-}
-
-pub fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
-    const high = units[index.*];
-    if (isHighSurrogateUnit(high) and index.* + 1 < units.len) {
-        const low = units[index.* + 1];
-        if (isLowSurrogateUnit(low)) {
-            index.* += 2;
-            return unicode_lib.codePointFromSurrogatePair(high, low);
-        }
-    }
-    index.* += 1;
-    return @intCast(high);
-}
 pub const RegExpMatch = struct {
     index: usize,
     len: usize,
@@ -2837,30 +2343,6 @@ pub fn defineSplitSliceElement(rt: *core.JSRuntime, object: *core.Object, index:
     try defineSplitValueElementOwned(rt, object, index, value);
 }
 
-pub fn createStringFromByteUnits(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
-    var index: usize = 0;
-    while (index < bytes.len) : (index += 1) {
-        if (index + 1 < bytes.len and bytes[index] == 0xd8 and bytes[index + 1] == 0xdf) {
-            try units.append(rt.memory.allocator, 0xd834);
-            try units.append(rt.memory.allocator, 0xdf06);
-            index += 1;
-            continue;
-        }
-        if (bytes[index] == 0xd8) {
-            try units.append(rt.memory.allocator, 0xd834);
-            continue;
-        }
-        if (bytes[index] == 0xdf) {
-            try units.append(rt.memory.allocator, 0xdf06);
-            continue;
-        }
-        try units.append(rt.memory.allocator, bytes[index]);
-    }
-    return (try core.string.String.createUtf16(rt, units.items)).value();
-}
-
 pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     const atom_id = core.atom.atomFromUInt32(index);
     if (try object.appendDenseArrayDefineIndex(rt, index, atom_id, value)) return;
@@ -2870,11 +2352,9 @@ pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index:
 pub fn defineSplitValueElementOwned(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     const atom_id = core.atom.atomFromUInt32(index);
     const appended = object.appendDenseArrayDefineIndexOwned(rt, index, atom_id, value) catch |err| {
-        value.free(rt);
         return err;
     };
     if (appended) return;
-    defer value.free(rt);
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
 }
 
@@ -2912,7 +2392,6 @@ pub noinline fn createRegExpMatchArrayFromValue(
     else
         null;
     const groups_value = if (groups_object) |groups| groups.value() else core.JSValue.undefinedValue();
-    defer groups_value.free(rt);
     const out = try core.Object.createRegExpMatchArrayFromShape(rt, template, @intCast(found.index), input_value, groups_value);
     errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
 
@@ -2922,7 +2401,6 @@ pub noinline fn createRegExpMatchArrayFromValue(
 
     if (has_indices) {
         const indices = try createRegExpIndicesArray(rt, global, &.{}, found);
-        defer indices.free(rt);
         const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
         try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
     }
@@ -2947,7 +2425,6 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     var transferred = false;
     errdefer {
         if (!transferred) {
-            for (elements[0..initialized]) |value| value.free(rt);
             rt.memory.free(core.JSValue, elements);
         }
     }
@@ -3003,7 +2480,6 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
         clearRegExpLegacySlot(rt, &legacy.left_context);
     } else {
         const left = try stringSliceValue(rt, input_value, 0, found.index);
-        defer left.free(rt);
         try replaceRegExpLegacySlot(rt, global, &legacy.left_context, left);
     }
 
@@ -3012,7 +2488,6 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
         clearRegExpLegacySlot(rt, &legacy.right_context);
     } else {
         const right = try stringSliceValue(rt, input_value, right_start, input_len - right_start);
-        defer right.free(rt);
         try replaceRegExpLegacySlot(rt, global, &legacy.right_context, right);
     }
 
@@ -3039,25 +2514,16 @@ pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Obje
     if (try updateRegExpLegacyStaticsLazyForMatch(rt, global, input_value, found, input_len)) return;
 
     const matched = try stringSliceValue(rt, input_value, found.index, found.len);
-    defer matched.free(rt);
 
     var legacy_capture_values: [9]?core.JSValue = @splat(null);
     var last_capture_value: ?core.JSValue = null;
-    defer {
-        for (&legacy_capture_values) |*value_slot| {
-            if (value_slot.*) |value| value.free(rt);
-        }
-        if (last_capture_value) |value| value.free(rt);
-    }
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const capture = found.captureAt(capture_index);
         if (capture.undefined) continue;
         const value = try stringSliceValue(rt, input_value, capture.start, capture.len);
-        defer value.free(rt);
-        if (capture_index < legacy_capture_values.len) legacy_capture_values[capture_index] = value.dup();
-        const next_last_capture = value.dup();
-        if (last_capture_value) |old| old.free(rt);
+        if (capture_index < legacy_capture_values.len) legacy_capture_values[capture_index] = value;
+        const next_last_capture = value;
         last_capture_value = next_last_capture;
     }
 
@@ -3140,19 +2606,19 @@ pub fn combinedSurrogateCodePoint(high: u16, low: u16) u21 {
 }
 
 pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, len: usize) !core.JSValue {
-    const string_value = value.asStringBody() orelse return value.dup();
+    const string_value = value.asStringBody() orelse return value;
     const input_len = string_value.len();
     const slice_start = @min(start, input_len);
     const slice_end = @min(input_len, slice_start + len);
     const slice_len = slice_end - slice_start;
-    if (slice_start == 0 and slice_len == input_len) return value.dup();
-    if (slice_len == 0) return (try rt.emptyString()).value().dup();
+    if (slice_start == 0 and slice_len == input_len) return value;
+    if (slice_len == 0) return (try rt.emptyString()).value();
     try string_value.ensureFlat(rt);
     if (slice_len == 1) {
         const unit = string_value.codeUnitAt(slice_start);
         if (unit <= 0x7f) {
             const cached = (try rt.singleByteString(@intCast(unit))) orelse unreachable;
-            return cached.value().dup();
+            return cached.value();
         }
     }
     return (try core.string.String.createSlice(rt, string_value, slice_start, slice_len)).value();
@@ -3180,10 +2646,8 @@ pub fn bigIntPrototypeToString(
         10
     else blk: {
         const radix_primitive = try toPrimitiveForNumber(ctx, output, global, args[0]);
-        defer radix_primitive.free(ctx.runtime);
         if (radix_primitive.isBigInt() or radix_primitive.isSymbol()) return error.TypeError;
         const radix_value = try value_ops.toNumberValue(ctx.runtime, radix_primitive);
-        defer radix_value.free(ctx.runtime);
         const radix_number = value_ops.numberValue(radix_value) orelse return error.RangeError;
         if (std.math.isNan(radix_number) or !std.math.isFinite(radix_number)) return error.RangeError;
         const integer = @trunc(radix_number);
@@ -3268,21 +2732,17 @@ pub fn errorToStringCall(
     _ = objectFromValue(this_value) orelse return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const name_value = try getValueProperty(ctx, output, global, this_value, core.atom.ids.name, caller_function, caller_frame);
-    defer name_value.free(ctx.runtime);
     const name_string = if (name_value.isUndefined())
         try value_ops.createStringValue(ctx.runtime, "Error")
     else
         try toStringForAnnexB(ctx, output, global, name_value, caller_function, caller_frame);
-    defer name_string.free(ctx.runtime);
 
     const message_atom = (comptime core.atom.predefinedId("message", .string)).?;
     const message_value = try getValueProperty(ctx, output, global, this_value, message_atom, caller_function, caller_frame);
-    defer message_value.free(ctx.runtime);
     const message_string = if (message_value.isUndefined())
         try value_ops.createStringValue(ctx.runtime, "")
     else
         try toStringForAnnexB(ctx, output, global, message_value, caller_function, caller_frame);
-    defer message_string.free(ctx.runtime);
 
     var name_bytes = std.ArrayList(u8).empty;
     defer name_bytes.deinit(ctx.runtime.memory.allocator);
@@ -3312,10 +2772,9 @@ pub fn toStringBytesForSymbol(
 ) ![]u8 {
     if (value.isSymbol()) return error.TypeError;
     const string_value = if (value.isString())
-        value.dup()
+        value
     else
         try toStringForAnnexB(ctx, output, global, value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     var buffer = std.ArrayList(u8).empty;
     errdefer buffer.deinit(ctx.runtime.memory.allocator);
@@ -3334,7 +2793,6 @@ pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSV
     if (!thrown_value.isObject()) return false;
     const thrown_object = property_ops.expectObject(thrown_value) catch return false;
     const ctor_value = try thrown_object.getProperty(core.atom.ids.constructor);
-    defer ctor_value.free(rt);
     if (ctor_value.isObject()) {
         const ctor = property_ops.expectObject(ctor_value) catch null;
         if (ctor) |ctor_object| {
@@ -3345,7 +2803,6 @@ pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSV
         }
     }
     const name_value = try thrown_object.getProperty(core.atom.ids.name);
-    defer name_value.free(rt);
     if (!name_value.isString()) return false;
     var name_bytes = std.ArrayList(u8).empty;
     defer name_bytes.deinit(rt.memory.allocator);
@@ -3386,8 +2843,7 @@ pub fn arraySearchCall(
     if (receiver.isNull() or receiver.isUndefined()) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
     }
-    const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
-    defer receiver_object_value.free(ctx.runtime);
+    const receiver_object_value = if (objectFromValue(receiver)) |_| receiver else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     const object = objectFromValue(receiver_object_value) orelse return null;
     const is_typed_array = core.object.isTypedArrayObject(object);
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
@@ -3402,7 +2858,6 @@ pub fn arraySearchCall(
         const method_atom = try ctx.runtime.internAtom(name);
         defer ctx.runtime.atoms.free(method_atom);
         const array_method = try array_proto.getProperty(method_atom);
-        defer array_method.free(ctx.runtime);
         if (objectFromValue(array_method) != function_object and !is_typed_array) return null;
     }
     const length = if (is_typed_array)
@@ -3411,7 +2866,6 @@ pub fn arraySearchCall(
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
-        defer length_value.free(ctx.runtime);
         break :blk try toLengthIndex(ctx, output, global, length_value);
     };
     if (length == 0) return if (mode == .includes) core.JSValue.boolean(false) else core.JSValue.int32(-1);
@@ -3466,7 +2920,6 @@ pub fn arraySearchCall(
                 if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
                 break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
             };
-            defer item.free(ctx.runtime);
             if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
         }
     } else {
@@ -3502,7 +2955,6 @@ pub fn arraySearchCall(
                 if (mode != .includes and !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
                 break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
             };
-            defer item.free(ctx.runtime);
             if (mode == .includes) {
                 if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
                 continue;
@@ -3530,18 +2982,15 @@ pub fn arrayConcatCall(
     }
 
     if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
-    const receiver_object_value = if (receiver.isObject()) receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
-    defer receiver_object_value.free(ctx.runtime);
+    const receiver_object_value = if (receiver.isObject()) receiver else try primitiveObjectForAccess(ctx.runtime, global, receiver);
 
     const out_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, 0, caller_function, caller_frame);
-    errdefer out_value.free(ctx.runtime);
     const out = try property_ops.expectObject(out_value);
     var next_index: usize = 0;
     try concatAppendValue(ctx, output, global, out, &next_index, receiver_object_value, caller_function, caller_frame);
     for (args) |arg| try concatAppendValue(ctx, output, global, out, &next_index, arg, caller_function, caller_frame);
     if (next_index > core.array.max_array_length) return error.RangeError;
-    const set_length = try setValueProperty(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(next_index), caller_function, caller_frame);
-    set_length.free(ctx.runtime);
+    _ = try setValueProperty(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(next_index), caller_function, caller_frame);
     return out_value;
 }
 
@@ -3559,7 +3008,6 @@ pub fn concatAppendValue(
     if (objectFromValue(value)) |object| {
         if (try isConcatSpreadable(ctx, output, global, value, object, caller_function, caller_frame)) {
             const length_value = try concatSpreadLengthValue(ctx, output, global, value, object, caller_function, caller_frame);
-            defer length_value.free(ctx.runtime);
             const length = try toLengthIndex(ctx, output, global, length_value);
             if (next_index.* > max_safe_length or length > max_safe_length - next_index.*) return error.TypeError;
             var index: usize = 0;
@@ -3569,7 +3017,6 @@ pub fn concatAppendValue(
                 defer from_key.deinit(ctx.runtime);
                 if (try hasValueProperty(ctx, output, global, value, object, from_key.atom, null, null)) {
                     const item = try getValueProperty(ctx, output, global, value, from_key.atom, caller_function, caller_frame);
-                    defer item.free(ctx.runtime);
                     const to_key = try propertyAtomFromLengthIndex(ctx.runtime, next_index.*);
                     defer to_key.deinit(ctx.runtime);
                     try createDataPropertyOrThrow(ctx, output, global, out.value(), out, to_key.atom, item, caller_function, caller_frame);
@@ -3597,17 +3044,14 @@ pub fn concatSpreadLengthValue(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const dynamic = try getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
-    errdefer dynamic.free(ctx.runtime);
     if (!core.object.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
     if (try core.object.typedArrayOutOfBounds(object)) return dynamic;
     const own = (try object.getOwnProperty(ctx.runtime, core.atom.ids.length)) orelse return dynamic;
-    defer own.destroy(ctx.runtime);
     if (own.kind != .data or !own.value.isNumber() or !dynamic.isNumber()) return dynamic;
     const own_number = value_ops.numberValue(own.value) orelse return dynamic;
     const dynamic_number = value_ops.numberValue(dynamic) orelse return dynamic;
     if (own_number > dynamic_number) {
-        dynamic.free(ctx.runtime);
-        return own.value.dup();
+        return own.value;
     }
     return dynamic;
 }
@@ -3623,7 +3067,6 @@ pub fn isConcatSpreadable(
 ) !bool {
     const spreadable_atom = (comptime core.atom.predefinedId("Symbol.isConcatSpreadable", .symbol)) orelse return arraySpeciesOriginalIsArray(object);
     const spreadable = try getValueProperty(ctx, output, global, value, spreadable_atom, caller_function, caller_frame);
-    defer spreadable.free(ctx.runtime);
     if (!spreadable.isUndefined()) return valueTruthy(spreadable);
     return arraySpeciesOriginalIsArray(object);
 }
@@ -3678,7 +3121,6 @@ pub fn regExpStringIteratorNext(
         return done_result;
     };
     const result = try regExpExecGeneric(ctx, output, global, regexp, string_value, caller_function, caller_frame);
-    defer result.free(ctx.runtime);
     if (result.isNull()) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
         iterator.iteratorIndexSlot().* = 1;
@@ -3690,12 +3132,9 @@ pub fn regExpStringIteratorNext(
     if (!is_global) iterator.iteratorIndexSlot().* = 1;
     const unicode = ((iterator.iteratorKindSlot().*) & 2) != 0;
     const zero_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
-    defer zero_value.free(ctx.runtime);
     const match_string = try toStringForAnnexB(ctx, output, global, zero_value, caller_function, caller_frame);
-    defer match_string.free(ctx.runtime);
     if (is_global and isEmptyStringValue(ctx.runtime, match_string)) {
         const last_index = try getValueProperty(ctx, output, global, regexp, core.atom.ids.lastIndex, caller_function, caller_frame);
-        defer last_index.free(ctx.runtime);
         const next = try advanceStringIndexNumber(ctx, output, global, string_value, last_index, unicode);
         try setValuePropertyStrict(ctx, output, global, regexp, core.atom.ids.lastIndex, next, caller_function, caller_frame);
     }
@@ -3737,7 +3176,7 @@ pub fn getFastStringPrimitiveDataProperty(
     // (accessor / auto-init) property falls back to the full resolver.
     if (proto.hasExoticMethods()) return null;
     var slow = false;
-    if (proto.findOwnDataValueFast(atom_id, &slow)) |value| return value.dup();
+    if (proto.findOwnDataValueFast(atom_id, &slow)) |value| return value;
     if (slow) return try ownDataOrAutoInitPropertyValue(proto, atom_id);
     return null;
 }
@@ -3750,7 +3189,6 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
         const units: [1]u16 = .{unit};
         break :blk (try core.string.String.createUtf16(rt, &units)).value();
     };
-    defer value.free(rt);
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
 }
 
@@ -3767,7 +3205,7 @@ pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: co
         // pair is a major speedup.
         const cached = (try rt.singleByteString(@intCast(unit))).?;
         const out = cached.value();
-        return out.dup();
+        return out;
     }
     if (unit <= 0xff) {
         const units: [1]u16 = .{unit};
@@ -3792,12 +3230,9 @@ pub fn arrayToStringCall(
         if (function_object.arrayBuiltinMarker() != .to_string) return null;
     }
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (this_value.isObject()) this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
-    const join_atom = try ctx.runtime.internAtom("join");
-    defer ctx.runtime.atoms.free(join_atom);
+    const object_value = if (this_value.isObject()) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    const join_atom = core.atom.ids.join;
     const join_value = try getValueProperty(ctx, output, global, object_value, join_atom, caller_function, caller_frame);
-    defer join_value.free(ctx.runtime);
     if (isCallableValue(join_value)) {
         return try callValueOrBytecodeRoot(ctx, output, global, object_value, join_value, &.{}, caller_function, caller_frame);
     }
@@ -3817,8 +3252,7 @@ pub fn arrayToLocaleStringCall(
         if (function_object.arrayBuiltinMarker() != .to_locale_string) return null;
     }
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (this_value.isObject()) this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
+    const object_value = if (this_value.isObject()) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = property_ops.expectObject(object_value) catch return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     const is_typed_array = core.object.isTypedArrayObject(object);
@@ -3827,11 +3261,9 @@ pub fn arrayToLocaleStringCall(
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, object_value, core.atom.ids.length, caller_function, caller_frame);
-        defer length_value.free(ctx.runtime);
         break :blk try toLengthIndex(ctx, output, global, length_value);
     };
-    const to_locale_key = try ctx.runtime.internAtom("toLocaleString");
-    defer ctx.runtime.atoms.free(to_locale_key);
+    const to_locale_key = core.atom.ids.toLocaleString;
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
@@ -3846,14 +3278,10 @@ pub fn arrayToLocaleStringCall(
             defer key.deinit(ctx.runtime);
             break :blk try getValueProperty(ctx, output, global, object_value, key.atom, caller_function, caller_frame);
         };
-        defer item.free(ctx.runtime);
         if (!item.isUndefined() and !item.isNull()) {
             const method = try getValueProperty(ctx, output, global, item, to_locale_key, caller_function, caller_frame);
-            defer method.free(ctx.runtime);
             const locale_value = try callValueOrBytecodeRoot(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
-            defer locale_value.free(ctx.runtime);
             const locale_string = try toStringForAnnexB(ctx, output, global, locale_value, caller_function, caller_frame);
-            defer locale_string.free(ctx.runtime);
             try value_ops.appendRawString(ctx.runtime, &bytes, locale_string);
         }
     }
@@ -3868,10 +3296,8 @@ pub fn objectToLocaleStringCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const to_string_key = try ctx.runtime.internAtom("toString");
-    defer ctx.runtime.atoms.free(to_string_key);
+    const to_string_key = core.atom.ids.toString;
     const method = try getValueProperty(ctx, output, global, this_value, to_string_key, caller_function, caller_frame);
-    defer method.free(ctx.runtime);
     return try callValueOrBytecodeRoot(ctx, output, global, this_value, method, &.{}, caller_function, caller_frame);
 }
 
@@ -3885,8 +3311,7 @@ pub fn objectToStringCall(
 ) !core.JSValue {
     if (this_value.isUndefined()) return try objectTagString(ctx.runtime, "Undefined");
     if (this_value.isNull()) return try objectTagString(ctx.runtime, "Null");
-    const object_value = if (this_value.isObject()) this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
+    const object_value = if (this_value.isObject()) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     return try objectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
 }
 
@@ -3902,7 +3327,6 @@ pub fn objectToStringIntrinsic(
     const builtin_tag = try defaultObjectToStringTag(object);
     const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return try objectTagString(ctx.runtime, "Object");
     const tag_value = try getValueProperty(ctx, output, global, object_value, tag_atom, caller_function, caller_frame);
-    defer tag_value.free(ctx.runtime);
     if (tag_value.isString()) {
         var tag = std.ArrayList(u8).empty;
         defer tag.deinit(ctx.runtime.memory.allocator);
@@ -3978,7 +3402,6 @@ test "default object tag distinguishes bytecode function classes" {
     };
     for (class_ids, expected_tags) |class_id, expected_tag| {
         const function_object = try core.Object.create(rt, class_id, null);
-        defer function_object.value().free(rt);
         try std.testing.expectEqualStrings(expected_tag, try defaultObjectToStringTag(function_object));
     }
 }
@@ -4007,10 +3430,6 @@ pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), u
 }
 pub fn appendAsciiUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), bytes: []const u8) !void {
     for (bytes) |byte| try out.append(rt.memory.allocator, byte);
-}
-
-pub fn isLineTerminatorUnit(unit: u16) bool {
-    return unicode_lib.isEcmaLineTerminatorUnit(unit);
 }
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
@@ -4158,7 +3577,6 @@ pub fn stringPad(
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     // Resolve the source to its flat code-unit slice ONCE (no per-char UTF-16
     // copy of the whole source — qjs reads p->len from the JSString directly,
@@ -4170,18 +3588,17 @@ pub fn stringPad(
 
     const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
-    if (target_length <= source_len) return string_value.dup();
+    if (target_length <= source_len) return string_value;
 
     const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
         break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
     } else try value_ops.createStringValue(ctx.runtime, " ");
-    defer fill_value.free(ctx.runtime);
 
     const fill = fill_value.asStringBody() orelse return error.TypeError;
     try fill.ensureFlat(ctx.runtime);
     const fill_data = fill.resolveData();
     const fill_len = fill_data.len();
-    if (fill_len == 0) return string_value.dup();
+    if (fill_len == 0) return string_value;
 
     // qjs caps the result at JS_STRING_LEN_MAX (quickjs.c:46331-46334); without
     // this an out-of-range maxLength would attempt a multi-GiB allocation instead
@@ -4220,11 +3637,9 @@ pub fn stringNormalize(
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
 
     const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].isUndefined()) .nfc else blk: {
         const form_value = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
-        defer form_value.free(ctx.runtime);
         var form_bytes = std.ArrayList(u8).empty;
         defer form_bytes.deinit(ctx.runtime.memory.allocator);
         try value_ops.appendRawString(ctx.runtime, &form_bytes, form_value);
@@ -4260,10 +3675,8 @@ pub fn stringLocaleCompare(
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const lhs = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer lhs.free(ctx.runtime);
     const rhs_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const rhs = try toStringForAnnexB(ctx, output, global, rhs_input, caller_function, caller_frame);
-    defer rhs.free(ctx.runtime);
 
     const lhs_nfc = try normalizedUtf32(ctx.runtime, lhs, .nfc);
     defer lhs_nfc.deinit();
@@ -4312,7 +3725,6 @@ pub fn stringNumericArgsMethod(
         this_value
     else
         try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer if (!this_value.isString()) string_value.free(ctx.runtime);
 
     var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     const count = @min(args.len, coerced.len);
@@ -4359,7 +3771,7 @@ fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []
     const hi = @max(start, end);
     if (lo == hi) {
         const empty = try rt.emptyString();
-        return empty.value().dup();
+        return empty.value();
     }
     return (try core.string.String.createLatin1(rt, bytes[lo..hi])).value();
 }
@@ -4428,8 +3840,7 @@ pub fn stringHtmlMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    var string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer string_value.free(ctx.runtime);
+    const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
     var string_units = std.ArrayList(u16).empty;
     defer string_units.deinit(ctx.runtime.memory.allocator);
@@ -4471,7 +3882,6 @@ fn stringCreateHtml(
     try appendAsciiUnits(ctx.runtime, &out, tag);
     if (has_attr) {
         const value = try toStringForAnnexB(ctx, output, global, attr_value, caller_function, caller_frame);
-        defer value.free(ctx.runtime);
         var attr_units = std.ArrayList(u16).empty;
         defer attr_units.deinit(ctx.runtime.memory.allocator);
         try appendStringValueUnits(ctx.runtime, &attr_units, value);

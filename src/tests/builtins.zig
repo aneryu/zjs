@@ -6,12 +6,8 @@ const core = zjs.core;
 const op = zjs.bytecode.opcode.op;
 
 const helpers = @import("helpers.zig");
-const vm_helpers = helpers.vm_helpers;
 
-const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
-const countJob = helpers.countJob;
-const countJobArgs = helpers.countJobArgs;
 const objectFromValue = helpers.objectFromValue;
 const expectActiveSetStrings = helpers.expectActiveSetStrings;
 
@@ -50,16 +46,6 @@ test "native handler realm readers have an explicit observable or synthetic auth
         }
         _ = entry.name;
     }
-
-    const promise_source = @embedFile("../core/promise.zig");
-    const array_source = @embedFile("../exec/array_builtin_ops.zig");
-    const module_graph_source = @embedFile("../exec/module_graph.zig");
-    const raw_data_factory = "core.function.nativeDataFunction(";
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, promise_source, raw_data_factory));
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, array_source, raw_data_factory));
-    // W1b3d2 moved dynamic-import scheduling to a typed job payload, so no
-    // scheduler or user-visible path retains the raw callable-data factory.
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, module_graph_source, raw_data_factory));
 }
 
 test "dense array writer readers retain their semantic guard class" {
@@ -96,7 +82,9 @@ test "dense array writer readers retain their semantic guard class" {
         .{ .class = .create_data_property, .source = array_ops_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 2 },
         .{ .class = .create_data_property, .source = array_ops_source, .needle = "out.?.defineDenseArrayDataPropertyUnchecked(ctx.runtime,", .count = 1 },
         .{ .class = .create_data_property, .source = array_ops_source, .needle = "out.?.defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
-        .{ .class = .create_data_property, .source = json_ops_source, .needle = ".appendDenseArrayLiteralIndex(", .count = 3 },
+        // The third reader was the dead recursive std.json conversion path;
+        // the parser's two live array construction paths remain inventoried.
+        .{ .class = .create_data_property, .source = json_ops_source, .needle = ".appendDenseArrayLiteralIndex(", .count = 2 },
         .{ .class = .create_data_property, .source = string_ops_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 1 },
         .{ .class = .create_data_property, .source = string_ops_source, .needle = ".appendDenseArrayDefineIndexOwned(rt,", .count = 1 },
         // Dropped to 0 on 2026-08-21: the single call site lived in
@@ -120,17 +108,19 @@ test "dense array writer readers retain their semantic guard class" {
         // js_array_splice (quickjs.c:43042-43047) and only consults
         // can_extend_fast_array.
         .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 2 },
-        .{ .class = .zjs_bulk_set, .source = object_source, .needle = "if (!arrayPrototypeChainAllowsBulkIndexedSet(proto))", .count = 3 },
+        // The three zjs-only bulk-fill entry points were dead and are gone;
+        // keep a zero pin so an unreviewed prototype-walk bypass cannot return.
+        .{ .class = .zjs_bulk_set, .source = object_source, .needle = "if (!arrayPrototypeChainAllowsBulkIndexedSet(proto))", .count = 0 },
     };
     for (readers) |reader| {
         try std.testing.expectEqual(reader.count, std.mem.count(u8, reader.source, reader.needle));
         _ = reader.class;
     }
 
-    // Only the two QuickJS-aligned pre-walk append consumers consult the
-    // direct %Array.prototype% marker. The runtime-wide sticky approximation
-    // is deliberately absent.
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, object_source, "if (!self.canExtendFastArray())"));
+    // The two QuickJS-aligned pre-walk append entry points share one mode
+    // implementation and therefore one direct %Array.prototype% marker. The
+    // runtime-wide sticky approximation is deliberately absent.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, object_source, "if (!self.canExtendFastArray())"));
     try std.testing.expect(std.mem.indexOf(u8, object_source, "is_std_array_prototype") != null);
     try std.testing.expect(std.mem.indexOf(u8, runtime_source, "any_prototype_may_have_indexed_properties") == null);
 }
@@ -241,7 +231,6 @@ test "latin1 string literal append range fast path collapses loop opcodes" {
         \\for (let i = 0; i < 2000; i++) s += "x";
         \\print(s.length);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("2000\n", stream.buffered());
@@ -263,7 +252,6 @@ test "latin1 string literal append range fast path accepts i8 loop limits" {
         \\for (let i = 0; i < 50; i++) s += "x";
         \\print(s.length);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("50\n", stream.buffered());
@@ -283,7 +271,6 @@ test "host output Number static literal fast path materializes lazy constructor"
     const result = try js.evalWithOutput(
         \\print(Number.parseInt("12345", 10));
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("12345\n", stream.buffered());
@@ -300,7 +287,6 @@ test "empty script eval uses root entry without user call opcodes" {
     defer js.runtime.setOpcodeProfile(null);
 
     const result = try js.eval("");
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     // The root evaluator is not a bytecode `call` instruction, so entering its
@@ -524,7 +510,6 @@ test "array dense writers distinguish own Set holes and CreateDataProperty" {
         \\    }
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -588,7 +573,6 @@ test "push splice fill and unshift preserve prototype and payload semantics" {
         \\    }
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -645,7 +629,6 @@ test "array indexed setter guards follow the receiver realm" {
         \\    }
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -696,7 +679,6 @@ test "array dense append guard distinguishes custom proxy and null prototypes" {
         \\    assert.sameValue(hasOwn(nullArray, "1"), true);
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -705,34 +687,29 @@ test "standard Array prototype guard publication and invalidation are realm loca
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    const setup = try js.eval(
+    _ = try js.eval(
         \\globalThis.__arrayGuardOther = $262.createRealm().global;
         \\globalThis.__arrayGuardPrototypeMutation = $262.createRealm().global;
         \\globalThis.__arrayGuardFailedPrototypeMutation = $262.createRealm().global;
         \\globalThis.__arrayGuardOomMutation = $262.createRealm().global;
     );
-    setup.free(js.runtime);
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const other_key = try js.runtime.internAtom("__arrayGuardOther");
     defer js.runtime.atoms.free(other_key);
     const other_value = try global.getProperty(other_key);
-    defer other_value.free(js.runtime);
     const other_global = try core.Object.expect(other_value);
     const prototype_mutation_key = try js.runtime.internAtom("__arrayGuardPrototypeMutation");
     defer js.runtime.atoms.free(prototype_mutation_key);
     const prototype_mutation_value = try global.getProperty(prototype_mutation_key);
-    defer prototype_mutation_value.free(js.runtime);
     const prototype_mutation_global = try core.Object.expect(prototype_mutation_value);
     const failed_prototype_mutation_key = try js.runtime.internAtom("__arrayGuardFailedPrototypeMutation");
     defer js.runtime.atoms.free(failed_prototype_mutation_key);
     const failed_prototype_mutation_value = try global.getProperty(failed_prototype_mutation_key);
-    defer failed_prototype_mutation_value.free(js.runtime);
     const failed_prototype_mutation_global = try core.Object.expect(failed_prototype_mutation_value);
     const oom_mutation_key = try js.runtime.internAtom("__arrayGuardOomMutation");
     defer js.runtime.atoms.free(oom_mutation_key);
     const oom_mutation_value = try global.getProperty(oom_mutation_key);
-    defer oom_mutation_value.free(js.runtime);
     const oom_mutation_global = try core.Object.expect(oom_mutation_value);
 
     const local_array_value = global.cachedRealmValue(js.runtime, .array_prototype) orelse return error.TestUnexpectedResult;
@@ -783,7 +760,7 @@ test "standard Array prototype guard publication and invalidation are realm loca
     // full ArrayIndex grammar: only tagged integer atoms (0...INT32_MAX)
     // poison the marker. A high index string and a non-canonical numeric name
     // still update ordinary lookup summaries without disabling dense append.
-    const mutate_other_high_or_named = try js.eval(
+    _ = try js.eval(
         \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Object.prototype, "2147483648", { value: 1, configurable: true });
         \\delete __arrayGuardOther.Object.prototype["2147483648"];
         \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Array.prototype, "2147483648", { value: 1, configurable: true });
@@ -796,36 +773,32 @@ test "standard Array prototype guard publication and invalidation are realm loca
         \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Array.prototype, __arrayGuardSymbol, { value: 1, configurable: true });
         \\delete __arrayGuardOther.Array.prototype[__arrayGuardSymbol];
     );
-    mutate_other_high_or_named.free(js.runtime);
     try std.testing.expect(other_array.isStandardArrayPrototype());
 
-    const mutate_local = try js.eval(
+    _ = try js.eval(
         \\Object.defineProperty(Array.prototype, "0", { value: 1, configurable: true });
         \\delete Array.prototype[0];
     );
-    mutate_local.free(js.runtime);
     try std.testing.expect(!local_array.isStandardArrayPrototype());
     try std.testing.expect(other_array.isStandardArrayPrototype());
     try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
 
-    const mutate_other = try js.eval(
+    _ = try js.eval(
         \\__arrayGuardOther.eval("Object.defineProperty(Object.prototype, '0', { value: 2, configurable: true }); delete Object.prototype[0];");
     );
-    mutate_other.free(js.runtime);
     try std.testing.expect(!local_array.isStandardArrayPrototype());
     try std.testing.expect(!other_array.isStandardArrayPrototype());
     try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
 
-    const retain_same_prototype = try js.eval(
+    _ = try js.eval(
         \\__arrayGuardPrototypeMutation.Object.setPrototypeOf(
         \\    __arrayGuardPrototypeMutation.Array.prototype,
         \\    __arrayGuardPrototypeMutation.Object.getPrototypeOf(__arrayGuardPrototypeMutation.Array.prototype)
         \\);
     );
-    retain_same_prototype.free(js.runtime);
     try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
 
-    const reject_prototype_mutation = try js.eval(
+    _ = try js.eval(
         \\__arrayGuardFailedPrototypeMutation.Object.preventExtensions(__arrayGuardFailedPrototypeMutation.Array.prototype);
         \\var __arrayGuardMutationRejected = false;
         \\try {
@@ -835,13 +808,11 @@ test "standard Array prototype guard publication and invalidation are realm loca
         \\}
         \\if (!__arrayGuardMutationRejected) throw new Error("expected cross-realm TypeError");
     );
-    reject_prototype_mutation.free(js.runtime);
     try std.testing.expect(failed_prototype_mutation_array.isStandardArrayPrototype());
 
-    const mutate_prototype = try js.eval(
+    _ = try js.eval(
         \\__arrayGuardPrototypeMutation.Object.setPrototypeOf(__arrayGuardPrototypeMutation.Array.prototype, null);
     );
-    mutate_prototype.free(js.runtime);
     try std.testing.expect(!prototype_mutation_array.isStandardArrayPrototype());
 }
 
@@ -936,7 +907,6 @@ test "sparse array literal length add range fast path collapses loop opcodes" {
         \\for (let i = 0; i < 50000; i++) { const a = [1, , 3]; s += a.length; }
         \\print(s);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("150000\n", stream.buffered());
@@ -979,7 +949,6 @@ test "collection constructors iterate their array argument, not index it" {
         \\print(patched);
         \\print(JSON.stringify([...new Set([1, 2, 2, 3])]), JSON.stringify([...new Set([1, , 3])]));
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -1027,7 +996,6 @@ test "collection constructors do not bulk fill past an overridable adder" {
         \\print(closed);
         \\print(JSON.stringify([...new Set([1, 2, 3])]));
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -1119,7 +1087,6 @@ test "Array.of and Array.from set factory result length with throw semantics" {
         \\  Array.of.call(ReadOnlyLength);
         \\});
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -1139,7 +1106,6 @@ test "Array.from rejects invalid typed array element definitions" {
         \\  ["a", "b"]
         \\);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -1444,7 +1410,6 @@ test "escaped direct eval function keeps script referrer for dynamic import" {
         hooks,
         std.testing.allocator,
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expect(host.saw_expected_referrer);
@@ -1471,7 +1436,6 @@ test "escaped direct eval function keeps eval stack filename" {
         .script,
         "/fixture/scripts/original.js",
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("", stream.buffered());
@@ -1515,7 +1479,6 @@ test "direct and indirect eval regexp literals share the generic parser semantic
         \\  assert.sameValue(syntax, true);
         \\}
     );
-    defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
 
@@ -1544,7 +1507,6 @@ test "direct eval expression completion does not depend on a source terminator" 
         \\  assert.sameValue(typeError, true);
         \\}
     );
-    defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
 
@@ -1561,7 +1523,6 @@ test "test262 frontmatter comments do not change engine strict mode" {
         \\function acceptsEval(eval) { return eval; }
         \\print(acceptsEval(1));
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1\n", stream.buffered());
@@ -1582,7 +1543,6 @@ test "Engine eval executes declaration-only side effects" {
         \\print(indirectEval("function evalDeclOnlyFunc(){}"));
         \\print(typeof evalDeclOnlyFunc, typeof globalThis.evalDeclOnlyFunc);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("undefined\ntrue undefined\nundefined\nfunction function\n", stream.buffered());
@@ -2594,7 +2554,6 @@ test "Engine async parameter grammar parses await only as an expression" {
         \\catch (error) { constructorSyntax = error instanceof SyntaxError; }
         \\assert.sameValue(constructorSyntax, true);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -2614,7 +2573,6 @@ test "Engine Dynamic Function preserves typed array subclass source" {
         \\assert.sameValue(value instanceof Uint8Array, true);
         \\assert.sameValue(value.length, 2);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -2631,7 +2589,6 @@ test "Engine direct eval callback passed to assert.throws keeps eval var scope" 
         \\scenario();
         \\assert.sameValue(typeof evalAssertVar, "undefined");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -2660,7 +2617,6 @@ test "Engine generator created by direct eval keeps eval var scope across resume
         \\scenario();
         \\assert.sameValue(typeof evalGenVar, "undefined");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -2846,7 +2802,6 @@ test "Engine function global data IC preserves binding guards" {
         \\assert.sameValue(__zjsGlobalDataIcRedefineFn(), 22);
         \\delete globalThis.__zjsGlobalDataIcRedefine;
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -2886,7 +2841,6 @@ test "Engine top-level var probes preserve QuickJS global object semantics" {
         \\Object.setPrototypeOf(globalThis, Object.prototype);
         \\try { Object.preventExtensions(globalThis); eval("var blockedVarProbe;"); print("nonExtensible", "noThrow"); } catch(e) { print("nonExtensible", e.name); }
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -2899,7 +2853,7 @@ test "Engine global function declarations publish through construction-time VarR
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    const indirect_result = try js.eval(
+    _ = try js.eval(
         \\(0, eval)('Object.defineProperty(globalThis, "__qjsFunctionData", { value: 1, writable: false, enumerable: false, configurable: true })');
         \\(0, eval)('function __qjsFunctionData(){ return 11; }');
         \\var dataDesc = Object.getOwnPropertyDescriptor(globalThis, "__qjsFunctionData");
@@ -2922,13 +2876,11 @@ test "Engine global function declarations publish through construction-time VarR
         \\assert.sameValue(fixedDesc.enumerable, true);
         \\assert.sameValue(fixedDesc.configurable, false);
     );
-    defer indirect_result.free(js.runtime);
 
-    const setup_result = try js.eval(
+    _ = try js.eval(
         \\Object.defineProperty(globalThis, "__qjsScriptFunction", { value: 1, writable: false, enumerable: false, configurable: true });
     );
-    defer setup_result.free(js.runtime);
-    const script_result = try js.eval(
+    _ = try js.eval(
         \\function __qjsScriptFunction(){ return 14; }
         \\var scriptDesc = Object.getOwnPropertyDescriptor(globalThis, "__qjsScriptFunction");
         \\assert.sameValue(__qjsScriptFunction(), 14);
@@ -2936,7 +2888,6 @@ test "Engine global function declarations publish through construction-time VarR
         \\assert.sameValue(scriptDesc.enumerable, true);
         \\assert.sameValue(scriptDesc.configurable, false);
     );
-    defer script_result.free(js.runtime);
 }
 
 test "Engine top-level var probes preserve cross-realm global identity" {
@@ -2964,7 +2915,6 @@ test "Engine top-level var probes preserve cross-realm global identity" {
         \\    assert.sameValue(globalThis.evalScriptVarProbe, undefined);
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -2982,7 +2932,6 @@ test "Engine createRealm owns independent intrinsics with realm-local instanceof
         \\assert.sameValue(new other.Array() instanceof other.Array, true);
         \\assert.sameValue(new other.Array() instanceof Array, false);
     );
-    defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
 
@@ -3033,7 +2982,6 @@ test "cross-realm construction uses class prototype state without observable rea
         \\    assert.sameValue(R.Function.__realm_Object_proto, fakePrototype);
         \\})();
     );
-    defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
 
@@ -3069,7 +3017,6 @@ test "Object RegExp and TypedArray use their C function Realm state" {
         \\    assert.notSameValue(Object.getPrototypeOf(backing), ArrayBuffer.prototype);
         \\})();
     );
-    defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 }
 
@@ -3084,7 +3031,6 @@ test "Engine cross-realm eval keeps global lexical declarations per realm" {
         \\assert.sameValue(crossRealmLexicalProbe, 1);
         \\assert.sameValue(other.crossRealmLexicalProbe, 2);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3108,7 +3054,6 @@ test "native builtin records use callee realm for errors and created objects" {
         \\    assert.sameValue(Object.getPrototypeOf(keys), other.Array.prototype);
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3125,7 +3070,6 @@ test "collection callback adapter materializes errors in its explicit realm" {
     const callback_global = try engine.exec.zjs_vm.contextGlobal(callback_realm);
 
     const callback = try engine.exec.closure.create(rt, 7, 0, 0, 0);
-    defer callback.free(rt);
 
     const callback_host = engine.exec.collection_adapter.host(callback_realm, &.{});
     try std.testing.expectError(
@@ -3135,7 +3079,6 @@ test "collection callback adapter materializes errors in its explicit realm" {
     try std.testing.expect(callback_realm.hasException());
 
     const error_value = callback_realm.takeException();
-    defer error_value.free(rt);
     const error_object = try core.Object.expect(error_value);
     const caller_type_error = engine.exec.object_ops.constructorPrototypeFromGlobal(rt, caller_global, "TypeError") orelse
         return error.TestUnexpectedResult;
@@ -3210,7 +3153,6 @@ test "constructor static prototype and accessor handlers keep their callee realm
         \\    assert.sameValue(Object.prototype.hasOwnProperty.call(iterator, "next"), false);
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3244,7 +3186,6 @@ test "bound and proxy wrappers defer realm switching to the final target" {
         \\    }
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3327,7 +3268,6 @@ test "Array species compares exact realm intrinsics without skipping wrapper get
         \\    assert.sameValue(Object.getPrototypeOf(activeResult), Array.prototype);
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3336,18 +3276,16 @@ test "Array species does not confuse a foreign native named Array with the intri
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const setup = try js.eval(
+    _ = try js.eval(
         \\globalThis.__arraySpeciesRealmHandle = $262.createRealm();
         \\globalThis.__arraySpeciesForeignGlobal = __arraySpeciesRealmHandle.global;
         \\globalThis.__arraySpeciesResultCtor = function Species(length) { this.length = length; };
     );
-    setup.free(js.runtime);
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const foreign_global_atom = try js.runtime.internAtom("__arraySpeciesForeignGlobal");
     defer js.runtime.atoms.free(foreign_global_atom);
     const foreign_global_value = try global.getProperty(foreign_global_atom);
-    defer foreign_global_value.free(js.runtime);
     const foreign_global = try core.Object.expect(foreign_global_value);
     const foreign_realm = js.runtime.contextForGlobalIncludingConstructing(foreign_global) orelse return error.TestUnexpectedResult;
 
@@ -3355,12 +3293,10 @@ test "Array species does not confuse a foreign native named Array with the intri
     // because its internal dispatch name happened to be "Array". It owns the
     // foreign FunctionRealm, but it is not that realm's intrinsic %Array%.
     const fake_array = try core.function.nativeFunction(foreign_realm, "Array", 1);
-    defer fake_array.free(js.runtime);
     const fake_array_object = try core.Object.expect(fake_array);
     const species_ctor_atom = try js.runtime.internAtom("__arraySpeciesResultCtor");
     defer js.runtime.atoms.free(species_ctor_atom);
     const species_ctor = try global.getProperty(species_ctor_atom);
-    defer species_ctor.free(js.runtime);
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TestUnexpectedResult;
     try fake_array_object.defineOwnProperty(js.runtime, species_atom, core.Descriptor.data(species_ctor, true, false, true));
 
@@ -3375,7 +3311,6 @@ test "Array species does not confuse a foreign native named Array with the intri
         \\assert.sameValue(Object.getPrototypeOf(output), __arraySpeciesResultCtor.prototype);
         \\assert.sameValue(output.length, 2);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3395,7 +3330,6 @@ test "TypedArray iterator methods accept cross-realm typed array receivers" {
         \\    assert.sameValue([...other.Uint8Array.prototype.entries.call(local)].toString(), "0,42,1,36");
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3440,7 +3374,6 @@ test "TypedArray iterator methods reject proxy-wrapped shared typed array receiv
         \\    }
         \\})(this);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3553,7 +3486,6 @@ test "TypedArray array-like construction does not replay coercions after fast pa
         \\assert.sameValue(typed[0], 7);
         \\assert.sameValue(typed[1], 8);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3585,7 +3517,6 @@ test "TypedArray defineProperty value conversion may detach buffer" {
         \\}), true);
         \\assert.sameValue(big[0], undefined);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3617,7 +3548,6 @@ test "TypedArray and species accessors follow inherited QuickJS shape" {
         \\    assert.sameValue(getter.call(C), C);
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3650,7 +3580,6 @@ test "Well-known symbol method aliases share lazy native identity" {
         \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose], AsyncDisposableStack.prototype.disposeAsync);
         \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose].name, "disposeAsync");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3701,7 +3630,6 @@ test "Lazy standard native accessors preserve descriptors and receiver markers" 
         \\assert.sameValue(asyncDisposedDesc.get.call(new AsyncDisposableStack()), false);
         \\assert.throws(TypeError, function() { asyncDisposedDesc.get.call({}); });
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3730,7 +3658,6 @@ test "Map and Set size live on prototype getter rather than instances" {
         \\set.add(1);
         \\assert.sameValue(set.size, 1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3753,7 +3680,6 @@ test "typed array instances keep concrete class identity" {
         \\assert.sameValue(Object.getPrototypeOf(big), BigUint64Array.prototype);
         \\assert.sameValue(Object.prototype.toString.call(big), "[object BigUint64Array]");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3796,7 +3722,6 @@ test "RegExp lazy native accessors preserve descriptor and mutation semantics" {
         \\assert.sameValue(typeof dotAllDesc.get, "function");
         \\assert.sameValue(dotAllDesc.set, undefined);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3846,7 +3771,6 @@ test "Buffer and TypedArray lazy native accessors preserve descriptor semantics"
         \\assert.sameValue(tagDesc.set, undefined);
         \\assert.sameValue(tagDesc.get.call(typed), "Uint8Array");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3888,7 +3812,6 @@ test "standard constructors publish final prototype graphs and eager metadata" {
         \\assert.sameValue(Function.prototype.length, 0);
         \\assert.sameValue(Object.getPrototypeOf(Function.prototype), Object.prototype);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3921,7 +3844,6 @@ test "DOMException participates in builtin construction protocols" {
         \\assert.sameValue(Object.getPrototypeOf(retargeted), DOMException.prototype);
         \\assert.sameValue(retargeted instanceof DOMException, true);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -3988,7 +3910,6 @@ test "Function apply CreateListFromArrayLike observes array indexed gets" {
         \\assert.sameValue(abrupt.message, "index-one");
         \\assert.sameValue(order.join(","), "length,0,1");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4041,7 +3962,6 @@ test "String.fromCodePoint through apply follows CreateListFromArrayLike" {
         \\    (function() {}).apply(null, 5);
         \\});
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4164,7 +4084,6 @@ test "Function and Reflect apply preserve target classes and argument shapes" {
         \\assert.sameValue(indirectApplyProbe(), "undefined");
         \\assert.sameValue(globalThis.__nativeApplyIndirect, 42);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4183,7 +4102,6 @@ test "Promise constructor resolve and reject functions inherit Function.prototyp
         \\assert.sameValue(Object.getPrototypeOf(resolveFunction), Function.prototype);
         \\assert.sameValue(Object.getPrototypeOf(rejectFunction), Function.prototype);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4216,7 +4134,6 @@ test "C function data callbacks are callable but not constructors" {
         \\    assert.throws(TypeError, function() { new wrapped(); });
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4256,7 +4173,6 @@ test "Promise resolving functions keep internal state off user properties" {
         \\    function(reason) { assert.sameValue(reason, "bad"); }
         \\);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4299,7 +4215,6 @@ test "cross-realm promise resolving data function keeps caller realm" {
         \\    other.resolvePromise(other.promise);
         \\})();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4324,7 +4239,6 @@ test "Promise.resolve rejects self-resolution from custom capability" {
         \\    function(reason) { assert.sameValue(reason.constructor, TypeError); }
         \\);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4375,7 +4289,6 @@ test "Promise.resolve returns an identity match before constructor validation" {
         \\    Promise.resolve.call(receiver, Promise.resolve(5));
         \\});
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4403,7 +4316,6 @@ test "Promise capability executor keeps internal slot off user properties" {
         \\Promise.resolve.call(C, 1);
         \\print("done");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("executor ok\nresolve 1\ndone\n", stream.buffered());
@@ -4438,7 +4350,6 @@ test "Promise.all preserves a resolve abrupt completion across IteratorClose" {
         \\  function(reason) { print(reason === resolveError, reason.message, returnCalls); }
         \\);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("true resolve-error 1\n", stream.buffered());
@@ -4470,7 +4381,6 @@ test "Promise.all next abrupt completion does not close the iterator" {
         \\  function(reason) { print(reason === nextError, reason.message, returnCalls); }
         \\);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("true next-error 0\n", stream.buffered());
@@ -4507,7 +4417,6 @@ test "Promise.all preserves a then abrupt completion across IteratorClose" {
         \\  function(reason) { print(reason === thenError, reason.message, returnCalls); }
         \\);
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("true then-error 1\n", stream.buffered());
@@ -4540,7 +4449,6 @@ test "Promise combinator element callbacks inherit Function.prototype" {
         \\assert.sameValue(Object.getPrototypeOf(resolveElementFunction), Function.prototype);
         \\assert.sameValue(Object.getPrototypeOf(rejectElementFunction), Function.prototype);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4596,7 +4504,6 @@ test "Promise combinator callbacks keep internal state off user properties" {
         \\    function(reason) { throw new Test262Error("unexpected rejection: " + reason); }
         \\);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4629,7 +4536,6 @@ test "pending Promise.then reactions run after deferred settlement" {
         \\passResolve("through");
         \\print("after pass");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -4654,7 +4560,6 @@ test "settled Promise.then reactions run as deferred jobs" {
         \\    .then(function(v) { print("recovered", v); });
         \\print("sync");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -4699,7 +4604,6 @@ test "Promise.finally callbacks keep internal state off user properties" {
         \\savedFulfill("direct");
         \\print("after direct");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("cleanup 1\nafter direct\n", stream.buffered());
@@ -4738,7 +4642,6 @@ test "Promise.allSettled reject element callback is alreadyCalled guarded" {
         \\pOnRejected();
         \\assert.sameValue(rejectCallCount, 1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4757,7 +4660,6 @@ test "Promise.all accepts string iterables through the built-in Promise path" {
         \\});
         \\print("after");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("after\n2\na\nb\n", stream.buffered());
@@ -4774,7 +4676,6 @@ test "Promise.race accepts Set iterables through the built-in Promise path" {
         \\Promise.race(new Set([1, 2])).then(v => print(v));
         \\print("after");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("after\n1\n", stream.buffered());
@@ -4797,7 +4698,6 @@ test "Promise.allSettled accepts Set iterables through the built-in Promise path
         \\});
         \\print("after");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("after\n2\nfulfilled\n1\nfulfilled\n2\n", stream.buffered());
@@ -4840,7 +4740,6 @@ test "Promise keyed combinators preserve enumerable own keys" {
         \\resolveFirst("one");
         \\print("after");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -4860,7 +4759,6 @@ test "Promise.any accepts Set iterables through the built-in Promise path" {
         \\Promise.any(new Set([1, 2])).then(v => print(v), e => print(e.name));
         \\print("after");
     , &stream);
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("after\n1\n", stream.buffered());
@@ -4913,7 +4811,6 @@ test "Object constructor record preserves call and construct semantics" {
         \\assert.sameValue(Object.getPrototypeOf(subclassed), ObjectSubclass.prototype);
         \\Object.defineProperty(renamed, "name", originalName);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4935,7 +4832,6 @@ test "property compaction preserves enumeration order across interleaved deletes
         \\assert.sameValue(Object.keys(object).join(","), "p16,p17,p18,p19,p20,p21,p22,p23,p3");
         \\assert.sameValue(Object.keys(object).map(k => k + ":" + object[k]).join("|"), "p16:160|p17:170|p18:180|p19:190|p20:200|p21:210|p22:220|p23:230|p3:303");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -4943,7 +4839,7 @@ test "property compaction preserves enumeration order across interleaved deletes
 test "shared engine baseline restore survives compacting global deletes" {
     const js = helpers.sharedTestEngine();
 
-    const result = try js.eval(
+    _ = try js.eval(
         \\const root = globalThis;
         \\const names = Object.getOwnPropertyNames(root);
         \\const descriptor = Object.getOwnPropertyDescriptor;
@@ -4952,7 +4848,6 @@ test "shared engine baseline restore survives compacting global deletes" {
         \\    if (current && current.configurable) delete root[name];
         \\}
     );
-    result.free(js.runtime);
     try std.testing.expect(js.context.global.?.shape_ref.deletedPropCount() < 8);
 
     helpers.endSharedTest();
@@ -4964,7 +4859,6 @@ test "shared engine baseline restore survives compacting global deletes" {
         \\assert.sameValue(typeof print, "function");
         \\assert.sameValue(eval("1 + 1"), 2);
     );
-    defer check.free(js.runtime);
     try std.testing.expect(check.isUndefined());
 }
 
@@ -4983,7 +4877,6 @@ test "native cproto distinguishes construct-only and callable constructors" {
         \\assert.sameValue(typeof Date(), "string");
         \\assert.sameValue(Object(null) instanceof Object, true);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5011,7 +4904,6 @@ test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
         \\assert.throws(TypeError, function () { map.set(Symbol.for("registered"), 3); });
         \\assert.throws(TypeError, function () { set.add(Symbol.for("registered")); });
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5021,11 +4913,9 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
-    defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
-    defer closure_value.free(rt);
 
     const registered_atom = try rt.atoms.internGlobalSymbol("registered");
     defer rt.atoms.free(registered_atom);
@@ -5036,14 +4926,11 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     defer rt.atoms.free(key_name);
 
     var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value.dup() },
+        .{ .name = map_name, .value = map_value },
         .{ .name = key_name, .value = try rt.symbolValue(registered_atom) },
     };
-    defer globals[0].value.free(rt);
-    defer globals[1].value.free(rt);
 
-    if (engine.exec.closure.call(rt, closure_value, &.{}, globals[0..])) |value| {
-        defer value.free(rt);
+    if (engine.exec.closure.call(rt, closure_value, &.{}, globals[0..])) |_| {
         try std.testing.expect(false);
     } else |err| {
         try std.testing.expectEqual(error.TypeError, err);
@@ -5056,30 +4943,24 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
-    defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
     var keys: [8]*core.Object = undefined;
     var key_count: usize = 0;
-    defer {
-        for (keys[0..key_count]) |key| key.value().free(rt);
-    }
+    defer {}
 
     for (&keys, 0..) |*slot, index| {
         const key = try core.Object.create(rt, core.class.ids.object, null);
         slot.* = key;
         key_count += 1;
-        const result = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
-        result.free(rt);
+        _ = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
     }
     try std.testing.expectEqual(@as(usize, 8), map_object.weakCollectionEntries().len);
     try std.testing.expect(map_object.collectionBucketHeads().len != 0);
 
     const mutation_key = try core.Object.create(rt, core.class.ids.object, null);
-    defer mutation_key.value().free(rt);
 
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
-    defer closure_value.free(rt);
 
     const map_name = try rt.internAtom("map");
     defer rt.atoms.free(map_name);
@@ -5087,17 +4968,14 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     defer rt.atoms.free(key_name);
 
     var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value.dup() },
-        .{ .name = key_name, .value = mutation_key.value().dup() },
+        .{ .name = map_name, .value = map_value },
+        .{ .name = key_name, .value = mutation_key.value() },
     };
-    defer globals[0].value.free(rt);
-    defer globals[1].value.free(rt);
 
     try std.testing.expectError(error.JSException, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
 
     try std.testing.expectEqual(@as(usize, 9), map_object.weakCollectionEntries().len);
     const get_result = try engine.exec.collection_ops.methodCall(rt, map_value, 2, &.{mutation_key.value()});
-    defer get_result.free(rt);
     try helpers.expectStringValueBytes(get_result, "mutated");
 }
 
@@ -5143,18 +5021,13 @@ fn symmetricDifferenceMutatingKeysImpl(
     if (args.len != 0) return core.JSValue.boolean(false);
 
     const base_set_value = try engine.exec.globals.getByName(rt, globals, "baseSet");
-    defer base_set_value.free(rt);
     inline for (.{ "b", "c" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
-        defer value.free(rt);
-        const out = try engine.exec.collection_ops.methodCall(rt, base_set_value, 4, &.{value});
-        out.free(rt);
+        _ = try engine.exec.collection_ops.methodCall(rt, base_set_value, 4, &.{value});
     }
     inline for (.{ "b", "d" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
-        defer value.free(rt);
-        const out = try engine.exec.collection_ops.methodCall(rt, base_set_value, 6, &.{value});
-        out.free(rt);
+        _ = try engine.exec.collection_ops.methodCall(rt, base_set_value, 6, &.{value});
     }
 
     const array = try core.Object.createArray(rt, null);
@@ -5162,7 +5035,6 @@ fn symmetricDifferenceMutatingKeysImpl(
     comptime var index: u32 = 0;
     inline for (.{ "x", "b", "c", "c" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
-        defer value.free(rt);
         try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
         index += 1;
     }
@@ -5198,7 +5070,6 @@ test "Set combinator results use the realm intrinsic prototype after global muta
         \\  globalThis.Set = IntrinsicSet;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5227,7 +5098,6 @@ test "Map.groupBy result uses the realm intrinsic prototype after global mutatio
         \\  globalThis.Map = IntrinsicMap;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5262,7 +5132,6 @@ test "RegExp call and String RegExpCreate use the realm intrinsic after global m
         \\  globalThis.RegExp = IntrinsicRegExp;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5298,7 +5167,6 @@ test "Uint8Array.fromHex/fromBase64 use realm intrinsic prototypes after global 
         \\  globalThis.ArrayBuffer = IntrinsicArrayBuffer;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5338,7 +5206,6 @@ test "native Error Reflect.construct fallback uses the realm intrinsic after glo
         \\  globalThis.EvalError = IntrinsicEvalError;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5373,7 +5240,6 @@ test "Error.prototype.stack setter still recognizes the intrinsic after global m
         \\  globalThis.Error = IntrinsicError;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5423,7 +5289,6 @@ test "DisposableStack.move and dispose keep realm intrinsic prototypes after glo
         \\  globalThis.SuppressedError = IntrinsicSuppressedError;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5456,7 +5321,6 @@ test "JSON.parse uses realm intrinsic Object/Array prototypes after global mutat
         \\  globalThis.Array = IntrinsicArray;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5483,7 +5347,6 @@ test "TypedArray Reflect.construct fallback uses the realm intrinsic after globa
         \\  globalThis.Uint8Array = IntrinsicUint8Array;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5497,26 +5360,21 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     _ = try engine.exec.zjs_vm.contextGlobal(callback_ctx);
 
     const base_set_value = try engine.exec.collection_ops.constructBare(rt, 2);
-    defer base_set_value.free(rt);
     const base_set = objectFromValue(base_set_value);
 
     inline for (.{ "a", "b", "c", "d", "e", "q" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
-        defer value.free(rt);
-        const out = try engine.exec.collection_ops.methodCall(rt, base_set_value, 6, &.{value});
-        out.free(rt);
+        _ = try engine.exec.collection_ops.methodCall(rt, base_set_value, 6, &.{value});
     }
 
     const setlike = try core.Object.create(rt, core.class.ids.object, null);
     const setlike_value = setlike.value();
-    defer setlike_value.free(rt);
 
     const size_key = try rt.internAtom("size");
     defer rt.atoms.free(size_key);
     try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
     const noop = try engine.exec.closure.create(rt, 13, 0, 0, 0);
-    defer noop.free(rt);
 
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
@@ -5529,9 +5387,8 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const base_set_name = try rt.internAtom("baseSet");
     defer rt.atoms.free(base_set_name);
     var globals = [_]engine.exec.globals.Slot{
-        .{ .name = base_set_name, .value = base_set_value.dup() },
+        .{ .name = base_set_name, .value = base_set_value },
     };
-    defer globals[0].value.free(rt);
 
     const host = core.host_function.CallbackHost{
         .ctx = callback_ctx,
@@ -5539,7 +5396,6 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
         .call = &symmetricDifferenceMutatingKeysHost,
     };
     const result_value = try engine.exec.collection_ops.methodCallWithCallbackHost(rt, base_set_value, 20, &.{setlike_value}, host);
-    defer result_value.free(rt);
     const result_set = objectFromValue(result_value);
 
     try expectActiveSetStrings(result_set, &.{ "a", "c", "d", "e", "q", "x" });
@@ -5551,25 +5407,21 @@ test "host map closure releases appended value when entry allocation fails" {
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 1);
-    defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
     inline for (.{ 10, 11, 12, 13, 14, 15, 16, 17 }) |key| {
-        const result = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(key), core.JSValue.int32(key) });
-        result.free(rt);
+        _ = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(key), core.JSValue.int32(key) });
     }
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntries().len);
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntriesCapacity());
 
     const closure_value = try engine.exec.closure.create(rt, 38, 0, 0, 0);
-    defer closure_value.free(rt);
 
     const map_name = try rt.internAtom("map");
     defer rt.atoms.free(map_name);
     var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value.dup() },
+        .{ .name = map_name, .value = map_value },
     };
-    defer globals[0].value.free(rt);
 
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
@@ -5588,24 +5440,20 @@ test "host map closure rolls back appended entry when size update fails" {
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 1);
-    defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
-    const first_set = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(1), core.JSValue.int32(11) });
-    first_set.free(rt);
+    _ = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(1), core.JSValue.int32(11) });
 
     try fillOwnPropertyStorageForFailure(rt, map_object);
     try std.testing.expect(map_object.deleteProperty(rt, core.atom.predefinedId("size", .string).?));
 
     const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
-    defer closure_value.free(rt);
 
     const map_name = try rt.internAtom("map");
     defer rt.atoms.free(map_name);
     var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value.dup() },
+        .{ .name = map_name, .value = map_value },
     };
-    defer globals[0].value.free(rt);
 
     const old_len = map_object.collectionEntries().len;
     const old_active = map_object.collectionActiveCount();
@@ -5619,7 +5467,6 @@ test "host map closure rolls back appended entry when size update fails" {
     const observed_len = entries_slot.*.len;
     const observed_active = map_object.collectionActiveCount();
     if (entries_slot.*.len > old_len) {
-        entries_slot.*[old_len].destroy(rt);
         entries_slot.*[old_len] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
         entries_slot.* = entries_slot.*.ptr[0..old_len];
         map_object.collectionActiveCountSlot().* = old_active;
@@ -5656,7 +5503,6 @@ test "Set.prototype.isDisjointFrom propagates IteratorClose errors on early fals
         \\}
         \\assert.sameValue(returnCalls, 1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5686,7 +5532,6 @@ test "Set.prototype.isSupersetOf propagates IteratorClose errors on early false"
         \\}
         \\assert.sameValue(returnCalls, 1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5712,7 +5557,6 @@ test "Set relation IteratorClose rejects a non-object return result" {
         \\});
         \\assert.sameValue(returnCalls, 1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5746,7 +5590,6 @@ test "Set relation next abrupt completion does not close the iterator" {
         \\assert.sameValue(thrown, nextError);
         \\assert.sameValue(returnCalls, 0);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5835,7 +5678,6 @@ test "Set.prototype.union uses GetSetRecord order for set-like classes" {
         \\});
         \\assert.sameValue(coercionCalls, 1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5876,7 +5718,6 @@ test "Set.prototype.intersection consumes set-like keys as a direct iterator" {
         \\assert.compareArray([...result], []);
         \\assert.compareArray(log, ["call keys", "get next", "call next"]);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5910,7 +5751,6 @@ test "Set union methods copy receiver after reading set-like keys next" {
         \\var symmetricBase = new Set([1, 2, 3]);
         \\assert.compareArray([...symmetricBase.symmetricDifference(setLikeThatReplaces(symmetricBase))], [4]);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5941,7 +5781,6 @@ test "Set.prototype.difference has branch ignores entries appended by receiver m
         \\assert.compareArray([...set], [11, 22]);
         \\assert.compareArray(seen, [1, 2, 3, 4]);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -5968,7 +5807,6 @@ test "URI globals use observable string coercion and reject malformed UTF-8" {
         \\assert.sameValue(threw, true);
         \\assert.sameValue(encodeURI(), "undefined");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6019,7 +5857,6 @@ test "URI four byte decode range preserves globals and completion" {
         \\}
         \\`), 3);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6045,7 +5882,6 @@ test "Engine eval builds frozen tagged template objects with raw arrays" {
         \\assert.sameValue(Object.getOwnPropertyDescriptor(captured, "length").writable, false);
         \\assert.sameValue(Object.getOwnPropertyDescriptor(captured.raw, "length").writable, false);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6082,7 +5918,6 @@ test "Engine eval permits invalid escapes only in tagged template cooked values"
         \\  assert.sameValue(value, "inner");
         \\})`\u{10FFFFF}${"inner"}right`;
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6114,7 +5949,6 @@ test "destructured parameter default class keeps initialized parameter bindings"
         \\};
         \\f([]);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6129,7 +5963,6 @@ test "top-level lexical destructuring reuses its predeclared global cells" {
         \\assert.sameValue(first, 1);
         \\assert.sameValue(second, 2);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6144,7 +5977,6 @@ test "for-of var destructuring predeclares generic binding patterns" {
         \\for (var { value: second } of [{ value: 19 }]) seen += second;
         \\assert.sameValue(seen, 42);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6164,7 +5996,6 @@ test "block function closures keep the current lexical binding cells" {
         \\}
         \\outer();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6187,7 +6018,6 @@ test "nested assignment patterns preserve yield identifier and expression gramma
         \\assert.sameValue(iterator.next("key").done, true);
         \\assert.sameValue(suspended.key, 23);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6209,7 +6039,6 @@ test "class field initializers inherit QuickJS arguments grammar" {
         \\class Allowed { static method() { return arguments.length; } }
         \\assert.sameValue(Allowed.method(1, 2), 2);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6230,7 +6059,6 @@ test "captured derived this binding can only be initialized once" {
         \\new Derived();
         \\assert.throws(ReferenceError, callSuperAgain);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6248,7 +6076,6 @@ test "class name binding is in TDZ throughout its heritage expression" {
         \\  assert.throws(ReferenceError, () => eval(source));
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6269,7 +6096,6 @@ test "class computed names observe the class name TDZ" {
         \\var named = class C { m() { return C; } };
         \\assert.sameValue(named.prototype.m(), named);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6290,7 +6116,6 @@ test "Array and String iterator prototypes inherit @@iterator from Iterator.prot
         \\expectIteratorChain([][Symbol.iterator]());
         \\expectIteratorChain(""[Symbol.iterator]());
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6305,7 +6130,6 @@ test "Object.assign writes through a proxy set trap" {
         \\Object.assign(p, { foo: 1, bar: 2 });
         \\assert.sameValue(set + "", "foo,bar");
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6328,7 +6152,6 @@ test "String match and search Get a proxy matcher then ToPrimitive" {
         \\expectWellKnownThenToPrimitive((p) => "".match(p), Symbol.match);
         \\expectWellKnownThenToPrimitive((p) => "".search(p), Symbol.search);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6346,7 +6169,6 @@ test "class static blocks use their installed receiver as the super home object"
         \\}
         \\assert.sameValue(observed, 42);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6368,7 +6190,6 @@ test "body function declarations reuse same-name parameter bindings" {
         \\}
         \\declarationWinsArguments(1);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6385,7 +6206,6 @@ test "parameter-expression and body environments classify body functions by reco
         \\};
         \\f();
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6398,7 +6218,6 @@ test "eval source conversion combines valid UTF-16 surrogate pairs" {
         \\const rawUnicodePattern = eval(`/\uD83D\uDC38/u`);
         \\assert.sameValue(rawUnicodePattern.test("\u{1F438}"), true);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6425,7 +6244,6 @@ test "module top-level await works in object computed property names" {
         \\assert.sameValue(o[await 9], 9);
         \\assert.sameValue(o[String(await 9)], 9);
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }
@@ -6449,7 +6267,6 @@ test "module top-level await works in class computed fields inside try" {
         \\  throw e;
         \\}
     );
-    defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
 }

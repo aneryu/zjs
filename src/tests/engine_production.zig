@@ -81,11 +81,9 @@ test "production embedding can own JSRuntime and JSContext directly" {
     defer ctx.deinit();
 
     const value = try ctx.eval("1 + 1", .{});
-    defer value.free(&rt);
     try std.testing.expectEqual(@as(?i32, 2), value.asInt32());
 
     const object = try ctx.eval("({ answer: 42 })", .{});
-    defer object.free(&rt);
     try std.testing.expect(object.isObject());
 
     const global = try ctx.globalObject();
@@ -108,7 +106,6 @@ test "production embedding API applies limits and releases eval handles" {
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const result = try ctx.eval("print(1 + 2);", .{ .output = &output });
-    defer result.free(rt);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\n", output.buffered());
@@ -154,7 +151,6 @@ test "production default host surface stays minimal" {
         \\try { std; } catch (e) { print(e.name); }
         \\try { os; } catch (e) { print(e.name); }
     , .{ .output = &output });
-    defer result.free(rt);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -181,7 +177,6 @@ test "production event loop does not add product runtime globals" {
         \\console.log(2);
         \\print(typeof std, typeof os, typeof setTimeout, typeof setInterval, typeof clearTimeout, typeof clearInterval);
     , .{ .output = &output });
-    defer result.free(rt);
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
@@ -201,7 +196,6 @@ test "production embedding can install external host functions" {
     try ctx.defineGlobalFunction("hostValue", 0, &state, HostFunctionState.call, null);
 
     const result = try ctx.eval("hostValue()", .{});
-    defer result.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
@@ -214,7 +208,6 @@ test "production embedding can create external host function values" {
 
     var state = HostFunctionState{ .value = 7 };
     const function = try ctx.createExternalFunction("HostCtor", 0, &state, HostFunctionState.call, null, .{ .with_prototype = true });
-    defer function.free(rt);
     try std.testing.expect(function.isObject());
     try std.testing.expect(ctx.isCallable(function));
     try std.testing.expect(ctx.isConstructor(function));
@@ -224,7 +217,6 @@ test "production embedding can create external host function values" {
     try std.testing.expectEqualStrings("HostCtor", name);
 
     const prototype = try ctx.getProperty(function, "prototype");
-    defer prototype.free(rt);
     try std.testing.expect(prototype.isObject());
 
     const global = try ctx.globalObject();
@@ -244,7 +236,6 @@ test "production embedding can create external host function values" {
         \\    throw new Error("invalid external constructor surface");
         \\}
     , .{});
-    defer surface.free(rt);
     try std.testing.expect(surface.isUndefined());
 }
 
@@ -256,11 +247,9 @@ test "production embedding can create objects and define data properties" {
     defer ctx.destroy();
 
     const object = try ctx.createObject();
-    defer object.free(rt);
     try ctx.defineDataProperty(object, "answer", zjs.JSValue.int32(42), .{});
 
     const answer = try ctx.getProperty(object, "answer");
-    defer answer.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
 }
 
@@ -284,16 +273,12 @@ test "production embedding can inspect own property descriptors by JS key" {
         \\  return { object, key };
         \\})()
     , .{});
-    defer envelope.free(rt);
 
     const object = try ctx.getProperty(envelope, "object");
-    defer object.free(rt);
     const key = try ctx.getProperty(envelope, "key");
-    defer key.free(rt);
 
     try std.testing.expect(try ctx.hasOwnPropertyKey(object, key, .{}));
     var desc = (try ctx.ownPropertyDescriptor(object, key, .{})) orelse return error.TestExpectedEqual;
-    defer desc.destroy(rt);
     try std.testing.expectEqual(zjs.PropertyDescriptor.data(zjs.JSValue.int32(17), false, false, true).kind, desc.kind);
     try std.testing.expectEqual(@as(?i32, 17), desc.value.asInt32());
     try std.testing.expectEqual(false, desc.writable.?);
@@ -301,11 +286,9 @@ test "production embedding can inspect own property descriptors by JS key" {
     try std.testing.expectEqual(true, desc.configurable.?);
 
     const read_value = try ctx.getPropertyKey(object, key, .{});
-    defer read_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 17), read_value.asInt32());
 
     const inherited = try ctx.eval("Object.create({ inherited: 1 })", .{});
-    defer inherited.free(rt);
     try std.testing.expect(!try ctx.hasOwnProperty(inherited, "inherited"));
     try ctx.defineDataProperty(inherited, "owned", zjs.JSValue.int32(1), .{});
     try std.testing.expect(try ctx.hasOwnProperty(inherited, "owned"));
@@ -313,15 +296,11 @@ test "production embedding can inspect own property descriptors by JS key" {
     try std.testing.expect(!try ctx.hasOwnProperty(inherited, "owned"));
 
     const proxy = try ctx.eval("new Proxy({ visible: 99 }, {})", .{});
-    defer proxy.free(rt);
     const visible_key = try ctx.createString("visible");
-    defer visible_key.free(rt);
     var proxy_desc = (try ctx.ownPropertyDescriptor(proxy, visible_key, .{})) orelse return error.TestExpectedEqual;
-    defer proxy_desc.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 99), proxy_desc.value.asInt32());
 
     const revoked = try ctx.eval("const r = Proxy.revocable({ visible: 1 }, {}); r.revoke(); r.proxy", .{});
-    defer revoked.free(rt);
     try std.testing.expectError(error.TypeError, ctx.ownPropertyDescriptor(revoked, visible_key, .{}));
 }
 
@@ -333,13 +312,11 @@ test "production embedding can create strings and convert values to owned utf8" 
     defer ctx.destroy();
 
     const direct = try ctx.createString("caf\xc3\xa9");
-    defer direct.free(rt);
     const direct_text = try direct.asString().?.toOwnedUtf8(std.testing.allocator);
     defer std.testing.allocator.free(direct_text);
     try std.testing.expectEqualStrings("caf\xc3\xa9", direct_text);
 
     const object = try ctx.eval("({ toString() { return 'semantic-\\u00e9'; } })", .{});
-    defer object.free(rt);
     const semantic_text = try ctx.toOwnedUtf8(object, std.testing.allocator);
     defer std.testing.allocator.free(semantic_text);
     try std.testing.expectEqualStrings("semantic-\xc3\xa9", semantic_text);
@@ -356,12 +333,10 @@ test "production embedding can convert values to numbers" {
     try std.testing.expect(zjs.JSValue.number(-0.0).asFloat64().? == 0);
 
     const numeric_object = try ctx.eval("({ valueOf() { return 12.75; } })", .{});
-    defer numeric_object.free(rt);
     try std.testing.expectEqual(@as(f64, 12.75), try ctx.toNumber(numeric_object));
     try std.testing.expectEqual(@as(f64, 12), try ctx.toIntegerOrInfinity(numeric_object));
 
     const non_numeric = try ctx.eval("({ toString() { return 'not-a-number'; } })", .{});
-    defer non_numeric.free(rt);
     try std.testing.expect(std.math.isNan(try ctx.toNumber(non_numeric)));
 }
 
@@ -373,7 +348,6 @@ test "production embedding can inspect callable and constructor values" {
     defer ctx.destroy();
 
     const function = try ctx.eval("(function NamedForEmbedding() {})", .{});
-    defer function.free(rt);
     try std.testing.expect(ctx.isCallable(function));
     try std.testing.expect(ctx.isConstructor(function));
 
@@ -382,7 +356,6 @@ test "production embedding can inspect callable and constructor values" {
     try std.testing.expectEqualStrings("NamedForEmbedding", name);
 
     const arrow = try ctx.eval("(() => {})", .{});
-    defer arrow.free(rt);
     try std.testing.expect(ctx.isCallable(arrow));
     try std.testing.expect(!ctx.isConstructor(arrow));
 
@@ -398,24 +371,19 @@ test "production embedding can call JavaScript functions" {
     defer ctx.destroy();
 
     const function = try ctx.eval("(function addToBase(a, b) { return this.base + a + b; })", .{});
-    defer function.free(rt);
 
     const receiver = try ctx.createObject();
-    defer receiver.free(rt);
     try ctx.defineDataProperty(receiver, "base", zjs.JSValue.int32(10), .{});
 
     const result = try ctx.callFunction(function, &.{ zjs.JSValue.int32(2), zjs.JSValue.int32(3) }, .{
         .this_value = receiver,
     });
-    defer result.free(rt);
     try std.testing.expectEqual(@as(?i32, 15), result.asInt32());
 
     const throwing = try ctx.eval("(function fail() { throw new TypeError('call failed'); })", .{});
-    defer throwing.free(rt);
     try std.testing.expectError(error.JSException, ctx.callFunction(throwing, &.{}, .{}));
     try std.testing.expect(ctx.hasException());
     const exception = ctx.takePendingException();
-    defer exception.free(rt);
     try std.testing.expect(exception.isObject());
 }
 
@@ -431,9 +399,7 @@ test "production embedding can compare values with SameValue semantics" {
     try std.testing.expect(zjs.JSValue.shortBigInt(7).sameValue(zjs.JSValue.shortBigInt(7)));
 
     const lhs = try ctx.eval("'same-value-string'", .{});
-    defer lhs.free(rt);
     const rhs = try ctx.eval("'same-' + 'value-string'", .{});
-    defer rhs.free(rt);
     try std.testing.expect(lhs.sameValue(rhs));
 }
 
@@ -445,26 +411,21 @@ test "production embedding can inspect arrays and indexed values" {
     defer ctx.destroy();
 
     const array = try ctx.eval("[1, 2, 3]", .{});
-    defer array.free(rt);
     try std.testing.expect(try ctx.isArray(array));
     try std.testing.expectEqual(@as(u32, 3), try ctx.arrayLength(array));
 
     const second = try ctx.getIndex(array, 1);
-    defer second.free(rt);
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
 
     const proxy = try ctx.eval("new Proxy([4], {})", .{});
-    defer proxy.free(rt);
     try std.testing.expect(try ctx.isArray(proxy));
     try std.testing.expectEqual(@as(u32, 1), try ctx.arrayLength(proxy));
 
     const object = try ctx.eval("({ length: 1, 0: 9 })", .{});
-    defer object.free(rt);
     try std.testing.expect(!try ctx.isArray(object));
     try std.testing.expectError(error.TypeError, ctx.arrayLength(object));
 
     const revoked = try ctx.eval("const r = Proxy.revocable([], {}); r.revoke(); r.proxy", .{});
-    defer revoked.free(rt);
     try std.testing.expectError(error.TypeError, ctx.isArray(revoked));
 }
 
@@ -489,7 +450,6 @@ test "production embedding roots host-held values with public handles" {
 
     var scope: zjs.JSValue.Scope = rt.enterHandleScope();
     const local: zjs.JSValue.Local = try scope.localDup(object);
-    object.free(rt);
 
     try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
@@ -503,7 +463,6 @@ test "production embedding roots host-held values with public handles" {
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 
     const answer = try ctx.getProperty(persistent.get(), "answer");
-    defer answer.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
 
     persistent.deinit();
@@ -527,8 +486,6 @@ test "production embedding can expose owned and shared byte stores" {
     errdefer owned_store.release();
 
     const owned_value = try ctx.arrayBuffer(&owned_store);
-    var owned_live = true;
-    defer if (owned_live) owned_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), owned_store.bytes.len);
     try std.testing.expectEqual(@as(usize, 4), rt.gcStats().external_bytes);
     try std.testing.expectEqual(@as(usize, 4), rt.gcStats().external_token_bytes);
@@ -542,8 +499,6 @@ test "production embedding can expose owned and shared byte stores" {
     try std.testing.expectEqualSlices(u8, &.{ 1, 9, 3, 4 }, owned_view.slice());
     try std.testing.expectEqual(@as(usize, 0), owned_state.calls);
 
-    owned_value.free(rt);
-    owned_live = false;
     // Dropping the embedder's last reference is what ends the buffer's life
     // under refcounting; under the tracer it is what makes it collectable, and
     // the store's `deinit` runs when the collection reaches it. This is an
@@ -564,8 +519,6 @@ test "production embedding can expose owned and shared byte stores" {
     errdefer shared_store.release();
 
     const shared_value = try ctx.arrayBuffer(&shared_store);
-    var shared_live = true;
-    defer if (shared_live) shared_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), shared_store.bytes.len);
     try std.testing.expectEqual(@as(usize, 3), rt.gcStats().external_bytes);
     try std.testing.expectEqual(@as(usize, 3), rt.gcStats().external_token_bytes);
@@ -579,8 +532,6 @@ test "production embedding can expose owned and shared byte stores" {
     try std.testing.expectEqualSlices(u8, &.{ 12, 9, 10 }, shared_view.slice());
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 
-    shared_value.free(rt);
-    shared_live = false;
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), shared_state.calls);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
@@ -604,11 +555,9 @@ test "production runtime can detach array buffers through public runtime API" {
     errdefer owned_store.release();
 
     const owned_value = try ctx.arrayBuffer(&owned_store);
-    defer owned_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), owned_state.calls);
 
     const detached = try zjs.runtime.detachArrayBuffer(ctx.core, owned_value);
-    defer detached.free(rt);
     try std.testing.expect(detached.isUndefined());
     try std.testing.expectEqual(@as(usize, 1), owned_state.calls);
     try std.testing.expectError(error.Detached, owned_value.asBytes(ctx));
@@ -623,7 +572,6 @@ test "production runtime can detach array buffers through public runtime API" {
     errdefer shared_store.release();
 
     const shared_value = try ctx.arrayBuffer(&shared_store);
-    defer shared_value.free(rt);
     try std.testing.expectError(error.TypeError, zjs.runtime.detachArrayBuffer(ctx.core, shared_value));
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 }
@@ -645,7 +593,6 @@ test "production embedding can retain and rewrap shared array buffers" {
     errdefer store.release();
 
     const original = try ctx.arrayBuffer(&store);
-    defer original.free(rt);
     var shared_ref = try ctx.retainSharedArrayBuffer(original);
     defer shared_ref.release();
 
@@ -655,7 +602,6 @@ test "production embedding can retain and rewrap shared array buffers" {
     defer other_ctx.destroy();
 
     const rewrapped = try other_ctx.sharedArrayBufferFromRef(shared_ref);
-    defer rewrapped.free(other_rt);
     const rewrapped_view = try rewrapped.asBytes(other_ctx);
     const rewrapped_mut = try rewrapped_view.sliceMut();
     rewrapped_mut[1] = 9;
@@ -682,14 +628,12 @@ test "production embedding lifecycle deinitializes repeated script and module ev
             \\for (let i = 0; i < 8; i++) values.push({ i });
             \\values.map(v => v.i).join(",");
         , .{ .discard_script_result = true });
-        defer script_result.free(rt);
         try std.testing.expect(script_result.isUndefined());
 
-        const module_result = try ctx.eval(
+        _ = try ctx.eval(
             \\const value = await Promise.resolve(42);
             \\export { value };
         , .{ .mode = .module });
-        defer module_result.free(rt);
     }
 }
 
@@ -700,7 +644,7 @@ test "production module import.meta identity survives methods and nested closure
     const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
-    const result = try ctx.eval(
+    _ = try ctx.eval(
         \\const rootMeta = import.meta;
         \\class Holder {
         \\  read() { return import.meta; }
@@ -716,7 +660,6 @@ test "production module import.meta identity survives methods and nested closure
         \\  throw new Error("import.meta identity escaped its module");
         \\}
     , .{ .mode = .module });
-    defer result.free(rt);
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {
@@ -740,7 +683,6 @@ test "production embedding public API allocation failures keep host ownership in
     defer ctx.destroy();
 
     const object = try ctx.eval("({ answer: 42 })", .{});
-    defer object.free(rt);
 
     const persistent_before = rt.persistentRootCountForTest();
     const local_before = rt.localRootCountForTest();
@@ -768,8 +710,7 @@ test "production embedding public API allocation failures keep host ownership in
     try std.testing.expectEqual(persistent_before, rt.persistentRootCountForTest());
     try std.testing.expectEqual(local_before, rt.localRootCountForTest());
 
-    if (ctx.createString("must allocate")) |value| {
-        value.free(rt);
+    if (ctx.createString("must allocate")) |_| {
         return error.TestExpectedError;
     } else |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
@@ -785,8 +726,7 @@ test "production embedding public API allocation failures keep host ownership in
         HostFinalizerState.call,
         HostFinalizerState.finalize,
         .{},
-    )) |value| {
-        value.free(rt);
+    )) |_| {
         return error.TestExpectedError;
     } else |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
@@ -802,8 +742,7 @@ test "production embedding public API allocation failures keep host ownership in
     });
     defer store.release();
 
-    if (ctx.arrayBuffer(&store)) |value| {
-        value.free(rt);
+    if (ctx.arrayBuffer(&store)) |_| {
         return error.TestExpectedError;
     } else |err| {
         try std.testing.expectEqual(error.OutOfMemory, err);
@@ -874,7 +813,6 @@ test "production embedding takeException captures exception snapshot without lea
     _ = ctx.eval("throw new Error('test exception snapshot');", .{}) catch |err| {
         try std.testing.expectEqual(error.JSException, err);
         const thrown = ctx.takePendingException();
-        defer thrown.free(rt);
         try std.testing.expect(thrown.isObject());
     };
 }
@@ -887,7 +825,6 @@ test "production embedding can create and throw named errors" {
     defer ctx.destroy();
 
     const created = try ctx.createError("TypeError", "host-created", .{});
-    defer created.free(rt);
     const created_text = try ctx.formatException(created, std.testing.allocator);
     defer std.testing.allocator.free(created_text);
     try std.testing.expectEqualStrings("TypeError: host-created", created_text);
@@ -899,7 +836,6 @@ test "production embedding can create and throw named errors" {
     try std.testing.expectError(error.JSException, ctx.throwError("RangeError", "host-thrown", .{}));
     try std.testing.expect(ctx.hasException());
     const thrown = ctx.takePendingException();
-    defer thrown.free(rt);
 
     const thrown_text = try ctx.formatException(thrown, std.testing.allocator);
     defer std.testing.allocator.free(thrown_text);
@@ -939,23 +875,18 @@ test "production embedding can create independent realms" {
 
     const retained = blk: {
         const realm = try ctx.createRealm();
-        defer realm.free(rt);
 
         const realm_global = try ctx.realmGlobal(realm);
-        defer realm_global.free(rt);
         try std.testing.expect(realm_global.isObject());
 
         const realm_global_object = try ctx.realmGlobalObject(realm);
         try std.testing.expect(realm_global_object.isGlobal());
 
         const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
-        defer realm_global_this.free(rt);
         try std.testing.expect(realm_global_this.sameValue(realm_global));
 
         const current_array = try ctx.eval("Array", .{});
-        defer current_array.free(rt);
         const realm_array = try ctx.getProperty(realm_global, "Array");
-        defer realm_array.free(rt);
         try std.testing.expect(!realm_array.sameValue(current_array));
 
         break :blk .{ try ctx.createValueHandle(realm_global), realm_global_object };
@@ -967,7 +898,6 @@ test "production embedding can create independent realms" {
     try std.testing.expect(rt.contextForGlobal(realm_global_object) != null);
     {
         const retained_global_this = try ctx.getProperty(realm_global_handle.get(), "globalThis");
-        defer retained_global_this.free(rt);
         try std.testing.expect(retained_global_this.sameValue(realm_global_handle.get()));
     }
 
@@ -984,9 +914,7 @@ test "production embedding can eval script source in explicit function realms" {
     defer ctx.destroy();
 
     const realm = try ctx.createRealm();
-    defer realm.free(rt);
     const realm_global = try ctx.realmGlobal(realm);
-    defer realm_global.free(rt);
     const realm_global_object = try ctx.realmGlobalObject(realm);
 
     try ctx.defineDataProperty(realm_global, "realmMarker", zjs.JSValue.int32(40), .{});
@@ -995,23 +923,19 @@ test "production embedding can eval script source in explicit function realms" {
         .realm_global = realm_global_object,
         .filename = "embedding-realm-source.js",
     });
-    defer source_result.free(rt);
     try std.testing.expectEqual(@as(?i32, 42), source_result.asInt32());
 
     const source_value = try ctx.createString("realmMarker + 3");
-    defer source_value.free(rt);
     const value_result = try ctx.evalScriptValue(source_value, .{
         .realm_global = realm_global_object,
         .filename = "embedding-realm-value.js",
     });
-    defer value_result.free(rt);
     try std.testing.expectEqual(@as(?i32, 43), value_result.asInt32());
 
     var state = HostFunctionState{ .value = 1 };
     const function = try ctx.createExternalFunction("RealmTaggedHost", 0, &state, HostFunctionState.call, null, .{
         .realm_global = realm_global_object,
     });
-    defer function.free(rt);
     const function_global = (try ctx.functionRealmGlobal(function)) orelse return error.TestExpectedEqual;
     try std.testing.expect(function_global == realm_global_object);
 
@@ -1037,16 +961,13 @@ test "production embedding getProperty follows JavaScript accessors" {
         \\  }
         \\})
     , .{});
-    defer object.free(rt);
 
     const stack = try ctx.getProperty(object, "stack");
-    defer stack.free(rt);
     var stack_text = try stack.asString().?.toUtf8(std.testing.allocator);
     defer stack_text.deinit();
     try std.testing.expectEqualStrings("semantic stack", stack_text.slice());
 
     const hits = try ctx.getProperty(object, "hits");
-    defer hits.free(rt);
     try std.testing.expectEqual(@as(?i32, 1), hits.asInt32());
 }
 
@@ -1064,11 +985,78 @@ test "production embedding getProperty reports accessor exceptions" {
         \\  }
         \\})
     , .{});
-    defer object.free(rt);
 
     try std.testing.expectError(error.JSException, ctx.getProperty(object, "stack"));
     try std.testing.expect(ctx.hasException());
     const thrown = ctx.takePendingException();
-    defer thrown.free(rt);
     try std.testing.expect(thrown.isObject());
+}
+
+// --- TGC S3-b: host-held property-name atoms (tracing-gc-s3-spec.md §4 B) ---
+//
+// `JSContext.defineDataProperty` interns the embedder's `[]const u8` and then
+// holds the bare id across a define that allocates a shape. See the JSON-parse
+// test in `tests/exec.zig` for why the §2.6 shadow audit reading is the
+// "`mark_epoch == epoch` while the frame held it" assertion.
+const S3HostDefineMajorProbe = struct {
+    rt: *zjs.JSRuntime,
+    active: bool = false,
+    majors: usize = 0,
+
+    fn trigger(context: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (!self.active) return;
+        const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
+        const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
+        self.rt.memory.trigger_gc_fn = null;
+        self.rt.memory.trigger_gc_ctx = null;
+        defer {
+            self.rt.memory.trigger_gc_fn = saved_trigger_fn;
+            self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        }
+        const before = self.rt.gc.block_heap.mark_epoch;
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+        if (self.rt.gc.block_heap.mark_epoch != before) self.majors += 1;
+    }
+};
+
+test "TGC S3: a host-defined property name stays reachable across a major taken mid-define" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Install the standard globals before arming the probe: their own atom
+    // traffic is not what this test is about.
+    _ = try ctx.globalObject();
+
+    var object = try ctx.createObject();
+    var object_roots = zjs.core.runtime.rootValues(.{&object});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+
+    const saved_trigger_fn = rt.memory.trigger_gc_fn;
+    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    var probe = S3HostDefineMajorProbe{ .rt = rt };
+    rt.memory.trigger_gc_fn = S3HostDefineMajorProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger_fn;
+        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    }
+
+    rt.atoms.atom_audit_missing_edge = 0;
+    probe.active = true;
+    ctx.defineDataProperty(object, "zjsS3HostDefinedPropertyName", zjs.JSValue.int32(42), .{}) catch |err| {
+        probe.active = false;
+        return err;
+    };
+    probe.active = false;
+
+    try std.testing.expect(probe.majors > 0);
+    try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_missing_edge);
+
+    const answer = try ctx.getProperty(object, "zjsS3HostDefinedPropertyName");
+    try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
 }

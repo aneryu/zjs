@@ -170,12 +170,10 @@ fn numberPrototypeMethod(
     const primitive = object_ops.primitivePrototypeThisValue(rt, this_value, 1) catch |err| switch (err) {
         error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a number"),
     };
-    defer primitive.free(rt);
     const coerced_arg: ?core.JSValue = if (id == @intFromEnum(PrototypeMethod.to_locale_string))
         null
     else
         try coercion_ops.coerceOptionalNumberMethodArgument(ctx, output, global, args, true);
-    defer if (coerced_arg) |value| value.free(rt);
     var coerced_storage: [1]core.JSValue = undefined;
     const method_args = if (coerced_arg) |value| blk: {
         coerced_storage[0] = value;

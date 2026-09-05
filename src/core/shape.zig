@@ -311,22 +311,16 @@ pub const Shape = extern struct {
                     }
                 }
             }
-
-            inline fn callVisitShape(vis: anytype, shape_ptr: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitShape")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitShape)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitShape(shape_ptr);
-                    } else {
-                        vis.visitShape(shape_ptr);
-                    }
-                }
-            }
         };
 
         try Helper.callVisitObject(visitor, &self.proto);
+        // TGC S3 §2.2 edge A: a shape names each of its property keys by atom
+        // id. Deleted slots and the `null_atom` filler hold nothing.
+        for (self.props()[0..self.prop_count]) |prop| {
+            if (prop.atom_id == atom.null_atom) continue;
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            try atom.callVisitAtom(visitor, prop.atom_id);
+        }
     }
 
     pub inline fn traceChildEdgesNoFail(self: *Shape, rt: *JSRuntime, visitor: anytype) void {
@@ -481,7 +475,6 @@ pub const Registry = struct {
         // `@sizeOf(Shape) + fam_bytes == allocationSize()` bit-for-bit; skip
         // the recompute (registerObjectWithBytes precedent, runtime.zig).
         self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -499,7 +492,6 @@ pub const Registry = struct {
         @memset(shape.hashBuckets(), no_property_index);
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -526,7 +518,6 @@ pub const Registry = struct {
         try self.link(shape, true);
         errdefer self.unlink(shape);
         self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -552,7 +543,6 @@ pub const Registry = struct {
         }
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -967,7 +957,7 @@ pub const Registry = struct {
             new_shape.props()[index] = .{
                 .hash_next = no_property_index,
                 .flags = prop.flags,
-                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dup(prop.atom_id),
+                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dupForHolder(prop.atom_id),
             };
         }
         errdefer self.freePropertyAtoms(new_shape.props()[0..baseline_props.len]);
@@ -1076,18 +1066,10 @@ pub const Registry = struct {
         // Prop atoms stay valid until freed below; the inline storage lives in
         // the single block freed last (qjs js_free_shape0 releases atoms +
         // proto, then the one allocation).
-        const old_proto = shape.proto;
         const prop_count = shape.prop_count;
         for (shape.props()[0..prop_count]) |prop| {
             if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
         }
-        // qjs js_free_shape0 releases the proto edge with one direct
-        // JS_FreeValueRT on a known JS_TAG_OBJECT value (quickjs.c:5308-5310).
-        // The typed object release keeps a single deinit-phase check; the old
-        // `phase != .deinit` pre-guard around a generic value().free was
-        // redundant (free's own deinit skip already covers the object tag), so
-        // the phase byte was loaded and tested twice per shape teardown.
-        if (old_proto) |proto| proto.value().freeObjectAssumeObject(self.runtime);
         self.memory.destroyWithFam(Shape, shape, fam_bytes);
     }
 
@@ -1129,7 +1111,7 @@ pub const Registry = struct {
             shape.props()[index] = .{
                 .hash_next = no_property_index,
                 .flags = prop.flags,
-                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dup(prop.atom_id),
+                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dupForHolder(prop.atom_id),
             };
         }
         errdefer self.freePropertyAtoms(shape.props()[0..shape.prop_count]);
@@ -1145,7 +1127,6 @@ pub const Registry = struct {
         // Same-value passthrough: fam_bytes derives from the capacity fields
         // stored above, so this equals allocationSize() bit-for-bit.
         self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
-        if (proto) |object| gc.retain(object.gcHeader());
         return shape;
     }
 
@@ -1154,7 +1135,7 @@ pub const Registry = struct {
         // already preflight a larger owner capacity hit this as a no-op.
         try self.reservePropertyAppend(shape_ptr, @as(usize, shape_ptr.*.prop_count) + 1);
 
-        const retained_atom = self.atoms.dup(atom_id);
+        const retained_atom = self.atoms.dupForHolder(atom_id);
         var retained_atom_owned = true;
         errdefer if (retained_atom_owned) self.atoms.free(retained_atom);
 
@@ -1179,16 +1160,6 @@ pub const Registry = struct {
         }
     }
 
-    fn ensurePropertyHash(self: *Registry, shape_ptr: **Shape) !bool {
-        const shape = shape_ptr.*;
-        const minimum = shape.prop_count + shape.deletedPropCount();
-        if (shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1) return false;
-        var bucket_count: usize = if (shape.hasPropertyHash()) shape.bucketCount() * 2 else initial_hash_size;
-        while (bucket_count <= minimum) : (bucket_count *= 2) {}
-        try self.rebuildPropertyHash(shape_ptr, bucket_count);
-        return true;
-    }
-
     fn rebuildPropertyHash(self: *Registry, shape_ptr: **Shape, bucket_count: usize) !void {
         std.debug.assert(std.math.isPowerOfTwo(bucket_count));
         // Same prop capacity, larger hash table: the relocation rebuilds the
@@ -1209,7 +1180,7 @@ pub const Registry = struct {
 
     inline fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
         // Shapes are tracked solely through the GC object list (added by the
-        // caller via `gc_registry.addWithSize`), exactly like qjs `add_gc_object`.
+        // caller via `gc_registry.addInitializedWithSize`), exactly like qjs `add_gc_object`.
         // The only per-shape bookkeeping here is hash-table insertion.
         //
         // Inline: qjs pays this boundary as straight-line code inside
