@@ -146,6 +146,16 @@ pub fn callValueWithThisGlobalsAndGlobal(
         args = inline_args[0..input_args.len];
         @memcpy(args, input_args);
     } else {
+        // `initCopy` allocates, and an allocation is a collection point. Until
+        // the copy lands, the caller's `input_args` window is the only storage
+        // naming these values, so it has to be a declared root for the
+        // duration of the copy -- the destination buffer does not exist yet.
+        var source_slices = [_]core.runtime.ValueRootSlice{
+            .{ .borrowed = input_args },
+        };
+        var source_frame = core.runtime.ValueRootFrame{ .slices = &source_slices };
+        source_frame.activate(ctx.runtime);
+        defer source_frame.deactivate(ctx.runtime);
         args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
         args = args_buffer.values;
     }
@@ -1759,6 +1769,105 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
+}
+
+test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    _ = try installTestStandardRealm(ctx);
+
+    // Closure kind 17 echoes `args[0]` back, so the callee has to read the
+    // window the helper handed it -- not the caller's original slice.
+    var callee = try closure_mod.create(rt, 17, 0, 0, 0);
+
+    // Strictly above the 8-slot inline buffer: this is the `initCopy` arm, and
+    // `initCopy` allocates, which is a collection point.
+    const arg_count = 9;
+    var arg_atoms: [arg_count]u32 = undefined;
+    var args: [arg_count]core.JSValue = undefined;
+    for (&arg_atoms, &args, 0..) |*atom_slot, *arg_slot, index| {
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "gc-call-overflow-arg-{d}", .{index});
+        atom_slot.* = try rt.atoms.newValueSymbol(name);
+        arg_slot.* = try rt.takeSymbolValue(atom_slot.*);
+    }
+
+    const Trigger = struct {
+        rt: *core.JSRuntime,
+        atom_ids: []const u32,
+        collections: usize = 0,
+        lost_arg: bool = false,
+
+        fn trigger(context: ?*anyopaque, size: usize) void {
+            _ = size;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
+            const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
+            self.rt.memory.trigger_gc_fn = null;
+            self.rt.memory.trigger_gc_ctx = null;
+            defer {
+                self.rt.memory.trigger_gc_fn = saved_trigger_fn;
+                self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+            }
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+            self.collections += 1;
+            for (self.atom_ids) |id| {
+                if (self.rt.atoms.name(id) == null) self.lost_arg = true;
+            }
+        }
+    };
+
+    // The caller's own GC-visible state here is the callee value; the argument
+    // window is deliberately left undeclared, because covering it across the
+    // copy is the callee-side obligation under test.
+    var callee_roots = [_]core.runtime.ValueRootValue{.{ .value = &callee }};
+    var callee_frame = core.runtime.ValueRootFrame{ .values = &callee_roots };
+    callee_frame.activate(rt);
+    defer callee_frame.deactivate(rt);
+
+    // Precise scanning is what makes this a regression test: under the
+    // conservative regime the caller's own stack copy of `args` covers the
+    // window by accident and a missing declared root cannot be observed.
+    rt.forcePreciseRootScanForTest();
+    defer rt.restoreDefaultRootScanForTest();
+
+    const saved_trigger_fn = rt.memory.trigger_gc_fn;
+    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    var trigger = Trigger{
+        .rt = rt,
+        .atom_ids = arg_atoms[0..],
+    };
+    rt.memory.trigger_gc_fn = Trigger.trigger;
+    rt.memory.trigger_gc_ctx = &trigger;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger_fn;
+        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    }
+
+    var globals = [_]globals_mod.Slot{};
+    const result = try callValueWithThisGlobalsAndGlobal(
+        ctx,
+        null,
+        null,
+        globals[0..],
+        core.JSValue.undefinedValue(),
+        callee,
+        args[0..],
+    );
+    rt.memory.trigger_gc_fn = saved_trigger_fn;
+    rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+
+    // At least one collection has to have run inside the call, or the
+    // assertions below prove nothing.
+    try std.testing.expect(trigger.collections > 0);
+    try std.testing.expect(!trigger.lost_arg);
+    try std.testing.expectEqual(arg_atoms[0], result.asSymbolAtom() orelse return error.TestUnexpectedResult);
+    for (arg_atoms, args) |atom_id, arg| {
+        try std.testing.expect(rt.atoms.name(atom_id) != null);
+        try std.testing.expectEqual(atom_id, arg.asSymbolAtom() orelse return error.TestUnexpectedResult);
+    }
 }
 
 fn callBoundFunction(

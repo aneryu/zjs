@@ -1797,7 +1797,7 @@ pub const Registry = struct {
     /// cells the heap then hands out, and the mapping cost has nothing to do
     /// with the JS heap limit.
     ///
-    /// Test builds must nevertheless route it through
+    /// The OOM-injection tier must nevertheless route it through
     /// `MemoryAccount.backing_allocator` -- the *unaccounted* raw allocator
     /// the account itself sits on. Everything the tracing collector moved
     /// into the block heap (S2: the string family; S4-b: property storage
@@ -1809,8 +1809,10 @@ pub const Registry = struct {
     /// the export-name-lookahead canary's injectable window collapsed from
     /// >8 to 6). Going through `backing_allocator` rather than `allocator`
     /// keeps the byte accounting and the memory-limit semantics identical to
-    /// the shipped build, so only the injection surface changes.
-    const block_heap_uses_account_backing = builtin.is_test;
+    /// the shipped build, so only the injection surface changes. That surface
+    /// is the `test-oom` step's alone: keyed off `builtin.is_test` it changed
+    /// the allocator topology of the whole unit suite.
+    const block_heap_uses_account_backing = memory.oom_injection_enabled;
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         readStressFromEnv();

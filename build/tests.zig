@@ -21,7 +21,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const target = ctx.target;
     const optimize = ctx.optimize;
     const engine_option_inputs = ctx.engine_inputs;
-    const engine_options = ctx.engine_options;
     const expect_config_debug = ctx.expect_config_debug;
     const addEngineOptions = build_config.addEngineOptions;
     const forceLlvmBackendOnDebug = build_config.forceLlvmBackendOnDebug;
@@ -365,7 +364,12 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .optimize = optimize,
         .link_libc = true,
     });
-    oom_engine_mod.addOptions("build_options", engine_options);
+    // The one step that wants the injectable allocator topology, and the
+    // reason `oom_injection` is a build option instead of `builtin.is_test`:
+    // this module needs the block heap and the slab arenas on the account's
+    // backing allocator, and `zig build test` must not.
+    const oom_engine_options = addEngineOptions(b, engine_option_inputs.withOomInjection(true));
+    oom_engine_mod.addOptions("build_options", oom_engine_options);
     const oom_tests = b.addTest(.{
         .name = "oom-tests",
         .root_module = b.createModule(.{

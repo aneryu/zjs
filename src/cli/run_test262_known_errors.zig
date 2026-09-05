@@ -1,6 +1,7 @@
 //! Known-error file loading, path resolution, and serialization for run-test262.
 const std = @import("std");
 const runner_config = @import("run_test262_config.zig");
+const runner_source = @import("run_test262_source.zig");
 const NameList = @import("run_test262_names.zig").NameList;
 pub fn load(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const u8) !NameList {
     const path = errorfile orelse return NameList.init(allocator);
@@ -12,6 +13,27 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const u8) !N
     return parseText(allocator, dirname(path), bytes);
 }
 
+/// Reduce a path to the space the known-error list is stored and queried in:
+/// the test262-root-relative name (`test/...`). Paths that name no test262
+/// checkout keep their raw spelling, so they still match rules that are
+/// equally un-normalizable. Same rule as `LoadedConfig.excludesTest`, so a
+/// selector, an `[exclude]` entry and a known-error entry all agree.
+pub fn normalizeKey(path: []const u8) []const u8 {
+    return runner_source.test262RelativePath(path) orelse path;
+}
+
+/// Membership test for a loaded known-error list. The queried path arrives in
+/// whatever spelling the selector produced (`test/x.js`, `test262/test/x.js`,
+/// or absolute), so it is reduced to the stored space first. The raw spelling
+/// is still tried as a fallback for lists that never went through `parseText`
+/// and therefore hold un-normalizable names.
+pub fn contains(known: NameList, test_path: []const u8) bool {
+    const key = normalizeKey(test_path);
+    if (known.findSortedExact(key) != null) return true;
+    if (key.ptr == test_path.ptr and key.len == test_path.len) return false;
+    return known.findSortedExact(test_path) != null;
+}
+
 pub fn parseText(allocator: std.mem.Allocator, base_dir: []const u8, text: []const u8) !NameList {
     var known = NameList.init(allocator);
     errdefer known.deinit();
@@ -20,7 +42,7 @@ pub fn parseText(allocator: std.mem.Allocator, base_dir: []const u8, text: []con
     while (lines.next()) |line| {
         const entry = runner_config.stripComment(std.mem.trim(u8, line, " \t\r"));
         if (entry.len == 0) continue;
-        try known.appendOwned(try normalizePath(allocator, base_dir, entryPath(entry)));
+        try known.appendOwned(try normalizeEntry(allocator, base_dir, entryPath(entry)));
     }
     known.sortAndDedupe();
     return known;
@@ -36,9 +58,14 @@ pub fn mergeForUpdate(allocator: std.mem.Allocator, known_failures: NameList, se
     var merged = NameList.init(allocator);
     errdefer merged.deinit();
 
-    for (current_failures.items) |test_path| try merged.append(test_path);
+    // Everything that lands in the merged list is written back through
+    // `renderText` and re-read by `parseText`, so it is stored in the same
+    // normalized space; otherwise a still-failing known error would be
+    // re-emitted under two spellings at once.
+    for (current_failures.items) |test_path| try merged.append(normalizeKey(test_path));
     for (known_failures.items) |test_path| {
-        if (!selected_tests.contains(test_path)) try merged.append(test_path);
+        const key = normalizeKey(test_path);
+        if (!selectedContains(selected_tests, key)) try merged.append(key);
     }
     merged.sortAndDedupe();
     return merged;
@@ -66,6 +93,21 @@ fn dirname(path: []const u8) []const u8 {
 fn entryPath(line: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, line, ':')) |colon| return std.mem.trim(u8, line[0..colon], " \t");
     return line;
+}
+
+fn selectedContains(selected_tests: NameList, key: []const u8) bool {
+    for (selected_tests.items) |item| {
+        if (std.mem.eql(u8, normalizeKey(item), key)) return true;
+    }
+    return false;
+}
+
+/// A known-error entry that names a test262 test is stored root-relative; only
+/// an entry that cannot be reduced falls back to the historical
+/// resolve-against-the-errorfile-directory rule.
+fn normalizeEntry(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ![]const u8 {
+    if (runner_source.test262RelativePath(path)) |relative| return allocator.dupe(u8, relative);
+    return normalizePath(allocator, base_dir, path);
 }
 
 fn normalizePath(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ![]const u8 {

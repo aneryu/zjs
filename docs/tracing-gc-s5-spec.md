@@ -53,3 +53,21 @@
 - S5-a 展开 190 处门时容易把 `else` 分支里仍被测试引用的符号一起删掉——按文件逐个编译。
 - S5-b 合一后 STW 路径改走分桶：`residual_kinds` 位图曾是 STW 的性能捷径，快筛看 deltablue/raytrace 的 major 析构 STW 时间。
 - S5-c 改名与 S5-d 拆分的 diff 巨大，必须在 S5-a/b 合入且门绿后单独进行，禁止与任何功能 lane 并行。
+
+## 7. 执行记录
+
+### 7.1 S5-a（合入 main `99793e8b`，2026-09-06）
+- `-Dzjs_gc` 选择器与 `build_options.zjs_gc` 删除；六个恒真门常量删除，门展开为无条件代码（含 tests）；`memory.zig` 里派生的 `arena_addressable` 一并删除（misc2 合并时的冲突就在这一处，见 7.3）。
+- rc 命名整改与 poison 文案更新；`--gc-stats` 删 `zero-ref drains`/`refcount-removed headers`/`parked_frees`，`pass-A settled cells` → `bitmap reclaimed cells`；`gc_stats_snapshot.py` 升 `SCHEMA_VERSION 9`，新增 `SCHEMA_REMOVED_LEAVES`/`SCHEMA_RENAMED_LEAVES`；atom audit 行正则修正（`stale-edge/shell-edge/entries`）并校验 `stale_edge == 0`。
+- 28 个 `pub fn` 降私有（勘察估 13+3，实做时另找到 12 个无外部调用者）。
+- 净 −294 行。门：test / stress / roots_diag / test-oom 绿。
+
+### 7.2 S5-c 文档半边（合入 main `15a6d291`）
+- `tracing-gc-header-v2-design.md`、`tracing-gc-block-drain-hot-reuse-design.md` 标 SUPERSEDED；十二份记录标 historical；`gc-invariants.md`/`gc-inventory.md`/`gc-ablation-plan.md`/`architecture.md` 改写到 S4 后模型。代码半边（`concurrent → incremental`、`IncrementalMarkState` 拆）等 S5-b 合入后单独 lane。
+
+### 7.3 misc2（合入 main `6bf7729e`）
+- 三件计划外小修：`callValueWithThisGlobalsAndGlobal` 在 >8 参数拷贝前根住源参数；run-test262 known-error 列表按 test262 根归一化；OOM 注入的 backing 拓扑改为显式 build option `zjs_oom_injection`（只由 `test-oom` 步设置），不再用 `builtin.is_test` 让整套单测跑在发布版没有的分配器拓扑上。
+- 合并冲突：misc2 基于 `6253b239`，与 S5-a 在 `memory.zig` 门常量区域相撞；裁决保留 `oom_injection_enabled`，删 `arena_addressable`（其条件在 S5-a 后恒真），`useIndependentSmallObjectSlabArenaBacking` 只剩注入门一条早退。门：test 2558/0、test-oom 22/0。
+
+### 7.4 S5-b（进行中，worktree `s5-b`，基线 `99793e8b`）
+待记。

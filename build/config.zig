@@ -107,6 +107,19 @@ pub const EngineOptionInputs = struct {
     compiler_layout: []const u8,
     expect_config: []const u8,
     oom_coverage: bool,
+    /// Route the block heap's superblock/extent backing and the small-object
+    /// slab arena refills through `MemoryAccount.backing_allocator`, so the
+    /// allocations the tracing collector moved into those pools are visible to
+    /// `std.testing.checkAllAllocationFailures` and to the fail-at-N
+    /// allocators. This is the OOM tier's injection surface, not a semantic
+    /// switch: the byte accounting and the memory-limit behaviour are the same
+    /// either way.
+    ///
+    /// Default false, including under `zig build test`: keyed off
+    /// `builtin.is_test` it changed the allocator topology of the ENTIRE unit
+    /// suite, so every test measured a heap the shipped build never has. Only
+    /// the `test-oom` step turns it on.
+    oom_injection: bool = false,
     force_gc: bool,
     ownership_audit: bool,
     dossier_layout_pad: usize,
@@ -118,6 +131,12 @@ pub const EngineOptionInputs = struct {
         out.expect_config = expect_config;
         return out;
     }
+
+    pub fn withOomInjection(self: EngineOptionInputs, oom_injection: bool) EngineOptionInputs {
+        var out = self;
+        out.oom_injection = oom_injection;
+        return out;
+    }
 };
 
 pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Options {
@@ -126,6 +145,7 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption([]const u8, "zjs_compiler_layout", in.compiler_layout);
     options.addOption([]const u8, "zjs_expect_config", in.expect_config);
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);
+    options.addOption(bool, "zjs_oom_injection", in.oom_injection);
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);

@@ -435,7 +435,7 @@ fn runWorkerLoop(
                 break :blk .{ .skipped, false };
             }
 
-            const known = shared.known_errors.findSortedExact(test_path) != null;
+            const known = runner_known_errors.contains(shared.known_errors, test_path);
             if (shared.reporter) |r| {
                 r.recordResult(shared.io, test_path, res, stderr_text, known) catch |err| {
                     run_err = err;
@@ -1240,7 +1240,7 @@ test "known error text parsing keeps only path segment before line marker" {
     try std.testing.expectEqualStrings("test/c.js", known.items[2]);
 }
 
-test "known error text parsing resolves entries relative to errorfile directory" {
+test "known error text parsing reduces entries to test262-root-relative names" {
     var known = try parseKnownErrorsText(std.testing.allocator, "",
         \\test262/test/a.js:14: SyntaxError
         \\test262/test/b.js:7: TypeError
@@ -1248,8 +1248,35 @@ test "known error text parsing resolves entries relative to errorfile directory"
     defer known.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), known.items.len);
-    try std.testing.expectEqualStrings("test262/test/a.js", known.items[0]);
-    try std.testing.expectEqualStrings("test262/test/b.js", known.items[1]);
+    try std.testing.expectEqualStrings("test/a.js", known.items[0]);
+    try std.testing.expectEqualStrings("test/b.js", known.items[1]);
+}
+
+test "known error lookup matches every spelling the selector can produce" {
+    // One entry, written the way `-u` emits it.
+    var known = try parseKnownErrorsText(std.testing.allocator, "",
+        \\test/built-ins/WeakRef/constructor.js
+    );
+    defer known.deinit();
+
+    try std.testing.expect(runner_known_errors.contains(known, "test/built-ins/WeakRef/constructor.js"));
+    try std.testing.expect(runner_known_errors.contains(known, "test262/test/built-ins/WeakRef/constructor.js"));
+    try std.testing.expect(runner_known_errors.contains(known, "./test262/test/built-ins/WeakRef/constructor.js"));
+    try std.testing.expect(runner_known_errors.contains(known, "/home/user/zjs/test262/test/built-ins/WeakRef/constructor.js"));
+    try std.testing.expect(!runner_known_errors.contains(known, "test262/test/built-ins/WeakRef/prototype.js"));
+
+    // The same three spellings on the stored side reduce to the same key.
+    var written_absolute = try parseKnownErrorsText(std.testing.allocator, "",
+        \\/home/user/zjs/test262/test/built-ins/WeakRef/constructor.js
+    );
+    defer written_absolute.deinit();
+    try std.testing.expect(runner_known_errors.contains(written_absolute, "test262/test/built-ins/WeakRef/constructor.js"));
+
+    var written_repo_relative = try parseKnownErrorsText(std.testing.allocator, "",
+        \\test262/test/built-ins/WeakRef/constructor.js
+    );
+    defer written_repo_relative.deinit();
+    try std.testing.expect(runner_known_errors.contains(written_repo_relative, "test/built-ins/WeakRef/constructor.js"));
 }
 
 test "known error renderer emits sorted unique newline-separated entries" {
@@ -1333,9 +1360,11 @@ test "known error update preserves unselected existing failures" {
     var merged = try mergeKnownErrorsForUpdate(std.testing.allocator, known, selected, current);
     defer merged.deinit();
 
+    // The merged list is the on-disk space: root-relative, whatever spelling
+    // the selector and the previous file used.
     try std.testing.expectEqual(@as(usize, 2), merged.items.len);
-    try std.testing.expectEqualStrings("test262/test/b.js", merged.items[0]);
-    try std.testing.expectEqualStrings("test262/test/c.js", merged.items[1]);
+    try std.testing.expectEqualStrings("test/b.js", merged.items[0]);
+    try std.testing.expectEqualStrings("test/c.js", merged.items[1]);
 }
 
 test "selected known failure that now passes is counted as fixed" {

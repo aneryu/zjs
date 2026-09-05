@@ -41,6 +41,21 @@ const extent_tracking_enabled = gc_carrier.extent_tracking_enabled;
 /// vtable instead, and schedule fail-injection toward not-yet-failed sites.
 pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
 
+/// OOM-injection topology, gated by the `oom_injection` build option
+/// (`build/config.zig`), which only the `test-oom` step sets.
+///
+/// When on, the pools the tracing collector allocates out of -- the block
+/// heap's superblocks and extents, and the small-object slab arenas -- take
+/// their memory from `MemoryAccount.backing_allocator` instead of from an
+/// independent allocator, which is what makes their allocations reachable by
+/// `std.testing.checkAllAllocationFailures` and the fail-at-N allocators.
+///
+/// It used to be `builtin.is_test`, which handed the WHOLE unit suite an
+/// allocator topology the shipped build never has. The injection surface is
+/// the only thing that changes here, so it belongs to the one tier that uses
+/// it.
+pub const oom_injection_enabled: bool = build_options.zjs_oom_injection;
+
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 
 pub const NonBlockObjectPrepare = *const fn (*anyopaque) std.mem.Allocator.Error!void;
@@ -1939,7 +1954,8 @@ pub const MemoryAccount = struct {
     /// runtime serves those physical pages from Zig's independent allocator;
     /// logical allocations remain charged to this account.
     ///
-    /// Test builds keep the arenas on `backing_allocator` instead. The
+    /// The OOM-injection tier keeps the arenas on `backing_allocator`
+    /// instead (`oom_injection_enabled`; `zig build test` does not). The
     /// independent allocator is a throughput choice ("keeps arena refills off
     /// glibc's high-alignment malloc path"), not a correctness one -- the
     /// page alignment is requested explicitly by `addArena`, so any allocator
@@ -1950,7 +1966,7 @@ pub const MemoryAccount = struct {
     /// bodies). That blindspot arrived with the tracing collector (7fc2c9e9)
     /// and is what shrank the canary's injectable window from 9 to 6.
     pub fn useIndependentSmallObjectSlabArenaBacking(self: *MemoryAccount) void {
-        if (comptime builtin.is_test) return;
+        if (comptime oom_injection_enabled) return;
         self.small_slab.setArenaBacking(std.heap.smp_allocator);
     }
 
