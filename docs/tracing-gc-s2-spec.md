@@ -278,6 +278,37 @@ pdfjs.fixed（同机对照）：wall 6.70 → **4.62s**、major 908 → **24**�
 
 **回归根因与修复（`s2/g-20260904` = 080c2ddc，已合入主树）**：S2-g 本身无错，它让 minor 真的会落在 string 分配边界上，掀开了「字符串是 rc 所有、永不判死」前提下的写点。真凶 `string_ops.initRegExpMatchArrayDenseElementsFromValue`：(1) capture 子串先写进 `rt.memory.alloc` 的原生暂存缓冲——既非 traced carrier 也不在保守扫描范围，第 i 个 capture 被第 i+1 个触发的 minor 判死；(2) `adoptDenseArrayElementsAssumingEmpty` 批量写入绕过 `rememberOwnerForBulkWrite`（`createArray` 之后的每次 `stringSliceValue` 都是收集边界，owner 可能已晋升）。静默是因为被判死的 cell 立刻被下一次分配复用（拿到别的字符串字节）。整个 regexp 负载里「minor 落在一次 fill 内部」只发生 5 次即毁 checksum；切分实验：把 `.normal` 排除即恢复；`ZJS_MINOR_AUDIT=1` 命中 owner=match 数组（3 属性）。修法：adopt 收口加 remember（改签名收 `rt`，5 调用点；孪生 `adoptDenseUnmappedArgumentsElementsAssumingEmpty` 同补）；fill 前缀发布为 `ValueSliceRoot`（与 `argsFromArray` 同型）。同族普查另修 4 处：`Object.setErrorStack`（与 S3-c 重合，合并时保留一份）、`setCallSiteMetadata` 的 `callsite_file`、`replaceRegExpLegacySlot` 记错 owner（槽在 realm 的 `regexp_legacy_statics` 却记 global，新增 `setRealmRegExpLegacySlot` 记 realm header）、`defineJsonParseDataProperty` 重复键覆盖臂。两条删除即红的测试（第二条只在 ReleaseFast 红：Debug 未优化帧把中间值溢出到栈被保守扫描接住）。读数：regexp.fixed 891-894；pdfjs major 24 / minor 2316 不变；test262 RegExp+String+JSON+Error+staging/sm 子集 0/4608。**owner 待裁的同类洞**：`initDenseArrayLiteralValues*` 直写无屏障（现靠「裸分配不触发收集」成立）；`putDenseArrayElementOverwriteOwnedFast` reserved-capacity append 只有探针无屏障（`UnbarrieredStoreSite` 登记的已知决定，热路径定价）；WeakMap value 写入无屏障（依赖 ephemeron 遍历是否在 minor 路径）；若干 `_ = rt;` 存量写点安装强边不记账。
 
+### 7.10 S2/S3 收口 Stage 0（2026-09-05 02:30，main 121edf3f，`.scratch/stage0/s3-final2-20260905`）
+
+门：test 2533/0、gc-stress 2529/0、test262 **0/49778**。
+
+| workload | insn | cycles | minflt | maxrss | committed |
+|---|---:|---:|---:|---:|---:|
+| deltablue | 0.900 | 0.982 | 0.881 | 0.984 | 1.090 |
+| earley-boyer | 0.886 | 0.948 | 1.059 | 1.224 | 0.976 |
+| pdfjs | **1.084** | **1.556** | 1.714 | 1.555 | 4.112 |
+| raytrace | 0.889 | 0.927 | 1.027 | 1.337 | 0.345 |
+| regexp | 0.991 | 1.005 | 5.675 | 3.364 | 3.896 |
+| splay | **1.217** | **1.332** | 0.768 | 0.759 | 1.022 |
+
+轨迹（cycles）：pdfjs 275.4 → 2.35（S2-f）→ **1.56**；regexp 1.47 → 1.005；splay 1.29 → 1.33（未动）。STOP：pdfjs cycles、splay。
+
+**残差归因**：全部指向 minor 的频次与单价——pdfjs minor 154→2443、minor STW 总 75ms→**1067ms**（0.44ms/次）、major 6→25；splay minor 5→804、STW 4ms→573ms（0.71ms/次）。符号差：`memcpy +330`、**`gc_address_registry.Table.remove +308 / insert +61`**（extent 的地址注册表 occupant 插删——页索引已是权威答案，占位是冗余）、`SmpAllocator.alloc +236`（large extent）、`allocCell +106`、`unindexExtentPages +104`、`createStringExtent +102`、`sweepUnmarkedYoung +89`、`nextInBlock +67`、`scanFreeRuns +67`、`destroyCellFromHeader +65`。
+
+**下一刀（S2-h，待 owner）**：(1) extent 不再进地址注册表 occupant 表（`extent_pages` 页索引即权威，`forEachTraceCandidateAt` 已先查它）——预计吃掉 ~370 采样；(2) minor 单价：young block 的 bitmap sweep 不摸 header（S4-d 的一部分可前移）；(3) minor 频次：`minor_young_threshold = 16K` 按**计数**触发，string 让它填快 60×——改按 young **字节**或把 nursery 扩到 1–4MB（此前 minorfb lane 在 rc-string 世界被 KILLED，前提已变，需重新定价；与 S2-g 的 `minor_crossing_young_floor` 一起记账）；(4) `memcpy +330`：flat 串复制来源待归因（`concatFlatStringBodiesOwned`/`flatten`/JSON）。
+
+### 7.11 S2-h1 落地与 `s = s + x` 的账（2026-09-05 03:30，`h1-extent-20260905` = e4d48ffd + 712b6b3e，已 apply 进主树）
+
+- extent 退出 occupant 表：`publishInitialized` 传 `needs_occupant = standalone ∧ !is_string`；`unpublishStringExtent` 不再 `Table.remove`；`addressSetWhole` 重放跳过 string。**occupant 条目暗中兼职的两件事显式化**：量程闸（`Table.bounds_lo/hi` 在 extent 臂之上，不补即掉根）→ `Heap.extent_bounds_lo/hi` 在 `indexExtentPages` 失败前打戳、`rebuildScanFilter` 合并；成员资格 → `Table.containsHeader` 加 extent 臂（`auditLiveObjectsResolve` 走 `.all` 含 extent）。测试：无 occupant 且五个候选地址都能解析（合并 bounds 改 `if (false)` 即红）。读数（3 轮交替）：pdfjs wall 6.01 → **5.47**（−9%）、minor STW 1269 → 863ms（−32%）；raytrace 中性。
+- `releaseFreeBlockPages` 挂 `pollGC` minor 分支尾部（门参数不动）；decommit checks pdfjs 22→51、raytrace 4→150，wall/maxrss 均在噪声内；**medium sb returned 全为 0**——S2-g 的 maxrss +31% 不是空闲块滞留，需重新归因（live 峰值 / 块内碎片 / 页粒度）。保留该 commit（结构对称、零代价）。
+- **`memcpy +330` 归因**（perf dwarf 8228 样本）：`memcpyFast` 14.04%，其中 **97.9% 来自 `value_ops.concatFlatStringBodiesOwned ← stringAddStringsOwned`**（`op_add_strings` inclusive 39.3%）；JSON/adopt/flatten/rope ≈0。根因：两边 flat 且 `a ≤ 8192 ∧ b ≤ 512` 走 `String.createLatin1Concat` 全拷贝，`s = s + x` 循环 O(n²)——即 §3 第三条风险 / §5.3「rc==1 原地追加先删、记账后定」的账单，**单独占 pdfjs 残差 cycles 13.75pp**。
+
+**S2-i 规格（extensible 尾缓冲，无 rc 判据）**：采 SpiderMonkey extensible/dependent string 形态。`s + x` 当 `s` 是「可扩展」rope 节点（持一个独立的 **尾缓冲 GC cell**：kind `.string_buffer`，S4-a 后有 kind 空间；≤3760B 走块 cell，否则 extent；容量按 2× 增长）且 `s.len + x.len ≤ capacity`：把 `x` 的字节写进缓冲 `[s.len, s.len+x.len)`，**新建** rope 节点 `r`（56B cell）指向同一缓冲、`len = s.len + x.len`、`extensible = true`，并把 `s.extensible` 清零（`s` 退化为 dependent：只读自己的 `len` 前缀，字节不变）。唯一性不需要 rc：同一缓冲任何时刻只有一个 `extensible` 节点有权追加，`r1 = s + x; r2 = s + y` 时第二次追加因 `s` 已非 extensible 而走复制路径。缓冲 cell 由所有引用它的节点的 trace 边标记（`traceStringEdges` 的 rope 臂加 `storageCell(buffer)`），无析构、位图回收（S4 存储 cell 机制）。`flatten`/读取路径把 `(buffer, len)` 当 flat 视图（与旧 `RopeTailState` 的 `tailResolved` 同形）。屏障：追加是对**新**节点的构造，`s`→缓冲 边已存在；老对象存入 `r` 走通用值屏障。门：string-concat 微基准 O(n)；pdfjs.fixed wall；Stage 0。排在 S4-a 合入后开工（需要 kind）。
+
+### 7.12 S2-i 落地（2026-09-05 上午，`s2-i-20260905` = 3f2c36df / 23d98b49 / 6c18261d，已 apply 进主树）
+
+通用原语：kind 12 `string_buffer`（不进 `isStringFamily`；进 `kindIsBlockCellKind`）；`memory.createStorageCell(comptime kind_tag, bytes)` = 块 cell → `createExtent(kind_tag)` 唯一漏斗（`createStringExtent` 变包装）；`Heap.sweepExtents/sweepYoungExtents/retireYoungExtents` kind 化（单回调内按 kind 分派）；storage cell 无出边无析构；`visitor.storageCell(ptr)` + `callVisitStorageCell` 壳；新谓词 `kindIsPrefixCarrier`（无链字）与 `kindIsExtentCapable`（可进 extent 表），替换 6 处冒充这两个问题的 `isStringFamily`。尾缓冲：`StringRope{buffer: ?*StringBuffer, extensible}`（48→56B）；`StringBuffer{capacity, is_wide, FAM}`；`stringAddStringsOwned` 两条新臂在 QJS 短右合并臂之前（视图的 `right` 是 undefined）；seed 阈值 `tail_buffer_seed_len = 512`、seed 容量 1.5×、增长 2×（128 → regexp maxrss 139MB，2048 → pdfjs 2.62s，512 两头不亏）；`flatten` 对视图是拷贝（`String` 的 FAM 约定不允许零拷贝），`.length`/索引/比较/hash/再拼接零拷贝；flatten 后节点断 buffer 边并失去追加权。**偏离**：`storageCell = shadeExact` 而非 NoPush（NoPush 跳过 `retireTracedYoung`，young 位永不退休）。**规格外真缺陷**：`publishInitialized` 以 `isStringFamily` 决定 occupant 占表，而 S2-h1 后 `unpublishStringExtent` 不再 `Table.remove` → 任何新 extent kind 泄漏 occupant 条目 → 保守扫描把已释放页解析成活对象（首次开关即崩）；改 `kindIsExtentCapable` 并在 `headerMarked` extent 臂加 `assert(containsExtent)` 哨兵——**S4-b 三个 kind 同样致命，已封**。门 test 2544/0、stress 2540/0、test262 0/49778、快照重生成。读数（ReleaseFast，对照 5b418bc6）：pdfjs.fixed wall **3.93 → 2.55s（−35%）**、maxrss 142 → 112MB；micro `s += "ab"` O(n²) 区间 −5×；raytrace/regexp 中性；perf：基线 `memcpy` 12.6% 中 11.75% 是本账。未决：阈值三常量未按 Stage 0 重定；`shadeExactNoPush` 留给 S4-b 百万级 cell 时做；nightly tier 未跑。
+
 ### 7.4 S3 余项
 
 

@@ -6,7 +6,7 @@
 Metadata size=8 align=8 size_class=0 alloc_info=2 flags=3 lifetime=4
 TraceHeader size=8 align=8 next_non_object=0
 AllocInfo class_mask=0x1f reserved=0x20 accounted=0x40 standalone=0x80
-BlockFlags kind_mask=0x07 mark=0x08 young=0x10 finalizing=0x20 pinned=0x40 cycle_visited=0x80
+BlockFlags kind_mask=0x0f young=0x10 finalizing=0x20 pinned=0x40 cycle_visited=0x80
 carrier block_cell_class=0x1f slab_class_range=0..30 standalone_class=0
 free_cell link_mask=0x0000ffff poison=0x86000000 encoded_word=poison|(next&link_mask)
 
@@ -15,9 +15,10 @@ size_class block-cell=cell-index; slab=allocator-block-index; standalone=encoded
 alloc_info.block_size_idx block-cell=0x1f; slab=0..30; standalone=0
 alloc_info.reserved unused
 alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell
-flags.kind valid for Metadata kinds; string uses JSValue tag; its Metadata prefix keeps the count in the lifetime tail
-flags.mark/young/finalizing/pinned/cycle_visited valid for registry kinds only
-lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/reserved:u8 for all carriers
+flags.kind valid for Metadata kinds; string/rope are one allocation family with distinct kinds and distinct JSValue tags
+flags.kind string_buffer is a bare code-unit carrier of that same family: no JSValue names it, no edges, no destructor
+flags.young/finalizing/pinned/cycle_visited valid for registry kinds only
+lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/needs_finalizer/reserved:u8 for all carriers
 
 [kind-contracts]
 kind.object tag=0 allocation=block_slab_or_standalone registry=yes
@@ -28,6 +29,11 @@ kind.module tag=4 allocation=slab_or_standalone registry=yes
 kind.shape tag=5 allocation=slab_or_standalone registry=yes
 kind.string tag=6 allocation=block_slab_or_standalone registry=yes
 kind.big_int tag=7 allocation=slab_or_standalone registry=yes
+kind.property_storage tag=8 allocation=block_slab_or_standalone registry=yes
+kind.array_storage tag=9 allocation=block_slab_or_standalone registry=yes
+kind.payload tag=10 allocation=block_slab_or_standalone registry=yes
+kind.rope tag=11 allocation=block_slab_or_standalone registry=yes
+kind.string_buffer tag=12 allocation=block_slab_or_standalone registry=yes
 
 [body-layouts]
 object head=24 align=8 body_from_handle=0 weakref_count=0 class_id=4 flags=6 shape_ref=8 prop_values=16 slots2_entries=24 slots2_body=72 physical=80 release_slots2_body=56 release_physical=64 arm_narrow=8 arm_wide=24
@@ -37,5 +43,7 @@ realm_context size=2176 align=16 header=0 runtime=1472 publication_state=2160 mo
 module size=272 align=16 header=0 registry_prev=136 registry=32 memory=40 module_name=244 requests=104 func_obj=192 module_ns=208
 shape size=56 align=8 header=0 list_prev=8 ownership=16 hash=20 prop_hash_mask=24 prop_size=28 prop_count=32 registry_hash_next=40 proto=48 fam=56
 string_flat size=12 align=4 metadata_prefix=8 len_meta=0 hash_meta=4 atom_id=8 fam=12
-string_rope size=48 align=8 metadata_prefix=8 left=0 right=16 rt=32 len=40 depth=44 wide=45
+string_rope size=56 align=8 metadata_prefix=8 left=0 right=16 rt=32 len=48 depth=52 wide=53
+string_rope_tail extensible=54 buffer=40
+string_buffer size=8 align=4 metadata_prefix=8 capacity=0 is_wide=4 fam=8
 big_int size=48 align=8 header=0 limbs_ptr=8 allocator=16 len=32 capacity=36 flags=40 fam=48

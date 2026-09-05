@@ -491,26 +491,6 @@ pub const JSValue = extern struct {
         return tag >= tracer_owned_first_tag and tag <= Tag.object;
     }
 
-    /// Compatibility release for an owner held by an active bytecode frame;
-    /// the assertions preserve its caller contract.
-    pub inline fn freeDuringActiveBytecode(_: JSValue, rt: anytype) void {
-        std.debug.assert(rt.hot.call_depth != 0);
-        std.debug.assert(rt.gc.phase != .deinit);
-    }
-
-    /// Typed compatibility no-op for callers that already proved `object`.
-    pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
-        std.debug.assert(self.tagOf() == Tag.object);
-        _ = rt;
-    }
-
-    /// Active-bytecode twin of `freeObjectAssumeObject`.
-    pub inline fn freeObjectAssumeObjectDuringActiveBytecode(self: JSValue, rt: anytype) void {
-        std.debug.assert(self.tagOf() == Tag.object);
-        std.debug.assert(rt.hot.call_depth != 0);
-        std.debug.assert(rt.gc.phase != .deinit);
-    }
-
     /// Read a 16-byte JSValue slot as two 64-bit integer loads. Hot
     /// property/operand slots are written and read across handlers as 64-bit
     /// integer halves; letting LLVM lower either side as one 128-bit SIMD
@@ -532,29 +512,6 @@ pub const JSValue = extern struct {
         const src: [2]u64 = @bitCast(value);
         words[0] = src[0];
         words[1] = src[1];
-    }
-
-    /// Compatibility predicate: traced values never require a destroy tail.
-    pub inline fn releaseObjectAssumeObjectNeedsDestroy(self: JSValue, rt: anytype) bool {
-        std.debug.assert(self.tagOf() == Tag.object);
-        _ = rt;
-        return false;
-    }
-
-    /// Active-bytecode twin of `releaseObjectAssumeObjectNeedsDestroy`.
-    pub inline fn releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode(self: JSValue, rt: anytype) bool {
-        std.debug.assert(self.tagOf() == Tag.object);
-        std.debug.assert(rt.hot.call_depth != 0);
-        std.debug.assert(rt.gc.phase != .deinit);
-        return false;
-    }
-
-    /// Any-tag active-bytecode twin of
-    /// `releaseObjectAssumeObjectNeedsDestroyDuringActiveBytecode`.
-    pub inline fn releaseRefCountedNeedsDestroyDuringActiveBytecode(_: JSValue, rt: anytype) bool {
-        std.debug.assert(rt.hot.call_depth != 0);
-        std.debug.assert(rt.gc.phase != .deinit);
-        return false;
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {

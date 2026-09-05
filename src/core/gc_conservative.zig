@@ -389,7 +389,7 @@ pub const RootsDiagCensus = struct {
     dropped_keys: usize = 0,
     by_source: [6]usize = @splat(0),
     by_ptr_kind: [3]usize = @splat(0),
-    by_kind: [8]usize = @splat(0),
+    by_kind: [gc.gc_kind_count]usize = @splat(0),
     by_register: [if (diag_register_words == 0) 1 else diag_register_words]usize = @splat(0),
 
     fn hashKey(key: Key) usize {

@@ -3212,6 +3212,28 @@ pub const JSRuntime = struct {
                         elapsed,
                         @import("gc_trace_stw.zig").detailed_reports,
                     );
+                    // TGC S2-h1 (2). The aged-decommit policy used to be
+                    // driven from major boundaries alone. S2-g took pdfjs
+                    // from 908 majors to 24, so the block decommit and the
+                    // empty-medium-superblock release stopped being offered
+                    // ~884 times per run and maxrss rose 31% (raytrace 33%)
+                    // on a live set that had FALLEN -- a superblock high
+                    // water mark, not retained garbage.
+                    //
+                    // A minor is now the same boundary: cells and medium
+                    // extents are exactly what it frees. Nothing about the
+                    // policy changes -- `releaseFreeBlockPages` keeps its own
+                    // 100 ms period gate and both idle gates
+                    // (`decommit_min_idle_ns`, `medium_release_min_idle_ns`)
+                    // -- so this only stops the offers from being withheld.
+                    // Placed after `elapsed` is taken, like the major call
+                    // sites: the release is not part of the pause it reports.
+                    // It also advances `Heap.clock_ns`, which is what makes
+                    // the idle gates measure real idleness again instead of
+                    // ageing against a clock that only ticked 24 times.
+                    if (comptime gc.block_heap_enabled) {
+                        _ = self.gc.block_heap.releaseFreeBlockPages(ended);
+                    }
                     const result: gc.CollectionResult = .{
                         .freed_objects = freed,
                         .duration_ns = elapsed,

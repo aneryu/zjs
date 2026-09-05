@@ -10,11 +10,25 @@ pub const metadata_flags_offset: usize = 3;
 pub const metadata_rc_offset: usize = 4;
 pub const metadata_young_mask: u8 = 1 << 4;
 
-/// The only GC kind admitted to the block heap. Kept here with the allocator
-/// representation rather than making `memory.zig` import the registry enum.
-/// `gc.zig` asserts that its public RefKind encoding still agrees.
+/// GC kind tags the allocator layer writes into the prefix by hand. Kept
+/// here with the allocator representation rather than making `memory.zig`
+/// import the registry enum; `gc.zig` asserts that its public RefKind
+/// encoding still agrees.
 pub const object_kind_tag: u8 = 0;
 pub const string_kind_tag: u8 = 6;
+/// TGC S4-a (D-S4-1): rope nodes are their own kind instead of a flat body
+/// carrying a borrowed `mark` bit.
+pub const rope_kind_tag: u8 = 11;
+/// TGC S2-i / S4-b: a bare storage cell holding string code units (the
+/// extensible tail buffer a rope's dependent views read). It carries no
+/// out-edges and no destructor, so the allocator writes the tag and nothing
+/// else ever interprets its body as a header.
+pub const string_buffer_kind_tag: u8 = 12;
+
+/// The kind occupies the low nibble of the flags byte (TGC S4-a widened it
+/// from three bits into the retired `mark` bit). Raw readers of the byte
+/// mask with this.
+pub const kind_mask: u8 = 0x0f;
 
 pub const alloc_info_class_mask: u8 = 0x1f;
 pub const alloc_info_heap_accounted_mask: u8 = 1 << 6;
@@ -27,9 +41,11 @@ pub const block_cell_alloc_info: u8 = block_cell_size_class;
 
 /// A freed block cell retains its successor in the low 16 bits.  The entire
 /// high half is poison, chosen so reading the word as live metadata yields an
-/// unaccounted, non-block, cycle-visited prefix whose kind is `.string`
-/// (6) -- the one kind the tracer does not walk until S2, which must pick a
-/// new poison when strings join the list.
+/// unaccounted, non-block, cycle-visited prefix whose kind reads `.string`
+/// (6).  The kind is not what protects the poison -- `heap_accounted` = 0 and
+/// `cycle_visited` = 1 are, and both survived S2 joining strings to the
+/// tracer and S4-a widening the kind into bit 3 (which the poison leaves
+/// clear, so the low nibble still reads 6).
 pub const free_cell_link_mask: u32 = 0x0000_ffff;
 pub const free_cell_poison: u32 = 0x8600_0000;
 
@@ -51,4 +67,8 @@ comptime {
     const poison_flags: u8 = @truncate(free_cell_poison >> 24);
     if (poison_flags & 0x80 == 0)
         @compileError("free-cell poison must read as cycle-visited");
+    if (poison_flags & kind_mask != string_kind_tag)
+        @compileError("free-cell poison kind nibble moved");
+    if (metadata_young_mask & kind_mask != 0)
+        @compileError("the young bit must stay above the kind nibble");
 }

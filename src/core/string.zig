@@ -49,6 +49,11 @@ pub const StringRope = struct {
     /// one pointer for on-demand linearization. QJS receives `JSContext *` at
     /// its linearization call site and therefore does not need it in the node.
     rt: *JSRuntime,
+    /// TGC S2-i: the shared tail buffer this node is a DEPENDENT VIEW of.
+    /// Non-null makes the node a leaf whose content is `buffer[0..len]`;
+    /// `left`/`right` are then undefined-valued and `depth` is one.
+    /// Null is the ordinary QJS-shaped `left ++ right` node.
+    buffer: ?*StringBuffer = null,
     /// Total length in code units.
     /// QJS uses uint32_t and caps strings below 2^30; keep the same width.
     len: u32,
@@ -58,16 +63,25 @@ pub const StringRope = struct {
     /// bounded. Zero is reserved for an already-linearized rope.
     depth: u8,
     wide: bool,
+    /// TGC S2-i: append rights on `buffer`. At most ONE live node per buffer
+    /// carries it, which is what replaces the retired `rc == 1` uniqueness
+    /// test: `r = s + x` moves the right from `s` to `r`, so a second
+    /// `s + y` finds `s` inextensible and copies instead of overwriting the
+    /// bytes `s` still names. Always false when `buffer == null`.
+    extensible: bool = false,
+    reserved: u8 = 0,
 
     comptime {
-        std.debug.assert(@sizeOf(StringRope) == 48);
+        std.debug.assert(@sizeOf(StringRope) == 56);
         std.debug.assert(@alignOf(StringRope) == 8);
         std.debug.assert(@offsetOf(StringRope, "left") == 0);
         std.debug.assert(@offsetOf(StringRope, "right") == 16);
         std.debug.assert(@offsetOf(StringRope, "rt") == 32);
-        std.debug.assert(@offsetOf(StringRope, "len") == 40);
-        std.debug.assert(@offsetOf(StringRope, "depth") == 44);
-        std.debug.assert(@offsetOf(StringRope, "wide") == 45);
+        std.debug.assert(@offsetOf(StringRope, "buffer") == 40);
+        std.debug.assert(@offsetOf(StringRope, "len") == 48);
+        std.debug.assert(@offsetOf(StringRope, "depth") == 52);
+        std.debug.assert(@offsetOf(StringRope, "wide") == 53);
+        std.debug.assert(@offsetOf(StringRope, "extensible") == 54);
     }
 
     /// Size of the collector metadata prefix ahead of a rope node.
@@ -114,6 +128,22 @@ pub const StringRope = struct {
         return self.left.asStringBodyRaw();
     }
 
+    /// TGC S2-i: the code units a dependent view names, or null for an
+    /// ordinary `left ++ right` node. Every rope reader tests this in the
+    /// same place it tests `flatString`: a view is a LEAF, so the tree walk
+    /// below it must not run (its `left`/`right` are undefined values).
+    pub inline fn bufferView(self: *const StringRope) ?String.ResolvedData {
+        const buf = self.buffer orelse return null;
+        return buf.prefix(self.len);
+    }
+
+    /// Can `self` still take an in-place append? Only the single node holding
+    /// the buffer's append right may, and only while the node is the buffer's
+    /// current end (`len` is the used prefix).
+    pub inline fn isExtensibleView(self: *const StringRope) bool {
+        return self.extensible and self.buffer != null;
+    }
+
     /// Materializes this rope into a flat `*String`, caching its owned value in
     /// `left` and releasing the former children and tail. Returns a BORROWED
     /// pointer to the cached flat string (the rope keeps ownership; callers
@@ -123,7 +153,24 @@ pub const StringRope = struct {
         if (self.flatString()) |flat| return flat;
         const rt = self.rt;
         const total_len: usize = @intCast(self.len);
-        const flat = if (self.wide) blk: {
+        // TGC S2-i: a dependent view materializes by copying its prefix out
+        // of the shared buffer. It cannot hand the buffer itself out as the
+        // flat body: a `String` keeps its units in its own FAM immediately
+        // after a twelve-byte header, and the buffer has neither that header
+        // nor exclusive ownership of the bytes (older views still name the
+        // same prefix).
+        const flat = if (self.buffer) |buf| blk: {
+            std.debug.assert(buf.is_wide == self.wide);
+            if (buf.is_wide) {
+                const s = try String.createUninitialized(rt, .utf16, total_len);
+                @memcpy(s.utf16Mut(), buf.utf16Const()[0..total_len]);
+                break :blk s;
+            }
+            const s = try String.createUninitialized(rt, .latin1, total_len);
+            @memcpy(s.latin1Mut(), buf.latin1Const()[0..total_len]);
+            writeLatin1Terminator(s.latin1Mut());
+            break :blk s;
+        } else if (self.wide) blk: {
             const s = try String.createUninitialized(rt, .utf16, total_len);
             errdefer String.destroyFlat(rt, s);
             copyRopeContent(u16, self, s.utf16Mut());
@@ -140,6 +187,12 @@ pub const StringRope = struct {
         rt.gc.generationalBarrierValue(@ptrCast(@alignCast(self)), flat.value());
         self.left = flat.value();
         self.right = JSValue.undefinedValue();
+        // Dropping the buffer edge is the same class of write `right` above
+        // takes: the linearized node owns its flat child and nothing else.
+        // The append right goes with it -- a linearized node is never a
+        // concat accumulator again.
+        self.buffer = null;
+        self.extensible = false;
         self.depth = 0;
         // Release the former tree only after publishing the new owned flat
         // child. String destruction has no user callback, but this ordering
@@ -163,6 +216,127 @@ pub const StringRope = struct {
         return stringValueContentHash(self.value()).?;
     }
 };
+
+/// TGC S2-i: the extensible tail buffer a chain of dependent rope views
+/// shares (SpiderMonkey's extensible/dependent string pair, minus the
+/// refcount its exclusivity test used to need -- see `StringRope.extensible`).
+///
+/// A bare storage carrier of GC kind `.string_buffer`: no out-edges, no
+/// destructor, no JSValue names it. It is kept alive by the `storageCell`
+/// edge every viewing rope node reports, and returned by the bitmap sweep
+/// (block cell) or the extent sweep, exactly like a flat body without the
+/// atom handshake.
+///
+/// Layout mirrors `String`: an eight-byte collector `Metadata` prefix, then
+/// this header, then the code-unit FAM. `capacity` counts CODE UNITS, so a
+/// wide buffer holds `capacity` u16s.
+pub const StringBuffer = struct {
+    capacity: u32,
+    is_wide: bool,
+    reserved: [3]u8 = .{ 0, 0, 0 },
+
+    /// Byte offset from the header to the code-unit FAM. Same reasoning as
+    /// `payload_offset` for `String`: the 8-aligned allocation base plus an
+    /// 8-byte header keeps the u16 payload u16-aligned.
+    pub const units_offset: usize = 8;
+
+    comptime {
+        std.debug.assert(@sizeOf(StringBuffer) == 8);
+        std.debug.assert(@alignOf(StringBuffer) == 4);
+        std.debug.assert(@offsetOf(StringBuffer, "capacity") == 0);
+        std.debug.assert(@offsetOf(StringBuffer, "is_wide") == 4);
+        std.debug.assert(units_offset % @alignOf(u16) == 0);
+    }
+
+    pub inline fn header(self: *const StringBuffer) *gc.GCObjectHeader {
+        return @ptrCast(@alignCast(@constCast(self)));
+    }
+
+    pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *StringBuffer {
+        return @ptrCast(@alignCast(hdr));
+    }
+
+    inline fn unitsPtr(self: *const StringBuffer) [*]u8 {
+        const base: [*]u8 = @ptrCast(@constCast(self));
+        return base + units_offset;
+    }
+
+    pub inline fn latin1(self: *StringBuffer) []u8 {
+        std.debug.assert(!self.is_wide);
+        return self.unitsPtr()[0..self.capacity];
+    }
+
+    pub inline fn utf16(self: *StringBuffer) []u16 {
+        std.debug.assert(self.is_wide);
+        const units: [*]u16 = @ptrCast(@alignCast(self.unitsPtr()));
+        return units[0..self.capacity];
+    }
+
+    pub inline fn latin1Const(self: *const StringBuffer) []const u8 {
+        std.debug.assert(!self.is_wide);
+        return self.unitsPtr()[0..self.capacity];
+    }
+
+    pub inline fn utf16Const(self: *const StringBuffer) []const u16 {
+        std.debug.assert(self.is_wide);
+        const units: [*]const u16 = @ptrCast(@alignCast(self.unitsPtr()));
+        return units[0..self.capacity];
+    }
+
+    /// The first `used` code units as a reader-shaped slice.
+    pub inline fn prefix(self: *const StringBuffer, used: u32) String.ResolvedData {
+        std.debug.assert(used <= self.capacity);
+        if (self.is_wide) return .{ .utf16 = self.utf16Const()[0..used] };
+        return .{ .latin1 = self.latin1Const()[0..used] };
+    }
+};
+
+/// Total allocation bytes (prefix included) for a buffer of `capacity` code
+/// units. Null on overflow.
+fn stringBufferAllocSize(is_wide: bool, capacity: usize) ?usize {
+    const unit_size: usize = if (is_wide) @sizeOf(u16) else @sizeOf(u8);
+    const payload = std.math.mul(usize, unit_size, capacity) catch return null;
+    const body = std.math.add(usize, StringBuffer.units_offset, payload) catch return null;
+    return std.math.add(usize, gc.string_prefix_size, body) catch return null;
+}
+
+/// Allocate and publish an uninitialized tail buffer. TGC S4 spec 2.2: one
+/// funnel, block cell under the small-class ceiling and a heap extent above
+/// it. The units are left undefined; the caller fills `[0, used)` before any
+/// view can name them.
+pub fn createStringBuffer(rt: *JSRuntime, is_wide: bool, capacity: usize) !*StringBuffer {
+    if (capacity > max_length) return error.StringTooLong;
+    const total = stringBufferAllocSize(is_wide, capacity) orelse return error.OutOfMemory;
+    // Same allocation-threshold boundary flat bodies and rope nodes take
+    // (TGC S2-f (3)); before the raw carrier pointer is taken.
+    rt.collectBeforeObjectAllocation(total);
+    const cell = try rt.memory.createStorageCell(gc.representation.string_buffer_kind_tag, total);
+    const buf: *StringBuffer = @ptrCast(@alignCast(cell.base + gc.string_prefix_size));
+    buf.* = .{ .capacity = @intCast(capacity), .is_wide = is_wide };
+    rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(buf)), cell.accounted_bytes);
+    return buf;
+}
+
+/// Sweep-time return of a condemned `.string_buffer` BLOCK CELL. Pure memory:
+/// a buffer owns no edges, no atom entry and no external resource.
+pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
+    std.debug.assert(gc.Registry.isBlockCellHeader(header));
+    const buf: *StringBuffer = @ptrCast(@alignCast(header));
+    const total = stringBufferAllocSize(buf.is_wide, buf.capacity).?;
+    rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(total, gc.string_prefix_size).?);
+    rt.memory.destroyStringCell(buf, total);
+}
+
+/// Registry-side size query for a `.string_buffer` carrier, the twin of
+/// `accountedAllocationSizeFromHeader`.
+pub fn accountedStorageSizeFromHeader(header: *const gc.GCObjectHeader) usize {
+    const buf: *const StringBuffer = @ptrCast(@alignCast(header));
+    const total = stringBufferAllocSize(buf.is_wide, buf.capacity).?;
+    if (gc.Registry.isBlockCellHeader(header)) {
+        return gc_block_heap.accountedBodyBytesForRequest(total, gc.string_prefix_size).?;
+    }
+    return total - gc.string_prefix_size;
+}
 
 pub fn isAsciiBytes(bytes: []const u8) bool {
     for (bytes) |byte| {
@@ -500,6 +674,25 @@ pub const String = struct {
     /// Fibonacci-bucket rope balancing algorithm.
     pub const rope_max_depth: u8 = 60;
 
+    /// TGC S2-i: the LHS length at which `a + b` stops producing a fresh flat
+    /// body and starts an extensible tail buffer instead.
+    ///
+    /// Below it the flat copy is the cheaper answer -- a short result usually
+    /// becomes a property key or a comparand next, and a dependent view has
+    /// to flatten (one copy plus one allocation) before it can be either. At
+    /// and above it the quadratic term of `s = s + x` dominates: the flat arm
+    /// re-copies the whole accumulator on every append, which is 97.9% of
+    /// pdfjs's memcpy time (spec 7.11).
+    ///
+    /// 512 was measured, not assumed (ReleaseFast, fixed-work, CPU 15):
+    /// 128 gave pdfjs 2.53 s but regexp maxrss 139 MB against a 106 MB
+    /// baseline; 2048 gave regexp 95 MB but pdfjs 2.62 s. 512 with the 1.5x
+    /// seed capacity below holds pdfjs at 2.55 s and regexp at ~103 MB.
+    pub const tail_buffer_seed_len: usize = 512;
+
+    /// Smallest tail buffer worth allocating, in code units.
+    pub const tail_buffer_min_capacity: usize = 64;
+
     /// Creates a rope deferring the concatenation of `left ++ right`. Returns a
     /// STANDALONE `*StringRope` (the caller emits its `Tag.string_rope` value via
     /// `node.value()`). Retains both children; content materializes lazily on
@@ -709,7 +902,7 @@ pub const String = struct {
         // is 8-aligned (Metadata), so the struct at `base + 8` keeps `String`'s
         // 4-byte alignment and the inline char FAM stays u16-aligned. The
         // prefix carries collector metadata.
-        if (try rt.memory.createStringCell(inline_layout.total_size)) |base| {
+        if (try rt.memory.createStringCell(gc.representation.string_kind_tag, inline_layout.total_size)) |base| {
             const self: *String = @ptrCast(@alignCast(base + gc.string_prefix_size));
             self.* = .{
                 .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
@@ -868,6 +1061,13 @@ pub const StringValueIterator = struct {
                     if (resolved.len() != 0) return resolved;
                     continue;
                 }
+                // TGC S2-i: a dependent view is a leaf over the shared tail
+                // buffer; descending into `left`/`right` would read undefined
+                // values.
+                if (node.bufferView()) |view| {
+                    if (view.len() != 0) return view;
+                    continue;
+                }
 
                 std.debug.assert(self.stack_len < self.nodes.len);
                 self.nodes[self.stack_len] = node;
@@ -907,6 +1107,10 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
 
         const node = StringRope.fromHeader(header);
         if (node.flatString()) |flat| return flat.codeUnitAt(relative);
+        if (node.bufferView()) |view| return switch (view) {
+            .latin1 => |bytes| bytes[relative],
+            .utf16 => |units| units[relative],
+        };
 
         const left_len = stringValueLenUnchecked(node.left);
         if (relative < left_len) {
@@ -1183,6 +1387,11 @@ fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSVa
     if (node.flatString()) |flat| {
         return addRopeRebalanceLeaf(rt, buckets, flat.value());
     }
+    // A dependent view is an indivisible leaf: the buffer bytes past `len`
+    // belong to a longer sibling view, so the rebalance must keep the node.
+    if (node.buffer != null) {
+        return addRopeRebalanceLeaf(rt, buckets, value);
+    }
 
     try collectRopeRebalanceLeaves(rt, buckets, node.left);
     try collectRopeRebalanceLeaves(rt, buckets, node.right);
@@ -1223,6 +1432,134 @@ comptime {
     std.debug.assert(StringRope.metadata_prefix_size == gc.string_prefix_size);
 }
 
+/// TGC S2-i: write `data` into `buf` starting at code-unit `offset`.
+/// The destination width is the buffer's; a narrow source widens per unit,
+/// and a wide source into a narrow buffer is impossible by construction (the
+/// callers pick the buffer width from the OR of both operands).
+fn writeTailUnits(buf: *StringBuffer, offset: u32, data: String.ResolvedData) void {
+    if (std.debug.runtime_safety) {
+        const meta = buf.header().metaConst();
+        std.debug.assert(meta.flags.kind == .string_buffer);
+        std.debug.assert(meta.alloc_info.heap_accounted);
+        std.debug.assert(@as(usize, offset) + data.len() <= buf.capacity);
+    }
+    if (buf.is_wide) {
+        const out = buf.utf16();
+        switch (data) {
+            .latin1 => |bytes| for (bytes, 0..) |byte, i| {
+                out[offset + i] = byte;
+            },
+            .utf16 => |units| @memcpy(out[offset..][0..units.len], units),
+        }
+        return;
+    }
+    const out = buf.latin1();
+    switch (data) {
+        .latin1 => |bytes| @memcpy(out[offset..][0..bytes.len], bytes),
+        .utf16 => unreachable,
+    }
+}
+
+/// Seed capacity: 1.5x, not the growth path's 2x. The seed is the one
+/// allocation an accumulator that never gets appended to again still pays,
+/// and there are many of those (regexp's maxrss moved 139 MB -> 103 MB on
+/// this constant alone). Amortization does not depend on it -- it is the
+/// GROWTH factor that has to be geometric.
+fn tailBufferSeedCapacityFor(total: usize) usize {
+    const wanted = @max(total +| total / 2, String.tail_buffer_min_capacity);
+    return @min(wanted, max_length);
+}
+
+/// Growth capacity: 2x, which is what makes a run of appends amortized O(1).
+fn tailBufferCapacityFor(total: usize) usize {
+    const doubled = total *| 2;
+    const wanted = @max(doubled, String.tail_buffer_min_capacity);
+    return @min(wanted, max_length);
+}
+
+/// TGC S2-i seed: `a ++ b` into a FRESH extensible tail buffer, returned as a
+/// dependent view node. This still copies `a` once -- the amortization starts
+/// with the next append, which writes only `b`'s units.
+pub fn createTailBufferRope(rt: *JSRuntime, a: *String, b: *String) !*StringRope {
+    const a_len = a.len();
+    const total = try std.math.add(usize, a_len, b.len());
+    if (total > max_length) return error.StringTooLong;
+    const wide = a.isWide() or b.isWide();
+    // Allocation may collect. `a`/`b` are native locals resolved by the
+    // conservative scan, and nothing published names the buffer yet.
+    const buf = try createStringBuffer(rt, wide, tailBufferSeedCapacityFor(total));
+    writeTailUnits(buf, 0, a.resolveData());
+    writeTailUnits(buf, @intCast(a_len), b.resolveData());
+    const node = try allocRopeNode(rt);
+    node.* = .{
+        .left = JSValue.undefinedValue(),
+        .right = JSValue.undefinedValue(),
+        .rt = rt,
+        .buffer = buf,
+        .len = @intCast(total),
+        .depth = 1,
+        .wide = wide,
+        .extensible = true,
+    };
+    return node;
+}
+
+/// TGC S2-i append: `view ++ b` where `view` is a dependent view node.
+///
+/// The in-place arm is the amortized-O(1) one: `b`'s units go into the shared
+/// buffer past `view.len`, which no live view names, and the append right
+/// moves to the new node. Every other case (right already taken, buffer full,
+/// buffer too narrow) allocates a doubled buffer and copies the prefix -- and
+/// leaves `view` untouched, which is what makes `r1 = s + x; r2 = s + y`
+/// correct without a refcount.
+pub fn appendTailBufferRope(rt: *JSRuntime, view: *StringRope, b: *String) !*StringRope {
+    const buf = view.buffer.?;
+    const used = view.len;
+    const total = try std.math.add(usize, @as(usize, used), b.len());
+    if (total > max_length) return error.StringTooLong;
+    const wide = buf.is_wide or b.isWide();
+
+    if (view.extensible and wide == buf.is_wide and total <= buf.capacity) {
+        // Allocate first: a collection here still sees `view` extensible over
+        // an unmodified buffer, so the operation is all-or-nothing.
+        const node = try allocRopeNode(rt);
+        // The allocation may have collected. Nothing the collector does may
+        // move a view off its buffer, shorten it, or spend its append right:
+        // those are mutator-only writes, and this is the one place that makes
+        // them.
+        std.debug.assert(view.buffer == buf and view.len == used and view.extensible);
+        writeTailUnits(buf, used, b.resolveData());
+        node.* = .{
+            .left = JSValue.undefinedValue(),
+            .right = JSValue.undefinedValue(),
+            .rt = rt,
+            .buffer = buf,
+            .len = @intCast(total),
+            .depth = 1,
+            .wide = buf.is_wide,
+            .extensible = true,
+        };
+        view.extensible = false;
+        return node;
+    }
+
+    const next = try createStringBuffer(rt, wide, tailBufferCapacityFor(total));
+    writeTailUnits(next, 0, buf.prefix(used));
+    writeTailUnits(next, used, b.resolveData());
+    const node = try allocRopeNode(rt);
+    node.* = .{
+        .left = JSValue.undefinedValue(),
+        .right = JSValue.undefinedValue(),
+        .rt = rt,
+        .buffer = next,
+        .len = @intCast(total),
+        .depth = 1,
+        .wide = wide,
+        .extensible = true,
+    };
+    return node;
+}
+
 /// Allocates a `StringRope` node with its leading collector metadata.
 fn allocRopeNode(rt: *JSRuntime) !*StringRope {
     // Ropes never take the extent route: the node fits a block cell.
@@ -1230,12 +1567,9 @@ fn allocRopeNode(rt: *JSRuntime) !*StringRope {
     // TGC S2-f (3): same allocation-threshold boundary as flat bodies (see
     // `String.createUninitialized`). Before the cell pointer is taken.
     rt.collectBeforeObjectAllocation(rope_node_alloc_size);
-    const base = (try rt.memory.createStringCell(rope_node_alloc_size)) orelse unreachable;
+    const base = (try rt.memory.createStringCell(gc.representation.rope_kind_tag, rope_node_alloc_size)) orelse unreachable;
     const node: *StringRope = @ptrCast(@alignCast(base + StringRope.metadata_prefix_size));
     rt.gc.addInitializedWithSizeNoFail(@ptrCast(node), gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
-    // Rope discriminator: the prefix `mark` flag is free for strings (cell
-    // bitmaps and extent tables hold the mark authority).
-    node.metadata().flags.mark = true;
     return node;
 }
 
@@ -1253,6 +1587,10 @@ fn copyRopeContent(comptime T: type, root: *const StringRope, out: []T) void {
 fn copyRopeNodeContent(comptime T: type, node: *const StringRope, out: []T, offset: *usize) void {
     if (node.flatString()) |flat| {
         offset.* += copyResolvedUnits(T, out[offset.*..], flat.resolveData());
+        return;
+    }
+    if (node.bufferView()) |view| {
+        offset.* += copyResolvedUnits(T, out[offset.*..], view);
         return;
     }
     copyRopeValueContent(T, node.left, out, offset);
@@ -1295,8 +1633,10 @@ const InlineAllocationLayout = struct {
     allocation_alignment: std.mem.Alignment,
 };
 
+/// TGC S4-a (D-S4-1): the rope discriminator is a GC kind, not a borrowed
+/// `mark` bit. `allocRopeNode` stamps it in the prefix the allocator writes.
 pub inline fn metaIsRope(meta: *const gc.Metadata) bool {
-    return meta.flags.mark;
+    return meta.flags.kind == .rope;
 }
 
 /// Registry-side size query for a string-family carrier (TGC S2). `header`
@@ -1330,6 +1670,10 @@ pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize
 pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
     std.debug.assert(gc.Registry.isBlockCellHeader(header));
     const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
+    if (meta.flags.kind == .string_buffer) {
+        destroyStringBufferCell(rt, header);
+        return;
+    }
     if (metaIsRope(meta)) {
         const node: *StringRope = @ptrCast(@alignCast(header));
         rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
@@ -1370,13 +1714,14 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
     // destroy what was recorded plus the one cell that did not fit, then
     // restart the walk over a strictly smaller population. Progress is at
     // least one cell per pass, so this terminates with zero spare memory.
-    cells.ensureTotalCapacity(std.heap.page_allocator, rt.gc.liveCountKind(.string)) catch {};
+    cells.ensureTotalCapacity(std.heap.page_allocator, rt.gc.liveCountKind(.string) +
+        rt.gc.liveCountKind(.rope) + rt.gc.liveCountKind(.string_buffer)) catch {};
     while (true) {
         cells.clearRetainingCapacity();
         var overflow: ?*gc.GCObjectHeader = null;
         var it = rt.gc.objectIterator(.all);
         while (it.next()) |header| {
-            if (header.metaConst().flags.kind != .string) continue;
+            if (!gc.kindIsPrefixCarrier(header.metaConst().flags.kind)) continue;
             if (!gc.Registry.isBlockCellHeader(header)) continue;
             cells.append(std.heap.page_allocator, header) catch {
                 // The iterator is abandoned here, so destroying out of the
@@ -1391,34 +1736,45 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
     }
     const heap = &rt.gc.block_heap;
     // Major epochs are even; the next one matches no recorded extent mark.
-    _ = heap.sweepStringExtents(heap.mark_epoch +% 2, @ptrCast(rt), destroyDeadStringExtent);
+    _ = heap.sweepExtents(heap.mark_epoch +% 2, @ptrCast(rt), destroyDeadStringExtent);
 }
 
-pub fn sweepStringExtents(rt: *JSRuntime) usize {
+pub fn sweepExtents(rt: *JSRuntime) usize {
     const heap = &rt.gc.block_heap;
-    return heap.sweepStringExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
+    return heap.sweepExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
 }
 
-/// Minor twin of `sweepStringExtents` (spec 7.2 (2)): destroy every extent in
+/// Minor twin of `sweepExtents` (spec 7.2 (2)): destroy every extent in
 /// the heap's young list the minor did not mark. Sound for the same reason
 /// the young cell sweep is: an old object's write to a young extent is in the
 /// remembered set (`generationalBarrierValue`; `cycleMarkHeader` accepts the
 /// string tags), the minor force-traces every remembered owner, and an extent
 /// has no out-edges of its own -- ropes always fit a cell.
-pub fn sweepYoungStringExtents(rt: *JSRuntime) usize {
+pub fn sweepYoungExtents(rt: *JSRuntime) usize {
     const heap = &rt.gc.block_heap;
-    return heap.sweepYoungStringExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
+    return heap.sweepYoungExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);
 }
 
-/// `Heap.sweepStringExtents` callback: the same handshake a condemned flat
+/// `Heap.sweepExtents` callback: the same handshake a condemned flat
 /// cell performs, then the registry unpublish and the memory return.
 /// `base` is the allocation start (prefix), `user_bytes` the request.
 fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize) void {
     const rt: *JSRuntime = @ptrCast(@alignCast(ctx));
     const meta: *const gc.Metadata = @ptrFromInt(base);
-    std.debug.assert(meta.flags.kind == .string and meta.alloc_info.standalone);
-    // Ropes always fit a cell (`allocRopeNode`), so an extent is a flat body.
-    std.debug.assert(!metaIsRope(meta));
+    // TGC S4 spec 2.2 "destroy_by_kind": the extent tables hold every prefix
+    // carrier over the cell ceiling, so the callback dispatches. Ropes always
+    // fit a cell (`allocRopeNode` asserts it at comptime), so the two live
+    // answers are a flat body (atom handshake) and a tail buffer (pure
+    // memory).
+    std.debug.assert(meta.alloc_info.standalone);
+    if (meta.flags.kind == .string_buffer) {
+        const buffer_header: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+        const buf: *StringBuffer = @ptrCast(@alignCast(buffer_header));
+        rt.gc.unpublishStringExtent(buffer_header, user_bytes - gc.string_prefix_size);
+        rt.memory.destroyStringExtent(buf, user_bytes);
+        return;
+    }
+    std.debug.assert(meta.flags.kind == .string);
     const header: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
     const body: *String = @ptrCast(@alignCast(header));
     std.debug.assert(accountedAllocationSizeFromHeader(header) == user_bytes - gc.string_prefix_size);
@@ -1433,16 +1789,38 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize) void
     rt.memory.destroyStringExtent(body, user_bytes);
 }
 
-/// Child edges of a string-family carrier: flat bodies are leaves, ropes own
-/// `left`/`right`. Reached from `traceHeaderEdges` for both block cells and
-/// (later) extents.
-pub fn traceStringEdges(rt: *JSRuntime, visitor: anytype, header: *gc.GCObjectHeader) !void {
+/// Child edges of a rope node: `left`/`right`. Flat bodies are leaves and
+/// never reach here -- `traceHeaderEdges` dispatches on the `.rope` kind
+/// (TGC S4-a) instead of re-reading the prefix discriminator.
+pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.GCObjectHeader) !void {
     _ = rt;
-    const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
-    if (!metaIsRope(meta)) return;
+    std.debug.assert(metaIsRope(@ptrFromInt(@intFromPtr(header) - gc.string_prefix_size)));
     const node: *StringRope = @ptrCast(@alignCast(header));
+    // TGC S2-i: the tail buffer is a storage cell with no edges of its own;
+    // every view that can still read it reports it here. A view's
+    // `left`/`right` are undefined VALUES (not garbage pointers), so the two
+    // visits below stay unconditional and branch-free.
+    if (node.buffer) |buf| {
+        std.debug.assert(buf.header().metaConst().flags.kind == .string_buffer);
+        try callVisitStorageCell(visitor, buf.header());
+    }
     try callVisitValue(visitor, &node.left);
     try callVisitValue(visitor, &node.right);
+}
+
+/// Visitor shim for the storage-cell edge (TGC S4 spec 2.2). Visitors that
+/// do not declare `storageCell` -- the root adaptors, which never enumerate
+/// heap edges -- compile this away entirely.
+inline fn callVisitStorageCell(vis: anytype, header: *gc.GCObjectHeader) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime !@hasDecl(CleanType, "storageCell")) return;
+    const ReturnType = @typeInfo(@TypeOf(CleanType.storageCell)).@"fn".return_type.?;
+    if (comptime @typeInfo(ReturnType) == .error_union) {
+        try vis.storageCell(header);
+    } else {
+        vis.storageCell(header);
+    }
 }
 
 /// Visitors come in two shapes (`visitValue` returning void or an error

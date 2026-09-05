@@ -769,7 +769,7 @@ test "public API surface snapshot matches the checked-in name lists" {
 
     // Known debt (backlog H9): JSValue is the public value type and still
     // publishes internal helpers. The count is pinned so a leak expansion
-    // is visible; do not call names such as freeObjectAssumeObject*.
+    // is visible.
     // 89 -> 88 on 2026-08-19: `has_fast_int32_slot_move` went away with the
     // NaN-boxed representation it existed to discriminate.
     // 88 -> 89 on 2026-08-20: `catchTarget`, the decoder for the catch-marker
@@ -780,9 +780,14 @@ test "public API surface snapshot matches the checked-in name lists" {
     // whose retain/release operations tracing erases. It remains an internal
     // helper exposed through the known broad JSValue surface; pin the leak
     // rather than pretending the declaration did not land.
+    // 90 -> 84 on 2026-09-05: the six refcount compatibility shells
+    // (`freeDuringActiveBytecode`, `freeObjectAssumeObject*`,
+    // `releaseObjectAssumeObjectNeedsDestroy*`,
+    // `releaseRefCountedNeedsDestroyDuringActiveBytecode`) were deleted. They
+    // had already decayed to assertion-only bodies with a constant `false`
+    // predicate, and every remaining caller was a test asserting the no-op.
     const jsvalue_decl_count = @typeInfo(zjs.JSValue).@"struct".decls.len;
-    try std.testing.expectEqual(@as(usize, 90), jsvalue_decl_count);
-    try std.testing.expect(@hasDecl(zjs.JSValue, "freeObjectAssumeObjectDuringActiveBytecode"));
+    try std.testing.expectEqual(@as(usize, 84), jsvalue_decl_count);
 
     // JSRuntime is likewise a public type with a deliberately broad internal
     // surface. Pin its declaration count so additions and removals require an

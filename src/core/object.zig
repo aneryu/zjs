@@ -2327,7 +2327,6 @@ pub const Object = extern struct {
     /// because a sibling not yet processed may still dereference this
     /// header.
     inline fn destroyPlainObjectFast(rt: *JSRuntime, self: *Object, two_pass: bool, has_slots2_layout: bool) void {
-        self.gcHeader().meta().flags.mark = true;
         self.gcHeader().meta().flags.finalizing = true;
 
         const object_shape = self.shape_ref;
@@ -2376,17 +2375,14 @@ pub const Object = extern struct {
         // off the plain-object fast arm above: only holders/husks reach here.
         if (gc.headerIsReclaimableWeakHusk(header)) return;
         // qjs marks an object "about to be freed" before its zero-refcount free
-        // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479), and
-        // js_weakref_free tests that mark (quickjs.c:51728-51735) so releasing
-        // the LAST weak reference to an object whose own teardown is in
-        // progress (a FinalizationRegistry registered as its own target /
-        // unregister token, or two dead registries weakly cross-registered)
-        // does NOT free the struct out from under free_object. The husk branch
-        // below resets the mark (mirror of quickjs.c:6389) so a later weak
-        // release can reclaim the kept struct. Without setting the mark here,
-        // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
-        // object mid-teardown — a double free corrupting the slab free list.
-        header.meta().flags.mark = true;
+        // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479) and
+        // js_weakref_free tests that mark (quickjs.c:51728-51735). Under the
+        // tracer that reentrancy guard is `lifetime.flags.husk`, not the
+        // prefix mark bit: `headerIsReclaimableWeakHusk` reads the husk bit,
+        // which this teardown only sets AFTER the resource pass, so a weak
+        // release arriving mid-teardown already refuses to free the struct.
+        // The mark bit was write-only here (TGC S4-a); `finalizing` remains
+        // the in-teardown stamp every reader actually consults.
         header.meta().flags.finalizing = true;
         // Keep only immutable scalar destruction data across recursive cleanup.
         // A dynamic object's allocation owns its definition pin until the
@@ -2527,7 +2523,6 @@ pub const Object = extern struct {
         // exactly like qjs free_object + gc_free_cycles.
         if (self.weakReferenceCount() != 0) {
             gc.setHeaderWeakHusk(self.gcHeader());
-            self.gcHeader().meta().flags.mark = false;
             self.gcHeader().meta().flags.finalizing = false;
             return;
         }
@@ -2619,7 +2614,6 @@ pub const Object = extern struct {
     pub fn destroyDeadWeakHusk(rt: *JSRuntime, self: *Object) void {
         std.debug.assert(gc.headerIsReclaimableWeakHusk(self.gcHeader()));
         std.debug.assert(self.weakReferenceCount() == 0);
-        std.debug.assert(!self.gcHeader().meta().flags.mark);
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
         _ = rt.takeWeakObjectIdentity(self);

@@ -1033,6 +1033,8 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
         .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
     );
     try writer.print(
+        // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
+        // the two are one family to every consumer of this panel.
         "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}, string {d}\n",
         .{
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],

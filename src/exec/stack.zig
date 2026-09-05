@@ -110,8 +110,17 @@ pub const Stack = struct {
     /// above it as the in-flight call's region. Only valid where those slots
     /// were just written by the operand pushes -- publishing a span of popped
     /// or never-initialised slots would hand the tracer garbage.
-    pub inline fn retreatToCallRegion(self: *Stack, region_start: [*]JSValue) void {
-        const high = self.top_ptr;
+    ///
+    /// `live_top` is the AUTHORITATIVE end of the operand window, which is not
+    /// always `self.top_ptr`: a resident dispatch handler advances only the
+    /// register `sp`, so at an inline call site the published top still names
+    /// the last cold op's boundary and is BELOW the freshly pushed callee/args.
+    /// Reading `self.top_ptr` there made the `high <= region_start` guard fire
+    /// on every register-resident call and the window was never published --
+    /// exactly the case the window exists for. Callers that already hold the
+    /// register-resident top pass it; the `self.top_ptr` spelling below stays
+    /// for the published call sites.
+    pub inline fn retreatToCallRegionFrom(self: *Stack, live_top: [*]JSValue, region_start: [*]JSValue) void {
         self.setTopPtr(region_start);
         if (comptime gc.generation_enabled) {
             // Not every call site reaches here with operands still above the
@@ -119,10 +128,14 @@ pub const Stack = struct {
             // them, and land at or below `region_start`. There is nothing to
             // publish then, and publishing a span that is not the just-written
             // operands would hand the tracer whatever those slots hold.
-            if (@intFromPtr(high) <= @intFromPtr(region_start)) return;
-            const count = (@intFromPtr(high) - @intFromPtr(region_start)) / @sizeOf(JSValue);
+            if (@intFromPtr(live_top) <= @intFromPtr(region_start)) return;
+            const count = (@intFromPtr(live_top) - @intFromPtr(region_start)) / @sizeOf(JSValue);
             publishPendingCallRegion(region_start[0..count]);
         }
+    }
+
+    pub inline fn retreatToCallRegion(self: *Stack, region_start: [*]JSValue) void {
+        self.retreatToCallRegionFrom(self.top_ptr, region_start);
     }
 
     pub inline fn liveValues(self: *const Stack) []JSValue {

@@ -68,8 +68,14 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
     // sooner.
     if (gc.Registry.isBlockCellHeader(header)) {
         const cell_kind = header.metaConst().flags.kind;
-        std.debug.assert(cell_kind == .object or cell_kind == .string);
-        if (cell_kind == .string) return string_mod.traceStringEdges(rt, visitor, header);
+        if (cell_kind != .object) {
+            // TGC S4-a: the string family is two kinds now, so the prefix
+            // re-read `traceStringEdges` used to do is this dispatch instead.
+            std.debug.assert(gc.kindIsPrefixCarrier(cell_kind));
+            if (cell_kind == .rope) return string_mod.traceRopeEdges(rt, visitor, header);
+            // A flat body and a `.string_buffer` tail buffer are leaves.
+            return;
+        }
     } else switch (header.meta().flags.kind) {
         // Fall through to the one shared object body below. Keeping a single
         // hot entry matters: spelling the fast path as an early object return
@@ -102,8 +108,15 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
             try record.traceChildEdgesFallible(rt, visitor);
             return;
         },
-        .string => return string_mod.traceStringEdges(rt, visitor, header),
+        // A flat body is a leaf; an extent is always flat (`allocRopeNode`
+        // asserts a rope node fits a cell), so this arm has no edges to walk.
+        .string => return,
+        .rope => return string_mod.traceRopeEdges(rt, visitor, header),
         .big_int => return,
+        // Storage cells are marked by their owner's edge and have no
+        // out-edges of their own: TGC S2-i's tail buffer is reported by
+        // `traceRopeEdges`, and the S4-b/S4-c kinds are not minted yet.
+        .string_buffer, .property_storage, .array_storage, .payload => return,
     }
 
     const obj = Object.fromHeader(header);
@@ -276,7 +289,16 @@ pub const MarkFootprint = struct {
     pub fn noteMarkedHeader(self: *MarkFootprint, header: *gc.Header) void {
         const kind = header.metaConst().flags.kind;
         self.marked_headers +|= 1;
-        self.by_kind[@intFromEnum(kind)] +|= 1;
+        // TGC S4-a: rope nodes became their own kind. The census keeps
+        // reporting one `string` population -- the two shapes are one family
+        // to every consumer of this panel, and folding here keeps
+        // `gc_stats_snapshot.py`'s existing line intact.
+        self.by_kind[@intFromEnum(switch (kind) {
+            // TGC S2-i folds the tail buffer in as well: it is string bytes
+            // that used to sit inside the flat bodies this row already counted.
+            .rope, .string_buffer => gc.GcKind.string,
+            else => kind,
+        })] +|= 1;
         if (gc.Registry.isBlockCellHeader(header)) self.block_headers +|= 1;
         self.refcount_removed_headers +|= 1;
     }
@@ -861,7 +883,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     }
     if (comptime gc.block_heap_enabled) {
         _ = rt.gc.block_heap.clearYoungBlocks();
-        rt.gc.block_heap.retireYoungStringExtents();
+        rt.gc.block_heap.retireYoungExtents();
     }
     // TGC S3-c: a value symbol's body is only reachable from an old holder
     // over an atom id, which no minor traces, so the table roots it until it
@@ -907,7 +929,7 @@ fn clearYoungState(rt: *JSRuntime) void {
         // Extents have no carrier to walk; their young enumeration is the
         // heap's own list. Survivors of the major's whole-table extent sweep
         // are promoted here, and the list is closed.
-        rt.gc.block_heap.retireYoungStringExtents();
+        rt.gc.block_heap.retireYoungExtents();
     }
     // Same promotion point for the atom table's young symbol bodies (§S3-c).
     rt.atoms.retireYoungSymbolBodies();
@@ -1102,7 +1124,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
         // Unmarked string extents are dead at finish and referenced by
         // nothing; free them now (rare, so the pause cost is negligible)
         // rather than teaching the sliced morgue a table-backed kind.
-        condemned += string_mod.sweepStringExtents(rt);
+        condemned += string_mod.sweepExtents(rt);
     }
     var previous_node: *gc.Header = &rt.gc.gc_obj_list.sentinel;
     var cursor_node = previous_node.next_non_object;
@@ -1384,7 +1406,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
                     .object => Object.destroyFromHeader(rt, header),
                     // String-family cells (TGC S2) share the block heap; the
                     // string side frees the rope tail / atom entry itself.
-                    .string => string_mod.destroyCellFromHeader(rt, header),
+                    .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(rt, header),
                     else => unreachable,
                 }
                 destroyed += 1;
@@ -1834,6 +1856,13 @@ const Collector = struct {
         self.shadeExact(&record.header);
     }
 
+    /// TGC S4 spec 2.2: an owner's edge to a bare storage cell. The cell has
+    /// no out-edges, so the shade is the whole visit -- the frontier pop that
+    /// follows finds an empty edge set and only retires the young bit.
+    pub fn storageCell(self: *Collector, header: *gc.Header) void {
+        self.shadeExact(header);
+    }
+
     /// TGC S3 §2.2. An atom id is not a heap pointer: the edge stamps the
     /// table entry with this major's epoch, and only a VALUE SYMBOL's body
     /// rides along (the id holder must be able to hand the JSValue back out).
@@ -2230,7 +2259,7 @@ const Collector = struct {
         if (snapshot_doomed) {
             for (doomed.items) |header| {
                 const doomed_kind = header.metaConst().flags.kind;
-                if (doomed_kind == .object or doomed_kind == .string) {
+                if (gc.kindIsBlockCellKind(doomed_kind)) {
                     // String cells share the block route; a string is never a
                     // list carrier (extents are not young-listed).
                     if (gc.Registry.isBlockCellHeader(header))
@@ -2254,7 +2283,7 @@ const Collector = struct {
         // The extent half of the young set. `destroyCondemned(false)` covers
         // only the block/list carriers, and an extent is in neither; without
         // this a short-lived >128 B string had to survive to the next major.
-        if (comptime gc.block_heap_enabled) reclaimed += string_mod.sweepYoungStringExtents(self.rt);
+        if (comptime gc.block_heap_enabled) reclaimed += string_mod.sweepYoungExtents(self.rt);
         gc.listInit(&self.rt.gc.tmp_obj_list);
 
         // Destroying under `.remove_cycles` parks every struct free on
@@ -2503,6 +2532,9 @@ const Collector = struct {
             pub fn visitModule(a: *@This(), record: *module_mod.ModuleRecord) void {
                 a.hit(&record.header);
             }
+            pub fn storageCell(a: *@This(), header: *gc.Header) void {
+                a.hit(header);
+            }
             pub fn visitWeakCollectionEntry(_: *@This(), _: *object_payloads.WeakCollectionEntry) void {}
             pub fn visitFinalizationCell(_: *@This(), _: *object_payloads.FinalizationRegistryCell) void {}
         };
@@ -2630,7 +2662,7 @@ const Collector = struct {
                     const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
                     switch (header.metaConst().flags.kind) {
                         .object => Object.destroyFromHeader(self.rt, header),
-                        .string => string_mod.destroyCellFromHeader(self.rt, header),
+                        .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(self.rt, header),
                         else => unreachable,
                     }
                     garbage_count += 1;
@@ -2646,7 +2678,7 @@ const Collector = struct {
             // Whole-table extent sweep: only a full major trace can prove an
             // OLD extent dead. The young ones a minor can prove are swept from
             // `Heap.young_extents` by `sweepUnmarkedYoung` instead.
-            if (sweep_string_extents) garbage_count += string_mod.sweepStringExtents(self.rt);
+            if (sweep_string_extents) garbage_count += string_mod.sweepExtents(self.rt);
         }
         if (self.rt.gc.nonblock_objects) |authority| {
             while (authority.temporary.pop()) |header| {

@@ -936,6 +936,16 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
                 return b;
             }
 
+            // TGC S2-i: `s` is already a dependent view over a tail buffer,
+            // so the append writes only `b`'s units (or, once the right is
+            // spent / the buffer full, doubles it). This has to precede the
+            // QJS short-right merge below: a view's `right` is an undefined
+            // VALUE, which that arm would read.
+            if (node.buffer != null and b_len <= core.string.String.rope_short_len) {
+                const appended = try core.string.appendTailBufferRope(rt, node, b_string);
+                return appended.value();
+            }
+
             if (b_len <= core.string.String.rope_short_len and
                 !node.isLinearized())
             {
@@ -962,6 +972,13 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
                 return b;
             }
             if (b_len <= core.string.String.rope_short_len and a_len <= core.string.String.rope_short2_len) {
+                // TGC S2-i: past the seed length the flat arm below is the
+                // quadratic term of `s = s + x`; start a tail buffer instead
+                // and pay `a`'s copy exactly once.
+                if (a_len >= core.string.String.tail_buffer_seed_len) {
+                    const seeded = try core.string.createTailBufferRope(rt, a_string, b_string);
+                    return seeded.value();
+                }
                 return concatFlatStringBodiesOwned(rt, a_string, b_string);
             }
         }

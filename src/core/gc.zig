@@ -422,15 +422,17 @@ pub const ExternalMemoryToken = struct {
 };
 
 /// 6.2 GcKind definition
-/// 3-bit tag packed into the shared kind/flags byte of `Metadata` (qjs
-/// `JSMallocBlockHeader.gc_obj_type : 7`, quickjs.c:276, also shares its byte
-/// with the mark bit).
+/// 4-bit tag packed into the low nibble of the shared kind/flags byte of
+/// `Metadata` (qjs `JSMallocBlockHeader.gc_obj_type : 7`, quickjs.c:276).
+/// It was three bits until TGC S4-a, which spent the retired `mark` bit on
+/// the fourth: eight values were full, and S4 needs four more kinds.
 ///
 /// Value order is load-bearing for codegen, mirroring qjs's
 /// `JS_GC_OBJ_TYPE_JS_OBJECT == 0` (quickjs.c:423): the hot `kind == .object`
 /// guards compile to a single `tst` of the masked byte, and the recurring
-/// encoded kind checks stay compact.
-pub const RefKind = enum(u3) {
+/// encoded kind checks stay compact. Values 0..7 are unchanged, so every
+/// bare kind tag byte a raw prefix writer stores keeps its old encoding.
+pub const RefKind = enum(u4) {
     object = 0,
     function_bytecode = 1,
     var_ref = 2,
@@ -439,7 +441,73 @@ pub const RefKind = enum(u3) {
     shape = 5,
     string = 6,
     big_int = 7,
+    /// TGC S4-b: an object's external property-entry buffer as a GC cell.
+    /// Declared here so the header encoding, the catalog and the snapshot
+    /// are settled in one batch; nothing allocates it until S4-b.
+    property_storage = 8,
+    /// TGC S4-b: an array/arguments element buffer as a GC cell.
+    array_storage = 9,
+    /// TGC S4-c: an a-class class payload as a GC cell.
+    payload = 10,
+    /// TGC S4-a (D-S4-1): rope nodes were discriminated from flat string
+    /// bodies by borrowing the prefix `mark` bit (S2). They are a kind of
+    /// their own now, which is what freed that bit -- `traceHeaderEdges`
+    /// dispatches the two string-family shapes directly instead of
+    /// re-reading the prefix inside `traceStringEdges`.
+    rope = 11,
+    /// TGC S2-i: the extensible tail buffer behind a rope's dependent views
+    /// (`string.StringBuffer`). A bare byte carrier: no out-edges, no
+    /// destructor, marked only by the `storageCell` edge of every rope node
+    /// that reads it. It is deliberately NOT part of `isStringFamily`: that
+    /// predicate answers "flat body or rope node", i.e. the two shapes a
+    /// string JSValue can name, and a buffer is named by no JSValue.
+    string_buffer = 12,
 };
+
+/// The string family: a flat body and a rope node share one JSValue tag, one
+/// allocation family (prefix + body, `gc.string_prefix_size`) and one size
+/// query. Every site that used to ask `kind == .string` about the FAMILY (as
+/// opposed to "flat body specifically") asks this instead.
+pub inline fn isStringFamily(kind: RefKind) bool {
+    return kind == .string or kind == .rope;
+}
+
+/// Kinds whose carrier may be a collector block cell. Mirrors the catalog's
+/// `.block_slab_or_standalone`, spelled as a predicate for the hot cell
+/// guards that must not index the catalog.
+pub inline fn kindIsBlockCellKind(kind: RefKind) bool {
+    return switch (kind) {
+        .object, .string, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
+        .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
+    };
+}
+
+/// Carriers whose body starts AT the collector handle behind an eight-byte
+/// `Metadata` prefix and therefore own no `TraceHeader` link word: the string
+/// family, the S2-i tail buffer and the S4-b storage kinds. Publication may
+/// not link them onto `gc_obj_list`, the young suffix may not anchor on one,
+/// and their standalone form is a block-heap EXTENT rather than a slab
+/// allocation. Every site that used to spell that set as `isStringFamily`
+/// (which is a JSValue-shape question, not a carrier question) asks this.
+pub inline fn kindIsPrefixCarrier(kind: RefKind) bool {
+    return switch (kind) {
+        .string, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
+        .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
+    };
+}
+
+/// Prefix carriers that can exceed the block-cell ceiling and therefore take
+/// the extent route (`memory.createExtent`): their mark, their finalizer
+/// column and their sweep live in the block heap's extent tables rather than
+/// in a block bitmap. Rope nodes are fixed-size and always fit a cell, so
+/// they are excluded -- the exclusion is what lets the extent arms stay a
+/// single equality test in the hot mark probes.
+pub inline fn kindIsExtentCapable(kind: RefKind) bool {
+    return switch (kind) {
+        .string, .string_buffer, .property_storage, .array_storage, .payload => true,
+        .rope, .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
+    };
+}
 
 /// Legal allocation carriers for a kind.  Only plain objects may enter the
 /// collector block heap; every other Metadata kind is slab/standalone, while
@@ -463,6 +531,11 @@ pub const representation_kind_catalog = [_]RepresentationKindDescriptor{
     .{ .kind = .shape, .allocation = .slab_or_standalone },
     .{ .kind = .string, .allocation = .block_slab_or_standalone },
     .{ .kind = .big_int, .allocation = .slab_or_standalone },
+    .{ .kind = .property_storage, .allocation = .block_slab_or_standalone },
+    .{ .kind = .array_storage, .allocation = .block_slab_or_standalone },
+    .{ .kind = .payload, .allocation = .block_slab_or_standalone },
+    .{ .kind = .rope, .allocation = .block_slab_or_standalone },
+    .{ .kind = .string_buffer, .allocation = .block_slab_or_standalone },
 };
 
 pub inline fn representationKindDescriptor(kind: RefKind) *const RepresentationKindDescriptor {
@@ -476,7 +549,7 @@ comptime {
     for (representation_kind_catalog, 0..) |descriptor, index| {
         std.debug.assert(@intFromEnum(descriptor.kind) == index);
         std.debug.assert((descriptor.allocation == .block_slab_or_standalone) ==
-            (descriptor.kind == .object or descriptor.kind == .string));
+            kindIsBlockCellKind(descriptor.kind));
     }
 }
 
@@ -495,7 +568,18 @@ pub const gc_kind_count: usize = @typeInfo(GcKind).@"enum".fields.len;
 /// Keep this separate from enum ranges: Realm sits between VarRef and Module.
 pub inline fn frontierEpochSafe(kind: GcKind) bool {
     return switch (kind) {
-        .object, .function_bytecode, .var_ref, .module, .string, .big_int => true,
+        .object,
+        .function_bytecode,
+        .var_ref,
+        .module,
+        .string,
+        .rope,
+        .string_buffer,
+        .big_int,
+        .property_storage,
+        .array_storage,
+        .payload,
+        => true,
         .realm_context, .shape => false,
     };
 }
@@ -503,7 +587,18 @@ pub inline fn frontierEpochSafe(kind: GcKind) bool {
 comptime {
     for (std.meta.tags(GcKind)) |kind| {
         const expected = switch (kind) {
-            .object, .function_bytecode, .var_ref, .module, .string, .big_int => true,
+            .object,
+            .function_bytecode,
+            .var_ref,
+            .module,
+            .string,
+            .rope,
+            .string_buffer,
+            .big_int,
+            .property_storage,
+            .array_storage,
+            .payload,
+            => true,
             .realm_context, .shape => false,
         };
         std.debug.assert(frontierEpochSafe(kind) == expected);
@@ -583,13 +678,17 @@ fn ratioPerMille(numerator: usize, denominator: usize) usize {
 
 /// Byte 3 of the metadata prefix: the GC kind and the GC lifecycle bits share
 /// one byte, mirroring qjs `JSMallocBlockHeader` byte 3 = `gc_obj_type : 7 |
-/// mark : 1` (quickjs.c:276). zjs needs four extra cycle/lifecycle bits qjs
-/// carries in its wider 4-bit `mark` value ranges and list membership, so the
-/// kind is 3 bits and the flags take the remaining five.
+/// mark : 1` (quickjs.c:276). zjs needs cycle/lifecycle bits qjs carries in
+/// its wider 4-bit `mark` value ranges and list membership, so the kind is
+/// four bits and the flags take the remaining four.
+///
+/// TGC S4-a: the kind grew from three bits into the retired `mark` bit
+/// (bit 3). Every other flag keeps its historical bit position, so the raw
+/// prefix writers in `memory.zig`, the free-cell poison and
+/// `metadata_young_mask` are all byte-identical to before.
 pub const BlockFlags = packed struct(u8) {
-    /// GC kind tag (qjs `gc_obj_type`). Bits 0-2.
+    /// GC kind tag (qjs `gc_obj_type`). Bits 0-3.
     kind: GcKind = .object,
-    mark: bool = false,
     /// Padding: former `in_cycle_list`. Membership is the cyclic list itself
     /// (qjs `list_add_tail` / `list_del`, quickjs.c:6545/6548). Kept so
     /// `finalizing` / `is_pinned` / `cycle_visited` stay at their historical
@@ -641,7 +740,22 @@ pub const MarkStack = mark_queue.MarkStack;
 /// so its death state must not alias an epoch value.
 pub const TraceHeaderFlags = packed struct(u8) {
     husk: bool = false,
-    reserved: u7 = 0,
+    /// TGC S4-a: this carrier's death owes a destructor call (an external
+    /// resource, a weak identity, a cursor, a borrowed holder, an atom
+    /// binding). S4-d's sweep visits `doomed & needs_finalizer` only; every
+    /// other corpse is reclaimed by clearing its allocation bit without the
+    /// header ever being read.
+    ///
+    /// Spec 2.1 puts this bit in `BlockFlags`, in the position the retired
+    /// `mark` bit held. That position is now the kind's fourth bit, and the
+    /// flags byte has no spare while `is_pinned` / `cycle_visited` live
+    /// (they retire in S4-e), so the bit lives in the lifetime tail instead.
+    /// Same eight-byte prefix, same cache line; S4-e can move it back when
+    /// the flags byte frees two bits.
+    ///
+    /// D-S4-4: set-only. Nothing sets it in S4-a.
+    needs_finalizer: bool = false,
+    reserved: u6 = 0,
 };
 
 /// Offset-6 byte ownership under trace_stw. Object's Shape projection owns the
@@ -702,15 +816,22 @@ comptime {
     // byte (all flags clear) equals the enum value, which is what the raw
     // prefix writers in memory.zig and object.zig store.
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .big_int })) == @intFromEnum(GcKind.big_int));
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .mark = true })) == 1 << 3);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .rope })) == @intFromEnum(GcKind.rope));
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .young = true })) == representation.metadata_young_mask);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .finalizing = true })) == 1 << 5);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .is_pinned = true })) == 1 << 6);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .cycle_visited = true })) == 1 << 7);
+    // The kind occupies the low nibble; the raw readers mask with it.
+    std.debug.assert(@bitSizeOf(GcKind) == 4);
+    std.debug.assert(@as(u8, std.math.maxInt(std.meta.Tag(GcKind))) == representation.kind_mask);
     // The contiguous kind ranges documented on RefKind.
     std.debug.assert(@intFromEnum(GcKind.object) == 0);
     std.debug.assert(@intFromEnum(GcKind.module) == 4 and @intFromEnum(GcKind.shape) == 5);
     std.debug.assert(@intFromEnum(GcKind.string) == 6 and @intFromEnum(GcKind.big_int) == 7);
+    std.debug.assert(@intFromEnum(GcKind.property_storage) == 8 and @intFromEnum(GcKind.array_storage) == 9);
+    std.debug.assert(@intFromEnum(GcKind.payload) == 10 and @intFromEnum(GcKind.rope) == 11);
+    std.debug.assert(@intFromEnum(GcKind.rope) == representation.rope_kind_tag);
+    std.debug.assert(@intFromEnum(GcKind.string_buffer) == representation.string_buffer_kind_tag);
 }
 
 /// The two owner facts that let a generational write barrier do nothing, as
@@ -838,7 +959,19 @@ pub const ObjectHeader = Header;
 pub inline fn bodyOffsetFromHeader(comptime kind: GcKind) usize {
     return switch (kind) {
         .object => 0,
-        .function_bytecode, .var_ref, .realm_context, .module, .shape, .string, .big_int => @sizeOf(TraceHeader),
+        .function_bytecode,
+        .var_ref,
+        .realm_context,
+        .module,
+        .shape,
+        .string,
+        .rope,
+        .string_buffer,
+        .big_int,
+        .property_storage,
+        .array_storage,
+        .payload,
+        => @sizeOf(TraceHeader),
     };
 }
 
@@ -859,7 +992,7 @@ pub inline fn bodyAddressFromHeader(comptime kind: GcKind, header: *const GCObje
 
 comptime {
     std.debug.assert(bodyOffsetFromHeader(.object) == 0);
-    for (.{ GcKind.function_bytecode, .var_ref, .realm_context, .module, .shape, .string, .big_int }) |kind|
+    for (.{ GcKind.function_bytecode, .var_ref, .realm_context, .module, .shape, .string, .rope, .string_buffer, .big_int, .property_storage, .array_storage, .payload }) |kind|
         std.debug.assert(bodyOffsetFromHeader(kind) == 8);
 }
 
@@ -894,6 +1027,14 @@ pub inline fn setDeferredNext(header: *GCObjectHeader, next: ?*GCObjectHeader) v
 
 pub inline fn headerIsHusk(h: *const Header) bool {
     return h.metaConst().lifetime.flags.husk;
+}
+
+/// TGC S4-a: does this carrier's death owe a destructor call?
+/// The header bit is the authority for extents and non-block kinds; block
+/// cells carry the same fact in `Block.finalizerBits` so the sweep can scan
+/// a whole block without touching a single header.
+pub inline fn headerNeedsFinalizer(h: *const Header) bool {
+    return h.metaConst().lifetime.flags.needs_finalizer;
 }
 
 /// True when dropping the last WeakRef may reclaim the resource-stripped
@@ -1356,10 +1497,11 @@ pub fn verifyMetadataSemantics(
             const initial_lifetime = meta.lifetime.mark_epoch == 0 and
                 meta.lifetime.object_shape_summary == 0 and
                 !meta.lifetime.flags.husk and
+                !meta.lifetime.flags.needs_finalizer and
                 meta.lifetime.flags.reserved == 0;
             if (expected_kind != .object or !is_block_cell or
                 meta.alloc_info.heap_accounted or meta.alloc_info.standalone or
-                meta.flags.mark or meta.flags.young or
+                meta.flags.young or
                 meta.flags.finalizing or !meta.flags.is_pinned or
                 meta.flags.cycle_visited or !initial_lifetime)
             {
@@ -2335,14 +2477,14 @@ pub const Registry = struct {
         comptime arm: PublicationArm,
     ) void {
         assertInitialHeaderLifetime(h);
-        std.debug.assert(!h.meta().flags.mark);
         std.debug.assert(!h.meta().flags.finalizing);
         std.debug.assert(!h.meta().flags.is_pinned);
         std.debug.assert(!h.meta().flags.cycle_visited);
         std.debug.assert(!h.meta().alloc_info.heap_accounted);
-        // Strings have no TraceHeader link word (the body starts at the
-        // handle), so "unlinked" is only meaningful for list carriers.
-        if (h.metaConst().flags.kind != .object and h.metaConst().flags.kind != .string)
+        // String-family carriers have no TraceHeader link word (the body
+        // starts at the handle), so "unlinked" is only meaningful for list
+        // carriers.
+        if (h.metaConst().flags.kind != .object and !kindIsPrefixCarrier(h.metaConst().flags.kind))
             std.debug.assert(!headerLinked(h));
 
         const is_large = self.isLargeAllocation(bytes);
@@ -2392,22 +2534,35 @@ pub const Registry = struct {
         // `standalone` or `block_size_idx`.
         std.debug.assert(info_at_entry.standalone == h.metaConst().alloc_info.standalone);
         std.debug.assert(is_block_cell == isBlockCellHeader(h));
+        // TGC S2-i: the occupant question is "is this an EXTENT carrier",
+        // not "is this a string JSValue": `unpublishStringExtent` has taken
+        // no `Table.remove` since S2-h1, so any extent kind that took an
+        // occupant here would leave a stale entry resolving freed pages.
+        const is_extent_carrier = kindIsExtentCapable(h.metaConst().flags.kind);
         const is_nonblock_object = tracked and !is_block_cell and
             h.metaConst().flags.kind == .object;
         // TGC S2: a string that is neither a block cell nor a non-block
         // Object is an extent (standalone prefix). Strings carry no
         // TraceHeader link word, so `gc_obj_list` cannot hold them; the
         // heap's medium/large extent tables are their enumeration (marked
-        // through `extentSetMark`, swept by `Heap.sweepStringExtents`).
+        // through `extentSetMark`, swept by `Heap.sweepExtents`).
         const is_list_carrier = tracked and !is_block_cell and
-            h.metaConst().flags.kind != .string;
+            !kindIsPrefixCarrier(h.metaConst().flags.kind);
         if (comptime address_registry_enabled) {
             if (is_nonblock_object) {
                 self.nonblock_objects.?.publish(h);
             } else if (is_list_carrier) {
                 self.linkGcObjectTail(h);
             }
-            self.registerLiveAddressClassified(h, bytes, tracked, standalone, is_block_cell, arm);
+            // TGC S2-h1: an extent string is standalone but takes NO occupant
+            // entry. `Heap.extent_pages` already resolves it exactly (and is
+            // the authority `forEachTraceCandidateAt` consults first), so the
+            // entry was a duplicate answer bought with a hash insert on every
+            // >3760-byte string body and a hash remove on every death --
+            // `Table.remove +308 / insert +61` of the S2/S3 close-out symbol
+            // diff. The range gate those inserts also widened is now merged
+            // from `Heap.extent_bounds_lo/hi` in `rebuildScanFilter`.
+            self.registerLiveAddressClassified(h, bytes, tracked, standalone and !is_extent_carrier, is_block_cell, arm);
             self.observeNewPublication(h, bytes);
         } else if (is_nonblock_object) {
             self.nonblock_objects.?.publish(h);
@@ -2471,7 +2626,11 @@ pub const Registry = struct {
                 const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
                 break :blk sh.accountedAllocationSize();
             },
-            .string => string.accountedAllocationSizeFromHeader(h),
+            .string, .rope => string.accountedAllocationSizeFromHeader(h),
+            .string_buffer => string.accountedStorageSizeFromHeader(h),
+            // TGC S4-b/S4-c: storage cells carry their own size query when
+            // they start being allocated; nothing mints one yet.
+            .property_storage, .array_storage, .payload => unreachable,
             .big_int => blk: {
                 const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
                 break :blk big.accountedAllocationSize();
@@ -2483,8 +2642,26 @@ pub const Registry = struct {
         return bytes != 0 and bytes >= self.policy.large_object_threshold;
     }
 
+    /// Every Metadata kind is tracer-owned, so every published header is a
+    /// candidate. Spelled as an exhaustive switch rather than `true` so a new
+    /// kind has to state its answer here (the S4 storage kinds did).
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.metaConst().flags.kind == .object or h.metaConst().flags.kind == .function_bytecode or h.metaConst().flags.kind == .var_ref or h.metaConst().flags.kind == .shape or h.metaConst().flags.kind == .realm_context or h.metaConst().flags.kind == .module or h.metaConst().flags.kind == .big_int or h.metaConst().flags.kind == .string;
+        return switch (h.metaConst().flags.kind) {
+            .object,
+            .function_bytecode,
+            .var_ref,
+            .shape,
+            .realm_context,
+            .module,
+            .big_int,
+            .string,
+            .rope,
+            .string_buffer,
+            .property_storage,
+            .array_storage,
+            .payload,
+            => true,
+        };
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
@@ -2604,11 +2781,12 @@ pub const Registry = struct {
     }
 
     /// TGC S2: unpublish an extent string the extent sweep found dead
-    /// (`string.sweepStringExtents`). Not `unlinkObjectWithBytes`: that path
+    /// (`string.sweepExtents`). Not `unlinkObjectWithBytes`: that path
     /// reads the intrusive link word, which a string does not have. What a
     /// standalone string publication left behind is the byte ledger, the
-    /// address-registry occupant (`insertLiveAddressCold`) and the young
-    /// census; undo exactly those, in `unregisterLiveAddress`'s order.
+    /// census; undo exactly those. Since S2-h1 there is no occupant entry to
+    /// remove: the heap's `extent_pages` index is the extent's membership,
+    /// and `Heap.free` unindexes it as part of returning the mapping.
     /// TGC S2: a condemned string BLOCK CELL leaves the registry. Cells are
     /// bitmap-owned (no list link, no occupant-table entry), so this is the
     /// byte debit plus the remembered-owner release -- the string twin of
@@ -2620,12 +2798,9 @@ pub const Registry = struct {
     }
 
     pub fn unpublishStringExtent(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
-        std.debug.assert(h.metaConst().flags.kind == .string);
+        std.debug.assert(kindIsExtentCapable(h.metaConst().flags.kind));
         std.debug.assert(h.metaConst().alloc_info.standalone);
         self.recordHeapFreeWithBytes(h, bytes);
-        if (comptime address_registry_enabled) {
-            self.address_registry.remove(addressRegistryAllocator(), h);
-        }
         if (comptime generation_enabled) self.forgetGenerationalOwner(h);
     }
 
@@ -2686,7 +2861,7 @@ pub const Registry = struct {
     /// the young SET but in no young CARRIER, so it has neither a young-block
     /// nor a list-suffix position to be produced from -- its young
     /// enumeration is `Heap.young_extents`
-    /// (`Heap.sweepYoungStringExtents` / `retireYoungStringExtents`), and
+    /// (`Heap.sweepYoungExtents` / `retireYoungExtents`), and
     /// `verifyGenerationInvariants` adds that half to the census by hand.
     /// `.dead_block` must not either: that is a bitmap condemnation walk over
     /// block cells, and an extent is condemned against the mark epoch
@@ -2769,7 +2944,7 @@ pub const Registry = struct {
                         // `heap_accounted` -- and `unpublishStringExtent`
                         // clears it again before the table entry goes away.
                         if (!header.metaConst().alloc_info.heap_accounted) continue;
-                        std.debug.assert(header.metaConst().flags.kind == .string);
+                        std.debug.assert(kindIsExtentCapable(header.metaConst().flags.kind));
                         std.debug.assert(header.metaConst().alloc_info.standalone);
                         return header;
                     }
@@ -3326,10 +3501,20 @@ pub const Registry = struct {
             // TGC S2 extent string (spec §5.7): no bitmap and no TraceHeader
             // epoch either -- the mark lives in the heap's extent table,
             // keyed by the allocation base (body - 8). Cold: only strings
-            // over the cell ceiling get here.
-            if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
+            // over the cell ceiling get here. `.string` and not
+            // `isStringFamily`: `allocRopeNode` asserts at comptime that a
+            // rope node always fits a cell, so no rope is ever an extent.
+            if (kindIsExtentCapable(h.metaConst().flags.kind) and h.metaConst().alloc_info.standalone) {
                 @branchHint(.unlikely);
-                return self.block_heap.extentIsMarked(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
+                const base = @intFromPtr(h) - metadata_prefix_size;
+                // An extent-capable standalone prefix that is NOT a live
+                // extent means a stale resolution reached a freed mapping;
+                // `extentIsMarked` would then read through an absent table
+                // entry. This is the assertion that named the S2-i occupant
+                // leak (a `.string_buffer` extent took an occupant entry that
+                // `unpublishStringExtent` no longer removes).
+                std.debug.assert(self.block_heap.containsExtent(base));
+                return self.block_heap.extentIsMarked(base, self.block_heap.mark_epoch);
             }
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
@@ -3354,7 +3539,7 @@ pub const Registry = struct {
                 return;
             }
             // Extent string: table-held mark, see `headerMarked`.
-            if (h.metaConst().flags.kind == .string and h.metaConst().alloc_info.standalone) {
+            if (kindIsExtentCapable(h.metaConst().flags.kind) and h.metaConst().alloc_info.standalone) {
                 @branchHint(.unlikely);
                 self.block_heap.extentSetMark(@intFromPtr(h) - metadata_prefix_size, self.block_heap.mark_epoch);
                 return;
@@ -3362,6 +3547,37 @@ pub const Registry = struct {
         }
         if (std.debug.runtime_safety) std.debug.assert(isCycleCandidate(h));
         @atomicStore(u16, &h.meta().lifetime.mark_epoch, self.header_mark_epoch, .monotonic);
+    }
+
+    /// TGC S4-a: record that this carrier's death owes a destructor call.
+    ///
+    /// Writes the fact twice on purpose. The header bit answers a single
+    /// carrier (extents, non-block kinds, audits); the block bitmap lets the
+    /// S4-d sweep intersect `doomed & finalizer` a word at a time and never
+    /// read the header of a corpse that owes nothing. D-S4-4: set-only --
+    /// the bit is cleared only when the cell itself is released
+    /// (`Heap.freeSmall` / `settleDoomedCellInPassA`).
+    ///
+    /// Nothing calls this in S4-a: the bit placement, the block bitmap and
+    /// the extent column land here so S4-d is only its set sites and its
+    /// sweep.
+    pub fn setNeedsFinalizer(self: *Registry, header: *GCObjectHeader) void {
+        header.meta().lifetime.flags.needs_finalizer = true;
+        if (comptime !block_heap_enabled) return;
+        const meta = header.metaConst();
+        if (meta.alloc_info.block_size_idx == representation.block_cell_size_class) {
+            const cell = @intFromPtr(header) - metadata_prefix_size;
+            BlockHeapMod.Block.fromCellTrusted(cell).setFinalizerBit(meta.size_class);
+            return;
+        }
+        // Only a block-heap EXTENT has a table row to stamp. A standalone
+        // prefix alone does not prove one: non-block Objects, shapes, modules
+        // and the rest come from the slab allocator and keep the header bit
+        // alone. String extents are the whole extent population today; S4-b
+        // adds the storage kinds to this test when they start allocating.
+        if (meta.alloc_info.standalone and kindIsExtentCapable(meta.flags.kind)) {
+            self.block_heap.extentSetNeedsFinalizer(@intFromPtr(header) - metadata_prefix_size);
+        }
     }
 
     /// Retire a block cell the tracer has just finished expanding.
@@ -3451,7 +3667,7 @@ pub const Registry = struct {
             self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
             std.debug.assert(!header.metaConst().flags.cycle_visited);
             const cell_kind = header.metaConst().flags.kind;
-            std.debug.assert(cell_kind == .object or cell_kind == .string);
+            std.debug.assert(kindIsBlockCellKind(cell_kind));
             std.debug.assert(isBlockCellHeader(header));
         }
         header.meta().flags.cycle_visited = true;
@@ -4137,7 +4353,7 @@ pub const Registry = struct {
         header: *GCObjectHeader,
         bytes: usize,
         tracked: bool,
-        standalone: bool,
+        needs_occupant: bool,
         is_block_cell: bool,
         comptime arm: PublicationArm,
     ) void {
@@ -4147,7 +4363,7 @@ pub const Registry = struct {
         // is the same "live GC object" answer the table was storing. Only
         // standalone-prefix allocations -- past the slab's 512-byte class
         // ceiling, or over-aligned -- are unreachable that way.
-        if (standalone) {
+        if (needs_occupant) {
             @branchHint(.unlikely);
             self.insertLiveAddressCold(header, bytes);
         }
@@ -4217,11 +4433,11 @@ pub const Registry = struct {
             // 343 MB live waiting for a major (spec 7.2 (2)). What they are
             // not in is any young CARRIER: no cell, no block, no list link.
             // Their enumeration is `Heap.young_extents`, appended by the
-            // allocator, swept by `Heap.sweepYoungStringExtents` and retired
-            // by `retireYoungStringExtents`. A non-block-cell string is
+            // allocator, swept by `Heap.sweepYoungExtents` and retired
+            // by `retireYoungExtents`. A non-block-cell string is
             // always an extent (`String.createUninitialized`; ropes always
             // fit a cell).
-            if (!is_block_cell and header.metaConst().flags.kind == .string) {
+            if (!is_block_cell and kindIsExtentCapable(header.metaConst().flags.kind)) {
                 @branchHint(.unlikely);
                 std.debug.assert(header.metaConst().alloc_info.standalone);
                 header.meta().flags.young = true;
@@ -4253,8 +4469,9 @@ pub const Registry = struct {
         // Extent strings never reach here: they returned above, right after
         // their young bit. They have no link word, so anchoring the young
         // suffix on one would send the next minor's list walk through string
-        // bytes -- `Heap.young_extents` is their anchor instead.
-        std.debug.assert(header.metaConst().flags.kind != .string);
+        // bytes -- `Heap.young_extents` is their anchor instead. Rope nodes
+        // always fit a cell and left through the block arm above.
+        std.debug.assert(!kindIsPrefixCarrier(header.metaConst().flags.kind));
         // This object was just appended at the tail, so if no suffix was open
         // it starts here.
         if (self.young_head == null) {
@@ -4454,6 +4671,11 @@ pub const Registry = struct {
         var live = self.objectIterator(.all);
         while (live.next()) |header| {
             if (!header.metaConst().alloc_info.standalone) continue;
+            // Extents deliberately have no occupant entry (S2-h1). Replaying
+            // one here would install a range nothing ever removes -- the
+            // death path is `unpublishStringExtent`, which no longer calls
+            // `Table.remove` -- and a stale occupant resolves freed memory.
+            if (kindIsExtentCapable(header.metaConst().flags.kind)) continue;
             if (self.address_registry.by_header.contains(@intFromPtr(header))) continue;
             const bytes = heapByteSizeFromHeader(rt, header);
             self.address_registry.insert(addressRegistryAllocator(), header, bytes) catch return false;
@@ -4688,7 +4910,7 @@ pub const Registry = struct {
             if ((physical_block != null) != stamped_block)
                 return error.RepresentationAllocationCarrierMismatch;
             if (physical_block) |block| {
-                if (kind != .object and kind != .string)
+                if (!kindIsBlockCellKind(kind))
                     return error.RepresentationAllocationCarrierMismatch;
                 const actual_index = block.cellIndex(cell_addr) orelse
                     return error.RepresentationCellIndexMismatch;
@@ -5041,8 +5263,9 @@ pub const Registry = struct {
                 }
                 const header: *GCObjectHeader = @ptrFromInt(handle.base);
                 const kind = header.metaConst().flags.kind;
-                // Block cells hold Objects, and string bodies once TGC S2 is on.
-                if (kind != .object and kind != .string) return error.HeaderMismatch;
+                // Block cells hold Objects, string-family bodies (TGC S2/S4-a)
+                // and, from S4-b, storage cells.
+                if (!kindIsBlockCellKind(kind)) return error.HeaderMismatch;
                 if (expected_kind) |expected| if (kind != expected) return error.KindMismatch;
                 if (resolved.state == .published and !header.metaConst().alloc_info.heap_accounted) {
                     return error.HeaderMismatch;

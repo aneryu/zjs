@@ -72,6 +72,15 @@ fn stringLayouts() []const u8 {
             @sizeOf(core.string.StringRope),            @alignOf(core.string.StringRope),          core.string.StringRope.metadata_prefix_size, @offsetOf(core.string.StringRope, "left"), @offsetOf(core.string.StringRope, "right"), @offsetOf(core.string.StringRope, "rt"),  @offsetOf(core.string.StringRope, "len"),
             @offsetOf(core.string.StringRope, "depth"), @offsetOf(core.string.StringRope, "wide"),
         },
+    ) ++ std.fmt.comptimePrint(
+        "string_rope_tail extensible={d} buffer={d}\n" ++
+            "string_buffer size={d} align={d} metadata_prefix={d} capacity={d} is_wide={d} fam={d}\n",
+        .{
+            @offsetOf(core.string.StringRope, "extensible"), @offsetOf(core.string.StringRope, "buffer"),
+            @sizeOf(core.string.StringBuffer),               @alignOf(core.string.StringBuffer),
+            core.gc.string_prefix_size,                      @offsetOf(core.string.StringBuffer, "capacity"),
+            @offsetOf(core.string.StringBuffer, "is_wide"),  core.string.StringBuffer.units_offset,
+        },
     );
 }
 
@@ -104,7 +113,7 @@ fn activeHeaderLayout() []const u8 {
 }
 
 fn lifetimeSemantics() []const u8 {
-    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/reserved:u8 for all carriers\n";
+    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/needs_finalizer/reserved:u8 for all carriers\n";
 }
 
 pub const snapshot_text =
@@ -116,7 +125,7 @@ pub const snapshot_text =
     activeHeaderLayout() ++
     std.fmt.comptimePrint(
         "AllocInfo class_mask=0x{x:0>2} reserved=0x{x:0>2} accounted=0x{x:0>2} standalone=0x{x:0>2}\n" ++
-            "BlockFlags kind_mask=0x07 mark=0x08 young=0x10 finalizing=0x20 pinned=0x40 cycle_visited=0x80\n" ++
+            "BlockFlags kind_mask=0x{x:0>2} young=0x{x:0>2} finalizing=0x20 pinned=0x40 cycle_visited=0x80\n" ++
             "carrier block_cell_class=0x{x:0>2} slab_class_range=0..{d} standalone_class=0\n" ++
             "free_cell link_mask=0x{x:0>8} poison=0x{x:0>8} encoded_word=poison|(next&link_mask)\n",
         .{
@@ -124,6 +133,8 @@ pub const snapshot_text =
             @as(u8, @bitCast(gc.AllocInfo{ .reserved = true })),
             gc.representation.alloc_info_heap_accounted_mask,
             gc.representation.alloc_info_standalone_mask,
+            gc.representation.kind_mask,
+            gc.representation.metadata_young_mask,
             gc.representation.block_cell_size_class,
             core.memory.SmallObjectSlab.class_count - 1,
             gc.representation.free_cell_link_mask,
@@ -135,8 +146,9 @@ pub const snapshot_text =
     "alloc_info.block_size_idx block-cell=0x1f; slab=0..30; standalone=0\n" ++
     "alloc_info.reserved unused\n" ++
     "alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell\n" ++
-    "flags.kind valid for Metadata kinds; string uses JSValue tag; its Metadata prefix keeps the count in the lifetime tail\n" ++
-    "flags.mark/young/finalizing/pinned/cycle_visited valid for registry kinds only\n" ++
+    "flags.kind valid for Metadata kinds; string/rope are one allocation family with distinct kinds and distinct JSValue tags\n" ++
+    "flags.kind string_buffer is a bare code-unit carrier of that same family: no JSValue names it, no edges, no destructor\n" ++
+    "flags.young/finalizing/pinned/cycle_visited valid for registry kinds only\n" ++
     lifetimeSemantics() ++
     "\n[kind-contracts]\n" ++
     kindContract(.object) ++
@@ -147,6 +159,11 @@ pub const snapshot_text =
     kindContract(.shape) ++
     kindContract(.string) ++
     kindContract(.big_int) ++
+    kindContract(.property_storage) ++
+    kindContract(.array_storage) ++
+    kindContract(.payload) ++
+    kindContract(.rope) ++
+    kindContract(.string_buffer) ++
     "\n[body-layouts]\n" ++
     objectLayout() ++
     functionBytecodeLayout() ++

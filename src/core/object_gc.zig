@@ -29,7 +29,6 @@ inline fn freeCycleDeferredObject(rt: *JSRuntime, h: *gc.Header) void {
         // Neither pop path clears the dead allocation's links. This is the one
         // branch that keeps the allocation, so finish the detach here.
         gc.setDeferredNext(h, null);
-        h.meta().flags.mark = false;
         h.meta().flags.cycle_visited = false;
         h.meta().flags.finalizing = false;
         // The shared word is mark/husk state, not an object count, so stamp the

@@ -20850,3 +20850,251 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
     helpers.finishGcCycles(rt);
     _ = rt.runObjectCycleRemoval();
 }
+
+// ---------------------------------------------------------------------------
+// TGC S3-d "publish before allocating" regression set.
+//
+// `Stack.liveValues` stops at the published `stack.top_ptr`, and a resident
+// dispatch handler advances only the register `sp`, so every operand pushed
+// since the last publish is outside the precise root set until the handler
+// syncs the boundary. Each test below drives one handler whose slow arm
+// allocates, with a string materialized into an operand slot ABOVE the stale
+// published top. The observable is the atom table's materialized body: the
+// destroy handshake unbinds `entry.str`, so a collected body turns
+// `cachedString` back into null. Same instrument as the S3-c push_atom_value
+// test above.
+// ---------------------------------------------------------------------------
+
+/// Forces a major at every heap allocation and watches one atom's materialized
+/// body. `seen` records that the body existed at some observation; `regressed`
+/// records that a LATER observation found it gone.
+const PublishRootProbe = struct {
+    rt: *core.JSRuntime,
+    id: core.Atom,
+    majors: usize = 0,
+    seen: bool = false,
+    regressed: bool = false,
+    armed: bool = false,
+
+    fn trigger(context: ?*anyopaque, _: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (!self.armed) return;
+        self.armed = false;
+        defer self.armed = true;
+        self.majors += 1;
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+        if (self.rt.atoms.cachedString(self.id) != null) {
+            self.seen = true;
+        } else if (self.seen) {
+            self.regressed = true;
+        }
+    }
+};
+
+/// Run `function` with the conservative native-stack net switched off and a
+/// major forced at every allocation, so only the precise operand-stack roots
+/// can keep the victim body alive. The realm is warmed unarmed first: the
+/// host-global install is not collection-safe and touches nothing under test.
+fn runUnderPublishProbe(
+    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    probe: *PublishRootProbe,
+) !core.JSValue {
+    helpers.registerStandardGlobalsBare(rt);
+    {
+        var warmup = try makeFunction(rt, &.{ op.push_i32, 1, 0, 0, 0, op.@"return" });
+        defer warmup.deinit(rt);
+        const warmed = try helpers.runFunction(rt, ctx, &warmup);
+        try std.testing.expectEqual(@as(i32, 1), warmed.asInt32().?);
+    }
+
+    const saved_fn = rt.memory.trigger_gc_fn;
+    const saved_ctx = rt.memory.trigger_gc_ctx;
+    rt.forcePreciseRootScanForTest();
+    rt.memory.trigger_gc_fn = PublishRootProbe.trigger;
+    rt.memory.trigger_gc_ctx = probe;
+    probe.armed = true;
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    const outcome = helpers.runMutableVm(&vm, function);
+    probe.armed = false;
+    rt.memory.trigger_gc_fn = saved_fn;
+    rt.memory.trigger_gc_ctx = saved_ctx;
+    rt.restoreDefaultRootScanForTest();
+    return outcome;
+}
+
+test "TGC S3-d: an inline call's argument region stays rooted while the callee frame is pushed" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `op_call1` retreats the operand top to the call region and hands the
+    // slots above it to `Stack.pendingCallRegion` -- the window that exists
+    // precisely because the retreated operands are invisible to both
+    // `liveValues` and the conservative pass. It used to compute that window's
+    // high end from the STALE published `top_ptr`, which at a register-resident
+    // call site sits below the freshly pushed operands, so the argument fell
+    // outside the published span and `Machine.pushPlainCall`'s first-use arena
+    // allocation collected it.
+    const victim_atom = try rt.internAtom("zjsH4CallArgVictim");
+    try std.testing.expect(rt.atoms.cachedString(victim_atom) == null);
+
+    const callee_name = try rt.internAtom("zjsH4Id");
+    const callee_fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = callee_name,
+        .realm = ctx,
+        .flags = .{ .has_simple_parameter_list = true, .func_kind = .normal },
+        .arg_count = 1,
+        .defined_arg_count = 1,
+        .stack_size = 4,
+        .byte_code = &.{ op.get_arg0, op.@"return" },
+    });
+    callee_fb.publishFixtureNoFail(rt);
+    helpers.registerStandardGlobalsBare(rt);
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    const callee = try object_ops.createRootBytecodeFunctionObject(
+        ctx,
+        global,
+        core.JSValue.functionBytecode(&callee_fb.header),
+        .root_global,
+    );
+
+    const name = try rt.internAtom("exec");
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    _ = try function.addConstant(callee);
+    var code: [12]u8 = undefined;
+    code[0] = op.push_const;
+    std.mem.writeInt(u32, code[1..5], 0, .little);
+    code[5] = op.push_atom_value;
+    std.mem.writeInt(u32, code[6..10], victim_atom, .little);
+    code[10] = op.call1;
+    code[11] = op.@"return";
+    try helpers.setCodeAndStackSize(&function, code[0..]);
+
+    // A legacy `Bytecode` fixture carries no tracer edge for its inline atom
+    // operands (see the S3-c test), so the forced majors would retire the atom
+    // entry itself instead of exercising the operand root.
+    var rooted_ids = [_]core.Atom{victim_atom};
+    var rooted_slice: []core.Atom = rooted_ids[0..];
+    var id_roots = core.runtime.rootAtomList(&rooted_slice);
+    id_roots.activate(rt);
+    defer id_roots.deactivate(rt);
+
+    var probe = PublishRootProbe{ .rt = rt, .id = victim_atom };
+    const result = try runUnderPublishProbe(rt, ctx, &function, &probe);
+
+    // Non-vacuity: the body has to have been minted and observed inside the
+    // window (`seen`), and the window has to have been collected in
+    // (`majors`). `regressed` is the failure the publish gap produced.
+    try std.testing.expect(probe.majors > 0);
+    try std.testing.expect(probe.seen);
+    try std.testing.expect(!probe.regressed);
+    try helpers.expectStringValueBytes(result, "zjsH4CallArgVictim");
+
+    helpers.finishGcCycles(rt);
+    _ = rt.runObjectCycleRemoval();
+}
+
+test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow allocates" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `op_put_array_el_cold` reaches `setFastArrayElementOwnedDuringActiveBytecode`
+    // / the dense append / the sparse and typed-array writers, every one of
+    // which can allocate. It ran entirely off the register-resident `sp`, so
+    // the operands the expression had already evaluated -- here the string in
+    // slot 0 -- sat above the stale `top_ptr` while the array's storage grew.
+    const victim_atom = try rt.internAtom("zjsH4PutArrayVictim");
+    try std.testing.expect(rt.atoms.cachedString(victim_atom) == null);
+
+    helpers.registerStandardGlobalsBare(rt);
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    // A zero-capacity fast array: index 0 misses both the in-bounds arm and the
+    // no-grow append arm, so the store falls to the cold twin and grows.
+    const array = try array_ops.createArrayFromArgs(rt, global, &.{});
+
+    const name = try rt.internAtom("exec");
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    _ = try function.addConstant(array);
+    var code: [18]u8 = undefined;
+    code[0] = op.push_atom_value;
+    std.mem.writeInt(u32, code[1..5], victim_atom, .little);
+    code[5] = op.push_const;
+    std.mem.writeInt(u32, code[6..10], 0, .little);
+    code[10] = op.push_0;
+    code[11] = op.push_1;
+    code[12] = op.put_array_el;
+    code[13] = op.@"return";
+    try helpers.setCodeAndStackSize(&function, code[0..14]);
+
+    var rooted_ids = [_]core.Atom{victim_atom};
+    var rooted_slice: []core.Atom = rooted_ids[0..];
+    var id_roots = core.runtime.rootAtomList(&rooted_slice);
+    id_roots.activate(rt);
+    defer id_roots.deactivate(rt);
+
+    var probe = PublishRootProbe{ .rt = rt, .id = victim_atom };
+    const result = try runUnderPublishProbe(rt, ctx, &function, &probe);
+
+    try std.testing.expect(probe.majors > 0);
+    try std.testing.expect(probe.seen);
+    try std.testing.expect(!probe.regressed);
+    try helpers.expectStringValueBytes(result, "zjsH4PutArrayVictim");
+
+    helpers.finishGcCycles(rt);
+    _ = rt.runObjectCycleRemoval();
+}
+
+test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-init resolver allocates" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // `op_get_field2_primitive`'s second arm calls the MATERIALIZING
+    // String.prototype resolver (`getFastStringPrimitiveDataProperty`), which
+    // allocates the auto-init entry. It ran unpublished, so both the receiver
+    // in `sp - 1` and everything pushed before it were outside the root set.
+    const victim_atom = try rt.internAtom("zjsH4StrFieldVictim");
+    const method_atom = try rt.internAtom("charCodeAt");
+    try std.testing.expect(rt.atoms.cachedString(victim_atom) == null);
+
+    const name = try rt.internAtom("exec");
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    var code: [16]u8 = undefined;
+    code[0] = op.push_atom_value;
+    std.mem.writeInt(u32, code[1..5], victim_atom, .little);
+    code[5] = op.get_field2;
+    std.mem.writeInt(u32, code[6..10], method_atom, .little);
+    code[10] = op.drop;
+    code[11] = op.@"return";
+    try helpers.setCodeAndStackSize(&function, code[0..12]);
+
+    var rooted_ids = [_]core.Atom{ victim_atom, method_atom };
+    var rooted_slice: []core.Atom = rooted_ids[0..];
+    var id_roots = core.runtime.rootAtomList(&rooted_slice);
+    id_roots.activate(rt);
+    defer id_roots.deactivate(rt);
+
+    var probe = PublishRootProbe{ .rt = rt, .id = victim_atom };
+    const result = try runUnderPublishProbe(rt, ctx, &function, &probe);
+
+    try std.testing.expect(probe.majors > 0);
+    try std.testing.expect(probe.seen);
+    try std.testing.expect(!probe.regressed);
+    try helpers.expectStringValueBytes(result, "zjsH4StrFieldVictim");
+
+    helpers.finishGcCycles(rt);
+    _ = rt.runObjectCycleRemoval();
+}

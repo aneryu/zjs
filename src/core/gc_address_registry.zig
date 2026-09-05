@@ -371,6 +371,14 @@ pub const Table = struct {
                         return error.AddressBoundsMissing;
                     }
                 }
+                // The extent window is the only thing keeping a >3760-byte
+                // string body inside the range gate (TGC S2-h1). A hole here
+                // drops the live root the page index would have resolved.
+                if (heap.extent_bounds_hi != 0) {
+                    if (heap.extent_bounds_lo < self.bounds_lo or heap.extent_bounds_hi > self.bounds_hi) {
+                        return error.AddressBoundsMissing;
+                    }
+                }
             }
         }
     }
@@ -401,6 +409,16 @@ pub const Table = struct {
                     const hi = lo + sb.bytes.len;
                     if (lo < self.bounds_lo) self.bounds_lo = lo;
                     if (hi + 1 > self.bounds_hi) self.bounds_hi = hi + 1;
+                }
+                // TGC S2-h1: string extents pay no occupant entry any more,
+                // so the insert that used to widen these bounds for them is
+                // gone. The heap's monotone extent window replaces it, and it
+                // has to be merged here, before any word can be dismissed --
+                // the extent arm of `forEachTraceCandidateAt` sits BELOW the
+                // range gate and never gets asked otherwise.
+                if (heap.extent_bounds_hi != 0) {
+                    if (heap.extent_bounds_lo < self.bounds_lo) self.bounds_lo = heap.extent_bounds_lo;
+                    if (heap.extent_bounds_hi > self.bounds_hi) self.bounds_hi = heap.extent_bounds_hi;
                 }
             }
         }
@@ -586,9 +604,9 @@ pub const Table = struct {
         }
         // TGC S2 extent strings (spec §5.7): medium page runs and large
         // mappings are the block heap's too, but not classed blocks, so the
-        // geometry probe above disowns them. Their occupant entry usually
-        // resolves below as well; this probe is the authoritative answer
-        // (and the only one if that insert failed). Extent ranges are
+        // geometry probe above disowns them. This page index is their ONLY
+        // resolution since S2-h1 -- an extent takes no occupant entry, so the
+        // fallback below has nothing to say about one. Extent ranges are
         // disjoint from arenas and other standalone pages, so a hit ends the
         // resolution here.
         //
@@ -647,6 +665,22 @@ pub const Table = struct {
                     if (!block.cellAllocated(index)) return false;
                     if (block.cellBase(index) + gc.metadata_prefix_size != addr) return false;
                     return header.metaConst().alloc_info.heap_accounted;
+                }
+            }
+        }
+        // TGC S2-h1: an extent string's membership lives in the heap's page
+        // index, not in the occupant table. `auditLiveObjectsResolve` walks
+        // every published header including extents, so this arm is what keeps
+        // "live object that reads as garbage" honest for them.
+        if (comptime gc.block_heap_enabled) {
+            if (self.block_heap) |heap| {
+                if (addr >= gc.metadata_prefix_size) {
+                    const extent_base = addr - gc.metadata_prefix_size;
+                    if (heap.extentsContaining(extent_base).inside) |resolved| {
+                        if (resolved == extent_base) {
+                            return header.metaConst().alloc_info.heap_accounted;
+                        }
+                    }
                 }
             }
         }

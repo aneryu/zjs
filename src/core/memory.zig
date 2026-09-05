@@ -1348,7 +1348,7 @@ pub const MemoryAccount = struct {
     /// Prefix writer for a block-heap cell: same field layout as
     /// `initGcPrefix`, info byte fixed to the block-cell marker.
     inline fn initGcPrefixBlockCell(comptime T: type, meta: [*]u8) void {
-        comptime std.debug.assert(T.gc_kind_tag < 8);
+        comptime std.debug.assert(T.gc_kind_tag <= gc_representation.kind_mask);
         // Bytes 0..2 carry the CELL INDEX, stamped by the block allocator so
         // the mark accessors never pay the non-power-of-two division on the
         // trace's hottest path. Preserved here, not zeroed.
@@ -1359,9 +1359,9 @@ pub const MemoryAccount = struct {
     }
 
     inline fn initGcPrefix(comptime T: type, meta: [*]u8, slab_class: ?usize) void {
-        // The kind must stay inside the low 3 bits of the shared kind/flags
+        // The kind must stay inside the low nibble of the shared kind/flags
         // byte (gc.BlockFlags.kind).
-        comptime std.debug.assert(T.gc_kind_tag < 8);
+        comptime std.debug.assert(T.gc_kind_tag <= gc_representation.kind_mask);
         // Exact-value stores (no memset-then-overwrite): size_class (bytes
         // 0..2, preserved when the slab header is overlaid), alloc_info + kind
         // as one u16 (byte order fixed by the gc.zig offset asserts), and the
@@ -1803,10 +1803,16 @@ pub const MemoryAccount = struct {
     /// pointer is the cell base (prefix start). Null when the request is not
     /// a small-class cell or the heap declined: the caller takes the extent
     /// route. The prefix is initialized like an Object cell (cell index in
-    /// bytes 0..2 preserved, kind `.string`, zero lifetime word); the caller
+    /// bytes 0..2 preserved, `kind_tag`, zero lifetime word); the caller
     /// still publishes through `addInitializedWithSizeNoFail`.
-    pub fn createStringCell(self: *MemoryAccount, total_bytes: usize) !?[*]u8 {
+    ///
+    /// `kind_tag` is the string-family kind this carrier holds:
+    /// `string_kind_tag` for a flat body, `rope_kind_tag` for a rope node
+    /// (TGC S4-a). It is comptime so each caller keeps the single-store
+    /// prefix write it had when the tag was hard-coded.
+    pub fn createStringCell(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) !?[*]u8 {
         comptime std.debug.assert(block_heap_enabled);
+        comptime std.debug.assert(kind_tag <= gc_representation.kind_mask);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (!gc_block_heap.canAllocCellSize(total_bytes)) return null;
         const heap = self.gc_object_cell_heap orelse return null;
@@ -1814,7 +1820,7 @@ pub const MemoryAccount = struct {
         try self.checkAllocation(accounted);
         if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
         const cell = (try heap.allocCell(total_bytes)) orelse return null;
-        std.mem.writeInt(u16, cell[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, gc_representation.string_kind_tag) << 8), .little);
+        std.mem.writeInt(u16, cell[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, kind_tag) << 8), .little);
         @as(*align(4) u32, @ptrCast(@alignCast(cell + 4))).* = 0;
         self.creditAlloc(accounted, null);
         if (comptime block_tracking_enabled) {
@@ -1853,6 +1859,14 @@ pub const MemoryAccount = struct {
     /// (`accountedMallocSize(total, null)`); audit builds also keep the extent
     /// identity/lifecycle records `carrierPublish` will look up.
     pub fn createStringExtent(self: *MemoryAccount, total_bytes: usize) ![]u8 {
+        return self.createExtent(gc_representation.string_kind_tag, total_bytes);
+    }
+
+    /// TGC S2-i / S4-b (D-S4-3): the kind-parameterized extent route. Every
+    /// prefix carrier over the block-cell ceiling lands here; `kind_tag` is
+    /// comptime so each caller keeps the single-store prefix write the string
+    /// path had when the tag was hard-coded.
+    pub fn createExtent(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) ![]u8 {
         comptime std.debug.assert(block_heap_enabled);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         std.debug.assert(!gc_block_heap.canAllocCellSize(total_bytes));
@@ -1864,7 +1878,8 @@ pub const MemoryAccount = struct {
         const slice = try heap.alloc(total_bytes);
         const base = slice.ptr;
         std.mem.writeInt(u16, base[0..2], 0, .little);
-        std.mem.writeInt(u16, base[2..4], @as(u16, alloc_info_standalone) | (@as(u16, gc_representation.string_kind_tag) << 8), .little);
+        comptime std.debug.assert(kind_tag <= gc_representation.kind_mask);
+        std.mem.writeInt(u16, base[2..4], @as(u16, alloc_info_standalone) | (@as(u16, kind_tag) << 8), .little);
         @as(*align(4) u32, @ptrCast(@alignCast(base + 4))).* = 0;
         self.creditAlloc(total_bytes, null);
         const body = @intFromPtr(base) + gc_prefix_size;
@@ -1877,7 +1892,7 @@ pub const MemoryAccount = struct {
                 payload_bytes,
                 total_bytes,
                 payload_bytes,
-                gc_representation.string_kind_tag,
+                kind_tag,
             );
         }
         self.noteAllocDiagnostics(false, 1, payload_bytes, body);
@@ -1897,6 +1912,37 @@ pub const MemoryAccount = struct {
         self.noteFreeDiagnostics(true);
         heap.free(@ptrFromInt(body - gc_prefix_size));
         if (comptime extent_tracking_enabled) self.finishExtentGcRawFree(body);
+    }
+
+    /// A storage cell as the collector sees it: the allocation base (prefix
+    /// start), the byte count publication must charge, and which of the two
+    /// carriers answered. TGC S4 spec 2.2.
+    pub const StorageCell = struct {
+        base: [*]u8,
+        accounted_bytes: usize,
+        is_block_cell: bool,
+    };
+
+    /// TGC S4 spec 2.2 -- the ONE allocation funnel for a bare storage
+    /// carrier (S2-i's string tail buffer today; property/array/payload
+    /// storage in S4-b). `total_bytes` counts the eight-byte Metadata prefix.
+    /// Small requests take a block cell, everything else an extent of the
+    /// same heap. The caller publishes the body (`base + 8`) through
+    /// `addInitializedWithSizeNoFail(body, accounted_bytes)`.
+    pub fn createStorageCell(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) !StorageCell {
+        if (try self.createStringCell(kind_tag, total_bytes)) |base| {
+            return .{
+                .base = base,
+                .accounted_bytes = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?,
+                .is_block_cell = true,
+            };
+        }
+        const slice = try self.createExtent(kind_tag, total_bytes);
+        return .{
+            .base = slice.ptr,
+            .accounted_bytes = total_bytes - gc_prefix_size,
+            .is_block_cell = false,
+        };
     }
 
     pub inline fn debitBlockCellPayload(self: *MemoryAccount, ptr: *const anyopaque, payload_bytes: usize) void {

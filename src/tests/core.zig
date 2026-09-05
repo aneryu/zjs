@@ -502,15 +502,13 @@ test "proven object release preserves generic JSValue ownership semantics" {
     const baseline_objects = rt.gc.liveCount();
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const value = object.value();
-    const retained = value;
     // The refcount steps are only meaningful where the count is the ownership
     // record. No `gc.Header` kind carries a count any more (the whole family --
-    // `refCountRemoved`, `headerRefCount`, `gc.retain`/`gc.release` -- was
-    // deleted through TGC S1-S3), so what survives here is the part that is
-    // still a claim about ownership: dropping both references, and only both,
-    // must make the object collectable.
-
-    retained.freeObjectAssumeObject(rt);
+    // `refCountRemoved`, `headerRefCount`, `gc.retain`/`gc.release`, and the
+    // `free*`/`release*NeedsDestroy` compatibility shells that outlived them --
+    // was deleted through TGC S1-S3), so what survives here is the part that is
+    // still a claim about ownership: reachability, and only reachability,
+    // decides whether the object is collectable.
     {
         // The root frame is scoped: it must be gone before the second release,
         // or the object stays reachable and the last assertion is vacuous.
@@ -521,7 +519,7 @@ test "proven object release preserves generic JSValue ownership semantics" {
         helpers.reclaimNow(rt);
         try std.testing.expect(rt.gc.liveCount() > baseline_objects);
     }
-    value.freeObjectAssumeObject(rt);
+    _ = value;
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
@@ -534,16 +532,15 @@ test "active bytecode release preserves generic ownership" {
     rt.hot.call_depth = 1;
     defer rt.hot.call_depth = 0;
 
+    // Same statement as above with the interpreter's active-frame flag set:
+    // an object nothing reaches is collectable mid-bytecode too. The
+    // `freeDuringActiveBytecode` shells this test used to call were pure
+    // assertions over that same flag and were deleted with the rest of the
+    // refcount compatibility surface.
     const generic_object = try core.Object.create(rt, core.class.ids.object, null);
-    const generic_value = generic_object.value();
-    const generic_retained = generic_value;
-    generic_retained.freeDuringActiveBytecode(rt);
-    generic_value.freeDuringActiveBytecode(rt);
+    _ = generic_object;
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
-
-    core.JSValue.int32(1).freeDuringActiveBytecode(rt);
-    core.JSValue.undefinedValue().freeDuringActiveBytecode(rt);
 }
 
 test "primitive value predicates match QuickJS helpers" {
@@ -2088,10 +2085,233 @@ test "flat strings store characters inline in a single fixed-size allocation" {
 
 test "rope nodes keep the compact tree-only layout" {
     // QJS's node is just u32/u8/u8 plus two JSValues. zjs additionally needs
-    // one runtime pointer for its context-free borrowed-string API; ropes must
-    // not regress to embedding cached-flat/hash or destroy-link state.
-    const compact_limit = 2 * @sizeOf(core.JSValue) + @sizeOf(*anyopaque) + 8;
+    // one runtime pointer for its context-free borrowed-string API and, since
+    // TGC S2-i, one tail-buffer pointer (the dependent-view slot that carries
+    // amortized `s = s + x` without a refcount). Ropes must not regress
+    // beyond that into cached-flat/hash or destroy-link state.
+    const compact_limit = 2 * @sizeOf(core.JSValue) + 2 * @sizeOf(*anyopaque) + 8;
     try std.testing.expect(@sizeOf(core.string.StringRope) <= compact_limit);
+    // The tail slot is the ONLY growth S2-i is allowed: the flags it needs
+    // ride in the padding the node already had.
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(core.string.StringRope));
+}
+
+
+/// TGC S2-i: force a full collection before every allocation, the shape
+/// `-Dzjs_force_gc=true` gives production. Used to prove the tail-buffer
+/// append chain keeps every live view and its shared buffer.
+const TailBufferForceGcProbe = struct {
+    rt: *core.JSRuntime,
+    fired: usize = 0,
+
+    fn trigger(ctx: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *TailBufferForceGcProbe = @ptrCast(@alignCast(ctx.?));
+        self.fired += 1;
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
+    }
+};
+
+fn tailBufferText(rt: *core.JSRuntime, allocator: std.mem.Allocator, value: core.JSValue) ![]u8 {
+    _ = rt;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var index: usize = 0;
+    const len = core.string.stringValueLen(value);
+    while (index < len) : (index += 1) {
+        const unit = core.string.stringValueCodeUnitAt(value, index).?;
+        try out.append(allocator, @intCast(unit & 0xff));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "S2-i tail buffer views read, compare and hash exactly like the flat string" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.string.String.createLatin1(rt, "abcdefgh");
+    const right = try core.string.String.createLatin1(rt, "IJ");
+    const view = try core.string.createTailBufferRope(rt, left, right);
+    try std.testing.expect(view.buffer != null);
+    try std.testing.expect(view.isExtensibleView());
+    try std.testing.expect(!view.isLinearized());
+
+    const flat = try core.string.String.createLatin1(rt, "abcdefghIJ");
+    try std.testing.expectEqual(@as(usize, 10), core.string.stringValueLen(view.value()));
+    try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(view.value(), flat.value(), false));
+    try std.testing.expectEqual(
+        core.string.stringValueContentHash(flat.value()).?,
+        core.string.stringValueContentHash(view.value()).?,
+    );
+    const text = try tailBufferText(rt, std.testing.allocator, view.value());
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("abcdefghIJ", text);
+
+    // A view materializes by copying its prefix out; the flat body it caches
+    // is a `String` of its own and the buffer edge is dropped.
+    const materialized = try view.flatten();
+    try std.testing.expect(materialized.eqlBytes("abcdefghIJ"));
+    try std.testing.expect(view.buffer == null);
+    try std.testing.expect(!view.isExtensibleView());
+    try std.testing.expect(view.isLinearized());
+    // A second read is idempotent and does not re-allocate.
+    try std.testing.expectEqual(materialized, try view.flatten());
+}
+
+test "S2-i in-place append moves the extensible right and leaves the shorter view intact" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const seed_left = try core.string.String.createLatin1(rt, "0123456789");
+    const seed_right = try core.string.String.createLatin1(rt, "ab");
+    const s = try core.string.createTailBufferRope(rt, seed_left, seed_right);
+    const shared = s.buffer.?;
+
+    const x = try core.string.String.createLatin1(rt, "XX");
+    const r1 = try core.string.appendTailBufferRope(rt, s, x);
+    // In place: same buffer, right transferred.
+    try std.testing.expectEqual(shared, r1.buffer.?);
+    try std.testing.expect(r1.isExtensibleView());
+    try std.testing.expect(!s.isExtensibleView());
+    try std.testing.expectEqual(@as(usize, 12), s.len_());
+
+    // Second fork off `s`: the right is spent, so this must COPY rather than
+    // overwrite the bytes `r1` still names. This is the case `rc == 1` used
+    // to answer.
+    const y = try core.string.String.createLatin1(rt, "YY");
+    const r2 = try core.string.appendTailBufferRope(rt, s, y);
+    try std.testing.expect(r2.buffer.? != shared);
+
+    const s_text = try tailBufferText(rt, std.testing.allocator, s.value());
+    defer std.testing.allocator.free(s_text);
+    const r1_text = try tailBufferText(rt, std.testing.allocator, r1.value());
+    defer std.testing.allocator.free(r1_text);
+    const r2_text = try tailBufferText(rt, std.testing.allocator, r2.value());
+    defer std.testing.allocator.free(r2_text);
+    try std.testing.expectEqualStrings("0123456789ab", s_text);
+    try std.testing.expectEqualStrings("0123456789abXX", r1_text);
+    try std.testing.expectEqualStrings("0123456789abYY", r2_text);
+}
+
+test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const seed_left = try core.string.String.createLatin1(rt, "ab");
+    const seed_right = try core.string.String.createLatin1(rt, "cd");
+    var view = try core.string.createTailBufferRope(rt, seed_left, seed_right);
+    const first_capacity = view.buffer.?.capacity;
+    try std.testing.expect(first_capacity >= 4);
+
+    const chunk = try core.string.String.createLatin1(rt, "0123456789");
+    var appended: usize = 0;
+    while (view.buffer.?.capacity == first_capacity) : (appended += 1) {
+        view = try core.string.appendTailBufferRope(rt, view, chunk);
+        if (appended > 64) return error.TestUnexpectedResult;
+    }
+    // Growth is geometric, not one-unit-at-a-time.
+    try std.testing.expect(view.buffer.?.capacity >= 2 * view.len_());
+    try std.testing.expectEqual(@as(usize, 4 + appended * 10), view.len_());
+    try std.testing.expect(!view.buffer.?.is_wide);
+
+    const wide = try core.string.String.createUtf16(rt, &.{0x4e2d});
+    const widened = try core.string.appendTailBufferRope(rt, view, wide);
+    try std.testing.expect(widened.buffer.?.is_wide);
+    try std.testing.expect(widened.wide);
+    try std.testing.expectEqual(view.len_() + 1, widened.len_());
+    try std.testing.expectEqual(
+        @as(?u16, 0x4e2d),
+        core.string.stringValueCodeUnitAt(widened.value(), widened.len_() - 1),
+    );
+    // The narrow predecessor still reads its own prefix.
+    const narrow_text = try tailBufferText(rt, std.testing.allocator, view.value());
+    defer std.testing.allocator.free(narrow_text);
+    try std.testing.expectEqual(view.len_(), narrow_text.len);
+}
+
+test "S2-i append chain survives a forced collection at every allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var accumulator = (try core.string.String.createLatin1(rt, "seed")).value();
+    var oldest: core.JSValue = accumulator;
+    var chunk_value = (try core.string.String.createLatin1(rt, "xy")).value();
+    var roots = core.runtime.rootValues(.{ &accumulator, &oldest, &chunk_value });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    var probe = TailBufferForceGcProbe{ .rt = rt };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = TailBufferForceGcProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger;
+        rt.memory.trigger_gc_ctx = saved_context;
+    }
+
+    const seeded = try core.string.createTailBufferRope(
+        rt,
+        accumulator.asStringBodyRaw().?,
+        chunk_value.asStringBodyRaw().?,
+    );
+    accumulator = seeded.value();
+    oldest = accumulator;
+
+    var step: usize = 0;
+    while (step < 48) : (step += 1) {
+        const node = accumulator.ropeBody().?;
+        const next = try core.string.appendTailBufferRope(rt, node, chunk_value.asStringBodyRaw().?);
+        accumulator = next.value();
+    }
+    try std.testing.expect(probe.fired > 0);
+
+    try std.testing.expectEqual(@as(usize, 6), core.string.stringValueLen(oldest));
+    try std.testing.expectEqual(@as(usize, 6 + 48 * 2), core.string.stringValueLen(accumulator));
+    const oldest_text = try tailBufferText(rt, std.testing.allocator, oldest);
+    defer std.testing.allocator.free(oldest_text);
+    try std.testing.expectEqualStrings("seedxy", oldest_text);
+    const newest_text = try tailBufferText(rt, std.testing.allocator, accumulator);
+    defer std.testing.allocator.free(newest_text);
+    try std.testing.expectEqual(@as(usize, 102), newest_text.len);
+    try std.testing.expectEqualStrings("seedxy", newest_text[0..6]);
+    for (newest_text[6..], 0..) |byte, index| {
+        try std.testing.expectEqual(@as(u8, if (index % 2 == 0) 'x' else 'y'), byte);
+    }
+}
+
+test "S2-i the concat operator seeds a tail buffer and keeps forks independent" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var seed = std.ArrayList(u8).empty;
+    defer seed.deinit(std.testing.allocator);
+    try seed.appendNTimes(std.testing.allocator, 'a', core.string.String.tail_buffer_seed_len);
+    var accumulator = (try core.string.String.createLatin1(rt, seed.items)).value();
+    const one = (try core.string.String.createLatin1(rt, "1")).value();
+    const two = (try core.string.String.createLatin1(rt, "2")).value();
+
+    // Past the seed length the operator stops producing flat bodies.
+    accumulator = try engine.exec.value_ops.addStringsOwned(rt, accumulator, one);
+    try std.testing.expect(accumulator.ropeBody() != null);
+    try std.testing.expect(accumulator.ropeBody().?.buffer != null);
+
+    const fork_a = try engine.exec.value_ops.addStringsOwned(rt, accumulator, one);
+    const fork_b = try engine.exec.value_ops.addStringsOwned(rt, accumulator, two);
+    try std.testing.expectEqual(
+        @as(?u16, '1'),
+        core.string.stringValueCodeUnitAt(fork_a, core.string.stringValueLen(fork_a) - 1),
+    );
+    try std.testing.expectEqual(
+        @as(?u16, '2'),
+        core.string.stringValueCodeUnitAt(fork_b, core.string.stringValueLen(fork_b) - 1),
+    );
+    try std.testing.expectEqual(
+        core.string.String.tail_buffer_seed_len + 1,
+        core.string.stringValueLen(accumulator),
+    );
 }
 
 test "rope index compare and hash traverse nested leaves without flattening" {
@@ -7094,7 +7314,7 @@ test "gc invariant negative: block cell publication audit rejects hidden allocat
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
     const marker = core.gc.representation.block_cell_size_class;
-    const object_kind: u3 = @intCast(@intFromEnum(core.gc.GcKind.object));
+    const object_kind: u4 = @intCast(@intFromEnum(core.gc.GcKind.object));
 
     try rt.gc.block_heap.verifyPublishedCellsAllowing(marker, object_kind, null);
     {
@@ -8142,6 +8362,10 @@ const TraceEdges = struct {
             recordHeader(self.set, &record.header);
         }
 
+        pub fn storageCell(self: Visitor, header: *core.gc.Header) void {
+            recordHeader(self.set, header);
+        }
+
         pub fn visitWeakCollectionEntry(_: Visitor, _: *core.object.WeakCollectionEntry) void {}
 
         pub fn visitFinalizationCell(self: Visitor, entry: *core.object.FinalizationRegistryCell) void {
@@ -8181,7 +8405,13 @@ const TraceEdges = struct {
                 const record: *core.ModuleRecord = @alignCast(@fieldParentPtr("header", header));
                 record.traceChildEdgesNoFail(rt, visitor);
             },
-            .string, .big_int => {},
+            .rope => {
+                const node: *core.string.StringRope = @ptrCast(@alignCast(header));
+                if (node.buffer) |buf| visitor.storageCell(buf.header());
+                visitor.visitValue(&node.left);
+                visitor.visitValue(&node.right);
+            },
+            .string, .string_buffer, .big_int, .property_storage, .array_storage, .payload => {},
         }
         const keys = try allocator.alloc(usize, set.count());
         var index: usize = 0;
@@ -14887,7 +15117,18 @@ test "mark frontier whitelist encodes the epoch exemption" {
 
     for (std.meta.tags(core.gc.GcKind)) |kind| {
         const expected = switch (kind) {
-            .object, .function_bytecode, .var_ref, .module, .string, .big_int => true,
+            .object,
+            .function_bytecode,
+            .var_ref,
+            .module,
+            .string,
+            .rope,
+            .string_buffer,
+            .big_int,
+            .property_storage,
+            .array_storage,
+            .payload,
+            => true,
             .realm_context, .shape => false,
         };
         try std.testing.expectEqual(expected, core.gc.frontierEpochSafe(kind));
@@ -15182,6 +15423,60 @@ test "a conservative candidate on a shared extent boundary visits both extents" 
     dropGcPtr(&probe);
     dropGcPtr(&a);
     dropGcPtr(&b);
+}
+
+test "a published string extent takes no occupant entry and still resolves conservatively" {
+    if (comptime !core.gc.address_registry_enabled or !core.gc.block_heap_enabled) return error.SkipZigTest;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var body = try core.string.String.createLatin1(rt, "e" ** extent_latin1_len);
+    const header = body.header();
+    const addr = @intFromPtr(header);
+    const base = addr - core.gc.metadata_prefix_size;
+    try std.testing.expect(header.metaConst().alloc_info.standalone);
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(header));
+
+    // TGC S2-h1. A standalone prefix used to buy an occupant entry; an extent
+    // no longer does, because `Heap.extent_pages` already answers exactly and
+    // is the arm `forEachTraceCandidateAt` consults first. Both halves are
+    // asserted: the entry is gone AND membership still reads true, so the
+    // audit that walks every published header (`auditLiveObjectsResolve`)
+    // cannot start calling live extents unresolvable.
+    try std.testing.expect(!rt.gc.address_registry.by_header.contains(addr));
+    try std.testing.expect(rt.gc.address_registry.containsHeader(header));
+
+    const user_bytes = rt.gc.block_heap.extentUserBytes(base).?;
+    const Probe = struct {
+        want: *core.gc.Header,
+        saw: bool = false,
+        fn visit(raw: *anyopaque, visited: *core.gc.Header) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (visited == self.want) self.saw = true;
+        }
+    };
+    // The occupant insert also widened the registry's range gate, which sits
+    // ABOVE the extent arm and dismisses a word in two compares. Rebuilding
+    // the filter must now pick that window up from the heap; if it does not,
+    // every one of these candidates is rejected before the page index is
+    // consulted -- a dropped root, which is what this loop fails on.
+    const filter = rt.gc.address_registry.rebuildScanFilter();
+    const candidates = [_]usize{ base, addr, base + user_bytes / 2, base + user_bytes - 1, base + user_bytes };
+    for (candidates) |candidate| {
+        var seen: Probe = .{ .want = header };
+        const hits = rt.gc.address_registry.forEachTraceCandidateAt(
+            candidate,
+            filter,
+            &seen,
+            Probe.visit,
+        );
+        try std.testing.expect(hits >= 1);
+        try std.testing.expect(seen.saw);
+    }
+
+    dropGcPtr(&body);
 }
 
 test "minor collection reclaims an unreachable young string extent" {
@@ -15485,6 +15780,50 @@ test "a crossing a minor cannot answer is still answered by a major" {
 // with 908 whole-heap majors where the refcounting baseline ran 6. The repair
 // is order plus a second reading: minor first, re-derive the crossing from the
 // account the minor left, and only then decide about the major.
+// TGC S2-h1 (2). The aged-decommit policy used to be offered only at major
+// boundaries. S2-g took pdfjs from 908 majors to 24 and raised maxrss 31% on a
+// live set that had fallen: the free blocks and the wholly-empty medium
+// superblocks were simply never scanned. A minor frees exactly those carriers,
+// so it is now the same boundary -- with the policy itself untouched.
+//
+// Pure young string churn, no explicit poll: zero majors, and the block heap
+// still has to have been offered the release AND to have returned pages.
+// Before the change both counters stay at zero for this workload.
+test "a minor-only workload still returns free block pages to the OS" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const majors_before = rt.gcStats().major_gc_count;
+    const checks_before = rt.gc.block_heap.stats.decommit_checks;
+    const decommitted_before = rt.gc.block_heap.stats.decommitted_bytes;
+    // Same shape as the S2-g crossing test above: ~336-byte bodies are block
+    // cells (the frozen class table covers them), and 22MB of churn against
+    // 1MB of headroom empties whole blocks over and over.
+    rt.setGCThreshold(rt.memory.allocated_bytes + 1024 * 1024);
+
+    var buf: [320]u8 = @splat('x');
+    var i: usize = 0;
+    while (i < 65536) : (i += 1) {
+        buf[0] = @truncate(i);
+        buf[1] = @truncate(i >> 8);
+        _ = try core.string.String.createLatin1(rt, &buf);
+    }
+    helpers.finishGcCycles(rt);
+
+    try std.testing.expectEqual(majors_before, rt.gcStats().major_gc_count);
+    try std.testing.expect(rt.gc.generation.stats.minor_collections > 0);
+    // The offer: only `releaseFreeBlockPages` moves this, and its own 100ms
+    // period gate is unchanged -- so a handful of checks across ~20 minors is
+    // the throttle working, not a missing call.
+    try std.testing.expect(rt.gc.block_heap.stats.decommit_checks > checks_before);
+    // And the offer was worth making: pages actually went back.
+    try std.testing.expect(rt.gc.block_heap.stats.decommitted_bytes > decommitted_before);
+}
+
 test "young churn that crosses the threshold is paid by the minor, not by a major" {
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
@@ -17130,4 +17469,36 @@ test "TGC S3-c: the atom verdict is applied in the pause that took it, not after
         @as(i32, 9),
         (try object.?.getOwnProperty(rt, reborn)).?.value.asInt32().?,
     );
+}
+
+test "needs_finalizer is recorded in both the header and the block bitmap" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const object = try core.Object.createPlainObject(rt, null);
+    const header = object.gcHeader();
+    try std.testing.expect(!core.gc.headerNeedsFinalizer(header));
+
+    rt.gc.setNeedsFinalizer(header);
+    try std.testing.expect(core.gc.headerNeedsFinalizer(header));
+
+    if (comptime core.gc.block_heap_enabled) {
+        // A plain object is a block cell; the sweep-side authority is the
+        // fourth bitmap, keyed by the cell index the prefix carries.
+        try std.testing.expect(core.gc.Registry.isBlockCellHeader(header));
+        const cell = @intFromPtr(header) - core.gc.metadata_prefix_size;
+        const block = core.gc_block_heap.Block.fromCellTrusted(cell);
+        const index = header.metaConst().size_class;
+        try std.testing.expect(block.cellNeedsFinalizer(index));
+        // Every other cell in the block is unaffected.
+        var others: usize = 0;
+        var i: u32 = 0;
+        while (i < block.cell_count) : (i += 1) {
+            if (i == index) continue;
+            if (block.cellNeedsFinalizer(i)) others += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 0), others);
+    }
 }

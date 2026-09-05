@@ -108,3 +108,7 @@
 - fin 位漏置 = 外部资源泄漏或弱语义错误（不是 UAF）：用 Debug 断言「进入任何 b/c destroy 的对象必带 fin 位」+ 反向「fin 集合里 `class_id==object` 且无 payload 的对象 = 0」双向审计。
 - 存储 cell 与 owner 的年龄错配：老 owner 持年轻 cell 只靠增长/压缩三处屏障；`ZJS_MINOR_AUDIT` 已能报未记忆边（S2-g 回归的经验），S4-b 门必须带 stress。
 - 块级计账与 extent/非块 kind 的逐条计账并存，`HeapLiveBytesMismatch` 校验臂重写要覆盖三种口径。
+
+## 7. 执行记录
+
+- **S4-a（2026-09-05 凌晨，`s4-a-20260905` = 48c4181a / df9acf73 / 2700de37）**：`RefKind` u3→u4（+ property_storage 8 / array_storage 9 / payload 10 / rope 11），`BlockFlags` 删 `mark`（young/finalizing/is_pinned/cycle_visited 位置不变），新增 `isStringFamily`/`kindIsBlockCellKind`，`metaIsRope → kind == .rope`，`createStringCell(comptime kind_tag, …)` 参数化裸前缀字节，`traceHeaderEdges` 拆 `.string`（叶）/`.rope`（left/right），`--gc-stats` 把 rope 折进 string 项；第四张位图 `Block.finalizerBits`（偏移派生，`Block` 仍 112B；64B 类 1016→1014 cell）+ extent `needs_finalizer` 列 + `Registry.setNeedsFinalizer/headerNeedsFinalizer`。`kind == .string` 逐点分类：家族判定 6 处、块 cell 集合 5 处、extent 臂 5 处保持 `== .string`（rope 永远是 cell）。反汇编：`allocCellFixedPtr` 278→278 逐条相同；`shadeExact`/`destroyDoomedSlice` 仅掩码常量 `0x7→0xf`；`traceHeader` 少 15 条（块 cell 的 object 判定变 `ands #0xf` 单指令）。门 test 2534/0、stress 2530/0、快照重生成。**偏离**：`needs_finalizer` 暂放 `Metadata.lifetime.flags`（byte 7，`reserved u7→u6`），因 `is_pinned/cycle_visited` 未删、flags 字节 9 位装不下——S4-e 删两位后搬回 flags 字节；kind 加宽/rope kind/mark 删除三者原子（一个 commit）。未决：`setNeedsFinalizer` 的 extent 分支只认 string 家族（S4-b 开放 storage extent 时扩）；`tools/perf/verify/test_gc_stats_snapshot.py` 7 个先存在的失败。

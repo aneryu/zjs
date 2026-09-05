@@ -87,9 +87,9 @@ pub const decommit_bytes: usize = blk: {
 /// a cleverly-chosen 32-bit terminator could not manage. The poison is
 /// chosen so a free cell read as a header is rejected by every path that
 /// matters: `block_size_idx` reads 0 (not a block cell), `heap_accounted`
-/// reads 0 (the iterators and `shade` refuse it), `cycle_visited` reads 1
-/// (`shade` refuses it again), and the kind reads `.string`, which is not
-/// traced until S2.
+/// reads 0 (the iterators and `shade` refuse it), and `cycle_visited` reads 1
+/// (`shade` refuses it again). The kind nibble reads `.string`; that is
+/// incidental, `heap_accounted`/`cycle_visited` are what reject the word.
 pub const free_nil: u32 = 0xFFFF;
 pub const free_link_mask: u32 = gc_representation.free_cell_link_mask;
 pub const free_poison: u32 = gc_representation.free_cell_poison;
@@ -277,6 +277,10 @@ const LargeMap = struct {
     /// credited.
     user_bytes: usize,
     mark_epoch: u64 = extent_unmarked_epoch,
+    /// TGC S4-a: the extent twin of `Block.finalizerBits`. Set at
+    /// construction for carriers whose death owes an external release; the
+    /// S4-d extent sweep runs a destroy callback only for those.
+    needs_finalizer: bool = false,
 };
 
 const MediumExtent = struct {
@@ -285,6 +289,7 @@ const MediumExtent = struct {
     pages: u32,
     user_bytes: usize,
     mark_epoch: u64 = extent_unmarked_epoch,
+    needs_finalizer: bool = false,
 };
 
 /// Newborn / cleared extent mark. Heap epochs are always even (`beginMajor`
@@ -412,6 +417,29 @@ pub const Block = extern struct {
             .mark = @as([*]u64, @ptrCast(@alignCast(base + self.mark_bits_off)))[0..words],
             .remember = @as([*]u64, @ptrCast(@alignCast(base + self.remember_bits_off)))[0..words],
         };
+    }
+
+    /// The `needs_finalizer` bitmap (TGC S4-a). Derived rather than stored:
+    /// see `blockGeometry`. Only cells whose bit is set are handed to a
+    /// destructor by the S4-d sweep; the rest are reclaimed by clearing
+    /// their alloc bit, without touching the header.
+    pub fn finalizerBits(self: *Block) []u64 {
+        const base: [*]u8 = @ptrCast(self);
+        const words = self.bitmap_words;
+        const offset = self.remember_bits_off + words * 8;
+        return @as([*]u64, @ptrCast(@alignCast(base + offset)))[0..words];
+    }
+
+    pub fn setFinalizerBit(self: *Block, index: u32) void {
+        setBitPlain(self.finalizerBits(), index);
+    }
+
+    pub fn clearFinalizerBit(self: *Block, index: u32) void {
+        clearBitPlain(self.finalizerBits(), index);
+    }
+
+    pub fn cellNeedsFinalizer(self: *Block, index: u32) bool {
+        return testBitPlain(self.finalizerBits(), index);
     }
 
     fn cellPtr(self: *Block, index: u32) [*]u8 {
@@ -676,6 +704,7 @@ const BlockGeometry = struct {
     alloc_off: u32,
     mark_off: u32,
     remember_off: u32,
+    finalizer_off: u32,
     cells_off: u32,
 };
 
@@ -687,13 +716,19 @@ fn blockGeometry(cell_size: u32) BlockGeometry {
     const alloc_off: u32 = @intCast(header_size);
     var mark_off: u32 = alloc_off + bitmap_words * 8;
     var remember_off: u32 = mark_off + bitmap_words * 8;
-    var cells_off = std.mem.alignForward(u32, remember_off + bitmap_words * 8, 64);
+    // TGC S4-a: the fourth bitmap (`needs_finalizer`). Its offset is not
+    // cached in `Block` -- deriving it as `remember_bits_off + words * 8`
+    // keeps the header at its pinned 112 bytes, and every reader of this
+    // bitmap is cold (construction-time set, sweep-time scan).
+    var finalizer_off: u32 = remember_off + bitmap_words * 8;
+    var cells_off = std.mem.alignForward(u32, finalizer_off + bitmap_words * 8, 64);
     while (cells_off + cell_count * cell_size > block_bytes) {
         cell_count -= 1;
         bitmap_words = @intCast((cell_count + 63) / 64);
         mark_off = alloc_off + bitmap_words * 8;
         remember_off = mark_off + bitmap_words * 8;
-        cells_off = std.mem.alignForward(u32, remember_off + bitmap_words * 8, 64);
+        finalizer_off = remember_off + bitmap_words * 8;
+        cells_off = std.mem.alignForward(u32, finalizer_off + bitmap_words * 8, 64);
     }
     return .{
         .cell_count = cell_count,
@@ -701,6 +736,7 @@ fn blockGeometry(cell_size: u32) BlockGeometry {
         .alloc_off = alloc_off,
         .mark_off = mark_off,
         .remember_off = remember_off,
+        .finalizer_off = finalizer_off,
         .cells_off = cells_off,
     };
 }
@@ -733,6 +769,23 @@ pub const Heap = struct {
     /// falls back to the linear table walk, which is the exact same answer at
     /// the old price. It returns to zero when the unindexed extents die.
     extent_pages_unindexed: usize = 0,
+    /// Monotone union of every string-extent mapping ever handed out, in the
+    /// same `[lo, hi)` convention as `gc_address_registry.Table.bounds_lo/hi`
+    /// (`hi` carries the `+ 1` that makes an inclusive one-past-end address
+    /// fall inside the window).
+    ///
+    /// TGC S2-h1: extents no longer take an occupant-table entry, and that
+    /// entry was what used to widen the registry's global range gate to cover
+    /// them. `Table.rebuildScanFilter` merges this instead. Without it the
+    /// two-compare gate at the top of `forEachTraceCandidateAt` would dismiss
+    /// every word pointing at a >3760-byte string body before the page index
+    /// was ever consulted -- a dropped root, not a missed optimisation.
+    ///
+    /// Monotone, like the registry's own bounds: a window that stayed wide
+    /// after the last extent in a region died only costs a probe that would
+    /// have happened anyway.
+    extent_bounds_lo: usize = std.math.maxInt(usize),
+    extent_bounds_hi: usize = 0,
     /// Removals since `extent_pages` was last compacted. Same disease and
     /// same cure as `gc_address_registry.Table.removes_since_rehash`: std's
     /// open-addressed map tombstones removed slots, and a map under balanced
@@ -946,6 +999,23 @@ pub const Heap = struct {
         unreachable; // not an extent base: the caller misclassified the header
     }
 
+    /// TGC S4-a: record that this extent's death owes a destructor call.
+    /// The bit only ever goes on (D-S4-4): a carrier that stops owing is
+    /// rare and paying one no-op destructor is cheaper than exact pairing.
+    pub fn extentSetNeedsFinalizer(self: *Heap, base: usize) void {
+        if (self.medium.getPtr(base)) |extent| {
+            extent.needs_finalizer = true;
+        } else if (self.large.getPtr(base)) |extent| {
+            extent.needs_finalizer = true;
+        } else unreachable;
+    }
+
+    pub fn extentNeedsFinalizer(self: *const Heap, base: usize) bool {
+        if (self.medium.getPtr(base)) |extent| return extent.needs_finalizer;
+        if (self.large.getPtr(base)) |extent| return extent.needs_finalizer;
+        unreachable;
+    }
+
     pub fn extentIsMarked(self: *const Heap, base: usize, epoch: u64) bool {
         const stamped = if (self.medium.getPtr(base)) |extent|
             extent.mark_epoch
@@ -1047,6 +1117,11 @@ pub const Heap = struct {
         std.debug.assert(base & (page_bytes - 1) == 0);
         std.debug.assert(span_bytes != 0 and span_bytes & (page_bytes - 1) == 0);
         std.debug.assert(user_bytes <= span_bytes);
+        // Widened BEFORE the fan-out can fail: the linear fallback
+        // (`extentsContainingLinear`) still answers for an unindexed extent,
+        // but only if the range gate lets the candidate reach it.
+        if (base < self.extent_bounds_lo) self.extent_bounds_lo = base;
+        if (base + span_bytes + 1 > self.extent_bounds_hi) self.extent_bounds_hi = base + span_bytes + 1;
         const first = base >> page_shift;
         const last = (base + span_bytes - 1) >> page_shift;
         const value: ExtentPage = .{ .base = base, .end = base + user_bytes };
@@ -1166,7 +1241,7 @@ pub const Heap = struct {
     /// `removeByIndex` only tombstones the slot in place (entries never move
     /// on removal; only inserts rehash), and the callback must not allocate
     /// an extent -- it frees one. Returns the number destroyed.
-    pub fn sweepStringExtents(
+    pub fn sweepExtents(
         self: *Heap,
         epoch: u64,
         ctx: *anyopaque,
@@ -1207,17 +1282,17 @@ pub const Heap = struct {
         return null;
     }
 
-    /// Minor twin of `sweepStringExtents`.
+    /// Minor twin of `sweepExtents`.
     ///
     /// Only an extent published since the last retirement can be proven dead
     /// by a young trace, and `young_extents` is exactly that population, so
     /// this walks the list instead of both whole tables. Survivors stay in the
-    /// list for `retireYoungStringExtents`, which promotes them.
+    /// list for `retireYoungExtents`, which promotes them.
     ///
     /// Stale entries are expected (see `young_extents`): a base that is no
     /// longer an extent, or one whose header is not published (`young` is the
     /// publication's own stamp), is skipped rather than destroyed.
-    pub fn sweepYoungStringExtents(
+    pub fn sweepYoungExtents(
         self: *Heap,
         epoch: u64,
         ctx: *anyopaque,
@@ -1245,7 +1320,7 @@ pub const Heap = struct {
     /// Promotion for the extent half of the young set: everything still in the
     /// list after the sweep lived through a collection, so it is old now and
     /// a later write to it must take the remembered-set path.
-    pub fn retireYoungStringExtents(self: *Heap) void {
+    pub fn retireYoungExtents(self: *Heap) void {
         for (self.young_extents.items) |base| {
             if (!self.containsExtent(base)) continue;
             const header: *gc.GCObjectHeader = @ptrFromInt(base + gc.metadata_prefix_size);
@@ -1543,6 +1618,7 @@ pub const Heap = struct {
             self.lifecycleFor(block, index).state = .raw_free_in_progress;
         }
         clearBitPlain(block.bitmaps().alloc, index);
+        block.clearFinalizerBit(index);
         block.allocated_count -= 1;
         if (comptime lifecycle_state_enabled) {
             const lifecycle = self.lifecycleFor(block, index);
@@ -2042,6 +2118,7 @@ pub const Heap = struct {
                     block.alloc_bits_off != expected.alloc_off or
                     block.mark_bits_off != expected.mark_off or
                     block.remember_bits_off != expected.remember_off or
+                    block.remember_bits_off + block.bitmap_words * 8 != expected.finalizer_off or
                     block.cells_offset != expected.cells_off or
                     block.bump > block.cell_count)
                 {
@@ -2075,7 +2152,9 @@ pub const Heap = struct {
                     const valid = (@as(u64, 1) << tail_bits) - 1;
                     const maps = block.bitmaps();
                     const last = maps.alloc.len - 1;
-                    if ((maps.alloc[last] | maps.mark[last] | maps.remember[last]) & ~valid != 0) {
+                    if ((maps.alloc[last] | maps.mark[last] | maps.remember[last] |
+                        block.finalizerBits()[last]) & ~valid != 0)
+                    {
                         return error.BitmapTailSet;
                     }
                 }
@@ -2348,7 +2427,7 @@ pub const Heap = struct {
     pub fn verifyPublishedCellsAllowing(
         self: *const Heap,
         block_cell_marker: u5,
-        object_kind: u3,
+        object_kind: u4,
         allowance: ?UnpublishedCellAllowance,
     ) VerifyError!void {
         return self.verifyCellsAllowing(block_cell_marker, object_kind, allowance, true);
@@ -2361,7 +2440,7 @@ pub const Heap = struct {
     pub fn verifyAccountingCellsAllowing(
         self: *const Heap,
         block_cell_marker: u5,
-        object_kind: u3,
+        object_kind: u4,
         allowance: ?UnpublishedCellAllowance,
     ) VerifyError!void {
         return self.verifyCellsAllowing(block_cell_marker, object_kind, allowance, false);
@@ -2370,7 +2449,7 @@ pub const Heap = struct {
     fn verifyCellsAllowing(
         self: *const Heap,
         block_cell_marker: u5,
-        object_kind: u3,
+        object_kind: u4,
         allowance: ?UnpublishedCellAllowance,
         require_young_membership: bool,
     ) VerifyError!void {
@@ -2390,11 +2469,16 @@ pub const Heap = struct {
                     const accounted = alloc_info & gc_representation.alloc_info_heap_accounted_mask != 0;
                     const standalone = alloc_info & gc_representation.alloc_info_standalone_mask != 0;
                     // String-family cells share the block heap with Objects
-                    // and carry kind 6 in the same prefix byte.
-                    const cell_kind = flags & 0x7;
+                    // and carry kinds 6 (flat body) / 11 (rope node) / 12
+                    // (TGC S2-i tail buffer) in the same prefix byte -- the
+                    // kind is the low nibble since TGC S4-a.
+                    const cell_kind = flags & gc_representation.kind_mask;
                     const prefix_valid = !standalone and
                         alloc_info & gc_representation.alloc_info_class_mask == block_cell_marker and
-                        (cell_kind == object_kind or cell_kind == gc_representation.string_kind_tag);
+                        (cell_kind == object_kind or
+                            cell_kind == gc_representation.string_kind_tag or
+                            cell_kind == gc_representation.rope_kind_tag or
+                            cell_kind == gc_representation.string_buffer_kind_tag);
                     if (!accounted and prefix_valid) {
                         const allowed = if (allowance) |candidate|
                             candidate.classify(candidate.context, cell)
@@ -2632,6 +2716,8 @@ pub const Heap = struct {
             self.lifecycleFor(block, index).state = .raw_free_in_progress;
         }
         clearBitPlain(block.bitmaps().alloc, index);
+        // A recycled cell must not inherit its predecessor's finalizer duty.
+        block.clearFinalizerBit(index);
         pushCell(block, index, cell);
         block.allocated_count -= 1;
         if (comptime lifecycle_state_enabled) {
@@ -2958,6 +3044,8 @@ pub const Heap = struct {
         @memset(bits.alloc, 0);
         @memset(bits.mark, 0);
         @memset(bits.remember, 0);
+        @memset(block.finalizerBits(), 0);
+        std.debug.assert(block.remember_bits_off + block.bitmap_words * 8 == geometry.finalizer_off);
     }
 
     fn allocMedium(self: *Heap, n: usize) std.mem.Allocator.Error![]u8 {
@@ -3324,7 +3412,7 @@ test "string extents: table-held marks, containment probe, epoch sweep" {
         }
     };
     var ctx = Ctx{ .heap = &heap };
-    try std.testing.expectEqual(@as(usize, 1), heap.sweepStringExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
+    try std.testing.expectEqual(@as(usize, 1), heap.sweepExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
     try std.testing.expectEqual(large_base, ctx.last_base);
     try std.testing.expectEqual(space.large_min_bytes + 1, ctx.last_bytes);
     try std.testing.expectEqual(@as(usize, 0), heap.large.count());
@@ -3337,10 +3425,10 @@ test "string extents: table-held marks, containment probe, epoch sweep" {
     var extra: [3]usize = undefined;
     for (&extra) |*slot| slot.* = @intFromPtr((try heap.alloc(page_bytes * 2)).ptr);
     heap.extentSetMark(extra[1], heap.mark_epoch);
-    try std.testing.expectEqual(@as(usize, 3), heap.sweepStringExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
+    try std.testing.expectEqual(@as(usize, 3), heap.sweepExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
     try std.testing.expectEqual(@as(usize, 1), heap.medium.count());
     try std.testing.expect(heap.medium.contains(extra[1]));
-    try std.testing.expectEqual(@as(usize, 0), heap.sweepStringExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
+    try std.testing.expectEqual(@as(usize, 0), heap.sweepExtents(heap.mark_epoch, @ptrCast(&ctx), Ctx.destroy));
     try std.testing.expectEqual(@as(usize, 4), ctx.freed);
 }
 

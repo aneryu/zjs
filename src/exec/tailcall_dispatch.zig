@@ -658,7 +658,7 @@ fn applyForwardCallMethod(
     if (live_bytes < total * @sizeOf(JSValue)) return .threw;
     const region_start = sp - total;
     vm.frame.pc += 2;
-    vm.stack.retreatToCallRegion(region_start);
+    vm.stack.retreatToCallRegionFrom(sp, region_start);
     const receiver = region_start[0];
     const method = region_start[1];
     const method_obj = object_ops.objectFromValue(method) orelse return .threw;
@@ -1513,7 +1513,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                 const region_start = sp - total;
                 const func = region_start[0];
                 if (inline_calls.resolveInlineFunction(vm.global, func)) |resolved| {
-                    vm.stack.retreatToCallRegion(region_start);
+                    vm.stack.retreatToCallRegionFrom(sp, region_start);
                     const execution = resolved.call_facts.execution;
                     if (argc == 0 and execution.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
@@ -1738,7 +1738,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
                     vm.frame.pc += 2;
-                    vm.stack.retreatToCallRegion(region_start);
+                    vm.stack.retreatToCallRegionFrom(sp, region_start);
                     const execution = resolved.call_facts.execution;
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
@@ -1837,7 +1837,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // boundary, stack limit) changes nothing — restore the
                 // operand top and take the authoritative path below.
                 if (argc <= 1 and target.call_facts.execution.simple_inline_empty_leaf and this_arg.isUndefined()) {
-                    vm.stack.retreatToCallRegion(region_start);
+                    vm.stack.retreatToCallRegionFrom(sp, region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
                         return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
@@ -3491,6 +3491,13 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
     // Auto-init String.prototype entries need the allocating/materializing
     // resolver; keep that existing cold call off the object get_field2 body.
     if (receiver.isString()) {
+        // The auto-init resolver materializes the String.prototype entry, so it
+        // allocates and can collect. `Stack.liveValues` stops at the published
+        // `top_ptr` and this handler is register-resident, so every value
+        // pushed since the last publish -- including the receiver in `sp - 1`
+        // -- is outside the root set until the boundary is synced (the
+        // `op_push_atom_value` / `op_array_from` contract).
+        vm.syncSp(sp);
         const resolved = string_ops.getFastStringPrimitiveDataProperty(vm.ctx, vm.global, receiver, atom_id) catch |e| return vm.fail(e);
         if (resolved) |value| {
             sp[0] = value;
@@ -3677,6 +3684,14 @@ fn op_put_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
     const key = loadValueAsIntPair(&(sp - 2)[0]);
     const obj = loadValueAsIntPair(&(sp - 3)[0]);
     const rt = vm.ctx.runtime;
+    // Every leg below can allocate (dense grow/append, the sparse own-element
+    // set, the typed-array writer), and this handler is register-resident, so
+    // `stack.top_ptr` still names the last cold op's boundary. Publish the live
+    // operand boundary once, here, before any of them: `a[i] = v` inside a
+    // larger expression otherwise loses whatever was pushed before the triple.
+    // The legs neither push nor pop, so the register `sp` stays authoritative
+    // for the continuations.
+    vm.syncSp(sp);
     // Inline Array check: skip the noinline dense overwrite/append probes for
     // non-Array objects (typed arrays, regular objects). 72% of puts in pdfjs
     // are typed array writes that always miss the dense probes — the noinline
@@ -3870,7 +3885,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     // read, so normal return/throw resumes at the correct instruction.
     if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
-        vm.stack.retreatToCallRegion(region_start);
+        vm.stack.retreatToCallRegionFrom(sp, region_start);
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
     }
     vm.stack.setTopPtr(sp);
@@ -4752,6 +4767,12 @@ pub fn opCompareCold(comptime opc: u8) Handler {
             const lhs = (sp - 2)[0];
             const rhs = (sp - 1)[0];
             vm.syncPc(pc, 1); // qjs sf->cur_pc — backtrace fidelity through ToPrimitive valueOf (compare ops are 1 byte)
+            // `compareAt` runs ToPrimitive, i.e. arbitrary user valueOf/toString
+            // that allocates and can collect. Sync the operand boundary too: the
+            // register-resident predecessors left `top_ptr` behind the live top,
+            // so both operands and everything pushed since the last publish are
+            // otherwise unrooted for the duration of the coercion.
+            vm.syncSp(sp);
             const result = vm_arith.compareAt(opc, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
                 // Error only: compareAt freed both operands, so publish the doubly-popped sp
                 // (frame.pc → next op) for a consistent catch stack.
@@ -5500,6 +5521,7 @@ pub fn op_eq_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     const lhs = (sp - 2)[0];
     const rhs = (sp - 1)[0];
     vm.syncPc(pc, 1);
+    vm.syncSp(sp); // see opCompareCold: ToPrimitive allocates, so the operand window must be live
     const result = vm_arith.compareAt(op.eq, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
         vm.publish(pc, sp - 2);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
@@ -5521,6 +5543,7 @@ pub fn op_cmp_if_false8_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     const lhs = (sp - 2)[0];
     const rhs = (sp - 1)[0];
     vm.syncPc(pc, 1);
+    vm.syncSp(sp); // see opCompareCold: ToPrimitive allocates, so the operand window must be live
     const result = vm_arith.compareAt(op.lt, vm.ctx, vm.global, vm.output, lhs, rhs) catch |err| {
         vm.publish(pc, sp - 2);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
@@ -5691,6 +5714,10 @@ pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     }
     const idx: u16 = pc[1];
     vm.syncPc(pc, 2); // qjs sf->cur_pc — backtrace fidelity through valueOf (see op_add_loc_cold)
+    // ToNumeric on the local can run user valueOf/toString, which allocates.
+    // The operand window is stack-neutral here but still stale, so sync it: the
+    // values pushed since the last publish are otherwise unrooted.
+    vm.syncSp(sp);
     vm_arith.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], pc[0]) catch |err| {
         vm.publish(pc + 1, sp);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
@@ -5764,6 +5791,11 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // qjs `sf->cur_pc = pc` (set before js_add_loc_slow): keep frame.pc live so a
     // backtrace captured inside an object operand's valueOf/toString reports this op.
     vm.syncPc(pc, 2);
+    // js_add_loc_slow's ToPrimitive/concat allocates, so the whole live operand
+    // window (rhs included -- the stack still owns it until addLocalAt consumes
+    // it) has to be inside `Stack.liveValues` first. Success continues from the
+    // register-resident sp exactly as before.
+    vm.syncSp(sp);
     vm_arith.addLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], rhs) catch |err| {
         // Error only: also sync the popped sp so the catch unwinder sees consistent
         // state. addLocalAt already freed rhs, so the published length excludes the
