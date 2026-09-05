@@ -802,3 +802,29 @@ zjs 编译器从显式注解**确定性重推**布局）之所以可行，恰因
 升格为设计不变量：**certificate 不携带布局，布局永远由 zjs
 编译器从注解确定性导出**（同源码同配置必同布局，产物缓存的
 一致性依据）。
+
+## 十一、GC 战役后校准批（v1.3 note，2026-09-06，driver；只读勘察 Opus）
+
+前提：tracing GC 完成计划 S0–S4 + S5 进行中已落地（`docs/tracing-gc-completion-account.md`）：无引用计数、atom 表 tracer 所有、Object 64B / `prop_values`@16 指向 `.property_storage` cell 或 slots2 内联 tail、a 类 payload 与数组元素为 GC cell、header `kind:u4|young|finalizing|needs_finalizer|reserved`、保守栈扫描仍是生产根集（R1 不立项）。本节逐条校准 v1.2 正文，**未改正文**，后续修订时按此表落笔。
+
+| # | 修订 | 章节 | 依据 |
+|---|---|---|---|
+| R1 | 版本对账：正文为 v1.2/08-26；本节为 v1.3 校准 | 页首 | — |
+| R2 | 删「short 区 178-253 已被占用…现平面放不下」：C0/C1-1 已关账，**243 用 / 13 空闲**，`ext0`(244) 子平面已有，容量预算 22–43 覆盖 typed 家族 20–40 | §6.1 F4 | `docs/perf/opcode-design.md:33-45`、`bytecode.zig:441-471,502,511` |
+| R3 | **撤销「热编码不携带 atom」**：S3 后 atom 活性 = `traceFunctionBytecodeAtoms` 走 `fb.atomOperandIterator()`（格式驱动、固定读 pc+1 u32，`bytecode.zig:4298-4317`）；typed op 必须保留 atom 操作数，且任何新/回收 id 的 `sizeOf` 恒非零（`sizeOf==0 → return null` 会丢掉函数余下全部 atom 边） | §三 T1 编码 | `gc_trace_stw.zig:162` |
+| R4 | P4「两个大改动不同时在飞」已消解：GC 收官、五门 + STRESS test262 0/49778；**F1/F2 施工窗口开放** | §6.1 P4 / §6.2 S1 | 完成对账 §2 |
+| R5 | F1 判据从「rc==1 原地变异」改为 `ShapeOwnership.shared` sticky 位（`shape.zig:246-250`，永不清零 → 可变 shape 更少）+ FAM 增长换址（`shape.zig:947`）；identity 失效率重估 | §4.1(1) / §6.1 F1 | — |
+| R6 | F1 成本项：u64 identity 让 `@sizeOf(Shape)` 56→64 跨 slab 台阶；pinned-pointer 臂零字节；双臂对比须含 footprint 列 | §4.1(1) | `shape.zig:153` |
+| R7 | **lowering contract**：slot 访问必须发 `load [obj+16]` 再索引，**禁止常量折叠为 `obj+const`**（slots2 内联 tail 仅 2 槽，第 3 属性即 spill 换指针；扩 tail 与 M 终态 64B 冲突） | §5.1 / §三 T1 | `object.zig:10236-10245,10036,474` |
+| R8 | §5.1「GC 集成有现成基建」细化为六条契约：根（保守扫描零协议，但 AOT 帧同样贡献残渣/浮动垃圾）、窗口（`ValueRootFrame`，裸 cell 指针不需根）、**安全点/publish（AOT 无 pc/sp，须定义 native 帧发布接口——真空缺口）**、屏障、分配慢臂（`collectBeforeObjectAllocation`）、**atom（AOT 模块无 FunctionBytecode ⇒ 需 per-module atom 表 + `visitAtom` 遍历器或 `host_pins`——真空缺口）** | §5.1 | `runtime.zig:540`、`memory.zig:97-109`、`atom.zig:1055,1232,1656` |
+| R9 | AOT 屏障四条：每条 typed 属性写发 `generationalBarrierValue(owner.gcHeader(), v)`（owner = Object 非 cell）；快门 `barrierOwnerSkips` 可内联但 safety 构建带 gate 断言；连续写用 `rememberOwnerForBulkWrite`；**AOT 不得自行扩容/压缩 `prop_values`**（三处屏障在 runtime helper 里） | §5.1 / §5.2 规则 5 | `tailcall_dispatch.zig:3788-3796`、`gc.zig:4130,4144,4210-4224` |
+| R10 | artifact 只落盘 atom **字符串**（装载重建 id），与 §4.1「永不落盘 identity/指针」合并为「artifact 不得携带 Runtime-local 身份」 | §4.1 / §10.5 | `atom.zig:1232` |
+| R11 | **T-spike 数据作废**：spike 臂含已删的 `value.dup()`/`releaseObjectAssume…`，两臂同掉 rc 常量 ⇒ 百分比赢面缩小（§三杀标是百分比口径）；须在 main 重跑；`tspike_get_slot=254` 与 main `object_slots2=254` 冲突，改用空闲 id | §6.2 S2 | `bytecode.zig:471` |
+| R12 | spike 方法论常设：capture 必须 `noinline`；站点 entry 取 2 的幂步长 | §6.2 | `spike/perf-t` `tspike.zig` |
+| R13 | §一归因整体标「需在 S4-i 后的树上重测」：47 insn own-hit 已无 rc 两臂（`op_get_field` 现内联 `findOwnDataSlotFast`，`tailcall_dispatch.zig:3426`/`object.zig:10601`）、23.3% stall 的 miss 特征因属性值搬到独立 cell 而变、各模块份额分母全变（pdfjs 0.81 / splay 1.17）、`op_get_field +67`/`opCall +66` 说明属性与调用的绝对成本已变、行号全部漂移 | §一 1/2、§1.5 | `tracing-gc-s4-spec.md` §7 |
+| R14 | §7 红线复核：SplayLatency S4-i 后 +2.80%、splay cycles 1.26 是 GC 唯一 STOP，「双第二不丢」的基线值需重钉 | §7 | — |
+| R15 | 解除「typed field unboxing 与 tracing GC 换代排序后再议」的等待条件，列入下一轮表示契约议程 | §三 明确不做 | — |
+| R16 | `op.object_slots2`（parser 证明 1–2 静态属性 ⇒ 预留内联 tail，`tailcall_dispatch.zig:4263`）登记为 **F5 最小先例**；F5 改「有先例，需扩到 typed class N 槽 + 预建 shape 注册表」 | §6.1 F5 | — |
+| R17 | 风险行：AOT 帧沿用保守扫描安全但保留浮动垃圾（R1-b/R1-d：可归因命中大部分是 LLVM 栈槽残渣），AOT 体积放大该效应 | §7 风险表 | 完成计划 T-R 段 |
+
+**对 T1 最不利的重算**：快臂又掉了 rc 两臂，own-hit 差价更薄，+8% 杀标更难；G1-TYPED 前必须先在 main 重跑 T-spike 五臂（`run_tspike_ab.py` + 六个负载可原样搬）。
