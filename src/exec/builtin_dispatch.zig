@@ -699,6 +699,16 @@ noinline fn callTypedInternalRecordDirect(
     // tracing they are not roots at all: a collection during a builtin can
     // reclaim the very object the builtin is walking. `Set.prototype.add`
     // losing its collection mid-insert is the case that made this concrete.
+    // TGC R1-c re-confirmed this frame needs nothing further. The R1-b
+    // census names its `.generic` / `.generic_magic` / getter call sites
+    // among the regexp-workload candidate frames, but every GC value the
+    // shell itself holds is already in this window: `receiver` is the named
+    // root and `args` is the borrowed operand window. `record` is a static
+    // engine-owned table entry and `ctx` is the realm, rooted by the
+    // runtime. The residual hits are deep slots the compiler reuses (one
+    // resolves to a fresh young string every scan with no local of that
+    // type in scope) plus this frame's prologue saves of ITS caller's
+    // registers; neither is answerable with a root here.
     var receiver = this_value;
     var call_roots = core.runtime.ValueRootFrame{
         .values = &[_]core.runtime.ValueRootValue{.{ .value = &receiver }},

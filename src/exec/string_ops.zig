@@ -609,6 +609,19 @@ pub fn callStringReplaceMethod(
     const replacer = try getValueProperty(ctx, output, global, search_value, replace_atom, caller_function, caller_frame);
     if (replacer.isUndefined() or replacer.isNull()) return null;
     if (!isCallableValue(replacer)) return error.TypeError;
+    // TGC R1-c: NOT rooted. The sync-internal boundary does require rooted
+    // inputs -- its `pollInterrupt` is a full collection point reached while
+    // `args` still borrows this array, and nothing copies it first -- but
+    // both slots are already covered one frame up: `this_value` and
+    // `replace_value` are copies of `args[0]`/`args[1]` in the builtin
+    // window that `callTypedInternalRecordDirect` roots with
+    // `.slices = .{ .borrowed = args }`, and `search_value` is `args[0]`
+    // as well. A `.slices` root here measured no drop on this frame
+    // (candidate 234 -> 218, inside run noise) and would have added a
+    // production frame link for nothing. The one slot with no second owner
+    // is `replacer`, reachable only as the @@replace property of the rooted
+    // `search_value`; a getter that mints a fresh callable would leave it
+    // bare, which is a gap the census cannot sample.
     const replace_args = [_]core.JSValue{ this_value, replace_value };
     return try call_runtime.callValueOrBytecodeSyncInternalOutlined(
         ctx,
@@ -1077,9 +1090,33 @@ pub fn regExpSymbolSplitGeneric(
     errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     var out_index: u32 = 0;
 
+    // TGC R1-c. Everything this loop carries is a bare Zig local across a
+    // JS-observable step: `out` is a freshly created array reachable from
+    // nowhere else until it is returned, `string_body` is a borrowed flat
+    // payload pointer whose owner is only named by `string_value`, and the
+    // `splitter` / exec `result` values are held while `lastIndex`
+    // set/get run accessors and `regExpExecGeneric` runs a user `exec`.
+    // Rooting `string_value` is what keeps `string_body` (and every
+    // `advanceStringIndexBody` read of it) legal, so the two must share the
+    // frame's lifetime.
+    var rooted_out: ?*core.Object = out;
+    var rooted_string = string_value;
+    var rooted_splitter = splitter;
+    var rooted_result = core.JSValue.undefinedValue();
+    var split_roots = core.runtime.ValueRootFrame{
+        .values = &[_]core.runtime.ValueRootValue{
+            .{ .value = &rooted_string },
+            .{ .value = &rooted_splitter },
+            .{ .value = &rooted_result },
+        },
+        .objects = &[_]core.runtime.ObjectRootValue{.{ .object = &rooted_out }},
+    };
+    split_roots.activate(ctx.runtime);
+    defer split_roots.deactivate(ctx.runtime);
+
     if (input_len == 0) {
-        const result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
-        if (result.isNull()) try defineSplitValueElement(ctx.runtime, out, out_index, string_value);
+        rooted_result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
+        if (rooted_result.isNull()) try defineSplitValueElement(ctx.runtime, out, out_index, string_value);
         return out.value();
     }
 
@@ -1087,7 +1124,8 @@ pub fn regExpSymbolSplitGeneric(
     var pos: usize = 0;
     while (pos < input_len) {
         try setValuePropertyStrict(ctx, output, global, splitter, core.atom.ids.lastIndex, core.JSValue.int32(@intCast(pos)), caller_function, caller_frame);
-        const result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
+        rooted_result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
+        const result = rooted_result;
         if (result.isNull()) {
             pos = advanceStringIndexBody(string_body, pos, unicode_matching);
             continue;
@@ -2234,6 +2272,15 @@ pub fn stringSplit(
         if (!splitter.isUndefined() and !splitter.isNull()) {
             if (!isCallableValue(splitter)) return error.TypeError;
             const split_limit = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+            // TGC R1-c: NOT rooted, and the reason is a property of the
+            // callee, not of this window. `callValueOrBytecodeRoot` copies
+            // the argument array into its own `inline_args` with a plain
+            // `@memcpy` before it can allocate, so this array stops being
+            // the authoritative storage before the first collection point.
+            // A `.slices` root here measured no drop in the census and would
+            // have added a production frame link for nothing; the real gap
+            // is the callee's own unrooted `inline_args` (call_runtime.zig,
+            // outside this lane).
             const split_args = [_]core.JSValue{ this_value, split_limit };
             return callValueOrBytecodeRoot(ctx, output, global, separator, splitter, &split_args, caller_function, caller_frame);
         }

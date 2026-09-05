@@ -752,6 +752,20 @@ pub fn regExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
+    // TGC R1-c. Three borrowed things outlive a collection point here.
+    // `compiled.bytecode` (carried on into `found.capture_bytecode`, which
+    // `captureNameAt` reads while the result array is being built) is the
+    // regexp object's own compiled payload, and `string_data` is the input
+    // string's flat payload; neither is a GC pointer the scanner can map
+    // back to an owner. Naming `regexp_value` and `string_value` is what
+    // keeps both payloads addressable across `setRegExpLastIndexStrict`
+    // (which can run an accessor) and `createRegExpMatchArrayFromValue`
+    // (which allocates every capture substring).
+    var rooted_regexp = regexp_value;
+    var rooted_string = string_value;
+    var exec_roots = core.runtime.rootValues(.{ &rooted_regexp, &rooted_string });
+    exec_roots.activate(rt);
+    defer exec_roots.deactivate(rt);
     const alloc_count = compiled.allocCount();
     var inline_capture_slots: [regexp_adapter.small_exec_slots]usize = undefined;
     var heap_capture_slots: []usize = &.{};
