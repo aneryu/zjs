@@ -26,6 +26,19 @@ pub const remembered_skip_audit = std.debug.runtime_safety;
 
 pub const Stats = struct {
     young_count: usize = 0,
+    /// The minor's SCHEDULING population: `young_count` minus the owned
+    /// storage cells (`gc.kindIsOwnedStorageCell`). A property buffer, an
+    /// element buffer, an a-class payload and a rope tail buffer are named by
+    /// exactly one owner and die with it, so a minor can never reclaim one
+    /// without tracing that owner -- counting them towards the trigger prices
+    /// an object's GROWTH as if it were a new young object.
+    ///
+    /// Kept as a second counter rather than replacing `young_count`, because
+    /// the first number is also the census `verifyGenerationInvariants`
+    /// recounts from the young list and the extent tables, and the population
+    /// the retirement walks must drain. Only `Registry.shouldTryMinor` and
+    /// `shouldTryMinorBeforeMajor` read this one.
+    young_trigger_count: usize = 0,
     remembered_drops: usize = 0,
     /// Times the minor was suspended for reclaiming too little to be worth its
     /// fixed cost. A workload that keeps its young objects alive is not a
@@ -199,6 +212,12 @@ pub const State = struct {
         return true;
     }
 
+    /// TGC S4-d: the bitmap reclaim skips headers, so it must know whether any
+    /// address-keyed remembered entry could name a corpse.
+    pub inline fn rememberedCount(self: *const State) usize {
+        return self.remembered.count();
+    }
+
     pub fn forget(self: *State, header: *const gc.Header) void {
         if (comptime remembered_skip_audit) std.debug.assert(!self.retirement_window_open);
         _ = self.remembered.remove(@intFromPtr(header));
@@ -234,6 +253,11 @@ pub const State = struct {
     inline fn forgetYoungCensus(self: *State, header: *const gc.Header) void {
         if (header.metaConst().flags.young and self.stats.young_count > 0) {
             self.stats.young_count -= 1;
+            if (!gc.kindIsOwnedStorageCell(header.metaConst().flags.kind) and
+                self.stats.young_trigger_count > 0)
+            {
+                self.stats.young_trigger_count -= 1;
+            }
         }
     }
 
@@ -269,6 +293,7 @@ pub const State = struct {
             self.stats.remembered_clears +|= 1;
         }
         self.stats.young_count = 0;
+        self.stats.young_trigger_count = 0;
         // Map and cache now agree again (both empty), so I0 holds once more.
         if (comptime remembered_skip_audit) self.retirement_window_open = false;
     }

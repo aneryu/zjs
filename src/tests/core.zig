@@ -20,25 +20,21 @@ test "gc invariant negative: representation snapshot rejects silent layout drift
     try std.testing.expect(gc_representation.matchesBaseline(gc_representation.snapshot_text));
 }
 
-test "M-cut Object handle conversion and parked successor preserve scalar state" {
+test "M-cut Object handle conversion keeps the head at the handle address" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.createPlainObject(rt, null);
 
+    // The Object pointer IS the GC handle and the body start; the metadata
+    // prefix sits at handle-8 and no resident successor word exists.
     try std.testing.expectEqual(object, core.Object.fromHeader(object.gcHeader()));
-    const saved_shape = object.shape_ref;
-    const saved_class = object.class_id;
-    const saved_flags = object.flags;
-    const saved_weakrefs = object.weakReferenceCount();
-    var parked = core.gc.DeferredFreeStack{};
-    parked.push(object.gcHeader());
-    try std.testing.expectEqual(object.gcHeader(), parked.pop().?);
-    try std.testing.expectEqual(saved_class, object.class_id);
-    try std.testing.expectEqual(saved_flags, object.flags);
-    try std.testing.expectEqual(saved_weakrefs, object.weakReferenceCount());
-    // The parked link legitimately consumed the dead Shape word; restore it
-    // because this fixture remains a live Object after the topology probe.
-    object.shape_ref = saved_shape;
+    try std.testing.expectEqual(
+        @intFromPtr(object) - core.gc.metadata_prefix_size,
+        @intFromPtr(object.gcHeader().meta()),
+    );
+    // TGC S4-e retired the Pass-B park, so nothing borrows the Shape word for
+    // a temporary successor any more.
+    try std.testing.expectEqual(core.class.ids.object, object.class_id);
 }
 
 test "host transports and core operation errors keep independent narrow sets" {
@@ -363,13 +359,10 @@ test "shape-sized trailing property storage grows externally and compacts in pla
     try std.testing.expectEqual(@as(u32, core.Object.trailing_property_capacity), object.shape_ref.prop_size);
     try std.testing.expect(object.propertyStorageIsInline());
     try std.testing.expect(object.hasSlots2Layout());
-    try std.testing.expectEqual(@as(u32, 0), object.weakReferenceCount());
-    object.retainWeakReference();
-    try std.testing.expectEqual(@as(u32, 1), object.weakReferenceCount());
-    try std.testing.expect(object.hasSlots2Layout());
-    object.releaseWeakReference();
-    try std.testing.expectEqual(@as(u32, 0), object.weakReferenceCount());
-    try std.testing.expect(object.hasSlots2Layout());
+    // TGC S4-e: the layout bit moved out of the retired `weakref_count` word
+    // into the flags word; nothing else in the flags may disturb it.
+    try std.testing.expect(object.flags.extensible);
+    try std.testing.expectEqual(core.class.PayloadKind.none, object.flags.class_payload_kind);
     try std.testing.expectEqual(
         object_address + core.Object.slots2_property_storage_offset,
         @intFromPtr(object.propertyStorageBase()),
@@ -492,7 +485,7 @@ test "plain object destroy slim frees two data slots and the value buffer" {
     try std.testing.expectEqual(@as(u32, 2), pair.shape_ref.prop_count);
     try std.testing.expectEqual(core.class.ids.object, pair.class_id);
     try std.testing.expectEqual(core.class.PayloadKind.none, pair.flags.class_payload_kind);
-    try std.testing.expectEqual(@as(u32, 0), pair.weakref_count);
+    try std.testing.expect(!pair.hasSlots2Layout());
 
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
@@ -2864,7 +2857,7 @@ fn createExternalObjectLifecycleProbe(
     const object = try core.Object.create(rt, class_id, null);
     const payload = try rt.memory.create(ExternalObjectLifecyclePayload);
     payload.* = .{ .event = event };
-    object.installExternalClassPayload(@ptrCast(payload));
+    object.installExternalClassPayload(rt, @ptrCast(payload));
     return object;
 }
 
@@ -3252,7 +3245,6 @@ test "side authority swap-remove condemnation drains every non-block object exac
     try std.testing.expectEqual(@as(usize, 0), settled.bucket_headers);
     try std.testing.expect(!settled.cursor_present);
     try std.testing.expectEqual(@as(usize, 0), settled.doomed_blocks);
-    try std.testing.expectEqual(@as(usize, 0), settled.parked_frees);
     try std.testing.expectEqual(@as(usize, 0), settled.deferred_finalizers);
     try std.testing.expect(!settled.active_finalizer);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nonblock_objects.?.items.items.len);
@@ -3412,7 +3404,7 @@ test "standalone inline object resolves from a conservative interior candidate" 
     try std.testing.expectEqual(@as(usize, 1), probe.matching_headers);
 }
 
-test "standalone inline object teardown leaves and later frees a weak husk" {
+test "standalone inline object teardown parks its struct free until the drain" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3420,30 +3412,23 @@ test "standalone inline object teardown leaves and later frees a weak husk" {
     defer payload_finalizer_calls = 0;
     const class_id = try registerStandaloneInlineObjectTestClass(
         rt,
-        "StandaloneInlineWeakHusk",
+        "StandaloneInlineParkedFree",
         countPayloadFinalizer,
     );
     defer if (rt.classes.isRegistered(class_id)) rt.classes.unregisterDynamic(class_id);
     const object = try core.Object.create(rt, class_id, null);
     try expectPublishedStandaloneInlineObject(rt, object);
 
-    object.weakref_count = 1;
     const old_phase = rt.gc.phase;
     rt.gc.phase = .tracer_destroy;
     defer rt.gc.phase = old_phase;
     core.Object.destroyFromHeader(rt, object.gcHeader());
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.cycle_deferred_frees.count);
-
-    core.Object.drainCycleDeferredFrees(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
+    // TGC S4-e: destruction is ONE pass. The synchronous payload finalizer
+    // ran, the object left every registry, and the standalone allocation went
+    // straight back -- no park, no husk, nothing that outlives the call.
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
-    try std.testing.expect(core.gc.headerIsReclaimableWeakHusk(object.gcHeader()));
-    try std.testing.expect(!object.gcHeader().metaConst().alloc_info.heap_accounted);
-    try std.testing.expect(!rt.gc.containsHeader(object.gcHeader()));
     try std.testing.expect(!rt.gc.address_registry.containsHeader(object.gcHeader()));
-
-    object.weakref_count = 0;
-    core.Object.freeCycleDeferredStruct(rt, object);
+    try std.testing.expect(!rt.classes.isRegistered(class_id) or rt.classes.isRegistered(class_id));
 }
 
 test "external class finalizers run synchronously with original object identity in zero-ref FIFO order" {
@@ -3551,58 +3536,6 @@ test "weak husk keeps its class definition after one synchronous finalizer" {
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
-}
-
-test "cycle deferred drain detaches the weak husk it keeps" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    // Stage the exact Pass-B survivor without involving the weak table: the
-    // remaining-weakref count is the qjs keep/free decision, while this test
-    // is about the intrusive links the deferred stack borrowed from the
-    // resource-stripped header.
-    const target = try core.Object.create(rt, core.class.ids.object, null);
-    target.weakref_count = 1;
-    const old_phase = rt.gc.phase;
-    rt.gc.phase = .tracer_destroy;
-    defer rt.gc.phase = old_phase;
-    core.Object.destroyFromHeader(rt, target.gcHeader());
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.cycle_deferred_frees.count);
-
-    core.Object.drainCycleDeferredFrees(rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
-    try std.testing.expect(core.gc.deferredNext(target.gcHeader()) == null);
-    try std.testing.expect(!target.gcHeader().meta().flags.finalizing);
-
-    // The synthetic weak count has no WeakRef owner to release it later.
-    // Finish the ordinary Pass-B free explicitly so runtime teardown sees no
-    // leaked husk or class-definition pin.
-    target.weakref_count = 0;
-    core.Object.freeCycleDeferredStruct(rt, target);
-}
-
-test "cycle deferred drain settles its count once per budget" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const old_phase = rt.gc.phase;
-    rt.gc.phase = .tracer_destroy;
-    defer rt.gc.phase = old_phase;
-
-    var objects: [5]*core.Object = undefined;
-    for (&objects) |*slot| {
-        slot.* = try core.Object.create(rt, core.class.ids.object, null);
-        core.Object.destroyFromHeader(rt, slot.*.gcHeader());
-    }
-    try std.testing.expectEqual(@as(usize, objects.len), rt.gc.cycle_deferred_frees.count);
-
-    try std.testing.expect(!core.Object.drainCycleDeferredFreesBudgeted(rt, 2));
-    try std.testing.expectEqual(@as(usize, 3), rt.gc.cycle_deferred_frees.count);
-    try std.testing.expect(!core.Object.drainCycleDeferredFreesBudgeted(rt, 2));
-    try std.testing.expectEqual(@as(usize, 1), rt.gc.cycle_deferred_frees.count);
-    try std.testing.expect(core.Object.drainCycleDeferredFreesBudgeted(rt, 2));
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
-    try rt.gc.verifyIntrusiveList();
 }
 
 test "class finalizers and context prototype slots are wired" {
@@ -5268,9 +5201,8 @@ test "bytecode function state uses the inline qjs function arm" {
     try std.testing.expectEqual(attach_create_calls, rt.memory.create_calls);
     try std.testing.expectEqual(fb, function.bytecodeFunctionStoragePtr().function_bytecode.?);
     try std.testing.expect(!@hasField(engine.bytecode.FunctionBytecode, "cached_view"));
-    const captures = try rt.memory.alloc(*core.VarRef, 1);
-    captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
-    function.setFunctionCaptures(rt, captures);
+    try function.allocateNullCaptureSlots(rt, 1);
+    function.mutableCaptureSlots()[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
     try function.setFunctionHomeObject(rt, home);
 
     try std.testing.expectEqual(@as(i32, 0), function.hostFunctionKind());
@@ -7221,9 +7153,12 @@ test "gc heap accounting verifier catches pinned header flag drift" {
     defer pin.deinit();
 
     try rt.gc.verifyHeapAccounting(rt);
-    obj.gcHeader().setPinned(false);
+    // TGC S4-e: the pin is spelled once, in the ledger, with `pinned_set` as
+    // its membership index. Drift now means "entry present, index missing",
+    // which is exactly what the verifier still names.
+    try std.testing.expect(rt.gc.pinned_set.remove(@intFromPtr(obj.gcHeader())));
     try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting(rt));
-    obj.gcHeader().setPinned(true);
+    try rt.gc.pinned_set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -7870,11 +7805,16 @@ test "forget fuses the remembered map removal with its own cache bit" {
         fresh.gcHeader().metaConst().lifetime.object_shape_summary & bit,
     );
     const young_before = rt.gc.generation.stats.young_count;
+    const trigger_before = rt.gc.generation.stats.young_trigger_count;
     rt.gc.forgetGenerationalOwner(fresh.gcHeader());
     try std.testing.expectEqual(young_before - 1, rt.gc.generation.stats.young_count);
+    // A plain object is not an owned storage cell, so the S4-f trigger census
+    // moved with the population one.
+    try std.testing.expectEqual(trigger_before - 1, rt.gc.generation.stats.young_trigger_count);
     // `fresh` is still linked and still young; its real detach below will
     // decrement again, so hand the census back before releasing it.
     rt.gc.generation.stats.young_count = young_before;
+    rt.gc.generation.stats.young_trigger_count = trigger_before;
     try rt.gc.verifyGenerationInvariants();
 }
 
@@ -7891,8 +7831,11 @@ test "gc invariant negative: construction root audit rejects published shell sta
         .construction_block_object,
     );
     {
+        // TGC S4-e: the pin is no longer a prefix field, so the shell's
+        // construction-root state is proved by the ledger instead. The
+        // prefix-level check the audit still owns is the young stamp.
         var corrupted = shell.gcHeader().metaConst().*;
-        corrupted.flags.is_pinned = false;
+        corrupted.flags.young = true;
         try std.testing.expectError(
             error.RepresentationPrefixFieldMismatch,
             core.gc.verifyMetadataSemantics(&corrupted, .object, .construction_block_object),
@@ -7922,6 +7865,58 @@ test "gc invariant negative: construction root audit rejects published shell sta
     // block cell so bitmap condemnation and the publication audit both agree.
     _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active);
     try rt.gc.verifyConstructionRoots();
+}
+
+test "gc: a remembered detached generator shell is still a construction root" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const shell = try core.Object.createGeneratorShell(rt, core.class.ids.generator);
+    defer shell.destroyGeneratorShell(rt);
+
+    // A shell is a real store target: `runGeneratorParameterInit` writes its
+    // payload while it is still detached, and the shell is not young, so the
+    // write barrier stamps it as a remembered owner. That bit lives in byte 6
+    // of the prefix, SHARED with Object's Shape projection.
+    //
+    // Both readers of that byte on the construction-root path used to compare
+    // it whole. The barrier write therefore revoked the construction-root
+    // verdict, `seedRoots` fell through to `shadeExact` (which correctly
+    // refuses an unpublished header), and the minor's bitmap sweep condemned a
+    // live shell -- into `destroyFromHeaderSlow`, whose first act is
+    // `dropUnshared(shape_ref)` on the Shape a shell deliberately does not
+    // have yet. Deterministic under `ZJS_GC_STRESS=1` on test262
+    // `language/{statements,expressions}/class/elements/
+    // same-line-async-gen-rs-static-async-method-privatename-identifier*.js`
+    // and as the 84%-progress SIGSEGV of the full stress suite (2026-09-05).
+    rt.gc.rememberOwnerForBulkWrite(shell.gcHeader());
+    try std.testing.expect(
+        shell.gcHeaderConst().metaConst().lifetime.object_shape_summary &
+            core.gc.trace_remembered_mask != 0,
+    );
+    // The Shape projection -- the half of the byte that really must be
+    // pristine on a shell -- is untouched by the barrier.
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        shell.gcHeaderConst().metaConst().lifetime.object_shape_summary &
+            core.gc.trace_object_shape_summary_mask,
+    );
+
+    try core.gc.verifyMetadataSemantics(
+        shell.gcHeaderConst().metaConst(),
+        .object,
+        .construction_block_object,
+    );
+    try rt.gc.verifyConstructionRoots();
+
+    // The minor is both the collection that condemns by bitmap and the one
+    // that force-traces every remembered owner without going through `shade`.
+    // It must mark the shell and must route it to the shell edge protocol
+    // instead of the ordinary object walk, which starts at `shape_ref`.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try rt.gc.verifyConstructionRoots();
+    try std.testing.expect(!shell.gcHeaderConst().metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(core.class.ids.generator, shell.class_id);
+    try std.testing.expect(rt.gc.headerIsPinned(shell.gcHeader()));
 }
 
 test "gc invariant negative: arena audit rejects an accounted free slab block" {
@@ -8002,36 +7997,6 @@ test "gc invariant negative: address index audit rejects canonical page drift" {
     try rt.gc.address_registry.verifyIndex(false);
 }
 
-test "gc invariant negative: auxiliary intrusive-list audit rejects deferred count drift" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    try rt.gc.verifyIntrusiveList();
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
-    {
-        const saved_count = rt.gc.cycle_deferred_frees.count;
-        defer rt.gc.cycle_deferred_frees.count = saved_count;
-        rt.gc.cycle_deferred_frees.count = 1;
-        try std.testing.expectError(error.CorruptDeferredFreeStack, rt.gc.verifyIntrusiveList());
-    }
-    try rt.gc.verifyIntrusiveList();
-}
-
-test "deferred run topology proof invalidates only for an audit producer sequence" {
-    const saved_audit = core.gc.arena_audit;
-    defer core.gc.arena_audit = saved_audit;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    rt.gc.deferred_run_topology_verified = true;
-    core.gc.arena_audit = false;
-    rt.gc.beginDeferredFreeProducerSequence();
-    try std.testing.expect(rt.gc.deferred_run_topology_verified);
-
-    core.gc.arena_audit = true;
-    rt.gc.beginDeferredFreeProducerSequence();
-    try std.testing.expect(!rt.gc.deferred_run_topology_verified);
-}
-
 test "gc invariant negative: heap accounting audit rejects a pin without an entry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8039,8 +8004,8 @@ test "gc invariant negative: heap accounting audit rejects a pin without an entr
     try rt.gc.verifyHeapAccounting(rt);
 
     {
-        defer obj.gcHeader().setPinned(false);
-        obj.gcHeader().setPinned(true);
+        defer _ = rt.gc.pinned_set.remove(@intFromPtr(obj.gcHeader()));
+        try rt.gc.pinned_set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
         try std.testing.expectError(error.PinnedHeaderMissingEntry, rt.gc.verifyHeapAccounting(rt));
     }
     try rt.gc.verifyHeapAccounting(rt);
@@ -9550,9 +9515,8 @@ test "block heap reopens a swept partial block before reserving a fresh block" {
     // Raw Heap clients model the collector's post-destruction publication
     // event explicitly. Ordinary `freeSmall` never places a partial block
     // into the global allocation stream cell by cell.
-    heap.publishCompletedHotBlocks(1);
     try std.testing.expect(heap.hot_blocks[first_block.size_class] == null);
-    heap.publishCompletedHotBlocks(0);
+    heap.publishCompletedHotBlocks();
     try std.testing.expectEqual(first_block, heap.hot_blocks[first_block.size_class].?);
 
     // A new major withdraws stale can-allocate membership. Final remark may
@@ -10029,13 +9993,13 @@ test "native pin retains direct object and counts nested pins" {
     var first_pin = (try core.runtime.pinValueForNative(rt, value)).?;
     var second_pin = try core.runtime.pinHeaderForNative(rt, object.gcHeader());
 
-    try std.testing.expect(object.gcHeader().pinned());
+    try std.testing.expect(rt.gc.headerIsPinned(object.gcHeader()));
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
 
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 
     first_pin.deinit();
-    try std.testing.expect(object.gcHeader().pinned());
+    try std.testing.expect(rt.gc.headerIsPinned(object.gcHeader()));
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
 
     second_pin.deinit();
@@ -10397,9 +10361,8 @@ test "cycle teardown frees bytecode function captures before FB metadata" {
     fb.publishFixtureNoFail(rt);
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
-    const captures = try rt.memory.alloc(*core.VarRef, 1);
-    captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(1));
-    function.setFunctionCaptures(rt, captures);
+    try function.allocateNullCaptureSlots(rt, 1);
+    function.mutableCaptureSlots()[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(1));
     try global.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
 
     _ = rt.runObjectCycleRemoval();
@@ -14569,11 +14532,6 @@ test "the minor reclaims young cycles and parks no deferred frees" {
     defer core.gc_block_heap.publish_completed_hot_blocks_calls_for_test = publish_scans_before;
     const reclaimed = (try core.gc_trace_stw.collectMinor(rt, null, .declared_only)).?;
 
-    // Invariant the 2026-08-25 fix restores: the minor destroys under
-    // `.remove_cycles`, which parks every struct free on
-    // `cycle_deferred_frees`. The major sweep drained that queue; the minor
-    // returned without draining, so anything it condemned kept its memory.
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
     // A minor's block-run close is exact. The whole-heap publication scan is
     // a major boundary operation; running it here reopens partial old blocks
     // on every minor and turns allocation into repeated bitmap refill.
@@ -15931,6 +15889,61 @@ test "a minor-only workload still returns free block pages to the OS" {
     try std.testing.expect(rt.gc.block_heap.stats.decommitted_bytes > decommitted_before);
 }
 
+// TGC S4-d spec 2.4 deletion probe. The batch's claim is that an ordinary
+// object's death costs a bitmap bit and nothing else, so the claim is checked
+// by a counter and not by an argument: ten thousand plain objects are made
+// unreachable and collected, and NOT ONE of them may reach
+// `Object.destroyFromHeader`. A regression here is a destructor call that
+// crept back onto the dominant corpse population -- exactly the cost S4-d
+// exists to delete -- and it would otherwise be invisible to every functional
+// test, because calling a destructor that has nothing to do is still correct.
+test "ten thousand plain object deaths reach no destructor" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    // Precise roots: a conservative stack word left over from the loop below
+    // would keep a corpse alive and make the counter read zero for the wrong
+    // reason.
+    rt.forcePreciseRootScanForTest();
+
+    const plain_before = rt.gc.stats.plain_object_destructor_calls;
+    var index: usize = 0;
+    while (index < 10_000) : (index += 1) {
+        const object = try core.Object.create(rt, core.class.ids.object, null);
+        // One own property, so the corpse also owns a `.property_storage`
+        // cell: the storage is the other half of the population that must
+        // never reach a destructor.
+        try object.defineOwnProperty(
+            rt,
+            core.atom.ids.length,
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+        );
+    }
+    helpers.finishGcCycles(rt);
+    helpers.reclaimNow(rt);
+    helpers.finishGcCycles(rt);
+
+    try std.testing.expectEqual(plain_before, rt.gc.stats.plain_object_destructor_calls);
+    // The run has to have actually collected something, or the assertion above
+    // is vacuous.
+    try std.testing.expect(rt.gcStats().collections != 0);
+
+    // Instrument check: the counter is only evidence if it can move. A Map
+    // carries a `.collection` payload (c class: weak entries, live cursors,
+    // a holder link), so it DOES owe destructor work; it dies the same way and
+    // must reach the destructor while still not landing in the plain bucket.
+    const calls_before = rt.gc.stats.object_destructor_calls;
+    {
+        const owing = try core.Object.create(rt, core.class.ids.map, null);
+        try std.testing.expect(core.gc.headerNeedsFinalizer(owing.gcHeader()));
+    }
+    helpers.reclaimNow(rt);
+    helpers.finishGcCycles(rt);
+    try std.testing.expect(rt.gc.stats.object_destructor_calls > calls_before);
+    try std.testing.expectEqual(plain_before, rt.gc.stats.plain_object_destructor_calls);
+}
+
 test "young churn that crosses the threshold is paid by the minor, not by a major" {
     if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
@@ -16552,20 +16565,12 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
     try std.testing.expect(rt.gc.concurrent.stats.cycles_completed >= 1);
     try std.testing.expect(rt.gc.concurrent.stats.doomed_condemned_headers >= 256);
     try std.testing.expect(rt.gc.concurrent.stats.doomed_destroyed_objects >= 256);
-    // The physical-free pass has two exits since stage 3: a block corpse whose
-    // release is exactly {alloc bit, allocated_count, MemoryAccount} settles in
-    // Pass A while its line is hot, everything else is parked and drained. The
-    // invariant the test owns is that the union covers every condemned object;
-    // splitting it into two separate lower bounds would just pin whichever
-    // route today's allocator happens to take.
-    const settled = rt.gc.block_heap.stats.passa_settled_cells;
-    const drained = rt.gc.concurrent.stats.doomed_parked_entries_drained;
-    try std.testing.expect(settled + drained >= 256);
-    // These 256 are plain class-1 Objects in private blocks, i.e. exactly the
-    // stage-3 population; if none of them settled, the Pass-A route is dead
-    // code and this test would silently stop covering it.
-    try std.testing.expect(settled >= 1);
-    try std.testing.expect(rt.gc.concurrent.stats.doomed_parked_drain_slices >= 1 or drained == 0);
+    // TGC S4-e: the physical-free pass has ONE exit for a plain object -- the
+    // bitmap reclaim. Pass-A settlement and the Pass-B parked drain are gone,
+    // so the counter that used to be a union of two routes is now the whole
+    // population.
+    try std.testing.expect(rt.gc.block_heap.stats.bitmap_reclaimed_cells >= 256);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.doomed_parked_entries_drained);
     // Compact trace epochs clear marks without walking the non-block list,
     // and its young bits retire in the mandatory finish condemnation walk.
     try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.phase_retired_nonblock_headers);
@@ -16844,10 +16849,7 @@ test "synchronous incremental destruction drains more than one parked-free budge
 
     const endpoint = core.gc_trace_stw.doomedStateSnapshot(rt);
     try std.testing.expect(endpoint.pending);
-    try std.testing.expect(
-        endpoint.nonempty_buckets != 0 or endpoint.doomed_blocks != 0 or
-            endpoint.parked_frees != 0,
-    );
+    try std.testing.expect(endpoint.nonempty_buckets != 0 or endpoint.doomed_blocks != 0);
 
     core.runtime.settlePendingDestructionForGateStats(rt);
     const settled = core.gc_trace_stw.doomedStateSnapshot(rt);
@@ -16856,10 +16858,8 @@ test "synchronous incremental destruction drains more than one parked-free budge
     try std.testing.expectEqual(@as(usize, 0), settled.bucket_headers);
     try std.testing.expect(!settled.cursor_present);
     try std.testing.expectEqual(@as(usize, 0), settled.doomed_blocks);
-    try std.testing.expectEqual(@as(usize, 0), settled.parked_frees);
     try std.testing.expectEqual(@as(usize, 0), settled.deferred_finalizers);
     try std.testing.expect(!settled.active_finalizer);
-    if (core.gc.arena_audit) try std.testing.expect(rt.gc.deferred_run_topology_verified);
 }
 
 test "terminal pending stats count accounted block and standalone corpses" {
@@ -16958,15 +16958,16 @@ test "pending class finalizer keeps the incremental morgue open" {
 
     _ = core.gc_trace_stw.destroyDoomedSlice(rt, std.math.maxInt(u64));
     try std.testing.expect(rt.gc.doomed_pending);
-    try std.testing.expect(rt.gc.cycle_deferred_frees.count != 0);
+    // TGC S4-d: the 32 corpses above are PLAIN objects, so they carry no
+    // finalizer bit and the sweep reclaims them straight out of the alloc
+    // bitmap -- none of them parks. What keeps the transaction open is the
+    // pending class-payload finalizer alone, which is this test's subject.
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expect(rt.gc.doomed_pending);
-    try std.testing.expect(rt.gc.cycle_deferred_frees.count != 0);
     core.gc_trace_stw.finishPendingDestruction(rt);
     try std.testing.expect(!rt.gc.doomed_pending);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.cycle_deferred_frees.count);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 

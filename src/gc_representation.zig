@@ -23,8 +23,8 @@ fn kindContract(comptime kind: gc.GcKind) []const u8 {
 
 fn objectLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "object head={d} align={d} body_from_handle={d} weakref_count={d} class_id={d} flags={d} shape_ref={d} prop_values={d} slots2_entries={d} slots2_body={d} physical={d} release_slots2_body=56 release_physical=64 arm_narrow={d} arm_wide={d}\n",
-        .{ @sizeOf(core.Object), @alignOf(core.Object), gc.bodyOffsetFromHeader(.object), @offsetOf(core.Object, "weakref_count"), @offsetOf(core.Object, "class_id"), @offsetOf(core.Object, "flags"), @offsetOf(core.Object, "shape_ref"), @offsetOf(core.Object, "prop_values"), core.Object.slots2_property_storage_offset, core.Object.objectBodyBytes(core.class.ids.object, true), gc.metadata_prefix_size + core.Object.objectBodyBytes(core.class.ids.object, true), core.Object.arm_min_bytes, core.Object.arm_max_bytes },
+        "object head={d} align={d} body_from_handle={d} flags={d} flags_bits={d} class_id={d} shape_ref={d} prop_values={d} slots2_entries={d} slots2_body={d} physical={d} release_slots2_body=56 release_physical=64 arm_narrow={d} arm_wide={d}\n",
+        .{ @sizeOf(core.Object), @alignOf(core.Object), gc.bodyOffsetFromHeader(.object), @offsetOf(core.Object, "flags"), @bitSizeOf(core.ObjectFlags), @offsetOf(core.Object, "class_id"), @offsetOf(core.Object, "shape_ref"), @offsetOf(core.Object, "prop_values"), core.Object.slots2_property_storage_offset, core.Object.objectBodyBytes(core.class.ids.object, true), gc.metadata_prefix_size + core.Object.objectBodyBytes(core.class.ids.object, true), core.Object.arm_min_bytes, core.Object.arm_max_bytes },
     );
 }
 
@@ -113,7 +113,7 @@ fn activeHeaderLayout() []const u8 {
 }
 
 fn lifetimeSemantics() []const u8 {
-    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/needs_finalizer/reserved:u8 for all carriers\n";
+    return "lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+reserved:u8 for all carriers\n";
 }
 
 pub const snapshot_text =
@@ -125,7 +125,7 @@ pub const snapshot_text =
     activeHeaderLayout() ++
     std.fmt.comptimePrint(
         "AllocInfo class_mask=0x{x:0>2} reserved=0x{x:0>2} accounted=0x{x:0>2} standalone=0x{x:0>2}\n" ++
-            "BlockFlags kind_mask=0x{x:0>2} young=0x{x:0>2} finalizing=0x20 pinned=0x40 cycle_visited=0x80\n" ++
+            "BlockFlags kind_mask=0x{x:0>2} young=0x{x:0>2} finalizing=0x20 needs_finalizer=0x40 cycle_visited=0x80\n" ++
             "carrier block_cell_class=0x{x:0>2} slab_class_range=0..{d} standalone_class=0\n" ++
             "free_cell link_mask=0x{x:0>8} poison=0x{x:0>8} encoded_word=poison|(next&link_mask)\n",
         .{
@@ -148,7 +148,7 @@ pub const snapshot_text =
     "alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell\n" ++
     "flags.kind valid for Metadata kinds; string/rope are one allocation family with distinct kinds and distinct JSValue tags\n" ++
     "flags.kind string_buffer is a bare code-unit carrier of that same family: no JSValue names it, no edges, no destructor\n" ++
-    "flags.young/finalizing/pinned/cycle_visited valid for registry kinds only\n" ++
+    "flags.young/finalizing/needs_finalizer/cycle_visited valid for registry kinds only\n" ++
     lifetimeSemantics() ++
     "\n[kind-contracts]\n" ++
     kindContract(.object) ++

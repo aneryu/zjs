@@ -4608,19 +4608,11 @@ pub const function_bytecode = struct {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
         const layout_value = self.layout();
         self.deinitWithLayout(rt, layout_value);
-        // Cycle removal and runtime deinit both defer the struct-free until all
-        // sibling resource destructors have released their edges.
-        if (rt.gc.phase == .deinit) {
-            rt.gc.deferCycleStructFree(header);
-            return;
-        }
+        // TGC S4-e spec 2.5: no Pass-B deferral. Runtime teardown already
+        // holds every FunctionBytecode back until all object resource passes
+        // have run (`Registry.deinit` phase 2), which is the ordering the
+        // park used to express here.
         rt.memory.destroyWithFam(FunctionBytecodeImpl, self, layout_value.famBytes());
-    }
-
-    pub fn freeCycleDeferredStruct(rt: anytype, header: *gc.Header) void {
-        const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
-        // deinit intentionally preserves the two physical-tail presence bits.
-        rt.memory.destroyWithFam(FunctionBytecodeImpl, self, self.famBytes());
     }
     pub const FunctionBytecode = FunctionBytecodeImpl;
 };

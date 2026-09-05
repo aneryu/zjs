@@ -256,6 +256,19 @@ const ConcurrentState = concurrent.State;
 /// further, and that trade is measurable once the block space lands.
 pub const minor_young_threshold: usize = 16 * 1024;
 
+/// TGC S4-f (2): superblocks a minor's hot-block publication slice visits
+/// (`Heap.publishCompletedHotBlocksSlice`). Eight 2 MiB superblocks is at most
+/// 256 block headers, i.e. a bounded tens-of-microseconds addition to a pause
+/// whose measured p50 is already hundreds of microseconds -- and it makes the
+/// whole superblock array's coverage period `ceil(superblocks / 8)` minors,
+/// which on every workload measured is one to two dozen.
+///
+/// A whole-heap walk per minor was the alternative and is what this constant
+/// exists to refuse: earley-boyer runs 9k-13k minors over ~3.5k populated
+/// blocks, so the unbounded form is a 50M-block-visit tax on the one path that
+/// must stay short.
+pub const minor_hot_publish_superblock_budget: usize = 8;
+
 /// The young set a crossed whole-heap threshold needs before a minor is run
 /// ahead of the major (`Registry.shouldTryMinorBeforeMajor`).
 ///
@@ -496,6 +509,28 @@ pub inline fn kindIsPrefixCarrier(kind: RefKind) bool {
     };
 }
 
+/// Storage cells whose life is decided entirely by ONE owner: an object's
+/// external property buffer, an array/arguments element buffer, an a-class
+/// payload and a rope's tail buffer. They have no independent reachability --
+/// no root names them, no second object may hold them -- so they are not an
+/// independent young POPULATION either, and counting them towards the minor
+/// TRIGGER prices the owner's growth as if it were new garbage.
+///
+/// S4-b/c/S2-i moved all four into the block heap and regexp's minor count
+/// went 641 -> 913 with an unchanged live set: the extra 272 minors were
+/// bought entirely by property/array/payload/tail-buffer publications, each of
+/// which a minor can only reclaim by tracing its owner anyway.
+///
+/// They stay in `young_count` (the census `verifyGenerationInvariants` checks
+/// and the young list/extent walks enumerate); only
+/// `Stats.young_trigger_count` excludes them.
+pub inline fn kindIsOwnedStorageCell(kind: RefKind) bool {
+    return switch (kind) {
+        .property_storage, .array_storage, .payload, .string_buffer => true,
+        .string, .rope, .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
+    };
+}
+
 /// Prefix carriers that can exceed the block-cell ceiling and therefore take
 /// the extent route (`memory.createExtent`): their mark, their finalizer
 /// column and their sweep live in the block heap's extent tables rather than
@@ -691,8 +726,8 @@ pub const BlockFlags = packed struct(u8) {
     kind: GcKind = .object,
     /// Padding: former `in_cycle_list`. Membership is the cyclic list itself
     /// (qjs `list_add_tail` / `list_del`, quickjs.c:6545/6548). Kept so
-    /// `finalizing` / `is_pinned` / `cycle_visited` stay at their historical
-    /// bit positions — `memory.zig` writes this flags byte by layout.
+    /// `finalizing` / `cycle_visited` stay at their historical bit positions
+    /// — `memory.zig` writes this flags byte by layout.
     /// Was `in_cycle_list`, then padding. Now carries the sticky generation
     /// bit: set on publication, cleared when a collection lets the object
     /// survive. It lives here rather than in a side table because a hash-map
@@ -703,7 +738,21 @@ pub const BlockFlags = packed struct(u8) {
     /// this byte still lands where it always did.
     young: bool = false,
     finalizing: bool = false,
-    is_pinned: bool = false,
+    /// TGC S4-a/S4-e: this carrier's death owes a destructor call (an external
+    /// resource, a weak identity, a cursor, a borrowed holder, an atom
+    /// binding). S4-d's sweep visits `doomed & needs_finalizer` only; every
+    /// other corpse is reclaimed by clearing its allocation bit without the
+    /// header ever being read. Block cells carry the same fact in
+    /// `Block.finalizerBits` so the sweep can scan a whole block without
+    /// touching a single header.
+    ///
+    /// S4-a parked it in the lifetime tail because the flags byte had no spare
+    /// while `is_pinned` lived here; S4-e retired `is_pinned` (the pin ledger
+    /// `pin_entries` was always the authority) and the bit moved into the
+    /// vacated position, which is spec 2.1's terminal layout.
+    ///
+    /// D-S4-4: set-only. Cleared only when the cell itself is released.
+    needs_finalizer: bool = false,
     /// Condemned-garbage flag after gc_scan. qjs derives the same state from
     /// `tmp_obj_list` membership; query sites (`headerIsCycleGarbage`, realm
     /// walk, var_ref release) cannot walk the list, so the bit stays.
@@ -735,27 +784,14 @@ pub const AllocInfo = packed struct(u8) {
 pub const MarkStack = mark_queue.MarkStack;
 
 /// Tracer-owned lifetime state in the tail of Metadata. Epoch 0 is reserved
-/// for newborn/unmarked; the Registry epoch starts at 1. Husk is orthogonal to
-/// marking: a weak object can outlive the major that stripped its resources,
-/// so its death state must not alias an epoch value.
+/// for newborn/unmarked; the Registry epoch starts at 1.
+/// TGC S4-e: the lifetime tail's flag byte is empty. `husk` retired with the
+/// weak husk and `needs_finalizer` moved into `BlockFlags` when `is_pinned`
+/// vacated its bit; the byte stays as reserved padding so `TraceHeaderState`
+/// keeps its four-byte extern layout and every "reserved must be zero" header
+/// check keeps a field to read.
 pub const TraceHeaderFlags = packed struct(u8) {
-    husk: bool = false,
-    /// TGC S4-a: this carrier's death owes a destructor call (an external
-    /// resource, a weak identity, a cursor, a borrowed holder, an atom
-    /// binding). S4-d's sweep visits `doomed & needs_finalizer` only; every
-    /// other corpse is reclaimed by clearing its allocation bit without the
-    /// header ever being read.
-    ///
-    /// Spec 2.1 puts this bit in `BlockFlags`, in the position the retired
-    /// `mark` bit held. That position is now the kind's fourth bit, and the
-    /// flags byte has no spare while `is_pinned` / `cycle_visited` live
-    /// (they retire in S4-e), so the bit lives in the lifetime tail instead.
-    /// Same eight-byte prefix, same cache line; S4-e can move it back when
-    /// the flags byte frees two bits.
-    ///
-    /// D-S4-4: set-only. Nothing sets it in S4-a.
-    needs_finalizer: bool = false,
-    reserved: u6 = 0,
+    reserved: u8 = 0,
 };
 
 /// Offset-6 byte ownership under trace_stw. Object's Shape projection owns the
@@ -777,7 +813,8 @@ pub const TraceHeaderState = extern struct {
 };
 
 /// qjs-style block-prefix metadata. The allocator-owned first four bytes keep
-/// the JSMallocBlockHeader ABI. The tail stores mark epoch and husk state.
+/// the JSMallocBlockHeader ABI. The tail stores the mark epoch and the
+/// finalizer-debt bit.
 /// For slab-backed objects these 8 bytes ARE the allocator block header;
 /// persistent/over-aligned objects keep a standalone prefix.
 pub const Metadata = extern struct {
@@ -819,7 +856,7 @@ comptime {
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .rope })) == @intFromEnum(GcKind.rope));
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .young = true })) == representation.metadata_young_mask);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .finalizing = true })) == 1 << 5);
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .is_pinned = true })) == 1 << 6);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .needs_finalizer = true })) == 1 << 6);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .cycle_visited = true })) == 1 << 7);
     // The kind occupies the low nibble; the raw readers mask with it.
     std.debug.assert(@bitSizeOf(GcKind) == 4);
@@ -939,13 +976,6 @@ pub const TraceHeader = extern struct {
         self.next_non_object = next;
     }
 
-    pub fn pinned(self: *const TraceHeader) bool {
-        return self.metaConst().flags.is_pinned;
-    }
-
-    pub fn setPinned(self: *TraceHeader, value: bool) void {
-        self.meta().flags.is_pinned = value;
-    }
 };
 
 /// Byte size of the prefix reserved ahead of every flat `String` and
@@ -999,79 +1029,23 @@ comptime {
         std.debug.assert(bodyOffsetFromHeader(kind) == 8);
 }
 
-/// Parked Object corpses keep their scalar word readable through Pass B, so
-/// their temporary successor occupies the already-dead Shape word at body+8.
-/// Non-Object corpses retain the ordinary TraceHeader successor.
+/// TGC S4-e: the Pass-B park is gone, and with it the temporary successor
+/// that used the dead Shape word at body+8. The constant survives as the
+/// Object head's layout pin: `shape_ref` sits here, and the M-terminal head
+/// assertions name this offset rather than an unexplained literal 8.
 pub const object_deferred_link_body_offset: usize = 8;
-
-inline fn deferredLinkSlot(header: *GCObjectHeader) *?*GCObjectHeader {
-    if (header.metaConst().flags.kind == .object)
-        return @ptrFromInt(@intFromPtr(header) + if (mCutInjection(1)) 0 else object_deferred_link_body_offset);
-    return &header.next_non_object;
-}
-
-pub inline fn deferredNext(header: *const GCObjectHeader) ?*GCObjectHeader {
-    return deferredLinkSlot(@constCast(header)).*;
-}
-
-/// Deferred successor when the caller has already proven `kind`; skips the
-/// per-corpse kind reload of `deferredLinkSlot` on the drain hot loops.
-pub inline fn deferredNextForKind(header: *const GCObjectHeader, kind: GcKind) ?*GCObjectHeader {
-    if (kind == .object) {
-        const slot: *?*GCObjectHeader = @ptrFromInt(@intFromPtr(header) + if (mCutInjection(1)) 0 else object_deferred_link_body_offset);
-        return slot.*;
-    }
-    return header.next_non_object;
-}
-
-pub inline fn setDeferredNext(header: *GCObjectHeader, next: ?*GCObjectHeader) void {
-    deferredLinkSlot(header).* = next;
-}
-
-pub inline fn headerIsHusk(h: *const Header) bool {
-    return h.metaConst().lifetime.flags.husk;
-}
 
 /// TGC S4-a: does this carrier's death owe a destructor call?
 /// The header bit is the authority for extents and non-block kinds; block
 /// cells carry the same fact in `Block.finalizerBits` so the sweep can scan
 /// a whole block without touching a single header.
 pub inline fn headerNeedsFinalizer(h: *const Header) bool {
-    return h.metaConst().lifetime.flags.needs_finalizer;
-}
-
-/// True when dropping the last WeakRef may reclaim the resource-stripped
-/// object struct. There is an explicit state bit for it, and tracer-owned
-/// objects never go through the zero-ref queue.
-pub inline fn headerIsReclaimableWeakHusk(h: *const Header) bool {
-    std.debug.assert(h.metaConst().flags.kind == .object);
-    return h.metaConst().lifetime.flags.husk;
-}
-
-pub inline fn setHeaderWeakHusk(h: *Header) void {
-    std.debug.assert(h.metaConst().flags.kind == .object);
-    {
-        std.debug.assert(!h.metaConst().alloc_info.heap_accounted);
-        std.debug.assert(h.metaConst().lifetime.flags.reserved == 0);
-        // I4 ordering pin. The whole-byte store below also erases the
-        // remembered-owner cache bit, so it MUST run after the object has left
-        // the remembered map (`unregisterObjectWithBytes` ->
-        // `forgetGenerationalOwner`). Hoisting husk marking above that
-        // deregistration would leave bit=0/map=1 and make the forget-side skip
-        // strand a dangling address -- silently, since nothing else reads the
-        // bit on this path. Assert the invariant here instead.
-        std.debug.assert(h.metaConst().lifetime.object_shape_summary & trace_remembered_mask == 0);
-        // Resource teardown has already released and replaced shape_ref. A
-        // husk has no property graph, so do not retain a stale body projection.
-        h.meta().lifetime.object_shape_summary = 0;
-        h.meta().lifetime.flags.husk = true;
-    }
+    return h.metaConst().flags.needs_finalizer;
 }
 
 inline fn assertInitialHeaderLifetime(h: *const Header) void {
     const state = h.metaConst().lifetime;
     std.debug.assert(state.mark_epoch == 0);
-    std.debug.assert(!state.flags.husk);
     std.debug.assert(state.flags.reserved == 0);
     // Only the Object-owned low seven bits must be newborn-zero. Bit7 is the
     // remembered-owner lease (audit §10) and a carrier can legitimately hold it
@@ -1264,41 +1238,6 @@ fn verifyCircularHeaderList(
     return count;
 }
 
-/// Allocation-free temporary intrusive list for cycle partitioning and
-/// Pass-B struct deferral. Non-Object kinds reuse their TraceHeader successor;
-/// Object uses the dead Shape word so its scalar word remains readable until
-/// the Pass-B weak-husk/class/free decision.
-pub const DeferredFreeStack = struct {
-    head: ?*GCObjectHeader = null,
-    count: usize = 0,
-
-    pub fn push(self: *DeferredFreeStack, header: *GCObjectHeader) void {
-        const object_scalar_before: u64 = if (comptime builtin.is_test)
-            (if (header.metaConst().flags.kind == .object)
-                @as(*const u64, @ptrCast(@alignCast(header))).*
-            else
-                0)
-        else
-            0;
-        setDeferredNext(header, self.head);
-        if (mCutInjection(1) and header.metaConst().flags.kind == .object and
-            @as(*const u64, @ptrCast(@alignCast(header))).* != object_scalar_before)
-        {
-            @panic("gc: M-CUT PARKED LINK: Object scalar word was used as successor");
-        }
-        self.head = header;
-        self.count += 1;
-    }
-
-    pub fn pop(self: *DeferredFreeStack) ?*GCObjectHeader {
-        const header = self.head orelse return null;
-        self.head = deferredNext(header);
-        setDeferredNext(header, null);
-        self.count -= 1;
-        return header;
-    }
-};
-
 /// Header-external membership authority for published `.object` allocations
 /// that are not served by the block heap. Block objects are enumerated by the
 /// block allocation bitmap; every other traced kind remains on `gc_obj_list`.
@@ -1413,10 +1352,6 @@ pub const InvariantError = error{
     DoomedBucketKindMismatch,
     DoomedPendingMismatch,
     DoomedCursorMismatch,
-    CorruptDeferredFreeStack,
-    DeferredFreeRunInterleaved,
-    DeferredBlockCellInvariant,
-    DeferredFreeAuditOutOfMemory,
     ConstructionRootStateMismatch,
     RepresentationKindMismatch,
     RepresentationAllocationCarrierMismatch,
@@ -1486,7 +1421,7 @@ pub fn verifyMetadataSemantics(
                 return error.RepresentationPrefixFieldMismatch;
             {
                 const lifetime = meta.lifetime;
-                if (lifetime.flags.husk or lifetime.flags.reserved != 0)
+                if (lifetime.flags.reserved != 0)
                     return error.RepresentationPrefixFieldMismatch;
                 // The low seven bits are Object's Shape projection and must
                 // stay zero on every other carrier. Bit7 is the remembered
@@ -1502,15 +1437,21 @@ pub fn verifyMetadataSemantics(
             }
         },
         .construction_block_object => {
+            // TGC S4-d: `needs_finalizer` is deliberately NOT in this set. A
+            // construction shell can already owe destructor work -- the
+            // generator shell stamps itself c-class before it becomes a
+            // construction root -- and the bit only ever goes on (D-S4-4),
+            // so it carries no information about construction state.
+            // Same shared-byte rule as `isConstructionRoot`: only the Shape
+            // projection must be pristine. Bit7 is the remembered cache and a
+            // shell that took a barrier write carries it legitimately.
             const initial_lifetime = meta.lifetime.mark_epoch == 0 and
-                meta.lifetime.object_shape_summary == 0 and
-                !meta.lifetime.flags.husk and
-                !meta.lifetime.flags.needs_finalizer and
+                meta.lifetime.object_shape_summary & trace_object_shape_summary_mask == 0 and
                 meta.lifetime.flags.reserved == 0;
             if (expected_kind != .object or !is_block_cell or
                 meta.alloc_info.heap_accounted or meta.alloc_info.standalone or
                 meta.flags.young or
-                meta.flags.finalizing or !meta.flags.is_pinned or
+                meta.flags.finalizing or
                 meta.flags.cycle_visited or !initial_lifetime)
             {
                 return error.RepresentationPrefixFieldMismatch;
@@ -1574,6 +1515,20 @@ pub const GeStats = struct {
     threshold_growth_hits: usize = 0,
     threshold_floor_hits: usize = 0,
     last_request_reason: ?RequestReason = null,
+
+    /// TGC S4-d deletion probe (spec 2.4) and its reverse audit (spec 6).
+    ///
+    /// `object_destructor_calls` counts every `Object.destroyFromHeader`
+    /// entry. `plain_object_destructor_calls` is the bucket this batch exists
+    /// to drive to ZERO: `class_id == object`, no class payload, no finalizer
+    /// bit -- a plain object the sweep should have reclaimed from the bitmap
+    /// without ever touching its header.
+    /// `plain_objects_with_finalizer_bit` is the reverse audit: a plain,
+    /// payload-free object that nevertheless carries the bit (the sticky-bit
+    /// residue allowed by D-S4-4).
+    object_destructor_calls: usize = 0,
+    plain_object_destructor_calls: usize = 0,
+    plain_objects_with_finalizer_bit: usize = 0,
 };
 
 pub const Stats = struct {
@@ -1687,34 +1642,26 @@ pub const Registry = struct {
     next_external_token_id: u64 = 1,
     pin_entries: []PinEntry = &.{},
     pin_entries_capacity: usize = 0,
+    /// TGC S4-e spec 2.5: membership index for `pin_entries`.
+    ///
+    /// Pinning used to be spelled twice -- a ledger entry AND a header bit --
+    /// and the bit existed only so the sweep's eleven read points could ask
+    /// "is this pinned?" without the ledger's linear search. The ledger is the
+    /// authority (`verifyHeapAccounting` checks the bit against it, never the
+    /// other way round), so the header bit was a cache; this is the same cache
+    /// with the header left alone, which is what freed `BlockFlags` bit 6 for
+    /// `needs_finalizer`.
+    ///
+    /// Kept exactly in step with `pin_entries` by the four mutators below, so
+    /// `count()` is `pin_entries.len` and the empty-heap case -- the normal
+    /// one -- costs a single load and branch, like the bit did.
+    pinned_set: std.AutoHashMapUnmanaged(usize, void) = .empty,
 
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
     major_request: Request = .{},
     stats: GeStats = .{},
 
-    // Pass-B struct-free deferral for cycle removal (qjs gc_zero_ref_count_list,
-    // quickjs.c:6382/6797): during JS_GC_PHASE_REMOVE_CYCLES an object's
-    // resources are torn down but its struct memory survives until every sibling
-    // in the batch has run, so a sibling finalizer/decref never dereferences a
-    // freed struct. The batch driver drains this list after the resource pass.
-    /// Structs whose resources are gone and whose storage waits for pass B.
-    ///
-    /// A singly-linked LIFO. Nothing removes from the middle -- park at one end, drain from
-    /// the same end -- and a doubly-linked splice per corpse is five memory
-    /// operations where one suffices. The queue carries every destroyed
-    /// object: 41 M of them on raytrace, 72 M on earley-boyer, and the drain
-    /// measured at 34% of destruction's stopped time.
-    ///
-    /// Order does not matter here. Pass A already ran every destructor in
-    /// the kind order that does matter; pass B only hands storage back.
-    cycle_deferred_frees: DeferredFreeStack = .{},
-    /// The arena-audit topology proof is invalidated once when a Pass-A
-    /// producer sequence opens and remains valid while Pass B only removes a
-    /// prefix. Do not invalidate this in `deferCycleStructFree`: that is one
-    /// production-path store per corpse for a checker that only runs under
-    /// `ZJS_GC_ARENA_AUDIT`.
-    deferred_run_topology_verified: bool = false,
     /// Set only around `JSRuntime.deinit`'s teardown collections. The host has
     /// by contract released every handle and no mutator frame is live, so those
     /// collections are entitled to the precise root scan that
@@ -1811,24 +1758,46 @@ pub const Registry = struct {
         if (heap_accounting_oracle_enabled) .{} else {},
     /// 64 KiB block heap.
     block_heap: BlockHeap = .init(std.heap.page_allocator),
-    /// R3 conservative-only root census; void outside the diag build so the
-    /// shipped Registry layout is untouched.
-    roots_diag: if (roots_diag_enabled) conservative_mod.RootsDiagCensus else void =
-        if (roots_diag_enabled) .{} else {},
+    // The R3 conservative-only root census is deliberately NOT a field here.
+    // It lives in `gc_conservative`'s `.bss`: as a Registry field it was part
+    // of `JSRuntime`, and changing its size changed the runtime's footprint,
+    // the allocator's threshold crossing and therefore how many collections a
+    // workload runs -- a diagnosis that moves collection timing measures
+    // itself. See `gc_conservative.RootsDiagCensus`.
+
+    /// Backing allocator for the block heap's 2 MiB superblocks, large
+    /// extents and side tables.
+    ///
+    /// Shipped builds take these straight from the OS: the memory is not
+    /// JS-visible, so charging it to the account would double-count the
+    /// cells the heap then hands out, and the mapping cost has nothing to do
+    /// with the JS heap limit.
+    ///
+    /// Test builds must nevertheless route it through
+    /// `MemoryAccount.backing_allocator` -- the *unaccounted* raw allocator
+    /// the account itself sits on. Everything the tracing collector moved
+    /// into the block heap (S2: the string family; S4-b: property storage
+    /// and array element buffers) is otherwise invisible to
+    /// `std.testing.checkAllAllocationFailures` and to
+    /// `OneShotFailingAllocator`, because `page_allocator` is not the
+    /// injector. That silently shrank the OOM tier's reach as the migration
+    /// progressed (`docs/tracing-gc-s3-spec.md` §7, "Nightly tier 验证":
+    /// the export-name-lookahead canary's injectable window collapsed from
+    /// >8 to 6). Going through `backing_allocator` rather than `allocator`
+    /// keeps the byte accounting and the memory-limit semantics identical to
+    /// the shipped build, so only the injection surface changes.
+    const block_heap_uses_account_backing = builtin.is_test;
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         readStressFromEnv();
         return .{
             .memory = account,
             .policy = policy,
-            // Off the JS heap deliberately. Backing the block heap with the
-            // account allocator means OOM injection reaches it, and a
-            // rollback then tears down structures whose allocation never
-            // succeeded -- which is what the Realm-construction canary
-            // caught. Its memory is not JS-visible, so it does not belong on
-            // the injected path in the first place.
             .block_heap = if (comptime block_heap_enabled)
-                BlockHeap.init(std.heap.page_allocator)
+                BlockHeap.init(if (comptime block_heap_uses_account_backing)
+                    account.backing_allocator
+                else
+                    std.heap.page_allocator)
             else {},
         };
     }
@@ -1841,64 +1810,6 @@ pub const Registry = struct {
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
         for (&self.doomed_by_kind) |*head| listInit(head);
-        self.cycle_deferred_frees = .{};
-        if (comptime block_heap_enabled) self.deferred_run_topology_verified = false;
-    }
-
-    /// Park a resource-stripped GC object's struct for the Pass-B drain. The
-    /// header is already unlinked from the GC object list by the resource pass.
-    pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
-        header.meta().flags.finalizing = true;
-        self.cycle_deferred_frees.push(header);
-    }
-
-    /// Open one Pass-A producer sequence for the deferred-free stack. Pass A
-    /// completes before any Pass-B drain, so one audit-only invalidation covers
-    /// every park in the sequence without taxing every dead object.
-    pub inline fn beginDeferredFreeProducerSequence(self: *Registry) void {
-        if (arena_audit) self.deferred_run_topology_verified = false;
-    }
-
-    /// Prove the implicit Pass-B block-run representation before its first
-    /// consumer slice. A nested destructor park may legally use the same
-    /// header stack, but it must not split a block run or insert a generic
-    /// header into the block suffix. Finding either shape is the explicit
-    /// signal to stop and review the reentrancy before introducing the
-    /// per-run-descriptor fallback described by the joint design.
-    pub fn verifyDeferredFreeRunTopology(self: *Registry) InvariantError!void {
-        if (!arena_audit or self.deferred_run_topology_verified) return;
-
-        var seen_blocks: std.AutoHashMapUnmanaged(usize, void) = .empty;
-        defer seen_blocks.deinit(std.heap.page_allocator);
-        var saw_block_suffix = false;
-        var current_block_base: ?usize = null;
-        var cursor = self.cycle_deferred_frees.head;
-        while (cursor) |header| : (cursor = deferredNext(header)) {
-            if (!isBlockCellHeader(header)) {
-                if (saw_block_suffix) return error.DeferredFreeRunInterleaved;
-                continue;
-            }
-            saw_block_suffix = true;
-            if (header.metaConst().flags.kind != .object or
-                !header.metaConst().flags.finalizing)
-            {
-                return error.DeferredBlockCellInvariant;
-            }
-            const cell_addr = @intFromPtr(header) - metadata_prefix_size;
-            const block = self.block_heap.blockOf(@ptrFromInt(cell_addr)) orelse
-                return error.DeferredBlockCellInvariant;
-            const cell_index = block.cellIndex(cell_addr) orelse
-                return error.DeferredBlockCellInvariant;
-            if (!block.cellAllocated(cell_index)) return error.DeferredBlockCellInvariant;
-
-            const block_base = @intFromPtr(block);
-            if (current_block_base == block_base) continue;
-            if (seen_blocks.contains(block_base)) return error.DeferredFreeRunInterleaved;
-            seen_blocks.put(std.heap.page_allocator, block_base, {}) catch
-                return error.DeferredFreeAuditOutOfMemory;
-            current_block_base = block_base;
-        }
-        self.deferred_run_topology_verified = true;
     }
 
     pub fn deinit(self: *Registry, rt: anytype) void {
@@ -2008,7 +1919,7 @@ pub const Registry = struct {
 
         // Phase 2: every closure has consumed its FB-owned capture count. FB
         // resources may now release constant-pool object edges; Object structs
-        // remain parked in cycle_deferred_frees until after Shape teardown.
+        // are freed by their own destructors.
         while (held_function_bytecodes) |h| {
             const next = h.nextNonObject();
             h.setNextNonObject(null);
@@ -2023,7 +1934,7 @@ pub const Registry = struct {
             const next = h.nextNonObject();
             h.setNextNonObject(null);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
-            var_ref.VarRef.freeCycleDeferredStruct(rt, h);
+            var_ref.VarRef.freeStruct(rt, h);
             held_var_refs = next;
         }
 
@@ -2038,15 +1949,16 @@ pub const Registry = struct {
             held_shapes = next;
         }
 
-        // Phase 5: all resource destructors and late Shape releases are done;
-        // reclaim the parked Object/FunctionBytecode structs.
-        object.Object.drainCycleDeferredFrees(rt);
+        // TGC S4-e spec 2.5: there is no phase 5. Object and FunctionBytecode
+        // structs are freed by their own destructors in phases 1 and 2; the
+        // holding stacks above are what order teardown, and Shape destruction
+        // reads no Object field (`Registry.destroyShape` frees the FAM and
+        // unlinks by stored hash).
         rt.shapes.deinit();
 
         listInit(&self.gc_obj_list);
         listInit(&self.tmp_obj_list);
 
-        std.debug.assert(self.cycle_deferred_frees.count == 0);
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
         } else if (self.external_tokens.len != 0) {
@@ -2061,6 +1973,7 @@ pub const Registry = struct {
         }
         self.pin_entries = &.{};
         self.pin_entries_capacity = 0;
+        self.pinned_set.deinit(self.memory.persistent_allocator);
 
         // TGC S2: string carriers that survived the host-quiescent teardown
         // collections (atom-table roots) leave through the same unpublish +
@@ -2486,7 +2399,6 @@ pub const Registry = struct {
     ) void {
         assertInitialHeaderLifetime(h);
         std.debug.assert(!h.meta().flags.finalizing);
-        std.debug.assert(!h.meta().flags.is_pinned);
         std.debug.assert(!h.meta().flags.cycle_visited);
         std.debug.assert(!h.meta().alloc_info.heap_accounted);
         // String-family carriers have no TraceHeader link word (the body
@@ -2700,6 +2612,12 @@ pub const Registry = struct {
         if (header.meta().alloc_info.standalone) header.meta().size_class = 0;
     }
 
+    /// Is `header` pinned? The ledger's membership index, not a header read.
+    pub inline fn headerIsPinned(self: *const Registry, header: *const GCObjectHeader) bool {
+        if (self.pinned_set.count() == 0) return false;
+        return self.pinned_set.contains(@intFromPtr(header));
+    }
+
     pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
         if (self.pinEntryIndex(header)) |index| {
             std.debug.assert(self.pin_entries[index].count != construction_pin_count);
@@ -2707,12 +2625,14 @@ pub const Registry = struct {
             return;
         }
         try self.ensurePinEntryCapacity(self.pin_entries.len + 1);
+        // Fallible step first: the array commit below must not be able to
+        // leave the ledger and its index disagreeing.
+        try self.pinned_set.put(self.memory.persistent_allocator, @intFromPtr(header), {});
         self.pin_entries.ptr[self.pin_entries.len] = .{
             .header = header,
             .count = 1,
         };
         self.pin_entries = self.pin_entries.ptr[0 .. self.pin_entries.len + 1];
-        header.setPinned(true);
     }
 
     pub fn unpinHeader(self: *Registry, header: *GCObjectHeader) void {
@@ -2730,7 +2650,7 @@ pub const Registry = struct {
             );
         }
         self.pin_entries = self.pin_entries[0 .. self.pin_entries.len - 1];
-        header.setPinned(false);
+        _ = self.pinned_set.remove(@intFromPtr(header));
     }
 
     // Production heap_live_bytes / old_live_bytes / large_object_bytes are
@@ -2842,6 +2762,74 @@ pub const Registry = struct {
     ///
     /// The extent twin is the storage arm of `string.destroyDeadStringExtent`,
     /// which is handed `user_bytes` by `Heap.sweepExtents`.
+    /// TGC S4-d spec 2.4: retire every condemned cell of `block` that owes no
+    /// destructor, after the finalizer subset has been drained and the block
+    /// has left the doomed list.
+    ///
+    /// Production does this with WORD ARITHMETIC and never reads a header. The
+    /// only header fact a free block cell owes anyone is `heap_accounted`, and
+    /// every production reader of it (`Table.containsHeader`, both
+    /// conservative resolvers, `clearYoungMarksStw`) tests the ALLOC BITMAP
+    /// first, so a stale byte behind a cleared alloc bit is unobservable. The
+    /// bytes were debited in one stroke at condemnation
+    /// (`DoomedSnapshot.bitmap_bytes`).
+    ///
+    /// Two cold cases still walk the cells:
+    ///   * audit builds, which own an independent publish/unpublish oracle and
+    ///     a carrier lifecycle state machine that must see every retirement;
+    ///   * a non-empty remembered map, which is keyed by header ADDRESS -- a
+    ///     recycled cell left in it would be re-traced by the next minor.
+    ///     Empty is the steady state (earley-boyer holds two entries; a major
+    ///     retires the whole map at cycle begin).
+    pub fn reclaimDoomedBlock(self: *Registry, block: *BlockHeapMod.Block) usize {
+        const audit_walk = comptime lifecycle_state_enabled;
+        if (audit_walk or self.generation.rememberedCount() != 0) {
+            const accounted = block.cell_size - metadata_prefix_size;
+            const cells_base = @intFromPtr(block) + block.cells_offset + metadata_prefix_size;
+            const cell_size: usize = block.cell_size;
+            // TGC S4-g (4): word arithmetic, and one prefetch pass per word.
+            //
+            // The old shape asked `isDoomed(index)` for every INDEX, which
+            // re-derived the bitmap base and re-loaded the same word up to 64
+            // times to answer a question a single `@ctz` loop answers once.
+            // That was the cheap half. The expensive half is that 77.30% of
+            // this function's cycles (4.86% of the whole splay.fixed run) sit
+            // on ONE instruction -- the `alloc_info` load of a corpse header,
+            // a cold line the destruction slice is the first to touch since
+            // the object died. Corpses are dense in the bitmap but the work
+            // per corpse is a call (`State.forget`), so the out-of-order
+            // window never had more than one of those misses in flight.
+            // Issuing the whole word's prefetches first gives the block up to
+            // 64 independent misses at once, over at most 64 lines.
+            for (block.doomedWords(), 0..) |word_bits, word_index| {
+                if (word_bits == 0) continue;
+                var probe = word_bits;
+                while (probe != 0) {
+                    const bit: u6 = @intCast(@ctz(probe));
+                    probe &= probe - 1;
+                    const index: usize = word_index * 64 + bit;
+                    if (index >= block.cell_count) break;
+                    @prefetch(@as(*const u8, @ptrFromInt(cells_base + index * cell_size)), .{
+                        .rw = .write,
+                        .locality = 1,
+                        .cache = .data,
+                    });
+                }
+                var bits = word_bits;
+                while (bits != 0) {
+                    const bit: u6 = @intCast(@ctz(bits));
+                    bits &= bits - 1;
+                    const index: usize = word_index * 64 + bit;
+                    if (index >= block.cell_count) break;
+                    const header: *GCObjectHeader = @ptrFromInt(cells_base + index * cell_size);
+                    self.unpublishStringCell(header, accounted);
+                    if (comptime audit_walk) self.memory.noteBlockCellBitmapReclaim(header);
+                }
+            }
+        }
+        return self.block_heap.reclaimDoomedCells(block);
+    }
+
     pub fn destroyStorageCell(self: *Registry, h: *GCObjectHeader) void {
         comptime std.debug.assert(block_heap_enabled);
         std.debug.assert(isBlockCellHeader(h));
@@ -3207,6 +3195,7 @@ pub const Registry = struct {
     /// the construction pin after initialization is a no-fail scalar publish.
     pub fn prepareConstructionRoot(self: *Registry) !void {
         try self.ensurePinEntryCapacity(self.pin_entries.len + 1);
+        try self.pinned_set.ensureUnusedCapacity(self.memory.persistent_allocator, 1);
     }
 
     /// Protect a fully initialized Object whose shape is intentionally not
@@ -3222,7 +3211,7 @@ pub const Registry = struct {
             .count = construction_pin_count,
         };
         self.pin_entries = self.pin_entries.ptr[0 .. self.pin_entries.len + 1];
-        header.setPinned(true);
+        self.pinned_set.putAssumeCapacity(@intFromPtr(header), {});
     }
 
     pub fn removeConstructionRoot(self: *Registry, header: *GCObjectHeader) void {
@@ -3236,23 +3225,37 @@ pub const Registry = struct {
             );
         }
         self.pin_entries = self.pin_entries[0 .. self.pin_entries.len - 1];
-        header.setPinned(false);
+        _ = self.pinned_set.remove(@intFromPtr(header));
     }
 
     fn isConstructionRoot(self: *const Registry, header: *const GCObjectHeader) bool {
         const index = self.pinEntryIndex(header) orelse return false;
         if (self.pin_entries[index].count != construction_pin_count) return false;
         const meta = header.metaConst();
+        // Byte 6 is SHARED: the low seven bits are Object's Shape projection
+        // (which must still be pristine on a shell) and bit7 is the
+        // remembered-set cache, which `gc_generation` owns and which a
+        // construction shell legitimately acquires. A shell is a real store
+        // target -- `runGeneratorParameterInit` writes its payload -- so the
+        // barrier stamps bit7 on it like any other unyoung owner.
+        //
+        // Reading the whole byte here made that barrier write REVOKE the
+        // construction-root verdict: `seedRoots` then fell through to
+        // `shadeExact`, which correctly refuses an unpublished header, so the
+        // shell went unmarked into the minor's bitmap sweep and
+        // `destroyFromHeaderSlow` dereferenced the deliberately-absent
+        // `shape_ref`. Deterministic under `ZJS_GC_STRESS=1` on test262
+        // `language/statements/class/elements/
+        // same-line-async-gen-rs-static-async-method-privatename-identifier-alt.js`,
+        // and the 84%-progress SIGSEGV of the full stress suite.
         if (meta.alloc_info.heap_accounted or
             meta.alloc_info.standalone or
             !isBlockCellHeader(header) or
             meta.flags.kind != .object or
             meta.flags.young or
             meta.flags.finalizing or
-            !meta.flags.is_pinned or
             meta.lifetime.mark_epoch != 0 or
-            meta.lifetime.object_shape_summary != 0 or
-            meta.lifetime.flags.husk or
+            meta.lifetime.object_shape_summary & trace_object_shape_summary_mask != 0 or
             meta.lifetime.flags.reserved != 0)
         {
             return false;
@@ -3285,11 +3288,7 @@ pub const Registry = struct {
         {
             return .none;
         }
-        var parked = self.cycle_deferred_frees.head;
-        while (parked) |candidate| : (parked = deferredNext(candidate)) {
-            if (candidate == header) return .parked_finalizer;
-        }
-        return .none;
+        return .parked_finalizer;
     }
 
     /// Heap-accounting runs both outside and after collections. A detached
@@ -3639,7 +3638,7 @@ pub const Registry = struct {
     /// the extent column land here so S4-d is only its set sites and its
     /// sweep.
     pub fn setNeedsFinalizer(self: *Registry, header: *GCObjectHeader) void {
-        header.meta().lifetime.flags.needs_finalizer = true;
+        header.meta().flags.needs_finalizer = true;
         if (comptime !block_heap_enabled) return;
         const meta = header.metaConst();
         if (meta.alloc_info.block_size_idx == representation.block_cell_size_class) {
@@ -3976,6 +3975,10 @@ pub const Registry = struct {
         // a correctness condition, and a diagnostic knob must not be able to
         // step past it. (Adversarial review, codex, 2026-08-27.)
         if (!self.generation.minorsAllowed()) return false;
+        // The stress knob deliberately keeps reading the POPULATION, not the
+        // trigger census: its contract is "collect whenever anything is
+        // young", and a heap holding only owned storage cells is still a heap
+        // a stress run must be able to walk.
         if (stress_collect) return self.generation.stats.young_count != 0;
         // A minor that keeps coming back empty is a root and stack scan spent
         // to learn that this workload's young objects do not die. Stop asking
@@ -3987,6 +3990,11 @@ pub const Registry = struct {
         if (comptime concurrent_enabled) {
             if (self.concurrent.markingActive()) return false;
         }
+        // S4-f (1): the size question is asked of `young_trigger_count`, which
+        // excludes the owned storage cells S4-b/c/S2-i moved into the heap. A
+        // property buffer that grows 4 -> 8 -> 16 entries publishes three
+        // young cells and adds nothing a minor can reclaim on its own; on
+        // regexp that inflation alone took the minor count 641 -> 913.
         // Minors run even while sliced destruction is pending. The first
         // version gated them, and the gate was the disease: destruction
         // windows with no minor let the young set grow to the millions
@@ -3997,7 +4005,7 @@ pub const Registry = struct {
         // one point every scan funnels through: `shade` refuses
         // `cycle_visited` headers, the bit `detachCycleCandidate` already
         // stamps on everything in the morgue.
-        return self.generation.stats.young_count >= minor_young_threshold;
+        return self.generation.stats.young_trigger_count >= minor_young_threshold;
     }
 
     /// The same minor, asked at a crossed whole-heap threshold, where only the
@@ -4020,7 +4028,7 @@ pub const Registry = struct {
         if (self.phase != .none) return false;
         if (!self.generation.minorsAllowed()) return false;
         if (stress_collect) return self.generation.stats.young_count != 0;
-        if (self.generation.stats.young_count < minor_crossing_young_floor) return false;
+        if (self.generation.stats.young_trigger_count < minor_crossing_young_floor) return false;
         if (self.generation.minorSuspended()) return false;
         if (comptime concurrent_enabled) {
             if (self.concurrent.markingActive()) return false;
@@ -4473,6 +4481,19 @@ pub const Registry = struct {
     /// alloc_info (byte 2) of the same prefix word, so deriving the class after
     /// the young store forced a reload of a byte adjacent to a just-issued
     /// store -- see `addInitializedWithSizeNoFail`'s note.
+    /// Both halves of the young census, in the one place a publication grows
+    /// it. `young_count` is the POPULATION (what
+    /// `verifyGenerationInvariants` recounts and what the young list plus the
+    /// extent tables enumerate); `young_trigger_count` is the SCHEDULING
+    /// question, and an owned storage cell is not part of it -- see
+    /// `kindIsOwnedStorageCell`.
+    inline fn noteYoungPublicationCensus(self: *Registry, header: *const GCObjectHeader) void {
+        self.generation.stats.young_count += 1;
+        if (!kindIsOwnedStorageCell(header.metaConst().flags.kind)) {
+            self.generation.stats.young_trigger_count += 1;
+        }
+    }
+
     inline fn markPublishedYoungClassified(
         self: *Registry,
         header: *GCObjectHeader,
@@ -4518,12 +4539,12 @@ pub const Registry = struct {
                 @branchHint(.unlikely);
                 std.debug.assert(header.metaConst().alloc_info.standalone);
                 header.meta().flags.young = true;
-                self.generation.stats.young_count += 1;
+                self.noteYoungPublicationCensus(header);
                 return;
             }
         }
         header.meta().flags.young = true;
-        self.generation.stats.young_count += 1;
+        self.noteYoungPublicationCensus(header);
         if (comptime block_heap_enabled) {
             // Checker for the hoist: the classification handed in must still
             // be the one the header answers with. Setting `heap_accounted` /
@@ -4792,7 +4813,7 @@ pub const Registry = struct {
                 return error.CorruptGcList;
             {
                 const state = h.metaConst().lifetime;
-                if (state.flags.reserved != 0 or state.flags.husk or state.mark_epoch > self.header_mark_epoch)
+                if (state.flags.reserved != 0 or state.mark_epoch > self.header_mark_epoch)
                     return error.InvalidHeaderState;
                 // Every list member is an eligible carrier (the range gate is
                 // the cycle-candidate set), so bit7 is legitimately theirs;
@@ -4891,25 +4912,6 @@ pub const Registry = struct {
                 for (temporary[0..index]) |candidate| if (candidate == header)
                     return error.CorruptNonBlockObjectAuthority;
             }
-        }
-
-        var deferred_count: usize = 0;
-        var slow = self.cycle_deferred_frees.head;
-        var fast = self.cycle_deferred_frees.head;
-        while (fast) |first| {
-            fast = deferredNext(first);
-            if (fast) |second| fast = deferredNext(second);
-            if (slow) |node| slow = deferredNext(node);
-            if (fast != null and fast == slow) return error.CorruptDeferredFreeStack;
-        }
-        var deferred = self.cycle_deferred_frees.head;
-        while (deferred) |node| {
-            if (!node.metaConst().flags.finalizing) return error.CorruptDeferredFreeStack;
-            deferred_count += 1;
-            deferred = deferredNext(node);
-        }
-        if (deferred_count != self.cycle_deferred_frees.count) {
-            return error.CorruptDeferredFreeStack;
         }
 
         const block_doomed = if (comptime block_heap_enabled)
@@ -5048,8 +5050,12 @@ pub const Registry = struct {
     /// by the next minor; an under-count silently postpones that minor.
     pub fn verifyGenerationInvariants(self: *Registry) InvariantError!void {
         var actual_young: usize = 0;
+        var actual_trigger: usize = 0;
         var young = self.objectIterator(.young);
-        while (young.next()) |_| actual_young += 1;
+        while (young.next()) |header| {
+            actual_young += 1;
+            if (!kindIsOwnedStorageCell(header.metaConst().flags.kind)) actual_trigger += 1;
+        }
         if (comptime block_heap_enabled) {
             // The extent half of the young set is in no young carrier, so the
             // iterator above cannot see it (`markPublishedYoungClassified`).
@@ -5058,10 +5064,16 @@ pub const Registry = struct {
             var extents = self.block_heap.extentKeys();
             while (extents.next()) |base| {
                 const header: *const GCObjectHeader = @ptrFromInt(base + metadata_prefix_size);
-                if (header.metaConst().flags.young) actual_young += 1;
+                if (header.metaConst().flags.young) {
+                    actual_young += 1;
+                    if (!kindIsOwnedStorageCell(header.metaConst().flags.kind)) actual_trigger += 1;
+                }
             }
         }
         if (actual_young != self.generation.stats.young_count) return error.YoungCountMismatch;
+        // The trigger census is what schedules minors, so a drift in it is a
+        // scheduling bug that no other checker would see (S4-f (1)).
+        if (actual_trigger != self.generation.stats.young_trigger_count) return error.YoungCountMismatch;
         var remembered = self.generation.remembered.keyIterator();
         while (remembered.next()) |addr| {
             const header: *GCObjectHeader = @ptrFromInt(addr.*);
@@ -5091,7 +5103,7 @@ pub const Registry = struct {
         var survivors = self.objectIterator(.all);
         while (survivors.next()) |header| {
             if (!header.metaConst().flags.young) continue;
-            if (self.headerMarked(header) or header.metaConst().flags.is_pinned) {
+            if (self.headerMarked(header) or self.headerIsPinned(header)) {
                 return error.RetirementYoungSurvivor;
             }
         }
@@ -5135,7 +5147,7 @@ pub const Registry = struct {
         var iterator = self.heapAccountingIterator();
         while (iterator.next()) |header| {
             if (!header.metaConst().alloc_info.heap_accounted) return error.MissingHeapAllocation;
-            if (header.pinned() and self.pinEntryIndex(header) == null) {
+            if (self.headerIsPinned(header) and self.pinEntryIndex(header) == null) {
                 return error.PinnedHeaderMissingEntry;
             }
             const bytes = heapByteSizeFromHeader(rt, header);
@@ -5172,7 +5184,7 @@ pub const Registry = struct {
                     return error.ConstructionRootStateMismatch;
                 }
             } else if (!self.containsHeader(entry.header)) return error.PinEntryNotLive;
-            if (!entry.header.pinned()) return error.PinnedHeaderFlagMismatch;
+            if (!self.headerIsPinned(entry.header)) return error.PinnedHeaderFlagMismatch;
             for (self.pin_entries[0..index]) |previous| {
                 if (previous.header == entry.header) return error.DuplicatePinEntry;
             }

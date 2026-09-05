@@ -71,18 +71,16 @@ pub const VarRef = struct {
         return self;
     }
 
+    /// TGC S4-e spec 2.5: no Pass-B deferral. `var_ref` is the fifth
+    /// destruction phase, after every object and function bytecode that could
+    /// hold a raw cell pointer has already run its destructor, so there is no
+    /// sibling left to keep the struct addressable for.
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
-        const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
-        // Keep the struct alive for Pass B while other condemned carriers may
-        // still hold raw cell pointers.
-        if (rt.gc.phase == .tracer_destroy) {
-            rt.gc.deferCycleStructFree(header);
-            return;
-        }
-        rt.destroyRuntime(VarRef, self);
+        freeStruct(rt, header);
     }
 
-    pub fn freeCycleDeferredStruct(rt: anytype, header: *gc.Header) void {
+    /// Runtime teardown's phase 3 frees the cells it held back by hand.
+    pub fn freeStruct(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
         rt.destroyRuntime(VarRef, self);
     }

@@ -55,6 +55,7 @@ pub const RuntimeOptions = struct {
     profile_opcodes: bool = false,
     gc_stats: bool = false,
     gc_gate_settle: bool = false,
+    gc_block_census: bool = false,
     perf_json: bool = false,
     leak_check: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
@@ -120,6 +121,16 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
             // callers cannot accidentally request a silent settlement.
             options.gc_stats = true;
             options.gc_gate_settle = true;
+            engine.core.gc_trace_stw.detailed_reports = true;
+            rest = rest[1..];
+            continue;
+        }
+        if (std.mem.eql(u8, rest[0], "--gc-block-census")) {
+            // TGC S4-f (2). A pure exit-time walk of the block table: nothing
+            // on a collector or allocator path consults it, so unlike
+            // `--gc-mark-footprint` it does not move the numbers it prints.
+            options.gc_stats = true;
+            options.gc_block_census = true;
             engine.core.gc_trace_stw.detailed_reports = true;
             rest = rest[1..];
             continue;
@@ -415,6 +426,9 @@ pub fn main(init: std.process.Init) !void {
         }
         if (comptime engine.core.gc.block_heap_enabled) {
             try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
+            if (commandRuntimeOptions(command).gc_block_census) {
+                try dumpGcBlockCensus(&stdout_writer.interface, &runtime.runtime.gc);
+            }
             try dumpGcMarkFootprint(&stdout_writer.interface, runtime.runtime);
             try dumpGcPhaseTotals(&stdout_writer.interface, &runtime.runtime.gc);
         }
@@ -422,7 +436,7 @@ pub fn main(init: std.process.Init) !void {
             try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
         }
         if (comptime engine.core.gc.roots_diag_enabled) {
-            try runtime.runtime.gc.roots_diag.report(&stdout_writer.interface, runtime.runtime);
+            try engine.core.gc_conservative.reportGlobal(&stdout_writer.interface);
         }
         try dumpGcDoomedState(
             &stdout_writer.interface,
@@ -467,7 +481,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -813,14 +827,90 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
     }
 }
 
+/// TGC S4-f (2): per-size-class block occupancy. `blocks` is what
+/// `committed_bytes` is actually made of (a superblock's `used_blocks` never
+/// falls, so it is the peak count of distinct opened blocks); the four
+/// occupancy buckets say whether that peak is live data, thinly-populated
+/// fragmentation, or blocks nothing has reclaimed.
+fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+    if (comptime !engine.core.gc.block_heap_enabled) return;
+    const census = registry.block_heap.censusBlocks();
+    try writer.print(
+        "gc: block census classed superblocks {d}, other {d}, uninitialized slots {d}\n",
+        .{ census.classed_superblocks, census.other_superblocks, census.uninitialized_blocks },
+    );
+    try writer.print(
+        "gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free\n",
+        .{},
+    );
+    var total: engine.core.gc_block_heap.BlockCensusRow = .{};
+    for (census.rows) |row| {
+        total.blocks += row.blocks;
+        total.cells += row.cells;
+        total.allocated += row.allocated;
+        total.empty += row.empty;
+        total.lt10 += row.lt10;
+        total.lt50 += row.lt50;
+        total.ge50 += row.ge50;
+        total.young += row.young;
+        total.decommitted += row.decommitted;
+        total.active += row.active;
+        total.hot_listed += row.hot_listed;
+        total.free_listed += row.free_listed;
+        if (row.blocks == 0) continue;
+        try writer.print(
+            "gc: block census row {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n",
+            .{
+                row.cell_bytes,
+                row.blocks,
+                row.cells,
+                row.allocated,
+                if (row.cells == 0) @as(u64, 0) else row.allocated * 1000 / row.cells,
+                row.empty,
+                row.lt10,
+                row.lt50,
+                row.ge50,
+                row.young,
+                row.decommitted,
+                row.active,
+                row.hot_listed,
+                row.free_listed,
+            },
+        );
+    }
+    try writer.print(
+        "gc: block census total 0 {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n",
+        .{
+            total.blocks,
+            total.cells,
+            total.allocated,
+            if (total.cells == 0) @as(u64, 0) else total.allocated * 1000 / total.cells,
+            total.empty,
+            total.lt10,
+            total.lt50,
+            total.ge50,
+            total.young,
+            total.decommitted,
+            total.active,
+            total.hot_listed,
+            total.free_listed,
+        },
+    );
+}
+
 /// Generational counters. `remembered without young` is the one to watch: it
 /// counts owners a minor re-traced that turned out to hold no young child, so
 /// a large share means the write barrier is firing more than it needs to.
 fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Registry) !void {
     const st = registry.generation.stats;
+    // Row shape frozen: tools/perf/gc_stats_snapshot.py parses it. The S4-f
+    // trigger census gets its own row below rather than a field here.
     try writer.print("gc: generation current young {d}, remembered owners {d}\n", .{
         st.young_count,
         registry.generation.remembered.count(),
+    });
+    try writer.print("gc: generation current young-trigger {d} (excludes owner-decided storage cells)\n", .{
+        st.young_trigger_count,
     });
     try writer.print("gc: minor collections {d}, reclaimed {d}, promoted-by-minor {d}, promoted-all {d}, remembered without young {d}, remembered drops {d}, suspensions {d}\n", .{
         st.minor_collections,
@@ -951,11 +1041,38 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
         );
         try writer.print(
             "gc: block heap deferred block runs {d}, hot reuse published {d}, reopened {d}, pass-A settled cells {d}\n",
-            .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.passa_settled_cells },
+            .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.bitmap_reclaimed_cells },
+        );
+        try writer.print(
+            "gc: block heap hot publish rejects empty {d}, capacity {d}, active {d}, doomed {d}, young {d}, listed {d}, decommitted {d}, cached-k {d}, k-rejected reopens {d}\n",
+            .{
+                st.hot_publish_rejected_empty,
+                st.hot_publish_rejected_capacity,
+                st.hot_publish_rejected_active,
+                st.hot_publish_rejected_doomed,
+                st.hot_publish_rejected_young,
+                st.hot_publish_rejected_listed,
+                st.hot_publish_rejected_decommitted,
+                st.hot_publish_rejected_cached_k,
+                st.hot_blocks_k_rejected,
+            },
         );
         try writer.print(
             "gc: major threshold resets growth {d}, small-heap-floor {d}\n",
             .{ registry.stats.threshold_growth_hits, registry.stats.threshold_floor_hits },
+        );
+        // TGC S4-d spec 2.4 deletion probe. The middle number is the one that
+        // has to read 0 on every workload: a plain, payload-free, unstamped
+        // object that still reached a destructor. The third is the sticky-bit
+        // residue D-S4-4 permits (an object that stopped owing work keeps its
+        // bit and so keeps paying one no-op visit).
+        try writer.print(
+            "gc: object destructor calls {d}, plain-object calls {d}, plain objects carrying the finalizer bit {d}\n",
+            .{
+                registry.stats.object_destructor_calls,
+                registry.stats.plain_object_destructor_calls,
+                registry.stats.plain_objects_with_finalizer_bit,
+            },
         );
         try writer.print(
             "gc: block heap page returns cumulative decommitted {d}, recommitted {d}\n",
@@ -1035,7 +1152,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
     try writer.print(
         // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
         // the two are one family to every consumer of this panel.
-        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}, string {d}\n",
+        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}, string {d}, storage {d}\n",
         .{
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
@@ -1045,6 +1162,9 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)],
             fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)],
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.property_storage)] +
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.array_storage)] +
+                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.payload)],
         },
     );
     try writer.print(
@@ -1150,7 +1270,7 @@ fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
 fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
     const state = engine.core.gc_trace_stw.doomedStateSnapshot(rt);
     try writer.print(
-        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, parked_frees {d}, deferred_finalizers {d}, active_finalizer {s}\n",
+        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, parked_frees 0, deferred_finalizers {d}, active_finalizer {s}\n",
         .{
             layer,
             if (state.pending) "true" else "false",
@@ -1158,7 +1278,6 @@ fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.J
             state.bucket_headers,
             if (state.cursor_present) "true" else "false",
             state.doomed_blocks,
-            state.parked_frees,
             state.deferred_finalizers,
             if (state.active_finalizer) "true" else "false",
         },

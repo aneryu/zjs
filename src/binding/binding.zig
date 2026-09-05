@@ -313,11 +313,11 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                     .js => {
                         const payload_ptr = try rt.memory.create(Payload);
                         payload_ptr.* = data;
-                        object.installExternalClassPayload(@ptrCast(payload_ptr));
+                        object.installExternalClassPayload(rt, @ptrCast(payload_ptr));
                         return payload_ptr;
                     },
                     .host => {
-                        object.installExternalClassPayload(@ptrCast(data));
+                        object.installExternalClassPayload(rt, @ptrCast(data));
                         return data;
                     },
                 },

@@ -37,6 +37,7 @@ jobs:
       # A machine runs them now.
       - run: zig build test-oom --summary all
       - run: zig build test-leak-census --summary all
+      - run: zig build test-stress --summary all
       - run: zig build test -Dzjs_ownership_audit=true --summary all
 
   linux-x86_64:

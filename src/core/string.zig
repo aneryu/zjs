@@ -390,6 +390,19 @@ pub const String = struct {
         return @ptrCast(@alignCast(hdr));
     }
 
+    /// TGC S4-d spec 2.4: bind a materialized-string back-pointer.
+    ///
+    /// A DYNAMIC atom id makes this body's death owe the atom-table handshake
+    /// (`destroyCellFromHeader` -> `onSymbolBodyDead`), so the sweep has to
+    /// visit the cell: stamp `needs_finalizer`. Predefined and tagged-int ids
+    /// are never recycled, the handshake skips them, and such a body stays in
+    /// the bitmap-only population. The bit only ever goes on (D-S4-4).
+    pub fn bindAtomId(self: *String, rt: *JSRuntime, atom_id: u32) void {
+        self.atom_id = atom_id;
+        if (atom_id == no_atom_id or atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id)) return;
+        rt.gc.setNeedsFinalizer(self.header());
+    }
+
     /// The `Metadata` word at the allocation base (`stringPtr - 8`).
     pub inline fn metadata(self: *const String) *gc.Metadata {
         const base: [*]u8 = @ptrCast(@constCast(self));
@@ -484,7 +497,7 @@ pub const String = struct {
         // `cacheString` only binds string-kind atoms: a symbol's
         // description string must not convert back into the symbol atom
         // when later used as a property key.
-        rt.atoms.cacheString(atom_id, self);
+        rt.atoms.cacheString(rt, atom_id, self);
         return self;
     }
 
@@ -515,7 +528,7 @@ pub const String = struct {
                 break :blk try rt.atoms.internString(utf8.items);
             },
         };
-        rt.atoms.cacheString(atom_id, self);
+        rt.atoms.cacheString(rt, atom_id, self);
         return atom_id;
     }
 
@@ -1773,9 +1786,18 @@ pub fn sweepYoungExtents(rt: *JSRuntime) usize {
 /// `Heap.sweepExtents` callback: the same handshake a condemned flat
 /// cell performs, then the registry unpublish and the memory return.
 /// `base` is the allocation start (prefix), `user_bytes` the request.
-fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize) void {
+fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, needs_finalizer: bool) void {
     const rt: *JSRuntime = @ptrCast(@alignCast(ctx));
     const meta: *const gc.Metadata = @ptrFromInt(base);
+    // TGC S4-d spec 2.4: the table row already answered "does this death owe
+    // anything?". Only a string body bound to a DYNAMIC atom ever sets it, so
+    // an unstamped extent skips the kind dispatch and the atom probe outright.
+    if (!needs_finalizer) {
+        const plain: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+        rt.gc.unpublishStringExtent(plain, user_bytes - gc.string_prefix_size);
+        rt.memory.destroyStringExtent(plain, user_bytes);
+        return;
+    }
     // TGC S4 spec 2.2 "destroy_by_kind": the extent tables hold every prefix
     // carrier over the cell ceiling, so the callback dispatches. Ropes always
     // fit a cell (`allocRopeNode` asserts it at comptime), so the two live

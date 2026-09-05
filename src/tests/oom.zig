@@ -1192,6 +1192,12 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     const request_bytes = layout.total_size + core.gc.metadata_prefix_size;
     const accounted_bytes = core.memory.MemoryAccount.accountedMallocSize(request_bytes, null);
 
+    // Quiesce the heap before the baseline is read. Bootstrap and the atom
+    // intern above leave collectable debris behind (40 bytes on this tree),
+    // and the closing assertions compare against a heap that a full
+    // collection has just walked -- so the baseline has to be taken from the
+    // same quiesced state or the debris shows up as a spurious delta.
+    _ = rt.runObjectCycleRemoval();
     const baseline_bytes = rt.memory.allocated_bytes;
     const baseline_allocations = rt.memory.allocation_count;
     const baseline_live = rt.gc.liveCount();
@@ -1220,40 +1226,58 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     try std.testing.expectEqual(baseline_create_calls, rt.memory.create_calls);
     try std.testing.expectEqual(baseline_destroy_calls, rt.memory.destroy_calls);
 
-    // The same runtime must immediately create, publish, and destroy the same
-    // full layout. Exactly one successful create/destroy pair proves there is
-    // no second main-artifact allocation left in the transaction.
-    const recovered = try zjs.bytecode.FunctionBytecode.createFixture(rt, fixture_options);
-    var recovered_published = false;
-    errdefer if (!recovered_published) recovered.destroyUnpublishedFixture(rt);
-    for (recovered.closureVar(), 0..) |*closure, index| {
-        closure.* = zjs.bytecode.function_bytecode.BytecodeClosureVar.init(.{
-            .closure_type = .ref,
-            .var_idx = @intCast(index),
-            .var_name = name,
-        });
+    // The same runtime must immediately create, publish, and then let the
+    // collector retire the same full layout. Exactly one successful
+    // create/destroy pair proves there is no second main-artifact allocation
+    // left in the transaction.
+    //
+    // Tracing shape (this half used to read `publish -> free -> account back
+    // to baseline`, which was the refcounted contract; the S2 ablation
+    // deleted the `free` and left the post-free assertions dangling). The
+    // published fixture is now GC-owned, so the only way to observe the
+    // account returning to baseline is to drop every reference to it and run
+    // one collection. `recovered` is scoped to the block below precisely so
+    // that no live Zig local names it afterwards, and
+    // `runObjectCycleRemoval` scans `.declared_only` -- it never looks at the
+    // native stack, so the retirement is a decision about reachability rather
+    // than about what a conservative scan happened to find in a stale frame
+    // slot.
+    {
+        const recovered = try zjs.bytecode.FunctionBytecode.createFixture(rt, fixture_options);
+        var recovered_published = false;
+        errdefer if (!recovered_published) recovered.destroyUnpublishedFixture(rt);
+        for (recovered.closureVar(), 0..) |*closure, index| {
+            closure.* = zjs.bytecode.function_bytecode.BytecodeClosureVar.init(.{
+                .closure_type = .ref,
+                .var_idx = @intCast(index),
+                .var_name = name,
+            });
+        }
+
+        try std.testing.expectEqual(layout.total_size, recovered.layout().total_size);
+        try std.testing.expectEqual(layout.total_size, recovered.heapByteSize());
+        try std.testing.expect(recovered.header.meta().alloc_info.standalone);
+        try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(baseline_allocations + 1, rt.memory.allocation_count);
+        try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
+        try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
+        try std.testing.expectEqual(baseline_destroy_calls, rt.memory.destroy_calls);
+        try std.testing.expectEqual(@as(usize, 64), recovered.cpoolSlice().len);
+        try std.testing.expectEqual(@as(usize, 8), recovered.allVarDefs().len);
+        try std.testing.expectEqual(@as(usize, 4), recovered.closureVar().len);
+        try std.testing.expectEqualSlices(u8, fixture_options.byte_code, recovered.byteCode());
+
+        recovered.publishFixtureNoFail(rt);
+        recovered_published = true;
+        try std.testing.expectEqual(baseline_live + 1, rt.gc.liveCount());
+        try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.memory.allocated_bytes);
     }
 
-    try std.testing.expectEqual(layout.total_size, recovered.layout().total_size);
-    try std.testing.expectEqual(layout.total_size, recovered.heapByteSize());
-    try std.testing.expect(recovered.header.meta().alloc_info.standalone);
-    try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(baseline_allocations + 1, rt.memory.allocation_count);
+    _ = rt.runObjectCycleRemoval();
+
     try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
-    try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
-    try std.testing.expectEqual(baseline_destroy_calls, rt.memory.destroy_calls);
-    try std.testing.expectEqual(@as(usize, 64), recovered.cpoolSlice().len);
-    try std.testing.expectEqual(@as(usize, 8), recovered.allVarDefs().len);
-    try std.testing.expectEqual(@as(usize, 4), recovered.closureVar().len);
-    try std.testing.expectEqualSlices(u8, fixture_options.byte_code, recovered.byteCode());
-
-    recovered.publishFixtureNoFail(rt);
-    recovered_published = true;
-    try std.testing.expectEqual(baseline_live + 1, rt.gc.liveCount());
-
     try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
-    try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
     try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
     try std.testing.expectEqual(baseline_destroy_calls + 1, rt.memory.destroy_calls);
 }

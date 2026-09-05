@@ -1959,6 +1959,9 @@ pub const JSRuntime = struct {
         }
         self.weak_reference_holder_tail = object;
         link.registered = true;
+        // TGC S4-d spec 2.4: an intrusive list the object must unlink itself
+        // from at death (`unregisterWeakReferenceHolder`) -- c class.
+        object.markNeedsFinalizer(self);
     }
 
     pub fn unregisterWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
@@ -1993,6 +1996,9 @@ pub const JSRuntime = struct {
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
         object.setBorrowedReferenceHolderIndex(index);
         object.flags.is_borrowed_reference_holder = true;
+        // TGC S4-d spec 2.4: this side table names the object by pointer and
+        // `unregisterBorrowedReferenceHolder` is what removes the entry.
+        object.markNeedsFinalizer(self);
         // This table is lifetime bookkeeping only. A borrowed realm/weak
         // pointer does not add exotic [[Get]]/[[Set]] semantics, so it must not
         // poison the object's ordinary shape fast paths. Semantic slow-path
@@ -2732,32 +2738,22 @@ pub const JSRuntime = struct {
         if (capacity != 0) self.memory.free(JSValue, values.ptr[0..capacity]);
     }
 
+    /// TGC S4-e spec 2.5: object identities are not counted. A weak identity
+    /// token stays valid until its object dies, and death hands the token back
+    /// (`takeWeakObjectIdentity`); nothing about how many WeakRefs name it
+    /// changes when the object is collected. Only symbol identities, whose
+    /// atom entry is kept indexed by the count in `atom.zig`, still count.
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
-        if ((identity & 1) == 0) {
-            const object = self.objectFromWeakIdentity(identity) orelse return;
-            object.retainWeakReference();
-            return;
-        }
+        if ((identity & 1) == 0) return;
         const atom_id = identity >> 1;
         if (atom_id > std.math.maxInt(atom.Atom)) return;
         self.atoms.retainSymbolWeakRef(@intCast(atom_id));
     }
 
+    /// Mirror of `retainWeakIdentity`: releasing an object identity is a no-op
+    /// because nothing was retained (TGC S4-e spec 2.5).
     pub fn releaseWeakIdentity(self: *JSRuntime, identity: usize) void {
-        if ((identity & 1) == 0) {
-            const object = self.objectFromWeakIdentity(identity) orelse return;
-            object.releaseWeakReference();
-            // A husk is an object the collector already stripped of resources
-            // but kept allocated because a WeakRef still names it; dropping the
-            // The last WeakRef is what finally frees the struct. trace_stw has
-            // an explicit husk bit; RC keeps its historical rc==0 + !mark
-            // distinction between a finished husk and in-progress teardown.
-            const husk_dead = gc.headerIsReclaimableWeakHusk(object.gcHeader());
-            if (object.weakReferenceCount() == 0 and husk_dead) {
-                Object.destroyDeadWeakHusk(self, object);
-            }
-            return;
-        }
+        if ((identity & 1) == 0) return;
         const atom_id = identity >> 1;
         if (atom_id > std.math.maxInt(atom.Atom)) return;
         self.atoms.releaseSymbolWeakRef(self, @intCast(atom_id));
@@ -2791,13 +2787,16 @@ pub const JSRuntime = struct {
     }
 
     /// Resolves an even weak identity (`weak_id << 1`) to its registered
-    /// object in O(1). Returns null for symbol identities, unregistered ids,
-    /// and objects that are currently being destroyed.
+    /// object in O(1). Returns null for symbol identities and for ids whose
+    /// object is gone.
+    ///
+    /// TGC S4-e spec 2.5: "gone" used to mean two things -- unregistered, or
+    /// still allocated as a resource-stripped weak husk. The husk is retired:
+    /// the sweep hands the id back (`takeWeakObjectIdentity`) inside the same
+    /// destruction that frees the struct, so an id that still resolves names a
+    /// live object and the map lookup is the whole liveness test.
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
-        if ((identity & 1) != 0) return null;
-        const object = self.objectFromWeakIdentity(identity) orelse return null;
-        if (gc.headerIsHusk(object.gcHeader())) return null;
-        return object;
+        return self.objectFromWeakIdentity(identity);
     }
 
     fn objectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
@@ -2821,6 +2820,19 @@ pub const JSRuntime = struct {
         };
         self.next_weak_id += 1;
         object.flags.has_weak_id = true;
+        // TGC S4-e spec 2.5 (step 5): the finalizer bit STAYS.
+        //
+        // The spec offered to retract it if the identity were handed back by a
+        // mark-driven sweep of the two id maps instead. It is not: the return
+        // happens in `destroyFromHeaderSlow` (see `takeWeakObjectIdentity`
+        // there), which only runs for the fin set, so retracting the bit would
+        // strand a `weak_object_ids` / `weak_id_objects` pair naming freed
+        // memory -- and with the husk gone, "in the map" IS the liveness test
+        // (`liveObjectFromWeakIdentity`), so a stale pair is a resurrection,
+        // not a leak. Moving the return to `processWeak` would cost a full
+        // scan of the id maps per collection; the population that carries a
+        // weak id is small enough that one destructor call each is cheaper.
+        object.markNeedsFinalizer(self);
         return weak_id << 1;
     }
 
@@ -4071,7 +4083,7 @@ pub const JSRuntime = struct {
         const created = try string.String.createUtf8(self, bytes);
         // Seeds the weak back-pointer (and, for non-tagged string atoms,
         // the table-side cache); no-op for symbol atoms.
-        self.atoms.cacheString(atom_id, created);
+        self.atoms.cacheString(self, atom_id, created);
         const slot_index: usize = self.compact_state.recent_atom_string_next;
         self.recent_atom_strings[slot_index] = .{
             .atom_id = atom_id,
@@ -4206,7 +4218,7 @@ pub const JSRuntime = struct {
             var candidate = self.context_head;
             while (candidate) |ctx| : (candidate = ctx.runtime_next) {
                 if (ctx.global != null) continue;
-                global.class_id = class.ids.global_object;
+                global.promoteToGlobalObjectClass(self);
                 ctx.global = global;
                 _ = global.ensureGlobalPayload(self) catch |err| {
                     ctx.rollbackIntrinsicBootstrap();
@@ -4446,15 +4458,6 @@ pub const JSRuntime = struct {
         }
 
         self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
-        // An incremental morgue may still have later resource destructors.
-        // Draining its parked structs here would collapse Pass B into the
-        // middle of Pass A. The next destruction slice owns closing that
-        // transaction after the callback prerequisite has cleared.
-        if (ran != 0 and self.deferred_class_payload_finalizers.len == 0 and
-            !self.gc.doomed_pending)
-        {
-            object_mod.Object.drainCycleDeferredFrees(self);
-        }
         return ran;
     }
 

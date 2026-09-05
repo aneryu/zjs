@@ -6,7 +6,7 @@
 Metadata size=8 align=8 size_class=0 alloc_info=2 flags=3 lifetime=4
 TraceHeader size=8 align=8 next_non_object=0
 AllocInfo class_mask=0x1f reserved=0x20 accounted=0x40 standalone=0x80
-BlockFlags kind_mask=0x0f young=0x10 finalizing=0x20 pinned=0x40 cycle_visited=0x80
+BlockFlags kind_mask=0x0f young=0x10 finalizing=0x20 needs_finalizer=0x40 cycle_visited=0x80
 carrier block_cell_class=0x1f slab_class_range=0..30 standalone_class=0
 free_cell link_mask=0x0000ffff poison=0x86000000 encoded_word=poison|(next&link_mask)
 
@@ -17,8 +17,8 @@ alloc_info.reserved unused
 alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell
 flags.kind valid for Metadata kinds; string/rope are one allocation family with distinct kinds and distinct JSValue tags
 flags.kind string_buffer is a bare code-unit carrier of that same family: no JSValue names it, no edges, no destructor
-flags.young/finalizing/pinned/cycle_visited valid for registry kinds only
-lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+husk/needs_finalizer/reserved:u8 for all carriers
+flags.young/finalizing/needs_finalizer/cycle_visited valid for registry kinds only
+lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+reserved:u8 for all carriers
 
 [kind-contracts]
 kind.object tag=0 allocation=block_slab_or_standalone registry=yes
@@ -36,7 +36,7 @@ kind.rope tag=11 allocation=block_slab_or_standalone registry=yes
 kind.string_buffer tag=12 allocation=block_slab_or_standalone registry=yes
 
 [body-layouts]
-object head=24 align=8 body_from_handle=0 weakref_count=0 class_id=4 flags=6 shape_ref=8 prop_values=16 slots2_entries=24 slots2_body=72 physical=80 release_slots2_body=56 release_physical=64 arm_narrow=8 arm_wide=24
+object head=24 align=8 body_from_handle=0 flags=0 flags_bits=32 class_id=4 shape_ref=8 prop_values=16 slots2_entries=24 slots2_body=72 physical=80 release_slots2_body=56 release_physical=64 arm_narrow=8 arm_wide=24
 function_bytecode size=88 align=8 header=0 js_mode=8 byte_code=16 byte_code_len=24 vardefs=32 closure_var=40 realm=64 cpool=72
 var_ref size=40 align=8 header=0 value=8 pvalue=24 is_const=32 is_open=36
 realm_context size=2176 align=16 header=0 runtime=1472 publication_state=2160 modules=1424 global=288 trace_rc=2164 list_prev=2168

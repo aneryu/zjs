@@ -34,6 +34,52 @@ pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []cons
     return error_value;
 }
 
+/// Materialize the JS value for an engine sentinel that `runtimeErrorInfo` /
+/// `promiseErrorInfo` has already classified.
+///
+/// Identical to `createNamedError` except for `error.OutOfMemory`, which is
+/// delivered as the Realm's preallocated `InternalError: out of memory`
+/// instead of building a fresh twin.
+///
+/// The Realm preallocates that object at bootstrap (`zjs_vm.contextGlobal`)
+/// precisely so this delivery costs no allocation. Building a new one here
+/// allocates three times -- the Error object, its message string, and its
+/// backtrace string -- on the heap that has just refused an allocation.
+/// Whether those succeed is a question about allocator luck (a free block
+/// still sitting in a slab arena), not about engine state, so the identity of
+/// the value a JS `catch` receives for an OOM used to depend on it: a fully
+/// exhausted heap delivered `preallocated_oom_error` (every construction site
+/// already falls back to it), while a heap that merely refused one request
+/// delivered a fresh object. Both spellings of "the same OOM" then existed,
+/// and nothing downstream could tell an out-of-memory delivery from a user
+/// throw.
+///
+/// Two contracts in the tree already assume the stable answer: the
+/// engine-production pin that OOM delivery to a JS catch allocates nothing
+/// (`src/tests/oom_cap.zig`), and the OOM tier's rule that a rethrown OOM is
+/// still an OOM rather than an arbitrary user exception
+/// (`src/tests/oom.zig`). The OOM tier caught the divergence once its
+/// injection reached the allocations the tracing collector had moved out of
+/// its view: `native-callback-map-reflect-apply` catches the failure, sees it
+/// is not the `RangeError` it expected, and rethrows -- and the rethrown
+/// value was a freshly built `InternalError` that no longer identified itself
+/// as the injected OOM.
+///
+/// Deliberately stack-less, by the same exemption `createNamedErrorWithoutStack`
+/// documents for this object: a backtrace cannot be captured on an exhausted
+/// heap, and the preallocated value is dup()ed, never rebuilt.
+pub fn createSentinelError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    err: anytype,
+    info: ErrorInfo,
+) !core.JSValue {
+    if (@as(anyerror, err) == error.OutOfMemory) {
+        if (ctx.preallocated_oom_error) |preallocated| return preallocated;
+    }
+    return createNamedError(ctx, global, info.name, info.message);
+}
+
 /// Construct a named error directly on a realm-owned native-error prototype.
 /// This is the QuickJS `ctx->native_error_proto[]` path: mutable constructor
 /// bindings and receiver objects do not participate in Realm selection.
@@ -256,7 +302,7 @@ pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytyp
     }
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const error_info = promiseErrorInfo(err);
-    return createNamedError(ctx, global, error_info.name, error_info.message) catch |create_err| {
+    return createSentinelError(ctx, global, err, error_info) catch |create_err| {
         // Promise jobs must be able to retain an abrupt completion after user
         // code has run. Under a fully exhausted heap, use the same allocation-
         // free OOM value as VM catch delivery so the job can advance to its
@@ -287,7 +333,7 @@ pub fn rejectedPromiseForRuntimeError(
         return promise;
     }
     const error_info = runtimeErrorInfo(err) orelse return err;
-    const error_value = try createNamedError(ctx, global, error_info.name, error_info.message);
+    const error_value = try createSentinelError(ctx, global, err, error_info);
     const promise = try core.promise.rejectedWithPrototype(ctx, error_value, prototype);
     if (ctx.hasException()) ctx.clearException();
     return promise;

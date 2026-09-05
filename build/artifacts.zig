@@ -93,7 +93,11 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
-        .omit_frame_pointer = true, // EXPERIMENT: measure per-op prologue (stp/ldp) cost
+        // EXPERIMENT: measure per-op prologue (stp/ldp) cost. The R3 roots
+        // census walks the native frame chain to name the engine function
+        // whose local rescued an object, which needs the frame pointer back;
+        // the diagnostic build is never shipped, so this costs nothing.
+        .omit_frame_pointer = !engine_option_inputs.gc_roots_diag,
     });
     internal_fast_mod.addOptions("build_options", engine_options_fast);
     const zjs_cli_mod = b.createModule(.{

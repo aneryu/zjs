@@ -1787,17 +1787,6 @@ pub const MemoryAccount = struct {
         if (comptime extent_tracking_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
     }
 
-    /// Stage-3 Pass-A settlement: the accounting half of the block-cell arm of
-    /// `destroy` / `destroyWithFam`, without returning the cell to the heap.
-    /// The caller (`object_gc.trySettleTracerBlockCorpse`) clears the alloc bit
-    /// and the block's `allocated_count` itself, so the cell is released but
-    /// unlinked; see `Heap.settleDoomedCellInPassA`.
-    ///
-    /// `payload_bytes` MUST be the same logical size the deferred free would
-    /// have debited: `@sizeOf(Object)` normally and `@sizeOf(Object) +
-    /// trailing_property_bytes` for the FAM variant. 62.3% of splay's block
-    /// corpses are the FAM variant, so a block-uniform size would silently
-    /// rewrite the RC comparison denominator.
     /// TGC S2: a string-family carrier from the collector's block heap.
     /// `total_bytes` counts the eight-byte Metadata prefix; the returned
     /// pointer is the cell base (prefix start). Null when the request is not
@@ -1832,7 +1821,6 @@ pub const MemoryAccount = struct {
 
     /// Return a string-family block cell (see `createStringCell`). `payload`
     /// is the body pointer (cell base + 8); accounting mirrors
-    /// `debitBlockCellPayload`.
     pub fn destroyStringCell(self: *MemoryAccount, payload: *const anyopaque, total_bytes: usize) void {
         comptime std.debug.assert(block_heap_enabled);
         const heap = self.gc_object_cell_heap orelse unreachable;
@@ -1945,16 +1933,32 @@ pub const MemoryAccount = struct {
         };
     }
 
-    pub inline fn debitBlockCellPayload(self: *MemoryAccount, ptr: *const anyopaque, payload_bytes: usize) void {
+    /// TGC S4-d spec 2.4: the audit half of a bitmap-reclaimed block cell.
+    ///
+    /// Production reclaims the cell with word arithmetic and writes nothing
+    /// per corpse. The audit builds still own an independent raw oracle and a
+    /// carrier lifecycle state machine, and both must see the same free record
+    /// `destroyStringCell` writes -- everything except the byte debit, which
+    /// happened once at condemnation (`debitBlockBytes`).
+    pub fn noteBlockCellBitmapReclaim(self: *MemoryAccount, payload: *const anyopaque) void {
         comptime std.debug.assert(block_heap_enabled);
-        std.debug.assert(payload_bytes == gc_block_heap.accountedBodyBytesForRequest(
-            gc_prefix_size + payload_bytes,
-            gc_prefix_size,
-        ).?);
-        if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
-        if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
-        self.debitAlloc(payload_bytes, null);
+        if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(payload));
+        if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(payload));
         self.noteFreeDiagnostics(true);
+        if (comptime block_tracking_enabled) self.finishBlockGcRawFree(@intFromPtr(payload));
+    }
+
+    /// TGC S4-d spec 2.4: one debit for a whole condemnation's worth of block
+    /// cells.
+    ///
+    /// `bytes` is the prefix-excluded accounted size summed over the corpses
+    /// the sweep reclaims from the BITMAP -- the ones no per-cell free path
+    /// will ever run for. The corpses that owe a destructor are excluded at
+    /// the snapshot and keep their per-cell debit, so the two routes partition
+    /// the condemned set and neither double-counts.
+    pub inline fn debitBlockBytes(self: *MemoryAccount, bytes: usize) void {
+        if (bytes == 0) return;
+        self.debitAlloc(bytes, null);
     }
 
     pub fn hasOutstandingAllocations(self: MemoryAccount) bool {
@@ -1971,8 +1975,20 @@ pub const MemoryAccount = struct {
     /// Conservative resolution requires page-aligned slab arenas. The trace
     /// runtime serves those physical pages from Zig's independent allocator;
     /// logical allocations remain charged to this account.
+    ///
+    /// Test builds keep the arenas on `backing_allocator` instead. The
+    /// independent allocator is a throughput choice ("keeps arena refills off
+    /// glibc's high-alignment malloc path"), not a correctness one -- the
+    /// page alignment is requested explicitly by `addArena`, so any allocator
+    /// that honours it works. Routing the refills away from the account's own
+    /// backing allocator, however, hides every slab-class allocation from OOM
+    /// injection, and slab classes are most of the engine's small allocations
+    /// (in the export-name-lookahead canary: all three interned identifier
+    /// bodies). That blindspot arrived with the tracing collector (7fc2c9e9)
+    /// and is what shrank the canary's injectable window from 9 to 6.
     pub fn useIndependentSmallObjectSlabArenaBacking(self: *MemoryAccount) void {
         if (comptime !arena_addressable) return;
+        if (comptime builtin.is_test) return;
         self.small_slab.setArenaBacking(std.heap.smp_allocator);
     }
 

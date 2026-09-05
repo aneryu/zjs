@@ -803,7 +803,7 @@ fn dynamicImportRejectionValue(
         },
         else => {
             if (exec.exception_ops.runtimeErrorInfo(err)) |info| {
-                return exec.exception_ops.createNamedError(ctx, global, info.name, info.message);
+                return exec.exception_ops.createSentinelError(ctx, global, err, info);
             }
             return exec.exception_ops.createNamedError(ctx, global, "Error", @errorName(err));
         },

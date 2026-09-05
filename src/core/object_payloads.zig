@@ -205,19 +205,6 @@ pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.GCObjectHeader {
     return @ptrCast(@alignCast(ptr));
 }
 
-/// Release the nullable module/ordinary closure slots and their single backing
-/// allocation.  Module creation deliberately leaves MODULE_IMPORT entries
-/// null until indexed linking; ordinary published functions are sealed.
-///
-/// qjs `js_bytecode_function_finalizer` (quickjs.c:6253-6256) is one loop of
-/// `free_var_ref` then `js_free_rt` of the pointer array. Keep that shape:
-/// null slots are skipped inside `free_var_ref`, not by a second helper.
-pub fn destroyOptionalVarRefCellSlice(rt: *JSRuntime, slot: *[]?*var_ref_mod.VarRef) void {
-    const cells = slot.*;
-    slot.* = &.{};
-    if (cells.len != 0) rt.memory.free(?*var_ref_mod.VarRef, cells);
-}
-
 /// Clear a var-ref window whose backing memory belongs to another slab.
 pub fn clearVarRefCellSlice(slot: *[]*var_ref_mod.VarRef) void {
     slot.* = &.{};

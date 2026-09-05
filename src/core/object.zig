@@ -54,7 +54,10 @@ const PropertyReadError = errors.RuntimeError;
 const FinalizingShapeStorage = extern struct {
     metadata: gc.Metadata = .{
         .alloc_info = .{ .standalone = true },
-        .flags = .{ .kind = .shape, .is_pinned = true },
+        // TGC S4-e: the pin bit retired with `BlockFlags.is_pinned`. This
+        // tombstone is a static that never enters a runtime's GC registry, so
+        // "pinned" was documentation rather than a fact any sweep read.
+        .flags = .{ .kind = .shape },
         .lifetime = .{},
     },
     value: shape.Shape = .{
@@ -153,7 +156,6 @@ pub const BytecodeFunctionStorage = object_payloads.BytecodeFunctionStorage;
 
 const destroyOwnedValue = object_payloads.destroyOwnedValue;
 const replaceOwnedValue = object_payloads.replaceOwnedValue;
-const destroyOptionalVarRefCellSlice = object_payloads.destroyOptionalVarRefCellSlice;
 const createGeneratorExecutionStateWithStorage = generator_state.createGeneratorExecutionStateWithStorage;
 const destroyGeneratorExecutionState = generator_state.destroyGeneratorExecutionState;
 const empty_suspended_execution_state = generator_state.empty_suspended_execution_state;
@@ -164,11 +166,15 @@ const empty_suspended_execution_state = generator_state.empty_suspended_executio
 pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payload_kind: class.PayloadKind, payload: *class.Payload) void {
     const ptr = payload.* orelse return;
     payload.* = null;
+    // TGC S4-e spec 2.5 (step 5): an a-class payload is a `.payload` GC cell
+    // whose whole content is GC-owned values, so detaching it IS its teardown
+    // -- the sweep returns the cell. The arms that used to run here only
+    // stored nulls into memory that was about to be reclaimed, which is the
+    // same waste S4-d deleted from `destroyFromHeaderSlow`'s payload switch.
+    // (regexp is inline in the Object allocation rather than a cell, and its
+    // destroy has been a no-op since S4-c.)
+    if (Object.payloadKindIsTracerOwnedCellOrNone(payload_kind)) return;
     switch (payload_kind) {
-        .ordinary => {
-            const typed: *OrdinaryPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
         .iterator => {
             const typed: *IteratorPayload = @ptrCast(@alignCast(ptr));
             Object.releaseIteratorCollectionCursor(class_id, typed);
@@ -190,14 +196,6 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             typed.destroy();
             rt.memory.destroy(StdFilePayload, typed);
         },
-        .disposable_stack => {
-            const typed: *DisposableStackPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
-        .global => {
-            const typed: *GlobalPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
         .realm_record => {
             const typed: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
             typed.destroy();
@@ -213,38 +211,10 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             typed.destroy(rt);
             rt.memory.destroy(TypedArrayPayload, typed);
         },
-        .regexp => {
-            const typed: *RegExpPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
-        .bound_function => {
-            const typed: *BoundFunctionPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
-        .proxy => {
-            const typed: *ProxyPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
-        .arguments => {
-            const typed: *ArgumentsPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
-        .object_data => {
-            const typed: *ObjectDataPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
         .weak_ref => {
             const typed: *WeakRefPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
             rt.memory.destroy(WeakRefPayload, typed);
-        },
-        .var_ref => {
-            const typed: *VarRefPayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-        },
-        .promise => {
-            const typed: *PromisePayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
         },
         .generator => {
             const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
@@ -256,11 +226,24 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             typed.destroyNative(rt);
             rt.memory.destroy(FunctionPayload, typed);
         },
-        .none => {},
+        // Filtered out above; naming them keeps the switch exhaustive so a new
+        // payload kind cannot be added without classifying it.
+        .none,
+        .ordinary,
+        .arguments,
+        .object_data,
+        .bound_function,
+        .proxy,
+        .var_ref,
+        .promise,
+        .disposable_stack,
+        .global,
+        .regexp,
+        => unreachable,
     }
 }
 
-pub const ObjectFlags = packed struct(u16) {
+pub const ObjectFlags = packed struct(u32) {
     extensible: bool = true,
     immutable_prototype: bool = false,
     fast_array: bool = false,
@@ -282,6 +265,16 @@ pub const ObjectFlags = packed struct(u16) {
     /// Actual active payload state. This is distinct from the class's declared
     /// payload kind because ordinary/global payloads are attached lazily.
     class_payload_kind: class.PayloadKind = .none,
+    /// TGC S4-e spec 2.5: the trailing two-slot property form (`slots2`).
+    ///
+    /// This used to be bit 31 of the `weakref_count` word, which is why that
+    /// word survived the tracer's arrival at all: the count itself was dead
+    /// weight the moment WeakRef started naming its target by weak identity
+    /// token instead of by pointer. The layout fact is a flag, so it lives
+    /// with the flags; the head is still 24 bytes because the word at offset 0
+    /// was pointer-alignment padding either way.
+    slots2_layout: bool = false,
+    reserved: u15 = 0,
 };
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
@@ -448,8 +441,6 @@ pub const Object = extern struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.object);
     pub const trailing_property_capacity: usize = 2;
     pub const trailing_property_bytes: usize = trailing_property_capacity * @sizeOf(property.Entry);
-    const slots2_layout_bit: u32 = 1 << 31;
-    const weakref_count_mask: u32 = slots2_layout_bit - 1;
     comptime {
         // Terminal M: the Object pointer is the GC handle and the body start.
         // Metadata remains at Object-8; unlike the other tracing kinds Object
@@ -460,14 +451,14 @@ pub const Object = extern struct {
         // `@sizeOf(Object)` is the head only and is NEVER an allocation size.
         // Use `bodyBytes()` / `objectBodyBytes(class_id, slots2)` for that.
         std.debug.assert(@sizeOf(@This()) == 24);
-        std.debug.assert(@sizeOf(ObjectFlags) == 2);
+        std.debug.assert(@sizeOf(ObjectFlags) == 4);
         std.debug.assert(@sizeOf(ObjectStorage) == 24);
-        std.debug.assert(@offsetOf(@This(), "weakref_count") == 0);
+        // TGC S4-e: `weakref_count` retired; the flags word took its offset so
+        // `class_id` / `shape_ref` / `prop_values` all keep theirs.
+        std.debug.assert(@offsetOf(@This(), "flags") == 0);
         std.debug.assert(@offsetOf(@This(), "class_id") == 4);
-        std.debug.assert(@offsetOf(@This(), "flags") == 6);
         std.debug.assert(@offsetOf(@This(), "shape_ref") == gc.object_deferred_link_body_offset);
         std.debug.assert(@offsetOf(@This(), "prop_values") == 16);
-        std.debug.assert(slots2_layout_bit & weakref_count_mask == 0);
         // The widest body must still be what the pre-knife fixed struct was, so
         // no wide class silently changed size class.
         std.debug.assert(objectBodyBytes(class.ids.array, false) == 48);
@@ -487,9 +478,8 @@ pub const Object = extern struct {
             std.debug.assert(trailing_property_bytes == 48);
         }
     }
-    weakref_count: u32 = 0,
-    class_id: class.ClassId,
     flags: ObjectFlags = .{},
+    class_id: class.ClassId,
     shape_ref: *shape.Shape,
     // qjs `JSObject.prop`: every object carries the live Entry pointer. The
     // slots2 form initially points it at the two entries beginning at body+24;
@@ -947,6 +937,9 @@ pub const Object = extern struct {
         // collection in that window marks its block cell and payload edges
         // without trying to read the deliberately undefined shape_ref.
         self.initArmPayload(class_payload);
+        // TGC S4-d spec 2.4: `.generator` is c class (suspended frame, stack,
+        // open VarRefs). This shell bypasses `createInternal`, so stamp here.
+        self.markNeedsFinalizer(rt);
         rt.gc.addConstructionRoot(self.gcHeader());
         return self;
     }
@@ -962,7 +955,12 @@ pub const Object = extern struct {
         self.shape_ref = final_shape;
         rt.gc.removeConstructionRoot(self.gcHeader());
         rt.registerObjectWithBytes(self, self.bodyBytes()) catch |err| {
-            self.gcHeader().meta().lifetime.object_shape_summary = 0;
+            // Only the Shape projection goes back to pristine. Bit7 of this
+            // byte is the remembered-set cache owned by `gc_generation`, and
+            // clearing it here would desynchronize the cache from
+            // `generation.remembered`, which still holds this address.
+            self.gcHeader().meta().lifetime.object_shape_summary &=
+                ~gc.trace_object_shape_summary_mask;
             rt.gc.addConstructionRoot(self.gcHeader());
             self.shape_ref = undefined;
             rt.shapes.dropUnshared(final_shape);
@@ -1241,12 +1239,16 @@ pub const Object = extern struct {
             freeRawCellConst(rt, self, class.ids.object, true);
 
         self.* = .{
-            .weakref_count = slots2_layout_bit,
-            .class_id = class.ids.object,
+            // Field order is load-bearing: `trailingPropertyStorageBase` below
+            // asserts `hasSlots2Layout()`, and the result location writes these
+            // fields into `self.*` in declaration order, so the layout bit is
+            // already stored when that assert runs.
             .flags = .{
                 .class_payload_kind = .none,
                 .has_exotic_methods = false,
+                .slots2_layout = true,
             },
+            .class_id = class.ids.object,
             .shape_ref = shape_ref,
             .prop_values = trailingPropertyStorageBase(self),
         };
@@ -1365,6 +1367,11 @@ pub const Object = extern struct {
         @memcpy(self.propertyStorageEntries(entries.len), entries);
         self.refreshTraceShapeSummary();
         initialized = true;
+        // TGC S4-d spec 2.4: no class payload on this constructor, so only the
+        // class-level owings remain.
+        if (class_id >= class.ids.init_count or class_id == class.ids.global_object) {
+            self.markNeedsFinalizer(rt);
+        }
         try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
@@ -1433,6 +1440,14 @@ pub const Object = extern struct {
 
         self.refreshTraceShapeSummary();
         initialized = true;
+        // TGC S4-d spec 2.4: the template's payload kind is copied verbatim,
+        // so the finalizer stamp has to be too.
+        if (payloadKindNeedsFinalizer(template.class_id, self.flags.class_payload_kind) or
+            template.class_id >= class.ids.init_count or
+            template.class_id == class.ids.global_object)
+        {
+            self.markNeedsFinalizer(rt);
+        }
         try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
         return self;
@@ -1666,6 +1681,21 @@ pub const Object = extern struct {
         // instead of recomputing it inside registerObject (mirror of the free
         // path's unregisterObjectWithBytes). Same value allocationSize derives.
         try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
+        // TGC S4-d spec 2.4: the construction-time half of the finalizer bit.
+        // `class_payload_kind` was forced to `.none` above for an INLINE
+        // payload, so the dynamic-class clauses (which are exactly the classes
+        // that can have one) are what cover those. `registerWeakReferenceHolder`
+        // below stamps the c-class holder classes itself.
+        if (payloadKindNeedsFinalizer(class_id, self.flags.class_payload_kind) or
+            !is_standard_class or
+            definition.has_payload_finalizer or
+            // A dying realm global has to clear every borrowed reference that
+            // names it (`clearBorrowedReferencesForDestroyedObject`); its own
+            // `.global` payload is a-class.
+            class_id == class.ids.global_object)
+        {
+            self.markNeedsFinalizer(rt);
+        }
         if (self.isWeakReferenceHolderClass()) rt.registerWeakReferenceHolder(self);
         initialized = false;
         return self;
@@ -1729,6 +1759,28 @@ pub const Object = extern struct {
     /// attached (`payloadSlot`).
     pub inline fn payloadKindIsTracerOwnedCellOrNone(payload_kind: class.PayloadKind) bool {
         return payload_kind == .none or payloadKindIsTracerOwnedCell(payload_kind);
+    }
+
+    /// TGC S4-d spec 2.4: does an object carrying this payload owe destructor
+    /// work at death? b class (external resources) and c class (weak semantics
+    /// / cursors) do; the a-class kinds are `.payload` GC cells the sweep
+    /// returns with no destructor.
+    ///
+    /// `.function` is b for its NATIVE arm only -- `class_id` is the
+    /// discriminator and the bytecode arm is inline a-class state whose whole
+    /// teardown is dropping three pointers.
+    pub inline fn payloadKindNeedsFinalizer(class_id: class.ClassId, payload_kind: class.PayloadKind) bool {
+        if (payload_kind == .function) return !class.isBytecodeFunctionClass(class_id);
+        return !payloadKindIsTracerOwnedCellOrNone(payload_kind);
+    }
+
+    /// TGC S4-d spec 2.4: stamp `needs_finalizer` on this object. The sweep
+    /// only visits `doomed & needs_finalizer`; everything else is reclaimed by
+    /// the bitmap without its header being touched. The bit only ever goes on
+    /// (D-S4-4): a holder that stops owing work pays one no-op destructor,
+    /// which is far cheaper than exact pairing at every release site.
+    pub inline fn markNeedsFinalizer(self: *Object, rt: *JSRuntime) void {
+        rt.gc.setNeedsFinalizer(self.gcHeader());
     }
 
     pub inline fn hasTracerOwnedPayloadCell(self: *const Object) bool {
@@ -2110,6 +2162,11 @@ pub const Object = extern struct {
         }
         rt.cached_iterator_next_entries = rt.cached_iterator_next_entries.ptr[0 .. len + 1];
         rt.cached_iterator_next_entries[len] = .{ .object = self };
+        // TGC S4-d spec 2.4 (§1.1 "must keep": `clearCachedIteratorNext`): this
+        // side table holds a BARE `*Object` and a value only reachable through
+        // it, so the entry has to be removed when the object dies. That is
+        // destructor work -- stamp the bit.
+        self.markNeedsFinalizer(rt);
         return &rt.cached_iterator_next_entries[len].value;
     }
 
@@ -2231,6 +2288,17 @@ pub const Object = extern struct {
         if (v) |env| rt.gc.generationalBarrier(self.gcHeader(), env.gcHeader());
     }
 
+    /// Promote an object to the realm-global class after construction.
+    ///
+    /// TGC S4-d spec 2.4: a dying global has to clear every borrowed reference
+    /// that names it (`clearBorrowedReferencesForDestroyedObject`), so the
+    /// class change is itself a finalizer-bit set point -- `createInternal`
+    /// stamps the objects that are BORN global, this stamps the rest.
+    pub fn promoteToGlobalObjectClass(self: *Object, rt: *JSRuntime) void {
+        self.class_id = class.ids.global_object;
+        self.markNeedsFinalizer(rt);
+    }
+
     pub fn ensureGlobalPayload(self: *Object, rt: *JSRuntime) !*GlobalPayload {
         if (self.globalPayload()) |payload| return payload;
         std.debug.assert(self.class_id == class.ids.global_object);
@@ -2245,7 +2313,7 @@ pub const Object = extern struct {
     /// establishes explicit global-object class identity; no realm state is
     /// attached to the object.
     pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*GlobalPayload {
-        if (self.class_id == class.ids.object) self.class_id = class.ids.global_object;
+        if (self.class_id == class.ids.object) self.promoteToGlobalObjectClass(rt);
         return self.ensureGlobalPayload(rt);
     }
 
@@ -2257,6 +2325,7 @@ pub const Object = extern struct {
         owner.* = .{};
         self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .realm_record;
+        self.markNeedsFinalizer(rt); // TGC S4-d: b class (realm host ref).
     }
 
     pub fn realmContext(self: *const Object) ?*context_mod.RealmContext {
@@ -2326,10 +2395,14 @@ pub const Object = extern struct {
         return payload.rare;
     }
 
-    pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
+    pub fn installExternalClassPayload(self: *Object, rt: *JSRuntime, payload: *anyopaque) void {
         std.debug.assert(self.payloadArm().* == null);
         self.payloadArm().* = payload;
         self.flags.class_payload_kind = .none;
+        // TGC S4-d spec 2.4: an embedder payload is released by the class's
+        // own finalizer callback. Dynamic ids are stamped at construction
+        // already; stamp here too so the fact does not depend on that.
+        self.markNeedsFinalizer(rt);
     }
 
     /// The proof that word 0 really is a payload pointer and nothing else in
@@ -2451,116 +2524,103 @@ pub const Object = extern struct {
     }
 
     // ===== destroy / teardown =====
+
+    /// TGC S4-d spec 2.4/§6: does this object, RIGHT NOW, owe destructor work?
+    ///
+    /// Recomputed from live state rather than read off the bit, so it can be
+    /// checked against the bit. Every clause names one entry in §1.1's "must
+    /// keep" list: a b/c payload, the two weak-identity tables, the borrowed
+    /// holder table, the weak-holder list, a realm global's borrowed-reference
+    /// sweep, an embedder class finalizer, and the iterator-next side table.
+    fn owesFinalizerWork(rt: *JSRuntime, self: *const Object) bool {
+        if (payloadKindNeedsFinalizer(self.class_id, self.flags.class_payload_kind)) return true;
+        if (self.flags.has_weak_id or self.flags.is_borrowed_reference_holder) return true;
+        if (self.isWeakReferenceHolderClass()) return true;
+        if (self.isGlobal()) return true;
+        if (self.class_id >= class.ids.init_count) return true;
+        if (rt.classes.destructionPlan(self.class_id)) |plan| {
+            if (plan.has_payload_finalizer) return true;
+        }
+        if (rt.cached_iterator_next_entries.len != 0 and
+            self.cachedIteratorNextSlotIfPresent(rt) != null) return true;
+        return false;
+    }
+
+    /// TGC S4-d spec §6: the two-way finalizer-bit audit (Debug only).
+    ///
+    /// Forward -- an object owing destructor work MUST carry the bit. A miss
+    /// is not a use-after-free but an external-resource leak or a dangling
+    /// side-table entry, and it becomes SILENT the moment the sweep stops
+    /// visiting unstamped cells, so it is a panic here rather than a counter.
+    ///
+    /// Reverse -- count the stamped objects that are plain and payload-free.
+    /// That is exactly the population S4-d takes out of the sweep; a non-zero
+    /// reading is sticky-bit residue (D-S4-4), not a defect.
+    fn auditNeedsFinalizerBit(rt: *JSRuntime, self: *Object) void {
+        const stamped = gc.headerNeedsFinalizer(self.gcHeader());
+        if (owesFinalizerWork(rt, self)) {
+            if (!stamped) {
+                std.debug.print(
+                    "gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x{x} class_id={d} payload={s} " ++
+                        "weak_id={} borrowed={} reached teardown unstamped\n",
+                    .{
+                        @intFromPtr(self),
+                        self.class_id,
+                        @tagName(self.flags.class_payload_kind),
+                        self.flags.has_weak_id,
+                        self.flags.is_borrowed_reference_holder,
+                    },
+                );
+                @panic("gc: an object owing destructor work has no needs_finalizer bit");
+            }
+            return;
+        }
+        if (stamped and self.class_id == class.ids.object and self.flags.class_payload_kind == .none) {
+            rt.gc.stats.plain_objects_with_finalizer_bit +|= 1;
+        }
+    }
+
+    /// TGC S4-d spec 2.4: the sweep now visits only `doomed & needs_finalizer`,
+    /// so the population that reaches here is the objects that OWE destructor
+    /// work -- plus, during teardown, whatever the runtime hands over
+    /// wholesale. The plain-object fast arm is gone with the population it
+    /// served: a plain object no longer reaches a destructor at all, its
+    /// property/array storage and a-class payload are GC cells the sweep
+    /// returns, and its cell is cleared out of the alloc bitmap in one word
+    /// operation with the rest of the block. That arm was the last thing
+    /// standing between this batch and "an ordinary object's death costs a
+    /// bit".
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) align(16) void {
         const self = fromHeader(header);
-        const weakref_state = self.weakref_count;
-        // qjs free_object (quickjs.c:6340-6391) for a plain JS Object: mark,
-        // free slots, free prop[], js_free_shape, remove_gc_object, js_free.
-        // Guards match K1: class_id==object, payload .none, no weakrefs,
-        // not cycle/deinit. Extra has_weak_id / borrowed bits fall back so
-        // this arm never skips table cleanup the general path still owns.
-        // The general teardown is outlined — leaving it in this function
-        // would keep the 0xf0 prologue on every sc_Pair.
-        // TGC S4-c: the gate widened from `payload none` to `payload none OR
-        // a class`. An a-class payload is a `.payload` GC cell with no
-        // destructor, so the fast arm skipping it is the CORRECT release --
-        // the sweep returns the cell. (For `class.ids.object` the admitted
-        // a-class kind is `.ordinary`.)
+        if (comptime builtin.mode == .Debug) auditNeedsFinalizerBit(rt, self);
+        // TGC S4-d spec 2.4 deletion probe. The batch's whole claim is that an
+        // ordinary object's death costs a bitmap bit, so the claim gets a
+        // counter rather than an argument: `plain_object_destructor_calls`
+        // must read ZERO over any workload. It is bucketed on the same two
+        // facts the sweep uses -- an ordinary class with no b/c payload, and
+        // no finalizer bit -- so a non-zero reading names a live destructor
+        // call this batch was supposed to have deleted, not a near miss.
+        rt.gc.stats.object_destructor_calls +|= 1;
         if (self.class_id == class.ids.object and
             payloadKindIsTracerOwnedCellOrNone(self.flags.class_payload_kind) and
-            weakReferenceCountFromState(weakref_state) == 0 and
-            !self.flags.has_weak_id and
-            !self.flags.is_borrowed_reference_holder)
+            !gc.headerNeedsFinalizer(header))
         {
-            const phase = rt.gc.phase;
-            // Only `.deinit` is excluded. `.remove_cycles` used to be
-            // excluded beside it -- refcounting's cycle collector needed more
-            // from teardown than this arm provides, and an earlier attempt to
-            // admit it tripped the former zero-ref teardown machinery.
-            // `.tracer_destroy` became a separate value precisely
-            // so it could be admitted here: the tracer frees every object
-            // inside such a window, so lumping the two together meant the
-            // tracing build never once used its own fast teardown. Measured:
-            // destruction cost the tracer 1.52 s of stopped time on raytrace
-            // against rc's 0.50 s for the same objects. `.remove_cycles`
-            // retired with rc; the exclusion is now `.deinit` alone.
-            if (phase != .deinit) {
-                @branchHint(.likely);
-                destroyPlainObjectFast(
-                    rt,
-                    self,
-                    phase == .tracer_destroy,
-                    hasSlots2LayoutFromState(weakref_state),
-                );
-                return;
-            }
+            rt.gc.stats.plain_object_destructor_calls +|= 1;
         }
         destroyFromHeaderSlow(rt, header);
     }
 
-    /// qjs free_object 6340-6391 ordinary-object arm. Inlined into
-    /// `destroyFromHeader` so the hot symbol stays the same.
-    /// `two_pass` folds in the only two things the general teardown does
-    /// differently inside a two-pass window: a shape condemned by the same
-    /// pass is not ours to decref, and the struct free waits for pass B
-    /// because a sibling not yet processed may still dereference this
-    /// header.
-    inline fn destroyPlainObjectFast(rt: *JSRuntime, self: *Object, two_pass: bool, has_slots2_layout: bool) void {
-        self.gcHeader().meta().flags.finalizing = true;
-
-        const object_shape = self.shape_ref;
-        const alloc_size = objectBodyBytes(self.class_id, has_slots2_layout);
-        const accounted_size = self.accountedBodyBytesForPhysical(alloc_size);
-        // TGC S4-b: `prop_values` is a GC cell. Dropping the pointer is the
-        // whole release -- the sweep returns the cell. (S4-d deletes this
-        // destructor outright.)
-        self.setPropertyStorageEmptyForDestroy();
-        // js_free_shape (quickjs.c:5320-5325): an unshared shape dies with
-        // its only holder; shared ones wait for the sweep.
-        rt.shapes.dropUnshared(object_shape);
-        // No finalizer on this arm (qjs 6365-6367 is NULL for JS_CLASS_OBJECT).
-        // qjs still writes shape=NULL as a fail-safe before the callback; the
-        // allocation is about to be freed, so the tombstone would be a dead store.
-        if (rt.cached_iterator_next_entries.len != 0) {
-            @call(.never_inline, Object.clearCachedIteratorNext, .{ self, rt });
-        }
-        rt.unregisterObjectWithBytes(self, accounted_size);
-        if (two_pass) {
-            // Stage 3: this arm's own guards already established everything the
-            // settlement predicate needs about the object (class 1, no weak
-            // state), and `accounted_size` is the exact debit Pass B would make.
-            if (object_gc.trySettleTracerBlockCorpse(rt, self, true, accounted_size)) return;
-            rt.gc.deferCycleStructFree(self.gcHeader());
-            return;
-        }
-        // `destroyFromHeader` enters this arm only for `class.ids.object`, so
-        // both tails are compile-time constants.
-        std.debug.assert(self.class_id == class.ids.object);
-        if (has_slots2_layout) {
-            rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, true), self);
-        } else {
-            rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, false), self);
-        }
-    }
-
     noinline fn destroyFromHeaderSlow(rt: *JSRuntime, header: *gc.Header) void {
         const self = fromHeader(header);
-        // A resource-stripped weak husk stays allocated (its WeakRefs still
-        // name it), so every later bitmap snapshot (`alloc & ~mark`) condemns
-        // it again and the drain arrives here a second time. It belongs to
-        // the last weak release (`destroyDeadWeakHusk`); running the resource
-        // pass again would dereference the finalizing sentinel shape. Kept
-        // off the plain-object fast arm above: only holders/husks reach here.
-        if (gc.headerIsReclaimableWeakHusk(header)) return;
-        // qjs marks an object "about to be freed" before its zero-refcount free
-        // runs (`js_rc(p)->mark = 1`, __JS_FreeValueRT quickjs.c:6479) and
-        // js_weakref_free tests that mark (quickjs.c:51728-51735). Under the
-        // tracer that reentrancy guard is `lifetime.flags.husk`, not the
-        // prefix mark bit: `headerIsReclaimableWeakHusk` reads the husk bit,
-        // which this teardown only sets AFTER the resource pass, so a weak
-        // release arriving mid-teardown already refuses to free the struct.
-        // The mark bit was write-only here (TGC S4-a); `finalizing` remains
-        // the in-teardown stamp every reader actually consults.
+        // TGC S4-e spec 2.5: no corpse survives its own resource pass any more,
+        // so there is no re-entry to guard against. The weak husk was the only
+        // state in which a destroyed object stayed allocated and could be
+        // condemned a second time by a later `alloc & ~mark` snapshot; a
+        // WeakRef now names its target by identity token and the token is
+        // handed back right here.
+        //
+        // `finalizing` remains the in-teardown stamp every reader consults
+        // (qjs `js_rc(p)->mark = 1` before free, quickjs.c:6479).
         header.meta().flags.finalizing = true;
         // Keep only immutable scalar destruction data across recursive cleanup.
         // A dynamic object's allocation owns its definition pin until the
@@ -2618,182 +2678,73 @@ pub const Object = extern struct {
         if (definition.has_payload_finalizer) {
             self.finalizeClassPayload(rt, definition.generation, has_inline_payload);
         }
-        // Array elements live in qjs's class-specific union arm and are released
-        // by the Array class finalizer, after the shape/prototype edge. Keep the
-        // same order for zjs's direct dense-storage teardown. The iterator cache
-        // is likewise class-specific state rather than an own-property slot.
-        self.destroyArrayElements();
+        // TGC S4-d spec 2.4: dense array elements are an `.array_storage` GC
+        // cell (S4-b), so there is nothing to release -- the sweep returns the
+        // cell. The iterator-next cache is different: it is a side table
+        // holding a bare `*Object`, so the entry has to go (and the object
+        // carries the finalizer bit precisely because of it).
         if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
-        // The non-array class payloads all share the single `u.payload`
-        // union slot, discriminated by `class_payload_kind` — at most ONE is
-        // ever live per object. A synchronous callback clears that payload and
-        // its discriminant above, so this switch handles only definitions
-        // without a payload finalizer.
+        // The class payloads all share the single `u.payload` union slot,
+        // discriminated by `class_payload_kind` — at most ONE is ever live per
+        // object. A synchronous callback clears that payload and its
+        // discriminant above, so this switch handles only definitions without
+        // a payload finalizer.
         //
         // qjs free_object reaches class teardown through one nullable pointer
-        // pair (class_array[p->class_id].finalizer / p->u.opaque). Mirror that
-        // for the dominant teardown — an ordinary object that never allocated
-        // a side payload — instead of paying the 21-arm jump-table dispatch:
-        // `.none`, and `.ordinary` with a null payload, have nothing to
-        // release (destroyOrdinaryPayload's own first check).
+        // pair (class_array[p->class_id].finalizer / p->u.opaque).
+        // TGC S4-d spec 2.4: only the b/c-class arms remain. An a-class payload
+        // is a `.payload` GC cell whose whole content is GC-owned values, so
+        // its former destructor was a loop of stores into memory the sweep is
+        // about to reclaim -- pure waste. `payloadKindNeedsFinalizer` is the
+        // same predicate that stamped the bit at construction, so this switch
+        // and the sweep's cell set are two readings of one classification.
         const payload_kind = self.flags.class_payload_kind;
-        const payload_dead = payload_kind == .none;
-        if (!payload_dead) switch (payload_kind) {
-            .none => unreachable,
-            .ordinary => self.destroyOrdinaryPayload(rt),
-            .arguments => self.destroyArgumentsPayload(rt),
-            .object_data => self.destroyObjectDataPayload(rt),
+        if (payloadKindNeedsFinalizer(destroying_class_id, payload_kind)) switch (payload_kind) {
             .weak_ref => self.destroyWeakRefPayload(rt),
             .function => self.destroyFunctionPayload(rt),
-            .bound_function => self.destroyBoundFunctionPayload(rt),
-            .var_ref => self.destroyVarRefPayload(rt),
             .generator => self.destroyGeneratorPayload(rt),
-            .promise => self.destroyPromisePayload(rt),
-            .proxy => self.destroyProxyPayload(rt),
-            .regexp => self.destroyRegExpPayload(rt),
             .iterator => self.destroyIteratorPayload(rt),
             .collection => self.destroyCollectionPayload(rt),
             .buffer => self.destroyBufferPayload(rt),
             .typed_array => self.destroyTypedArrayPayload(rt),
             .finalization_registry => self.destroyFinalizationRegistryPayload(rt),
             .std_file => self.destroyStdFilePayload(rt),
-            .disposable_stack => self.destroyDisposableStackPayload(rt),
-            .global => self.destroyGlobalPayload(rt),
             .realm_record => self.destroyRealmRecordPayload(rt),
+            else => unreachable,
         };
+        // TGC S4-e spec 2.5: hand the weak identity back HERE, in the resource
+        // pass, not in whatever later stage frees the struct.
+        //
+        // The husk used to cover the window between the two: a WeakRef target
+        // stayed allocated, and the husk bit told `liveObjectFromWeakIdentity`
+        // that the id no longer names anything. Without the husk the id map is
+        // the whole liveness test, so it must not name a corpse for even one
+        // parked-drain poll -- `processWeak` has already cleared every weak
+        // slot that could reach this id, but "unreachable" is a weaker
+        // statement than "not in the map", and this is the cheap one.
+        // Only objects handed a weak id have an entry, so the flag gates the
+        // call; a plain object never enters `takeWeakObjectIdentity` just to
+        // load the flag and return.
+        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
         // The callback and every class-specific owned edge run while the object
         // is still heap-accounted. This is qjs free_object's remove_gc_object
         // boundary: after it returns, callbacks must no longer observe the
-        // object as live even when a weak husk keeps the raw struct allocated.
+        // object as live.
         rt.unregisterObjectWithBytes(self, accounted_size);
-        // Cycle removal and runtime deinit both use a resource pass followed by
-        // a struct-free pass: a not-yet-processed sibling (or a held Shape)
-        // may still decref and therefore dereference this header. Defer the
-        // allocation free until that resource pass completes (qjs free_object,
-        // quickjs.c:6382).
-        if (rt.gc.phase == .tracer_destroy or rt.gc.phase == .deinit) {
-            // Stage 3, generic-teardown twin of the fast arm above. The class
-            // predicate is spelled from state this path already loaded:
-            // `has_inline_payload` comes from the same `destructionPlan` read
-            // the widened Pass-B fast arm would repeat, and a standard id makes
-            // `releaseObjectDefinition` a compare-and-return with no pin to
-            // drop. Dynamic ids own a definition pin and stay on the park path.
-            // Census §3.2: this arm carried 25.6%-31.6% of all block corpses
-            // (array, mapped_arguments, bytecode_function, date), and on
-            // raytrace their 3.1% sprinkle is what made whole-block settlement
-            // impossible before the fast arm was widened.
-            if (object_gc.trySettleTracerBlockCorpse(
-                rt,
-                self,
-                destroying_class_id < class.ids.init_count and !has_inline_payload,
-                accounted_size,
-            )) return;
-            rt.gc.deferCycleStructFree(self.gcHeader());
-            return;
-        }
-        // Outside cycle removal, zero-ref destruction may need to leave the
-        // resource-stripped object as a weak husk. During REMOVE_CYCLES the
-        // restored refcount must remain intact until every condemned incoming
-        // edge has been released; Pass B below makes the keep/free decision,
-        // exactly like qjs free_object + gc_free_cycles.
-        if (self.weakReferenceCount() != 0) {
-            gc.setHeaderWeakHusk(self.gcHeader());
-            self.gcHeader().meta().flags.finalizing = false;
-            return;
-        }
-        // qjs releases the weak-id mapping in its weak sweep, never per plain
-        // object; only objects handed a weak id (has_weak_id) have an entry, so
-        // gate the call — a plain object never enters takeWeakObjectIdentity just
-        // to load the flag and return.
-        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
+        // TGC S4-e spec 2.5: the struct goes back NOW.
+        //
+        // The two-pass teardown (Pass A strips resources, Pass B hands the
+        // storage back once every sibling destructor has run) existed to stop
+        // a sibling's destructor -- or a weak release -- from dereferencing a
+        // freed struct mid-pass. Both callers of that guarantee are gone: no
+        // refcount decrements during destruction any more (S1), and no weak
+        // husk keeps a corpse addressable (step 2 of this batch). What is
+        // left is the same one-pass release the string family has used since
+        // S2, on the same population -- `doomed & needs_finalizer` -- and with
+        // the same per-cell debit S4-d deliberately kept for that half of the
+        // condemned set.
         freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(destroying_class_id, definition.generation);
-    }
-
-    /// Pass-B fast-arm predicate: the corpse's physical release is exactly
-    /// `MemoryAccount.destroy{,WithFam}` on the Object allocation, with no
-    /// class-table release call and no inline-payload base fixup.
-    ///
-    /// Class 1 answers without touching the class table at all: `Object` is
-    /// registered once by `Table.init` and re-registration returns
-    /// `DuplicateClass`, so its plan is a compile-time known zero-payload
-    /// record. Every other standard id needs the `standard_plans[id]` load
-    /// because ids outside `standard_classes` (50..68) are unregistered and an
-    /// embedding could in principle register one with an inline payload -- for
-    /// those the allocation base is BEFORE the Object and a plain
-    /// `destroy(Object, self)` would free the wrong address. The load is not a
-    /// new cost: it is exactly the load the generic arm below already performs,
-    /// so the widened arm is strictly fewer instructions than the generic arm
-    /// for the ids it takes over (it drops the `destructionPlan` null/range
-    /// branch and the `releaseObjectDefinition` call).
-    ///
-    /// Dynamic ids (>= `init_count`) stay on the generic arm: they own a
-    /// definition pin that `releaseObjectDefinition` must drop.
-    /// Public so the corpse census classifies against the predicate the code
-    /// actually branches on rather than a restatement of it.
-    pub inline fn passBFastArmEligible(rt: *const JSRuntime, class_id: class.ClassId) bool {
-        if (class_id == class.ids.object) return true;
-        if (class_id >= class.ids.init_count) return false;
-        return rt.classes.standardPlan(class_id).inline_payload_size == 0;
-    }
-
-    /// Pass-B drain of a cycle-deferred object: its resources were freed by the
-    /// resource pass; only the struct memory remains. Mirrors qjs Pass B
-    /// (quickjs.c:6797). Pass B keeps only live-weakref husks before calling this.
-    pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
-        const class_id = self.class_id;
-        // Constructor-created splay nodes are ordinary Objects, but the corpse
-        // census (docs/corpse-census-2026-08-29.md §3.3) showed the remaining
-        // 3%-26% are standard classes too -- array, mapped_arguments,
-        // bytecode_function, date, for_in_iterator -- and for a standard id
-        // `releaseObjectDefinition` is a single compare-and-return. Their only
-        // real cost was that they made a corpse ineligible for the block-level
-        // settlement stage 3 wants: on raytrace a 3.1% `mapped_arguments`
-        // sprinkle took the share of whole-run-clean blocks from ~97% to 0.
-        // The trailing two-slot allocation remains a physical property of the
-        // object and is handled exactly as in the generic arm.
-        if (passBFastArmEligible(rt, class_id)) {
-            if (comptime std.debug.runtime_safety) {
-                const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-                std.debug.assert(definition.inline_payload_size == 0);
-                // Load-bearing for the FAM accounting below: the debit must
-                // be `@sizeOf(Object) + trailing_property_bytes`, and that
-                // constant is only the right trailing size for the class-1
-                // property layout (`verifyObjectPropertyStorageLayouts`
-                // enforces the same rule from the arena checker side).
-                std.debug.assert(!self.hasSlots2Layout() or
-                    class_id == class.ids.object);
-            }
-            if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
-            if (self.hasSlots2Layout()) {
-                return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, true), self);
-            }
-            // The overwhelmingly common Pass-B corpse is a plain object; give
-            // it the constant tail and leave the class switch to the rest.
-            if (class_id == class.ids.object) {
-                return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, false), self);
-            }
-            rt.memory.destroyWithFam(Object, self, objectTailBytes(class_id, false));
-            return;
-        }
-        const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-        // The flag test belongs here, not behind the call. Almost no object
-        // has a weak identity, and this runs on every corpse -- 41 M on
-        // raytrace, 72 M on earley-boyer -- so the outlined call's prologue
-        // was the whole cost for nearly all of them.
-        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, definition);
-        rt.classes.releaseObjectDefinition(class_id, definition.generation);
-    }
-
-    pub fn destroyDeadWeakHusk(rt: *JSRuntime, self: *Object) void {
-        std.debug.assert(gc.headerIsReclaimableWeakHusk(self.gcHeader()));
-        std.debug.assert(self.weakReferenceCount() == 0);
-        const class_id = self.class_id;
-        const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-        _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, definition);
-        rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
     fn finalizeClassPayload(self: *Object, rt: *JSRuntime, generation: u64, inline_payload: bool) void {
@@ -2862,10 +2813,6 @@ pub const Object = extern struct {
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
-            if (gc.headerIsHusk(current.gcHeader())) {
-                rt.unregisterBorrowedReferenceHolder(current);
-                continue;
-            }
             if (!current.mayContainBorrowedReferences(rt)) {
                 index += 1;
                 continue;
@@ -2888,21 +2835,15 @@ pub const Object = extern struct {
         }
     }
 
+    /// TGC S4-e: the list used to be compacted here because a weak husk could
+    /// sit in it as an already-destroyed entry. Husks are gone -- an entry
+    /// leaves this list in `unregisterBorrowedReferenceHolder`, inside the
+    /// holder's own destructor -- so the pass is now only the cached-index
+    /// repair the matcher loop relies on.
     fn compactBorrowedReferenceHolders(rt: *JSRuntime) void {
-        var write_index: usize = 0;
-        var read_index: usize = 0;
-        while (read_index < rt.borrowed_reference_holders.len) : (read_index += 1) {
-            const current = rt.borrowed_reference_holders[read_index];
-            if (!gc.headerIsHusk(current.gcHeader())) {
-                if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
-                current.setBorrowedReferenceHolderIndex(write_index);
-                write_index += 1;
-                continue;
-            }
-            current.setBorrowedReferenceHolderIndex(null);
-            current.flags.is_borrowed_reference_holder = false;
+        for (rt.borrowed_reference_holders, 0..) |current, index| {
+            current.setBorrowedReferenceHolderIndex(index);
         }
-        rt.borrowed_reference_holders = rt.borrowed_reference_holders.ptr[0..write_index];
     }
 
     fn runtimeBorrowedReferenceHolderIndex(rt: *JSRuntime, object: *Object) ?usize {
@@ -3113,30 +3054,8 @@ pub const Object = extern struct {
         return self.prop_values != emptyPropertyStorageBase();
     }
 
-    inline fn weakReferenceCountFromState(state: u32) u32 {
-        return state & weakref_count_mask;
-    }
-
-    inline fn hasSlots2LayoutFromState(state: u32) bool {
-        return state & slots2_layout_bit != 0;
-    }
-
-    pub inline fn weakReferenceCount(self: *const Object) u32 {
-        return weakReferenceCountFromState(self.weakref_count);
-    }
-
-    pub inline fn retainWeakReference(self: *Object) void {
-        std.debug.assert(self.weakReferenceCount() != weakref_count_mask);
-        self.weakref_count += 1;
-    }
-
-    pub inline fn releaseWeakReference(self: *Object) void {
-        std.debug.assert(self.weakReferenceCount() != 0);
-        self.weakref_count -= 1;
-    }
-
     pub inline fn hasSlots2Layout(self: *const Object) bool {
-        return hasSlots2LayoutFromState(self.weakref_count);
+        return self.flags.slots2_layout;
     }
 
     pub inline fn propertyStorageIsInline(self: *const Object) bool {
@@ -3854,6 +3773,7 @@ pub const Object = extern struct {
         payload.* = .{};
         self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .typed_array;
+        self.markNeedsFinalizer(rt); // TGC S4-d: b class (view double link).
     }
 
     /// Initialize a TypedArray/DataView payload and link it into its backing
@@ -4590,32 +4510,6 @@ pub const Object = extern struct {
         return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
     }
 
-    /// TGC S4-b: the element buffer is an `.array_storage` GC cell, so this is
-    /// now only the dense-extent reset the class arms need; the memory is the
-    /// sweep's. (S4-d deletes the caller.)
-    fn destroyArrayElements(self: *Object) void {
-        // Only these classes activate the dense-array union arm. Other class
-        // arms may legitimately use all three words (notably inline RegExp's
-        // second string pointer), so their bytes must never be interpreted as
-        // array count/capacity state.
-        if (self.class_id != class.ids.array and
-            self.class_id != class.ids.arguments and
-            self.class_id != class.ids.mapped_arguments) return;
-        if (self.class_id == class.ids.mapped_arguments) {
-            self.arrayArm().*.count = 0;
-            self.arrayArm().*.capacity = 0;
-            self.arrayArm().*.length = 0;
-            return;
-        }
-        if (!self.flags.fast_array and self.arrayArm().*.capacity == 0) return;
-        if (self.flags.fast_array) {} else {
-            std.debug.assert(self.arrayArm().*.capacity == 0);
-        }
-        self.arrayArm().*.count = 0;
-        self.arrayArm().*.capacity = 0;
-        self.arrayArm().*.length = 0;
-        self.flags.fast_array = false;
-    }
 
     /// TGC S4-b: dropping the dense extent is the whole release -- the
     /// `.array_storage` cell the arm pointed at is returned by the sweep once
@@ -5668,6 +5562,11 @@ pub const Object = extern struct {
     /// array and attach it to the function object *before* the fill loop so
     /// the object is the sole GC root. Null slots are skipped by mark/destroy.
     /// Inline: qjs does this mallocz inside js_closure2, not as a sibling call.
+    ///
+    /// TGC S4-d step 0: the capture array is a SUBORDINATE `.payload` cell
+    /// (spec 2.3), reported by the owner's bytecode trace arm and returned by
+    /// the sweep with no destructor. Mint and install stay adjacent -- a bare
+    /// cell has no precise root.
     pub inline fn allocateNullCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
         if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
         const storage = &self.bytecodeArm().*;
@@ -5676,9 +5575,10 @@ pub const Object = extern struct {
         if (storage.var_refs != BytecodeFunctionStorage.emptyVarRefs()) return error.InvalidBytecode;
         if (count == 0) return;
 
-        const slots = try rt.memory.alloc(?*var_ref_mod.VarRef, count);
+        const slots = try createPayloadSliceCell(rt, ?*var_ref_mod.VarRef, count);
         @memset(slots, null);
         storage.var_refs = slots.ptr;
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
     }
 
     /// Allocate the one and only module capture array with every slot null.
@@ -5730,21 +5630,6 @@ pub const Object = extern struct {
         for (slots) |slot| {
             if (slot == null) return error.InvalidBytecode;
         }
-    }
-
-    /// Replace the closure-captures slice, releasing the previous cells —
-    /// the cell-typed `setValueSlice` (ownership of `next_cells` transfers).
-    pub fn setFunctionCaptures(self: *Object, rt: *JSRuntime, next_cells: []*var_ref_mod.VarRef) void {
-        std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        var old_cells = self.bytecodeArm().*.captureSlots();
-        if (self.bytecodeArm().*.function_bytecode) |fb| {
-            std.debug.assert(next_cells.len == fb.closureVarCount());
-        }
-        self.bytecodeArm().*.var_refs = if (next_cells.len == 0)
-            BytecodeFunctionStorage.emptyVarRefs()
-        else
-            @ptrCast(next_cells.ptr);
-        destroyOptionalVarRefCellSlice(rt, &old_cells);
     }
 
     pub fn functionHomeObject(self: *const Object) ?*Object {
@@ -6213,14 +6098,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(self.payloadSlot().*.?));
     }
 
-    fn destroyOrdinaryPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.ordinaryPayload() orelse return;
-        self.payloadSlot().* = null;
-        self.flags.class_payload_kind = .none;
-        // TGC S4-c: the payload is a `.payload` GC cell. Dropping the pointer
-        // is the whole release -- the sweep returns the cell.
-        payload.destroy(rt);
-    }
 
     fn iteratorPayload(self: *Object) ?*IteratorPayload {
         if (self.flags.class_payload_kind != .iterator) return null;
@@ -6389,12 +6266,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyDisposableStackPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.disposableStackPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn globalPayload(self: *Object) ?*GlobalPayload {
         if (self.flags.class_payload_kind != .global) return null;
@@ -6408,12 +6279,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyGlobalPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.globalPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn destroyRealmRecordPayload(self: *Object, rt: *JSRuntime) void {
         if (self.flags.class_payload_kind != .realm_record) return;
@@ -6477,18 +6342,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyRegExpPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.regExpPayload() orelse return;
-        if (self.class_id == class.ids.regexp) {
-            payload.destroy(rt);
-            self.regexpArm().* = .{};
-            self.flags.class_payload_kind = .none;
-            return;
-        }
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn boundFunctionPayload(self: *Object) ?*BoundFunctionPayload {
         if (self.flags.class_payload_kind != .bound_function) return null;
@@ -6502,12 +6355,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyBoundFunctionPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.boundFunctionPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn proxyPayload(self: *Object) ?*ProxyPayload {
         if (self.flags.class_payload_kind != .proxy) return null;
@@ -6521,12 +6368,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyProxyPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.proxyPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn argumentsPayload(self: *Object) ?*ArgumentsPayload {
         if (self.flags.class_payload_kind != .arguments) return null;
@@ -6540,12 +6381,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyArgumentsPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.argumentsPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn objectDataPayload(self: *Object) ?*ObjectDataPayload {
         if (self.flags.class_payload_kind != .object_data) return null;
@@ -6559,12 +6394,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyObjectDataPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.objectDataPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn varRefPayload(self: *Object) ?*VarRefPayload {
         if (self.flags.class_payload_kind != .var_ref) return null;
@@ -6576,12 +6405,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
-    fn destroyVarRefPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.varRefPayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     pub fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.flags.class_payload_kind != .promise) return null;
@@ -6593,12 +6416,6 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(self.payloadArm().*.?));
     }
 
-    fn destroyPromisePayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.promisePayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-    }
 
     fn generatorPayload(self: *Object) ?*GeneratorPayload {
         if (self.flags.class_payload_kind != .generator) return null;
@@ -6634,9 +6451,9 @@ pub const Object = extern struct {
 
     fn destroyFunctionPayload(self: *Object, rt: *JSRuntime) void {
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            var captures = self.bytecodeArm().*.captureSlots();
+            // TGC S4-d step 0: the capture array is a `.payload` cell; the
+            // sweep returns it. Drop the pointer only.
             self.bytecodeArm().*.var_refs = BytecodeFunctionStorage.emptyVarRefs();
-            destroyOptionalVarRefCellSlice(rt, &captures);
 
             if (self.bytecodeFunctionAux()) |aux| {
                 self.bytecodeArm().*.home_or_aux = null;
@@ -6659,8 +6476,6 @@ pub const Object = extern struct {
     }
 
     // ===== visit* / cycle GC =====
-    pub const drainCycleDeferredFrees = object_gc.drainCycleDeferredFrees;
-    pub const drainCycleDeferredFreesBudgeted = object_gc.drainCycleDeferredFreesBudgeted;
 
     fn weakIdentityIsLive(rt: *const JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
@@ -6703,7 +6518,6 @@ pub const Object = extern struct {
     }
 
     fn collectReachableObjects(rt: *JSRuntime, visited: *ObjectVisitSet, current: *Object) ObjectGraphError!void {
-        if (gc.headerIsHusk(current.gcHeaderConst())) return;
         const visit = try visited.getOrPut(@intFromPtr(current));
         if (visit.found_existing) return;
         try current.collectDirectChildObjects(rt, visited);
@@ -7211,6 +7025,10 @@ pub const Object = extern struct {
             // markClassPayload (that path is JSClass.gc_mark for exotic
             // host classes, not u.func).
             const captures = self.bytecodeArm().*.captureSlots();
+            // TGC S4-d step 0: the capture array is a subordinate `.payload`
+            // cell; report the cell before walking its contents.
+            if (captures.len != 0)
+                try object_payloads.callVisitStorageCell(visitor, object_payloads.payloadSliceCellHeader(captures.ptr));
             for (captures) |maybe_cell| {
                 const cell = maybe_cell orelse continue;
                 var cell_value = cell.valueRef();

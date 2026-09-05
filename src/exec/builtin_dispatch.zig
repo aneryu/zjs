@@ -425,7 +425,7 @@ pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err:
     if (@as(anyerror, err) == error.Interrupted and ctx.exceptionIsUncatchable()) return;
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
-    const error_value = exception_ops.createNamedError(ctx, error_global, error_info.name, error_info.message) catch |create_err| {
+    const error_value = exception_ops.createSentinelError(ctx, error_global, err, error_info) catch |create_err| {
         // The native-call seam signals failure by returning the exception
         // sentinel, and `nativeIsExc` asserts sentinel implies a pending
         // exception. On an exhausted heap the Error object cannot be built, so

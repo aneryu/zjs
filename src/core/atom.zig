@@ -1997,7 +1997,7 @@ pub const AtomTable = struct {
             // repeating this findDynamic hash walk per OP_push_atom_value.
             if (entry.kind == .string and entry.str == null) {
                 entry.str = cached;
-                if (cached.atom_id == string.String.no_atom_id) cached.atom_id = atom_id;
+                if (cached.atom_id == string.String.no_atom_id) cached.bindAtomId(rt, atom_id);
             }
             return cached.value();
         }
@@ -2008,7 +2008,7 @@ pub const AtomTable = struct {
         if (entry.str) |cached| return cached.value();
         const created = try string.String.createUtf8(rt, text);
         entry.str = created;
-        created.atom_id = atom_id;
+        created.bindAtomId(rt, atom_id);
         return created.value();
     }
 
@@ -2030,7 +2030,7 @@ pub const AtomTable = struct {
     /// content-equal string interned later simply stays unbound. No-op for
     /// non-string atoms, so a symbol's description never converts back
     /// into the symbol atom.
-    pub fn cacheString(self: *AtomTable, atom_id: Atom, s: *string.String) void {
+    pub fn cacheString(self: *AtomTable, rt: *JSRuntime, atom_id: Atom, s: *string.String) void {
         if (s.atom_id != string.String.no_atom_id) return;
         if (isTaggedInt(atom_id)) {
             // Tagged ints have no table entry, but the id encodes the
@@ -2055,7 +2055,7 @@ pub const AtomTable = struct {
         const entry = self.findDynamic(atom_id) orelse return;
         if (!entry.isLive() or entry.kind != .string or entry.str != null) return;
         entry.str = s;
-        s.atom_id = atom_id;
+        s.bindAtomId(rt, atom_id);
     }
 
     /// JSValue for an atom the caller keeps holding BY ID. The value is an
@@ -2190,7 +2190,7 @@ pub const AtomTable = struct {
             try string.String.createSymbolNoDescription(rt)
         else
             try string.String.createUtf8(rt, entry.bytes);
-        body.atom_id = atom_id;
+        body.bindAtomId(rt, atom_id);
         entry.str = body;
         if (root_until_promoted) self.young_symbol_atoms.appendAssumeCapacity(atom_id);
         return body;

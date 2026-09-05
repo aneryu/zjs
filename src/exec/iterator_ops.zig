@@ -1471,7 +1471,7 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.class_id = core.class.ids.global_object;
+    global.promoteToGlobalObjectClass(rt);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
@@ -2534,7 +2534,7 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.class_id = core.class.ids.global_object;
+    global.promoteToGlobalObjectClass(rt);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);

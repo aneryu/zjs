@@ -266,7 +266,7 @@ pub fn runtimeErrorValueForDisposableDispose(
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     if (ctx.hasException()) ctx.clearException();
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return err;
-    return exception_ops.createNamedError(ctx, global, error_info.name, error_info.message);
+    return exception_ops.createSentinelError(ctx, global, err, error_info);
 }
 
 pub fn suppressedErrorForDispose(

@@ -66,6 +66,7 @@ pub const Shape = shape.Shape;
 pub const FunctionBytecode = function_bytecode.FunctionBytecode;
 pub const ModuleRecord = module.ModuleRecord;
 pub const Object = object.Object;
+pub const ObjectFlags = object.ObjectFlags;
 pub const VarRef = var_ref.VarRef;
 pub const Descriptor = descriptor.Descriptor;
 pub const JSRuntime = runtime.JSRuntime;

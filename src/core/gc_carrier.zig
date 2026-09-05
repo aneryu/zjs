@@ -37,7 +37,6 @@ pub const LifecycleState = enum(u4) {
     published,
     doomed,
     finalizer_current,
-    husk,
     parked,
     rollback_pending,
     raw_free_in_progress,

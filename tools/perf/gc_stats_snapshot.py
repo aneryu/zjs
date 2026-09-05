@@ -405,7 +405,7 @@ def parse_gc_stats(text: str) -> dict:
     )
     marked_kinds = one_match(
         text,
-        r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)(?:, big-int (?P<big_int>\d+))?(?:, string (?P<string>\d+))?$",
+        r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)(?:, big-int (?P<big_int>\d+))?(?:, string (?P<string>\d+))?(?:, storage (?P<storage>\d+))?$",
         "marked-set kinds",
     )
     trace_classes = one_match(
@@ -546,7 +546,7 @@ def parse_gc_stats(text: str) -> dict:
         raise SnapshotError("marked trace-class partition does not add to headers")
     # Since TGC S2 the string family also lives in block cells, so the block
     # census covers both populations and cannot be held under objects alone.
-    if marked["block_headers"] > marked_kinds["object"] + marked_kinds.get("string", 0):
+    if marked["block_headers"] > marked_kinds["object"] + marked_kinds.get("string", 0) + marked_kinds.get("storage", 0):
         raise SnapshotError("marked block headers exceed marked block-cell kinds")
     # Every gc.Header kind is tracer-owned since TGC S1/S2; big-int and string
     # are optional in the row so pre-S1/pre-S2 baseline binaries still parse.
@@ -554,7 +554,7 @@ def parse_gc_stats(text: str) -> dict:
         marked_kinds.get(key, 0)
         for key in (
             "object", "function_bytecode", "var_ref", "module", "shape",
-            "realm_context", "big_int", "string",
+            "realm_context", "big_int", "string", "storage",
         )
     )
     if marked["refcount_removed_headers"] != expected_refcount_removed:
@@ -785,6 +785,7 @@ def parse_gc_stats(text: str) -> dict:
                 # Optional in the printed row (pre-S2 binaries omit it), so the
                 # JSON schema has to stay stable across baseline/candidate.
                 "string": marked_kinds.get("string", 0),
+                "storage": marked_kinds.get("storage", 0),
             },
             "byTraceClass": {
                 "ordinaryObject": trace_classes["ordinary_object"],

@@ -502,16 +502,7 @@ pub const ModuleRecord = struct {
         self.module_name = atom.null_atom;
         self.clearForDestroy(rt);
 
-        if (rt.gc.phase == .tracer_destroy) {
-            rt.gc.deferCycleStructFree(header);
-            return;
-        }
-        self.memory.destroy(ModuleRecord, self);
-    }
-
-    pub fn freeCycleDeferredStruct(rt: anytype, header: *gc.Header) void {
-        const self: *ModuleRecord = @alignCast(@fieldParentPtr("header", header));
-        _ = rt;
+        // TGC S4-e spec 2.5: no Pass-B deferral.
         self.memory.destroy(ModuleRecord, self);
     }
 

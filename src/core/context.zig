@@ -906,16 +906,7 @@ pub const JSContext = struct {
         rt.assertOwnerThread();
         const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
         self.deinitResources();
-        if (rt.gc.phase == .tracer_destroy) {
-            rt.gc.deferCycleStructFree(header);
-            return;
-        }
-        rt.destroyRuntime(JSContext, self);
-    }
-
-    pub fn freeCycleDeferredStruct(rt: *JSRuntime, header: *gc.Header) void {
-        rt.assertOwnerThread();
-        const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
+        // TGC S4-e spec 2.5: no Pass-B deferral.
         rt.destroyRuntime(JSContext, self);
     }
 

@@ -177,7 +177,7 @@ pub fn tryCatchInFrame(
     const catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
     else
-        exception_ops.createNamedError(ctx, global, error_info.?.name, error_info.?.message) catch |create_err| blk: {
+        exception_ops.createSentinelError(ctx, global, err, error_info.?) catch |create_err| blk: {
             // A fully exhausted heap cannot materialize a fresh error object;
             // fall back to the preallocated out-of-memory exception so the
             // JS catch handler still runs (allocation-free dup). This is the
@@ -294,7 +294,7 @@ pub fn callNativeBuiltinRecordForVm(
 pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, err: anytype) !void {
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
-    const error_value = try exception_ops.createNamedError(ctx, global, error_info.name, error_info.message);
+    const error_value = try exception_ops.createSentinelError(ctx, global, err, error_info);
     if (ctx.hasException()) ctx.clearException();
     _ = ctx.throwValue(error_value);
 }
@@ -4382,7 +4382,7 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.class_id = core.class.ids.global_object;
+    global.promoteToGlobalObjectClass(rt);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
@@ -4450,7 +4450,7 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.class_id = core.class.ids.global_object;
+    global.promoteToGlobalObjectClass(rt);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
 

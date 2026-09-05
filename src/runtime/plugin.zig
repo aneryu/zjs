@@ -651,7 +651,7 @@ fn createOpaqueObjectValue(ctx: *core.JSContext, plugin: *InstalledPlugin, objec
         .descriptor = host_class.descriptor,
         .object = object,
     };
-    wrapper.installExternalClassPayload(@ptrCast(payload));
+    wrapper.installExternalClassPayload(rt, @ptrCast(payload));
     if (defer_user_finalizer) {
         rt.registerReservedDeferredClassPayloadRoot(wrapper);
         finalizer_reservation_pending = false;

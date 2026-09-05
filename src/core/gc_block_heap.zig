@@ -167,13 +167,34 @@ pub const Stats = struct {
     deferred_block_runs_completed: usize = 0,
     hot_blocks_published: usize = 0,
     hot_blocks_reopened: usize = 0,
-    /// Stage-3: corpses released by `settleDoomedCellInPassA`, i.e. that never
-    /// became a parked entry. Together with the Registry's
-    /// `doomed_parked_entries_drained` this is the whole population the
-    /// two-pass teardown physically released. It lives here rather than in
-    /// `gc_concurrent.Stats` on purpose: that struct is instantiated by the
-    /// `rc` build too, and stage 3 must not move a single `rc` byte.
-    passa_settled_cells: usize = 0,
+    /// TGC S4-f (2): why a candidate partial block was NOT admitted to the
+    /// per-class hot pool. The pool is the only route by which a
+    /// partially-emptied block re-enters allocation, so a rejection here is a
+    /// 64 KiB block that stays committed with its handful of survivors until
+    /// some later cycle changes the answer.
+    hot_publish_rejected_empty: usize = 0,
+    hot_publish_rejected_capacity: usize = 0,
+    hot_publish_rejected_active: usize = 0,
+    hot_publish_rejected_doomed: usize = 0,
+    hot_publish_rejected_young: usize = 0,
+    hot_publish_rejected_listed: usize = 0,
+    hot_publish_rejected_decommitted: usize = 0,
+    /// Candidates refused from the cached verdict of an earlier reopen
+    /// (`Block.flag_hot_rejected`), i.e. bitmap walks the cache saved.
+    hot_publish_rejected_cached_k: usize = 0,
+    /// Hot blocks `openBlock` rejected for having no interval long enough to
+    /// be worth the reopen (`hot_reuse_min_interval_cells`). They are dropped
+    /// from the pool, so the next chance to reuse them is the next major.
+    hot_blocks_k_rejected: usize = 0,
+    /// Corpses reclaimed straight into the alloc bitmap -- no free link, no
+    /// parked entry, no header read (`Block.reclaimDoomedIntoBitmap`).
+    ///
+    /// TGC S4-e retired the Pass-A settlement this counter was born for
+    /// (`passa_settled_cells`), so the name now says what the number is. The
+    /// `--gc-stats` line text is unchanged on purpose: `gc_stats_snapshot.py`
+    /// compares leaf sets, and dropping a leaf invalidates every frozen
+    /// Stage-0 baseline.
+    bitmap_reclaimed_cells: usize = 0,
     /// Wholly-empty medium superblocks whose mapping was returned to the
     /// backing allocator (TGC S2-f (2)). Deliberately NOT folded into
     /// `decommitted_bytes`: that counter is paired with `recommitted_bytes`
@@ -186,6 +207,54 @@ pub const Stats = struct {
         return self.decommitted_bytes -| self.recommitted_bytes;
     }
 };
+
+/// TGC S4-d spec 2.4: one block's condemnation split by whether the corpse
+/// owes a destructor. `dead - finalizing` is the bitmap-reclaimed population.
+pub const DoomedCounts = struct { dead: u32 = 0, finalizing: u32 = 0 };
+
+/// TGC S4-f (2): one size class's share of the committed block heap, as a
+/// walk of every block ever handed out by `takeClassedBlock`.
+///
+/// The question this exists to answer is why `committed/live` reached 21-34x
+/// after S4-b/c moved the storage kinds into the heap. `committed_bytes` is a
+/// superblock count times 2 MiB and a superblock's `used_blocks` never falls,
+/// so the figure is the PEAK number of distinct blocks the allocator ever
+/// opened -- and the occupancy histogram below says whether those blocks are
+/// empty (a decommit question), thinly populated (a reuse question) or full
+/// (an honest live-set question).
+pub const BlockCensusRow = struct {
+    cell_bytes: u32 = 0,
+    blocks: u32 = 0,
+    cells: u64 = 0,
+    allocated: u64 = 0,
+    /// Occupancy buckets, by `allocated_count / cell_count`.
+    empty: u32 = 0,
+    lt10: u32 = 0,
+    lt50: u32 = 0,
+    ge50: u32 = 0,
+    /// Blocks carrying `flag_young` (they hold at least one cell published
+    /// since the last retirement) and blocks whose cell pages are returned.
+    young: u32 = 0,
+    decommitted: u32 = 0,
+    /// List membership at census time: the per-class allocation target, the
+    /// hot (partially-free, republished by a major) pool, and the wholly-empty
+    /// pool the decommit scavenger reads.
+    active: u32 = 0,
+    hot_listed: u32 = 0,
+    free_listed: u32 = 0,
+};
+
+pub const BlockCensus = struct {
+    rows: [space.class_count]BlockCensusRow = @splat(.{}),
+    classed_superblocks: usize = 0,
+    other_superblocks: usize = 0,
+    /// Slots inside a classed superblock's `used_blocks` prefix whose header
+    /// does not read back as an initialized block (a `resetBlock` that failed
+    /// after the slot was claimed). Expected zero.
+    uninitialized_blocks: usize = 0,
+};
+
+
 
 pub fn canAllocCellSize(n: usize) bool {
     if (n == 0 or n >= space.large_min_bytes) return false;
@@ -377,6 +446,18 @@ pub const Block = extern struct {
     }
 
     pub const flag_young: u8 = 1 << 0;
+    /// TGC S4-f (2): `openBlock` reopened this block, rebuilt its free
+    /// intervals and found none long enough to be worth allocating from
+    /// (`hot_reuse_min_interval_cells`). The answer cannot change until the
+    /// block gains free space, so it is cached here and cleared by the two
+    /// sites that grow a block's free space -- `freeSmall` and
+    /// `reclaimDoomedCells` -- plus `resetBlock`, which rewrites `flags`.
+    ///
+    /// Without the cache the minor-time publication slice re-offered the same
+    /// rejects on every sweep and `openBlock` paid a full bitmap walk to
+    /// re-derive the same no: earley-boyer took 592,540 rejected reopens
+    /// against 112,076 accepted ones (-6.5% on its score), splay 58,569.
+    pub const flag_hot_rejected: u8 = 1 << 1;
     /// Stage-3 Pass-A settlement left holes that only the alloc bitmap
     /// records: `settleDoomedCellInPassA` clears a cell's alloc bit without
     /// writing a free link, so `free_list`/`bump` no longer enumerate every
@@ -474,6 +555,15 @@ pub const Block = extern struct {
         return self.bitmaps().alloc;
     }
 
+    /// The condemnation bitmap words (TGC S4-g (3)), for enumerating a
+    /// block's corpses without reading one header per CELL. Only meaningful
+    /// between `snapshotDoomed` and the reclaim that clears them -- outside
+    /// that window this bitmap is the generational remembered column, which
+    /// is exactly what `isDoomed` already assumes of its callers.
+    pub fn doomedWords(self: *Block) []u64 {
+        return self.bitmaps().remember;
+    }
+
     /// One word of dead candidates: allocated cells the current epoch never
     /// marked. A stale epoch means no cell was marked, so every allocated
     /// cell is a candidate.
@@ -564,12 +654,16 @@ pub const Block = extern struct {
     /// arithmetic only: the whole heap's condemnation becomes microseconds
     /// of STW instead of a walk that touches every corpse.
     ///
-    /// Returns dead count; bytes are count * cell_size by construction.
-    pub fn snapshotDoomed(self: *Block, epoch: u64) u32 {
+    /// Returns the dead count and, of those, how many owe a destructor
+    /// (TGC S4-d): the complement is the population the sweep reclaims with
+    /// word arithmetic and accounts for in ONE block-level debit, so the split
+    /// has to be counted here, where the words are already in registers.
+    pub fn snapshotDoomed(self: *Block, epoch: u64) DoomedCounts {
         const maps = self.bitmaps();
+        const fin = self.finalizerBits();
         self.doomed_cursor = 0;
         self.doomed_word = 0;
-        var dead: u32 = 0;
+        var counts = DoomedCounts{};
         const stale = @atomicLoad(u64, &self.mark_epoch, .acquire) != epoch;
         for (maps.alloc, 0..) |alloc_word, i| {
             const mark_word = if (stale) 0 else @atomicLoad(u64, &maps.mark[i], .monotonic);
@@ -580,9 +674,11 @@ pub const Block = extern struct {
             // the common word is zero over zero. A load and a compare do not
             // dirty the line; the store does.
             if (doomed != 0 or maps.remember[i] != 0) maps.remember[i] = doomed;
-            dead += @popCount(doomed);
+            if (doomed == 0) continue;
+            counts.dead += @popCount(doomed);
+            counts.finalizing += @popCount(doomed & fin[i]);
         }
-        return dead;
+        return counts;
     }
 
     /// Pop the next doomed cell index, clearing its bit.
@@ -608,6 +704,70 @@ pub const Block = extern struct {
         const mask = @as(u64, 1) << @as(u6, @intCast(index % 64));
         self.bitmaps().remember[word_index] &= ~mask;
         if (self.doomed_cursor == word_index) self.doomed_word &= ~mask;
+    }
+
+    /// TGC S4-d spec 2.4: pop the next condemned cell that OWES A DESTRUCTOR
+    /// (`doomed & needs_finalizer`), clearing its doomed bit.
+    ///
+    /// What is left in the doomed bitmap when this returns null is exactly the
+    /// complement -- the cells whose whole release is `alloc &= ~doomed`, which
+    /// `Heap.reclaimDoomedCells` then does with word arithmetic and without
+    /// reading a single header. That is the point of the batch: on splay the
+    /// destructor set is a few percent of the corpses, and the other 97% used
+    /// to cost a cold header line each.
+    ///
+    /// The `doomed_word` register cache `takeDoomedCell` keeps is deliberately
+    /// NOT used here: the finalizer subset is sparse, so a whole-word cache
+    /// buys nothing, and leaving it zero keeps `forgetDoomedCell` (a weak
+    /// release racing the drain) a pure bitmap operation.
+    pub fn takeDoomedFinalizerCell(self: *Block) ?u32 {
+        const maps = self.bitmaps();
+        const fin = self.finalizerBits();
+        var word_index: u32 = self.doomed_cursor;
+        while (word_index * 64 < self.cell_count) : (word_index += 1) {
+            const word = maps.remember[word_index] & fin[word_index];
+            if (word == 0) continue;
+            const bit = @ctz(word);
+            maps.remember[word_index] &= ~(@as(u64, 1) << @intCast(bit));
+            self.doomed_cursor = word_index;
+            return word_index * 64 + bit;
+        }
+        self.doomed_cursor = 0;
+        return null;
+    }
+
+    /// TGC S4-d spec 2.4: clear every cell still in the doomed bitmap out of
+    /// the alloc bitmap, in whole words. Returns the count.
+    ///
+    /// The three bitmaps are updated together (`mark` for hygiene -- a doomed
+    /// cell is unmarked by construction, `needs_finalizer` because a recycled
+    /// cell must not inherit its predecessor's duty). No header is read and no
+    /// free link is written, so the block's free representation becomes the
+    /// alloc bitmap alone: `flag_bitmap_canonical`, exactly the state
+    /// `settleDoomedCellInPassA` used to leave one cell at a time.
+    ///
+    /// Callers go through `Heap.reclaimDoomedCells`, which owns the two cases
+    /// this cannot express (the allocator-current block and a release that
+    /// empties the block).
+    fn reclaimDoomedIntoBitmap(self: *Block) u32 {
+        const maps = self.bitmaps();
+        const fin = self.finalizerBits();
+        var freed: u32 = 0;
+        for (maps.remember, 0..) |doomed, i| {
+            if (doomed == 0) continue;
+            maps.remember[i] = 0;
+            maps.alloc[i] &= ~doomed;
+            maps.mark[i] &= ~doomed;
+            fin[i] &= ~doomed;
+            freed += @popCount(doomed);
+        }
+        self.doomed_cursor = 0;
+        self.doomed_word = 0;
+        if (freed != 0) {
+            self.allocated_count -= freed;
+            self.flags |= flag_bitmap_canonical;
+        }
+        return freed;
     }
 
     pub fn takeDoomedCell(self: *Block, start: u32) ?u32 {
@@ -836,6 +996,9 @@ pub const Heap = struct {
     /// the decommit policy needs only second-scale resolution.
     clock_ns: u64 = 0,
     last_decommit_ns: u64 = 0,
+    /// Round-robin cursor into `superblocks` for the minor-time hot-block
+    /// publication slice (`publishCompletedHotBlocksSlice`, S4-f (2)).
+    hot_publish_cursor: usize = 0,
     next_block_incarnation: if (block_generation_enabled) u32 else void =
         if (block_generation_enabled) 1 else {},
     block_generation_exhausted: if (block_generation_enabled) bool else void =
@@ -1241,11 +1404,16 @@ pub const Heap = struct {
     /// `removeByIndex` only tombstones the slot in place (entries never move
     /// on removal; only inserts rehash), and the callback must not allocate
     /// an extent -- it frees one. Returns the number destroyed.
+    /// TGC S4-d spec 2.4: the extent twin of the block sweep. `needs_finalizer`
+    /// comes off the table row, so a carrier that owes nothing (every storage
+    /// and payload extent, and a string body never bound to a dynamic atom)
+    /// reaches the callback already knowing its release is pure memory --
+    /// no kind dispatch, no atom-table probe.
     pub fn sweepExtents(
         self: *Heap,
         epoch: u64,
         ctx: *anyopaque,
-        destroy: *const fn (*anyopaque, usize, usize) void,
+        destroy: *const fn (*anyopaque, usize, usize, bool) void,
     ) usize {
         std.debug.assert(epoch != 0 and epoch & 1 == 0);
         var destroyed: usize = 0;
@@ -1254,7 +1422,7 @@ pub const Heap = struct {
             if (entry.value_ptr.mark_epoch == epoch) continue;
             const base = entry.key_ptr.*;
             const user_bytes = entry.value_ptr.user_bytes;
-            destroy(ctx, base, user_bytes);
+            destroy(ctx, base, user_bytes, entry.value_ptr.needs_finalizer);
             std.debug.assert(!self.medium.contains(base));
             destroyed += 1;
         }
@@ -1263,7 +1431,7 @@ pub const Heap = struct {
             if (entry.value_ptr.mark_epoch == epoch) continue;
             const base = entry.key_ptr.*;
             const user_bytes = entry.value_ptr.user_bytes;
-            destroy(ctx, base, user_bytes);
+            destroy(ctx, base, user_bytes, entry.value_ptr.needs_finalizer);
             std.debug.assert(!self.large.contains(base));
             destroyed += 1;
         }
@@ -1296,7 +1464,7 @@ pub const Heap = struct {
         self: *Heap,
         epoch: u64,
         ctx: *anyopaque,
-        destroy: *const fn (*anyopaque, usize, usize) void,
+        destroy: *const fn (*anyopaque, usize, usize, bool) void,
     ) usize {
         std.debug.assert(epoch & 1 == 0);
         var destroyed: usize = 0;
@@ -1310,7 +1478,7 @@ pub const Heap = struct {
             const header: *const gc.GCObjectHeader = @ptrFromInt(base + gc.metadata_prefix_size);
             if (!header.metaConst().flags.young) continue;
             if (self.extentIsMarked(base, epoch)) continue;
-            destroy(ctx, base, user_bytes);
+            destroy(ctx, base, user_bytes, self.extentNeedsFinalizer(base));
             std.debug.assert(!self.containsExtent(base));
             destroyed += 1;
         }
@@ -1570,63 +1738,101 @@ pub const Heap = struct {
         }
     }
 
-    /// Stage-3 (`docs/corpse-census-2026-08-29.md` §5.2): may a corpse in this
-    /// block be settled during Pass A instead of parked for Pass B?
+    /// TGC S4-d spec 2.4: reclaim every condemned cell in `block` that owes no
+    /// destructor. The caller must have drained the finalizer subset
+    /// (`Block.takeDoomedFinalizerCell`) and must have UNLINKED the block from
+    /// the doomed list first -- a block that goes empty here joins the
+    /// free-block list, and a free-listed block with a live `doomed_link` is
+    /// both an audit failure and a severed chain the moment `resetBlock` runs.
     ///
-    /// Two block-side vetoes, and only two, because the census showed every
-    /// other candidate veto (weak husk, weak id, inline payload, non-standard
-    /// class) is either zero or handled by the caller's class predicate:
-    ///
-    /// 1. **allocator-current.** The mutator allocates from this block between
-    ///    destruction slices, so its live free representation must keep being
-    ///    maintained by the ordinary `freeSmall` path. Settlement deliberately
-    ///    writes no free link, which is legal only for a private block.
-    /// 2. **the release would empty the block.** The empty-block lifecycle
-    ///    (`noteEmptyBlock`, `free_blocks`, aged decommit) must not run while
-    ///    the global doomed transaction is open: `openBlock` could hand the
-    ///    reset block straight back out while another block's destructor may
-    ///    still dereference a resource-stripped sibling. Leaving the last cell
-    ///    to Pass B keeps that transition on its proven path, and costs one
-    ///    parked entry per emptied block (splay 22, raytrace 28 K).
-    pub inline fn canSettleDoomedCellInPassA(self: *const Heap, block: *const Block) bool {
-        if (self.active[block.size_class] == block) return false;
-        return block.allocated_count > 1;
+    /// Two cases keep the ordinary per-cell `freeSmall` path, for the reasons
+    /// `canSettleDoomedCellInPassA` names: the allocator-current block must
+    /// keep a maintained free-list/bump representation because the mutator
+    /// allocates out of it between destruction slices, and a release that
+    /// empties a block has to run the empty-block transition (list membership,
+    /// aged decommit). Both are bounded -- one block per size class, one block
+    /// per emptying -- so the bulk path still covers essentially every corpse.
+    pub fn reclaimDoomedCells(self: *Heap, block: *Block) u32 {
+        std.debug.assert(block.doomed_link == 0);
+        var doomed_total: u32 = 0;
+        for (block.bitmaps().remember) |word| doomed_total += @popCount(word);
+        if (doomed_total == 0) return 0;
+        if (self.active[block.size_class] == block or block.allocated_count == doomed_total) {
+            var freed: u32 = 0;
+            while (block.takeDoomedCell(0)) |index| {
+                self.freeSmall(block, index, block.cellPtr(index));
+                freed += 1;
+            }
+            std.debug.assert(freed == doomed_total);
+            return freed;
+        }
+        if (comptime lifecycle_state_enabled) {
+            var index: u32 = 0;
+            while (index < block.cell_count) : (index += 1) {
+                if (!block.isDoomed(index)) continue;
+                const lifecycle = self.lifecycleFor(block, index);
+                lifecycle.state = .free;
+                lifecycle.accounted_bytes = 0;
+            }
+        }
+        const freed = block.reclaimDoomedIntoBitmap();
+        block.flags &= ~Block.flag_hot_rejected;
+        std.debug.assert(freed == doomed_total);
+        self.stats.bitmap_reclaimed_cells +|= freed;
+        return freed;
     }
 
-    /// Physically release a block cell down to the canonical bitmap facts,
-    /// with no free-list link and no empty-block transition.
-    ///
-    /// The cell becomes allocatable only when `rebuildFreeIntervals`
-    /// reconstructs this block's intervals from the alloc bitmap, and that
-    /// happens exclusively inside `openBlock` for a block the publication gate
-    /// already admitted -- i.e. after Pass A completed globally. So the global
-    /// two-pass rule is preserved: what stage 3 removes is the second cold
-    /// touch of every corpse, not the ordering of destruction against reuse.
-    ///
-    /// The corpse's bytes are left intact (unlike `pushCell`, which overwrites
-    /// the first four), so a not-yet-processed sibling destructor sees exactly
-    /// the resource-stripped husk it sees today.
-    pub inline fn settleDoomedCellInPassA(self: *Heap, block: *Block, index: u32) void {
-        std.debug.assert(block.magic == block_magic);
-        std.debug.assert(index < block.cell_count);
-        std.debug.assert(self.canSettleDoomedCellInPassA(block));
-        // Catches a corpse settled twice, and a corpse settled after Pass B
-        // already freed it, at the site rather than at the next whole-heap
-        // `AllocCountMismatch`.
-        std.debug.assert(testBitPlain(block.bitmaps().alloc, index));
-        if (comptime lifecycle_state_enabled) {
-            self.lifecycleFor(block, index).state = .raw_free_in_progress;
+    /// Walk every classed block and bucket it by size class and occupancy.
+    /// Diagnostic only: `--gc-block-census` calls it once, at exit, so it is
+    /// off every collector path and costs the run nothing.
+    pub fn censusBlocks(self: *const Heap) BlockCensus {
+        var out: BlockCensus = .{};
+        for (space.classes, 0..) |cell_bytes, i| out.rows[i].cell_bytes = @intCast(cell_bytes);
+        for (self.superblocks.items) |*sb| {
+            if (sb.kind != .classed) {
+                out.other_superblocks += 1;
+                continue;
+            }
+            out.classed_superblocks += 1;
+            var i: usize = 0;
+            while (i < sb.used_blocks) : (i += 1) {
+                const block: *const Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
+                if (block.magic != block_magic or block.size_class >= space.class_count) {
+                    out.uninitialized_blocks += 1;
+                    continue;
+                }
+                const row = &out.rows[block.size_class];
+                row.blocks += 1;
+                row.cells += block.cell_count;
+                row.allocated += block.allocated_count;
+                if (block.flags & Block.flag_young != 0) row.young += 1;
+                if (block.flags & Block.flag_decommitted != 0) row.decommitted += 1;
+                if (block.allocated_count == 0) {
+                    row.empty += 1;
+                } else {
+                    const pct = @as(u64, block.allocated_count) * 100 / @max(@as(u64, block.cell_count), 1);
+                    if (pct < 10) row.lt10 += 1 else if (pct < 50) row.lt50 += 1 else row.ge50 += 1;
+                }
+            }
         }
-        clearBitPlain(block.bitmaps().alloc, index);
-        block.clearFinalizerBit(index);
-        block.allocated_count -= 1;
-        if (comptime lifecycle_state_enabled) {
-            const lifecycle = self.lifecycleFor(block, index);
-            lifecycle.state = .free;
-            lifecycle.accounted_bytes = 0;
+        for (self.active, 0..) |maybe_block, i| {
+            if (maybe_block != null) out.rows[i].active += 1;
         }
-        block.flags |= Block.flag_bitmap_canonical;
-        self.stats.passa_settled_cells +|= 1;
+        for (self.hot_blocks, 0..) |head, i| {
+            var cursor = head;
+            while (cursor) |block| {
+                out.rows[i].hot_listed += 1;
+                cursor = if (block.next_free == 0) null else @as(*Block, @ptrFromInt(block.next_free));
+            }
+        }
+        for (self.free_blocks, 0..) |head, i| {
+            var cursor = head;
+            while (cursor) |block| {
+                out.rows[i].free_listed += 1;
+                cursor = if (block.next_free == 0) null else @as(*Block, @ptrFromInt(block.next_free));
+            }
+        }
+        return out;
     }
 
     /// Per-block form of `verify`'s `AllocCountMismatch`, run when Pass A
@@ -1810,9 +2016,38 @@ pub const Heap = struct {
     }
 
     fn publishHotBlock(self: *Heap, block: *Block) void {
-        if (block.allocated_count == 0 or !hasHotReuseCapacity(block)) return;
-        if (self.active[block.size_class] == block or block.hasPendingDoomed()) return;
-        if (block.flags & (Block.flag_young | Block.flag_hot_list | Block.flag_decommitted) != 0) return;
+        if (block.allocated_count == 0) {
+            self.stats.hot_publish_rejected_empty +|= 1;
+            return;
+        }
+        if (!hasHotReuseCapacity(block)) {
+            self.stats.hot_publish_rejected_capacity +|= 1;
+            return;
+        }
+        if (self.active[block.size_class] == block) {
+            self.stats.hot_publish_rejected_active +|= 1;
+            return;
+        }
+        if (block.hasPendingDoomed()) {
+            self.stats.hot_publish_rejected_doomed +|= 1;
+            return;
+        }
+        if (block.flags & Block.flag_young != 0) {
+            self.stats.hot_publish_rejected_young +|= 1;
+            return;
+        }
+        if (block.flags & Block.flag_hot_list != 0) {
+            self.stats.hot_publish_rejected_listed +|= 1;
+            return;
+        }
+        if (block.flags & Block.flag_decommitted != 0) {
+            self.stats.hot_publish_rejected_decommitted +|= 1;
+            return;
+        }
+        if (block.flags & Block.flag_hot_rejected != 0) {
+            self.stats.hot_publish_rejected_cached_k +|= 1;
+            return;
+        }
         // Rebuild even when this was an interval block before condemnation:
         // parked Pass-B frees accumulated in its returned-cell chain while it
         // was private. The alloc bitmap is now the single canonical source.
@@ -1826,45 +2061,76 @@ pub const Heap = struct {
         self.stats.hot_blocks_published += 1;
     }
 
-    /// Pass-B consumed one complete, contiguous run of parked Object cells
-    /// from `block`. The caller captured the next run's block identity before
-    /// freeing the final cell, so no per-entry block side table is needed.
+    /// Publish partial blocks once the whole doomed transaction has closed.
     ///
-    /// This minimal handoff preserves the current eager interval preparation;
-    /// the joint drain/reuse follow-up moves that work to `openBlock` so the
-    /// bitmap walk immediately precedes allocation.
-    pub noinline fn onBlockPassBComplete(self: *Heap, block: *Block) void {
-        std.debug.assert(!block.hasPendingDoomed());
-        self.stats.deferred_block_runs_completed +|= 1;
-        self.publishHotBlock(block);
+    /// TGC S4-e: this used to also wait on the global parked-free Pass B,
+    /// because a corpse's alloc bit stayed set until its struct was handed
+    /// back. Destruction is one pass now -- a destructor releases its own cell
+    /// -- so an empty doomed list is the whole condition.
+    pub fn publishCompletedHotBlocks(self: *Heap) void {
+        if (comptime builtin.is_test) publish_completed_hot_blocks_calls_for_test += 1;
+        std.debug.assert(self.doomed_blocks == null);
+        for (self.superblocks.items) |*sb| self.publishSuperblockHotBlocks(sb);
     }
 
-    /// Publish partial blocks only after the collector's global parked-free
-    /// Pass B has drained. A block's doomed bitmap becoming empty ends Pass A,
-    /// but Object structs (and therefore their alloc bits) deliberately stay
-    /// live until every doomed object's resource destructor has run.
-    pub fn publishCompletedHotBlocks(self: *Heap, parked_frees: usize) void {
-        if (comptime builtin.is_test) publish_completed_hot_blocks_calls_for_test += 1;
-        // This is a production guard, not merely an assertion: the block heap
-        // cannot inspect Registry's parked queue itself, and publishing on a
-        // caller's premature notification would make later Pass-B frees race
-        // allocator ownership of the same block.
+    /// TGC S4-f (2): the same publication, run at the end of a MINOR over a
+    /// bounded round-robin slice of the superblock array.
+    ///
+    /// A partially-emptied block re-enters allocation only through the hot
+    /// pool, and until now the pool was only refilled at the end of a major's
+    /// two-pass teardown. regexp.fixed takes 3 majors and 640 minors: the
+    /// holes 640 minors punched in its blocks were invisible to the allocator
+    /// for the whole run, so every block that filled up was retired forever
+    /// and `committed` became "peak count of blocks ever opened". Its census
+    /// read 2,681 blocks of which 2,539 were under 10% occupied -- 166 MB of
+    /// the 182 MB committed, holding 42k live cells (1.2% of capacity).
+    ///
+    /// Bounded rather than whole-heap because the walk is O(populated blocks)
+    /// and a minor is meant to be short: earley-boyer takes 9k-13k minors over
+    /// a heap of ~3.5k blocks, and the unbounded form would have made this a
+    /// 50M-block-visit tax. The cursor makes coverage a function of minor
+    /// COUNT instead, which is exactly the workload property that made the
+    /// holes accumulate.
+    pub fn publishCompletedHotBlocksSlice(
+        self: *Heap,
+        parked_frees: usize,
+        superblock_budget: usize,
+    ) void {
         if (parked_frees != 0) return;
         std.debug.assert(self.doomed_blocks == null);
-        for (self.superblocks.items) |*sb| {
-            if (sb.kind != .classed) continue;
-            var nonempty = sb.page_bits[0];
-            while (nonempty != 0) {
-                const i: usize = @ctz(nonempty);
-                nonempty &= nonempty - 1;
-                const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
-                if (block.flags & Block.flag_hot_list != 0) continue;
-                self.publishHotBlock(block);
-            }
+        const total = self.superblocks.items.len;
+        if (total == 0) return;
+        var cursor = if (self.hot_publish_cursor >= total) 0 else self.hot_publish_cursor;
+        var scanned: usize = 0;
+        while (scanned < superblock_budget and scanned < total) : (scanned += 1) {
+            self.publishSuperblockHotBlocks(&self.superblocks.items[cursor]);
+            cursor += 1;
+            if (cursor == total) cursor = 0;
+        }
+        self.hot_publish_cursor = cursor;
+    }
+
+    fn publishSuperblockHotBlocks(self: *Heap, sb: *Superblock) void {
+        if (sb.kind != .classed) return;
+        var nonempty = sb.page_bits[0];
+        while (nonempty != 0) {
+            const i: usize = @ctz(nonempty);
+            nonempty &= nonempty - 1;
+            const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
+            if (block.flags & Block.flag_hot_list != 0) continue;
+            self.publishHotBlock(block);
         }
     }
 
-    const DoomedSnapshot = struct { count: usize = 0, bytes: usize = 0 };
+    const DoomedSnapshot = struct {
+        count: usize = 0,
+        bytes: usize = 0,
+        /// TGC S4-d spec 2.4: the accounted bytes of the corpses the sweep
+        /// reclaims from the BITMAP (`doomed & ~needs_finalizer`), i.e. the
+        /// ones no per-cell debit will ever run for. Already prefix-excluded,
+        /// so it is the exact number to hand `debitBlockBytes`.
+        bitmap_bytes: usize = 0,
+    };
     const DoomedOrigin = enum { minor, major };
 
     /// Finish the heap-owned half of condemning one block. Object corpses
@@ -1873,10 +2139,11 @@ pub const Heap = struct {
     fn recordDoomedBlock(
         self: *Heap,
         block: *Block,
-        dead: u32,
+        counts: DoomedCounts,
         result: *DoomedSnapshot,
         comptime origin: DoomedOrigin,
     ) void {
+        const dead = counts.dead;
         if (dead == 0) {
             // Hot reuse is a major-lifecycle decision. A minor snapshot is
             // only the side authority for Object condemnation; it must not
@@ -1895,6 +2162,13 @@ pub const Heap = struct {
         }
         result.count += dead;
         result.bytes += @as(usize, dead) * block.cell_size;
+        // TGC S4-d spec 2.4: the block-level debit covers exactly the corpses
+        // the bitmap reclaim takes. A cell that owes a destructor keeps the
+        // per-cell release it always had (TGC S4-e: that release now happens
+        // inside the destructor itself), so its bytes must NOT be debited
+        // here.
+        result.bitmap_bytes += @as(usize, dead - counts.finalizing) *
+            (block.cell_size - gc.metadata_prefix_size);
         if (block.doomed_link == 0) {
             block.doomed_link = if (self.doomed_blocks) |head| @intFromPtr(head) else 1;
             self.doomed_blocks = block;
@@ -1918,8 +2192,7 @@ pub const Heap = struct {
                 const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
                 std.debug.assert(block.magic == block_magic);
                 std.debug.assert(block.allocated_count != 0);
-                const dead = block.snapshotDoomed(epoch);
-                self.recordDoomedBlock(block, dead, &result, .major);
+                self.recordDoomedBlock(block, block.snapshotDoomed(epoch), &result, .major);
             }
         }
         return result;
@@ -1935,8 +2208,7 @@ pub const Heap = struct {
         var cursor = self.young_blocks;
         while (cursor) |block| {
             const young_link = block.young_link;
-            const dead = block.snapshotDoomed(epoch);
-            self.recordDoomedBlock(block, dead, &result, .minor);
+            self.recordDoomedBlock(block, block.snapshotDoomed(epoch), &result, .minor);
             cursor = if (young_link <= 1) null else @ptrFromInt(young_link);
         }
         return result;
@@ -2725,6 +2997,10 @@ pub const Heap = struct {
         block.clearFinalizerBit(index);
         pushCell(block, index, cell);
         block.allocated_count -= 1;
+        // This block just gained free space, so a cached "no long enough
+        // interval" verdict is out of date (S4-f (2)). The header line is
+        // already dirty from `allocated_count`.
+        block.flags &= ~Block.flag_hot_rejected;
         if (comptime lifecycle_state_enabled) {
             const lifecycle = self.lifecycleFor(block, index);
             lifecycle.state = .free;
@@ -2761,6 +3037,8 @@ pub const Heap = struct {
             block.sweep_state = .active;
             const max_interval = rebuildFreeIntervals(block);
             if (max_interval < hot_reuse_min_interval_cells) {
+                self.stats.hot_blocks_k_rejected +|= 1;
+                block.flags |= Block.flag_hot_rejected;
                 // K-rejected non-empty partial: retain the valid interval
                 // representation just built, but give it no allocation/list
                 // owner. It remains census-owned and non-decommittable until
@@ -2802,24 +3080,34 @@ pub const Heap = struct {
             const off = sb.used_blocks * block_bytes;
             const base = @intFromPtr(sb.bytes.ptr + off);
             const block_index: usize = sb.used_blocks;
+            // The rollbacks below MUST be declared in the loop-body scope, not
+            // inside the `if (comptime ...)` blocks that own the allocation:
+            // an `errdefer` fires when *its own* scope unwinds with an error,
+            // and a comptime-if block that falls through has already exited
+            // normally by the time a later `try` fails. Written the other way
+            // (as it was until the block heap's backing became injectable), a
+            // failing `cell_lifecycles` alloc or `classed_blocks.put` left
+            // `cell_generations[block_index]` allocated while `used_blocks`
+            // stayed put, and the next `takeClassedBlock` for that superblock
+            // tripped the `len == 0` assertion on the very same slot.
             if (comptime block_generation_enabled) {
                 std.debug.assert(sb.cell_generations[block_index].len == 0);
                 sb.cell_generations[block_index] = try self.backing.alloc(u32, geometry.cell_count);
                 @memset(sb.cell_generations[block_index], 0);
-                errdefer {
-                    self.backing.free(sb.cell_generations[block_index]);
-                    sb.cell_generations[block_index] = &.{};
-                }
             }
+            errdefer if (comptime block_generation_enabled) {
+                self.backing.free(sb.cell_generations[block_index]);
+                sb.cell_generations[block_index] = &.{};
+            };
             if (comptime lifecycle_state_enabled) {
                 std.debug.assert(sb.cell_lifecycles[block_index].len == 0);
                 sb.cell_lifecycles[block_index] = try self.backing.alloc(CellLifecycle, geometry.cell_count);
                 @memset(sb.cell_lifecycles[block_index], .{});
-                errdefer {
-                    self.backing.free(sb.cell_lifecycles[block_index]);
-                    sb.cell_lifecycles[block_index] = &.{};
-                }
             }
+            errdefer if (comptime lifecycle_state_enabled) {
+                self.backing.free(sb.cell_lifecycles[block_index]);
+                sb.cell_lifecycles[block_index] = &.{};
+            };
             try self.classed_blocks.put(self.backing, base, {});
             self.classed_block_filter |= base;
             sb.used_blocks += 1;
@@ -3408,11 +3696,13 @@ test "string extents: table-held marks, containment probe, epoch sweep" {
         freed: usize = 0,
         last_base: usize = 0,
         last_bytes: usize = 0,
-        fn destroy(ctx: *anyopaque, base: usize, user_bytes: usize) void {
+        last_needs_finalizer: bool = false,
+        fn destroy(ctx: *anyopaque, base: usize, user_bytes: usize, needs_finalizer: bool) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.freed += 1;
             self.last_base = base;
             self.last_bytes = user_bytes;
+            self.last_needs_finalizer = needs_finalizer;
             self.heap.free(@ptrFromInt(base));
         }
     };

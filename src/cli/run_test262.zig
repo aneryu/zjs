@@ -102,6 +102,15 @@ pub fn main(init: std.process.Init) !void {
     defer summary.deinit(init.gpa);
 
     try printSummary(io, summary);
+    if (comptime test262_root.core.gc.roots_diag_enabled) {
+        // R3: every worker runtime is already torn down here, but the
+        // process-wide census outlives them, so a whole sweep prints one
+        // attribution table.
+        var diag_buf: [4096]u8 = undefined;
+        var diag_writer = std.Io.File.stderr().writer(io, &diag_buf);
+        try test262_root.core.gc_conservative.reportGlobal(&diag_writer.interface);
+        try diag_writer.interface.flush();
+    }
     const has_unexpected = summary.failed != 0 or summary.fixed != 0;
     std.process.exit(if (has_unexpected) 1 else 0);
 }
