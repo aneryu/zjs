@@ -1,6 +1,12 @@
 # 尸体与 teardown 表示终案（header v2 补充案一）
 
-Status: **APPROVED — owner 委托 driver 终审裁决（2026-09-01，「参考其他引擎、要终案、减少中间过渡」）**
+状态：**HISTORICAL（2026-09-06）— 已完成并被实现超越。**
+本文规划的「尸体表示」终案在 TGC S4 全部兑现或改道：Pass-A/Pass-B 两遍析构与 husk 于 S4-e 删除，
+普通对象死亡不进析构（S4-d），condemn 谓词最终落在 `mark_epoch` 保留值 `0xffff` 而非本文的位方案（S4-h）。
+现状事实以 [`tracing-gc-completion-account.md`](tracing-gc-completion-account.md) 与
+[`tracing-gc-s4-spec.md`](tracing-gc-s4-spec.md) §7 为准；本文只作设计推理的历史记录。
+
+原状态：**APPROVED — owner 委托 driver 终审裁决（2026-09-01，「参考其他引擎、要终案、减少中间过渡」）**
 本文修订 docs/tracing-gc-header-v2-design.md（APPROVED r2）的 §2.2/§4.4，构成其补充案；冲突处以本文为准。
 证据链：slice2 NO-GO 归档（EB cycles +17.7%，gc/s3-slice2-20260901）、重设计勘察（gc-minorfb/.scratch/SLICE2_REDESIGN_SCOUT.md）、五引擎源码调研。
 

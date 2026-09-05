@@ -289,7 +289,6 @@ pub fn spillRegistersAndScan(
     shade_ctx: *anyopaque,
 ) void {
     if (comptime !target_supported) unreachable;
-    comptime std.debug.assert(gc.address_registry_enabled);
     // The filter must be current before any word is dismissed by it; arenas
     // and standalone allocations may have appeared since the last scan.
     // Keep both TinyBloom filters and the monotone bounds in locals across
@@ -433,7 +432,7 @@ fn diagOwnerPcs(w: DiagWord) struct { owner: usize, caller: usize, frame_base: u
 /// Number of machine words in the register spill image.
 pub const diag_register_words = if (target_supported) @sizeOf(SpillImage) / @sizeOf(usize) else 0;
 
-pub fn diagRegisterName(index: usize, buf: []u8) []const u8 {
+fn diagRegisterName(index: usize, buf: []u8) []const u8 {
     if (comptime builtin.cpu.arch == .aarch64) {
         if (index < 31) return std.fmt.bufPrint(buf, "x{d}", .{index}) catch "?";
         if (index == 31) return "pad";
@@ -565,7 +564,7 @@ pub const RootsDiagCensus = struct {
     pub const offset_interior_max: u8 = offset_interior_base + 32;
     pub const offset_below: u8 = 255;
 
-    pub fn offsetBucket(word: usize, header_addr: usize) u8 {
+    fn offsetBucket(word: usize, header_addr: usize) u8 {
         if (word == header_addr) return offset_exact;
         if (word == header_addr - gc.metadata_prefix_size) return offset_prefix;
         if (word < header_addr) return offset_below;
@@ -573,7 +572,7 @@ pub const RootsDiagCensus = struct {
         return @min(offset_interior_base + @as(u8, @intCast(@min(delta, 32))), offset_interior_max);
     }
 
-    pub fn offsetBucketName(bucket: u8, buf: []u8) []const u8 {
+    fn offsetBucketName(bucket: u8, buf: []u8) []const u8 {
         return switch (bucket) {
             offset_exact => "+0",
             offset_prefix => "-8",
@@ -1312,7 +1311,7 @@ pub fn reportGlobal(writer: *std.Io.Writer) !void {
 ///
 /// For tests: each one allocates its own object, so the header address is a
 /// unique handle into the process-wide site table without needing a delta.
-pub fn diagVerdictForHeader(header_addr: usize) ?RootsDiagCensus.Verdict {
+fn diagVerdictForHeader(header_addr: usize) ?RootsDiagCensus.Verdict {
     if (comptime !gc.roots_diag_enabled) return null;
     global_mutex.lock();
     defer global_mutex.unlock();
@@ -1329,7 +1328,7 @@ pub fn diagVerdictForHeader(header_addr: usize) ?RootsDiagCensus.Verdict {
 }
 
 /// Snapshot for tests, which must not race the shared table.
-pub fn diagCensusSnapshot() RootsDiagCensus {
+fn diagCensusSnapshot() RootsDiagCensus {
     global_mutex.lock();
     defer global_mutex.unlock();
     return global;

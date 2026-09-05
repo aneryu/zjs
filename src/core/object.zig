@@ -500,13 +500,10 @@ pub const Object = extern struct {
     /// Round a block-cell request to its physical body capacity without reading
     /// the owning block. A request that bypasses the block classes stays exact.
     inline fn prospectiveAccountedBodyBytes(physical_body_bytes: usize) usize {
-        if (comptime gc.block_heap_enabled) {
-            return block_heap.accountedBodyBytesForRequest(
-                gc.metadata_prefix_size + physical_body_bytes,
-                gc.metadata_prefix_size,
-            ) orelse physical_body_bytes;
-        }
-        return physical_body_bytes;
+        return block_heap.accountedBodyBytesForRequest(
+            gc.metadata_prefix_size + physical_body_bytes,
+            gc.metadata_prefix_size,
+        ) orelse physical_body_bytes;
     }
 
     pub inline fn bodyBytes(self: *const Object) usize {
@@ -8087,11 +8084,9 @@ pub const Object = extern struct {
         // complete rather than a list that has to be kept in step; the
         // individual stores keep their own barriers where they are the only
         // writer.
-        if (comptime gc.generation_enabled) {
-            rt.gc.generationalBarrier(self.gcHeader(), desc.value.cycleMarkHeader());
-            rt.gc.generationalBarrier(self.gcHeader(), desc.getter.cycleMarkHeader());
-            rt.gc.generationalBarrier(self.gcHeader(), desc.setter.cycleMarkHeader());
-        }
+        rt.gc.generationalBarrier(self.gcHeader(), desc.value.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.gcHeader(), desc.getter.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.gcHeader(), desc.setter.cycleMarkHeader());
         // qjs JS_DefineProperty resolves a real own shape entry first; only a
         // miss reaches JS_CreateProperty's exotic/array create machinery.
         // Ordinary classes therefore pay one slow-property classification,
@@ -8162,11 +8157,9 @@ pub const Object = extern struct {
         // complete rather than a list that has to be kept in step; the
         // individual stores keep their own barriers where they are the only
         // writer.
-        if (comptime gc.generation_enabled) {
-            rt.gc.generationalBarrier(self.gcHeader(), desc.value.cycleMarkHeader());
-            rt.gc.generationalBarrier(self.gcHeader(), desc.getter.cycleMarkHeader());
-            rt.gc.generationalBarrier(self.gcHeader(), desc.setter.cycleMarkHeader());
-        }
+        rt.gc.generationalBarrier(self.gcHeader(), desc.value.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.gcHeader(), desc.getter.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.gcHeader(), desc.setter.cycleMarkHeader());
 
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8773,9 +8766,7 @@ pub const Object = extern struct {
             self.arrayArm().*.values[element_index] = item;
             element_index += 1;
         }
-        if (comptime gc.generation_enabled) {
-            for (values) |item| rt.gc.generationalBarrier(self.gcHeader(), item.cycleMarkHeader());
-        }
+        for (values) |item| rt.gc.generationalBarrier(self.gcHeader(), item.cycleMarkHeader());
         self.setFastArrayCountAssumeCapacity(new_len);
         if (new_len > self.arrayArm().*.length) self.arrayArm().*.length = new_len;
         if (added != 0) self.markIndexedProperties(rt);
@@ -9846,7 +9837,6 @@ pub const Object = extern struct {
     /// build a slot and publish it must go through here; the shape transition
     /// takes its own separate barrier for the Shape.
     inline fn barrierPropertySlot(self: *Object, rt: *JSRuntime, flags: property.Flags, slot: property.Slot) void {
-        if (comptime !gc.generation_enabled) return;
         if (flags.deleted) return;
         switch (flags.kind) {
             .data => rt.gc.generationalBarrier(self.gcHeader(), slot.data.cycleMarkHeader()),

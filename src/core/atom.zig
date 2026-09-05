@@ -1622,7 +1622,7 @@ pub const AtomTable = struct {
     /// runtime (compiler/parser fixtures) reports can never match a stamp.
     inline fn traceEpoch(self: *const AtomTable) u64 {
         const rt = self.owner_runtime orelse return 0;
-        return if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
+        return rt.gc.block_heap.mark_epoch;
     }
 
     /// §2.2, the table half of `Collector.visitAtom`: stamp `id` with this
@@ -1697,7 +1697,6 @@ pub const AtomTable = struct {
     /// trace (white holder -> black holder id migration), so the store shades
     /// it. Outside a marking window this is one relaxed byte load.
     pub inline fn shadeAtomIfMarking(self: *AtomTable, id: Atom) void {
-        if (comptime !gc.concurrent_enabled) return;
         const rt = self.owner_runtime orelse return;
         if (rt.gc.concurrent.markingActive()) {
             @branchHint(.unlikely);
@@ -1706,7 +1705,7 @@ pub const AtomTable = struct {
     }
 
     noinline fn shadeAtomBarrierSlow(self: *AtomTable, rt: *runtime_mod.JSRuntime, id: Atom) void {
-        const epoch = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
+        const epoch = rt.gc.block_heap.mark_epoch;
         if (self.markAtomAtEpoch(id, epoch)) |body| rt.gc.shadeCellForAtomBarrier(body.header());
     }
 
@@ -1745,10 +1744,8 @@ pub const AtomTable = struct {
         entry.born_epoch = epoch;
         entry.host_pins = 0;
         entry.mark_epoch = 0;
-        if (comptime gc.concurrent_enabled) {
-            const rt = self.owner_runtime orelse return;
-            if (rt.gc.concurrent.markingActive()) entry.mark_epoch = epoch;
-        }
+        const rt = self.owner_runtime orelse return;
+        if (rt.gc.concurrent.markingActive()) entry.mark_epoch = epoch;
     }
 
     /// §2.2 compile scope: record `id` in the innermost active
@@ -2178,21 +2175,14 @@ pub const AtomTable = struct {
         // shape, which reaches it over an atom id no minor traces. Reserve the
         // interval-root slot BEFORE the body exists, so the publish and the
         // rooting cannot be separated by an allocation failure.
-        //
-        // Non-generational builds have no promotion point to close the
-        // interval at, and no minor that could sweep the body either, so the
-        // list stays empty there.
-        const root_until_promoted = comptime gc.generation_enabled;
-        if (root_until_promoted) {
-            try self.young_symbol_atoms.ensureUnusedCapacity(self.youngListAllocator(), 1);
-        }
+        try self.young_symbol_atoms.ensureUnusedCapacity(self.youngListAllocator(), 1);
         const body = if (entry.no_symbol_description)
             try string.String.createSymbolNoDescription(rt)
         else
             try string.String.createUtf8(rt, entry.bytes);
         body.bindAtomId(rt, atom_id);
         entry.str = body;
-        if (root_until_promoted) self.young_symbol_atoms.appendAssumeCapacity(atom_id);
+        self.young_symbol_atoms.appendAssumeCapacity(atom_id);
         return body;
     }
 

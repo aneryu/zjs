@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **GC: the `-Dzjs_gc` selector and its six always-true comptime gates are
+  removed** (TGC S5-a). `-Dzjs_gc=rc` / `=shadow` had been rejected with a
+  migration message since 2026-08-29; the option itself, `build_options.zjs_gc`,
+  and `gc.trace_stw_enabled` plus its `generation_enabled` /
+  `concurrent_enabled` / `block_heap_enabled` / `address_registry_enabled` /
+  `space_model_enabled` aliases now go too. Every `if (comptime ...)` gate that
+  read them is unconditional code and every `else` arm is deleted. No behaviour
+  change: all six constants were `true` in every build that has shipped since
+  the tracing collector became the default.
+
 - **GC: the refcounting collector is removed** (2026-08-29). The tracing
   collector is now the only collector. `-Dzjs_gc=rc` and `-Dzjs_gc=shadow`
   are rejected with a migration message; `-Dzjs_experimental_gc` stays as an

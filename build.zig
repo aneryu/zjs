@@ -47,32 +47,6 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine one just-freed atom slot so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
-    // Collector implementation. The tracing collector is the only one that
-    // exists: Stage 7 (2026-08-29) promoted it to the production default, and
-    // the same day the reference-counting collector was retired outright. The
-    // rollback story is git history plus the frozen binaries, not a build
-    // flag -- keeping a second collector alive costs a permanent second
-    // configuration on every gate and a second semantics in every module that
-    // touches object lifetime, and nothing was buying that.
-    //
-    // `-Dzjs_gc` survives as a selector with exactly one legal value so a
-    // caller that passes the retired one gets a migration message instead of
-    // "unknown option". `-Dzjs_experimental_gc` survives as an accepted but
-    // redundant compat alias, because gate scripts and release automation
-    // still pass it.
-    const zjs_gc_base = b.option([]const u8, "zjs_gc", "collector: trace_stw (the only implementation; the rc and shadow collectors were removed 2026-08-29)") orelse "trace_stw";
-    if (std.mem.eql(u8, zjs_gc_base, "rc") or std.mem.eql(u8, zjs_gc_base, "shadow")) {
-        std.debug.print(
-            "error: -Dzjs_gc={s} is no longer available: rc collector removed 2026-08-29; use a frozen binary or checkout before 6e5d7a69\n",
-            .{zjs_gc_base},
-        );
-        std.process.exit(1);
-    }
-    if (!std.mem.eql(u8, zjs_gc_base, "trace_stw")) {
-        std.debug.print("error: invalid -Dzjs_gc value '{s}': expected trace_stw\n", .{zjs_gc_base});
-        std.process.exit(1);
-    }
-    const zjs_gc = zjs_gc_base;
     // TGC R3 roots diagnosis (docs/tracing-gc-s0-spec.md §L4). Links scalar
     // ValueRootFrames in production, attributes every object the conservative
     // scan alone kept alive (`--gc-stats` "conservative-only census"), and
@@ -166,7 +140,6 @@ pub fn build(b: *std.Build) void {
         .force_gc = zjs_force_gc,
         .ownership_audit = zjs_ownership_audit,
         .dossier_layout_pad = zjs_dossier_layout_pad,
-        .zjs_gc = zjs_gc,
         .gc_roots_diag = gc_roots_diag,
     };
     // Follows -Doptimize: the public engine module and the OOM corpus engine.

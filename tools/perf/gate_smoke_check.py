@@ -39,12 +39,12 @@ RETIREMENT_RE = re.compile(
 ENDPOINT_RE = re.compile(
     r"^gc: endpoint doomed_pending (true|false), doomed_buckets (\d+), "
     r"doomed_headers (\d+), doomed_cursor (true|false), doomed_blocks (\d+), "
-    r"parked_frees (\d+), deferred_finalizers (\d+), active_finalizer (true|false)$"
+    r"deferred_finalizers (\d+), active_finalizer (true|false)$"
 )
 SETTLED_RE = re.compile(
     r"^gc: settled doomed_pending (true|false), doomed_buckets (\d+), "
     r"doomed_headers (\d+), doomed_cursor (true|false), doomed_blocks (\d+), "
-    r"parked_frees (\d+), deferred_finalizers (\d+), active_finalizer (true|false)$"
+    r"deferred_finalizers (\d+), active_finalizer (true|false)$"
 )
 BLOCK_RE = re.compile(
     r"^gc: block heap committed (\d+) live (\d+) committed/live-x1000 (\d+) "
@@ -84,17 +84,15 @@ def parse_output(text: str, max_committed_live_milli: int) -> tuple[dict[str, An
         "endpoint_doomed_headers": int(endpoint.group(3)),
         "endpoint_doomed_cursor": endpoint.group(4) == "true",
         "endpoint_doomed_blocks": int(endpoint.group(5)),
-        "endpoint_parked_frees": int(endpoint.group(6)),
-        "endpoint_deferred_finalizers": int(endpoint.group(7)),
-        "endpoint_active_finalizer": endpoint.group(8) == "true",
+        "endpoint_deferred_finalizers": int(endpoint.group(6)),
+        "endpoint_active_finalizer": endpoint.group(7) == "true",
         "settled_doomed_pending": settled.group(1) == "true",
         "settled_doomed_buckets": int(settled.group(2)),
         "settled_doomed_headers": int(settled.group(3)),
         "settled_doomed_cursor": settled.group(4) == "true",
         "settled_doomed_blocks": int(settled.group(5)),
-        "settled_parked_frees": int(settled.group(6)),
-        "settled_deferred_finalizers": int(settled.group(7)),
-        "settled_active_finalizer": settled.group(8) == "true",
+        "settled_deferred_finalizers": int(settled.group(6)),
+        "settled_active_finalizer": settled.group(7) == "true",
         "committed_bytes": int(block.group(1)),
         "live_bytes": int(block.group(2)),
         "committed_live_milli": int(block.group(3)),
@@ -115,7 +113,6 @@ def parse_output(text: str, max_committed_live_milli: int) -> tuple[dict[str, An
         "doomed_headers": values["settled_doomed_headers"],
         "doomed_cursor": values["settled_doomed_cursor"],
         "doomed_blocks": values["settled_doomed_blocks"],
-        "parked_frees": values["settled_parked_frees"],
         "deferred_finalizers": values["settled_deferred_finalizers"],
         "active_finalizer": values["settled_active_finalizer"],
     }
@@ -319,7 +316,6 @@ def check_corpus(
             f"headers={values['endpoint_doomed_headers']},"
             f"cursor={values['endpoint_doomed_cursor']},"
             f"blocks={values['endpoint_doomed_blocks']},"
-            f"parked={values['endpoint_parked_frees']},"
             f"finalizers={values['endpoint_deferred_finalizers']},"
             f"active_finalizer={values['endpoint_active_finalizer']}]"
             if values["endpoint_doomed_pending"]

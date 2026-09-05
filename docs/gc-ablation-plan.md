@@ -1,6 +1,10 @@
 # GC 代码量消融计划（勘察综合，driver 审阅中）
 
-Status: **EXECUTING（分支 `gc/ablation-20260903`，worktree `/home/aneryu/worktrees/gc-ablation`）— 2026-09-03 owner「并行消融缩减 GC 代码量」；七组只读勘察 + 逐组对抗核验 + 综合排序（workflow wf_7c269289）；driver 逐批亲核亲改，每批过 `zig build test` + `test-gc-stress` + test262 script + `mise run stage0`。**
+Status: **本批已收官（2026-09-03，全部合入 main）；余项转 TGC S5 消融规格
+[`tracing-gc-s5-spec.md`](tracing-gc-s5-spec.md)（S5-a/b/c/d 四批），见下节的对照表。**
+本文继续作为条目账本与勘察原文；新增消融条目请写进 S5 规格，不要在此表新增。
+
+原状态：**EXECUTING（分支 `gc/ablation-20260903`，worktree `/home/aneryu/worktrees/gc-ablation`）— 2026-09-03 owner「并行消融缩减 GC 代码量」；七组只读勘察 + 逐组对抗核验 + 综合排序（workflow wf_7c269289）；driver 逐批亲核亲改，每批过 `zig build test` + `test-gc-stress` + test262 script + `mise run stage0`。**
 
 执行记录（每批一个 commit，门禁读数在 commit message）：
 
@@ -19,21 +23,38 @@ Status: **EXECUTING（分支 `gc/ablation-20260903`，worktree `/home/aneryu/wor
 
 累计 **−4,990 行**（分支对 S0 合入点：−4,929/+548；gc*.zig+object_gc+memory 由 19,120 行降到约 16,300）。
 
-### 待 owner 裁决后才能继续的条目
+### 余项对照 TGC S5 规格（更新 2026-09-06）
 
-| 条目 | 估算 | 为什么要裁决 |
-|---|---|---|
-| D02 恒真 comptime 门全树折叠（`trace_stw_enabled` 及六个别名、`-Dzjs_gc` 单值选项、memory.zig 的 `zjs_gc` 字符串比较、root.zig 余下桩） | ≈250 | 计划把它排在 S5；提前做没有技术障碍，只是与完成计划的分期冲突 |
-| D05 `gc.Stats` 公共快照的死字段（total_allocated_bytes、old_*、large_*、major_gc_time_ns…）与 `GeStats` 合并 | ≈150 | `gc.Stats` 是 embedding API（`JSRuntime.gcStats()`），删字段是 API 变更 |
-| D07 两套 major（STW `collectCycles` 与 incremental begin/step/finish）统一 | ≈300 | 改语义（requested major 走 incremental 强制收尾），需要 test262-stress 与 pause 读数复核 |
-| D10 memory.zig 分配器分层（comptime trigger 线程、`small_slab_enabled` 23 处运行时旗标、`gc_object_cell_heap` orelse） | ≈150-250 | 触及最热分配路径，按 stage0 insn 判但布局效应大 |
-| B04 RSS/cgroup/external 压力策略 | ≈130 | `Policy.rss_soft_limit` 等是 embedding 选项，删除即 API 变更（有 5 个测试） |
-| B05 `-Dzjs_oom_coverage` | ≈60 | 非 GC 专属；owner 说过要不要保留 OOM 注入覆盖 |
-| C11 external-memory token 表、C12 memory 诊断计数、C13 cycle envelope、C14 minor pause/phase 行、C15 space histogram、C16 mark-footprint census | ≈905 | 都被 tools/perf（stage0/gc_stats_snapshot/gate_smoke）解析或是 Stage 0 工具本身，删除要改工具与冻结基线 |
-| D04 RefKind 描述符目录 | ≈100 | 要重生成 representation snapshot 基线 |
+下表把本批「待裁决」条目逐条对到 [`tracing-gc-s5-spec.md`](tracing-gc-s5-spec.md) §2 的四批。
+S5 的目标是净删行与可维护性，不是性能；每批只做 Stage 0 快筛（insn 口径）确认无回归。
 
-不需裁决但收益已很小（≤50 行/条）：D06 NonBlockObjectAuthority 转发器、D09 wrapper/alias 束、C07 registry 测试镜像计数、C08 验证器精简、C09 `AllocInfo.large`（S4 会重排 flags，顺延）、C10 尺寸 pin、C17 pause ring 缩容。Stage 0 的「splay deferred block runs」计数呈双峰（1691 或 1509），已多次与 insn 持平同时出现，视为 wall-clock 切片耦合，不作阻塞。门禁链已改并行形式（一张构建图 + stage0‖test262），每批约 7.5 分钟。stage0 记账：splay insn 0.9915（B02 后）～1.0025，其余负载 0.997-1.000。
+| 原条目 | 估算 | 归宿 | 说明 |
+|---|---|---|---|
+| D02 恒真 comptime 门全树折叠 | ≈250 | **S5-a 第 1 项** | 删 `-Dzjs_gc` 选择器与 `build_options.zjs_gc`；`trace_stw_enabled` / `block_heap_enabled` / `generation_enabled` / `address_registry_enabled` / `space_model_enabled` / `concurrent_enabled` 六常量删除，~190 处 `if (comptime …)` 展开；`gc_representation` 快照重生成 |
+| D07 两套 major 统一 | ≈300 | **S5-b 第 1/4 项** | `destroyCondemned` ⊕ `destroyDoomedSlice` → 一个 `destroyCondemnedSlice(budget_ns, clock_cadence, sweep_extents)`（STW = `budget = maxInt`）；`collectCycles` 若能收缩成「begin → 全量 markStep → finish」则 STW 专用函数体整体删除 |
+| C11-C16 诊断族 | ≈905 | **部分进 S5-a 第 3 项** | S5-a 只处理 `--gc-stats` 的**过期行**（删 `zero-ref drains` / `refcount-removed headers`、`pass-A settled cells` 改名 `bitmap reclaimed cells`、删 `parked_frees 0`）并配 `SCHEMA_VERSION 9` + `SCHEMA_REMOVED_LEAVES` 映射；计数器本体仍被 Stage 0 工具解析，删除仍需裁决 |
+| D05 `gc.Stats` 死字段与 `GeStats` 合并 | ≈150 | 仍待裁决 | 是 embedding API（`JSRuntime.gcStats()`），未进 S5 |
+| D10 memory.zig 分配器分层 | ≈150-250 | 仍待裁决 | 最热分配路径，布局效应大，未进 S5 |
+| B04 RSS/cgroup/external 压力策略 | ≈130 | 仍待裁决 | embedding 选项，删即 API 变更 |
+| B05 `-Dzjs_oom_coverage` | ≈60 | 仍待裁决 | 非 GC 专属 |
+| D04 RefKind 描述符目录 | ≈100 | 仍待裁决 | 要重生成 representation snapshot 基线；注意 `RefKind` 已由 8 值扩到 13 值（S4-a/S4-c/S2-i），估算需重做 |
 
+S5 在本表之外新增的条目（详见规格 §2）：
+
+- **S5-a**：rc 命名整改（`metadata_rc_offset` → `metadata_lifetime_offset`，poison 注释与 `@compileError` 文案）；`MarkFootprint.refcount_removed_headers` 字段删除；**修 atom audit 行的解析正则**——解析器找的是 `missing-edge/over-marked` 而面板打的是 `stale-edge/shell-edge`，永不匹配静默回 0；13 个 `pub fn` 降私有、3 个 test-only 加门。
+- **S5-b**：三处凝判扫链（`sweepUnmarked` / `sweepUnmarkedYoung` / `finishIncrementalCycle` 内联段）合成 `condemnListSweep`；增量 `markStep` 的手写 frontier 循环改用带预算的 `drain`；STW 入口双 `beginMajor` 去重。
+- **S5-c**：`concurrent` → `incremental` 改名（`gc_concurrent.zig` 零线程，`major_marking_active` 的 atomic 与单线程注释矛盾）；`IncrementalMarkState`（`gc_mark_pool`）拆解；**文档 supersede / historical / 活文档改写**（本次提交）。
+- **S5-d（owner 可选）**：`Registry` 3,796 行 / 37 字段 / 114 方法拆成七个子结构，硬约束是 `phase align(64)` 必须在 offset 0 且与 `barrier_gate` 相邻。
+
+**计划外删除的条目**：完成计划 S5 原有的「删 `gc_conservative` 生产路径的门」以 R1 全精确根为前提；
+owner 2026-09-06 裁「R1 不立项，S5 消融后转 TS/AOT」，故该项取消，**保守扫描保持生产默认**
+（`tracing-gc-s5-spec.md` §0）。
+
+不需裁决但收益已很小（≤50 行/条）：D06 NonBlockObjectAuthority 转发器、D09 wrapper/alias 束、C07 registry 测试镜像计数、C08 验证器精简、C09 `AllocInfo.large`、C10 尺寸 pin、C17 pause ring 缩容。
+其中 C09 当初「S4 会重排 flags，顺延」的理由已兑现：S4-e/S4-h 已把 flags 字节定死为
+`kind:u4 | young | finalizing | needs_finalizer | reserved`，`lifetime.flags`（byte 7）整字节空闲。
+Stage 0 的「splay deferred block runs」计数呈双峰（1691 或 1509），已多次与 insn 持平同时出现，视为 wall-clock 切片耦合，不作阻塞。
+门禁链已改并行形式（一张构建 + stage0‖test262），每批约 7.5 分钟。stage0 记账：splay insn 0.9915（B02 后）～1.0025，其余负载 0.997-1.000。
 
 > 下文为综合代理原文（英文）。行号对应 gc/tgc-s0-20260903 工作树在勘察时刻的状态；执行前按符号名重新定位。
 
@@ -166,7 +187,7 @@ Test-line removal ≈ 1,100 (mostly sticky 220, parallel 108, carrier 150, slot 
 | `arena_audit`/`invariantChecksEnabled` (`ZJS_GC_ARENA_AUDIT`) and everything under it: `verifyCollectorInvariants` 601-687, `verifyIntrusiveList`/`verifyCircularHeaderList` 5607-5774/1636-1680, `verifyRepresentationInvariants`+`verifyMetadataSemantics` 5786-5892/2024-2105, `verifyConstructionRoots`/`verifyGenerationInvariants`/`verifyMajorRetirementCommit` 5776-5932, `verifyHeapAccounting` core walk 5951-5977/6000-6027, `verifyDeferredFreeRunTopology` 2469-2503 + `deferred_run_topology_verified`, `verifyObjectPropertyStorageLayouts` 3907-3986, block heap `verify` 1558-1883 + `verifyBlockAllocCount` (stw 1611-1619, 2897-2900), registry `auditArenas`/`verifyIndex`/`forEachArenaBlock`, `remembered_skip_audit` (GN-5) | `if (comptime runtime_safety) return true; return arena_audit;` (gc.zig 222-225) → runs after every collection in all unit tests; tools/perf/gate_smoke.sh:110 and build/gates.zig:48 set `ZJS_GC_ARENA_AUDIT=1` in ReleaseFast |
 | `verify_major_all` (`ZJS_GC_VERIFY_MAJOR_ALL`) + `IncrementalMajorScope`/`incrementalMajorScope()`/`verifyStickyCondemnation` 482-516/`noteStickyMajorOracle`/oracle block 1230-1248/marking suppression 391-397 | `if (comptime gc.sticky_major_enabled or gc.roots_diag_enabled)` — shared with R3; deleting them with B02 breaks the `-Dzjs_gc_roots_diag=true` build |
 | `-Dzjs_gc_roots_diag` / `roots_diag_enabled`: gc_conservative.zig 389-617 census, gc_trace_stw.zig 423-461, 2207-2223 `recordConservativeCandidate`, cli 436-438, `Registry.roots_diag` (void by default) | in-flight owner-approved R3 (docs/tracing-gc-s0-spec.md §L4, completion-plan:5,145); rows parsed by untracked `tools/perf/r3_summarize.py:17,32,36` |
-| Every `--gc-stats` row in gc_stats_snapshot.py:237-437 (`one_match` → SnapshotError): collections/freed/failed, collector outcome (incl. `zero-ref drains` token), heap bytes + `account peak`, major pause (`retained N of M`), allocation histogram, block heap committed/…/`large maps`, deferred block runs/hot reuse/reopened/pass-A settled, major threshold resets, page returns, decommit checks, process heap trim, incremental subphase totals + work totals, generation current young, minor collections, retirement commits/abandons/state, generational barrier, marking barrier, incremental doomed, minor STW total, minor pause (2 variants), minor phase totals, minor young-at-start, conservative-only young (2 variants), incremental major cycles, cycle envelope, STW phase-segment max, STW phase totals, marked-set census family (15 rows: census/kinds/trace classes, 6 `mark storage`, 5 `mark trace class storage`, `inline property upper slots` + `inline ordinary property upper slots`) | `mise run stage0` (mise.toml:41-47 → stage0_screen.py:202-222). gate_smoke_check.py:37-53 additionally requires retirement, `endpoint`/`settled doomed_pending`, block heap committed (`mise run gate`) |
+| Every `--gc-stats` row in gc_stats_snapshot.py:237-437 (`one_match` → SnapshotError): collections/freed/failed, collector outcome, heap bytes + `account peak`, major pause (`retained N of M`), allocation histogram, block heap committed/…/`large maps`, deferred block runs/hot reuse/reopened/bitmap reclaimed cells, major threshold resets, page returns, decommit checks, process heap trim, incremental subphase totals + work totals, generation current young, minor collections, retirement commits/abandons/state, generational barrier, marking barrier, incremental doomed, minor STW total, minor pause (2 variants), minor phase totals, minor young-at-start, conservative-only young (2 variants), incremental major cycles, cycle envelope, STW phase-segment max, STW phase totals, marked-set census family (15 rows: census/kinds/trace classes, 6 `mark storage`, 5 `mark trace class storage`, `inline property upper slots` + `inline ordinary property upper slots`) | `mise run stage0` (mise.toml:41-47 → stage0_screen.py:202-222). gate_smoke_check.py:37-53 additionally requires retirement, `endpoint`/`settled doomed_pending`, block heap committed (`mise run gate`) |
 | `detailed_reports` switch (stw 518-542), `doomedStateSnapshot` 1468-1512, incremental subphase timers (CC-5), `SliceKind`/`recordMajorSlicePause` (C3), barrier counters `generationalBarrierDetailed`/`shadeForConcurrentMark` report (C11/C12), `threshold_growth_hits/floor_hits`, `liveCount`/`liveCountKind` (57/14 test oracles; `memoryUsage`), generation retirement counters, `PauseDistribution`/`GCPauseDistribution`/`JSRuntime.gcPauseDistribution()` (public API src/root.zig:11) | all feed parsed rows or public API |
 | `peak_allocated_bytes` + `samplePeakAtCollection` (memory.zig 1983-1985; runtime.zig 3019/3121/3301); `allocation_count`/`hasOutstandingAllocations` (runtime.zig 1749-1762 leak net); `limit_gc_fn` collect-and-retry 1946-1958; `trigger_gc_fn` hook + `-Dzjs_force_gc` tier | `account peak` row :247; leak net; 27 test refs |
 | `block_header_bytes` memory.zig 263-264 | prod use at memory.zig:756 (`accountedMallocSize`) |

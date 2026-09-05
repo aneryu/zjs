@@ -1,5 +1,9 @@
 # splay 差距全账(2026-08-28)
 
+状态：**HISTORICAL（2026-09-06）— 归因方法留用，读数已过期数代。**
+splay 的现行读数与结论见 [`tracing-gc-completion-account.md`](tracing-gc-completion-account.md) §3
+（S4-i 后 insn/cycles = 1.17/1.26，唯一 STOP）与 [`tracing-gc-s4-spec.md`](tracing-gc-s4-spec.md) §7。
+
 ## 刷新账(lane-d,主线 c9c66de3 vs frozen-rc bf624dea)
 
 本节取代下面 f660 时代的原账。ReleaseFast trace 二进制来自

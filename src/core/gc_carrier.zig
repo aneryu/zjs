@@ -121,7 +121,7 @@ pub const ExtentIdentityAuthority = struct {
         return self.records.getPtr(base);
     }
 
-    pub fn recordMut(self: *ExtentIdentityAuthority, base: usize) ?*ExtentIdentityRecord {
+    fn recordMut(self: *ExtentIdentityAuthority, base: usize) ?*ExtentIdentityRecord {
         return self.records.getPtr(base);
     }
 
@@ -193,7 +193,7 @@ pub const ExtentLifecycleAuthority = struct {
         return self.records.getPtr(base);
     }
 
-    pub fn recordMut(self: *ExtentLifecycleAuthority, base: usize) ?*ExtentLifecycleRecord {
+    fn recordMut(self: *ExtentLifecycleAuthority, base: usize) ?*ExtentLifecycleRecord {
         return self.records.getPtr(base);
     }
 

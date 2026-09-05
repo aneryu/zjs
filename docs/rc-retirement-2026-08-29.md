@@ -1,5 +1,11 @@
 # RC 收集器退役(2026-08-29)
 
+状态：**HISTORICAL（2026-09-06）— 本文记的是收集器退役；rc *机器* 的最终清零发生在其后。**
+S1（shape/realm/bigint）、S2（string 家族 + `RefCountHeader`/`StringHeader`）、S3（atom `ref_count`）、
+S4-e（`weakref_count` 对象位、husk、Pass A/B、`DeferredFreeStack`）之后，堆上再无引用计数；
+`JSValue.dup/free` 及其 903/2966 个调用点亦已删除。现状见
+[`tracing-gc-completion-account.md`](tracing-gc-completion-account.md) §1。
+
 分支 `gc/rm-rc`,基线 `main@6e5d7a69`("gc: flip the production default to the
 tracing collector (Stage 7)")。owner 裁决:refcounting 收集器整个退役,回滚故事
 改由 git 历史 + 冻结二进制承担,不再由构建开关承担。

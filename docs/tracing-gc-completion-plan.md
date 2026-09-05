@@ -70,7 +70,19 @@ BlockFlags(u8): kind:u4 | young:1 | needs_finalizer:1 | finalizing:1 | reserved:
 
 ## 3. 分期
 
-> **进度（2026-09-05 14:00）**：S0/S1 已合入；S2（含 S2-e/f/g/h1/i）与 S3（a/b/c/d + 阶段末修复）已在 main 落地并过阶段末门（test262 0/49778、leak-census 绿、oom tier 21/0）；S4-a/b/c 已合入，S4-d（sweep 只遍历 finalizer / 块级计账 / 删析构机器）与 T-R R3 诊断进行中，S4-e 待派；S2-h2（nursery 按字节）KILLED。规格与执行记录：`docs/tracing-gc-s2-spec.md` §7、`docs/tracing-gc-s3-spec.md` §7、`docs/tracing-gc-s4-spec.md` §7。`JSValue.dup/free` 与调用点已在 owner 的消融裁剪中删除（原 S3 步 4/5 提前完成）。Stage 0（S2-i 后）：pdfjs 0.83/0.82 PASS，splay 1.22/1.33 待 S4-d。
+> **进度（2026-09-06）**：**S0/S1/S2/S3/S4 全部合入 main 并过阶段末门**（S4 收口至 **S4-i**：minor 侧
+> trace-coupled retirement，退休窗口在任何 shade 之前打开、`traceRememberedOwner` 不 claim mark 故不退休、
+> construction-root 臂补 `retireTracedYoung`；splay +5.4% / raytrace +2.4% / earley-boyer +3.2%）。
+> 门（main 3ff3f8d3 起）：test 2553/0、stress 2549/0、roots_diag 2553/0、test262 0/49778、
+> **`ZJS_GC_STRESS=1` test262 0/49778**、leak-census 1562/0、oom 21/0。
+> T-R：**R3 完成**，R1-a/b/c/**d 已合入**（R1-d = `callValueOrBytecodeRoot` 的 rooted args/this/func 帧）；
+> owner 2026-09-06 裁「**R1 不立项**，S5 消融后转 TS/AOT」，保守扫描保持生产默认。
+> **S5 进行中**（规格 `docs/tracing-gc-s5-spec.md`：a 恒真门与过期面板 / b 重复路径合一 / c 改名与文档 /
+> d Registry 拆分，owner 可选）。KILLED：S2-h2（nursery 按字节）。
+> Stage 0（S4-i 后，insn/cycles）：pdfjs 0.81/0.83、raytrace 0.90/0.92、earley-boyer 0.90/0.92、
+> deltablue 0.90/0.99、regexp 0.98/1.02，**唯一 STOP = splay 1.17/1.26**。
+> 逐期事实与执行记录：`docs/tracing-gc-completion-account.md`（终态事实来源）、
+> `docs/tracing-gc-s2-spec.md` §7、`s3` §7、`s4` §7。
 
 
 两条并行 track：**T-M 对象模型**（S1→S4 串行）与 **T-R 根集**（R3→R1，与 T-M 并行）。S0 与 S5 是公共首尾。每期开工前 driver 出函数/偏移级规格（先例 `gc-v2-m-cut-object-layout.md`），codex 实现，对抗 ≤1 轮，driver 亲读关键 diff。

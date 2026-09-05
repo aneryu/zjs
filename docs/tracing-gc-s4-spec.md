@@ -1,6 +1,10 @@
 # TGC S4 规格：零成本 sweep（存储与 payload 入 tracer，普通对象死亡不进析构）
 
-状态：v0.1 草案（driver，2026-09-05 凌晨）；上游 `docs/tracing-gc-completion-plan.md` §3 S4、§2.1/§2.2 目标态、§8 D2（owner 批：属性/数组存储做独立 GC kind）。
+状态：**本期已完成（S4 a–i 全部合入 main；执行记录见 §7）**。
+本期删除的机制：husk、Pass A/B、`DeferredFreeStack`、对象 `weakref_count`、`is_pinned`、`cycle_visited`、
+`mark` 位、`slots2_payloads` 侧表、11 个 a 类 `destroy*Payload` 与 `destroyPlainObjectFast`（S4-d/e，净 −784 行）。
+位序终态与 condemn 谓词见 §7 的 S4-h 条；trace-coupled retirement 契约见 S4-i 条。
+原状态：v0.1 草案（driver，2026-09-05 凌晨）；上游 `docs/tracing-gc-completion-plan.md` §3 S4、§2.1/§2.2 目标态、§8 D2（owner 批：属性/数组存储做独立 GC kind）。
 基线：main（S3 落地后，≥ 13c68700；S3-d 清理与 pdfjs 回归修复合入后起步）。分支 `gc/tgc-s4-*`。
 勘察：只读报告一份（2026-09-05，Opus，main@13c68700，行号为现值）；本文只引用其结论与位置。
 

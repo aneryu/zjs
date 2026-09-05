@@ -1,6 +1,14 @@
 # Tracing GC header v2 / obj64 representation design r2
 
-Status: **APPROVED — owner ruling 2026-08-31（O1-O5 per Owner decision list，O2=Option B）**
+Status: **SUPERSEDED (2026-09-06) — 头部布局的终态由 TGC S4-a/S4-e/S4-h 落地，取代本文 §2 的 header v2 位序。**
+终态为 `BlockFlags(u8) = kind:u4 | young(0x10) | finalizing(0x20) | needs_finalizer(0x40) | reserved(0x80)`；
+`mark` / `is_pinned` / `cycle_visited` 三位全删，condemn 谓词改为 `lifetime.mark_epoch` 的保留值
+`condemned_mark_epoch = 0xffff`（`gc.headerCondemned` / `stampHeaderCondemned`）。
+替代物：[`tracing-gc-s4-spec.md`](tracing-gc-s4-spec.md) §2.1 与 §7（S4-a / S4-e / S4-h 三条执行记录）、
+[`tracing-gc-completion-account.md`](tracing-gc-completion-account.md) §1「头部位」行。
+本文正文保留原样，只作历史设计依据阅读。
+
+原状态：**APPROVED — owner ruling 2026-08-31（O1-O5 per Owner decision list，O2=Option B）**
 
 Date: 2026-08-31
 

@@ -1,6 +1,8 @@
 # S4a：位图游标分配 + minor 判死块回填（driver 设计，2026-09-02）
 
-状态：规格冻结；实现基点 = `gc/m-cut-20260902` 终态（M 合入 main 后 rebase）。
+状态：**HISTORICAL / 已完成（2026-09-06）**——GC v2 S4a 已实现并合入 main；本文留作规格与设计推理记录。
+（注意：本文的 S4a 属 **GC v2** 分期，与 tracing-gc 完成计划的 S4-a 不是同一件事。）
+原状态：规格冻结；实现基点 = `gc/m-cut-20260902` 终态（M 合入 main 后 rebase）。
 
 ## 1. 事实与账目
 - M 首轮意外实测（minor 判死块进 hot-reuse 门）：**raytrace committed 76.2→5.5 MB（C/L 28.8×→2.2×）、minflt 64.7k→8.5k；

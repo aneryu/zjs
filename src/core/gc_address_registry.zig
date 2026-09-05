@@ -96,8 +96,7 @@ pub const Table = struct {
     /// Installed by `serveObjectCells`; null until then (and forever in
     /// builds without the block heap), which every block arm treats as "no
     /// such population".
-    block_heap: if (gc.block_heap_enabled) ?*const block_heap_mod.Heap else void =
-        if (gc.block_heap_enabled) null else {},
+    block_heap: ?*const block_heap_mod.Heap = null,
     /// One-word bloom filter over every 4 KiB base a candidate could resolve
     /// through: arena bases OR'd with occupant-table page bases. `ruleOut` is
     /// two ALU ops, and it rejects almost every stack word before any hash
@@ -139,7 +138,7 @@ pub const Table = struct {
         return self.removes_since_rehash & arenas_incomplete_bit != 0;
     }
 
-    pub inline fn setArenasIncomplete(self: *Table, value: bool) void {
+    inline fn setArenasIncomplete(self: *Table, value: bool) void {
         if (value) {
             self.removes_since_rehash |= arenas_incomplete_bit;
         } else {
@@ -360,24 +359,22 @@ pub const Table = struct {
             if (verify_scan_cache and self.filterRulesOut(base.*)) return error.AddressScanFilterMissing;
         }
 
-        if (comptime gc.block_heap_enabled) {
-            if (verify_scan_cache and self.block_heap != null) {
-                const heap = self.block_heap.?;
-                for (heap.superblocks.items) |sb| {
-                    if (sb.used_blocks == 0) continue; // medium population
-                    const lo = @intFromPtr(sb.bytes.ptr);
-                    const hi = lo + sb.bytes.len;
-                    if (lo < self.bounds_lo or hi + 1 > self.bounds_hi) {
-                        return error.AddressBoundsMissing;
-                    }
+        if (verify_scan_cache and self.block_heap != null) {
+            const heap = self.block_heap.?;
+            for (heap.superblocks.items) |sb| {
+                if (sb.used_blocks == 0) continue; // medium population
+                const lo = @intFromPtr(sb.bytes.ptr);
+                const hi = lo + sb.bytes.len;
+                if (lo < self.bounds_lo or hi + 1 > self.bounds_hi) {
+                    return error.AddressBoundsMissing;
                 }
-                // The extent window is the only thing keeping a >3760-byte
-                // string body inside the range gate (TGC S2-h1). A hole here
-                // drops the live root the page index would have resolved.
-                if (heap.extent_bounds_hi != 0) {
-                    if (heap.extent_bounds_lo < self.bounds_lo or heap.extent_bounds_hi > self.bounds_hi) {
-                        return error.AddressBoundsMissing;
-                    }
+            }
+            // The extent window is the only thing keeping a >3760-byte
+            // string body inside the range gate (TGC S2-h1). A hole here
+            // drops the live root the page index would have resolved.
+            if (heap.extent_bounds_hi != 0) {
+                if (heap.extent_bounds_lo < self.bounds_lo or heap.extent_bounds_hi > self.bounds_hi) {
+                    return error.AddressBoundsMissing;
                 }
             }
         }
@@ -395,31 +392,29 @@ pub const Table = struct {
         self.scan_filter = bits;
 
         var block_bits: usize = 0;
-        if (comptime gc.block_heap_enabled) {
-            if (self.block_heap) |heap| {
-                block_bits = heap.scanFilter();
-                // The global range gate stays first because it rejects more
-                // than 96% of EB's candidate words in two compares. Extend
-                // it with the block mappings, but do not rebuild, sort, and
-                // linearly search a duplicate range index: the heap now owns
-                // exact block membership.
-                for (heap.superblocks.items) |sb| {
-                    if (sb.used_blocks == 0) continue; // medium population
-                    const lo = @intFromPtr(sb.bytes.ptr);
-                    const hi = lo + sb.bytes.len;
-                    if (lo < self.bounds_lo) self.bounds_lo = lo;
-                    if (hi + 1 > self.bounds_hi) self.bounds_hi = hi + 1;
-                }
-                // TGC S2-h1: string extents pay no occupant entry any more,
-                // so the insert that used to widen these bounds for them is
-                // gone. The heap's monotone extent window replaces it, and it
-                // has to be merged here, before any word can be dismissed --
-                // the extent arm of `forEachTraceCandidateAt` sits BELOW the
-                // range gate and never gets asked otherwise.
-                if (heap.extent_bounds_hi != 0) {
-                    if (heap.extent_bounds_lo < self.bounds_lo) self.bounds_lo = heap.extent_bounds_lo;
-                    if (heap.extent_bounds_hi > self.bounds_hi) self.bounds_hi = heap.extent_bounds_hi;
-                }
+        if (self.block_heap) |heap| {
+            block_bits = heap.scanFilter();
+            // The global range gate stays first because it rejects more
+            // than 96% of EB's candidate words in two compares. Extend
+            // it with the block mappings, but do not rebuild, sort, and
+            // linearly search a duplicate range index: the heap now owns
+            // exact block membership.
+            for (heap.superblocks.items) |sb| {
+                if (sb.used_blocks == 0) continue; // medium population
+                const lo = @intFromPtr(sb.bytes.ptr);
+                const hi = lo + sb.bytes.len;
+                if (lo < self.bounds_lo) self.bounds_lo = lo;
+                if (hi + 1 > self.bounds_hi) self.bounds_hi = hi + 1;
+            }
+            // TGC S2-h1: string extents pay no occupant entry any more,
+            // so the insert that used to widen these bounds for them is
+            // gone. The heap's monotone extent window replaces it, and it
+            // has to be merged here, before any word can be dismissed --
+            // the extent arm of `forEachTraceCandidateAt` sits BELOW the
+            // range gate and never gets asked otherwise.
+            if (heap.extent_bounds_hi != 0) {
+                if (heap.extent_bounds_lo < self.bounds_lo) self.bounds_lo = heap.extent_bounds_lo;
+                if (heap.extent_bounds_hi > self.bounds_hi) self.bounds_hi = heap.extent_bounds_hi;
             }
         }
         return .{
@@ -442,7 +437,6 @@ pub const Table = struct {
         context: *anyopaque,
         visit: *const fn (*anyopaque, *gc.Header) void,
     ) struct { owns_address: bool, hits: usize } {
-        if (comptime !gc.block_heap_enabled) return .{ .owns_address = false, .hits = 0 };
         const heap = self.block_heap orelse return .{ .owns_address = false, .hits = 0 };
         var hits: usize = 0;
         var owns_address = false;
@@ -530,7 +524,7 @@ pub const Table = struct {
         self.removePtr(allocator, @intFromPtr(header));
     }
 
-    pub fn removePtr(self: *Table, allocator: std.mem.Allocator, identity: usize) void {
+    fn removePtr(self: *Table, allocator: std.mem.Allocator, identity: usize) void {
         const occupant = self.by_header.fetchRemove(identity) orelse return;
         const range = occupant.value;
         const first_page = range.lo >> page_shift;
@@ -616,22 +610,20 @@ pub const Table = struct {
         // why both bases have to clear the filter before a word is dismissed.
         // Picking a single winner would drop the predecessor's only root
         // (spec 7.2 (3)).
-        if (comptime gc.block_heap_enabled) {
-            if (self.block_heap) |heap| {
-                const pair = heap.extentsContaining(addr);
-                if (pair.inside != null or pair.one_past_end != null) {
-                    var hits: usize = 0;
-                    inline for (.{ pair.inside, pair.one_past_end }) |candidate| {
-                        if (candidate) |extent_base| {
-                            const header: *gc.Header = @ptrFromInt(extent_base + gc.metadata_prefix_size);
-                            if (header.metaConst().alloc_info.heap_accounted) {
-                                visit(context, header);
-                                hits += 1;
-                            }
+        if (self.block_heap) |heap| {
+            const pair = heap.extentsContaining(addr);
+            if (pair.inside != null or pair.one_past_end != null) {
+                var hits: usize = 0;
+                inline for (.{ pair.inside, pair.one_past_end }) |candidate| {
+                    if (candidate) |extent_base| {
+                        const header: *gc.Header = @ptrFromInt(extent_base + gc.metadata_prefix_size);
+                        if (header.metaConst().alloc_info.heap_accounted) {
+                            visit(context, header);
+                            hits += 1;
                         }
                     }
-                    return hits;
                 }
+                return hits;
             }
         }
         const base = addr & ~(Slab.arena_size - 1);
@@ -658,28 +650,24 @@ pub const Table = struct {
     /// the occupant table still holds.
     pub fn containsHeader(self: *const Table, header: *const gc.Header) bool {
         const addr = @intFromPtr(header);
-        if (comptime gc.block_heap_enabled) {
-            if (self.block_heap) |heap| {
-                if (heap.blockOf(@ptrFromInt(addr))) |block| {
-                    const index = block.cellIndexInterior(addr) orelse return false;
-                    if (!block.cellAllocated(index)) return false;
-                    if (block.cellBase(index) + gc.metadata_prefix_size != addr) return false;
-                    return header.metaConst().alloc_info.heap_accounted;
-                }
+        if (self.block_heap) |heap| {
+            if (heap.blockOf(@ptrFromInt(addr))) |block| {
+                const index = block.cellIndexInterior(addr) orelse return false;
+                if (!block.cellAllocated(index)) return false;
+                if (block.cellBase(index) + gc.metadata_prefix_size != addr) return false;
+                return header.metaConst().alloc_info.heap_accounted;
             }
         }
         // TGC S2-h1: an extent string's membership lives in the heap's page
         // index, not in the occupant table. `auditLiveObjectsResolve` walks
         // every published header including extents, so this arm is what keeps
         // "live object that reads as garbage" honest for them.
-        if (comptime gc.block_heap_enabled) {
-            if (self.block_heap) |heap| {
-                if (addr >= gc.metadata_prefix_size) {
-                    const extent_base = addr - gc.metadata_prefix_size;
-                    if (heap.extentsContaining(extent_base).inside) |resolved| {
-                        if (resolved == extent_base) {
-                            return header.metaConst().alloc_info.heap_accounted;
-                        }
+        if (self.block_heap) |heap| {
+            if (addr >= gc.metadata_prefix_size) {
+                const extent_base = addr - gc.metadata_prefix_size;
+                if (heap.extentsContaining(extent_base).inside) |resolved| {
+                    if (resolved == extent_base) {
+                        return header.metaConst().alloc_info.heap_accounted;
                     }
                 }
             }

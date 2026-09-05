@@ -3789,10 +3789,8 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // direction routinely -- every large object-graph benchmark failed
         // without it. Comptime-gated so the refcounting build emits nothing,
         // not even the receiver re-extraction.
-        if (comptime core.gc.generation_enabled) {
-            if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
-                rt.gc.generationalBarrierValue(owner.gcHeader(), (sp - 1)[0]);
-            }
+        if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
+            rt.gc.generationalBarrierValue(owner.gcHeader(), (sp - 1)[0]);
         }
         return cont(pc + 5, sp - 2, var_buf, vm);
     }

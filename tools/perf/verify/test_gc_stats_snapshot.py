@@ -20,13 +20,13 @@ _spec.loader.exec_module(snapshot)
 
 PANEL = """\
 gc: collection entries total 32, major completed 9, minor completed 22, failed 1
-gc: collector counted objects freed 77 (excludes bytecode), zero-ref drains 88
+gc: collector counted objects freed 77 (excludes bytecode)
 gc: heap live 1000 bytes, account peak 2000 bytes
 gc: weak refs current 3, finalizer queue current 4
 gc: major pause p50 1 ns, p95 2 ns, p99 3 ns, max 4 ns, retained 9 of 50 pauses
 gc: allocation histogram publications 100, payload bytes 200, p50-below-large 16, p95-below-large 32, p99-below-large 64, max-small 128, covered-by-small 90/95 below-large, large 5
 gc: block heap committed 4000 live 500 committed/live-x1000 8000 superblocks 2 large maps 1
-gc: block heap deferred block runs 12, hot reuse published 13, reopened 14, pass-A settled cells 15
+gc: block heap deferred block runs 12, hot reuse published 13, reopened 14, bitmap reclaimed cells 15
 gc: major threshold resets growth 11, small-heap-floor 7
 gc: block heap page returns cumulative decommitted 6000, recommitted 700
 gc: block heap decommit checks 8, released blocks cumulative 9, current bytes 5300, max batch bytes 1000
@@ -48,7 +48,8 @@ gc: incremental major cycles completed 8, aborted 1, forced 0, mark steps 37, cy
 gc: cycle envelope measured 7, skipped 1, max-P/T S 1000, T 1750, B 1751, P 1764, B/T-x1000000 1000572, P/T-x1000000 1008000, P/S-x1000000 1764000, forced 0
 gc: incremental STW phase-segment max ns begin 5, increment 6, destroy 7, finish 8
 gc: incremental STW phase totals begin 40 ns/41 segments, increment 42 ns/43 segments, destroy 44 ns/45 segments, finish 46 ns/47 segments
-gc: marked-set census majors 9, headers 100, block headers 60, refcount-removed headers 100
+gc: marked-set census majors 9, headers 100, block headers 60
+gc: atom audit stale-edge 0, shell-edge 4, entries 512
 gc: marked-set kinds object 70, function-bytecode 5, var-ref 5, realm-context 5, module 5, shape 6, big-int 1, string 3
 gc: marked-set trace classes ordinary-object 40, fast-array 10, bytecode-function 5, exotic-object 15, non-object 30
 gc: mark storage base allocation-touches 100, allocated-bytes 7200, touched-cache-lines 180
@@ -88,7 +89,7 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(parsed["blockHeap"]["deferredBlockRuns"], 12)
         self.assertEqual(parsed["blockHeap"]["hotReusePublished"], 13)
         self.assertEqual(parsed["blockHeap"]["reopened"], 14)
-        self.assertEqual(parsed["blockHeap"]["passASettledCells"], 15)
+        self.assertEqual(parsed["blockHeap"]["bitmapReclaimedCells"], 15)
         self.assertEqual(parsed["allocations"]["publications"], 100)
         self.assertEqual(parsed["barriers"]["generational"]["calls"], 29)
         self.assertEqual(parsed["barriers"]["marking"]["exitMarkedTarget"], 10)
@@ -107,10 +108,9 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(parsed["pauseNs"]["minor"]["total"], 36)
         self.assertEqual(parsed["pauseNs"]["minorPhaseTotals"]["sweepDestroy"], 6)
         self.assertEqual(parsed["markFootprint"]["markedHeaders"], 100)
-        # TGC S1/S2: every gc.Header kind is tracer-owned, so the
-        # refcount-removed column equals the whole marked set, and the kinds
-        # row carries the big-int/string columns the emitter prints today.
-        self.assertEqual(parsed["markFootprint"]["refcountRemovedHeaders"], 100)
+        # TGC S1/S2: every gc.Header kind is tracer-owned, so the kinds row
+        # partitions the whole marked set and carries the big-int/string
+        # columns the emitter prints today.
         self.assertEqual(parsed["markFootprint"]["byKind"]["string"], 3)
         self.assertEqual(parsed["markFootprint"]["byKind"]["bigInt"], 1)
         self.assertEqual(parsed["markFootprint"]["markedPerMajorX1000"], 11111)
@@ -162,9 +162,9 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertTrue(parsed["cycles"]["envelope"]["passesPeakOverThreshold36Over35"])
 
     def test_marked_kind_export_covers_the_whole_marked_set(self) -> None:
-        # `big-int` was parsed and used to validate `refcountRemovedHeaders`
-        # but never exported, so `byKind` did not add up to the marked set and
-        # a screen could not see the only tracer-owned kind it was blind to.
+        # `big-int` was parsed but never exported, so `byKind` did not add up
+        # to the marked set and a screen could not see the only tracer-owned
+        # kind it was blind to.
         parsed = snapshot.parse_gc_stats(PANEL)
         by_kind = parsed["markFootprint"]["byKind"]
         self.assertEqual(
@@ -190,14 +190,68 @@ class GcStatsSnapshotTests(unittest.TestCase):
         # the current emitter actually produces; a typo would silently widen
         # the tolerance instead of naming a row.
         leaves = snapshot.numeric_leaves(snapshot.parse_gc_stats(PANEL))
+        # A leaf may be added by one version and retired by a later one; the
+        # addition entry stays, because a baseline frozen in between still
+        # carries the row.
+        retired = snapshot.candidate_retired_leaves(snapshot.SCHEMA_VERSION)
         for version, paths in snapshot.SCHEMA_ADDED_LEAVES.items():
             self.assertLessEqual(version, snapshot.SCHEMA_VERSION)
             for path in paths:
+                if path in retired:
+                    continue
                 self.assertIn(path, leaves, f"schema v{version} leaf {path}")
         self.assertIn(
-            "markFootprint.byKind.bigInt",
+            "blockHeap.bitmapReclaimedCells",
             snapshot.SCHEMA_ADDED_LEAVES[snapshot.SCHEMA_VERSION],
         )
+
+    def test_registered_schema_removals_name_leaves_the_emitter_dropped(self) -> None:
+        # The mirror contract: a path in the removal table must NOT be a path
+        # the current emitter produces, or the table would forgive a genuinely
+        # dropped row.
+        leaves = snapshot.numeric_leaves(snapshot.parse_gc_stats(PANEL))
+        for version, paths in snapshot.SCHEMA_REMOVED_LEAVES.items():
+            self.assertLessEqual(version, snapshot.SCHEMA_VERSION)
+            for path in paths:
+                self.assertNotIn(path, leaves, f"schema v{version} leaf {path}")
+        self.assertIn(
+            "collector.zeroRefDrains",
+            snapshot.SCHEMA_REMOVED_LEAVES[snapshot.SCHEMA_VERSION],
+        )
+
+    def test_a_retired_leaf_is_not_a_dropped_leaf(self) -> None:
+        def shape(version: int, stats: dict) -> dict:
+            return {
+                "schemaVersion": version,
+                "kind": "gc-heavy-six-fixed-work-structure",
+                "engine": {"configSignature": "same"},
+                "workload": {"sourceRevision": "same"},
+                "runs": [{
+                    "benchmark": "case",
+                    "fixedSourceSha256": "same",
+                    "stats": stats,
+                }],
+            }
+
+        baseline = shape(8, {"collector": {"objectsFreed": 10, "zeroRefDrains": 0}})
+        candidate = shape(9, {"collector": {"objectsFreed": 10}})
+        self.assertEqual(snapshot.compare_snapshots(baseline, candidate, 10.0, 0), [])
+
+        # A leaf that no removal entry accounts for is still a hard error.
+        broken = shape(9, {"collector": {}})
+        with self.assertRaisesRegex(
+            snapshot.SnapshotError, r"missing=\['collector.objectsFreed'\]"
+        ):
+            snapshot.compare_snapshots(baseline, broken, 10.0, 0)
+
+    def test_a_stale_atom_edge_fails_closed(self) -> None:
+        with self.assertRaisesRegex(snapshot.SnapshotError, "stale-edge"):
+            snapshot.parse_gc_stats(
+                PANEL.replace(
+                    "gc: atom audit stale-edge 0,",
+                    "gc: atom audit stale-edge 1,",
+                )
+            )
 
     def test_older_baseline_tolerates_only_registered_new_leaves(self) -> None:
         def shape(version: int, stats: dict) -> dict:

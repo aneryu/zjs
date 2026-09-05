@@ -1049,7 +1049,7 @@ pub const Registry = struct {
     /// way an unpublished `*Reserved` shape (on no GC list) ever gets freed.
     /// A shared shape is tracer-owned garbage-or-not: leave it to the sweep.
     /// Skips mirror the old release guards: during `gc.deinit` the teardown
-    /// pass owns every shape, and a condemned (cycle-visited) shape is freed
+    /// pass owns every shape, and a condemned shape is freed
     /// by the morgue's shape pass after all its objects.
     ///
     /// TGC S4-h: the condemnation test is the reserved mark epoch, which is

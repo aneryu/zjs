@@ -2624,18 +2624,16 @@ test "runtime Plugin deferred opaque wrapper finalizers keep traced payload root
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
     try std.testing.expect(state.slot.isObject());
     try std.testing.expect(rt.gc.containsHeader(child_header));
-    if (comptime core.gc.block_heap_enabled) {
-        // Contract with clustered doomed draining/hot-block publication: the
-        // payload child may share a block with dead neighbours, but its root
-        // must keep its own cell allocated and out of the doomed intervals
-        // that a publisher exposes for reuse.
-        const cell_addr = @intFromPtr(child_header) - core.gc.metadata_prefix_size;
-        const block = rt.gc.block_heap.blockOf(@ptrFromInt(cell_addr)) orelse unreachable;
-        const cell_index = block.cellIndex(cell_addr) orelse unreachable;
-        try std.testing.expect(block.cellAllocated(cell_index));
-        try std.testing.expect(!block.isDoomed(cell_index));
-        try rt.verifyDeferredClassPayloadRootLiveness();
-    }
+    // Contract with clustered doomed draining/hot-block publication: the
+    // payload child may share a block with dead neighbours, but its root
+    // must keep its own cell allocated and out of the doomed intervals
+    // that a publisher exposes for reuse.
+    const cell_addr = @intFromPtr(child_header) - core.gc.metadata_prefix_size;
+    const block = rt.gc.block_heap.blockOf(@ptrFromInt(cell_addr)) orelse unreachable;
+    const cell_index = block.cellIndex(cell_addr) orelse unreachable;
+    try std.testing.expect(block.cellAllocated(cell_index));
+    try std.testing.expect(!block.isDoomed(cell_index));
+    try rt.verifyDeferredClassPayloadRootLiveness();
 
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);

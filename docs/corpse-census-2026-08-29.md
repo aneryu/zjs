@@ -1,5 +1,11 @@
 # 尸体普查与 Pass-B 定价(2026-08-29)
 
+状态：**HISTORICAL（2026-09-06）— 定价对象已不存在。**
+本文普查与定价的 Pass-B / 停尸链 / 私有块 per-cell link 三件事，在 TGC S4-e 随两遍析构整体删除
+（普通对象死亡改为位图回收，只有 `doomed ∧ needs_finalizer` 的 cell 走 finalizer）。
+留作方法学与历史读数；现状见 [`tracing-gc-s4-spec.md`](tracing-gc-s4-spec.md) §7 与
+[`tracing-gc-completion-account.md`](tracing-gc-completion-account.md)。
+
 分支 `gc/opus-corpse-census`,基线 `4c621491`。**§1–§7 只做 census 与定价,不改任何生产机制。**
 §8 是快臂放宽的落地(stage-3 的分母),**§9 是 stage-3 本身的落地**——读 §5.3/§6 的形状描述前
 先读 §9.1,那里记了落地形状与草图的两处偏离和推翻的两条预测。

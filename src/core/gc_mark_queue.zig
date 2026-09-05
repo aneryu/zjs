@@ -66,7 +66,7 @@ pub const SegmentPool = struct {
     test_fail_backing_allocations: if (builtin.is_test) usize else void =
         if (builtin.is_test) 0 else {},
 
-    pub fn ensureBacking(self: *SegmentPool, allocator: std.mem.Allocator) void {
+    fn ensureBacking(self: *SegmentPool, allocator: std.mem.Allocator) void {
         if (self.backing == null) self.backing = allocator;
     }
 
@@ -135,7 +135,7 @@ pub const SegmentPool = struct {
     }
 
     pub fn failBackingAllocationsForTest(self: *SegmentPool, count: usize) void {
-        if (comptime !builtin.is_test) unreachable;
+        if (!builtin.is_test) @compileError("test-only helper");
         self.test_fail_backing_allocations = count;
     }
 
@@ -243,7 +243,7 @@ pub const MarkStack = struct {
 
     /// Adopt a segment taken from the queue as the hot end without copying
     /// entries.
-    pub fn adoptAsTop(self: *MarkStack, segment: *Segment) void {
+    fn adoptAsTop(self: *MarkStack, segment: *Segment) void {
         std.debug.assert(segment.older == null and segment.newer == null);
         std.debug.assert(segment.len != 0);
         segment.older = self.top;
@@ -276,7 +276,7 @@ pub const Queue = struct {
     }
 
     pub fn failBackingAllocationsForTest(self: *Queue, count: usize) void {
-        if (comptime !builtin.is_test) unreachable;
+        if (!builtin.is_test) @compileError("test-only helper");
         self.pool.failBackingAllocationsForTest(count);
     }
 

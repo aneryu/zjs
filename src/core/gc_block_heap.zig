@@ -131,11 +131,10 @@ pub const decommit_bytes: usize = blk: {
 /// a cleverly-chosen 32-bit terminator could not manage. The poison is
 /// chosen so a free cell read as a header is rejected by every path that
 /// matters: `block_size_idx` reads 0 (not a block cell), `heap_accounted`
-/// reads 0 (the iterators and `shade` refuse it). TGC S4-h retired the second
-/// guard's home -- the flags byte's bit 7, once `cycle_visited` -- but not the
-/// guard: the condemnation stamp now lives in the lifetime word, which the
-/// free path does not overwrite, so every cell that reached the free list
-/// through a collection still reads condemned. The kind nibble reads
+/// reads 0 (the iterators and `shade` refuse it). The flags byte's bit 7 is
+/// reserved and reads by nobody; the condemnation stamp lives in the lifetime
+/// word, which the free path does not overwrite, so every cell that reached
+/// the free list through a collection still reads condemned. The kind nibble reads
 /// `.string`; that is incidental, `heap_accounted` is what rejects the word.
 pub const free_nil: u32 = 0xFFFF;
 pub const free_link_mask: u32 = gc_representation.free_cell_link_mask;
@@ -237,10 +236,10 @@ pub const Stats = struct {
     /// parked entry, no header read (`Block.reclaimDoomedIntoBitmap`).
     ///
     /// TGC S4-e retired the Pass-A settlement this counter was born for
-    /// (`passa_settled_cells`), so the name now says what the number is. The
-    /// `--gc-stats` line text is unchanged on purpose: `gc_stats_snapshot.py`
-    /// compares leaf sets, and dropping a leaf invalidates every frozen
-    /// Stage-0 baseline.
+    /// (`passa_settled_cells`); TGC S5-a moved the `--gc-stats` line text and
+    /// the `blockHeap.bitmapReclaimedCells` JSON leaf onto the same name.
+    /// Frozen Stage-0 baselines still carry `passASettledCells`, which
+    /// `gc_stats_snapshot.SCHEMA_REMOVED_LEAVES[9]` accounts for.
     bitmap_reclaimed_cells: usize = 0,
     /// Wholly-empty medium superblocks whose mapping was returned to the
     /// backing allocator (TGC S2-f (2)). Deliberately NOT folded into
@@ -562,7 +561,7 @@ pub const Block = extern struct {
         setBitPlain(self.finalizerBits(), index);
     }
 
-    pub fn clearFinalizerBit(self: *Block, index: u32) void {
+    fn clearFinalizerBit(self: *Block, index: u32) void {
         clearBitPlain(self.finalizerBits(), index);
     }
 
@@ -678,7 +677,7 @@ pub const Block = extern struct {
         }
     }
 
-    pub inline fn isYoungListed(self: *const Block) bool {
+    inline fn isYoungListed(self: *const Block) bool {
         return (self.flags & flag_young) != 0;
     }
 
@@ -745,7 +744,7 @@ pub const Block = extern struct {
     /// (found by test262 FinalizationRegistry cases under `ZJS_GC_STRESS=1`).
     /// Only meaningful while the block is on the doomed list; outside that
     /// window `remember` holds remembered-set bits, which must stay.
-    pub fn forgetDoomedCell(self: *Block, index: u32) void {
+    fn forgetDoomedCell(self: *Block, index: u32) void {
         if (self.doomed_link == 0) return;
         const word_index = index / 64;
         const mask = @as(u64, 1) << @as(u6, @intCast(index % 64));
@@ -1227,7 +1226,7 @@ pub const Heap = struct {
         } else unreachable;
     }
 
-    pub fn extentNeedsFinalizer(self: *const Heap, base: usize) bool {
+    fn extentNeedsFinalizer(self: *const Heap, base: usize) bool {
         if (self.medium.getPtr(base)) |extent| return extent.needs_finalizer;
         if (self.large.getPtr(base)) |extent| return extent.needs_finalizer;
         unreachable;
@@ -1723,6 +1722,7 @@ pub const Heap = struct {
     }
 
     pub fn setReuseSequenceForTest(self: *Heap, cell: [*]u8, sequence: u32) void {
+        if (!builtin.is_test) @compileError("test-only helper");
         comptime std.debug.assert(block_generation_enabled);
         const block = Block.fromCellTrusted(@intFromPtr(cell));
         const index = block.cellIndex(@intFromPtr(cell)).?;
@@ -3307,7 +3307,7 @@ pub const Heap = struct {
         return true;
     }
 
-    pub fn releaseEmptyMediumSuperblocks(self: *Heap, now_ns: u64) usize {
+    fn releaseEmptyMediumSuperblocks(self: *Heap, now_ns: u64) usize {
         var released: usize = 0;
         var spared: usize = 0;
         var slot: u32 = 0;
@@ -3980,9 +3980,9 @@ fn popCell(block: *Block) ?u32 {
 
 fn pushCell(block: *Block, index: u32, cell: [*]u8) void {
     // Poison the whole word, not just the tail. Every free cell then reads
-    // as unaccounted, cycle-visited and untraced no matter where it sits in
-    // the chain, so the "free cell impersonates a live header" class of bug
-    // is closed for links as well as for the terminator.
+    // as unaccounted and untraced no matter where it sits in the chain, so the
+    // "free cell impersonates a live header" class of bug is closed for links
+    // as well as for the terminator.
     if (block.flags & Block.flag_interval_allocator != 0) {
         std.debug.assert(block.flags & Block.flag_hot_list == 0);
         const returned: u32 = @intCast(block.next_free);

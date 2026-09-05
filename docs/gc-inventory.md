@@ -1,7 +1,12 @@
 # GC inventory (Stage 0 remainder)
 
-Date: 2026-08-23
-Branch: `gc/tracing`
+Date: 2026-08-23. **Sections 1.1, 1.2, 3.7, 5, 6.1 and 7 rewritten 2026-09-06**
+for the completion-plan end state (S0-S4 + R3); everything else is the
+original Stage 0 census and still reads against the rc-era tree in places --
+where it does, the current facts are
+[`tracing-gc-completion-account.md`](tracing-gc-completion-account.md) and the
+per-stage records in `tracing-gc-s2/s3/s4-spec.md` §7.
+Branch: `gc/tracing` (census), `main` (rewrite).
 Source of truth: current tree, not this file. Re-run the method in each
 section if the named symbols have moved.
 
@@ -47,9 +52,11 @@ There are no hot copies any more: the rc-era `markOrdinaryObjectHot` /
 after the trial-deletion collector went and were deleted in TGC S0
 (2026-09-03). `object_gc.zig` now holds only death-side helpers.
 
-`JSValue.cycleMarkHeader` (`src/core/value.zig`) only returns a header for
-tags in `[Tag.module, Tag.object]`. Strings, ropes, and BigInts are never
-trial-deletion children even when a payload holds them.
+`JSValue.cycleMarkHeader` (`src/core/value.zig`) returns a header for every
+tracer-owned tag. It was widened to BigInt in S1 and to the string family in
+S2, so strings, ropes and BigInts are ordinary traced children now; the
+rc-era statement that they are never children is void
+(`tracing-gc-completion-account.md` §1).
 
 ### 1.0 Two entries corrected by measurement
 
@@ -77,28 +84,51 @@ and that request edges therefore neither retain nor trace — explicitly matchin
 QuickJS `JSReqModuleEntry.module`. The migration constraint to carry forward is
 that this stays correct only while the registry keeps owning those records.
 
-### 1.1 `gc.RefKind` (8)
+### 1.1 `gc.RefKind` (13, rewritten 2026-09-06)
 
-Defined in `src/core/gc.zig` `RefKind`. Cycle-candidate range is
-`object..shape`; `string` / `big_int` sit above it and are RC leaves.
+Defined in `src/core/gc.zig` `RefKind`, a `u4` since S4-a: 0 `object`,
+1 `function_bytecode`, 2 `var_ref`, 3 `realm_context`, 4 `module`, 5 `shape`,
+6 `string`, 7 `big_int`, 8 `property_storage`, 9 `array_storage`,
+10 `payload`, 11 `rope`, 12 `string_buffer`. **Every one of them is
+tracer-owned**; there is no RC leaf and no cycle-candidate sub-range any
+more. Kinds 8/9/10/12 are owned storage cells: leaves, no destructor, kept
+alive only by their owner's `storageCell(...)` edge, and excluded from
+`young_trigger_count` (`kindIsOwnedStorageCell`).
 
 | Kind | Authority | Strong child edges | Weak / external | Risk |
 |---|---|---|---|---|
 | `object` | `Object.traceChildEdgesFallible` | shape, properties, payload family, dense elements, class-payload mark | weak identities, view lists, holder links — see 1.2 | MED (dynamic layout + class mark) |
-| `function_bytecode` | `traceHeaderEdges` `.function_bytecode` — **no** `traceChildEdges` on the type | `FunctionBytecode.realm` (`RealmRef`); `cpoolSlice()` (`JSValue` FAM) | atoms (`func_name`, vardefs, closure names) are atom-table RC, not GC edges; `byte_code` / debug FAM are non-GC | MED: authority is collector-local, unlike Object/Shape/Module |
+| `function_bytecode` | `traceHeaderEdges` `.function_bytecode` — **no** `traceChildEdges` on the type | `FunctionBytecode.realm` (`RealmRef`); `cpoolSlice()` (`JSValue` FAM) | atoms (`func_name`, vardefs, closure names) are reported through `visitAtom` since S3, not counted; `byte_code` / debug FAM are non-GC | MED: authority is collector-local, unlike Object/Shape/Module |
 | `var_ref` | `traceHeaderEdges` `.var_ref` — **no** `traceChildEdges` on the type | `VarRef.value` only | `pvalue` is a borrowed frame alias when `is_open`; tracing it would double-count the frame slot (comment in `traceHeaderEdges`) | HIGH for Slot rewrite: `pvalue` is not a heap Slot |
 | `realm_context` | `JSContext.traceChildEdgesNoFail` | module registry, unhandled rejections, eval function, OOM error, class/native-error prototypes, cached function/promise protos, five initial shapes, `cached_values`, regexp legacy statics, `global`, `lexicals` | `host_event_loop` is **not** a child edge (it is a root; §3); runtime/construction list links are membership | MED: `traceRoots` and `traceChildEdges` are not the same set |
-| `module` | `ModuleRecord.traceChildEdgesFallible` | retained export cells, `func_obj`, `module_ns`, `import_meta`, `eval_exception` | `RequestEntry.module` is a borrowed registry pointer, **not** traced; atoms are atom RC | HIGH: borrowed request graph is invisible to both cycle mark and `traceRoots` |
-| `shape` | `Shape.traceChildEdgesFallible` | `proto: ?*Object` | `registry_hash_next` is hashed-shape membership, not a GC edge; property atoms are atom RC; FAM props/buckets are non-GC | LOW after publish (hashed shapes are immutable) |
-| `string` | `traceHeaderEdges` `.string` is empty | flat `String`: none. `StringRope.left` / `.right` (`src/core/string.zig`) are owned `JSValue` children **not walked by the cycle collector** (`JS_MarkValue` drops strings) | 4-byte `StringHeader` prefix; not on `gc_obj_list` | HIGH for tracing: ropes must gain an explicit child descriptor; they are not in the current registry census |
-| `big_int` | `traceHeaderEdges` `.big_int` is empty | none (limbs are non-GC) | `BigInt.create*` never calls `addInitialized*`; RC-only, off the cycle list | LOW for edges; MED for `HeapCensus` (kind exists, objects are not in the intrusive registry) |
+| `module` | `ModuleRecord.traceChildEdgesFallible` | retained export cells, `func_obj`, `module_ns`, `import_meta`, `eval_exception` | `RequestEntry.module` is a borrowed registry pointer, **not** traced; atoms go through `visitAtom` (S3) | HIGH: borrowed request graph is invisible to both cycle mark and `traceRoots` |
+| `shape` | `Shape.traceChildEdgesFallible` | `proto: ?*Object` | `registry_hash_next` is hashed-shape membership, not a GC edge; property atoms are reported through `visitAtom` (S3); FAM props/buckets are non-GC | LOW after publish (hashed shapes are immutable) |
+| `string` | `traceHeaderEdges` `.string` (flat body) | none; a flat body is a leaf | block cell or registered extent; the rc prefix is gone (S2) | LOW |
+| `rope` (11) | `traceHeaderEdges` `.rope` | `StringRope.left` / `.right` as traced children, plus `storageCell` to the tail buffer when one exists | own kind since S4-a (it used to be discriminated by borrowing the prefix `mark` bit) | LOW |
+| `string_buffer` (12) | none (leaf) | none | the extensible tail buffer behind a rope's dependent views (S2-i); named by no `JSValue`, so deliberately outside `isStringFamily` | LOW |
+| `big_int` | `traceHeaderEdges` `.big_int` (leaf) | none (limbs are non-GC) | published through `addInitializedWithSizeNoFail` (`BigInt.register`); parser constant-pool literals are allocated **reserved** and registered with their FunctionBytecode | LOW |
+| `property_storage` (8) | none (leaf) | none | minted by `Object.createPropertyStorageCell` via `Registry.createStorageCellPublished`; owner edge `storageCell(prop_values)` at the top of `tracePropertyEdgesFallible` | MED: mint and install must be adjacent |
+| `array_storage` (9) | none (leaf) | none | `createArrayStorageCell/Slice`; also mapped-arguments var-ref slices. Exception: `initRegExpMatchArrayDenseElementsFromValue` keeps a native scratch buffer | MED: same adjacency rule |
+| `payload` (10) | none (leaf) | none | a-class class payloads and four dependent slices (promise reactions, bound args, disposable resources, arguments var_refs); owner edge `storageCell(payload)` before the payload switch, `storageCell(aux)` on the bytecode arm | MED |
 
 ### 1.2 Object payload families
 
 `class.PayloadKind` (`src/core/class.zig`) has 21 tags. `none` is the
-no-payload / dense-array / inline-union case. Every allocating family has
-`destroy` + `traceChildEdges` beside each other except native
-`FunctionPayload`, which exposes `traceNativeRealm` instead.
+no-payload / dense-array / inline-union case.
+
+**Rewritten 2026-09-06 (S4-c/S4-d).** The families split in two. The *a
+class* -- ordinary, arguments, object_data, bound_function, proxy, var_ref,
+promise, disposable_stack, global, regexp, plus `FunctionRarePayload` and
+`BytecodeFunctionAux` -- are `.payload` GC cells (kind 10), leaves with **no
+destructor**: their eleven `destroy*Payload` arms and `destroyArrayElements`
+were deleted, and their dependent slices are `.payload` cells too. The *b/c
+class* -- buffer, typed_array, collection, iterator, weak_ref,
+finalization_registry, std_file, generator, native `function`, dynamic and
+host/plugin payloads -- keep `allocRuntime` backing, keep their `destroy`,
+and set `needs_finalizer` at construction. Every family still has
+`traceChildEdges` beside its data, except native `FunctionPayload`, which
+exposes `traceNativeRealm`. The tables below list edges, not lifetimes;
+"freed in `destroy`" in any row means the b/c class only.
 
 Object-level edges traced **before** the payload switch
 (`Object.traceChildEdgesFallible`):
@@ -124,11 +154,11 @@ Per-payload (`traceChildEdges` unless noted):
 | PayloadKind / type | Strong | Weak / external | Not an edge | Risk |
 |---|---|---|---|---|
 | `ordinary` `OrdinaryPayload` | 14 optional `JSValue`s (callsite, promise reaction/capability/combinator, error stack) | — | flags | LOW |
-| `iterator` `IteratorPayload` | 8 optional `JSValue`s | `collection_cursor_held` pins Map/Set entry array by count, not by pointer | `atom_keys` atom RC | MED (cursor is a live-count, not a Slot) |
-| `collection` `CollectionPayload` | `entries[].key/value` | `weak_entries[]`: `visitWeakCollectionEntry` is a **no-op** in `MarkVisitor`; keys are weak identities; values are RC-owned and freed in `destroy` / weak sweep | `bucket_heads`, `live_cursors` | MED for tracing (see note below); **not** a current leak |
+| `iterator` `IteratorPayload` | 8 optional `JSValue`s | `collection_cursor_held` pins Map/Set entry array by count, not by pointer | `atom_keys` go through `visitAtom` (S3) | MED (cursor is a live-count, not a Slot) |
+| `collection` `CollectionPayload` | `entries[].key/value` | `weak_entries[]`: `visitWeakCollectionEntry` is a **no-op** in `MarkVisitor`; keys are weak identities; values are traced strongly from `entries[]` and cleared by `processWeak` at major finish | `bucket_heads`, `live_cursors` | MED for tracing (see note below); **not** a current leak |
 | `buffer` `BufferPayload` | none | `first_view` / view list are weak reverse links | `bytes`, `shared_store` (atomic external RC), `external_memory` | MED: `SharedBufferStore` is process-allocator + `ExternalMemoryToken`, not a GC node |
 | `typed_array` `TypedArrayPayload` | `buffer: ?JSValue` | `backing_payload`, `buffer_prev/next` weak view links | `data: ?[*]u8` cached host pointer | MED: `data` is not a GC edge; detach protocol must stay |
-| `regexp` `RegExpPayload` | none for cycle GC | — | `source` / `compiled_bytecode` `?*String` (string leaves) | MED for tracing: those strings must be traced even though `cycleMarkHeader` drops them |
+| `regexp` `RegExpPayload` | `source` / `compiled_bytecode` `?*String` are traced children since S2 | — | flags | LOW (an a-class `.payload` cell; no destructor) |
 | `bound_function` `BoundFunctionPayload` | `target`, `this_value`, `args[]` | — | — | LOW |
 | `proxy` `ProxyPayload` | `target`, `handler` | — | — | LOW |
 | `arguments` `ArgumentsPayload` | `var_refs[]` as `JSValue` | — | — | LOW |
@@ -429,39 +459,26 @@ Event-loop roots: `src/runtime/event_loop.zig` `EventLoop.traceRoots` →
 timers / rw / signal handlers, reached through `JSContext.host_event_loop`
 inside the context provider.
 
-### 3.7 Part B: `pollGC` roots chain is a shell
+### 3.7 `pollGC` roots chain (rewritten 2026-09-06)
 
-This is the Stage 1 "costs no design work, only a consumer" item
-(design §2.2 gap 3). The chain:
+The rc-era text here described a shell: `pollGC` discarded `roots`,
+`destroyRuntimeCyclesWithValueRoots` discarded them again, and there was no
+mark-from-roots phase for a `ValueRootFrame` to feed. All three premises are
+void. The tracer marks from roots, `runObjectCycleRemoval` is the single
+production entry into a major, and a `ValueRootFrame` keeps its contents
+alive on its own -- there is no refcount underneath it to do the work.
 
-| Frame | What it does with `roots` |
-|---|---|
-| `JSRuntime.pollGC` (`runtime.zig`) | `_ = roots;` then `tryRunObjectCycleRemovalWithValueRoots(null)` |
-| `tryRunObjectCycleRemovalWithValueRoots` | forwards `roots` to `Object.destroyRuntimeCyclesWithValueRoots` |
-| `destroyRuntimeCyclesWithValueRoots` (`object_gc.zig`) | `_ = roots;` then `gcRemoveWeakObjects` + three-phase trial deletion over the **heap list only** |
+What survives from that section is the production shape, not the defect:
+**only container/window value-root frames are linked in production**
+(`value_root_link_containers_only`); scalar `rootValues`/`rootObjects` are
+compiled out, and the conservative native stack/register scan is the net for
+every Zig local holding a heap reference across an allocation. Flipping that
+flag is the tail of lane R1 and is gated on the residue analysis in
+`tracing-gc-completion-account.md` §6 item 6, not on this census.
 
-There is no mark-from-roots phase in the current collector. Trial deletion
-starts from every cycle-candidate header and walks `traceChildEdges*`. A
-`ValueRootFrame` cannot keep an object alive unless that object's RC is
-already > 0, which is the RC-owned stack `JSValue`, not the frame.
-
-Existing tests (`src/tests/core.zig` "GC keeps rooted unique symbol atoms",
-"GC keeps rooted function bytecode symbol constants") pass `ValueRootFrame`s
-into `runObjectCycleRemovalWithValueRoots` and stay green because the
-`JSValue` they point at still holds a refcount. They do not prove the
-collector reads the frame.
-
-Wiring `pollGC` to pass `roots` into `tryRunObjectCycleRemovalWithValueRoots`
-would only move the discard one frame down. Building a fake consumer that
-increments trial RC from a frame would be a second collector, not "a
-consumer". **Stopped here. No pollGC code change in this tranche.**
-
-A red test of the form "object held only by ValueRootFrame survives pollGC"
-cannot be true in production (`value_root_frames_enabled` is false) and
-cannot be true of the current algorithm even in tests without adding a
-root-shading phase the RC collector does not have.
-
----
+Two real defects found in this area during S4/R1 and fixed with regression
+tests: the regexp match array's native fill had no root, and a
+publishing-shape root frame was deactivated before its window closed.
 
 ## 4. Native boundaries
 
@@ -514,10 +531,11 @@ These must stay no-JS. Not tracing roots.
 ## 5. Allocation sites
 
 Publication primitive: `gc.Registry.addInitializedWithSizeNoFail` /
-`addInitializedShape` / `JSRuntime.registerObjectWithBytes`.
+`addInitializedShape` / `JSRuntime.registerObjectWithBytes`, and for owned
+storage cells `Registry.createStorageCellPublished`.
 `allocated = 1` in today's terms is `heap_accounted` plus intrusive-list
-membership. `collectBeforeObjectAllocation` is the scheduling seam
-(design §4.4).
+membership (block cells carry the fact in the block bitmaps instead).
+`collectBeforeObjectAllocation` is the scheduling seam (design §4.4).
 
 ### 5.1 Funnel per `RefKind`
 
@@ -530,8 +548,9 @@ membership. `collectBeforeObjectAllocation` is the scheduling seam
 | `realm_context` | `JSContext.createWithPublication` → `initConstructing` (`addInitializedWithSize`) then optional `finishConstruction` / `publishLive` (RootProvider + live list) | Two-phase: GC-registered while `publication_state == .constructing`; `traceChildEdgesNoFail` / `traceRoots` no-op until `.live` | MED: constructing realms are in the cycle list but absent from live root traversal |
 | `module` | `module.Registry.prepareFreshTarget`: `memory.create` + `replaceDefinitionNoFail` + `addInitializedWithSizeNoFail` + `link` | Prepared, no-fail after the single alloc | LOW |
 | `function_bytecode` | compiler commit (`src/bytecode.zig` around `publishExecutionFlags` + `addInitializedWithSizeNoFail`); tests: `createFixture` + `publishFixtureNoFail`; `src/exec/small_inline.zig` one no-fail publish | **Prepared / sealed publication**: unpublished shell owns FAM; commit transfers atoms/cpool then publishes. Destroy unpublished via `destroyUnpublishedFixture` | MED: post-publish cpool writes must stay named |
-| `string` / rope | `String.createAscii` / `createUtf8` / `createUtf16*` / `createLatin1*` / `createRope*` / `createSlice` / … (`src/core/string.zig`). **Not** `addInitialized*` | RC prefix only; never on `gc_obj_list` | HIGH for HeapCensus / conservative lookup |
-| `big_int` | `BigInt.create` / `createFromOwned` / `createInlineUninitialized` / `createMulInline`. **Not** `addInitialized*` | RC header; off the cycle list | HIGH for HeapCensus |
+| `string` / `rope` / `string_buffer` | `String.createAscii` / `createUtf8` / `createUtf16*` / `createLatin1*` / `createRope*` / `createSlice` / … (`src/core/string.zig`) | Block cell or registered extent since S2; no rc prefix; the extensible tail buffer (kind 12) is minted with the rope that reads it | LOW for HeapCensus / conservative lookup |
+| `big_int` | `BigInt.create` / `createFromOwned` / `createInlineUninitialized` / `createMulInline`, published by `BigInt.register` (`addInitializedWithSizeNoFail`) | Prepared; parser constant-pool literals are `createFromOwnedReserved` (on no list, neither marked nor swept) until their FunctionBytecode publishes them; a builder that dies first calls `destroyIfReservedValue` | MED (the reserved window) |
+| `property_storage` / `array_storage` / `payload` / `string_buffer` | `Registry.createStorageCellPublished` (single funnel) behind `Object.createPropertyStorageCell` / `createArrayStorageCell` / `mintPayloadCell` / `createPayloadSliceCell` | **Rooted by adjacency**: mint immediately before install, both `requestGCForAllocation` calls hoisted ahead of the first mint, growth leaves the old cell to the sweep, bulk writes call `rememberOwnerForBulkWrite` | HIGH if minting and installing drift apart |
 
 Object `create*` wrappers (closed list from `src/core/object.zig`):
 `create`, `createFinalizationRegistry`, `createWithOwnPropertyCapacity`,
@@ -543,43 +562,55 @@ Object `create*` wrappers (closed list from `src/core/object.zig`):
 `createArray`, `createArrayWithOwnPropertyCapacity`. All except
 `createGeneratorShell` publish before return.
 
-### 5.2 Classification against §4.6
+### 5.2 Classification against §4.6 (rewritten 2026-09-06)
 
-Almost every current constructor is "prepared" in the RC sense: fallible
-backing is allocated first, the cell is initialized to a fully interpretable
-layout, then the registry link is taken. Nested JS objects created *during*
-construction are kept alive by RC on locals / `ValueRootFrame` (erased in
-production), not by a construction root handle.
+Almost every constructor is still "prepared": fallible backing first, the
+cell initialised to a fully interpretable layout, then the registry link.
+What has changed is what keeps the half-built graph alive. There is no
+refcount on locals any more, so the three items this section listed as
+missing are now the load-bearing mechanisms:
 
-What tracing will need that does not exist yet:
-
-- a `NoSafepointScope` around the init+publish window;
-- black-allocation / initial-edge shading;
-- for generator shells (and any future unpublished type), an explicit
-  construction root once RC no longer keeps detached `JSValue` edges alive.
+- publication traces the initial edges (`markPublishedYoungClassified`) and
+  black allocation covers what is minted during marking; an *unpublished*
+  owner (`alloc_info.heap_accounted == false`) must never be remembered or
+  queued;
+- generator shells and other unpublished types have an explicit construction
+  root, and `seedRoots`'s construction-root arm retires the traced young
+  header (S4-i) rather than leaving a claim unpaid;
+- owned storage cells are rooted by **adjacency** rather than by a handle,
+  which is why the mint/install rule in §5.1 is a correctness rule.
 
 Hot common types (`createPlainObject`, `createArrayFromInitialShape`,
 `createShape`, `VarRef.createClosed`, module `prepareFreshTarget`, FB sealed
-publish) can stay prepared. Do not force them onto rooted construction.
+publish) stay prepared. Do not force them onto rooted construction.
 
 ---
 
 ## 6. Finalizable types
 
-### 6.1 Engine object destroy (Pass A resource strip)
+### 6.1 Engine object destroy (rewritten 2026-09-06)
 
-Every payload `destroy` in §1.2 runs from `destroyDetachedClassPayload` /
-object teardown. Cycle collection: Pass A strips, Pass B frees husks
-(`object_gc.zig`). `hasPendingDeferredClassPayloadFinalizers` makes Pass B wait
-when a plugin `.js` wrapper transfers its payload into the production deferred
-queue.
+There is no Pass A / Pass B any more. S4-e deleted both passes together with
+husks and `DeferredFreeStack`; the sweep is one pass over
+`doomed & needs_finalizer` (`Block.takeDoomedFinalizerCell`), and everything
+else -- ordinary objects, all owned storage cells, the whole string family,
+BigInt -- is reclaimed by the block bitmaps with block-level accounting and
+runs no destructor at all (deletion probe: 0 plain-object destructor calls
+over 5.49M reclaims, `tracing-gc-s4-spec.md` §7, S4-d/S4-e).
 
-This is ordinary ownership release, not host finalization. Listed so a
-tracer's sweep records match destroy:
+What still has an engine-side `destroy`, i.e. the population a tracer's sweep
+records must match:
 
-payloads in §1.2, plus `FunctionBytecode` / `VarRef` / `Shape` /
-`ModuleRecord` / `JSContext` `destroyFromHeader`, plus string/rope/BigInt RC
-zero paths.
+- the b/c payload families of §1.2 (buffer, typed_array, collection,
+  iterator, weak_ref, finalization_registry, std_file, generator, native
+  `function`, dynamic and host/plugin payloads), reached through
+  `destroyFromHeaderSlow`'s payload switch, which is gated by
+  `payloadKindNeedsFinalizer` -- the same classification that sets the bit at
+  construction;
+- the non-block kinds `FunctionBytecode` / `VarRef` / `Shape` /
+  `ModuleRecord` / `JSContext` `destroyFromHeader`;
+- any object handed a weak identity, which keeps `needs_finalizer` so the id
+  is returned inside the same destruction that frees the struct (§6.4).
 
 ### 6.2 Host / plugin finalizers
 
@@ -611,11 +642,17 @@ finalizers; semantics already match the target.
 
 ### 6.4 Weak-dead callbacks
 
-`WeakPersistentCallback` during `gcRemoveWeakObjects` (§4). This is
-finalization-shaped host code running **inside** the collector's only
-fallible phase. Tracing must not call it from mark/sweep; it belongs on the
-owner thread after the heap is consistent, same as deferred payload
-finalizers.
+`WeakPersistentCallback` during weak processing (§4). This is
+finalization-shaped host code running inside the collector; it must not be
+called from mark, and it belongs on the owner thread after the heap is
+consistent, same as deferred payload finalizers.
+
+Weak liveness itself is decided by mark bits at major finish. There is no
+husk: `liveObjectFromWeakIdentity` resolving an id **is** the liveness test,
+so the id is handed back inside the same destruction that frees the struct,
+and an object with a weak identity keeps `needs_finalizer` for exactly that
+reason (`runtime.zig` `registerWeakObjectIdentity`, `tracing-gc-s4-spec.md`
+§7, S4-e).
 
 ### 6.5 External memory
 
@@ -624,7 +661,7 @@ finalizers.
 | `gc.ExternalMemoryToken` on `BufferPayload` / `SharedBufferStore` | runtime via `reportExternalAlloc` | yes |
 | inline buffer bytes | `reportExternalFreeUntracked` on destroy | yes |
 | plugin DSO / class-generation pins | `InstalledPlugin` pin counts | not heap bytes |
-| `NativePin` | extra RC + pin flag | not external bytes |
+| `NativePin` | `pin_entries` ledger (the authority; the header bit retired with `is_pinned` in S4-e) | not external bytes |
 
 A small JS heap cannot silently hide tracked native storage here:
 `JSRuntime.reportExternalAlloc` records a token, adds weighted allocation debt,
@@ -638,23 +675,30 @@ after a completed major. Ordinary ArrayBuffer backing also overlaps
 
 ## 7. Closed facts this census depends on
 
-1. Eight `gc.RefKind`s, 21 `class.PayloadKind`s, 8 `Job.Payload` tags.
+1. **Thirteen** `gc.RefKind`s (was eight; 8/9/10/11/12 added by S4-a..S4-c
+   and S2-i), 21 `class.PayloadKind`s, 8 `Job.Payload` tags.
 2. One `RootProvider` production registrant: `JSContext`.
-3. `value_root_frames_enabled = builtin.is_test or gc.shadow_tracer_enabled`.
-4. `traceActiveRoots` passes `active_value_roots` and the exec Adapter when
-   `value_root_frames_enabled`; default `rc` still calls `traceRoots(null, visitor)`.
-4b. Conservative native roots are shadow-only (`gc_conservative.zig`).
-    Generator/async is not a fiber scan. Shadow CLI `--gc-shadow-check`
-    (gated out of default `rc`) prints the report after eval/jobs/quiesce
-    and exits non-zero when `unexplained != 0`. Shadow `run-test262
-    --gc-shadow-check` censuses each executed test in-process and exits
-    non-zero if any test has `unexplained != 0`.
-5. `pollGC` and `destroyRuntimeCyclesWithValueRoots` both `_ = roots;` —
-   empty shell, not wired in this tranche.
+3. Value-root frames are linked in production for containers/windows only
+   (`value_root_link_containers_only`); scalar `rootValues`/`rootObjects`
+   are compiled out. The shadow build and `-Dzjs_gc=shadow` no longer exist
+   (the selector accepts `trace_stw` only).
+4. `traceActiveRoots` passes `active_value_roots` and the exec Adapter; the
+   tracer is the only collector, so there is no `rc` default arm to fall
+   back to.
+4b. Conservative native roots are **production** (`gc_conservative.zig`), not
+    shadow-only: they are the net for every Zig local holding a heap
+    reference across an allocation, and narrowing them is a correctness
+    change until lane R1 lands. `-Dzjs_gc_roots_diag` is the precise-root
+    diagnosis build. Generator/async is still not a fiber scan. The
+    `--gc-shadow-check` CLI and its test262 census are gone with the shadow
+    build.
+5. `pollGC` marks from roots like any other entry; the rc-era
+   `_ = roots;` shell described in §3.7 is void.
 6. Plugin tracer symbol that blocks reclaiming tracing:
    `opaquePayloadMark` (`src/runtime/plugin.zig`), installed as
-   `payload_mark` on opaque host classes. Measured 2026-08-23 under
-   `-Dzjs_gc=shadow`:
+   `payload_mark` on opaque host classes. Measured 2026-08-23 under the
+   then-current `-Dzjs_gc=shadow` build (that selector value no longer
+   exists; the classification stands, the reproduction command does not):
    - DSO `zjs-runtime-plugin-fixture` has no tracer (`opaquePayloadMark`
      returns at `tracer orelse return`); allocated=251 unexplained=0.
      Classification: edge-free payload.
@@ -673,32 +717,25 @@ after a completed major. Ordinary ArrayBuffer backing also overlaps
 6c. `Atomics.waitAsync` Adapter (2026-08-23): hanging waiter (no notify)
     after dropping the JS result object has the waiter Promise in the
     exact-reachable set (`gc_shadow.isExactReachable`). Not conservative-only.
-7. Strings/ropes/BigInts stay off `gc_obj_list` by representation, not by
-    accident. **Not folded into the unexplained census this round.**
-    - String: 4-byte `StringHeader` RC prefix at `payload-4` (qjs `__js_rc`).
-      An intrusive list would widen that prefix and break JSValue decoding.
-      A production side table on every string alloc is a hot-path identity
-      risk. Shadow-only pointer ledgers without extending `visitValue` and
-      conservative `AddressLookup` would dump live stack strings into
-      `unexplained` and break the Stage 1 re-zero gate.
-    - BigInt: already has unused `BlockHeader` prev/next, but
-      `cycleMarkHeader` ignores `Tag.big_int`, so linking it onto a census
-      list has the same unexplained problem until visitValue+lookup grow.
-    - Stage 2 write-audit alternative: StringRope `left`/`right` are JSValue
-      fields and take `HeapValueSlot` when that payload migrates; BigInt is a
-      leaf with no child slots. Complete live-string inventory waits for
-      Stage 4's allocation ledger + string-tag tracing, not a representation
-      change now.
+7. **Void since S1/S2.** This item recorded why strings, ropes and BigInts
+   stayed off `gc_obj_list` (the 4-byte rc prefix, the `cycleMarkHeader`
+   gap, the conservative-lookup cost). All three obstacles were removed:
+   BigInt publishes through `BigInt.register` (S1-c), the string family
+   lives in block cells or registered extents with no prefix rc and its own
+   kinds 6/11/12 (S2, S4-a, S2-i), and both are resolvable by the
+   conservative path. Nothing is off the tracer by representation any more.
 8. `createGeneratorShell` is the unpublished-construction prototype.
 
-Stage 4 observation (2026-08-24): `gc_space.zig` classifies published
-compatibility-heap sizes with a measured small-class table (16–128 linear;
+Stage 4 observation (2026-08-24, corrected 2026-09-06): `gc_space.zig`
+classifies published sizes with a measured small-class table (16-128 linear;
 max small class 128 from a 99% histogram p50=64/p95=96/p99=128, not 4 KiB).
-`gc_sweep_model.zig` records logical 64 KiB window states and the four
-§8.7 quantities. `gc_block_heap.zig` is the 2 MiB superblock / 64 KiB
-block allocator, STW-only. Strings/ropes register intervals in
-`gc_address_registry` without widening the 4-byte RC prefix. Default
-`rc` keeps the existing allocator and does not import the block heap.
+`gc_sweep_model.zig` was deleted in the 2026-09-03 ablation (batch 3b) --
+it drove an empty window map in production. `gc_block_heap.zig` is the 2 MiB
+superblock / 64 KiB block allocator and is the production heap, not an
+experiment: it carries four per-block bitmaps (alloc / mark / doomed /
+`finalizerBits`) and publishes hot blocks back at minor end (S4-f). Strings
+and ropes register extent intervals in `gc_address_registry`; there is no rc
+prefix to widen, and there is no `rc` default to keep the old allocator.
 
 When a later stage adds a Slot type or a root, update the corresponding
 section in the same change.

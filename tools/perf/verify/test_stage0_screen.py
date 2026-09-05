@@ -30,8 +30,9 @@ def stats(
     minor: int = 20,
     stw: int = 1000,
     committed: int = 4096,
-    settled: int = 30,
+    reclaimed: int = 30,
     diagnostic: int = 7,
+    reclaimed_leaf: str = "bitmapReclaimedCells",
 ) -> dict:
     return {
         "blockHeap": {
@@ -39,7 +40,7 @@ def stats(
             "reopened": reopened,
             "deferredBlockRuns": deferred,
             "committed": committed,
-            "passASettledCells": settled,
+            reclaimed_leaf: reclaimed,
         },
         "cycles": {"majorCompleted": major, "minor": minor},
         "pauseNs": {"minor": {"total": stw}},
@@ -66,7 +67,7 @@ class Stage0ScreenTests(unittest.TestCase):
         classes = {path: classification for path, _, classification in stage0.METRICS}
         self.assertEqual(classes["cycles.minor"], "deterministic")
         self.assertEqual(classes["pauseNs.minor.total"], "phase-sensitive")
-        self.assertEqual(classes["blockHeap.passASettledCells"], "deterministic")
+        self.assertEqual(classes["blockHeap.bitmapReclaimedCells"], "deterministic")
         self.assertEqual(classes["blockHeap.deferredBlockRuns"], "deterministic")
         self.assertEqual(classes["cycles.majorCompleted"], "phase-sensitive")
         self.assertEqual(classes["blockHeap.hotReusePublished"], "phase-sensitive")
@@ -111,6 +112,27 @@ class Stage0ScreenTests(unittest.TestCase):
             stage0.compare_stats(snapshot(forked, version=7), snapshot(stats()), ("splay",))
         with self.assertRaisesRegex(stage0.Stage0Error, "precedes the frozen baseline"):
             stage0.compare_stats(snapshot(stats()), snapshot(stats(), version=7), ("splay",))
+
+    def test_a_renamed_contract_metric_still_reads_out_of_a_frozen_baseline(self) -> None:
+        # `blockHeap.passASettledCells` became `blockHeap.bitmapReclaimedCells`
+        # in TGC S5-a. The frozen baseline can never be re-emitted, so the
+        # deterministic +-10% line has to follow the rename rather than either
+        # aborting the screen or silently scoring the metric against 0.
+        old = snapshot(stats(reclaimed=30, reclaimed_leaf="passASettledCells"), version=8)
+        new = snapshot(stats(reclaimed=31))
+        summary, other = stage0.compare_stats(old, new, ("splay",))
+        row = summary["splay"]["metrics"]["bitmap reclaimed cells"]
+        self.assertEqual(row["baseline"], 30)
+        self.assertEqual(row["candidate"], 31)
+        self.assertFalse(row["crossed"])
+        self.assertFalse(summary["splay"]["deterministicDrift"])
+        # The retired leaf is not reported as a dropped one, and it is not
+        # replayed into the appendix either.
+        self.assertEqual([r["metric"] for r in other], [])
+
+        crossed = snapshot(stats(reclaimed=60))
+        summary, _ = stage0.compare_stats(old, crossed, ("splay",))
+        self.assertTrue(summary["splay"]["deterministicDrift"])
 
     def test_zero_baseline_is_stable_only_when_candidate_is_also_zero(self) -> None:
         self.assertFalse(stage0.drift_row("x", "m", 0, 0)["crossed"])

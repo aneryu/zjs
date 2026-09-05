@@ -1,5 +1,10 @@
 # Tracing GC: pause-first execution plan
 
+**Status: HISTORICAL / COMPLETED (marked 2026-09-06). The pause-first plan is closed;
+its readings and its Phase-3 remainder were overtaken by the completion plan (S0-S4).
+Current pause baseline: `docs/pause-baseline-2026-08-29.md`; current collector facts:
+`docs/tracing-gc-completion-account.md`. Original status line follows.**
+
 **Status (2026-08-26, updated 2026-09-03): Phases 0-2 and Phase 3's first tranche (sliced
 destruction, §4b) executed, landed on `gc/tracing` and merged to `main` on 2026-08-29; every outcome,
 including the two missed lines, is recorded in its section. Standing against

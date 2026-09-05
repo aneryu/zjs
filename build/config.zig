@@ -110,11 +110,6 @@ pub const EngineOptionInputs = struct {
     force_gc: bool,
     ownership_audit: bool,
     dossier_layout_pad: usize,
-    /// Resolved collector implementation. `trace_stw` is the only value the
-    /// public selector accepts since the rc and shadow collectors were removed
-    /// (2026-08-29); the field stays a string so the configuration signature
-    /// and the build options keep their shape.
-    zjs_gc: []const u8,
     /// R3 roots diagnosis build. Default false; diag artifacts only.
     gc_roots_diag: bool,
 
@@ -134,7 +129,6 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(usize, "zjs_dossier_layout_pad", in.dossier_layout_pad);
-    options.addOption([]const u8, "zjs_gc", in.zjs_gc);
     options.addOption(bool, "zjs_gc_roots_diag", in.gc_roots_diag);
     return options;
 }

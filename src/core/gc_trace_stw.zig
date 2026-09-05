@@ -147,7 +147,7 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
 /// that did not survive (see its "doomed cache" arm) -- that is the part the
 /// destroy handshake used to do before the mutator could look.
 fn sweepAtomTable(rt: *JSRuntime) void {
-    const epoch = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
+    const epoch = rt.gc.block_heap.mark_epoch;
     rt.atoms.sweepDead(rt, epoch);
 }
 
@@ -259,7 +259,6 @@ pub const MarkFootprint = struct {
     major_censuses: usize = 0,
     marked_headers: usize = 0,
     block_headers: usize = 0,
-    refcount_removed_headers: usize = 0,
     by_kind: [gc.gc_kind_count]usize = @splat(0),
     by_trace_class: [mark_trace_class_count]usize = @splat(0),
     storage: [mark_storage_component_count]MarkStorageAggregate = @splat(.{}),
@@ -302,7 +301,6 @@ pub const MarkFootprint = struct {
             else => kind,
         })] +|= 1;
         if (gc.Registry.isBlockCellHeader(header)) self.block_headers +|= 1;
-        self.refcount_removed_headers +|= 1;
     }
 
     pub fn beginTraceClass(self: *MarkFootprint, class: MarkTraceClass) void {
@@ -446,7 +444,7 @@ const FullReachable = struct {
 /// and the run this is supposed to be auditing dies of missing property keys.
 fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReachable {
     const allocator = rt.memory.persistent_allocator;
-    const entry_epoch: u64 = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
+    const entry_epoch: u64 = rt.gc.block_heap.mark_epoch;
     var reachable: FullReachable = .{ .allocator = allocator };
     errdefer reachable.deinit();
 
@@ -525,9 +523,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
 
     probe.clearMarks();
     for (saved.items) |header| rt.gc.setHeaderMarked(header);
-    if (comptime gc.block_heap_enabled) {
-        rt.atoms.restampTraceEpoch(entry_epoch, rt.gc.block_heap.mark_epoch);
-    }
+    rt.atoms.restampTraceEpoch(entry_epoch, rt.gc.block_heap.mark_epoch);
     return reachable;
 }
 
@@ -690,21 +686,19 @@ fn verifyCollectorInvariants(
     auditDeferredPayloadRootsBeforeBlockPublication(rt);
     requireInvariant(rt.gc.verifyObjectPropertyStorageLayouts(rt), "PROPERTY STORAGE", "object property storage invariant violated");
     requireInvariant(rt.gc.verifyIntrusiveList(), "INTRUSIVE LIST", "intrusive list invariant violated");
-    if (comptime gc.block_heap_enabled) {
-        requireInvariant(rt.gc.block_heap.verify(), "BLOCK HEAP", "block heap invariant violated");
-        requireInvariant(
-            rt.gc.block_heap.verifyPublishedCellsAllowing(
-                gc.representation.block_cell_size_class,
-                @as(u3, @intCast(@intFromEnum(gc.GcKind.object))),
-                .{
-                    .context = @ptrCast(&rt.gc),
-                    .classify = gc.Registry.blockCellPublicationAllowance,
-                },
-            ),
-            "BLOCK CELL PUBLICATION",
-            "block cell publication invariant violated",
-        );
-    }
+    requireInvariant(rt.gc.block_heap.verify(), "BLOCK HEAP", "block heap invariant violated");
+    requireInvariant(
+        rt.gc.block_heap.verifyPublishedCellsAllowing(
+            gc.representation.block_cell_size_class,
+            @as(u3, @intCast(@intFromEnum(gc.GcKind.object))),
+            .{
+                .context = @ptrCast(&rt.gc),
+                .classify = gc.Registry.blockCellPublicationAllowance,
+            },
+        ),
+        "BLOCK CELL PUBLICATION",
+        "block cell publication invariant violated",
+    );
     requireInvariant(rt.gc.verifyGenerationInvariants(), "GENERATION", "generation invariant violated");
     if (require_retirement_commit) {
         requireInvariant(rt.gc.verifyMajorRetirementCommit(), "RETIREMENT", "young retirement incomplete");
@@ -753,7 +747,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     last_census_ns = 0;
     rt.gc.stats.collections += 1;
-    if (comptime gc.block_heap_enabled) rt.gc.block_heap.beginMajor();
+    rt.gc.block_heap.beginMajor();
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
     // The synchronous major uses the same trace-coupled retirement contract as
@@ -802,7 +796,6 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
 /// Returns the number of young objects reclaimed, or null when there is no
 /// generational state to work with.
 pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!?usize {
-    if (comptime !gc.generation_enabled) return null;
     // Hard guard, not only the scheduler's. `shouldTryMinor` is the policy
     // gate, but a minor can also be reached directly, and running one with a
     // retirement transaction open means reading a young population the trace
@@ -947,12 +940,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // until that call. The doomed list is drained by `destroyCondemned` inside
     // the sweep; since TGC S4-e there is no parked-free stack any more, so
     // that half of the major call site's precondition is vacuous (0).
-    if (comptime gc.block_heap_enabled) {
-        rt.gc.block_heap.publishCompletedHotBlocksSlice(
-            0,
-            gc.minor_hot_publish_superblock_budget,
-        );
-    }
+    rt.gc.block_heap.publishCompletedHotBlocksSlice(
+        0,
+        gc.minor_hot_publish_superblock_budget,
+    );
     rt.gc.generation.noteMinorPromotion(young_before -| reclaimed);
     if (phase_stats) {
         rt.gc.generation.stats.minor_promote_ns_total +|= profile.nowNanos() -| phase_started;
@@ -982,10 +973,8 @@ fn promoteYoungSurvivorsInBulk(rt: *JSRuntime) void {
 /// so a destructor's own publication starts the NEXT young generation instead
 /// of being stranded in a census that has already been zeroed.
 fn closeYoungGeneration(rt: *JSRuntime) void {
-    if (comptime gc.block_heap_enabled) {
-        rt.gc.block_heap.retireYoungExtents();
-        _ = rt.gc.block_heap.clearYoungBlocks();
-    }
+    rt.gc.block_heap.retireYoungExtents();
+    _ = rt.gc.block_heap.clearYoungBlocks();
     // TGC S3-c: a value symbol's body is only reachable from an old holder
     // over an atom id, which no minor traces, so the table roots it until it
     // is promoted -- which is exactly here.
@@ -1008,7 +997,6 @@ fn closeYoungGeneration(rt: *JSRuntime) void {
 /// (`verifyHeapAccounting`) is what caught this: with `young_head` null, any
 /// surviving young bit is a corruption report.
 fn clearYoungState(rt: *JSRuntime) void {
-    if (comptime !gc.generation_enabled) return;
     // Intrusive carriers use the young suffix; non-block Objects use their
     // side authority and are filtered by the same young bit.
     var young_nonblock = rt.gc.objectIterator(.young_list);
@@ -1019,15 +1007,13 @@ fn clearYoungState(rt: *JSRuntime) void {
     // Block-population young bits: walk the young-block list, not the heap.
     // This also retires sweep-time allocations -- a block that received one
     // is on the list like any other.
-    if (comptime gc.block_heap_enabled) {
-        var young = rt.gc.objectIterator(.young_block);
-        while (young.next()) |h| h.meta().flags.young = false;
-        _ = rt.gc.block_heap.clearYoungBlocks();
-        // Extents have no carrier to walk; their young enumeration is the
-        // heap's own list. Survivors of the major's whole-table extent sweep
-        // are promoted here, and the list is closed.
-        rt.gc.block_heap.retireYoungExtents();
-    }
+    var young = rt.gc.objectIterator(.young_block);
+    while (young.next()) |h| h.meta().flags.young = false;
+    _ = rt.gc.block_heap.clearYoungBlocks();
+    // Extents have no carrier to walk; their young enumeration is the
+    // heap's own list. Survivors of the major's whole-table extent sweep
+    // are promoted here, and the list is closed.
+    rt.gc.block_heap.retireYoungExtents();
     // Same promotion point for the atom table's young symbol bodies (§S3-c).
     rt.atoms.retireYoungSymbolBodies();
     rt.gc.resetYoungListSuffix();
@@ -1084,10 +1070,7 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     // can run inside this window (`minorsAllowed`), so the remembered index and
     // scalar count can be reset once seeding completes.
     const t_retire = profile.nowNanos();
-    const young_blocks = if (comptime gc.block_heap_enabled)
-        rt.gc.block_heap.clearYoungBlocks()
-    else
-        0;
+    const young_blocks = rt.gc.block_heap.clearYoungBlocks();
     rt.gc.retireGenerationalYoungSet();
     const retire_ns = profile.nowNanos() -| t_retire;
     rt.gc.concurrent.stats.phase_begin_retire_ns +|= retire_ns;
@@ -1212,20 +1195,18 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     assertMorgueEmptyBeforeCondemnation(rt);
     var condemned: usize = 0;
     var doomed_bytes: usize = 0;
-    if (comptime gc.block_heap_enabled) {
-        rt.gc.assertFrontierAllowsReclaimKind(.object);
-        const snap = rt.gc.block_heap.snapshotAllDoomed(rt.gc.block_heap.mark_epoch);
-        // TGC S4-d spec 2.4: one debit for every corpse the sweep will take
-        // from the bitmap. Those cells never reach a per-cell free path.
-        rt.memory.debitBlockBytes(snap.bitmap_bytes);
-        condemned += snap.count;
-        // Ledger parity: the account carries object sizes, not cell sizes.
-        doomed_bytes +|= snap.bytes -| (snap.count * gc.metadata_prefix_size);
-        // Unmarked string extents are dead at finish and referenced by
-        // nothing; free them now (rare, so the pause cost is negligible)
-        // rather than teaching the sliced morgue a table-backed kind.
-        condemned += string_mod.sweepExtents(rt);
-    }
+    rt.gc.assertFrontierAllowsReclaimKind(.object);
+    const snap = rt.gc.block_heap.snapshotAllDoomed(rt.gc.block_heap.mark_epoch);
+    // TGC S4-d spec 2.4: one debit for every corpse the sweep will take
+    // from the bitmap. Those cells never reach a per-cell free path.
+    rt.memory.debitBlockBytes(snap.bitmap_bytes);
+    condemned += snap.count;
+    // Ledger parity: the account carries object sizes, not cell sizes.
+    doomed_bytes +|= snap.bytes -| (snap.count * gc.metadata_prefix_size);
+    // Unmarked string extents are dead at finish and referenced by
+    // nothing; free them now (rare, so the pause cost is negligible)
+    // rather than teaching the sliced morgue a table-backed kind.
+    condemned += string_mod.sweepExtents(rt);
     var previous_node: *gc.Header = &rt.gc.gc_obj_list.sentinel;
     var cursor_node = previous_node.next_non_object;
     while (cursor_node) |header| {
@@ -1290,9 +1271,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     rt.gc.doomed_bytes = doomed_bytes;
     rt.gc.concurrent.stats.doomed_condemned_headers +|= condemned;
     rt.gc.doomed_pending = condemned != 0;
-    if (comptime gc.block_heap_enabled) {
-        if (rt.gc.block_heap.doomed_blocks != null) rt.gc.doomed_pending = true;
-    }
+    if (rt.gc.block_heap.doomed_blocks != null) rt.gc.doomed_pending = true;
     if (!rt.gc.doomed_pending) rt.gc.concurrent.stats.cycles_completed += 1;
     // TGC S3 §2.4. The verdict and its application must share one pause: see
     // `sweepAtomTable`. This used to be deferred to the point the morgue
@@ -1374,9 +1353,7 @@ const destroy_clock_cadence: usize = 256;
 
 fn morgueIsEmpty(rt: *const JSRuntime) bool {
     if (rt.gc.doomed_cursor != null) return false;
-    if (comptime gc.block_heap_enabled) {
-        if (rt.gc.block_heap.doomed_blocks != null) return false;
-    }
+    if (rt.gc.block_heap.doomed_blocks != null) return false;
     if (rt.gc.nonblock_objects) |authority| {
         if (authority.doomed.items.len != 0 or authority.temporary.items.len != 0) return false;
     }
@@ -1416,13 +1393,11 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
     }
 
     var doomed_blocks: usize = 0;
-    if (comptime gc.block_heap_enabled) {
-        var block = rt.gc.block_heap.doomed_blocks;
-        while (block) |current| {
-            doomed_blocks += 1;
-            const link = current.doomed_link;
-            block = if (link <= 1) null else @ptrFromInt(link);
-        }
+    var block = rt.gc.block_heap.doomed_blocks;
+    while (block) |current| {
+        doomed_blocks += 1;
+        const link = current.doomed_link;
+        block = if (link <= 1) null else @ptrFromInt(link);
     }
 
     return .{
@@ -1480,67 +1455,65 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     // kind order's first pass, so draining them before the list phases keeps
     // "objects before realms before shapes" intact -- standalone objects on
     // the list still get their turn in pass 0 below.
-    if (comptime gc.block_heap_enabled) {
-        while (rt.gc.block_heap.doomed_blocks) |block| {
-            // Geometry is immutable until `resetBlock`. Keep the base/stride
-            // across callbacks instead of reloading both fields for every
-            // corpse.
-            const cells_base = @intFromPtr(block) + block.cells_offset + gc.metadata_prefix_size;
-            const cell_size: usize = block.cell_size;
-            // TGC S4-d spec 2.4: only `doomed & needs_finalizer` reaches a
-            // destructor. Everything else -- plain objects, storage cells,
-            // unbound string bodies -- is left in the doomed bitmap for the
-            // word-arithmetic reclaim below, which never reads its header.
-            while (block.takeDoomedFinalizerCell()) |index| {
-                const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
-                // The alloc bit and heap-accounted stamp remain live through
-                // every payload callback, so containsHeader's block iterator
-                // already publishes this object. Standalone/list objects need
-                // sweep_current below because condemnation delisted them.
-                switch (header.meta().flags.kind) {
-                    .object => Object.destroyFromHeader(rt, header),
-                    // String-family cells (TGC S2) share the block heap; the
-                    // stamped ones are the bodies bound to a dynamic atom, and
-                    // the string side performs that handshake.
-                    .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(rt, header),
-                    // A bare storage cell never owes destructor work, so it
-                    // can never carry the bit.
-                    else => unreachable,
-                }
-                destroyed += 1;
-                since_clock += 1;
-                if (since_clock == destroy_clock_cadence) {
-                    since_clock = 0;
-                    if (profile.nowNanos() -| started >= budget_ns) {
-                        rt.gc.doomed_destroyed += destroyed;
-                        rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
-                        return destroyed;
-                    }
+    while (rt.gc.block_heap.doomed_blocks) |block| {
+        // Geometry is immutable until `resetBlock`. Keep the base/stride
+        // across callbacks instead of reloading both fields for every
+        // corpse.
+        const cells_base = @intFromPtr(block) + block.cells_offset + gc.metadata_prefix_size;
+        const cell_size: usize = block.cell_size;
+        // TGC S4-d spec 2.4: only `doomed & needs_finalizer` reaches a
+        // destructor. Everything else -- plain objects, storage cells,
+        // unbound string bodies -- is left in the doomed bitmap for the
+        // word-arithmetic reclaim below, which never reads its header.
+        while (block.takeDoomedFinalizerCell()) |index| {
+            const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
+            // The alloc bit and heap-accounted stamp remain live through
+            // every payload callback, so containsHeader's block iterator
+            // already publishes this object. Standalone/list objects need
+            // sweep_current below because condemnation delisted them.
+            switch (header.meta().flags.kind) {
+                .object => Object.destroyFromHeader(rt, header),
+                // String-family cells (TGC S2) share the block heap; the
+                // stamped ones are the bodies bound to a dynamic atom, and
+                // the string side performs that handshake.
+                .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(rt, header),
+                // A bare storage cell never owes destructor work, so it
+                // can never carry the bit.
+                else => unreachable,
+            }
+            destroyed += 1;
+            since_clock += 1;
+            if (since_clock == destroy_clock_cadence) {
+                since_clock = 0;
+                if (profile.nowNanos() -| started >= budget_ns) {
+                    rt.gc.doomed_destroyed += destroyed;
+                    rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
+                    return destroyed;
                 }
             }
-            // The destructor set is drained, so the rest of this block is
-            // bitmap work that cannot be interrupted. Close the block out of
-            // the doomed list FIRST: `reclaimDoomedCells` may hand an emptied
-            // block to the free-block list, and a free-listed block must not
-            // carry a live `doomed_link`.
-            const link = block.doomed_link;
-            block.doomed_link = 0;
-            rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
-            destroyed += rt.gc.reclaimDoomedBlock(block);
-            // This block's doomed bitmap is fully consumed, so its alloc
-            // bitmap and `allocated_count` are canonical again -- a claim
-            // about work this loop just did, not a tautology. Name the
-            // offending block here rather than waiting for the next
-            // whole-heap `AllocCountMismatch`.
-            if (gc.invariantChecksEnabled()) {
-                BlockHeapMod.Heap.verifyBlockAllocCount(block) catch |err| {
-                    std.debug.print(
-                        "gc: DOOMED RECLAIM AUDIT: {s} block=0x{x} allocated_count={d}\n",
-                        .{ @errorName(err), @intFromPtr(block), block.allocated_count },
-                    );
-                    @panic("the doomed reclaim left a block's alloc bitmap and count disagreeing");
-                };
-            }
+        }
+        // The destructor set is drained, so the rest of this block is
+        // bitmap work that cannot be interrupted. Close the block out of
+        // the doomed list FIRST: `reclaimDoomedCells` may hand an emptied
+        // block to the free-block list, and a free-listed block must not
+        // carry a live `doomed_link`.
+        const link = block.doomed_link;
+        block.doomed_link = 0;
+        rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
+        destroyed += rt.gc.reclaimDoomedBlock(block);
+        // This block's doomed bitmap is fully consumed, so its alloc
+        // bitmap and `allocated_count` are canonical again -- a claim
+        // about work this loop just did, not a tautology. Name the
+        // offending block here rather than waiting for the next
+        // whole-heap `AllocCountMismatch`.
+        if (gc.invariantChecksEnabled()) {
+            BlockHeapMod.Heap.verifyBlockAllocCount(block) catch |err| {
+                std.debug.print(
+                    "gc: DOOMED RECLAIM AUDIT: {s} block=0x{x} allocated_count={d}\n",
+                    .{ @errorName(err), @intFromPtr(block), block.allocated_count },
+                );
+                @panic("the doomed reclaim left a block's alloc bitmap and count disagreeing");
+            };
         }
     }
 
@@ -1648,10 +1621,8 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         // alloc bitmaps are canonical. This transaction boundary, not
         // per-block doomed-list removal, is the first sound point to publish
         // partial blocks for interval reuse.
-        if (comptime gc.block_heap_enabled) {
-            auditDeferredPayloadRootsBeforeBlockPublication(rt);
-            rt.gc.block_heap.publishCompletedHotBlocks();
-        }
+        auditDeferredPayloadRootsBeforeBlockPublication(rt);
+        rt.gc.block_heap.publishCompletedHotBlocks();
         rt.gc.doomed_pending = false;
         rt.gc.doomed_cursor = null;
         rt.gc.concurrent.stats.cycles_completed += 1;
@@ -1693,6 +1664,7 @@ pub fn finishPendingDestruction(rt: *JSRuntime) void {
 /// tests that construct a mutator interleaving between marking phases.
 /// Returns the number of grey entries traced.
 pub fn remarkBarrierQueueForTest(rt: *JSRuntime) CollectError!usize {
+    if (!builtin.is_test) @compileError("test-only helper");
     rt.gc.mark_stack.ensure(rt.gc.concurrent_mark_queue.segmentPool());
     var collector = try Collector.init(rt, null, .declared_only);
     defer collector.deinit();
@@ -1826,7 +1798,7 @@ const Collector = struct {
     /// semantics for the VERIFY_MINOR probe hold: re-marking a saved set under
     /// the new epochs means exactly "marked" again.
     fn clearMarks(self: *Collector) void {
-        if (comptime gc.block_heap_enabled) self.rt.gc.block_heap.beginMajor();
+        self.rt.gc.block_heap.beginMajor();
         self.rt.gc.advanceHeaderMarkEpoch();
     }
 
@@ -1843,10 +1815,8 @@ const Collector = struct {
         while (iterator.next()) |header| {
             self.rt.gc.setHeaderUnmarked(header);
         }
-        if (comptime gc.block_heap_enabled) {
-            self.rt.gc.block_heap.clearYoungBlockMarksStw();
-            self.rt.gc.block_heap.clearYoungExtentMarksStw();
-        }
+        self.rt.gc.block_heap.clearYoungBlockMarksStw();
+        self.rt.gc.block_heap.clearYoungExtentMarksStw();
     }
 
     fn countMarked(self: *Collector) usize {
@@ -2005,7 +1975,7 @@ const Collector = struct {
             if (self.rt.atoms.atomEdgeBodyWithoutStamp(id)) |body| self.shadeExact(body.header());
             return;
         }
-        const epoch = if (comptime gc.block_heap_enabled) self.rt.gc.block_heap.mark_epoch else 0;
+        const epoch = self.rt.gc.block_heap.mark_epoch;
         if (self.rt.atoms.markAtomAtEpoch(id, epoch)) |body| self.shadeExact(body.header());
     }
 
@@ -2139,7 +2109,6 @@ const Collector = struct {
     /// stolen whole; exhaustion is an explicit collection failure, never an
     /// address-losing overflow followed by a whole-heap rescan.
     fn drainBarrierQueue(self: *Collector) CollectError!usize {
-        if (comptime !gc.concurrent_enabled) return 0;
         const queue = &self.rt.gc.concurrent_mark_queue;
         try checkFrontierFailure(queue);
         var drained: usize = 0;
@@ -2347,7 +2316,6 @@ const Collector = struct {
     /// earlier condemnation still carries the stamp -- re-detaching it
     /// would trip `detachBlockObjectCandidate`'s own assertion.
     fn stampYoungBlockCorpses(self: *Collector) void {
-        comptime std.debug.assert(gc.block_heap_enabled);
         var cursor = self.rt.gc.block_heap.young_blocks;
         while (cursor) |block| {
             const next_link = block.young_link;
@@ -2425,19 +2393,10 @@ const Collector = struct {
             // because `seedRoots` shades the whole pin ledger before anything
             // else; the pin test below is kept anyway, now that it costs a
             // probe per corpse rather than per cell.
-            if (comptime gc.block_heap_enabled) {
-                self.rt.memory.debitBlockBytes(
-                    self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
-                );
-                self.stampYoungBlockCorpses();
-            } else {
-                var young_blocks = self.rt.gc.objectIterator(.young_block);
-                while (young_blocks.next()) |header| {
-                    if (self.rt.gc.headerMarked(header)) continue;
-                    if (self.rt.gc.headerIsPinned(header)) continue;
-                    self.rt.gc.detachBlockObjectCandidate(header);
-                }
-            }
+            self.rt.memory.debitBlockBytes(
+                self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
+            );
+            self.stampYoungBlockCorpses();
             // The list population is a young suffix. Its predecessor was
             // captured at the first publication, so deletion is O(young).
             if (self.rt.gc.young_head) |young_head| {
@@ -2534,10 +2493,9 @@ const Collector = struct {
                     gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
                 }
             }
-            if (comptime gc.block_heap_enabled)
-                self.rt.memory.debitBlockBytes(
-                    self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
-                );
+            self.rt.memory.debitBlockBytes(
+                self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
+            );
         }
 
         const old_phase = self.rt.gc.phase;
@@ -2550,18 +2508,16 @@ const Collector = struct {
         // major. It runs before the close because it reads both structures the
         // close retires (`young_extents` and the young bit).
         var reclaimed: usize = 0;
-        if (comptime gc.block_heap_enabled) {
-            const published_before = self.rt.gc.generation.stats.young_publications;
-            reclaimed += string_mod.sweepYoungExtents(self.rt);
-            // What licenses running this before the close: an extent's death
-            // is an atom handshake plus a mapping return, and neither
-            // PUBLISHES. A GC publication here would be a young object the
-            // close is about to strand -- counted into a census that is about
-            // to be zeroed, on a young list that is about to be broken.
-            // (`young_count` cannot answer this on its own: a death here
-            // legitimately DECREMENTS it, via `forgetUnremembered`.)
-            std.debug.assert(self.rt.gc.generation.stats.young_publications == published_before);
-        }
+        const published_before = self.rt.gc.generation.stats.young_publications;
+        reclaimed += string_mod.sweepYoungExtents(self.rt);
+        // What licenses running this before the close: an extent's death
+        // is an atom handshake plus a mapping return, and neither
+        // PUBLISHES. A GC publication here would be a young object the
+        // close is about to strand -- counted into a census that is about
+        // to be zeroed, on a young list that is about to be broken.
+        // (`young_count` cannot answer this on its own: a death here
+        // legitimately DECREMENTS it, via `forgetUnremembered`.)
+        std.debug.assert(self.rt.gc.generation.stats.young_publications == published_before);
 
         // TGC S4-h (2): close the young generation BETWEEN the condemnation and
         // the destruction slice, not after it.
@@ -2602,10 +2558,9 @@ const Collector = struct {
             }
             self.rt.gc.detachBlockObjectCandidate(header);
         }
-        if (comptime gc.block_heap_enabled)
-            self.rt.memory.debitBlockBytes(
-                self.rt.gc.block_heap.snapshotAllDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
-            );
+        self.rt.memory.debitBlockBytes(
+            self.rt.gc.block_heap.snapshotAllDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
+        );
 
         // List carriers are singly linked in trace. Walk them with an explicit
         // predecessor so every condemnation is an O(1) splice.
@@ -2677,9 +2632,7 @@ const Collector = struct {
         const garbage_count = self.destroyCondemned(true);
         sweepAtomTable(self.rt);
         if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) {
-            if (comptime gc.block_heap_enabled) {
-                self.rt.gc.block_heap.publishCompletedHotBlocks();
-            }
+            self.rt.gc.block_heap.publishCompletedHotBlocks();
         }
         return garbage_count;
     }
@@ -2940,35 +2893,33 @@ const Collector = struct {
         // Object is the first destruction kind. Block cells are owned by the
         // doomed bitmap and standalone Objects by the temporary side lane;
         // neither population ever enters `tmp_obj_list`.
-        if (comptime gc.block_heap_enabled) {
-            while (self.rt.gc.block_heap.doomed_blocks) |block| {
-                const cells_base = @intFromPtr(block) + block.cells_offset + gc.metadata_prefix_size;
-                const cell_size: usize = block.cell_size;
-                // TGC S4-d spec 2.4: STW twin of `destroyDoomedSlice` -- only
-                // the finalizer subset is visited by hand.
-                while (block.takeDoomedFinalizerCell()) |index| {
-                    const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
-                    switch (header.metaConst().flags.kind) {
-                        .object => Object.destroyFromHeader(self.rt, header),
-                        .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(self.rt, header),
-                        else => unreachable,
-                    }
-                    garbage_count += 1;
+        while (self.rt.gc.block_heap.doomed_blocks) |block| {
+            const cells_base = @intFromPtr(block) + block.cells_offset + gc.metadata_prefix_size;
+            const cell_size: usize = block.cell_size;
+            // TGC S4-d spec 2.4: STW twin of `destroyDoomedSlice` -- only
+            // the finalizer subset is visited by hand.
+            while (block.takeDoomedFinalizerCell()) |index| {
+                const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
+                switch (header.metaConst().flags.kind) {
+                    .object => Object.destroyFromHeader(self.rt, header),
+                    .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(self.rt, header),
+                    else => unreachable,
                 }
-                const link = block.doomed_link;
-                block.doomed_link = 0;
-                self.rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
-                garbage_count += self.rt.gc.reclaimDoomedBlock(block);
-                if (gc.invariantChecksEnabled()) {
-                    BlockHeapMod.Heap.verifyBlockAllocCount(block) catch
-                        @panic("STW Object destruction left block allocation accounting inconsistent");
-                }
+                garbage_count += 1;
             }
-            // Whole-table extent sweep: only a full major trace can prove an
-            // OLD extent dead. The young ones a minor can prove are swept from
-            // `Heap.young_extents` by `sweepUnmarkedYoung` instead.
-            if (sweep_string_extents) garbage_count += string_mod.sweepExtents(self.rt);
+            const link = block.doomed_link;
+            block.doomed_link = 0;
+            self.rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
+            garbage_count += self.rt.gc.reclaimDoomedBlock(block);
+            if (gc.invariantChecksEnabled()) {
+                BlockHeapMod.Heap.verifyBlockAllocCount(block) catch
+                    @panic("STW Object destruction left block allocation accounting inconsistent");
+            }
         }
+        // Whole-table extent sweep: only a full major trace can prove an
+        // OLD extent dead. The young ones a minor can prove are swept from
+        // `Heap.young_extents` by `sweepUnmarkedYoung` instead.
+        if (sweep_string_extents) garbage_count += string_mod.sweepExtents(self.rt);
         if (self.rt.gc.nonblock_objects) |authority| {
             while (authority.temporary.pop()) |header| {
                 self.rt.gc.sweep_current = header;

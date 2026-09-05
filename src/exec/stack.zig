@@ -31,12 +31,10 @@ threadlocal var pending_call_region: []JSValue = &.{};
 /// Publish the slots a call site has just retreated past. The top must already
 /// be at `region.ptr`; `setTopPtr` drops the window again on the next move.
 pub inline fn publishPendingCallRegion(region: []JSValue) void {
-    if (comptime !gc.generation_enabled) return;
     pending_call_region = region;
 }
 
 pub inline fn pendingCallRegion() []JSValue {
-    if (comptime !gc.generation_enabled) return &.{};
     return pending_call_region;
 }
 
@@ -122,16 +120,14 @@ pub const Stack = struct {
     /// for the published call sites.
     pub inline fn retreatToCallRegionFrom(self: *Stack, live_top: [*]JSValue, region_start: [*]JSValue) void {
         self.setTopPtr(region_start);
-        if (comptime gc.generation_enabled) {
-            // Not every call site reaches here with operands still above the
-            // region: some arms retreat after an earlier arm already consumed
-            // them, and land at or below `region_start`. There is nothing to
-            // publish then, and publishing a span that is not the just-written
-            // operands would hand the tracer whatever those slots hold.
-            if (@intFromPtr(live_top) <= @intFromPtr(region_start)) return;
-            const count = (@intFromPtr(live_top) - @intFromPtr(region_start)) / @sizeOf(JSValue);
-            publishPendingCallRegion(region_start[0..count]);
-        }
+        // Not every call site reaches here with operands still above the
+        // region: some arms retreat after an earlier arm already consumed
+        // them, and land at or below `region_start`. There is nothing to
+        // publish then, and publishing a span that is not the just-written
+        // operands would hand the tracer whatever those slots hold.
+        if (@intFromPtr(live_top) <= @intFromPtr(region_start)) return;
+        const count = (@intFromPtr(live_top) - @intFromPtr(region_start)) / @sizeOf(JSValue);
+        publishPendingCallRegion(region_start[0..count]);
     }
 
     pub inline fn retreatToCallRegion(self: *Stack, region_start: [*]JSValue) void {
@@ -163,10 +159,8 @@ pub const Stack = struct {
         // over them, so `liveValues` reaches them again) or abandons them.
         // Tying the lifetime to this one comparison keeps every exit path --
         // including unwind -- from leaving a stale span behind.
-        if (comptime gc.generation_enabled) {
-            if (pending_call_region.len != 0 and new_top != pending_call_region.ptr) {
-                pending_call_region = &.{};
-            }
+        if (pending_call_region.len != 0 and new_top != pending_call_region.ptr) {
+            pending_call_region = &.{};
         }
         self.top_ptr = new_top;
     }

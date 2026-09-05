@@ -604,14 +604,12 @@ pub const JSContext = struct {
         // instructions. Safe only because the builtin dispatch funnel roots
         // receivers and arguments -- without that a minor here reclaims
         // objects a running builtin is still walking.
-        if (comptime gc.generation_enabled) {
-            if (self.runtime.gc.shouldTryMinor()) {
-                _ = self.runtime.pollGC(null, .safepoint) catch {};
-            }
-            // Stress mode wants the collection window everywhere, not once per
-            // 10k ticks; the cadence is the other half of the knob.
-            if (gc.stress_collect) self.interrupt_counter = gc.stress_cadence;
+        if (self.runtime.gc.shouldTryMinor()) {
+            _ = self.runtime.pollGC(null, .safepoint) catch {};
         }
+        // Stress mode wants the collection window everywhere, not once per
+        // 10k ticks; the cadence is the other half of the knob.
+        if (gc.stress_collect) self.interrupt_counter = gc.stress_cadence;
         return self.runtime.runInterruptHandler();
     }
 

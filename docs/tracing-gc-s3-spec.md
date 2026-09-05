@@ -1,6 +1,10 @@
 # TGC S3 规格：atom 表弱化（tracing 接管 atom 活性）
 
-状态：v0.2（2026-09-05 按落地规则改写 §2.1/§2.2/§2.4；原 v0.1 草案 2026-09-04 上午）；上游 `docs/tracing-gc-completion-plan.md` §3 S3、§8 D3/D4（owner 批：全弱化，编译期用作用域 root provider）。
+状态：**本期已完成（S3 a/b/c/d + 两次收口修复全部合入 main；执行记录见 §7）**。
+本期删除的机制：`DynamicAtom.ref_count`（结构体 80→72B）与 `atoms.dup/free` 的 1,279+209 个调用点；
+活性改由 `visitAtom` 边 ∨ body 标记 ∨ `host_pins` ∨ 黑分配判定，判决与 sweep 必须同 pause。
+（`AtomTable` 条目的 `weakref_count` **未**删除，它是 atom 弱壳计数，与 S4-e 删掉的对象 `weakref_count` 不是一回事。）
+原状态：v0.2（2026-09-05 按落地规则改写 §2.1/§2.2/§2.4；原 v0.1 草案 2026-09-04 上午）；上游 `docs/tracing-gc-completion-plan.md` §3 S3、§8 D3/D4（owner 批：全弱化，编译期用作用域 root provider）。
 基线：`wip/s2-ablated-base`（23385e95，owner 裁剪树；S2 已固化，`JSValue.dup/free` 已 no-op 且调用点已删）。分支 `gc/tgc-s3-*`。
 勘察：两份只读报告（2026-09-04，Opus），事实均对裁剪树核实；本文只引用其结论与位置。
 

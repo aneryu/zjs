@@ -304,7 +304,6 @@ test "first named property allocates initial_prop_size slots" {
 }
 
 test "block Object accounting uses physical cell body capacity" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3255,7 +3254,6 @@ test "side authority swap-remove condemnation drains every non-block object exac
 }
 
 test "standalone inline object survives a rooted minor and retires young" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3334,7 +3332,6 @@ fn registryResolveOne(rt: *core.JSRuntime, addr: usize) ?*core.gc.Header {
 }
 
 test "standalone inline object resolves from a conservative interior candidate" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -7163,7 +7160,6 @@ test "gc heap accounting verifier catches pinned header flag drift" {
 }
 
 test "gc invariant negative: block candidate index audit rejects bloom and exact-set drift" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
@@ -7192,7 +7188,6 @@ test "gc invariant negative: block candidate index audit rejects bloom and exact
 }
 
 test "gc invariant negative: block heap rejects geometry free-chain and doomed-list corruption" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
@@ -7253,7 +7248,6 @@ test "gc invariant negative: block heap rejects geometry free-chain and doomed-l
 }
 
 test "gc invariant negative: block cell publication audit rejects hidden allocations" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -7489,7 +7483,6 @@ test "trace shape summary: incremental writers track the Shape projection" {
 }
 
 test "trace shape summary: appends preserve the leased remembered bit" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -7546,7 +7539,6 @@ test "trace shape summary: appends preserve the leased remembered bit" {
 }
 
 test "gc invariant negative: representation audit rejects physical carrier and cell index drift" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -7607,7 +7599,6 @@ test "gc invariant negative: representation audit rejects physical carrier and c
 }
 
 test "representation audit cross-checks the remembered object cache and map" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -7667,7 +7658,6 @@ test "representation audit cross-checks the remembered object cache and map" {
 }
 
 test "representation audit cross-checks the remembered cache on a non-object carrier" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     // Audit §10 widened the byte-6 lease from `.object` to every
     // GC carrier. §8.3 called the two-directional
@@ -7752,7 +7742,6 @@ test "representation audit cross-checks the remembered cache on a non-object car
 }
 
 test "forget fuses the remembered map removal with its own cache bit" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -7920,7 +7909,6 @@ test "gc: a remembered detached generator shell is still a construction root" {
 }
 
 test "gc invariant negative: arena audit rejects an accounted free slab block" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8012,7 +8000,6 @@ test "gc invariant negative: heap accounting audit rejects a pin without an entr
 }
 
 test "gc invariant negative: generation audit rejects census and stale remembered drift" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8039,7 +8026,6 @@ test "gc invariant negative: generation audit rejects census and stale remembere
 }
 
 test "gc invariant negative: retirement audit rejects a marked young survivor" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8971,7 +8957,6 @@ test "trace_stw survivor classes on a known graph" {
 }
 
 test "address registry tracks published objects and interior pointers" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8987,9 +8972,7 @@ test "address registry tracks published objects and interior pointers" {
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     // Plain objects are served from the collector's block heap now, so the
     // structure this creation must populate is a block cell, not an arena.
-    if (comptime core.gc.block_heap_enabled) {
-        try std.testing.expect(rt.gc.block_heap.liveSmall().count > 0);
-    }
+    try std.testing.expect(rt.gc.block_heap.liveSmall().count > 0);
     const header = obj.gcHeader();
     const bytes = obj.allocationSize(rt);
     const occupant = core.gc_address_registry.Table.occupantFor(header, bytes);
@@ -9017,7 +9000,6 @@ test "address registry tracks published objects and interior pointers" {
 }
 
 test "conservative scan shades a stack-held object header word" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
     try std.testing.expect(core.gc_conservative.target_supported);
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -9049,7 +9031,6 @@ test "conservative scan shades a stack-held object header word" {
 }
 
 test "carrier protocols keep adjacent one-past roots multi-hit and diagnostics explicit" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -9082,7 +9063,6 @@ test "carrier protocols keep adjacent one-past roots multi-hit and diagnostics e
 }
 
 test "address registry page radix covers a multi-page allocation" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -9103,7 +9083,6 @@ test "address registry page radix covers a multi-page allocation" {
 }
 
 test "address registry lookup cost stays with page occupants not live N" {
-    if (comptime !core.gc.address_registry_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -9174,7 +9153,6 @@ test "address registry lookup cost stays with page occupants not live N" {
 // agreement with the table, so re-freezing `measured_max_small_payload` needs
 // no edit to this test.
 test "size-class table pins the measured §4.2 allocation policy" {
-    if (comptime !core.gc.space_model_enabled) return error.SkipZigTest;
     const space = core.gc_space;
     const linear = space.linear_max_bytes / space.min_class_bytes;
 
@@ -9220,7 +9198,6 @@ test "size-class table pins the measured §4.2 allocation policy" {
 }
 
 test "size-class table matches measured publication histogram" {
-    if (comptime !core.gc.space_model_enabled) return error.SkipZigTest;
 
     var harness = try helpers.TestEngine.init(std.testing.allocator);
     defer harness.deinit();
@@ -9298,7 +9275,6 @@ test "size-class table matches measured publication histogram" {
 }
 
 test "block heap splits a 2MiB superblock into 64KiB classed blocks" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const heap_mod = core.gc_block_heap;
     var heap = heap_mod.Heap.init(std.testing.allocator);
     defer heap.deinit();
@@ -9344,7 +9320,6 @@ test "block heap splits a 2MiB superblock into 64KiB classed blocks" {
 }
 
 test "block heap reserve OOM is visible and not swallowed" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     var tiny: [128]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&tiny);
     var heap = core.gc_block_heap.Heap.init(fba.allocator());
@@ -9354,7 +9329,6 @@ test "block heap reserve OOM is visible and not swallowed" {
 }
 
 test "block heap rolls a superblock back when its exact index cannot reserve" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     // First allocation reserves the 2 MiB mapping, second grows the
     // superblock list, third reserves the exact block-set capacity. Fail that
@@ -9379,7 +9353,6 @@ test "block heap rolls a superblock back when its exact index cannot reserve" {
 }
 
 test "block heap mark epoch lazily clears the mark bitmap" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
     const cell = try heap.alloc(16);
@@ -9399,7 +9372,6 @@ test "block heap mark epoch lazily clears the mark bitmap" {
 }
 
 test "minor doomed snapshot preserves the active block lifecycle" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
 
@@ -9461,7 +9433,6 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
 }
 
 test "block heap nonempty index follows zero-one population transitions" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const heap_mod = core.gc_block_heap;
     var heap = heap_mod.Heap.init(std.testing.allocator);
     defer heap.deinit();
@@ -9491,7 +9462,6 @@ test "block heap nonempty index follows zero-one population transitions" {
 }
 
 test "block heap reopens a swept partial block before reserving a fresh block" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     var heap = core.gc_block_heap.Heap.init(std.testing.allocator);
     defer heap.deinit();
 
@@ -9572,7 +9542,6 @@ test "block heap reopens a swept partial block before reserving a fresh block" {
 }
 
 test "block heap aged decommit reports scans release and recommit" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     const heap_mod = core.gc_block_heap;
     var heap = heap_mod.Heap.init(std.testing.allocator);
@@ -9630,7 +9599,6 @@ test "block heap aged decommit reports scans release and recommit" {
 // this drives it through `releaseFreeBlockPages` rather than calling the new
 // entry point directly.
 test "block heap returns wholly empty medium superblocks and keeps one spare" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const heap_mod = core.gc_block_heap;
     var heap = heap_mod.Heap.init(std.testing.allocator);
     defer heap.deinit();
@@ -9697,7 +9665,6 @@ test "block heap returns wholly empty medium superblocks and keeps one spare" {
 }
 
 test "process heap trim fires only when a contraction crosses its threshold" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const heap_mod = core.gc_block_heap;
     const threshold = heap_mod.Heap.process_trim_min_decommitted_bytes;
 
@@ -14459,7 +14426,6 @@ test "reciprocal two-by-one division is exactly the wide division" {
 }
 
 test "minor collection reclaims young garbage and promotes survivors" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -14482,7 +14448,6 @@ test "minor collection reclaims young garbage and promotes survivors" {
 }
 
 test "minor block mark clearing preserves old sticky marks" {
-    if (comptime !core.gc.generation_enabled or !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -14499,13 +14464,12 @@ test "minor block mark clearing preserves old sticky marks" {
     rt.gc.setHeaderMarked(old.gcHeader());
     rt.gc.setHeaderMarked(young.gcHeader());
 
-    if (comptime core.gc.block_heap_enabled) rt.gc.block_heap.clearYoungBlockMarksStw();
+    rt.gc.block_heap.clearYoungBlockMarksStw();
     try std.testing.expect(rt.gc.headerMarked(old.gcHeader()));
     try std.testing.expect(!rt.gc.headerMarked(young.gcHeader()));
 }
 
 test "the minor reclaims young cycles and parks no deferred frees" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -14577,43 +14541,7 @@ test "minor pause distribution retains the complete diagnostic run" {
     try std.testing.expectEqual(@as(u64, 110), generation.stats.pause_ns_max);
 }
 
-test "the young-suffix guard rejects a stranded anchor" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
-    // Plain objects are block cells now and never enter the suffix, so this
-    // construction has no cheap handle on a suffix member (the non-block
-    // populations -- shapes, bytecode -- are created only as side effects).
-    // The guard itself still protects the non-block suffix; the construction
-    // just cannot be staged from plain objects any more.
-    if (comptime core.gc.block_heap_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    // Clear the suffix, then rebuild it so the anchor and at least one
-    // successor are unambiguous.
-    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
-    _ = try core.Object.createPlainObject(rt, null);
-    _ = try core.Object.createPlainObject(rt, null);
-
-    const anchor = rt.gc.young_head orelse return error.TestUnexpectedResult;
-    const successor = anchor.nextNonObject() orelse return error.TestUnexpectedResult;
-    if (successor == &rt.gc.gc_obj_list.sentinel) return error.TestUnexpectedResult;
-    try rt.gc.verifyIntrusiveList();
-
-    // Strand the anchor exactly as the pre-2026-08-25 `unlinkObjectWithBytes`
-    // did: the node it names leaves the suffix while still carrying the young
-    // bit. Membership alone would not catch this once a recycled slab put a
-    // live node back at the old address, so the guard checks the suffix shape.
-    rt.gc.young_head = successor;
-    try std.testing.expectError(error.DanglingYoungHead, rt.gc.verifyIntrusiveList());
-
-    rt.gc.young_head = anchor;
-    try rt.gc.verifyIntrusiveList();
-}
-
 test "old-to-young edge survives a minor only because the barrier remembered it" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -14669,7 +14597,6 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
 }
 
 test "object remembered bit is consumed and rebuilt across consecutive minors" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
@@ -14718,7 +14645,6 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
 }
 
 test "incremental retirement clears remembered cache before the next generation" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
@@ -14791,7 +14717,6 @@ test "incremental retirement clears remembered cache before the next generation"
 }
 
 test "non-object remembered owners use the byte-6 cache and re-arm across consecutive minors" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
@@ -14870,7 +14795,6 @@ test "minor full-trace verifier owns its reachability set per runtime" {
 }
 
 test "the generational barrier ignores edges a minor would find anyway" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -14886,7 +14810,6 @@ test "the generational barrier ignores edges a minor would find anyway" {
 }
 
 test "the folded barrier gate skips exactly the two owner facts" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const saved_audit = core.gc.minor_audit;
     core.gc.minor_audit = true;
@@ -14963,7 +14886,6 @@ test "the folded barrier gate skips exactly the two owner facts" {
 }
 
 test "the barrier gate closes on every phase that needs a richer arm" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15016,7 +14938,6 @@ test "the barrier gate closes on every phase that needs a richer arm" {
 }
 
 test "the barrier shades exact targets while marking and remembers owners otherwise" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15040,7 +14961,6 @@ test "the barrier shades exact targets while marking and remembers owners otherw
 }
 
 test "the barrier shades a target the marker had already passed" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15076,7 +14996,6 @@ test "the barrier shades a target the marker had already passed" {
 }
 
 test "segmented shared mark frontier grows without dropping work" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const MarkQueue = core.gc.mark_queue;
     var queue = MarkQueue.Queue{};
     queue.ensureCapacity(std.testing.allocator);
@@ -15103,7 +15022,6 @@ test "segmented shared mark frontier grows without dropping work" {
 }
 
 test "mark frontier whitelist encodes the epoch exemption" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
 
     for (std.meta.tags(core.gc.GcKind)) |kind| {
         const expected = switch (kind) {
@@ -15126,7 +15044,6 @@ test "mark frontier whitelist encodes the epoch exemption" {
 }
 
 test "checked frontier admission requires a published marked header" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15145,7 +15062,6 @@ test "checked frontier admission requires a published marked header" {
 }
 
 test "frontier requeue admission checks a prior claim without executing one" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15181,7 +15097,6 @@ test "frontier requeue admission checks a prior claim without executing one" {
 }
 
 test "Shape barrier requeues only an owner with a prior mark claim" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15217,7 +15132,6 @@ test "Shape barrier requeues only an owner with a prior mark claim" {
 }
 
 test "incremental abort disables marking before draining every frontier segment" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15244,7 +15158,6 @@ test "incremental abort disables marking before draining every frontier segment"
 }
 
 test "the barrier queue hands whole segments to a private mark stack" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const MarkQueue = core.gc.mark_queue;
     var queue = MarkQueue.Queue{};
     queue.ensureCapacity(std.testing.allocator);
@@ -15307,7 +15220,6 @@ test "an abandoned retirement transaction closes minors until a major repairs it
 }
 
 test "a major retires every block-cell survivor it traces" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15356,7 +15268,6 @@ fn countExtentStringHeaders(rt: *core.JSRuntime, header: *const core.gc.Header) 
 }
 
 test "a conservative candidate on a shared extent boundary visits both extents" {
-    if (comptime !core.gc.address_registry_enabled or !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15416,7 +15327,6 @@ test "a conservative candidate on a shared extent boundary visits both extents" 
 }
 
 test "a published string extent takes no occupant entry and still resolves conservatively" {
-    if (comptime !core.gc.address_registry_enabled or !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15470,7 +15380,6 @@ test "a published string extent takes no occupant entry and still resolves conse
 }
 
 test "minor collection reclaims an unreachable young string extent" {
-    if (comptime !core.gc.generation_enabled or !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15503,7 +15412,6 @@ test "minor collection reclaims an unreachable young string extent" {
 }
 
 test "a rooted or remembered young string extent survives the minor" {
-    if (comptime !core.gc.generation_enabled or !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15549,7 +15457,6 @@ test "a rooted or remembered young string extent survives the minor" {
 }
 
 test "the whole-heap iterator enumerates string extents and a major removes the unreachable one" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15615,7 +15522,6 @@ fn atomMarkEpochForTest(rt: *core.JSRuntime, id: anytype) ?u64 {
 }
 
 test "the full-reachable verifier restores extent marks and atom epoch stamps" {
-    if (comptime !core.gc.block_heap_enabled or !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -15732,7 +15638,6 @@ test "incremental begin preserves list-young suffix until finish retirement" {
 }
 
 test "representation audit guards block-cell marker direct dispatch" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -15796,7 +15701,6 @@ test "independent runtimes collect without touching each other" {
 }
 
 test "a crossing a minor cannot answer is still answered by a major" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -15857,8 +15761,6 @@ test "a crossing a minor cannot answer is still answered by a major" {
 // still has to have been offered the release AND to have returned pages.
 // Before the change both counters stay at zero for this workload.
 test "a minor-only workload still returns free block pages to the OS" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -15947,7 +15849,6 @@ test "ten thousand plain object deaths reach no destructor" {
 }
 
 test "young churn that crosses the threshold is paid by the minor, not by a major" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -15986,7 +15887,6 @@ test "young churn that crosses the threshold is paid by the minor, not by a majo
 // keep coming -- earley-boyer's shape, expressed as growth rather than as a
 // single crossing.
 test "an old generation that keeps growing keeps triggering majors" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -16040,7 +15940,6 @@ test "an old generation that keeps growing keeps triggering majors" {
 // young string cell is simply handed to the next allocation, so the array ends
 // up naming another string's bytes rather than freed memory.
 test "a dense buffer adopted by an aged array is remembered for the next minor" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16095,7 +15994,6 @@ test "a dense buffer adopted by an aged array is remembered for the next minor" 
 // much wider net there and the same run comes back `bad=0`. Keep the assertion
 // exact anyway: it is the release build that ships.
 test "regexp capture strings survive a minor taken inside the match-array fill" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
     var engine_instance = try helpers.TestEngine.init(std.testing.allocator);
@@ -16137,7 +16035,6 @@ test "regexp capture strings survive a minor taken inside the match-array fill" 
 }
 
 test "a minor does not move the major's threshold" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16168,7 +16065,6 @@ test "a minor does not move the major's threshold" {
 }
 
 test "minor detailed stats decompose the outer STW envelope" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16211,7 +16107,6 @@ test "minor detailed stats decompose the outer STW envelope" {
 }
 
 test "cell resolution stops at the block header and at unallocated cells" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16234,7 +16129,6 @@ test "cell resolution stops at the block header and at unallocated cells" {
 }
 
 test "carrier exact handles reject stale block-cell generations" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16323,7 +16217,6 @@ test "carrier generation authorities reject wrap in both extent and block scheme
 }
 
 test "a minor that keeps reclaiming nothing stops being offered" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16360,7 +16253,6 @@ test "a minor that keeps reclaiming nothing stops being offered" {
 }
 
 test "marking barrier shades grey, not black: the stored object's children survive the remark" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -16404,7 +16296,6 @@ test "marking barrier shades grey, not black: the stored object's children survi
 }
 
 test "mark frontier allocation failure invalidates rather than rescans" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     var no_storage: [0]u8 = .{};
     var fba = std.heap.FixedBufferAllocator.init(&no_storage);
     var queue = core.gc.mark_queue.Queue{};
@@ -16419,7 +16310,6 @@ test "mark frontier allocation failure invalidates rather than rescans" {
 }
 
 test "runtime recovers a frontier OOM through allocation-boundary full GC" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16482,7 +16372,6 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
 }
 
 test "incremental marking preserves a frontier beyond both former 65K bounds" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -16865,7 +16754,6 @@ test "synchronous incremental destruction drains more than one parked-free budge
 }
 
 test "terminal pending stats count accounted block and standalone corpses" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -16974,7 +16862,6 @@ test "pending class finalizer keeps the incremental morgue open" {
 }
 
 test "incremental block finalizer observes its object without sweep publication" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
@@ -17332,7 +17219,6 @@ test "TGC S3-c: the atom entry census falls back after a major" {
 }
 
 test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -17381,7 +17267,6 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
 }
 
 test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they accumulate" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -17411,7 +17296,6 @@ test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they
 }
 
 test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -17508,7 +17392,6 @@ test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycl
 }
 
 test "TGC S3: the insertion barrier shades an atom stored during marking" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -17535,7 +17418,6 @@ test "TGC S3: the insertion barrier shades an atom stored during marking" {
 }
 
 test "TGC S3-c: the atom verdict is applied in the pause that took it, not after the morgue drains" {
-    if (comptime !core.gc.concurrent_enabled) return error.SkipZigTest;
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -17594,23 +17476,21 @@ test "needs_finalizer is recorded in both the header and the block bitmap" {
     rt.gc.setNeedsFinalizer(header);
     try std.testing.expect(core.gc.headerNeedsFinalizer(header));
 
-    if (comptime core.gc.block_heap_enabled) {
-        // A plain object is a block cell; the sweep-side authority is the
-        // fourth bitmap, keyed by the cell index the prefix carries.
-        try std.testing.expect(core.gc.Registry.isBlockCellHeader(header));
-        const cell = @intFromPtr(header) - core.gc.metadata_prefix_size;
-        const block = core.gc_block_heap.Block.fromCellTrusted(cell);
-        const index = header.metaConst().size_class;
-        try std.testing.expect(block.cellNeedsFinalizer(index));
-        // Every other cell in the block is unaffected.
-        var others: usize = 0;
-        var i: u32 = 0;
-        while (i < block.cell_count) : (i += 1) {
-            if (i == index) continue;
-            if (block.cellNeedsFinalizer(i)) others += 1;
-        }
-        try std.testing.expectEqual(@as(usize, 0), others);
+    // A plain object is a block cell; the sweep-side authority is the
+    // fourth bitmap, keyed by the cell index the prefix carries.
+    try std.testing.expect(core.gc.Registry.isBlockCellHeader(header));
+    const cell = @intFromPtr(header) - core.gc.metadata_prefix_size;
+    const block = core.gc_block_heap.Block.fromCellTrusted(cell);
+    const index = header.metaConst().size_class;
+    try std.testing.expect(block.cellNeedsFinalizer(index));
+    // Every other cell in the block is unaffected.
+    var others: usize = 0;
+    var i: u32 = 0;
+    while (i < block.cell_count) : (i += 1) {
+        if (i == index) continue;
+        if (block.cellNeedsFinalizer(i)) others += 1;
     }
+    try std.testing.expectEqual(@as(usize, 0), others);
 }
 
 // ---------------------------------------------------------------------------
@@ -17698,7 +17578,6 @@ test "TGC S4-b: an external property buffer survives with its owner and dies one
 }
 
 test "TGC S4-b: an aged owner remembers a property buffer minted after its promotion" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -17784,7 +17663,6 @@ test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
 }
 
 test "TGC S4-b: storage over the block-cell ceiling takes the extent route and is swept" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -17940,7 +17818,6 @@ test "TGC S4-c: a bytecode function's rare/aux record is a payload cell" {
 }
 
 test "TGC S4-c: an aged promise remembers a reaction cell minted after its promotion" {
-    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -18042,7 +17919,6 @@ test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cro
 }
 
 test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent route" {
-    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

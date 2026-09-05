@@ -421,20 +421,14 @@ pub fn main(init: std.process.Init) !void {
         try dumpGcStats(&stdout_writer.interface, runtime.runtime.gcStats(), &runtime.runtime.gc);
         try dumpAtomAuditStats(&stdout_writer.interface, runtime.runtime);
         try dumpGcPauses(&stdout_writer.interface, runtime.runtime.gcPauseDistribution());
-        if (comptime engine.core.gc.space_model_enabled) {
-            try dumpGcSpaceStats(&stdout_writer.interface, &runtime.runtime.gc);
+        try dumpGcSpaceStats(&stdout_writer.interface, &runtime.runtime.gc);
+        try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
+        if (commandRuntimeOptions(command).gc_block_census) {
+            try dumpGcBlockCensus(&stdout_writer.interface, &runtime.runtime.gc);
         }
-        if (comptime engine.core.gc.block_heap_enabled) {
-            try dumpGcBlockHeapStats(&stdout_writer.interface, &runtime.runtime.gc);
-            if (commandRuntimeOptions(command).gc_block_census) {
-                try dumpGcBlockCensus(&stdout_writer.interface, &runtime.runtime.gc);
-            }
-            try dumpGcMarkFootprint(&stdout_writer.interface, runtime.runtime);
-            try dumpGcPhaseTotals(&stdout_writer.interface, &runtime.runtime.gc);
-        }
-        if (comptime engine.core.gc.generation_enabled) {
-            try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
-        }
+        try dumpGcMarkFootprint(&stdout_writer.interface, runtime.runtime);
+        try dumpGcPhaseTotals(&stdout_writer.interface, &runtime.runtime.gc);
+        try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
         if (comptime engine.core.gc.roots_diag_enabled) {
             try engine.core.gc_conservative.reportGlobal(&stdout_writer.interface);
         }
@@ -804,27 +798,25 @@ const OpcodeProfileRow = struct {
 /// collector; fields the engine does not instrument are simply absent rather
 /// than printed as zero.
 fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    if (comptime engine.core.gc.space_model_enabled) {
-        const space = engine.core.gc_space;
-        const hist = registry.space_histogram;
-        const p50 = hist.percentilePayloadBelowLarge(50);
-        const p95 = hist.percentilePayloadBelowLarge(95);
-        const p99 = hist.percentilePayloadBelowLarge(99);
-        try writer.print(
-            "gc: allocation histogram publications {d}, payload bytes {d}, p50-below-large {d}, p95-below-large {d}, p99-below-large {d}, max-small {d}, covered-by-small {d}/{d} below-large, large {d}\n",
-            .{
-                hist.total,
-                hist.bytes_total,
-                p50,
-                p95,
-                p99,
-                space.max_small_payload,
-                hist.coveredByMaxSmall(),
-                hist.belowLarge(),
-                hist.large,
-            },
-        );
-    }
+    const space = engine.core.gc_space;
+    const hist = registry.space_histogram;
+    const p50 = hist.percentilePayloadBelowLarge(50);
+    const p95 = hist.percentilePayloadBelowLarge(95);
+    const p99 = hist.percentilePayloadBelowLarge(99);
+    try writer.print(
+        "gc: allocation histogram publications {d}, payload bytes {d}, p50-below-large {d}, p95-below-large {d}, p99-below-large {d}, max-small {d}, covered-by-small {d}/{d} below-large, large {d}\n",
+        .{
+            hist.total,
+            hist.bytes_total,
+            p50,
+            p95,
+            p99,
+            space.max_small_payload,
+            hist.coveredByMaxSmall(),
+            hist.belowLarge(),
+            hist.large,
+        },
+    );
 }
 
 /// TGC S4-f (2): per-size-class block occupancy. `blocks` is what
@@ -833,7 +825,6 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
 /// occupancy buckets say whether that peak is live data, thinly-populated
 /// fragmentation, or blocks nothing has reclaimed.
 fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    if (comptime !engine.core.gc.block_heap_enabled) return;
     const census = registry.block_heap.censusBlocks();
     try writer.print(
         "gc: block census classed superblocks {d}, other {d}, uninitialized slots {d}\n",
@@ -972,130 +963,126 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
     } else {
         try writer.print("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n", .{});
     }
-    if (comptime engine.core.gc.concurrent_enabled) {
-        const cs = registry.concurrent.stats;
-        try writer.print(
-            "gc: exact-target marking barrier calls {d}, exit marked-target {d}, exit unpublished-owner {d}, exit unpublished-target {d}, requeued-owner {d}, shaded-target {d}\n",
-            .{
-                cs.barrier_calls,
-                cs.barrier_marked_target,
-                cs.barrier_unpublished_owner,
-                cs.barrier_unpublished_target,
-                cs.barrier_requeued_owner,
-                cs.shaded,
-            },
-        );
-        try writer.print("gc: incremental doomed condemned headers {d}, destroyed counted objects {d}, parked entries drained {d}, parked-drain slices {d}\n", .{
-            cs.doomed_condemned_headers,
-            cs.doomed_destroyed_objects,
-            cs.doomed_parked_entries_drained,
-            cs.doomed_parked_drain_slices,
-        });
-        try writer.print(
-            "gc: incremental major cycles completed {d}, aborted {d}, forced {d}, mark steps {d}, cycle STW last {d} ns max {d} ns\n",
-            .{ cs.cycles_completed, cs.cycles_aborted, cs.forced_finishes, cs.increments, cs.last_cycle_stw_ns, cs.max_cycle_stw_ns },
-        );
-        try writer.print(
-            "gc: cycle envelope measured {d}, skipped {d}, max-P/T S {d}, T {d}, B {d}, P {d}, B/T-x1000000 {d}, P/T-x1000000 {d}, P/S-x1000000 {d}, forced {d}\n",
-            .{
-                cs.envelope_measured_cycles,
-                cs.envelope_skipped_cycles,
-                cs.envelope_max_start_bytes,
-                cs.envelope_max_threshold_bytes,
-                cs.envelope_max_begin_bytes,
-                cs.envelope_max_peak_bytes,
-                engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes),
-                engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes),
-                engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes),
-                cs.forced_finishes,
-            },
-        );
-        try writer.print(
-            "gc: incremental STW phase-segment max ns begin {d}, increment {d}, destroy {d}, finish {d}\n",
-            .{ cs.segment_max_ns[0], cs.segment_max_ns[1], cs.segment_max_ns[2], cs.segment_max_ns[3] },
-        );
-        try writer.print(
-            "gc: incremental STW phase totals begin {d} ns/{d} segments, increment {d} ns/{d} segments, destroy {d} ns/{d} segments, finish {d} ns/{d} segments\n",
-            .{
-                cs.total_stw_by_kind[0], cs.total_segments_by_kind[0],
-                cs.total_stw_by_kind[1], cs.total_segments_by_kind[1],
-                cs.total_stw_by_kind[2], cs.total_segments_by_kind[2],
-                cs.total_stw_by_kind[3], cs.total_segments_by_kind[3],
-            },
-        );
-    }
+    const cs = registry.concurrent.stats;
+    try writer.print(
+        "gc: exact-target marking barrier calls {d}, exit marked-target {d}, exit unpublished-owner {d}, exit unpublished-target {d}, requeued-owner {d}, shaded-target {d}\n",
+        .{
+            cs.barrier_calls,
+            cs.barrier_marked_target,
+            cs.barrier_unpublished_owner,
+            cs.barrier_unpublished_target,
+            cs.barrier_requeued_owner,
+            cs.shaded,
+        },
+    );
+    try writer.print("gc: incremental doomed condemned headers {d}, destroyed counted objects {d}, parked entries drained {d}, parked-drain slices {d}\n", .{
+        cs.doomed_condemned_headers,
+        cs.doomed_destroyed_objects,
+        cs.doomed_parked_entries_drained,
+        cs.doomed_parked_drain_slices,
+    });
+    try writer.print(
+        "gc: incremental major cycles completed {d}, aborted {d}, forced {d}, mark steps {d}, cycle STW last {d} ns max {d} ns\n",
+        .{ cs.cycles_completed, cs.cycles_aborted, cs.forced_finishes, cs.increments, cs.last_cycle_stw_ns, cs.max_cycle_stw_ns },
+    );
+    try writer.print(
+        "gc: cycle envelope measured {d}, skipped {d}, max-P/T S {d}, T {d}, B {d}, P {d}, B/T-x1000000 {d}, P/T-x1000000 {d}, P/S-x1000000 {d}, forced {d}\n",
+        .{
+            cs.envelope_measured_cycles,
+            cs.envelope_skipped_cycles,
+            cs.envelope_max_start_bytes,
+            cs.envelope_max_threshold_bytes,
+            cs.envelope_max_begin_bytes,
+            cs.envelope_max_peak_bytes,
+            engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes),
+            engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes),
+            engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes),
+            cs.forced_finishes,
+        },
+    );
+    try writer.print(
+        "gc: incremental STW phase-segment max ns begin {d}, increment {d}, destroy {d}, finish {d}\n",
+        .{ cs.segment_max_ns[0], cs.segment_max_ns[1], cs.segment_max_ns[2], cs.segment_max_ns[3] },
+    );
+    try writer.print(
+        "gc: incremental STW phase totals begin {d} ns/{d} segments, increment {d} ns/{d} segments, destroy {d} ns/{d} segments, finish {d} ns/{d} segments\n",
+        .{
+            cs.total_stw_by_kind[0], cs.total_segments_by_kind[0],
+            cs.total_stw_by_kind[1], cs.total_segments_by_kind[1],
+            cs.total_stw_by_kind[2], cs.total_segments_by_kind[2],
+            cs.total_stw_by_kind[3], cs.total_segments_by_kind[3],
+        },
+    );
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    if (comptime engine.core.gc.block_heap_enabled) {
-        const st = registry.block_heap.stats;
-        try writer.print(
-            "gc: block heap committed {d} live {d} committed/live-x1000 {d} superblocks {d} large maps {d}\n",
-            .{
-                st.committed_bytes,
-                registry.block_heap.liveBytes(),
-                registry.block_heap.committedLiveMilli(),
-                st.superblocks,
-                st.large_maps,
-            },
-        );
-        try writer.print(
-            "gc: block heap deferred block runs {d}, hot reuse published {d}, reopened {d}, pass-A settled cells {d}\n",
-            .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.bitmap_reclaimed_cells },
-        );
-        try writer.print(
-            "gc: block heap hot publish rejects empty {d}, capacity {d}, active {d}, doomed {d}, young {d}, listed {d}, decommitted {d}, cached-k {d}, k-rejected reopens {d}\n",
-            .{
-                st.hot_publish_rejected_empty,
-                st.hot_publish_rejected_capacity,
-                st.hot_publish_rejected_active,
-                st.hot_publish_rejected_doomed,
-                st.hot_publish_rejected_young,
-                st.hot_publish_rejected_listed,
-                st.hot_publish_rejected_decommitted,
-                st.hot_publish_rejected_cached_k,
-                st.hot_blocks_k_rejected,
-            },
-        );
-        try writer.print(
-            "gc: major threshold resets growth {d}, small-heap-floor {d}\n",
-            .{ registry.stats.threshold_growth_hits, registry.stats.threshold_floor_hits },
-        );
-        // TGC S4-d spec 2.4 deletion probe. The middle number is the one that
-        // has to read 0 on every workload: a plain, payload-free, unstamped
-        // object that still reached a destructor. The third is the sticky-bit
-        // residue D-S4-4 permits (an object that stopped owing work keeps its
-        // bit and so keeps paying one no-op visit).
-        try writer.print(
-            "gc: object destructor calls {d}, plain-object calls {d}, plain objects carrying the finalizer bit {d}\n",
-            .{
-                registry.stats.object_destructor_calls,
-                registry.stats.plain_object_destructor_calls,
-                registry.stats.plain_objects_with_finalizer_bit,
-            },
-        );
-        try writer.print(
-            "gc: block heap page returns cumulative decommitted {d}, recommitted {d}\n",
-            .{ st.decommitted_bytes, st.recommitted_bytes },
-        );
-        try writer.print(
-            "gc: block heap medium superblocks returned {d}, bytes {d}\n",
-            .{ st.medium_superblocks_released, st.medium_superblock_bytes_released },
-        );
-        try writer.print(
-            "gc: block heap decommit checks {d}, released blocks cumulative {d}, current bytes {d}, max batch bytes {d}\n",
-            .{
-                st.decommit_checks,
-                st.decommitted_bytes / @max(engine.core.gc_block_heap.decommit_bytes, 1),
-                st.currentDecommittedBytes(),
-                st.decommit_max_batch_bytes,
-            },
-        );
-        try writer.print(
-            "gc: process heap trim attempts {d}, successes {d}\n",
-            .{ st.malloc_trim_attempts, st.malloc_trim_successes },
-        );
-    }
+    const st = registry.block_heap.stats;
+    try writer.print(
+        "gc: block heap committed {d} live {d} committed/live-x1000 {d} superblocks {d} large maps {d}\n",
+        .{
+            st.committed_bytes,
+            registry.block_heap.liveBytes(),
+            registry.block_heap.committedLiveMilli(),
+            st.superblocks,
+            st.large_maps,
+        },
+    );
+    try writer.print(
+        "gc: block heap deferred block runs {d}, hot reuse published {d}, reopened {d}, bitmap reclaimed cells {d}\n",
+        .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.bitmap_reclaimed_cells },
+    );
+    try writer.print(
+        "gc: block heap hot publish rejects empty {d}, capacity {d}, active {d}, doomed {d}, young {d}, listed {d}, decommitted {d}, cached-k {d}, k-rejected reopens {d}\n",
+        .{
+            st.hot_publish_rejected_empty,
+            st.hot_publish_rejected_capacity,
+            st.hot_publish_rejected_active,
+            st.hot_publish_rejected_doomed,
+            st.hot_publish_rejected_young,
+            st.hot_publish_rejected_listed,
+            st.hot_publish_rejected_decommitted,
+            st.hot_publish_rejected_cached_k,
+            st.hot_blocks_k_rejected,
+        },
+    );
+    try writer.print(
+        "gc: major threshold resets growth {d}, small-heap-floor {d}\n",
+        .{ registry.stats.threshold_growth_hits, registry.stats.threshold_floor_hits },
+    );
+    // TGC S4-d spec 2.4 deletion probe. The middle number is the one that
+    // has to read 0 on every workload: a plain, payload-free, unstamped
+    // object that still reached a destructor. The third is the sticky-bit
+    // residue D-S4-4 permits (an object that stopped owing work keeps its
+    // bit and so keeps paying one no-op visit).
+    try writer.print(
+        "gc: object destructor calls {d}, plain-object calls {d}, plain objects carrying the finalizer bit {d}\n",
+        .{
+            registry.stats.object_destructor_calls,
+            registry.stats.plain_object_destructor_calls,
+            registry.stats.plain_objects_with_finalizer_bit,
+        },
+    );
+    try writer.print(
+        "gc: block heap page returns cumulative decommitted {d}, recommitted {d}\n",
+        .{ st.decommitted_bytes, st.recommitted_bytes },
+    );
+    try writer.print(
+        "gc: block heap medium superblocks returned {d}, bytes {d}\n",
+        .{ st.medium_superblocks_released, st.medium_superblock_bytes_released },
+    );
+    try writer.print(
+        "gc: block heap decommit checks {d}, released blocks cumulative {d}, current bytes {d}, max batch bytes {d}\n",
+        .{
+            st.decommit_checks,
+            st.decommitted_bytes / @max(engine.core.gc_block_heap.decommit_bytes, 1),
+            st.currentDecommittedBytes(),
+            st.decommit_max_batch_bytes,
+        },
+    );
+    try writer.print(
+        "gc: process heap trim attempts {d}, successes {d}\n",
+        .{ st.malloc_trim_attempts, st.malloc_trim_successes },
+    );
 }
 
 fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
@@ -1146,8 +1133,8 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
         return;
     }
     try writer.print(
-        "gc: marked-set census majors {d}, headers {d}, block headers {d}, refcount-removed headers {d}\n",
-        .{ fp.major_censuses, fp.marked_headers, fp.block_headers, fp.refcount_removed_headers },
+        "gc: marked-set census majors {d}, headers {d}, block headers {d}\n",
+        .{ fp.major_censuses, fp.marked_headers, fp.block_headers },
     );
     try writer.print(
         // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
@@ -1210,21 +1197,15 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
 }
 
 fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engine.core.gc.Registry) !void {
-    const minors = if (comptime engine.core.gc.generation_enabled)
-        registry.generation.stats.minor_collections
-    else
-        0;
+    const minors = registry.generation.stats.minor_collections;
     try writer.print("gc: collection entries total {d}, major completed {d}, minor completed {d}, failed {d}\n", .{
         stats.collections,
         stats.major_gc_count,
         minors,
         stats.failed_collections,
     });
-    try writer.print("gc: collector counted objects freed {d} (excludes bytecode), zero-ref drains {d}\n", .{
+    try writer.print("gc: collector counted objects freed {d} (excludes bytecode)\n", .{
         stats.freed_objects,
-        // `zero ref drains` has no writer since the rc collector went; the
-        // token stays because tools/perf/gc_stats_snapshot.py parses the row.
-        @as(usize, 0),
     });
     try writer.print("gc: heap live {d} bytes, account peak {d} bytes\n", .{
         stats.heap_live_bytes,
@@ -1270,7 +1251,7 @@ fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
 fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
     const state = engine.core.gc_trace_stw.doomedStateSnapshot(rt);
     try writer.print(
-        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, parked_frees 0, deferred_finalizers {d}, active_finalizer {s}\n",
+        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, deferred_finalizers {d}, active_finalizer {s}\n",
         .{
             layer,
             if (state.pending) "true" else "false",

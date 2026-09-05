@@ -7,7 +7,7 @@ pub const metadata_size: usize = 8;
 pub const metadata_size_class_offset: usize = 0;
 pub const metadata_alloc_info_offset: usize = 2;
 pub const metadata_flags_offset: usize = 3;
-pub const metadata_rc_offset: usize = 4;
+pub const metadata_lifetime_offset: usize = 4;
 pub const metadata_young_mask: u8 = 1 << 4;
 
 /// GC kind tags the allocator layer writes into the prefix by hand. Kept
@@ -57,17 +57,16 @@ pub const block_cell_alloc_info: u8 = block_cell_size_class;
 /// unaccounted, non-block prefix whose kind reads `.string` (6).  The kind is
 /// not what protects the poison -- `heap_accounted` = 0 is, and it survived S2
 /// joining strings to the tracer and S4-a widening the kind into bit 3 (which
-/// the poison leaves clear, so the low nibble still reads 6).  Bit 7 was the
-/// `cycle_visited` second guard until TGC S4-h retired the flag; the bit is
-/// kept SET so the poison byte is unchanged (the allocator's free path is
-/// byte-identical), and it now lands in `BlockFlags.reserved`, where nothing
-/// reads it.  The condemnation guard itself did not move out of the free
-/// cell: it lives in the lifetime word, which the free path never writes.
+/// the poison leaves clear, so the low nibble still reads 6).  Bit 7 is
+/// `BlockFlags.reserved` and nothing reads it; it is kept SET only so the
+/// poison byte value stays 0x86 and the allocator's free path is
+/// byte-identical.  The condemnation guard is not in the free cell at all: it
+/// lives in the lifetime word, which the free path never writes.
 pub const free_cell_link_mask: u32 = 0x0000_ffff;
 pub const free_cell_poison: u32 = 0x8600_0000;
 
 comptime {
-    if (metadata_rc_offset + @sizeOf(i32) != metadata_size)
+    if (metadata_lifetime_offset + @sizeOf(i32) != metadata_size)
         @compileError("GC metadata offsets no longer fill the eight-byte prefix");
     if (block_cell_alloc_info & alloc_info_class_mask != block_cell_size_class)
         @compileError("block-cell discriminator no longer occupies the alloc_info class field");
@@ -83,7 +82,7 @@ comptime {
         @compileError("free-cell poison reads as heap-accounted");
     const poison_flags: u8 = @truncate(free_cell_poison >> 24);
     if (poison_flags & 0x80 == 0)
-        @compileError("free-cell poison must read as cycle-visited");
+        @compileError("free-cell poison byte moved off 0x86 (bit 7 is reserved and is kept set only to pin the value)");
     if (poison_flags & kind_mask != string_kind_tag)
         @compileError("free-cell poison kind nibble moved");
     if (metadata_young_mask & kind_mask != 0)

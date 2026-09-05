@@ -1,6 +1,10 @@
 # TGC S2 规格：string 家族入 tracer
 
-状态：v0.1 草案（driver，2026-09-03 夜，S1 整期门通过后起草）；上游 `docs/tracing-gc-completion-plan.md` §3 S2、§8 D5（owner 批：块 cell 载体）。
+状态：**本期已完成（S2 含 e/f/g/h1/i 全部合入 main；执行记录见 §7）**。
+本期之后被删除的机制：rope 尾部累加器（`RopeTailState`/`appendRopeTail`，依赖 rc==1）与
+`gc.string_tracer_owned` 开关已在 owner 的消融裁剪中删除，string 家族无条件由 tracer 拥有；
+`s = s + x` 的均摊 O(1) 由 S2-i 的 extensible 尾缓冲（kind 12）承担。
+原状态：v0.1 草案（driver，2026-09-03 夜，S1 整期门通过后起草）；上游 `docs/tracing-gc-completion-plan.md` §3 S2、§8 D5（owner 批：块 cell 载体）。
 基线：main（S1 合入后）。分支 `gc/tgc-s2-*`。
 
 ## 0. 目标

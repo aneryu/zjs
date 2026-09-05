@@ -1,6 +1,16 @@
 # Block-clustered deferred drain and hot reuse
 
-Status: **approved for joint implementation (owner ruling 2026-08-28).**
+Status: **SUPERSEDED (2026-09-06) — 两个半边都已被取代。**
+Pass-A/Pass-B 两遍析构（`cycle_deferred_frees`、`DeferredFreeStack`、块聚簇 drain）在 TGC S4-e 整体删除，
+普通对象死亡不再进析构，只有 `doomed ∧ needs_finalizer` 的 cell 走 finalizer；
+hot-reuse 半边由 TGC S4-f 的 **minor 末尾有界热块再发布**
+（`Heap.publishCompletedHotBlocksSlice`，`minor_hot_publish_superblock_budget = 8`，
+配 `Block.flag_hot_rejected` 拒绝缓存）取代 —— 原设计假设发布只发生在 major 拆除末尾。
+替代物：[`tracing-gc-s4-spec.md`](tracing-gc-s4-spec.md) §7（S4-e、S4-f 两条执行记录）、
+[`tracing-gc-completion-account.md`](tracing-gc-completion-account.md) §1「rc 归零」行。
+本文正文保留原样，只作历史设计与定价依据阅读。
+
+原状态：**approved for joint implementation (owner ruling 2026-08-28).**
 
 Owners: lane-d (Pass-B drain and completion proof), lane-f (hot publication,
 lazy interval preparation, and allocation). This is one mechanism with two

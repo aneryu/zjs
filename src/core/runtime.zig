@@ -2434,18 +2434,16 @@ pub const JSRuntime = struct {
                     audit.failure = error.DeferredPayloadRootDoomed;
                     return;
                 }
-                if (comptime gc.block_heap_enabled) {
-                    const cell_addr = @intFromPtr(header) - gc.metadata_prefix_size;
-                    if (audit.rt.gc.block_heap.blockOf(@ptrFromInt(cell_addr))) |block| {
-                        const index = block.cellIndex(cell_addr) orelse {
-                            audit.failure = error.DeferredPayloadRootNotLive;
-                            return;
-                        };
-                        if (!block.cellAllocated(index)) {
-                            audit.failure = error.DeferredPayloadRootNotLive;
-                        } else if (block.isDoomed(index)) {
-                            audit.failure = error.DeferredPayloadRootDoomed;
-                        }
+                const cell_addr = @intFromPtr(header) - gc.metadata_prefix_size;
+                if (audit.rt.gc.block_heap.blockOf(@ptrFromInt(cell_addr))) |block| {
+                    const index = block.cellIndex(cell_addr) orelse {
+                        audit.failure = error.DeferredPayloadRootNotLive;
+                        return;
+                    };
+                    if (!block.cellAllocated(index)) {
+                        audit.failure = error.DeferredPayloadRootNotLive;
+                    } else if (block.isDoomed(index)) {
+                        audit.failure = error.DeferredPayloadRootDoomed;
                     }
                 }
             }
@@ -3089,7 +3087,7 @@ pub const JSRuntime = struct {
         // Service the same aged-decommit policy here; otherwise explicit GC,
         // urgent pressure collections, and small-heap floor collections can
         // age free blocks forever without ever scanning them.
-        if (comptime gc.block_heap_enabled) _ = self.gc.block_heap.releaseFreeBlockPages(end_ns);
+        _ = self.gc.block_heap.releaseFreeBlockPages(end_ns);
         return result;
     }
 
@@ -3193,104 +3191,100 @@ pub const JSRuntime = struct {
         //
         // The crossing also asks a different SIZE question of the young set --
         // see `Registry.shouldTryMinorBeforeMajor`.
-        if (comptime gc.generation_enabled) {
-            const offer_minor = if (crossing)
-                self.pollScansConservatively(mode) and self.gc.shouldTryMinorBeforeMajor()
-            else
-                mode.acceptsMinor() and self.gc.shouldTryMinor();
-            if (offer_minor and !self.gc_running) {
-                self.gc_running = true;
-                defer self.gc_running = false;
-                self.memory.samplePeakAtCollection();
-                const started = profile.nowNanos();
-                if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
-                    self.gc.stats.collections += 1;
-                    const ended = profile.nowNanos();
-                    const elapsed = if (ended > started) ended - started else 0;
-                    // Tracked separately from the major distribution: a minor
-                    // is judged on being short, and averaging it with
-                    // whole-heap pauses hides exactly that.
-                    //
-                    // Counted whether or not it reclaimed anything. A minor
-                    // that frees nothing is the EXPENSIVE case, not a
-                    // non-event: it walked its roots and every remembered
-                    // owner and came back empty. Pricing those at zero made
-                    // the panel report `minor pause mean 0 ns, max 0 ns` for a
-                    // run that performed 320 of them, which is precisely the
-                    // shape anyone optimising the minor needs to see.
-                    self.gc.generation.recordMinorPause(
-                        gc.Registry.markQueueAllocator(),
-                        elapsed,
-                        @import("gc_trace_stw.zig").detailed_reports,
-                    );
-                    // TGC S2-h1 (2). The aged-decommit policy used to be
-                    // driven from major boundaries alone. S2-g took pdfjs
-                    // from 908 majors to 24, so the block decommit and the
-                    // empty-medium-superblock release stopped being offered
-                    // ~884 times per run and maxrss rose 31% (raytrace 33%)
-                    // on a live set that had FALLEN -- a superblock high
-                    // water mark, not retained garbage.
-                    //
-                    // A minor is now the same boundary: cells and medium
-                    // extents are exactly what it frees. Nothing about the
-                    // policy changes -- `releaseFreeBlockPages` keeps its own
-                    // 100 ms period gate and both idle gates
-                    // (`decommit_min_idle_ns`, `medium_release_min_idle_ns`)
-                    // -- so this only stops the offers from being withheld.
-                    // Placed after `elapsed` is taken, like the major call
-                    // sites: the release is not part of the pause it reports.
-                    // It also advances `Heap.clock_ns`, which is what makes
-                    // the idle gates measure real idleness again instead of
-                    // ageing against a clock that only ticked 24 times.
-                    if (comptime gc.block_heap_enabled) {
-                        _ = self.gc.block_heap.releaseFreeBlockPages(ended);
+        const offer_minor = if (crossing)
+            self.pollScansConservatively(mode) and self.gc.shouldTryMinorBeforeMajor()
+        else
+            mode.acceptsMinor() and self.gc.shouldTryMinor();
+        if (offer_minor and !self.gc_running) {
+            self.gc_running = true;
+            defer self.gc_running = false;
+            self.memory.samplePeakAtCollection();
+            const started = profile.nowNanos();
+            if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
+                self.gc.stats.collections += 1;
+                const ended = profile.nowNanos();
+                const elapsed = if (ended > started) ended - started else 0;
+                // Tracked separately from the major distribution: a minor
+                // is judged on being short, and averaging it with
+                // whole-heap pauses hides exactly that.
+                //
+                // Counted whether or not it reclaimed anything. A minor
+                // that frees nothing is the EXPENSIVE case, not a
+                // non-event: it walked its roots and every remembered
+                // owner and came back empty. Pricing those at zero made
+                // the panel report `minor pause mean 0 ns, max 0 ns` for a
+                // run that performed 320 of them, which is precisely the
+                // shape anyone optimising the minor needs to see.
+                self.gc.generation.recordMinorPause(
+                    gc.Registry.markQueueAllocator(),
+                    elapsed,
+                    @import("gc_trace_stw.zig").detailed_reports,
+                );
+                // TGC S2-h1 (2). The aged-decommit policy used to be
+                // driven from major boundaries alone. S2-g took pdfjs
+                // from 908 majors to 24, so the block decommit and the
+                // empty-medium-superblock release stopped being offered
+                // ~884 times per run and maxrss rose 31% (raytrace 33%)
+                // on a live set that had FALLEN -- a superblock high
+                // water mark, not retained garbage.
+                //
+                // A minor is now the same boundary: cells and medium
+                // extents are exactly what it frees. Nothing about the
+                // policy changes -- `releaseFreeBlockPages` keeps its own
+                // 100 ms period gate and both idle gates
+                // (`decommit_min_idle_ns`, `medium_release_min_idle_ns`)
+                // -- so this only stops the offers from being withheld.
+                // Placed after `elapsed` is taken, like the major call
+                // sites: the release is not part of the pause it reports.
+                // It also advances `Heap.clock_ns`, which is what makes
+                // the idle gates measure real idleness again instead of
+                // ageing against a clock that only ticked 24 times.
+                _ = self.gc.block_heap.releaseFreeBlockPages(ended);
+                const result: gc.CollectionResult = .{
+                    .freed_objects = freed,
+                    .duration_ns = elapsed,
+                };
+                // NOT `recordSuccess`: that would push a minor's duration
+                // into the major pause ring and count it as a whole-heap
+                // cycle. The minor's own pause accounting is the
+                // `generation.stats` update just above. This holds on the
+                // fall-through below too -- a minor that precedes a major
+                // in the same poll contributes its reclaim to the freed
+                // account but never its time to the major's pause ring.
+                if (freed > 0) self.gc.recordMinorSuccess(result);
+                // Deliberately NOT `resetGCThreshold()`. That sets the
+                // major threshold to 1.5x the CURRENT footprint and
+                // clears the allocation debt, and a minor has no claim
+                // to either: it did not look at the old generation, so
+                // the footprint it is measuring is mostly old garbage
+                // it cannot see. Resetting here raised the bar by half
+                // on every minor, so the more garbage accumulated the
+                // further the major receded -- the threshold outran the
+                // heap it was meant to bound. Both belong to the major.
+                if (crossing) {
+                    // The second verdict, on the account this minor left
+                    // behind. Still over means the garbage the threshold
+                    // is complaining about was not young, so fall through
+                    // to the major with the crossing intact.
+                    over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
+                    if (!over_threshold) {
+                        // The crossing WAS young churn and is now paid.
+                        // The threshold condition is level-triggered, so
+                        // the `.allocation_threshold`/`.soon` request an
+                        // allocation boundary recorded on the way up is
+                        // stale: discard exactly that request, the way
+                        // `collectBeforeObjectAllocation` does when a
+                        // prospective total falls back under the bar.
+                        _ = self.gc.clearStaleAllocationThresholdRequest();
+                        // Only the threshold's own request is retired by a
+                        // minor. A host manual GC, memory pressure or a
+                        // failure retry that happened to be queued behind
+                        // it is a promise to someone: leave the poll on its
+                        // major path so this call still keeps it.
+                        if (!self.gc.hasPendingMajorRequest()) return result;
                     }
-                    const result: gc.CollectionResult = .{
-                        .freed_objects = freed,
-                        .duration_ns = elapsed,
-                    };
-                    // NOT `recordSuccess`: that would push a minor's duration
-                    // into the major pause ring and count it as a whole-heap
-                    // cycle. The minor's own pause accounting is the
-                    // `generation.stats` update just above. This holds on the
-                    // fall-through below too -- a minor that precedes a major
-                    // in the same poll contributes its reclaim to the freed
-                    // account but never its time to the major's pause ring.
-                    if (freed > 0) self.gc.recordMinorSuccess(result);
-                    // Deliberately NOT `resetGCThreshold()`. That sets the
-                    // major threshold to 1.5x the CURRENT footprint and
-                    // clears the allocation debt, and a minor has no claim
-                    // to either: it did not look at the old generation, so
-                    // the footprint it is measuring is mostly old garbage
-                    // it cannot see. Resetting here raised the bar by half
-                    // on every minor, so the more garbage accumulated the
-                    // further the major receded -- the threshold outran the
-                    // heap it was meant to bound. Both belong to the major.
-                    if (crossing) {
-                        // The second verdict, on the account this minor left
-                        // behind. Still over means the garbage the threshold
-                        // is complaining about was not young, so fall through
-                        // to the major with the crossing intact.
-                        over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
-                        if (!over_threshold) {
-                            // The crossing WAS young churn and is now paid.
-                            // The threshold condition is level-triggered, so
-                            // the `.allocation_threshold`/`.soon` request an
-                            // allocation boundary recorded on the way up is
-                            // stale: discard exactly that request, the way
-                            // `collectBeforeObjectAllocation` does when a
-                            // prospective total falls back under the bar.
-                            _ = self.gc.clearStaleAllocationThresholdRequest();
-                            // Only the threshold's own request is retired by a
-                            // minor. A host manual GC, memory pressure or a
-                            // failure retry that happened to be queued behind
-                            // it is a promise to someone: leave the poll on its
-                            // major path so this call still keeps it.
-                            if (!self.gc.hasPendingMajorRequest()) return result;
-                        }
-                    } else if (freed > 0) {
-                        return result;
-                    }
+                } else if (freed > 0) {
+                    return result;
                 }
             }
         }
@@ -3515,7 +3509,7 @@ pub const JSRuntime = struct {
         self.gc.doomed_destroyed = 0;
         self.gc.recordIncrementalCycleSuccess(result);
         self.resetGCThreshold();
-        if (comptime gc.block_heap_enabled) _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
+        _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
         return result;
     }
 

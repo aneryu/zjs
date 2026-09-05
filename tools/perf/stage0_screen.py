@@ -57,7 +57,7 @@ METRICS: tuple[tuple[str, str, str], ...] = (
     ("cycles.minor", "minor collections", "deterministic"),
     ("pauseNs.minor.total", "minor STW total", "phase-sensitive"),
     ("blockHeap.committed", "block committed", "phase-sensitive"),
-    ("blockHeap.passASettledCells", "pass-A settled cells", "deterministic"),
+    ("blockHeap.bitmapReclaimedCells", "bitmap reclaimed cells", "deterministic"),
 )
 CONTRACT_PATHS = {path for path, _, _ in METRICS}
 
@@ -297,6 +297,23 @@ def value_at(root: dict, path: str) -> int:
     return value
 
 
+def baseline_value_at(root: dict, path: str) -> int:
+    """`value_at` over a FROZEN baseline, following the schema's renames.
+
+    A frozen baseline can never be re-emitted, so a renamed contract metric
+    has to be read out of it under its old name.  Dropping the metric would
+    silently retire a deterministic +-10% hard line; scoring it against 0
+    would be worse, because the row would then cross on every screen.
+    """
+    old_path = gc_snapshot.SCHEMA_RENAMED_LEAVES.get(path)
+    for candidate in (path,) if old_path is None else (path, old_path):
+        try:
+            return value_at(root, candidate)
+        except Stage0Error:
+            continue
+    raise Stage0Error(f"GC snapshot is missing required metric {path}")
+
+
 def ratio(after: int | float, before: int | float) -> float | None:
     if before == 0:
         return 1.0 if after == 0 else None
@@ -336,6 +353,7 @@ def compare_stats(
             "candidate GC snapshot schemaVersion precedes the frozen baseline"
         )
     baseline_optional = gc_snapshot.baseline_optional_leaves(baseline_version)
+    candidate_retired = gc_snapshot.candidate_retired_leaves(candidate_version)
     old_runs = snapshot_runs(baseline)
     new_runs = snapshot_runs(candidate)
     summary: dict[str, dict] = {}
@@ -357,15 +375,17 @@ def compare_stats(
             row = drift_row(
                 bench,
                 path,
-                value_at(old_stats, path),
+                baseline_value_at(old_stats, path),
                 value_at(new_stats, path),
             )
             row["label"] = label
             row["classification"] = classification
             metrics[label] = row
 
-        old_leaves = gc_snapshot.numeric_leaves(old_stats)
         new_leaves = gc_snapshot.numeric_leaves(new_stats)
+        old_leaves = gc_snapshot.follow_renames(
+            gc_snapshot.numeric_leaves(old_stats), new_leaves
+        )
         # Losing a metric is a broken candidate and stays fatal.  Gaining one is
         # how instrumentation grows against a FROZEN baseline snapshot: the
         # baseline JSON can never be re-emitted, so a leaf the baseline's schema
@@ -375,7 +395,12 @@ def compare_stats(
         # schema forked without a version bump, which is what let the S2 string
         # kind and the S3 atom audit diverge silently -- so it is fatal and
         # names the table that has to be updated.
-        missing_in_candidate = sorted(old_leaves.keys() - new_leaves.keys())
+        # A leaf the candidate's schema version records as REMOVED is not a
+        # dropped leaf: the row left `--gc-stats` on purpose, and the frozen
+        # baseline's value has nothing left to be scored against.
+        missing_in_candidate = sorted(
+            old_leaves.keys() - new_leaves.keys() - candidate_retired
+        )
         if missing_in_candidate:
             raise Stage0Error(
                 f"GC stats schema differs for {bench}: candidate dropped "

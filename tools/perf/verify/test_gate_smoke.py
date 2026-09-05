@@ -25,7 +25,6 @@ def stats_output(
     endpoint_headers: int = 0,
     endpoint_cursor: bool = False,
     endpoint_blocks: int = 0,
-    endpoint_parked: int = 0,
     endpoint_finalizers: int = 0,
     endpoint_active_finalizer: bool = False,
     settled_pending: bool = False,
@@ -33,7 +32,6 @@ def stats_output(
     settled_headers: int = 0,
     settled_cursor: bool = False,
     settled_blocks: int = 0,
-    settled_parked: int = 0,
     settled_finalizers: int = 0,
     settled_active_finalizer: bool = False,
     committed: int = 4096,
@@ -47,7 +45,6 @@ def stats_output(
         headers: int,
         cursor: bool,
         blocks: int,
-        parked: int,
         finalizers: int,
         active_finalizer: bool,
     ) -> str:
@@ -55,7 +52,7 @@ def stats_output(
             f"gc: {layer} doomed_pending {'true' if pending else 'false'}, "
             f"doomed_buckets {buckets}, doomed_headers {headers}, "
             f"doomed_cursor {'true' if cursor else 'false'}, "
-            f"doomed_blocks {blocks}, parked_frees {parked}, "
+            f"doomed_blocks {blocks}, "
             f"deferred_finalizers {finalizers}, "
             f"active_finalizer {'true' if active_finalizer else 'false'}"
         )
@@ -70,7 +67,6 @@ def stats_output(
                 endpoint_headers,
                 endpoint_cursor,
                 endpoint_blocks,
-                endpoint_parked,
                 endpoint_finalizers,
                 endpoint_active_finalizer,
             ),
@@ -84,7 +80,6 @@ def stats_output(
                 settled_headers,
                 settled_cursor,
                 settled_blocks,
-                settled_parked,
                 settled_finalizers,
                 settled_active_finalizer,
             ),
@@ -112,7 +107,6 @@ class GateSmokeCheckTests(unittest.TestCase):
                 endpoint_headers=7,
                 endpoint_cursor=True,
                 endpoint_blocks=2,
-                endpoint_parked=3,
                 endpoint_finalizers=4,
                 endpoint_active_finalizer=True,
             ),
@@ -130,7 +124,6 @@ class GateSmokeCheckTests(unittest.TestCase):
             stats_output(settled_headers=1),
             stats_output(settled_cursor=True),
             stats_output(settled_blocks=1),
-            stats_output(settled_parked=1),
             stats_output(settled_finalizers=1),
             stats_output(settled_active_finalizer=True),
             stats_output(milli=3999),
@@ -231,10 +224,10 @@ class GateSmokeCheckTests(unittest.TestCase):
                 "printf '%s|%s|%s\\n' \"${ZJS_GC_ARENA_AUDIT:-0}\" \"$affinity\" \"$*\" >>\"$FAKE_LOG\"\n"
                 "if [[ \"$*\" == *'--gc-gate-settle --gc-stats'* ]]; then\n"
                 "  printf '%s\\n' 'Fixture: 7' \\\n"
-                "    'gc: endpoint doomed_pending true, doomed_buckets 1, doomed_headers 7, doomed_cursor true, doomed_blocks 2, parked_frees 3, deferred_finalizers 4, active_finalizer false' \\\n"
+                "    'gc: endpoint doomed_pending true, doomed_buckets 1, doomed_headers 7, doomed_cursor true, doomed_blocks 2, deferred_finalizers 4, active_finalizer false' \\\n"
                 "    'gc: block heap committed 4096 live 1024 committed/live-x1000 4000 superblocks 1 large maps 0' \\\n"
                 "    'gc: major retirement commits 3, abandons 0, current state clean' \\\n"
-                "    'gc: settled doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 0, parked_frees 0, deferred_finalizers 0, active_finalizer false'\n"
+                "    'gc: settled doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor false, doomed_blocks 0, deferred_finalizers 0, active_finalizer false'\n"
                 "fi\n"
             )
             fake.chmod(0o755)

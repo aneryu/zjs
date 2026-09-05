@@ -28,25 +28,22 @@ still true when the second implementation no longer exists.
 zig build zjs
 ```
 
-`-Dzjs_gc` survives as a selector with exactly one legal value, `trace_stw`, so
-that a caller who passes a retired one gets a migration message rather than
-"unknown option":
-
-```
-$ zig build zjs -Dzjs_gc=rc
-error: -Dzjs_gc=rc is no longer available: rc collector removed 2026-08-29;
-use a frozen binary or checkout before 6e5d7a69
-```
+`-Dzjs_gc` was removed outright in TGC S5-a (2026-09-05). Between 2026-08-29
+and then it survived as a selector with exactly one legal value, `trace_stw`,
+so that a caller who passed a retired one got a migration message rather than
+"unknown option"; a year of that message is not worth a permanent build option,
+and `-Dzjs_gc=rc` now fails as an unknown option. The rollback story is
+unchanged: a frozen binary or a checkout before `6e5d7a69`.
 
 `-Dzjs_experimental_gc=trace_stw|off` survives as an accepted-but-redundant
 compat alias, because gate scripts and release automation still pass it.
-`-Dzjs_gc=shadow` is rejected by the same message: the Stage 1 shadow observer
-enumerated the rc heap and had nothing left to observe.
 
-`build_options.zjs_gc` remains the resolved implementation selector inside the
-engine, and `gc.trace_stw_enabled` remains a public comptime `true`. Roughly
-270 `if (comptime gc.trace_stw_enabled)` gates read it; keeping the name meant
-none of them had to move when the `else` arms were deleted.
+`build_options.zjs_gc` is gone with the option, and so are the six comptime
+`true` constants that read it (`gc.trace_stw_enabled` and its
+`generation_enabled` / `concurrent_enabled` / `block_heap_enabled` /
+`address_registry_enabled` / `space_model_enabled` aliases). The ~190
+`if (comptime ...)` gates that read them were expanded to unconditional code
+and their `else` arms deleted.
 
 The `zjs-config-v2` configuration signature describes the shipped
 compiler/value/build-safety configuration and does **not** encode the

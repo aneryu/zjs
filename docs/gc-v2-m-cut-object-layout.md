@@ -1,6 +1,9 @@
 # M 切换 r2：Object 64B 终态布局规格（driver 设计，2026-09-02）
 
-状态：**规格冻结，交 codex 按此实现**。上级文档：`docs/gc-v2-final-cut-driver-review-2026-09-02.md`（路径 M）。
+状态：**HISTORICAL / 已完成（2026-09-06）**——Object 64B 终态布局已实现并合入 main（`d944f26d`）。
+此后 TGC S4-e 又把 `ObjectFlags` u16→u32 搬到 offset 0 并删除 `weakref_count` / `slots2_layout_bit` 同字，
+故本文的字段位序应以源码与 `src/gc-representation-trace-snapshot.txt` 为准。
+原状态：**规格冻结，交 codex 按此实现**。上级文档：`docs/gc-v2-final-cut-driver-review-2026-09-02.md`（路径 M）。
 背景：M 首轮（gc/m-cut-20260902@4a455534）用「方案 A：implicit prop_values + weakref_count bit30 spill 判别」到 64B，
 把布局判别（load 状态字 + 2 分支）带进了全部对象的属性路径（getOwnDataPropertyValue 50→66、append 416→505）。
 本规格改用**方案 B′：保留 base 的常驻 `prop_values` 指针（所有对象单 load、spill=改指针、无判别位），

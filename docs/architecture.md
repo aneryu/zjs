@@ -57,22 +57,24 @@ runtime/context storage.
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
 | `gc_address_registry.zig` | Page-radix address → allocation map for conservative lookup (always on under the tracer) |
-| `gc_space.zig` | Measured size-class table and publication histogram (tests/shadow/STW; no 64 KiB blocks) |
-| `gc_sweep_model.zig` | Logical 64 KiB window sweep state machine and four debt quantities (tests/shadow/STW) |
-| `gc_block_heap.zig` | 64 KiB block heap: 2 MiB superblocks, classed cells, medium page runs, large maps (`-Dzjs_experimental_gc=trace_stw` only) |
-| `gc_slot.zig` | Stage 2 Slot-under-RC mutation protocol (no atomics) |
-| `gc_write_audit.zig` | Shadow runtime write audit of Slot-bypassing heap stores |
-| `gc_trace_stw.zig` | Experimental STW mark/sweep over the compatibility heap (`-Dzjs_experimental_gc=trace_stw`) |
+| `gc_space.zig` | Measured size-class table and publication histogram; the block heap is production, so the sizes it classifies are block-cell sizes |
+| `gc_block_heap.zig` | Production block heap: 2 MiB superblocks, 64 KiB blocks, classed cells, extents, and the four per-block bitmaps (alloc / mark / doomed / `finalizerBits`) |
+| `gc_generation.zig` | Generational state: young lists and extents, remembered set, promotion, `young_trigger_count` |
+| `gc_conservative.zig` | Conservative native stack/register scan (production root net; precise roots under `-Dzjs_gc_roots_diag`) |
+| `gc_concurrent.zig` | Incremental-major state and stats (single-threaded despite the name; rename is TGC S5-c) |
+| `gc_trace_stw.zig` | The collector: incremental mark, minor and major, condemnation and sweep |
 | `host_function.zig` | native-function ABI (`NativeCProto`, records) |
 
-Lifetime model: non-atomic reference counting for immediate free; cycle
-removal for `Object` and `FunctionBytecode` graphs. There is no nursery,
-moving, or concurrent collector. VM operand stacks and locals are carved from
+Lifetime model: a non-moving, generational (sticky mark bit), incrementally
+marking stop-the-world tracing collector owns every heap kind. There is no
+reference counting left anywhere on the heap, and no moving or concurrent
+collector. Ordinary object death is a bitmap operation; only the
+`needs_finalizer` population runs a destructor. VM operand stacks and locals are carved from
 a `VmStackArena` and released with the frame; they are not individually linked
-as per-frame roots. When tracing roots are live (`value_root_frames_enabled`),
-the exec-owned `ActiveInvocationTrace` prefix exposes those semantic live
-windows without teaching core the VM layout; default `rc` erases the call at
-compile time. The same gated path snapshots `Atomics.waitAsync` waiter
+as per-frame roots. The exec-owned `ActiveInvocationTrace` prefix exposes those semantic live
+windows without teaching core the VM layout; in production only
+container/window value-root frames are linked
+(`value_root_link_containers_only`) and the scalar arms are compiled out. The same gated path snapshots `Atomics.waitAsync` waiter
 Promises through `trace_atomics_wait_async`. Host values that outlive a call
 must use public handles, not a raw `JSValue`.
 

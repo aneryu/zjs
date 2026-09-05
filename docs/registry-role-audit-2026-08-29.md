@@ -1,5 +1,8 @@
 # 登记簿职责审计:block-cell 对象还需要逐对象登记吗?(2026-08-29)
 
+状态：**HISTORICAL（2026-09-06）**——审计结论已被后续分期消化（登记簿仍在，逐对象登记的成本账在
+GC v2 M/S4a 与 tracing-gc S4-b/c/g 之后重新分布）。留作方法学与历史符号账。
+
 基线 `4c621491`(worktree `/home/aneryu/worktrees/opus-registry-audit`,分支
 `gc/opus-registry-audit`)。任务假设是:splay 符号账里 `serveObjectCells`
 0.163G + `addInitialized*` 0.167G + `removeGcObjectAfter`+`unlinkObjectWithBytes`

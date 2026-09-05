@@ -1,6 +1,9 @@
 # TGC S1 规格：Shape / Realm / BigInt 去 rc
 
-状态：v0.1（driver 规格，2026-09-03）；上游计划 `docs/tracing-gc-completion-plan.md` §3 S1。
+状态：**本期已完成（S1 全部合入 main，2026-09-03；执行记录见本文「执行记录」节）**。
+本期之后被删除的机制：shape/realm/bigint 的 `ref_count` 与 `retain/release` 已随 rc 归零全部消失，
+`RefCountHeader`/`StringHeader` 于 S2 删除、`JSValue.dup/free` 于 owner 消融裁剪中删除。
+原状态：v0.1（driver 规格，2026-09-03）；上游计划 `docs/tracing-gc-completion-plan.md` §3 S1。
 基线：main（S0 e5115fd4 + 消融 gc/ablation-20260903 合入后）。分支 `gc/tgc-s1-20260903`。
 
 ## 0. 目标与拆批

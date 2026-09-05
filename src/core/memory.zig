@@ -17,10 +17,6 @@ const gc_block_heap = @import("gc_block_heap.zig");
 const gc_carrier = @import("gc_carrier.zig");
 
 const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
-/// Exact per-allocation cycle peaks (§1.3 envelope) are tracked only when
-/// the tracing collector is the build's collector -- always, today.
-const cycle_envelope_tracking_available = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
-const block_heap_enabled = std.mem.eql(u8, build_options.zjs_gc, "trace_stw");
 const block_generation_enabled = gc_carrier.block_generation_enabled;
 const extent_identity_enabled = gc_carrier.extent_identity_enabled;
 const lifecycle_state_enabled = gc_carrier.lifecycle_state_enabled;
@@ -45,16 +41,6 @@ const extent_tracking_enabled = gc_carrier.extent_tracking_enabled;
 /// vtable instead, and schedule fail-injection toward not-yet-failed sites.
 pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
 
-/// Does a collector in this build need to find an arena from an interior
-/// pointer?
-///
-/// The tracing collector scans conservatively and resolves a stack word
-/// against the heap: self-aligned arenas, the `magic` word in the arena
-/// header, the lifetime observer, and the class-byte stamps all exist for that
-/// one query. Mirrors `gc.address_registry_enabled`, which cannot be imported
-/// here -- `gc.zig` depends on this module, not the other way round.
-pub const arena_addressable: bool = std.mem.eql(u8, build_options.zjs_gc, "trace_stw") or
-    builtin.is_test;
 pub const force_gc_on_allocation_enabled: bool = build_options.zjs_force_gc;
 
 pub const NonBlockObjectPrepare = *const fn (*anyopaque) std.mem.Allocator.Error!void;
@@ -170,7 +156,7 @@ pub const SmallObjectSlab = struct {
     /// runtime. The arena is a whole page either way, so alignment costs the
     /// backing allocator nothing it was not already paying.
     pub const arena_alignment: std.mem.Alignment =
-        if (arena_addressable) .fromByteUnits(arena_size) else slab_alignment;
+        .fromByteUnits(arena_size);
     const free_nil: u16 = std.math.maxInt(u16);
     const block_sizes = [_]usize{
         16,  24,  32,  40,  48,  56,  64,  72,
@@ -230,7 +216,7 @@ pub const SmallObjectSlab = struct {
     pub const arena_magic: u32 = 0x5a4a5341;
 
     const Arena = struct {
-        magic: if (arena_addressable) u32 else void = if (arena_addressable) arena_magic else {},
+        magic: u32 = arena_magic,
         next: ?*Arena = null,
         prev: ?*Arena = null,
         free_next: ?*Arena = null,
@@ -255,21 +241,18 @@ pub const SmallObjectSlab = struct {
     /// Trace-only physical backing for the 4 KiB arenas. Logical payload
     /// accounting and limits still belong to MemoryAccount; this only keeps
     /// arena refills off glibc's high-alignment malloc path.
-    arena_backing: if (arena_addressable) ?std.mem.Allocator else void =
-        if (arena_addressable) null else {},
+    arena_backing: ?std.mem.Allocator = null,
     /// Told when an arena is created or released, so the collector can keep a
     /// set of valid arena bases. Arena lifetime, not object lifetime: at 4 KiB
     /// per arena against ~64-byte objects this is roughly two orders of
     /// magnitude less traffic than registering each published object.
-    arena_observer: if (arena_addressable) ?ArenaObserver else void =
-        if (arena_addressable) null else {},
+    arena_observer: ?ArenaObserver = null,
 
     pub inline fn canUse(byte_count: usize, alignment: std.mem.Alignment) bool {
         return classIndex(byte_count, alignment) != null;
     }
 
     pub fn setArenaBacking(self: *SmallObjectSlab, allocator: std.mem.Allocator) void {
-        if (comptime !arena_addressable) return;
         for (self.arenas) |head| std.debug.assert(head == null);
         self.arena_backing = allocator;
     }
@@ -382,10 +365,8 @@ pub const SmallObjectSlab = struct {
     noinline fn releaseEmptyArena(self: *SmallObjectSlab, backing: *const std.mem.Allocator, index: usize, arena: *Arena) void {
         self.removeArena(index, arena);
         self.removeFreeArena(index, arena);
-        if (comptime arena_addressable) {
-            if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
-            arena.magic = 0;
-        }
+        if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
+        arena.magic = 0;
         self.arenaBacking(backing.*).rawFree(arenaAllocation(arena), arena_alignment, @returnAddress());
     }
 
@@ -394,10 +375,8 @@ pub const SmallObjectSlab = struct {
             var arena = head.*;
             while (arena) |node| {
                 arena = node.next;
-                if (comptime arena_addressable) {
-                    if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(node));
-                    node.magic = 0;
-                }
+                if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(node));
+                node.magic = 0;
                 self.arenaBacking(backing).rawFree(arenaAllocation(node), arena_alignment, @returnAddress());
             }
         }
@@ -413,7 +392,7 @@ pub const SmallObjectSlab = struct {
         std.debug.assert(block_count > 0 and block_count <= free_nil);
         const alloc_size = arena_header_size + block_count * block_size;
         const storage_ptr = self.arenaBacking(backing).rawAlloc(alloc_size, arena_alignment, @returnAddress()) orelse return error.OutOfMemory;
-        if (comptime arena_addressable) std.debug.assert(@intFromPtr(storage_ptr) % arena_size == 0);
+        std.debug.assert(@intFromPtr(storage_ptr) % arena_size == 0);
         const arena: *Arena = @ptrCast(@alignCast(storage_ptr));
         arena.* = .{
             .block_size_idx = @intCast(index),
@@ -432,13 +411,11 @@ pub const SmallObjectSlab = struct {
             // of a conservative candidate is a live GC object. A stale
             // `heap_accounted` bit in a never-allocated block makes the tracer
             // walk garbage as if it were an object.
-            if (comptime arena_addressable) header.block_size_idx = @intCast(index);
+            header.block_size_idx = @intCast(index);
         }
         self.addArenaList(index, arena);
         self.addFreeArena(index, arena);
-        if (comptime arena_addressable) {
-            if (self.arena_observer) |observer| observer.on_create(observer.ctx, @intFromPtr(arena));
-        }
+        if (self.arena_observer) |observer| observer.on_create(observer.ctx, @intFromPtr(arena));
         return arena;
     }
 
@@ -512,7 +489,6 @@ pub const SmallObjectSlab = struct {
     /// a candidate pointing at the prefix and one pointing at the object both
     /// land on the same block and resolve identically.
     pub fn userPtrWithinArena(base: usize, addr: usize) ?[*]u8 {
-        if (comptime !arena_addressable) return null;
         const arena: *Arena = @ptrFromInt(base);
         if (arena.magic != arena_magic) return null;
         const blocks = @intFromPtr(arenaBlocks(arena));
@@ -537,7 +513,6 @@ pub const SmallObjectSlab = struct {
         context: *anyopaque,
         visit: *const fn (ctx: *anyopaque, user: [*]u8, is_free: bool) void,
     ) void {
-        if (comptime !arena_addressable) return;
         const arena: *Arena = @ptrFromInt(base);
         if (arena.magic != arena_magic) return;
         const block_size = block_sizes[arena.block_size_idx];
@@ -581,8 +556,7 @@ pub const SmallObjectSlab = struct {
     }
 
     inline fn arenaBacking(self: *const SmallObjectSlab, fallback: std.mem.Allocator) std.mem.Allocator {
-        if (comptime arena_addressable) return self.arena_backing orelse fallback;
-        return fallback;
+        return self.arena_backing orelse fallback;
     }
 
     fn addArenaList(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
@@ -650,8 +624,7 @@ pub const MemoryAccount = struct {
     /// the settled S/T reset through the next incremental cycle's completion;
     /// null keeps an ordinary tracing run to one predictable branch per
     /// account credit.
-    cycle_peak_output: if (cycle_envelope_tracking_available) ?*usize else void =
-        if (cycle_envelope_tracking_available) null else {},
+    cycle_peak_output: ?*usize = null,
     alloc_calls: usize = 0,
     free_calls: usize = 0,
     create_calls: usize = 0,
@@ -665,12 +638,11 @@ pub const MemoryAccount = struct {
     /// allocator directly and the default RC build carries neither this
     /// pointer nor a dead nullable-function-pointer branch. The Object kind's
     /// byte encoding is part of the shared allocator representation above.
-    gc_object_cell_heap: if (block_heap_enabled) ?*gc_block_heap.Heap else void =
-        if (block_heap_enabled) null else {},
-    gc_extent_identity: if (block_heap_enabled and extent_identity_enabled) gc_carrier.ExtentIdentityAuthority else void =
-        if (block_heap_enabled and extent_identity_enabled) .{} else {},
-    gc_extent_lifecycle: if (block_heap_enabled and lifecycle_state_enabled) gc_carrier.ExtentLifecycleAuthority else void =
-        if (block_heap_enabled and lifecycle_state_enabled) .{} else {},
+    gc_object_cell_heap: ?*gc_block_heap.Heap = null,
+    gc_extent_identity: if (extent_identity_enabled) gc_carrier.ExtentIdentityAuthority else void =
+        if (extent_identity_enabled) .{} else {},
+    gc_extent_lifecycle: if (lifecycle_state_enabled) gc_carrier.ExtentLifecycleAuthority else void =
+        if (lifecycle_state_enabled) .{} else {},
     gc_heap_oracle: if (heap_accounting_oracle_enabled) ?*gc_carrier.HeapAccountingOracle else void =
         if (heap_accounting_oracle_enabled) null else {},
 
@@ -1179,7 +1151,6 @@ pub const MemoryAccount = struct {
     }
 
     pub fn reserveGcExtent(self: *MemoryAccount) !gc_carrier.ExtentReservation {
-        comptime std.debug.assert(block_heap_enabled);
         comptime std.debug.assert(extent_tracking_enabled);
         try self.prepareGcRawAudit();
         if (comptime lifecycle_state_enabled) {
@@ -1201,7 +1172,6 @@ pub const MemoryAccount = struct {
         accounted_bytes: usize,
         kind: u8,
     ) void {
-        comptime std.debug.assert(block_heap_enabled);
         comptime std.debug.assert(extent_tracking_enabled);
         if (comptime extent_identity_enabled) {
             self.gc_extent_identity.commit(reservation, .{
@@ -1247,7 +1217,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn carrierGenerationHandle(self: *const MemoryAccount, base: usize) ?gc_carrier.AllocationHandle {
-        comptime std.debug.assert(block_heap_enabled and block_generation_enabled and extent_identity_enabled);
+        comptime std.debug.assert(block_generation_enabled and extent_identity_enabled);
         if (self.gc_object_cell_heap) |heap| {
             if (heap.generationHandle(base, gc_prefix_size)) |handle| return handle;
         }
@@ -1255,7 +1225,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn carrierTransition(self: *MemoryAccount, base: usize, state: gc_carrier.LifecycleState) gc_carrier.ResolveError!void {
-        comptime std.debug.assert(block_heap_enabled and lifecycle_state_enabled);
+        comptime std.debug.assert(lifecycle_state_enabled);
         if (self.gc_object_cell_heap) |heap| {
             if (heap.containsAllocatedCell(base, gc_prefix_size)) {
                 return heap.transitionCell(base, gc_prefix_size, state);
@@ -1265,7 +1235,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn carrierPublish(self: *MemoryAccount, base: usize, accounted_bytes: usize) gc_carrier.ResolveError!void {
-        comptime std.debug.assert(block_heap_enabled and lifecycle_state_enabled);
+        comptime std.debug.assert(lifecycle_state_enabled);
         if (self.gc_object_cell_heap) |heap| {
             if (heap.containsAllocatedCell(base, gc_prefix_size)) {
                 return heap.publishCell(base, gc_prefix_size, accounted_bytes);
@@ -1275,7 +1245,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn beginGcRawFree(self: *MemoryAccount, base: usize) void {
-        comptime std.debug.assert(block_heap_enabled and (block_tracking_enabled or extent_tracking_enabled));
+        comptime std.debug.assert(block_tracking_enabled or extent_tracking_enabled);
         if (comptime builtin.is_test) {
             if (comptime extent_identity_enabled) {}
         }
@@ -1286,7 +1256,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn finishExtentGcRawFree(self: *MemoryAccount, base: usize) void {
-        comptime std.debug.assert(block_heap_enabled and extent_tracking_enabled);
+        comptime std.debug.assert(extent_tracking_enabled);
         if (comptime lifecycle_state_enabled) {
             self.gc_extent_lifecycle.finishRawFree(base) catch
                 @panic("gc: CARRIER IDENTITY: extent lifecycle removed before raw free commit");
@@ -1308,10 +1278,10 @@ pub const MemoryAccount = struct {
     }
 
     pub fn deinitGcCarrier(self: *MemoryAccount) void {
-        if (comptime block_heap_enabled and extent_identity_enabled) {
+        if (comptime extent_identity_enabled) {
             self.gc_extent_identity.deinit(std.heap.page_allocator);
         }
-        if (comptime block_heap_enabled and lifecycle_state_enabled) {
+        if (comptime lifecycle_state_enabled) {
             self.gc_extent_lifecycle.deinit(std.heap.page_allocator);
         }
         if (comptime heap_accounting_oracle_enabled) self.gc_heap_oracle = null;
@@ -1398,7 +1368,7 @@ pub const MemoryAccount = struct {
         // of the selected kind directly to its block heap. The build-mode arm
         // is comptime-eliminated in RC; the direct call also lets the compiler
         // specialize the block size class for fixed-size Object allocations.
-        if (comptime block_heap_enabled and is_gc) {
+        if (comptime is_gc) {
             if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
                 if (comptime gc_block_heap.canAllocCellSize(gc_prefix_size + payload_size)) {
                     if (self.gc_object_cell_heap) |heap| {
@@ -1512,7 +1482,7 @@ pub const MemoryAccount = struct {
         const bytes_ptr: [*]u8 = @ptrCast(ptr);
         // Collector-served cell goes home first: the marker byte is in the
         // prefix this free is already about to touch.
-        if (comptime block_heap_enabled and is_gc) {
+        if (comptime is_gc) {
             if (comptime T.gc_kind_tag == gc_representation.object_kind_tag and
                 gc_block_heap.canAllocCellSize(gc_prefix_size + payload_size))
             {
@@ -1629,29 +1599,27 @@ pub const MemoryAccount = struct {
         // createInternal's direct block route: only the authorized GC kind can enter,
         // and medium/large requests are declined by allocCell and fall through
         // to the compatibility slab without acquiring a partial block.
-        if (comptime block_heap_enabled) {
-            if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
-                if (self.gc_object_cell_heap) |heap| {
-                    const prospective_accounted = gc_block_heap.accountedBodyBytesForRequest(
-                        gc_prefix_size + payload_bytes,
-                        gc_prefix_size,
-                    ) orelse unreachable;
-                    try self.checkAllocation(prospective_accounted);
-                    if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
-                    if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
-                    if ((heap.allocCell(gc_prefix_size + payload_bytes) catch null)) |cell| {
-                        initGcPrefixBlockCell(T, cell);
-                        self.creditAlloc(prospective_accounted, null);
-                        if (comptime block_tracking_enabled) {
-                            self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, prospective_accounted);
-                        }
-                        self.noteAllocDiagnostics(true, 1, prospective_accounted, @intFromPtr(cell) + gc_prefix_size);
-                        return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
+        if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
+            if (self.gc_object_cell_heap) |heap| {
+                const prospective_accounted = gc_block_heap.accountedBodyBytesForRequest(
+                    gc_prefix_size + payload_bytes,
+                    gc_prefix_size,
+                ) orelse unreachable;
+                try self.checkAllocation(prospective_accounted);
+                if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
+                if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
+                if ((heap.allocCell(gc_prefix_size + payload_bytes) catch null)) |cell| {
+                    initGcPrefixBlockCell(T, cell);
+                    self.creditAlloc(prospective_accounted, null);
+                    if (comptime block_tracking_enabled) {
+                        self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, prospective_accounted);
                     }
+                    self.noteAllocDiagnostics(true, 1, prospective_accounted, @intFromPtr(cell) + gc_prefix_size);
+                    return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
                 }
-                if (comptime prepare_nonblock) |prepare| {
-                    try prepare(prepare_context orelse unreachable);
-                }
+            }
+            if (comptime prepare_nonblock) |prepare| {
+                try prepare(prepare_context orelse unreachable);
             }
         }
         // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566)
@@ -1748,7 +1716,7 @@ pub const MemoryAccount = struct {
         // Objects. Debit the logical Object+tail payload and return the exact
         // cell to the classed block; no class reclassification or partial-block
         // reuse is introduced here.
-        if (comptime block_heap_enabled and T.gc_kind_tag == gc_representation.object_kind_tag) {
+        if (comptime T.gc_kind_tag == gc_representation.object_kind_tag) {
             if (info & alloc_info_class_mask == alloc_info_block_cell) {
                 if (self.gc_object_cell_heap) |heap| {
                     const accounted = gc_block_heap.accountedBodyBytesForRequest(
@@ -1800,7 +1768,6 @@ pub const MemoryAccount = struct {
     /// (TGC S4-a). It is comptime so each caller keeps the single-store
     /// prefix write it had when the tag was hard-coded.
     pub fn createStringCell(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) !?[*]u8 {
-        comptime std.debug.assert(block_heap_enabled);
         comptime std.debug.assert(kind_tag <= gc_representation.kind_mask);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (!gc_block_heap.canAllocCellSize(total_bytes)) return null;
@@ -1822,7 +1789,6 @@ pub const MemoryAccount = struct {
     /// Return a string-family block cell (see `createStringCell`). `payload`
     /// is the body pointer (cell base + 8); accounting mirrors
     pub fn destroyStringCell(self: *MemoryAccount, payload: *const anyopaque, total_bytes: usize) void {
-        comptime std.debug.assert(block_heap_enabled);
         const heap = self.gc_object_cell_heap orelse unreachable;
         const accounted = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(payload));
@@ -1855,7 +1821,6 @@ pub const MemoryAccount = struct {
     /// comptime so each caller keeps the single-store prefix write the string
     /// path had when the tag was hard-coded.
     pub fn createExtent(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) ![]u8 {
-        comptime std.debug.assert(block_heap_enabled);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         std.debug.assert(!gc_block_heap.canAllocCellSize(total_bytes));
         const heap = self.gc_object_cell_heap orelse return error.OutOfMemory;
@@ -1891,7 +1856,6 @@ pub const MemoryAccount = struct {
     /// body pointer (base + 8); the registry side (`unpublishStringExtent`)
     /// has already run. Mirrors `destroyWithFam`'s standalone arm.
     pub fn destroyStringExtent(self: *MemoryAccount, payload: *const anyopaque, total_bytes: usize) void {
-        comptime std.debug.assert(block_heap_enabled);
         const heap = self.gc_object_cell_heap orelse unreachable;
         const body = @intFromPtr(payload);
         if (comptime diagnostic_accounting_enabled) self.traceFree(body);
@@ -1941,7 +1905,6 @@ pub const MemoryAccount = struct {
     /// `destroyStringCell` writes -- everything except the byte debit, which
     /// happened once at condemnation (`debitBlockBytes`).
     pub fn noteBlockCellBitmapReclaim(self: *MemoryAccount, payload: *const anyopaque) void {
-        comptime std.debug.assert(block_heap_enabled);
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(payload));
         if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(payload));
         self.noteFreeDiagnostics(true);
@@ -1987,7 +1950,6 @@ pub const MemoryAccount = struct {
     /// bodies). That blindspot arrived with the tracing collector (7fc2c9e9)
     /// and is what shrank the canary's injectable window from 9 to 6.
     pub fn useIndependentSmallObjectSlabArenaBacking(self: *MemoryAccount) void {
-        if (comptime !arena_addressable) return;
         if (comptime builtin.is_test) return;
         self.small_slab.setArenaBacking(std.heap.smp_allocator);
     }
@@ -2054,19 +2016,16 @@ pub const MemoryAccount = struct {
     /// Route account credits to one pacing window's peak. The caller owns the
     /// destination and must keep it stable until `endCyclePeakTracking`.
     pub fn beginCyclePeakTracking(self: *MemoryAccount, output: *usize) void {
-        if (comptime !cycle_envelope_tracking_available) return;
         std.debug.assert(self.cycle_peak_output == null);
         output.* = self.allocated_bytes;
         self.cycle_peak_output = output;
     }
 
     pub fn endCyclePeakTracking(self: *MemoryAccount) void {
-        if (comptime !cycle_envelope_tracking_available) return;
         self.cycle_peak_output = null;
     }
 
     inline fn noteCyclePeak(self: *MemoryAccount) void {
-        if (comptime !cycle_envelope_tracking_available) return;
         if (self.cycle_peak_output) |peak| peak.* = @max(peak.*, self.allocated_bytes);
     }
 

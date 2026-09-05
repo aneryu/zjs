@@ -85,9 +85,9 @@ GC_HEAVY_SIX = (
 FORBIDDEN_CPUS = frozenset((*range(5, 10), *range(15, 20)))
 
 # Snapshot schema version, stamped on every captured artifact.  Bump it in the
-# same change that adds or removes a JSON leaf, and record the added leaves in
-# `SCHEMA_ADDED_LEAVES` below.
-SCHEMA_VERSION = 8
+# same change that adds or removes a JSON leaf, and record the leaves in
+# `SCHEMA_ADDED_LEAVES` / `SCHEMA_REMOVED_LEAVES` below.
+SCHEMA_VERSION = 9
 
 # Leaves that a schema version is the first to guarantee.
 #
@@ -110,6 +110,51 @@ SCHEMA_ADDED_LEAVES: dict[int, tuple[str, ...]] = {
         "markFootprint.byKind.string",
     ),
     8: ("markFootprint.byKind.bigInt", "markFootprint.byKind.storage"),
+    9: (
+        "atomAudit.staleEdge",
+        "atomAudit.shellEdge",
+        "blockHeap.bitmapReclaimedCells",
+    ),
+}
+
+# Leaves a schema version is the first to STOP emitting.
+#
+# The mirror of the table above, and it exists for the same reason: a frozen
+# baseline can never be re-emitted, so once a row leaves `--gc-stats` every
+# comparison against a pre-removal baseline would report a dropped leaf --
+# which is otherwise the signature of a broken capture and stays fatal.
+#
+# A candidate stamped version N may be missing the rows listed for N and for
+# every earlier version.  The baseline's value for such a leaf is not scored:
+# there is nothing to score it against, and the row is gone on purpose.
+SCHEMA_REMOVED_LEAVES: dict[int, tuple[str, ...]] = {
+    9: (
+        # TGC S5-a: the last refcounting-era rows.  `zeroRefDrains` had no
+        # writer and printed a literal 0; `refcountRemovedHeaders` was
+        # identically `markedHeaders` once every kind became tracer-owned;
+        # `passASettledCells` was renamed to the counter it has actually
+        # reported since S4-e (`blockHeap.bitmapReclaimedCells`); and the atom
+        # audit's `missingEdge`/`overMarked` never matched the row the engine
+        # prints (`stale-edge`/`shell-edge`), so they were a constant 0.
+        "atomAudit.missingEdge",
+        "atomAudit.overMarked",
+        "blockHeap.passASettledCells",
+        "collector.zeroRefDrains",
+        "markFootprint.refcountRemovedHeaders",
+    ),
+}
+
+# Leaves that changed NAME without changing meaning: new path -> old path.
+#
+# A rename is not an addition plus a removal.  Scored that way it retires the
+# old series (a deterministic contract metric would silently stop being
+# checked) and opens the new one against a baseline of 0, which crosses every
+# threshold on the first comparison and says nothing.  A frozen baseline
+# answers for the new path under its old name instead.
+SCHEMA_RENAMED_LEAVES: dict[str, str] = {
+    # TGC S5-a: the counter has reported bitmap reclamation since S4-e retired
+    # Pass-A settlement; the panel row and the leaf now say so.
+    "blockHeap.bitmapReclaimedCells": "blockHeap.passASettledCells",
 }
 
 # The inline-property rows carry seven columns; only these three are held to
@@ -269,7 +314,7 @@ def parse_gc_stats(text: str) -> dict:
     )
     collector = one_match(
         text,
-        r"^gc: collector counted objects freed (?P<objects_freed>\d+) \(excludes bytecode\), zero-ref drains (?P<zero_ref_drains>\d+)$",
+        r"^gc: collector counted objects freed (?P<objects_freed>\d+) \(excludes bytecode\)$",
         "collector outcome",
     )
     heap = one_match(
@@ -299,7 +344,7 @@ def parse_gc_stats(text: str) -> dict:
     )
     block_reuse = one_match(
         text,
-        r"^gc: block heap deferred block runs (?P<deferred_block_runs>\d+), hot reuse published (?P<hot_reuse_published>\d+), reopened (?P<reopened>\d+), pass-A settled cells (?P<pass_a_settled_cells>\d+)$",
+        r"^gc: block heap deferred block runs (?P<deferred_block_runs>\d+), hot reuse published (?P<hot_reuse_published>\d+), reopened (?P<reopened>\d+), bitmap reclaimed cells (?P<bitmap_reclaimed_cells>\d+)$",
         "block reuse",
     )
     thresholds = one_match(
@@ -415,22 +460,33 @@ def parse_gc_stats(text: str) -> dict:
     )
     marked = one_match(
         text,
-        r"^gc: marked-set census majors (?P<majors>\d+), headers (?P<headers>\d+), block headers (?P<block_headers>\d+), refcount-removed headers (?P<refcount_removed_headers>\d+)$",
+        r"^gc: marked-set census majors (?P<majors>\d+), headers (?P<headers>\d+), block headers (?P<block_headers>\d+)$",
         "marked-set census",
     )
     # TGC S3-a §2.6 shadow audit. Optional: binaries older than S3-a do not
-    # print the row at all, so a missing match reads as zero and adds no
-    # validation of its own (the audit is expected non-zero until S3-b).
+    # print the row at all, so a missing match reads as zero.
+    #
+    # The column names here were `missing-edge`/`over-marked` until TGC S5-a,
+    # which is not what `dumpAtomAuditStats` has ever printed -- the row never
+    # matched, the fallback fired on every capture, and `atomAudit` reported a
+    # silent zero for a live audit.  A parser that cannot see its row is worse
+    # than no parser, so `stale_edge` is now asserted to be zero as well: it
+    # counts atom edges the tracer reached through a stale table entry, which
+    # is a correctness failure, not a rate.
     atom_audit_match = re.search(
-        r"^gc: atom audit missing-edge (?P<missing_edge>\d+), over-marked (?P<over_marked>\d+), entries (?P<entries>\d+)$",
+        r"^gc: atom audit stale-edge (?P<stale_edge>\d+), shell-edge (?P<shell_edge>\d+), entries (?P<entries>\d+)$",
         text,
         re.MULTILINE,
     )
     atom_audit = (
         {key: int(value) for key, value in atom_audit_match.groupdict().items()}
         if atom_audit_match is not None
-        else {"missing_edge": 0, "over_marked": 0, "entries": 0}
+        else {"stale_edge": 0, "shell_edge": 0, "entries": 0}
     )
+    if atom_audit["stale_edge"] != 0:
+        raise SnapshotError(
+            f"atom audit reports {atom_audit['stale_edge']} stale-edge hits"
+        )
     marked_kinds = one_match(
         text,
         r"^gc: marked-set kinds object (?P<object>\d+), function-bytecode (?P<function_bytecode>\d+), var-ref (?P<var_ref>\d+), realm-context (?P<realm_context>\d+), module (?P<module>\d+), shape (?P<shape>\d+)(?:, big-int (?P<big_int>\d+))?(?:, string (?P<string>\d+))?(?:, storage (?P<storage>\d+))?$",
@@ -576,17 +632,6 @@ def parse_gc_stats(text: str) -> dict:
     # census covers both populations and cannot be held under objects alone.
     if marked["block_headers"] > marked_kinds["object"] + marked_kinds.get("string", 0) + marked_kinds.get("storage", 0):
         raise SnapshotError("marked block headers exceed marked block-cell kinds")
-    # Every gc.Header kind is tracer-owned since TGC S1/S2; big-int and string
-    # are optional in the row so pre-S1/pre-S2 baseline binaries still parse.
-    expected_refcount_removed = sum(
-        marked_kinds.get(key, 0)
-        for key in (
-            "object", "function_bytecode", "var_ref", "module", "shape",
-            "realm_context", "big_int", "string", "storage",
-        )
-    )
-    if marked["refcount_removed_headers"] != expected_refcount_removed:
-        raise SnapshotError("refcount-removed marked partition is inconsistent")
     if storage["base"]["allocation_touches"] != marked["headers"]:
         raise SnapshotError("base allocation touches differ from marked headers")
     if storage["shape"]["allocation_touches"] != marked_kinds["object"]:
@@ -657,8 +702,8 @@ def parse_gc_stats(text: str) -> dict:
 
     return {
         "atomAudit": {
-            "missingEdge": atom_audit["missing_edge"],
-            "overMarked": atom_audit["over_marked"],
+            "staleEdge": atom_audit["stale_edge"],
+            "shellEdge": atom_audit["shell_edge"],
             "entries": atom_audit["entries"],
         },
         "allocations": {
@@ -708,7 +753,7 @@ def parse_gc_stats(text: str) -> dict:
             "deferredBlockRuns": block_reuse["deferred_block_runs"],
             "hotReusePublished": block_reuse["hot_reuse_published"],
             "reopened": block_reuse["reopened"],
-            "passASettledCells": block_reuse["pass_a_settled_cells"],
+            "bitmapReclaimedCells": block_reuse["bitmap_reclaimed_cells"],
         },
         "cycles": {
             "collectionEntries": collections["entries"],
@@ -741,7 +786,6 @@ def parse_gc_stats(text: str) -> dict:
         },
         "collector": {
             "objectsFreed": collector["objects_freed"],
-            "zeroRefDrains": collector["zero_ref_drains"],
         },
         "generation": {
             "currentYoung": generation["young"],
@@ -802,7 +846,6 @@ def parse_gc_stats(text: str) -> dict:
                 else marked["headers"] * 1000 // marked["majors"]
             ),
             "blockHeaders": marked["block_headers"],
-            "refcountRemovedHeaders": marked["refcount_removed_headers"],
             "byKind": {
                 "object": marked_kinds["object"],
                 "functionBytecode": marked_kinds["function_bytecode"],
@@ -813,10 +856,7 @@ def parse_gc_stats(text: str) -> dict:
                 # Optional in the printed row (pre-S1/pre-S2 binaries omit
                 # them), so the JSON schema has to stay stable across
                 # baseline/candidate: an absent column reports as zero rather
-                # than dropping the leaf.  `bigInt` was parsed and validated
-                # against `refcountRemovedHeaders` long before it was exported,
-                # which left the only tracer-owned kind that a screen could not
-                # see move.
+                # than dropping the leaf.
                 "bigInt": marked_kinds.get("big_int", 0),
                 "string": marked_kinds.get("string", 0),
                 "storage": marked_kinds.get("storage", 0),
@@ -964,6 +1004,25 @@ def baseline_optional_leaves(baseline_version: int) -> set[str]:
     }
 
 
+def follow_renames(baseline_leaves: dict[str, int], candidate_leaves: dict[str, int]) -> dict[str, int]:
+    """Re-key a baseline's leaves onto the candidate's current names."""
+    resolved = dict(baseline_leaves)
+    for new_path, old_path in SCHEMA_RENAMED_LEAVES.items():
+        if new_path in candidate_leaves and new_path not in resolved and old_path in resolved:
+            resolved[new_path] = resolved.pop(old_path)
+    return resolved
+
+
+def candidate_retired_leaves(candidate_version: int) -> set[str]:
+    """Leaves a candidate stamped `candidate_version` is allowed to be missing."""
+    return {
+        path
+        for version, paths in SCHEMA_REMOVED_LEAVES.items()
+        if version <= candidate_version
+        for path in paths
+    }
+
+
 def comparable_runs(baseline: dict, candidate: dict) -> tuple[dict, dict]:
     if baseline.get("kind") != candidate.get("kind"):
         raise SnapshotError("snapshot kind differs")
@@ -1022,11 +1081,12 @@ def compare_snapshots(
     old_runs, new_runs = comparable_runs(baseline, candidate)
     baseline_version = schema_version(baseline)
     optional = baseline_optional_leaves(baseline_version)
+    retired = candidate_retired_leaves(schema_version(candidate))
     drifts: list[dict] = []
     for bench in sorted(old_runs):
-        old = numeric_leaves(old_runs[bench].get("stats", {}))
         new = numeric_leaves(new_runs[bench].get("stats", {}))
-        missing = sorted(old.keys() - new.keys())
+        old = follow_renames(numeric_leaves(old_runs[bench].get("stats", {})), new)
+        missing = sorted(old.keys() - new.keys() - retired)
         gained = sorted(new.keys() - old.keys())
         unlisted = [path for path in gained if path not in optional]
         if missing or unlisted:
