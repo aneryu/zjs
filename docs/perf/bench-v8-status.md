@@ -1,5 +1,50 @@
 # bench-v8 status
 
+## 2026-09-06: 17-suite five-engine pinned snapshot (new composite baseline)
+
+First pinned run under the 17-result contract (zlib scored, not skipped).
+zjs `10966b12` ReleaseFast (md5 `c8cd7b22…`), QuickJS GCC-16 yardstick
+(md5 `5e965b35…`), Hermes / V8 jitless / JSC jitless binaries unchanged
+since 2026-08-25. Serial, CPU 19, host lock, forward/reverse round-robin,
+8 samples per engine, medians. Artifact:
+`reports/evidence/BENCH-V8-17/multiengine-2026-09-06-10966b12.json`.
+
+| Benchmark | zjs | QuickJS | Hermes | V8 jitless | JSC jitless | zjs / qjs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Richards | 1899 | 1792 | 2926 | 2121 | 2881 | 1.06 |
+| DeltaBlue | 1560 | 1587 | 2614 | 2017 | 1845 | 0.98 |
+| Crypto | 2548 | 2350 | 3960 | 1746 | 3588 | 1.08 |
+| RayTrace | 3833 | 3757 | 9872 | 6962 | 4180 | 1.02 |
+| EarleyBoyer | 4143 | 4890 | 11848 | 10050 | 5948 | 0.85 |
+| RegExp | 879 | 828 | 1114 | 4612 | 1024 | 1.06 |
+| Splay | 4910 | 7962 | 6846 | 8348 | 7872 | **0.62** |
+| SplayLatency | 14207 | 20511 | 16302 | 7686 | 23082 | **0.69** |
+| NavierStokes | 4555 | 4764 | 6719 | 2644 | 4122 | 0.96 |
+| PdfJS | 9480 | 10602 | 17170 | 15052 | 12578 | 0.89 |
+| Mandreel | 2489 | 2146 | 2828 | 1918 | 1776 | 1.16 |
+| MandreelLatency | 16956 | 15482 | 16160 | 10861 | 7288 | 1.10 |
+| Gameboy | 15181 | 14598 | 17296 | 11465 | 11679 | 1.04 |
+| CodeLoad | 34450 | 35662 | 11020 | 89668 | 61038 | 0.97 |
+| Box2D | 7824 | 7606 | 16002 | 7313 | 9692 | 1.03 |
+| zlib | 4890 | 3972 | 3436 | 3659 | 3650 | 1.23 |
+| Typescript | 24792 | 27146 | 48252 | 36425 | 26440 | 0.91 |
+| **Score (v9)** | **5678** | **5874** | **7702** | **6749** | **6305** | **0.9666** |
+
+Hermes / qjs 1.3113, V8 jitless / qjs 1.1491, JSC jitless / qjs 1.0735.
+
+Reading: with the tracing collector (TGC S0–S5) zjs is at or above QuickJS
+on 11 of 17 results; the composite gap is Splay and SplayLatency
+(0.62 / 0.69 — the structural account closed in
+`docs/tracing-gc-completion-account.md` §6b), plus EarleyBoyer 0.85 and
+PdfJS 0.89. Removing the two Splay results alone would put the composite
+at about 1.01. **Owner ruling 2026-09-06: the performance line is closed;
+Octane vs QuickJS is a regression gate at ≥ 0.95 from here.**
+
+Protocol note going forward: the three non-yardstick engines are
+unchanged binaries and are re-run only when the suite contract changes;
+routine snapshots run zjs + QuickJS only (`--qjs` alone), which cuts the
+run from ~65 min to ~25 min.
+
 ## 2026-09-05: zlib un-skipped (never an engine gap)
 
 The 2026-08-25 diagnosis below ("genuine zjs engine gap: indirect eval /

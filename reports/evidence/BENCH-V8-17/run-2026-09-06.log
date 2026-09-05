@@ -1,0 +1,68 @@
+round 1/8 zjs: score 5686
+round 1/8 qjs: score 5861
+round 1/8 hermes: score 7718
+round 1/8 v8: score 6689
+round 1/8 jsc: score 6288
+round 2/8 jsc: score 6268
+round 2/8 v8: score 6755
+round 2/8 hermes: score 7740
+round 2/8 qjs: score 5865
+round 2/8 zjs: score 5649
+round 3/8 zjs: score 5675
+round 3/8 qjs: score 5816
+round 3/8 hermes: score 7701
+round 3/8 v8: score 6720
+round 3/8 jsc: score 6303
+round 4/8 jsc: score 6305
+round 4/8 v8: score 6751
+round 4/8 hermes: score 7671
+round 4/8 qjs: score 5897
+round 4/8 zjs: score 5645
+round 5/8 zjs: score 5662
+round 5/8 qjs: score 5882
+round 5/8 hermes: score 7676
+round 5/8 v8: score 6750
+round 5/8 jsc: score 6312
+round 6/8 jsc: score 6305
+round 6/8 v8: score 6779
+round 6/8 hermes: score 7703
+round 6/8 qjs: score 5913
+round 6/8 zjs: score 5713
+round 7/8 zjs: score 5706
+round 7/8 qjs: score 5858
+round 7/8 hermes: score 7711
+round 7/8 v8: score 6702
+round 7/8 jsc: score 6352
+round 8/8 jsc: score 6318
+round 8/8 v8: score 6748
+round 8/8 hermes: score 7635
+round 8/8 qjs: score 5886
+round 8/8 zjs: score 5680
+
+protocol: serial, CPU 19, forward/reverse round-robin, 8 samples/engine
+reference for ratios: QuickJS
+  suite                      zjs         QuickJS          Hermes    V8 (jitless)   JSC (jitless)
+  Richards                  1899            1792            2926            2121            2881
+  DeltaBlue                 1560            1587            2614            2017            1845
+  Crypto                    2548            2350            3960            1746            3588
+  RayTrace                  3833            3757            9872            6962            4180
+  EarleyBoyer               4143            4890           11848           10050            5948
+  RegExp                     879             828            1114            4612            1024
+  Splay                     4910            7962            6846            8348            7872
+  SplayLatency             14207           20511           16302            7686           23082
+  NavierStokes              4555            4764            6719            2644            4122
+  PdfJS                     9480           10602           17170           15052           12578
+  Mandreel                  2489            2146            2828            1918            1776
+  MandreelLatency           16956           15482           16160           10861            7288
+  Gameboy                  15181           14598           17296           11465           11679
+  CodeLoad                 34450           35662           11020           89668           61038
+  Box2D                     7824            7606           16002            7313            9692
+  zlib                      4890            3972            3436            3659            3650
+  Typescript               24792           27146           48252           36425           26440
+  Score (v9)                5678            5874            7702            6749            6305
+
+ratio zjs / QuickJS: 0.9666
+ratio Hermes / QuickJS: 1.3113
+ratio V8 (jitless) / QuickJS: 1.1491
+ratio JSC (jitless) / QuickJS: 1.0735
+artifact: /tmp/snap-20260906/multiengine.json
