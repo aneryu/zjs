@@ -84,11 +84,18 @@ ownership, not fine-resolution authority.
 
 ## 3. Build pool and concurrency matrix
 
-The default build pool is `0-4,10-14` (`ZJS_BUILD_CPUS` can narrow it). It uses
-only small cores, but each half still shares an L3 with its field. Therefore a
-cycles job may coexist only with compilation confined to the **opposite**
-domain: cycles@A forbids CPUs 0-4, cycles@B forbids CPUs 10-14. A host window
-forbids all compilation. Because §4 did not admit either tested compile
+The default build pool is the big cores of both domains, `5-8,15-18`
+(`ZJS_BUILD_CPUS` overrides it; 2026-09-06, previously `0-4,10-14`). Every
+compile is one single-threaded LLVM job, and on the A725 pool each ran ~2x
+slower than on the X925 cores (ReleaseFast zjs 111 s -> 57 s, unified test
+45 s -> 23 s) for a concurrency permission that §4 only ever granted at
+coarse resolution. The small-core pool `0-4,10-14` remains the
+**overlap-safe** pool: the rows below were calibrated on it and only on it,
+so a build that must coexist with an instruction-count screen sets
+`ZJS_BUILD_CPUS=0-4,10-14` explicitly. Each pool half shares an L3 with its
+field, so a cycles job may coexist only with compilation confined to the
+**opposite** domain: cycles@A forbids CPUs 0-4 (and 5-8), cycles@B forbids
+CPUs 10-14 (and 15-18). A host window forbids all compilation. Because §4 did not admit either tested compile
 overlap for fine or verdict work, checked-in mise build tasks currently take
 the host token exclusively. §2.1's coarse permission does not change that
 default; relaxing a verdict-bearing build workflow requires a new passing

@@ -152,6 +152,11 @@ test {
     std.testing.refAllDecls(@import("binding/native_call_plan.zig"));
     std.testing.refAllDecls(@import("abi/sdk.zig"));
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
+    // The stress tier compiles into this binary and is selected by name
+    // prefix at run time (`--skip-prefix tests.stress.` on the per-change
+    // shards, `--only-prefix tests.stress.` on `test-stress`), so it costs
+    // no second engine compile.
+    std.testing.refAllDecls(@import("tests/stress.zig"));
     std.testing.refAllDecls(@import("cli/zjs.zig"));
     std.testing.refAllDecls(@import("cli/run_test262.zig"));
 }

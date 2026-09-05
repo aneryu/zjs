@@ -355,12 +355,15 @@ for an explicit randomized validation run.
 mise run checkpoint-gate
 ```
 
-This includes the unified Debug suite, Debug CLI smoke, and source-side
-architecture checks. It does not compile ReleaseFast `zjs`; the
-compiler-stage `nm` check stays on the production gate. It also excludes the
-long-running stress tier (`zig build test-stress`: stack exhaustion and
-bigint kernel sweeps in `src/tests/stress.zig`) — that tier runs on the
-engine-production gate, primary-platform CI, and the per-merge-batch gate
+This includes the unified Debug suite, its gc-stress rerun, Debug CLI
+smoke, the sema-only public-root check (`check-embedding`), and source-side
+architecture checks; measured 2026-09-06 at 33 s after an engine edit on the
+big-core build pool. It does not compile ReleaseFast `zjs`; the
+compiler-stage `nm` check stays on the merge and production gates. It also
+excludes the long-running stress tier (`zig build test-stress`: stack
+exhaustion and bigint kernel sweeps in `src/tests/stress.zig`, selected out
+of the same unified binary by `--only-prefix tests.stress.`) — that tier
+runs on the merge gate, the engine-production gate and primary-platform CI
 (docs/verification-policy.md). Run `test-stress` locally when a change
 touches stack unwinding, call teardown, or the bigint division kernels. Add
 the relevant focused test262 directory or file set; do not run `quick-gate`
@@ -375,9 +378,15 @@ backstop, not the first line.
 evidence, or CI gates:
 
 ```bash
-zig build engine-production-gate --summary all
+mise run batch-gate        # merge-gate: 2 ReleaseFast + 2 Debug engine compiles, test262 + fixed-work smoke in-graph
+mise run production-gate   # engine-production-gate: adds the ReleaseFast zjs-profile smoke and the full test-embedding run
 zig build test test-stress -Doptimize=ReleaseSafe --summary all
 ```
+
+All mise build tasks pin to the big-core pool `5-8,15-18` (X925); the
+small-core pool `0-4,10-14` (A725) that was the default until 2026-09-06
+compiles about 2x slower and is only for overlapping a build with an
+instruction-count screen (`ZJS_BUILD_CPUS=0-4,10-14`).
 
 **Instrumentation tiers.** `zig build test-oom --summary all` (allocator / OOM
 behavior), `zig build test-leak-census --summary all` (allocation-leak

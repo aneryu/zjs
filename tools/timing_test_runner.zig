@@ -30,6 +30,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // all on one shard.
     var shard_index: usize = 0;
     var shard_count: usize = 1;
+    // `--only-prefix P` / `--skip-prefix P`: select by test-name prefix, so
+    // one compiled binary serves both the per-change suite (which skips the
+    // stress tier) and the stress tier itself (which runs only it). The
+    // stress tests used to be a second engine compile (src/stress_tests.zig).
+    var only_prefix: ?[]const u8 = null;
+    var skip_prefix: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--list")) {
@@ -49,6 +55,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             shard_index = try std.fmt.parseUnsigned(usize, shard_arg[0..slash], 10);
             shard_count = try std.fmt.parseUnsigned(usize, shard_arg[slash + 1 ..], 10);
             if (shard_count == 0 or shard_index >= shard_count) return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--only-prefix")) {
+            only_prefix = args.next() orelse return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--skip-prefix")) {
+            skip_prefix = args.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--range")) {
             const range_arg = args.next() orelse return error.InvalidArgs;
             const range = try parseRange(range_arg, test_fns.len);
@@ -74,6 +84,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (filter) |pattern| std.debug.print(" matching \"{s}\"", .{pattern});
     if (start_index != 0 or end_index != test_fns.len) std.debug.print(" in range {}..{}", .{ start_index, end_index });
     if (shard_count != 1) std.debug.print(" on shard {}/{}", .{ shard_index, shard_count });
+    if (only_prefix) |prefix| std.debug.print(" only prefix \"{s}\"", .{prefix});
+    if (skip_prefix) |prefix| std.debug.print(" skipping prefix \"{s}\"", .{prefix});
     if (repeat_count != 1) std.debug.print(" for {} passes", .{repeat_count});
     std.debug.print("...\n", .{});
     if (leak_census) {
@@ -110,6 +122,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (filter) |pattern| {
             if (std.mem.indexOf(u8, test_fn.name, pattern) == null) {
+                filtered_count += 1;
+                continue;
+            }
+        }
+        if (only_prefix) |prefix| {
+            if (!std.mem.startsWith(u8, test_fn.name, prefix)) {
+                filtered_count += 1;
+                continue;
+            }
+        }
+        if (skip_prefix) |prefix| {
+            if (std.mem.startsWith(u8, test_fn.name, prefix)) {
                 filtered_count += 1;
                 continue;
             }

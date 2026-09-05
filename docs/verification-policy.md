@@ -26,7 +26,8 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
    insn 判死且内存收益大的刀获得一次新货币复审资格(先例:refill-v2);
    **不要求**陪跑全负载矩阵。CPU、L3、锁、编译池与裁决等级统一服从
    [`docs/perf/measurement-contracts.md`](perf/measurement-contracts.md):默认场 B
-   单核 CPU19,编译池 `0-4,10-14`;显式 `--field`/`ZJS_MEASURE_FIELD` 才可换场。
+   单核 CPU19,编译池默认大核 `5-8,15-18`(2026-09-06 起;要与 insn 粗筛并行
+   时显式 `ZJS_BUILD_CPUS=0-4,10-14`);显式 `--field`/`ZJS_MEASURE_FIELD` 才可换场。
    2026-09-01 校准的失败判定全部保留;补充裁决仅允许 `insn@B ∥ 编译` 与
    `insn@B ∥ cycles@A` 作探索/粗筛,且每个结果必须显式标
    `resolution >= 0.5% (coarse/concurrent)`。该结果只能决定是否值得静场复跑,
@@ -73,12 +74,14 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 ## 每合并批(driver 侧)做的
 
 1. 合并载荷审查(`git log trunk..candidate`,合并 commit = 合并其全部祖先);
-2. 批门禁一轮:`zig build test` + `tools/perf/gate_smoke.sh <显式二进制>` +
-   test262 + 至少一个负载的 `ZJS_GC_ARENA_AUDIT=1`;(操作上一条命令:
-   `mise run batch-gate` = engine-production-gate 单构建图并行 + 并行
-   gate_smoke(每负载含一次 arena-audit run),实测 ~5-7 分钟);默认构建 affinity
-   为纯小核池 `0-4,10-14` 且构建阶段持 host 排他锁,批 runner 显式核集仍可按
-   正确性吞吐需要覆盖;
+2. 批门禁一轮:`mise run batch-gate` = `zig build merge-gate` 单构建图:
+   统一套件(含 stress 层)+ gc-stress + Debug CLI smoke + 架构检查 +
+   ReleaseFast zjs/run-test262 + 全量 test262 + gate_smoke(每负载含一次
+   arena-audit run)全部并行;引擎编译 2 ReleaseFast + 2 Debug。相比
+   engine-production-gate(发布门,`mise run production-gate`)少了
+   ReleaseFast `zjs-profile` 的 smoke 与 `test-embedding` 的第二个 Debug 引擎
+   编译(改为 sema-only `check-embedding`;运行期 pin 在统一套件里跑)。默认
+   构建 affinity 为大核池 `5-8,15-18` 且构建阶段持 host 排他锁;
 3. 失败 → 按批内 commit bisect,只对肇事 commit 追加验证;
 4. cycles/L2D 终裁攒安静窗口一次做:用 measurement contract 的 field/host
    锁作仲裁并保存 mpstat/进程诊断。当前校准没有批准任何跨场或编译重叠的
@@ -97,7 +100,7 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 
 - **预注册验收线**:性能刀开工前写下通过/失败判据(曾正确否决整把刀);
 - 设计文过审:仅限触碰对象表示层/GC 语义/公共 ABI 的大刀;
-- 测量合同:编译池固定 `0-4,10-14`,测量走 field registry/锁、测量前 mpstat、
+- 测量合同:编译池默认 `5-8,15-18`(与测量并行时 `0-4,10-14`),测量走 field registry/锁、测量前 mpstat、
   指令数筛选/cycles 终裁两级仪器、wall-clock 在并发场不可信;CPU9 与 CPU19
   的绝对数不可混腿,拓扑层只与同拓扑基线比较;并发粗筛显式标
   `resolution >= 0.5%`,任何预注册裁决保持串行/静场 0.1% 制度;

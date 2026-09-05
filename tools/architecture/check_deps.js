@@ -219,7 +219,6 @@ const TEST_ROOTS = [
   'src/parser_tests.zig',
   'src/bytecode_tests.zig',
   'src/runner_tests.zig',
-  'src/stress_tests.zig',
   'src/leak_census_tests.zig',
   'src/embedding_tests.zig',
   'src/compiler_tests.zig',

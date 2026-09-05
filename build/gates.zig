@@ -134,7 +134,50 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     // what a code-bearing change is actually handed off behind. The test is a
     // Debug source-shape check, so it costs the gate nothing it was not
     // already paying.
-    checkpoint_gate_step.dependOn(embedding_step);
+    checkpoint_gate_step.dependOn(test_graph.check_embedding_step);
+
+    // Fixed-work smoke (tools/perf/gate_smoke.sh) as a build step, so the
+    // merge gate runs it inside the graph -- concurrently with test262 and
+    // the suites -- instead of after the whole graph as a second command
+    // (the 2026-08-30 batch-gate accounting had the serial sweep at ~8 of
+    // ~12 minutes; parallel mode brought it down, the serial position stayed).
+    // It is a crash/invariant smoke, not a measurement; the CPUs are the
+    // big cores of both L3 domains by default and `-Dgate-smoke-cpus` overrides.
+    const gate_smoke_cpus = b.option([]const u8, "gate-smoke-cpus", "Comma-separated CPUs for the parallel fixed-work smoke (default 5,6,7,8,15,16)") orelse "5,6,7,8,15,16";
+    const run_gate_smoke = b.addSystemCommand(&.{"tools/perf/gate_smoke.sh"});
+    run_gate_smoke.addArtifactArg(zjs_exe);
+    run_gate_smoke.setEnvironmentVariable("ZJS_GATE_PARALLEL_CPUS", gate_smoke_cpus);
+    run_gate_smoke.step.dependOn(&install_zjs.step);
+    // The script's own stale-binary guard compares against source mtimes and
+    // the build graph is the authority here; it still re-runs whenever the
+    // zjs artifact changes because the artifact path is an input.
+    run_gate_smoke.has_side_effects = true;
+    const gate_smoke_step = b.step("gate-smoke", "Run the fixed-work corpus smoke (ordinary runs + arena-audit stats run per workload) against the built zjs");
+    gate_smoke_step.dependOn(&run_gate_smoke.step);
+
+    // Per-merge-batch gate (docs/verification-policy.md): everything the
+    // production gate proves about the ENGINE, minus the release-artifact
+    // duplicates. Compared with engine-production-gate it drops the
+    // ReleaseFast `zjs-profile` compile (smoke's profile-contract checks are
+    // release-tier), the second Debug engine compile behind `test-embedding`
+    // (sema-only `check-embedding` instead; the runtime pins run in the
+    // unified suite), and takes the fixed-work smoke in-graph. Engine
+    // compiles: 2 ReleaseFast (zjs, run-test262) + 2 Debug (unified,
+    // zjs-dev), down from 3 + 3.
+    const merge_gate_step = b.step("merge-gate", "Per-merge-batch gate: suites + stress + gc-stress + smoke-dev + architecture + test262 + fixed-work smoke (2 ReleaseFast + 2 Debug engine compiles)");
+    merge_gate_step.dependOn(test_step);
+    merge_gate_step.dependOn(test_graph.gc_stress_step);
+    merge_gate_step.dependOn(test_graph.stress_step);
+    merge_gate_step.dependOn(smoke_dev_step);
+    merge_gate_step.dependOn(test_graph.check_embedding_step);
+    merge_gate_step.dependOn(&run_architecture_deps.step);
+    merge_gate_step.dependOn(&run_architecture_oom_panics.step);
+    merge_gate_step.dependOn(&run_architecture_borrowed_atoms.step);
+    merge_gate_step.dependOn(&run_architecture_gc_slots.step);
+    merge_gate_step.dependOn(&run_architecture_stage_boundaries.step);
+    merge_gate_step.dependOn(&run_config_signature.step);
+    merge_gate_step.dependOn(test262_check_step);
+    merge_gate_step.dependOn(gate_smoke_step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);

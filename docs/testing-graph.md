@@ -101,13 +101,17 @@ Each scoped target is `src/<area>_tests.zig` × a trailing-dot filter:
 | `test-runner` | `src/runner_tests.zig` | `cli.run_test262` |
 | `test-compiler` | `src/compiler_tests.zig` | `compiler.` |
 | `test-embedding` | `src/embedding_tests.zig` | `tests.embedding_examples.` |
+| `test-stress` | (unified binary, `--only-prefix tests.stress.`) | `tests.stress.` — the per-change shards pass `--skip-prefix tests.stress.`; no separate root since 2026-09-06 |
+| `check-embedding` | `src/embedding_tests.zig` (sema-only, `-fno-emit-bin`) | checkpoint-gate's embedding dependency; `test-embedding` stays on the production gate |
 | `test-leak-census` | `src/leak_census_tests.zig` | (none — reruns the shared exec + builtins tiers twice with the leak census armed) |
 
 The trailing dot is the namespace boundary (`test-runner`'s filter omits it
 in `build/tests.zig`; the `cli.run_test262` prefix has no sibling
 namespaces to exclude). `test-embedding` uses an independent Debug `zjs`
-module rooted at `src/root.zig` and hangs on `engine-production-gate`, not
-checkpoint.
+module rooted at `src/root.zig` and hangs on `engine-production-gate`;
+checkpoint-gate and merge-gate take its sema-only twin `check-embedding`
+(the public root assembles, comptime pins hold) because the same test
+bodies, runtime pins included, already run in the unified suite.
 
 ## Step naming
 

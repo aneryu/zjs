@@ -14,6 +14,9 @@ pub const TestGraph = struct {
     smoke_step: *std.Build.Step,
     smoke_dev_step: *std.Build.Step,
     embedding_step: *std.Build.Step,
+    /// Sema-only twin of `embedding_step` (public root assembles; comptime
+    /// pins hold). checkpoint-gate's embedding dependency.
+    check_embedding_step: *std.Build.Step,
 };
 
 pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) TestGraph {
@@ -89,6 +92,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         const run_unified_tests = b.addRunArtifact(unified_tests);
         run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
         run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
+        run_unified_tests.addArgs(&.{ "--skip-prefix", "tests.stress." });
         if (test_shards != 1) {
             run_unified_tests.addArgs(&.{ "--shard", b.fmt("{d}/{d}", .{ shard, test_shards }) });
             run_unified_tests.setName(b.fmt("run test unified-tests shard {d}/{d}", .{ shard, test_shards }));
@@ -120,6 +124,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_STRESS", "1");
         run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_VERIFY_MINOR", "fatal");
         run_gc_stress_tests.setEnvironmentVariable("ZJS_MINOR_AUDIT", "fatal");
+        run_gc_stress_tests.addArgs(&.{ "--skip-prefix", "tests.stress." });
         if (test_shards != 1) {
             run_gc_stress_tests.addArgs(&.{ "--shard", b.fmt("{d}/{d}", .{ shard, test_shards }) });
             run_gc_stress_tests.setName(b.fmt("run test unified-tests (gc-stress) shard {d}/{d}", .{ shard, test_shards }));
@@ -129,48 +134,23 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         gc_stress_step.dependOn(&run_gc_stress_tests.step);
     }
 
-    // Stress tier: the long-running tests split out of the unified run so
-    // checkpoint-gate and the per-change `zig build test` close-out keep
-    // fast feedback (they were ~47s of a ~53s unified run; see
-    // src/tests/stress.zig). Coverage is unchanged at the outer tiers: the
-    // engine-production gate, primary-platform CI, and the per-merge-batch
-    // gate run `test-stress`; the ReleaseSafe phase close should invoke
-    // `zig build test test-stress -Doptimize=ReleaseSafe`. Follows
-    // -Doptimize like the unified suite.
-    const stress_test_options = addEngineOptions(b, engine_option_inputs);
-    stress_test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
-    stress_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
-    const stress_engine_mod = b.createModule(.{
-        .root_source_file = b.path("src/internal_root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    stress_engine_mod.addOptions("build_options", stress_test_options);
-    const stress_root = b.createModule(.{
-        .root_source_file = b.path("src/stress_tests.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zjs", .module = stress_engine_mod },
-        },
-    });
-    stress_root.addOptions("build_options", stress_test_options);
-    const stress_tests = b.addTest(.{
-        .name = "test-stress",
-        .root_module = stress_root,
-        .filters = &.{"tests.stress."},
-    });
-    forceLlvmBackendOnDebug(stress_tests);
-    stress_tests.test_runner = .{
-        .path = b.path("tools/timing_test_runner.zig"),
-        .mode = .simple,
-    };
-    const run_stress_tests = b.addRunArtifact(stress_tests);
-    run_stress_tests.addArg("--require-tests");
+    // Stress tier: the long-running tests (stack exhaustion, bigint kernel
+    // sweeps; src/tests/stress.zig) stay out of the per-change `zig build
+    // test` close-out and checkpoint-gate so those keep fast feedback, and
+    // ride the merge/production gates. They compile into the SAME unified
+    // binary (selected by `--only-prefix tests.stress.`; the per-change shards
+    // pass `--skip-prefix`), which retired the second Debug engine compile
+    // the old `src/stress_tests.zig` root cost every gate (~37 s CPU,
+    // 2026-09-06). One process, not sharded: five tests, and
+    // `--require-tests` must be able to see them.
+    const run_stress_tests = b.addRunArtifact(unified_tests);
+    run_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
+    run_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
+    run_stress_tests.addArgs(&.{ "--only-prefix", "tests.stress.", "--require-tests" });
+    run_stress_tests.setName("run test unified-tests (stress tier)");
+    _ = run_stress_tests.captureStdErr(.{});
     if (b.args) |args| run_stress_tests.addArgs(args);
-    const stress_step = b.step("test-stress", "Run the long-running stress tier (stack exhaustion, bigint kernel sweeps)");
+    const stress_step = b.step("test-stress", "Run the long-running stress tier (stack exhaustion, bigint kernel sweeps) from the unified binary");
     stress_step.dependOn(&run_stress_tests.step);
 
     // Production smoke tests retain the ReleaseFast CLI contract.
@@ -391,6 +371,24 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     if (b.args) |args| run_embedding_tests.addArgs(args);
     const embedding_step = b.step("test-embedding", "Run focused public-module embedding tests");
     embedding_step.dependOn(&run_embedding_tests.step);
+    // The public-root assembly check without codegen: what `test-embedding`
+    // uniquely proves is that `src/root.zig` assembles and its comptime pins
+    // hold; the same test bodies (and their runtime pins, e.g. the public
+    // decl counts) already run inside the unified suite through
+    // `internal_root`. checkpoint-gate takes this ~6 s sema pass instead of
+    // the ~40 s Debug engine compile + link; the production gate keeps the
+    // full run.
+    const check_embedding = b.addTest(.{
+        .name = "check-embedding",
+        .root_module = embedding_tests.root_module,
+    });
+    forceLlvmBackendOnDebug(check_embedding);
+    check_embedding.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    const check_embedding_step = b.step("check-embedding", "Semantic-analysis-only compile of the public-root embedding test shell (no codegen, no run)");
+    check_embedding_step.dependOn(&check_embedding.step);
 
     // OOM injection suite (`zig build test-oom`): exhaustive allocation
     // failure injection (std.testing.checkAllAllocationFailures) over an
@@ -484,5 +482,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .smoke_step = smoke_step,
         .smoke_dev_step = smoke_dev_step,
         .embedding_step = embedding_step,
+        .check_embedding_step = check_embedding_step,
     };
 }

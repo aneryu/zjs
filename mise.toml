@@ -5,15 +5,15 @@ bun = "1"
 
 [tasks.quick-gate]
 description = "Run the Debug inner-loop gate once"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build quick-gate --summary all'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate --summary all'
 
 [tasks.checkpoint-gate]
 description = "Run the checkpoint gate"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build checkpoint-gate --summary all'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build checkpoint-gate --summary all'
 
 [tasks.quick-watch]
 description = "Keep the Debug quick-gate compiler alive for faster incremental edit feedback"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build quick-gate --watch -fincremental --summary new'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate --watch -fincremental --summary new'
 
 # Resident incremental compiler for ANY build step. The engine-wide Debug
 # targets (unified test ~60s, zjs-dev ~35s cold) are the ones worth keeping
@@ -21,7 +21,7 @@ run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14
 # watch mode). Example: mise run watch -- test-exec
 [tasks.watch]
 description = "Keep a resident incremental compiler on a named build step (mise run watch -- test-exec)"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build --watch -fincremental --summary new'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build --watch -fincremental --summary new'
 
 # Fixed-work instruction/cycle screen of zig-out/bin/zjs against pinned
 # QuickJS. This is the per-candidate screening instrument (~30s/benchmark at
@@ -79,15 +79,23 @@ ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 1000
 """
 
 # The per-merge-batch gate (docs/verification-policy.md, driver side) as one
-# command. engine-production-gate is a single build graph, so every artifact
-# (unified suite, stress tier, ReleaseFast zjs, test262 runner, embedding,
-# smoke) compiles in parallel and full test262 runs alongside the suites --
-# measured 2026-08-30 against the ~18-minute sequential dance it replaces.
-# gate_smoke then runs the fixed-work corpus, including one arena-audit run
-# per workload, against the zjs binary the same graph just installed.
+# command. `merge-gate` is a single build graph: the unified suite (which now
+# carries the stress tier), gc-stress, Debug CLI smoke, the architecture
+# checks, the ReleaseFast zjs + test262 runner, full test262, and the
+# fixed-work gate_smoke (one arena-audit run per workload) all run
+# concurrently. Engine compiles: 2 ReleaseFast + 2 Debug (2026-09-06; the
+# production gate below still pays 3 + 3 for the release artifacts).
+#
+# Build affinity: the big cores of both L3 domains (`5-8,15-18`, X925).
+# Until 2026-09-06 the default was the small-core pool `0-4,10-14` (A725),
+# chosen so an instruction-count screen could overlap a build; every
+# single-threaded LLVM compile ran ~2x slower for it (ReleaseFast zjs 111 s
+# -> 57 s, unified test 45 s -> 23 s). Set ZJS_BUILD_CPUS=0-4,10-14 to get
+# the old overlap-safe pool back for a concurrent screen.
 [tasks.batch-gate]
-description = "Per-merge-batch gate: engine-production-gate (parallel graph incl. test262) + fixed-work gate_smoke"
-run = """
-flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-0-4,10-14}" zig build engine-production-gate --summary all
-ZJS_GATE_PARALLEL_CPUS=0,1,2,3,4,10 tools/perf/gate_smoke.sh zig-out/bin/zjs
-"""
+description = "Per-merge-batch gate: zig build merge-gate (one parallel graph: suites, stress, gc-stress, smoke-dev, architecture, test262, fixed-work smoke)"
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build merge-gate --summary all'
+
+[tasks.production-gate]
+description = "Release gate: engine-production-gate (adds the ReleaseFast zjs-profile smoke and the full test-embedding run)"
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build engine-production-gate --summary all'
