@@ -71,7 +71,7 @@ pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []cons
 pub fn createSentinelError(
     ctx: *core.JSContext,
     global: *core.Object,
-    err: anytype,
+    err: anyerror,
     info: ErrorInfo,
 ) !core.JSValue {
     if (@as(anyerror, err) == error.OutOfMemory) {
@@ -493,7 +493,7 @@ pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
     return rt.memory.allocator.dupe(u8, bytes.items);
 }
 
-pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
+pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anyerror) bool {
     if (!ctx.hasException()) return false;
     if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
@@ -544,7 +544,7 @@ fn stringBodyEqualsAscii(string: *core.string.String, expected: []const u8) bool
 // neutral because they cover every remaining source of the sentinel. The
 // URIError text is kept: every URIError sentinel comes from the URI builtins
 // and the hex-digit failure is the dominant source (matching the qjs text).
-pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
+pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
         // Allocation failure under a memory limit is catchable, mirroring
@@ -581,7 +581,7 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
     };
 }
 
-pub fn promiseErrorInfo(err: anytype) ErrorInfo {
+pub fn promiseErrorInfo(err: anyerror) ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
         error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
@@ -695,7 +695,7 @@ pub fn throwModuleHostStall(
     return error.JSException;
 }
 
-fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
+fn errorNameForRuntimeError(err: anyerror) ?[]const u8 {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => "URIError",
         error.StackOverflow => "InternalError",

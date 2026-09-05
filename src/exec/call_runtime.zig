@@ -144,7 +144,7 @@ pub noinline fn handleCatchableRuntimeError(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    err: anytype,
+    err: anyerror,
 ) !bool {
     return tryCatchInFrame(ctx, output, stack, frame, catch_target, global, err);
 }
@@ -162,7 +162,7 @@ pub fn tryCatchInFrame(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    err: anytype,
+    err: anyerror,
 ) !bool {
     if (ctx.exceptionIsUncatchable()) return false;
     const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
@@ -321,7 +321,7 @@ pub fn callNativeBuiltinRecordForVm(
     return null;
 }
 
-pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, err: anytype) !void {
+pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, err: anyerror) !void {
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
     const error_value = try exception_ops.createSentinelError(ctx, global, err, error_info);

@@ -53,7 +53,7 @@ pub inline fn nativeIsExc(ctx: *core.JSContext, v: NativeValue) bool {
 /// Leaf/helper-boundary adapter only. Must not appear as the NMFD↔assume ABI.
 /// Returns NativeBits so the caller does not allocate a JSValue sret slot.
 /// noinline: keep materialize / Error construction out of the assume prologue.
-pub noinline fn nativeFromHostError(ctx: *core.JSContext, global: ?*core.Object, err: anytype) NativeBits {
+pub noinline fn nativeFromHostError(ctx: *core.JSContext, global: ?*core.Object, err: anyerror) NativeBits {
     materializeRuntimeError(ctx, global, err) catch {};
     if (!ctx.hasException()) {
         if (global orelse ctx.global) |error_global| {
@@ -415,7 +415,7 @@ noinline fn throwCFunctionStackOverflow(
 /// Turn a raw engine sentinel into its JS Error while the caller's native frame
 /// is still active. Message-carrying throw helpers already leave a matching
 /// pending exception and therefore take the allocation-free first return.
-pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err: anytype) HostError!void {
+pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err: anyerror) HostError!void {
     const error_global = global orelse return;
     // A synchronous native -> bytecode callback may return the VM's
     // uncatchable interrupt sentinel through this native-call seam. Its
