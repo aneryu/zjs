@@ -41,6 +41,50 @@ pub var extent_page_index_fail_after_for_test: if (builtin.is_test) ?usize else 
 pub var medium_superblock_visits_for_test: if (builtin.is_test) usize else void =
     if (builtin.is_test) 0 else {};
 
+/// Test-only OOM injection point for block-cell allocation.
+///
+/// The block heap is a pool: once a superblock is mapped, cell allocation
+/// never touches the backing allocator again, so `checkAllAllocationFailures`
+/// and the hand-rolled fail-at-N allocators are structurally blind to it --
+/// the OOM tier could not reach a single "cell exhaustion" error path. A probe
+/// allocation inside `allocSmallCell` would fix the visibility at the cost of
+/// breaking everything the tier is built on: it would add allocations to the
+/// `oom_cap` "OOM delivery allocates nothing" invariant, multiply the corpus
+/// index space, and make every sticky sweep fail at the first cell.
+///
+/// So the cell dimension gets its own channel instead. The hook is consulted
+/// on the slow arm of `allocSmallCell` only (the arm that would take a new
+/// block), returns `error.OutOfMemory` without touching or charging the
+/// backing allocator, and leaves the heap unmutated so a later retry behaves
+/// exactly as if the failure had never been offered. The driver in
+/// `src/tests/oom.zig` points it at the same counter its allocator injection
+/// uses, which is what folds cell failures into one `fail_index` space.
+pub const CellFailureInjector = struct {
+    context: *anyopaque,
+    /// Called once per candidate cell allocation. `true` means "fail this
+    /// one". Implementations must be non-sticky if the sweep expects the
+    /// engine to keep running after the injected failure.
+    shouldFail: *const fn (context: *anyopaque) bool,
+};
+
+pub var cell_failure_injector: if (builtin.is_test) ?CellFailureInjector else void =
+    if (builtin.is_test) null else {};
+
+/// How many times the slow arm has offered an injection point, armed or not.
+/// The hook is only worth anything if it sits on a path the engine actually
+/// takes, and "the block heap stopped reaching this arm" is exactly the kind
+/// of silent regression that made the cell dimension invisible in the first
+/// place, so a test asserts this counter moves.
+pub var cell_injection_questions_for_test: if (builtin.is_test) usize else void =
+    if (builtin.is_test) 0 else {};
+
+inline fn injectedCellFailure() bool {
+    if (comptime !builtin.is_test) return false;
+    cell_injection_questions_for_test += 1;
+    const injector = cell_failure_injector orelse return false;
+    return injector.shouldFail(injector.context);
+}
+
 pub const superblock_bytes: usize = 2 * 1024 * 1024;
 pub const block_bytes: usize = 64 * 1024;
 pub const blocks_per_superblock: usize = superblock_bytes / block_bytes;
@@ -1081,12 +1125,19 @@ pub const Heap = struct {
     }
 
     inline fn allocSmallCell(self: *Heap, class_idx: usize, cell_size: u32) std.mem.Allocator.Error![*]u8 {
+        // Both `orelse` arms are the slow path -- the active block is missing
+        // or exhausted and a block has to be opened. The injection question is
+        // asked before any heap state moves, so a refusal is indistinguishable
+        // from the block open having failed, and the fast arm (pop a cell from
+        // the active block) stays untouched in test builds too.
         var block = self.active[class_idx] orelse blk: {
+            if (injectedCellFailure()) return error.OutOfMemory;
             const opened = try self.openBlock(class_idx, cell_size);
             self.active[class_idx] = opened;
             break :blk opened;
         };
         const index = self.popTrackedCell(block) orelse blk: {
+            if (injectedCellFailure()) return error.OutOfMemory;
             self.active[class_idx] = null;
             block = try self.openBlock(class_idx, cell_size);
             self.active[class_idx] = block;

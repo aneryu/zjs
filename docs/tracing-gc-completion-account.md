@@ -57,8 +57,8 @@ S2-h2 nursery 按字节触发（无配置支配 16K 计数，4MiB 让 eb maxrss 
 
 1. `cycle_visited` 删除需给 list carrier 补 condemned 判据（epoch 或位图），规格外重构。
 2. splay 剩余刀：promote 走位图当权（净 +2.5%，波及 43 处 `flags.young`）/ minor 内 trace-coupled retirement / `opCall +66`（H4）定价。
-3. OOM 注入对块堆 cell 级仍不可见（需独立注入钩子）；`builtin.is_test` 粗粒度门是否收窄为 oom artifact 选项。
-4. run-test262 用绝对路径 `-d` 静默丢 override manifest——应改为报错。
-5. `--gc-stats` `byKind.bigInt` 未进 JSON；`gc_stats_snapshot.py` 冻结基线 schema 长期方案（版本号或允许重跑基线二进制）。
+3. ~~OOM 注入对块堆 cell 级仍不可见~~ → harness lane 已加独立 cell 级钩子（不计 backing、非粘性，同一 `fail_index` 空间；retry sweep 62→72、64→74；parse 窗口零 cell 分配故 lookahead canary 不变）；`builtin.is_test` 粗粒度门是否收窄为 oom artifact 选项仍待裁。
+4. ~~run-test262 用绝对路径 `-d` 静默丢 override manifest~~ → 已归一到 test262 根并对越界绝对路径硬错；余：known-error 文件未归一、相对越界选择器仍静默（保 `-d built-ins/Object` 用法）。
+5. ~~`byKind.bigInt` 未进 JSON；schema 长期方案~~ → `SCHEMA_VERSION = 8` + `SCHEMA_ADDED_LEAVES` 版本映射，候选多出未登记 leaf 改为硬错；余：冻结基线的 v7 戳其实早于 v7 内容（用「stamp N 可缺 N 的新增」规则容纳，更干净是重标 v6）。
 6. R1 的量级：R3 修正后「可归因」29% 经 R1-a 实证绝大部分是 LLVM 栈槽残渣与调用方 callee-saved 溢出（`eval_entry.zig:196` 加根无效），真缺根只有 regexp 匹配数组一处；R1 的正路 = 普查加 `word-header` 偏移/帧内槽位两列以分辨残渣 → 缩帧/擦栈（eval 编译阶段大局部限定作用域）→ cold 出口 publish + reg_sp windowed 根 → 翻 `value_root_link_containers_only`；量级需按修正后的清单重新估（不再是 12-20 lane-week 的「补 740 个候选」）。`class/elements` 缺陷已修，「shape 年轻路径存活性依赖保守钉住」的同型窗口未普查。
 7. push 前压缩：main 领先 origin 42 个 commit（含 8 个 WIP 快照），建议按时间段压成 5–6 个主题 commit（S2 flip+S3-a/b、S2-g+S3-c/d、S2-h/i+S4-a、S4-b/c+测试 tier、S4-d..g+R3+修复、docs）。

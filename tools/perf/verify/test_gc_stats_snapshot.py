@@ -112,6 +112,7 @@ class GcStatsSnapshotTests(unittest.TestCase):
         # row carries the big-int/string columns the emitter prints today.
         self.assertEqual(parsed["markFootprint"]["refcountRemovedHeaders"], 100)
         self.assertEqual(parsed["markFootprint"]["byKind"]["string"], 3)
+        self.assertEqual(parsed["markFootprint"]["byKind"]["bigInt"], 1)
         self.assertEqual(parsed["markFootprint"]["markedPerMajorX1000"], 11111)
         self.assertEqual(parsed["markFootprint"]["allocationTouches"], 245)
         self.assertEqual(parsed["markFootprint"]["allocationTouchesPerMarkedX1000"], 2450)
@@ -159,6 +160,82 @@ class GcStatsSnapshotTests(unittest.TestCase):
             1764,
         )
         self.assertTrue(parsed["cycles"]["envelope"]["passesPeakOverThreshold36Over35"])
+
+    def test_marked_kind_export_covers_the_whole_marked_set(self) -> None:
+        # `big-int` was parsed and used to validate `refcountRemovedHeaders`
+        # but never exported, so `byKind` did not add up to the marked set and
+        # a screen could not see the only tracer-owned kind it was blind to.
+        parsed = snapshot.parse_gc_stats(PANEL)
+        by_kind = parsed["markFootprint"]["byKind"]
+        self.assertEqual(
+            sum(by_kind.values()), parsed["markFootprint"]["markedHeaders"]
+        )
+        self.assertEqual(
+            sorted(by_kind),
+            [
+                "bigInt",
+                "functionBytecode",
+                "module",
+                "object",
+                "realmContext",
+                "shape",
+                "storage",
+                "string",
+                "varRef",
+            ],
+        )
+
+    def test_registered_schema_additions_name_real_leaves(self) -> None:
+        # The version table is only load-bearing if every path in it is a path
+        # the current emitter actually produces; a typo would silently widen
+        # the tolerance instead of naming a row.
+        leaves = snapshot.numeric_leaves(snapshot.parse_gc_stats(PANEL))
+        for version, paths in snapshot.SCHEMA_ADDED_LEAVES.items():
+            self.assertLessEqual(version, snapshot.SCHEMA_VERSION)
+            for path in paths:
+                self.assertIn(path, leaves, f"schema v{version} leaf {path}")
+        self.assertIn(
+            "markFootprint.byKind.bigInt",
+            snapshot.SCHEMA_ADDED_LEAVES[snapshot.SCHEMA_VERSION],
+        )
+
+    def test_older_baseline_tolerates_only_registered_new_leaves(self) -> None:
+        def shape(version: int, stats: dict) -> dict:
+            return {
+                "schemaVersion": version,
+                "kind": "gc-heavy-six-fixed-work-structure",
+                "engine": {"configSignature": "same"},
+                "workload": {"sourceRevision": "same"},
+                "runs": [{
+                    "benchmark": "case",
+                    "fixedSourceSha256": "same",
+                    "stats": stats,
+                }],
+            }
+
+        baseline = shape(7, {"markFootprint": {"byKind": {"object": 10}}})
+        candidate = shape(
+            snapshot.SCHEMA_VERSION,
+            {"markFootprint": {"byKind": {"object": 10, "bigInt": 4}}},
+        )
+        drifts = snapshot.compare_snapshots(baseline, candidate, 10.0, 0)
+        self.assertEqual(len(drifts), 1)
+        self.assertEqual(drifts[0]["metric"], "markFootprint.byKind.bigInt")
+        self.assertEqual(drifts[0]["baseline"], 0)
+        self.assertTrue(drifts[0]["baselineMissingLeaf"])
+        self.assertIn("schemaVersion 7", drifts[0]["note"])
+
+        unlisted = shape(
+            snapshot.SCHEMA_VERSION,
+            {"markFootprint": {"byKind": {"object": 10, "bigInt": 4}}, "novel": 1},
+        )
+        with self.assertRaisesRegex(
+            snapshot.SnapshotError, "added-without-a-version-entry=\\['novel'\\]"
+        ):
+            snapshot.compare_snapshots(baseline, unlisted, 10.0, 0)
+
+        with self.assertRaisesRegex(snapshot.SnapshotError, "precedes the baseline"):
+            snapshot.compare_snapshots(candidate, baseline, 10.0, 0)
 
     def test_missing_required_row_fails_closed(self) -> None:
         without_barrier = "\n".join(

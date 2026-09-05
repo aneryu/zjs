@@ -833,14 +833,42 @@ const OneShotFailingAllocator = struct {
         };
     }
 
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+    /// One step of the shared injection index. Both the allocator vtable and
+    /// the block-cell hook consume it, which is what puts "the N-th cell
+    /// allocation fails" into the same `fail_index` space as "the N-th
+    /// allocator call fails" instead of a second sweep dimension.
+    fn takeInjectionSlot(self: *OneShotFailingAllocator) bool {
         const index = self.attempts;
         self.attempts += 1;
-        if (!self.disarmed and !self.induced and index == self.fail_index) {
-            self.induced = true;
-            return null;
-        }
+        if (self.disarmed or self.induced or index != self.fail_index) return false;
+        self.induced = true;
+        return true;
+    }
+
+    /// Block-cell refusal. Charges nothing to the byte/call ledger: no
+    /// backing allocation happens, so `expectBalanced` stays a statement about
+    /// the backing allocator and the `oom_cap` "OOM delivery allocates
+    /// nothing" invariant is untouched. Single-shot like the allocator arm, so
+    /// the engine has a working heap again while it unwinds.
+    fn shouldFailCell(ctx: *anyopaque) bool {
+        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.takeInjectionSlot();
+    }
+
+    fn armCellInjection(self: *OneShotFailingAllocator) void {
+        core.gc_block_heap.cell_failure_injector = .{
+            .context = self,
+            .shouldFail = shouldFailCell,
+        };
+    }
+
+    fn disarmCellInjection() void {
+        core.gc_block_heap.cell_failure_injector = null;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.takeInjectionSlot()) return null;
         const result = self.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
         self.allocated_bytes += len;
         self.alloc_calls += 1;
@@ -896,6 +924,12 @@ const canary_source = "(1 + 2) * 14 === 42 ? \"canary-ok\" : \"canary-bad\"";
 ///     correct result;
 ///   - teardown releases every byte (explicit alloc/free balance).
 fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !void {
+    // Cell dimension: the block heap is a pool, so once its superblock exists
+    // the object and string cells this snippet takes never reach the injected
+    // allocator. Arming the hook on the same injector folds "the N-th cell
+    // allocation is refused" into this sweep's existing `fail_index` space.
+    injector.armCellInjection();
+    defer OneShotFailingAllocator.disarmCellInjection();
     attempt: {
         ensureStandardGlobalsInstaller();
         const rt = core.JSRuntime.create(injector.allocator()) catch |err| {
@@ -1038,6 +1072,10 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
         .disarmed = true,
     };
     var induced = false;
+    // Cell dimension folded into the same dense index space (see
+    // `OneShotFailingAllocator.shouldFailCell`).
+    injector.armCellInjection();
+    defer OneShotFailingAllocator.disarmCellInjection();
     {
         ensureStandardGlobalsInstaller();
         const rt = try core.JSRuntime.create(injector.allocator());
@@ -1094,6 +1132,10 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         .disarmed = true,
     };
     var induced = false;
+    // Cell dimension folded into the same dense index space (see
+    // `OneShotFailingAllocator.shouldFailCell`).
+    injector.armCellInjection();
+    defer OneShotFailingAllocator.disarmCellInjection();
     {
         ensureStandardGlobalsInstaller();
         const rt = try core.JSRuntime.create(injector.allocator());
@@ -1338,6 +1380,90 @@ test "oom recovery canary: generator return through shared finalizer" {
 }
 
 // ---------------------------------------------------------------------------
+// Block-cell injection hook contract
+// ---------------------------------------------------------------------------
+
+/// Refuses one nominated block-cell allocation and nothing else. Separate from
+/// `OneShotFailingAllocator` on purpose: the sweeps share one index space
+/// across allocator and cell attempts, which is right for coverage but makes
+/// it impossible to name a specific cell. This one names it, so the hook's own
+/// contract can be pinned rather than inferred from a sweep staying green.
+const CellOnlyInjector = struct {
+    fail_at: usize,
+    questions: usize = 0,
+    fired: bool = false,
+
+    fn shouldFail(ctx: *anyopaque) bool {
+        const self: *CellOnlyInjector = @ptrCast(@alignCast(ctx));
+        const index = self.questions;
+        self.questions += 1;
+        if (self.fired or index != self.fail_at) return false;
+        self.fired = true;
+        return true;
+    }
+
+    fn arm(self: *CellOnlyInjector) void {
+        core.gc_block_heap.cell_failure_injector = .{
+            .context = self,
+            .shouldFail = shouldFail,
+        };
+    }
+};
+
+// The cell hook only buys coverage if it sits on a path the engine takes and
+// a refusal is actually honoured. Both halves are asserted here, because a
+// hook that quietly stopped being reached would leave every sweep above green
+// while measuring nothing -- which is the exact failure the block-cell pool
+// created for `checkAllAllocationFailures` to begin with.
+test "oom cell injection: the hook is reached and a refusal is honoured" {
+    const alloc_source = "var sink = []; for (var i = 0; i < 4096; i++) sink.push({ i: i }); sink.length";
+
+    const before = core.gc_block_heap.cell_injection_questions_for_test;
+    {
+        var never = CellOnlyInjector{ .fail_at = std.math.maxInt(usize) };
+        never.arm();
+        defer OneShotFailingAllocator.disarmCellInjection();
+        ensureStandardGlobalsInstaller();
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+        var wrapper = BindingContext.borrowCore(ctx);
+        _ = try wrapper.eval(alloc_source, .{ .filename = corpus_filename });
+        try std.testing.expect(never.questions > 0);
+        try std.testing.expect(!never.fired);
+    }
+    try std.testing.expect(core.gc_block_heap.cell_injection_questions_for_test > before);
+
+    // A refused cell is a real OOM at the block heap. Object allocation is
+    // allowed to answer it by falling back to the compatibility slab (the
+    // graceful direction memory.zig documents) and string cells propagate it,
+    // so the contract asserted here is the same one the recovery canary uses:
+    // succeed, or surface it, and stay usable either way.
+    var refuse_first = CellOnlyInjector{ .fail_at = 0 };
+    refuse_first.arm();
+    defer OneShotFailingAllocator.disarmCellInjection();
+    ensureStandardGlobalsInstaller();
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    var wrapper = BindingContext.borrowCore(ctx);
+    if (wrapper.eval(alloc_source, .{ .filename = corpus_filename })) |_| {} else |err| switch (err) {
+        error.OutOfMemory => {},
+        error.JSException => {
+            if (!ctx.hasException()) return error.TestUnexpectedResult;
+            _ = ctx.takePendingException();
+        },
+        else => return err,
+    }
+    try std.testing.expect(refuse_first.fired);
+    // Non-sticky: the same runtime still evaluates the canary correctly.
+    const canary = try wrapper.eval(canary_source, .{ .filename = "<oom-canary>" });
+    try expectStringValue(rt, canary, "canary-ok");
+}
+
+// ---------------------------------------------------------------------------
 // Parser lookahead transactional contract (lexer position restore)
 // ---------------------------------------------------------------------------
 
@@ -1369,6 +1495,13 @@ const lookahead_restore_source =
 /// some lookahead helper returned with the lexer left mid-token.
 fn runLookaheadRestoreAttempt(injector: *OneShotFailingAllocator, fail_index: usize) !void {
     injector.disarmed = true;
+    // The block heap is a pool, so the atom and string cells this parse takes
+    // are invisible to the allocator vtable once a superblock exists. Arming
+    // the cell hook on the same injector adds those attempts to the same index
+    // space; `disarmed` gates them exactly as it gates allocator calls, so
+    // bootstrap and teardown stay outside the counted window.
+    injector.armCellInjection();
+    defer OneShotFailingAllocator.disarmCellInjection();
     const rt = try core.JSRuntime.create(injector.allocator());
     defer rt.destroy();
     const realm = try core.RealmContext.create(rt);

@@ -2,6 +2,7 @@
 const std = @import("std");
 const NameList = @import("run_test262_names.zig").NameList;
 const BoundedFeatureOverrides = @import("run_test262_options.zig").BoundedFeatureOverrides;
+const runner_source = @import("run_test262_source.zig");
 
 pub const LoadedConfig = struct {
     testdir: ?[]const u8 = null,
@@ -31,9 +32,15 @@ pub const LoadedConfig = struct {
         self.skipped_features.deinit();
     }
 
+    /// Both the stored rules and the queried path are reduced to test262-root
+    /// relative names first, so `-d test262/test`, `-d ./test262/test` and
+    /// `-d /abs/checkout/test262/test` all match the same `[exclude]` entries.
+    /// Paths that are not inside a test262 checkout keep their raw spelling and
+    /// therefore only match rules that are equally un-normalizable.
     pub fn excludesTest(self: LoadedConfig, path: []const u8) bool {
-        const exclude_len = self.excludes.bestMatchLen(path) orelse return false;
-        const reinclude_len = self.reincludes.bestMatchLen(path) orelse return true;
+        const key = runner_source.test262RelativePath(path) orelse path;
+        const exclude_len = self.excludes.bestMatchLen(key) orelse return false;
+        const reinclude_len = self.reincludes.bestMatchLen(key) orelse return true;
         return exclude_len > reinclude_len;
     }
 };
@@ -111,10 +118,10 @@ fn parseExcludeEntry(allocator: std.mem.Allocator, loaded: *LoadedConfig, base_d
     if (line[0] == '!') {
         const value = std.mem.trim(u8, line[1..], " \t");
         if (value.len == 0) return;
-        try loaded.reincludes.appendOwned(try composePath(allocator, base_dir, value));
+        try loaded.reincludes.appendOwned(try composeRulePath(allocator, base_dir, value));
         return;
     }
-    try loaded.excludes.appendOwned(try composePath(allocator, base_dir, line));
+    try loaded.excludes.appendOwned(try composeRulePath(allocator, base_dir, line));
 }
 
 fn parseConfigEntry(allocator: std.mem.Allocator, loaded: *LoadedConfig, base_dir: []const u8, line: []const u8) !void {
@@ -131,7 +138,7 @@ fn parseConfigEntry(allocator: std.mem.Allocator, loaded: *LoadedConfig, base_di
         if (loaded.errorfile) |old| allocator.free(old);
         loaded.errorfile = try composePath(allocator, base_dir, value);
     } else if (std.mem.eql(u8, key, "excludefile")) {
-        try loaded.excludes.appendOwned(try composePath(allocator, base_dir, value));
+        try loaded.excludes.appendOwned(try composeRulePath(allocator, base_dir, value));
     }
 }
 
@@ -152,6 +159,17 @@ pub fn stripComment(line: []const u8) []const u8 {
     const hash = std.mem.indexOfScalar(u8, line, '#') orelse line.len;
     const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
     return std.mem.trim(u8, line[0..@min(hash, semi)], " \t");
+}
+
+/// Exclude and re-include rules are stored in the same normalized space that
+/// `excludesTest` queries with. A rule that names no test262 root keeps its
+/// composed spelling.
+fn composeRulePath(allocator: std.mem.Allocator, base: []const u8, name: []const u8) ![]const u8 {
+    const composed = try composePath(allocator, base, name);
+    const relative = runner_source.test262RelativePath(composed) orelse return composed;
+    if (relative.len == composed.len) return composed;
+    defer allocator.free(composed);
+    return allocator.dupe(u8, relative);
 }
 
 fn composePath(allocator: std.mem.Allocator, base: []const u8, name: []const u8) ![]const u8 {

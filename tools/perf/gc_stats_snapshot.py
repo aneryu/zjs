@@ -84,6 +84,34 @@ GC_HEAVY_SIX = (
 )
 FORBIDDEN_CPUS = frozenset((*range(5, 10), *range(15, 20)))
 
+# Snapshot schema version, stamped on every captured artifact.  Bump it in the
+# same change that adds or removes a JSON leaf, and record the added leaves in
+# `SCHEMA_ADDED_LEAVES` below.
+SCHEMA_VERSION = 8
+
+# Leaves that a schema version is the first to guarantee.
+#
+# A frozen baseline artifact can never be re-emitted, so a comparison has to
+# know which absences are legitimate.  A snapshot stamped version N may lack
+# the rows listed for N and for every later version: the stamp records the row
+# set that was DECLARED, and an artifact frozen part-way through a version
+# predates its own additions.  `main-d944f26d` is exactly that case -- it
+# carries the v7 stamp but was captured before the v7 atom-audit and
+# string-kind rows existed, which is why the "candidate simply gained a leaf"
+# tolerance used to paper over a real schema fork.
+#
+# A missing leaf that is NOT listed here stays a hard error: it means the two
+# snapshots disagree about a row that both of their versions claim to emit.
+SCHEMA_ADDED_LEAVES: dict[int, tuple[str, ...]] = {
+    7: (
+        "atomAudit.entries",
+        "atomAudit.missingEdge",
+        "atomAudit.overMarked",
+        "markFootprint.byKind.string",
+    ),
+    8: ("markFootprint.byKind.bigInt",),
+}
+
 # The inline-property rows carry seven columns; only these three are held to
 # the "wider slot budget cannot serve fewer objects / fewer bytes / fewer
 # cache lines" monotonicity contract.
@@ -782,8 +810,14 @@ def parse_gc_stats(text: str) -> dict:
                 "realmContext": marked_kinds["realm_context"],
                 "module": marked_kinds["module"],
                 "shape": marked_kinds["shape"],
-                # Optional in the printed row (pre-S2 binaries omit it), so the
-                # JSON schema has to stay stable across baseline/candidate.
+                # Optional in the printed row (pre-S1/pre-S2 binaries omit
+                # them), so the JSON schema has to stay stable across
+                # baseline/candidate: an absent column reports as zero rather
+                # than dropping the leaf.  `bigInt` was parsed and validated
+                # against `refcountRemovedHeaders` long before it was exported,
+                # which left the only tracer-owned kind that a screen could not
+                # see move.
+                "bigInt": marked_kinds.get("big_int", 0),
                 "string": marked_kinds.get("string", 0),
                 "storage": marked_kinds.get("storage", 0),
             },
@@ -913,10 +947,32 @@ def load_snapshot(path: Path) -> dict:
     return value
 
 
+def schema_version(snapshot: dict) -> int:
+    version = snapshot.get("schemaVersion")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise SnapshotError("snapshot schemaVersion is missing or not an integer")
+    return version
+
+
+def baseline_optional_leaves(baseline_version: int) -> set[str]:
+    """Leaves a baseline stamped `baseline_version` is allowed to be missing."""
+    return {
+        path
+        for version, paths in SCHEMA_ADDED_LEAVES.items()
+        if version >= baseline_version
+        for path in paths
+    }
+
+
 def comparable_runs(baseline: dict, candidate: dict) -> tuple[dict, dict]:
-    for key in ("schemaVersion", "kind"):
-        if baseline.get(key) != candidate.get(key):
-            raise SnapshotError(f"snapshot {key} differs")
+    if baseline.get("kind") != candidate.get("kind"):
+        raise SnapshotError("snapshot kind differs")
+    # Versions need not be equal -- comparing a newer candidate against a frozen
+    # older baseline is the whole point of the freeze -- but the candidate may
+    # not be the older of the two, because then its absent leaves would be
+    # indistinguishable from a broken capture.
+    if schema_version(candidate) < schema_version(baseline):
+        raise SnapshotError("candidate snapshot schemaVersion precedes the baseline")
     if baseline.get("engine", {}).get("configSignature") != candidate.get("engine", {}).get("configSignature"):
         raise SnapshotError("engine config signatures differ")
     if baseline.get("workload") != candidate.get("workload"):
@@ -964,35 +1020,45 @@ def compare_snapshots(
     if threshold_percent < 0 or threshold_absolute < 0:
         raise SnapshotError("comparison thresholds must be non-negative")
     old_runs, new_runs = comparable_runs(baseline, candidate)
+    baseline_version = schema_version(baseline)
+    optional = baseline_optional_leaves(baseline_version)
     drifts: list[dict] = []
     for bench in sorted(old_runs):
         old = numeric_leaves(old_runs[bench].get("stats", {}))
         new = numeric_leaves(new_runs[bench].get("stats", {}))
-        if old.keys() != new.keys():
-            missing = sorted(old.keys() - new.keys())
-            added = sorted(new.keys() - old.keys())
+        missing = sorted(old.keys() - new.keys())
+        gained = sorted(new.keys() - old.keys())
+        unlisted = [path for path in gained if path not in optional]
+        if missing or unlisted:
             raise SnapshotError(
-                f"stats schema differs for {bench}: missing={missing}, added={added}"
+                f"stats schema differs for {bench}: missing={missing}, "
+                f"added-without-a-version-entry={unlisted}"
             )
-        for metric in sorted(old):
-            before = old[metric]
+        for metric in sorted(new):
+            baseline_missing = metric not in old
+            before = old.get(metric, 0)
             after = new[metric]
             delta = after - before
             relative_percent = None if before == 0 else delta * 100.0 / abs(before)
             relative_limit = abs(before) * threshold_percent / 100.0
             if abs(delta) <= max(threshold_absolute, relative_limit):
                 continue
-            drifts.append(
-                {
-                    "benchmark": bench,
-                    "metric": metric,
-                    "baseline": before,
-                    "candidate": after,
-                    "delta": delta,
-                    "relativePercent": relative_percent,
-                    "direction": "increase" if delta > 0 else "decrease",
-                }
-            )
+            row = {
+                "benchmark": bench,
+                "metric": metric,
+                "baseline": before,
+                "candidate": after,
+                "delta": delta,
+                "relativePercent": relative_percent,
+                "direction": "increase" if delta > 0 else "decrease",
+                "baselineMissingLeaf": baseline_missing,
+            }
+            if baseline_missing:
+                row["note"] = (
+                    f"baseline snapshot has no such leaf at schemaVersion "
+                    f"{baseline_version}; scored against 0"
+                )
+            drifts.append(row)
     return drifts
 
 
@@ -1109,7 +1175,7 @@ def capture(args: argparse.Namespace) -> dict:
     repo_desc = git_identity(repo)
     zoo_desc = git_identity(zoo)
     return {
-        "schemaVersion": 7,
+        "schemaVersion": SCHEMA_VERSION,
         "kind": "gc-heavy-six-fixed-work-structure",
         "interpretation": (
             "One run per benchmark; structural counts are diff guards. "
@@ -1177,7 +1243,7 @@ def main() -> int:
                 args.threshold_absolute,
             )
             snapshot = {
-                "schemaVersion": 7,
+                "schemaVersion": SCHEMA_VERSION,
                 "kind": "gc-shape-comparison",
                 "baseline": str(baseline_path),
                 "candidate": str(candidate_path),

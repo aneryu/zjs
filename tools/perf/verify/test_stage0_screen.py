@@ -47,8 +47,9 @@ def stats(
     }
 
 
-def snapshot(value: dict) -> dict:
+def snapshot(value: dict, version: int | None = None) -> dict:
     return {
+        "schemaVersion": stage0.gc_snapshot.SCHEMA_VERSION if version is None else version,
         "kind": "gc-heavy-six-fixed-work-structure",
         "runs": [
             {
@@ -82,6 +83,34 @@ class Stage0ScreenTests(unittest.TestCase):
             summary["splay"]["metrics"]["hot reuse published"]["crossed"]
         )
         self.assertEqual([row["metric"] for row in other], ["diagnostic"])
+
+    def test_frozen_baseline_tolerates_only_version_registered_new_leaves(self) -> None:
+        # The frozen `main-d944f26d` baseline carries the v7 stamp but predates
+        # the v7 atom-audit and string-kind rows, so a leaf the baseline's
+        # version is allowed to lack is scored against 0 and annotated instead
+        # of aborting the screen.
+        old = snapshot(stats(), version=7)
+        with_leaf = stats()
+        with_leaf["markFootprint"] = {"byKind": {"bigInt": 5}}
+        new = snapshot(with_leaf)
+        summary, other = stage0.compare_stats(old, new, ("splay",))
+        self.assertFalse(summary["splay"]["deterministicDrift"])
+        rows = {row["metric"]: row for row in other}
+        self.assertEqual(list(rows), ["markFootprint.byKind.bigInt"])
+        self.assertEqual(rows["markFootprint.byKind.bigInt"]["baseline"], 0)
+        self.assertTrue(rows["markFootprint.byKind.bigInt"]["baselineMissingLeaf"])
+        self.assertIn("schemaVersion 7", rows["markFootprint.byKind.bigInt"]["note"])
+
+    def test_unregistered_new_leaf_is_a_hard_schema_fork(self) -> None:
+        old = snapshot(stats(), version=7)
+        forked = stats()
+        forked["novelCounter"] = 3
+        with self.assertRaisesRegex(stage0.Stage0Error, "novelCounter"):
+            stage0.compare_stats(old, snapshot(forked), ("splay",))
+        with self.assertRaisesRegex(stage0.Stage0Error, "candidate dropped"):
+            stage0.compare_stats(snapshot(forked, version=7), snapshot(stats()), ("splay",))
+        with self.assertRaisesRegex(stage0.Stage0Error, "precedes the frozen baseline"):
+            stage0.compare_stats(snapshot(stats()), snapshot(stats(), version=7), ("splay",))
 
     def test_zero_baseline_is_stable_only_when_candidate_is_also_zero(self) -> None:
         self.assertFalse(stage0.drift_row("x", "m", 0, 0)["crossed"])

@@ -507,6 +507,7 @@ pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
     }
 
     tests.sortAndDedupe();
+    try requireTest262Roots(io, tests);
     var summary = SelectionSummary{
         .total_tests = tests.items.len,
         .harnessdir = if (loaded.harnessdir) |value| try allocator.dupe(u8, value) else null,
@@ -533,6 +534,27 @@ pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
         .summary = summary,
         .skipped_features = loaded.skipped_features.move(),
     };
+}
+
+/// An absolute selector that does not walk through a `test262` component
+/// cannot be matched against the `[exclude]` list or the override manifest.
+/// That used to be dropped silently: `-d /abs/checkout/test262/test` still ran,
+/// but with intl402 and staging un-excluded and every override ignored, so an
+/// operator typo surfaced as a phantom 466-failure run instead of an error.
+/// Relative selectors keep the historic behaviour of being interpreted against
+/// the working directory.
+fn requireTest262Roots(io: std.Io, tests: NameList) !void {
+    for (tests.items) |test_path| {
+        if (!std.fs.path.isAbsolute(test_path)) continue;
+        _ = runner_source.requireTest262RelativePath(test_path) catch |err| {
+            try cli_process.printError(
+                io,
+                "run-test262: {s} is not inside a test262 checkout; exclude rules and the override manifest cannot be applied\n",
+                .{test_path},
+            );
+            return err;
+        };
+    }
 }
 
 fn enumerateTests(allocator: std.mem.Allocator, io: std.Io, tests: *NameList, root: []const u8) !void {
@@ -1080,13 +1102,95 @@ test "test262 config text parses paths features and excludes relative to config"
     try std.testing.expectEqualStrings("test262/test", loaded.testdir.?);
     try std.testing.expectEqualStrings("test262/harness", loaded.harnessdir.?);
     try std.testing.expectEqualStrings("test262_errors.txt", loaded.errorfile.?);
-    try std.testing.expect(loaded.excludes.contains("test262/test/intl402/foo.js"));
-    try std.testing.expect(loaded.reincludes.contains("test262/test/intl402/pass/foo.js"));
+    // Rules are stored in test262-root-relative space so that they match a
+    // selector regardless of how the operator spelled the checkout root.
+    try std.testing.expect(loaded.excludes.contains("test/intl402/foo.js"));
+    try std.testing.expect(loaded.reincludes.contains("test/intl402/pass/foo.js"));
     try std.testing.expect(loaded.excludesTest("test262/test/intl402/fail/foo.js"));
     try std.testing.expect(!loaded.excludesTest("test262/test/intl402/pass/foo.js"));
     try std.testing.expect(loaded.excludesTest("test262/test/intl402/pass/known-bad.js"));
     try std.testing.expectEqual(@as(usize, 1), loaded.enabled_features.items.len);
     try std.testing.expectEqual(@as(usize, 1), loaded.skipped_features.items.len);
+}
+
+test "test262 exclude rules match absolute dot-slash and relative selectors alike" {
+    // Regression: `-d /abs/checkout/test262/test` and `-d ./test262/test` used
+    // to bypass every `[exclude]` rule, turning a 0/49778 run into 466/53293.
+    var loaded = try loadConfigText(std.testing.allocator, "",
+        \\[exclude]
+        \\test262/test/intl402/
+        \\!test262/test/intl402/pass/
+    );
+    defer loaded.deinit(std.testing.allocator);
+
+    const excluded = [_][]const u8{
+        "test262/test/intl402/fail/foo.js",
+        "./test262/test/intl402/fail/foo.js",
+        "/home/user/zjs/test262/test/intl402/fail/foo.js",
+        "test/intl402/fail/foo.js",
+    };
+    for (excluded) |path| try std.testing.expect(loaded.excludesTest(path));
+
+    const reincluded = [_][]const u8{
+        "test262/test/intl402/pass/foo.js",
+        "./test262/test/intl402/pass/foo.js",
+        "/home/user/zjs/test262/test/intl402/pass/foo.js",
+        "test/intl402/pass/foo.js",
+    };
+    for (reincluded) |path| try std.testing.expect(!loaded.excludesTest(path));
+
+    // A selector outside any test262 checkout keeps its raw spelling and stays
+    // unmatched rather than being coerced into the rule space.
+    try std.testing.expect(!loaded.excludesTest("/tmp/corpus/intl402/fail/foo.js"));
+}
+
+test "test262 relative path normalizes every accepted selector spelling" {
+    try std.testing.expectEqualStrings(
+        "test/built-ins/WeakRef/constructor.js",
+        runner_source.test262RelativePath("test262/test/built-ins/WeakRef/constructor.js").?,
+    );
+    try std.testing.expectEqualStrings(
+        "test/built-ins/WeakRef/constructor.js",
+        runner_source.test262RelativePath("./test262/test/built-ins/WeakRef/constructor.js").?,
+    );
+    try std.testing.expectEqualStrings(
+        "test/built-ins/WeakRef/constructor.js",
+        runner_source.test262RelativePath("/home/user/zjs/test262/test/built-ins/WeakRef/constructor.js").?,
+    );
+    try std.testing.expectEqualStrings(
+        "test/built-ins/WeakRef/constructor.js",
+        runner_source.test262RelativePath("test/built-ins/WeakRef/constructor.js").?,
+    );
+    // Only whole `test262` components count as the checkout root, and a path
+    // with no root at all is a normalization failure rather than a guess.
+    try std.testing.expect(runner_source.test262RelativePath("my-test262/test/x.js") == null);
+    try std.testing.expect(runner_source.test262RelativePath("/tmp/corpus/x.js") == null);
+    try std.testing.expect(runner_source.test262RelativePath("built-ins/WeakRef/x.js") == null);
+    try std.testing.expectError(
+        error.Test262PathOutsideRoot,
+        runner_source.requireTest262RelativePath("/tmp/corpus/x.js"),
+    );
+}
+
+test "test262 override manifest resolves through absolute and dot-slash paths" {
+    const relative = "test/staging/sm/Error/prototype.js";
+    const spellings = [_][]const u8{
+        "test262/" ++ relative,
+        "./test262/" ++ relative,
+        "/home/user/zjs/test262/" ++ relative,
+        relative,
+    };
+    for (spellings) |path| {
+        const override = test262Override(path) orelse return error.TestExpectedOverride;
+        try std.testing.expectEqualStrings(relative, override.path);
+        const override_path = try test262OverridePath(std.testing.allocator, path);
+        defer std.testing.allocator.free(override_path);
+        try std.testing.expectEqualStrings(
+            "tests/fixtures/test262-overrides/" ++ relative,
+            override_path,
+        );
+    }
+    try std.testing.expect(test262Override("/tmp/corpus/" ++ relative) == null);
 }
 
 test "test262 feature overrides update loaded feature lists" {
@@ -1633,7 +1737,11 @@ test "test262 override path maps only manifest entries" {
     try std.testing.expectEqualStrings("test262/test/built-ins/TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js", upstream);
 
     try std.testing.expect(test262Override("test262/test/example.js") == null);
-    try std.testing.expect(test262Override("quickjs/test262/test/built-ins/TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js") == null);
+    // A checkout nested under another directory is still a checkout: the
+    // manifest keys off the `test262` component, not off the string's start.
+    // This is the same rule that lets `-d /abs/path/test262/test` work.
+    try std.testing.expect(test262Override("quickjs/test262/test/built-ins/TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js") != null);
+    // Normalizing still yields `harness/...`, which no manifest entry names.
     try std.testing.expect(test262Override("tests/fixtures/test262/harness/asyncHelpers.js") == null);
 }
 

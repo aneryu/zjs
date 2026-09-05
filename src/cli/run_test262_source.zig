@@ -198,11 +198,56 @@ pub fn test262UpstreamPath(allocator: std.mem.Allocator, relative_path: []const 
     return try std.fs.path.join(allocator, &.{ "test262", relative_path });
 }
 
-fn test262RelativePath(test_path: []const u8) ?[]const u8 {
-    const config_prefix = "test262/";
-    if (std.mem.startsWith(u8, test_path, config_prefix)) return test_path[config_prefix.len..];
-    if (std.mem.startsWith(u8, test_path, "test/")) return test_path;
+/// Raised when a path that must be interpreted against the test262 checkout
+/// cannot be reduced to a root-relative name. Callers report and exit instead
+/// of degrading silently: a dropped normalization loses the whole `[exclude]`
+/// list and the override manifest, which shows up as a large phantom failure
+/// count rather than as an error.
+pub const PathError = error{Test262PathOutsideRoot};
+
+/// Normalize a runner path to a test262-root-relative name (`test/...`).
+///
+/// Accepted shapes, all of which the runner can receive through `-d`, `-f`,
+/// `testdir=` or an `[exclude]` entry:
+///   * `test262/test/x.js`               (repo-relative, the gate shape)
+///   * `./test262/test/x.js`             (leading `./`, possibly repeated)
+///   * `/home/user/zjs/test262/test/x.js` (absolute, or any path that walks
+///                                         through a `test262` component)
+///   * `test/x.js`                       (already root-relative)
+/// Returns null when no interpretation is possible; use `requireRelativePath`
+/// where a missing normalization is a hard error.
+pub fn test262RelativePath(test_path: []const u8) ?[]const u8 {
+    var rest = test_path;
+    while (std.mem.startsWith(u8, rest, "./")) rest = rest[2..];
+    if (lastTest262ComponentEnd(rest)) |offset| {
+        const relative = rest[offset..];
+        return if (relative.len == 0) null else relative;
+    }
+    if (std.mem.startsWith(u8, rest, "test/")) return rest;
+    if (std.mem.eql(u8, rest, "test")) return rest;
     return null;
+}
+
+/// `test262RelativePath` with the silent-drop path turned into an error.
+pub fn requireTest262RelativePath(test_path: []const u8) PathError![]const u8 {
+    return test262RelativePath(test_path) orelse error.Test262PathOutsideRoot;
+}
+
+/// Byte offset just past the last `test262/` path component of `path`, i.e.
+/// the start of the root-relative remainder. Only whole components match, so a
+/// file named `my-test262/x.js` is not mistaken for the checkout root. The last
+/// component wins so that a checkout nested under another `test262` directory
+/// still resolves against the innermost root.
+fn lastTest262ComponentEnd(path: []const u8) ?usize {
+    const component = "test262/";
+    var found: ?usize = null;
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, path, index, component)) |hit| {
+        index = hit + 1;
+        if (hit != 0 and path[hit - 1] != '/') continue;
+        found = hit + component.len;
+    }
+    return found;
 }
 
 pub fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *HarnessCache, harness_prelude: []const u8, test_source: []const u8, metadata: TestMetadata) ![]u8 {

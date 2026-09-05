@@ -326,6 +326,16 @@ def compare_stats(
 ) -> tuple[dict[str, dict], list[dict]]:
     if baseline.get("kind") != candidate.get("kind"):
         raise Stage0Error("GC snapshot kinds differ")
+    try:
+        baseline_version = gc_snapshot.schema_version(baseline)
+        candidate_version = gc_snapshot.schema_version(candidate)
+    except gc_snapshot.SnapshotError as exc:
+        raise Stage0Error(str(exc)) from exc
+    if candidate_version < baseline_version:
+        raise Stage0Error(
+            "candidate GC snapshot schemaVersion precedes the frozen baseline"
+        )
+    baseline_optional = gc_snapshot.baseline_optional_leaves(baseline_version)
     old_runs = snapshot_runs(baseline)
     new_runs = snapshot_runs(candidate)
     summary: dict[str, dict] = {}
@@ -357,20 +367,39 @@ def compare_stats(
         old_leaves = gc_snapshot.numeric_leaves(old_stats)
         new_leaves = gc_snapshot.numeric_leaves(new_stats)
         # Losing a metric is a broken candidate and stays fatal.  Gaining one is
-        # how instrumentation grows against a FROZEN baseline snapshot (the S2
-        # string kind is the first case): the baseline JSON can never be
-        # re-emitted, so a new leaf is scored against 0 and shows up as drift
-        # rather than aborting the screen.
+        # how instrumentation grows against a FROZEN baseline snapshot: the
+        # baseline JSON can never be re-emitted, so a leaf the baseline's schema
+        # version predates is scored against 0 and shows up as an annotated
+        # drift row rather than aborting the screen.  A gained leaf that no
+        # version entry accounts for is NOT that case -- it means the snapshot
+        # schema forked without a version bump, which is what let the S2 string
+        # kind and the S3 atom audit diverge silently -- so it is fatal and
+        # names the table that has to be updated.
         missing_in_candidate = sorted(old_leaves.keys() - new_leaves.keys())
         if missing_in_candidate:
             raise Stage0Error(
                 f"GC stats schema differs for {bench}: candidate dropped "
                 + ", ".join(missing_in_candidate)
             )
+        unlisted = sorted(new_leaves.keys() - old_leaves.keys() - baseline_optional)
+        if unlisted:
+            raise Stage0Error(
+                f"GC stats schema differs for {bench}: candidate added "
+                + ", ".join(unlisted)
+                + f" with no entry in gc_stats_snapshot.SCHEMA_ADDED_LEAVES above "
+                f"baseline schemaVersion {baseline_version}"
+            )
         for path in sorted(new_leaves):
             if path in CONTRACT_PATHS:
                 continue
+            baseline_missing = path not in old_leaves
             row = drift_row(bench, path, old_leaves.get(path, 0), new_leaves[path])
+            row["baselineMissingLeaf"] = baseline_missing
+            if baseline_missing:
+                row["note"] = (
+                    f"baseline snapshot has no such leaf at schemaVersion "
+                    f"{baseline_version}; scored against 0"
+                )
             if row["crossed"]:
                 other_drifts.append(row)
 
@@ -688,12 +717,29 @@ def markdown_report(artifact: dict) -> str:
     lines.extend(["", "## Other >10% GC-stat drifts (diagnostic appendix)", ""])
     if artifact["otherGcDrifts"]:
         for row in artifact["otherGcDrifts"]:
+            # A leaf the frozen baseline predates is scored against 0, so its
+            # "drift" is an instrumentation fact, not a candidate regression.
+            suffix = " (baseline has no such leaf)" if row.get("baselineMissingLeaf") else ""
             lines.append(
                 f"- {row['benchmark']} / {row['metric']}: "
-                f"{row['baseline']} -> {row['candidate']}"
+                f"{row['baseline']} -> {row['candidate']}{suffix}"
             )
     else:
         lines.append("None.")
+    schema = artifact.get("gcStatsSchema")
+    if schema:
+        lines.extend(["", "## GC stats schema", ""])
+        lines.append(
+            f"- baseline schemaVersion {schema['baselineVersion']}, "
+            f"candidate schemaVersion {schema['candidateVersion']}"
+        )
+        if schema["baselineMissingLeaves"]:
+            lines.append(
+                "- leaves absent from the baseline and scored against 0: "
+                + ", ".join(schema["baselineMissingLeaves"])
+            )
+        else:
+            lines.append("- every candidate leaf is present in the baseline")
     if artifact.get("symbolDiff"):
         lines.extend(["", "## STOP attribution: cycles:u symbol delta top 15", ""])
         lines.append("| delta samples | baseline | candidate | symbol |")
@@ -767,6 +813,13 @@ def screen(args: argparse.Namespace) -> int:
     capture_stats(candidate, candidate_snapshot_path, benches, args.timeout)
     candidate_stats = load_json(candidate_snapshot_path)
     gc_summary, other_drifts = compare_stats(baseline_stats, candidate_stats, benches)
+    gc_stats_schema = {
+        "baselineVersion": baseline_stats.get("schemaVersion"),
+        "candidateVersion": candidate_stats.get("schemaVersion"),
+        "baselineMissingLeaves": sorted(
+            {row["metric"] for row in other_drifts if row.get("baselineMissingLeaf")}
+        ),
+    }
 
     run_pmu(candidate, baseline, pmu_path, benches, args.timeout)
     pmu_artifact = load_json(pmu_path)
@@ -855,6 +908,7 @@ def screen(args: argparse.Namespace) -> int:
         "summary": summary,
         "gcStats": gc_summary,
         "otherGcDrifts": other_drifts,
+        "gcStatsSchema": gc_stats_schema,
         "pmuArtifact": str(pmu_path),
         "candidateStatsArtifact": str(candidate_snapshot_path),
         "symbolDiff": symbol_diff,
