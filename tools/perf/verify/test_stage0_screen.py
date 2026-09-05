@@ -219,6 +219,25 @@ class Stage0ScreenTests(unittest.TestCase):
         self.assertEqual(top[0]["deltaSamples"], 2876)
         self.assertEqual(top[1]["deltaSamples"], 1580)
 
+    def test_perf_report_merges_renumbered_instantiations(self) -> None:
+        # Same instance, different per-build numbering: one key, summed.
+        base = stage0.parse_perf_report(
+            " 72|[.] exec.tailcall_dispatch.opCall__struct_138912.h|x\n"
+            " 2|[.] exec.tailcall_dispatch.opCall__struct_138896.h|x\n"
+            " 9|[.] core.gc_trace_stw.traceHeaderEdges__anon_133046|x\n"
+        )
+        candidate = stage0.parse_perf_report(
+            " 70|[.] exec.tailcall_dispatch.opCall__struct_139059.h|x\n"
+            " 2|[.] exec.tailcall_dispatch.opCall__struct_139043.h|x\n"
+            " 9|[.] core.gc_trace_stw.traceHeaderEdges__anon_133100|x\n"
+        )
+        self.assertEqual(base, {
+            "exec.tailcall_dispatch.opCall__struct.h": 74,
+            "core.gc_trace_stw.traceHeaderEdges__anon": 9,
+        })
+        top = stage0.symbol_delta(base, candidate)
+        self.assertEqual([row["deltaSamples"] for row in top], [0, -2])
+
     def test_field_b_is_not_a_stage0_cli_choice(self) -> None:
         parser = stage0.build_parser()
         with self.assertRaises(SystemExit):

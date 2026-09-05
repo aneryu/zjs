@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -484,13 +485,23 @@ def validate_pmu(
     return result
 
 
+# Zig numbers anonymous and generic instantiations per compilation
+# (`opCall__struct_138912.h`, `traceHeaderEdges__anon_133046`), so the same
+# instance carries a different number in every binary. Left in, the two
+# sides never share a key: the 2026-09-06 splay account read the fixed-arity
+# `opCall` instance as `0 -> 70` samples (baseline `__struct_138912` 72,
+# candidate `__struct_139059` 70) and carried a "+66 opCall" knife for a
+# week. Drop the number and sum every instance under the one name.
+_INSTANCE_NUMBER = re.compile(r"__(anon|struct)_\d+")
+
+
 def normalize_perf_symbol(raw: str) -> str:
     value = raw.strip()
     if value.startswith("[.") or value.startswith("[k"):
         close = value.find("]")
         if close >= 0:
             value = value[close + 1 :].strip()
-    return value
+    return _INSTANCE_NUMBER.sub(lambda m: f"__{m.group(1)}", value)
 
 
 def parse_perf_report(text: str) -> dict[str, int]:
