@@ -1117,11 +1117,22 @@ pub const Object = extern struct {
     /// a newly published Shape and a pre-existing hash hit from collection.
     fn collectBeforeObjectAllocationPublishingShape(rt: *JSRuntime, shape_ref: *shape.Shape, accounted_size: usize) void {
         if (!shape_ref.header.meta().alloc_info.heap_accounted) rt.shapes.publish(shape_ref);
+        // The root has to outlive the collection it is taken for, so the
+        // collection call belongs INSIDE the frame's block. It used to sit
+        // after it, which meant the frame's `defer deactivate` had already run
+        // and the Shape was unrooted for exactly the window the frame exists
+        // to cover. The conservative arm hid that; a precise-only scan would
+        // not have (R3 census item 5).
         if (comptime !runtime_mod.value_root_link_containers_only) {
             var header_roots = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
             var frame = runtime_mod.ValueRootFrame{ .headers = &header_roots };
             frame.activate(rt);
             defer frame.deactivate(rt);
+            // INSIDE the block, so the frame's `defer` runs after this call
+            // rather than before it. The production arm below is the same
+            // straight-line `publish; collect` it was, byte for byte.
+            rt.collectBeforeObjectAllocation(accounted_size);
+            return;
         }
         rt.collectBeforeObjectAllocation(accounted_size);
     }
@@ -4368,7 +4379,7 @@ pub const Object = extern struct {
     /// The collector header of a dense element buffer. Only valid when
     /// `arrayArm().capacity != 0` -- an empty arm's `values` is the null
     /// no-payload sentinel, not a cell.
-    inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.GCObjectHeader {
+    pub inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.GCObjectHeader {
         return @ptrCast(@alignCast(values));
     }
 

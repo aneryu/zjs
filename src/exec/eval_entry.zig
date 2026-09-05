@@ -192,15 +192,43 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         try stack.reserveAdditional(root_function.stack_size);
         const value = if (root_function_object) |root_object| v: {
             const is_eval_code = options.mode == .eval_direct or options.mode == .eval_indirect;
-            const initial_this = if (root_function.runtimeStrictMode()) core.JSValue.undefinedValue() else root_object.bytecodeFunctionRealmGlobalPtr().?.value();
+            const realm_global = root_object.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
+            const initial_this = if (root_function.runtimeStrictMode()) core.JSValue.undefinedValue() else realm_global.value();
+            const captures = root_object.functionCaptures();
+            // TGC R1: the call environment below is a native struct built in
+            // THIS frame and read for the whole script. Its members -- the
+            // root function object and the bytecode it runs, the realm global
+            // that is also the sloppy `this`, and the closure cells -- have no
+            // other owner while the VM runs, so a precise-only root set has to
+            // name them here. `.slices` rather than a scalar `rootValues`, for
+            // the reason the completion value below gives: a container frame
+            // is honoured by the production container-only policy, a scalar
+            // one is not.
+            //
+            // Measured: this does NOT move the R3 census share attributed to
+            // this call site (158,240 -> 158,214 over the R1-a test262 corpus).
+            // That share is not the call env at all -- it is stale words in
+            // eval's own 2 KiB frame, in slots the compile/diagnostic phase
+            // used and the VM phase never rewrites (an `Io.Writer` buffer slot
+            // and a dead JSValue slot, both re-resolving to recycled cells).
+            // Residue needs scrubbing or a smaller frame, not a root.
+            var env_values = [_]core.JSValue{ root_function_value, initial_this, realm_global.value() };
+            var env_slices = [_]core.runtime.ValueRootSlice{
+                .{ .borrowed = &env_values },
+                .{ .borrowed_cells = captures },
+            };
+            var env_headers = [_]core.runtime.HeaderRootValue{.{ .header = @constCast(&root_function.header) }};
+            var env_roots = core.runtime.ValueRootFrame{ .slices = &env_slices, .headers = &env_headers };
+            env_roots.activate(rt);
+            defer env_roots.deactivate(rt);
             break :v try zjs_vm.runWithCallEnv(.{
                 .ctx = ctx,
                 .stack = &stack,
                 .function = root_function,
                 .initial_this_value = initial_this,
-                .var_refs = root_object.functionCaptures(),
+                .var_refs = captures,
                 .output = options.output,
-                .global = root_object.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry,
+                .global = realm_global,
                 .strict_unresolved_get_var = root_function.isStrictMode(),
                 .current_function_value = root_function_value,
                 .eval_global_var_bindings = options.mode == .eval_indirect,

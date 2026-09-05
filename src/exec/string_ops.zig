@@ -2434,65 +2434,52 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     std.debug.assert(out.arrayElementsCapacity() == 0);
 
     const element_count = found.capture_count + 1;
-    // The staging buffer stays NATIVE memory, deliberately, even though TGC
-    // S4-b makes the buffer an adopt installs an `.array_storage` GC cell: the
-    // fill loop below allocates on every iteration, and a bare cell has no
-    // precise root to survive those boundaries on (`createArrayStorageSlice`
-    // documents the same rule -- mint and install must be adjacent). So the
-    // cell is minted after the loop and the staged prefix is copied into it.
-    const elements = try rt.memory.alloc(core.JSValue, element_count);
-    defer rt.memory.free(core.JSValue, elements);
-    var initialized: usize = 0;
-    // The staging buffer is native memory, so the collector cannot see it:
-    // it is neither a traced carrier nor a range the conservative scan walks,
-    // and only the machine word holding the LAST substring is a root. Every
-    // `stringSliceValue` below allocates, and since TGC S2-f a string body
-    // allocation is a collection boundary (`String.createUninitialized` ->
-    // `collectBeforeObjectAllocation`), so the capture written at iteration
-    // `i` can be condemned by the minor that iteration `i+1` triggers.
-    // Nothing asserts, because a young string cell is simply reused: the
-    // array ends up holding a live pointer to another string's bytes, which
-    // is how this arrived -- as a wrong regexp checksum, not a crash.
-    // Publish the initialized prefix as a root slice, growing it with the
-    // fill, exactly like `argsFromArray`.
-    var rooted_elements: []core.JSValue = elements[0..0];
-    var elements_root = ValueSliceRoot{};
-    elements_root.init(rt, &rooted_elements);
-    defer elements_root.deinit();
+    // TGC R1 item 6, retiring the S4-b native-staging exception. The old shape
+    // staged the captures in native memory and copied them into a freshly
+    // minted `.array_storage` cell at the end, because a bare cell has no
+    // precise root to survive an allocation on and every `stringSliceValue`
+    // below IS an allocation boundary (S2-f: a string body allocation calls
+    // `collectBeforeObjectAllocation`). `ValueRootFrame` can name a bare cell:
+    // `.headers` roots the cell itself and the `.slices` window roots what is
+    // in it, so "mint and install must be adjacent" is satisfied by the root
+    // frame instead of by adjacency, and the native buffer plus its copy go
+    // away. The window is what makes the frame a CONTAINER frame, which is
+    // what the production container-only link policy honours.
+    const cell = try core.Object.createArrayStorageSlice(rt, element_count);
+    // Rooting publishes the whole cell to the tracer, so no slot may still
+    // hold an uninitialized word once the frame is live.
+    @memset(cell, core.JSValue.undefinedValue());
+    const cell_header = core.Object.arrayStorageCellHeader(cell.ptr);
+    var cell_headers = [_]core.runtime.HeaderRootValue{.{ .header = cell_header }};
+    var cell_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = cell }};
+    var cell_frame = core.runtime.ValueRootFrame{ .slices = &cell_slices, .headers = &cell_headers };
+    cell_frame.activate(rt);
+    defer cell_frame.deactivate(rt);
 
     // QuickJS writes each newly-created substring straight into the expanded
     // fast array. Let the dense array own this value directly as well, instead
-    // of duplicating it here and releasing a second owner in the caller.
-    elements[0] = try stringSliceValue(rt, input_value, found.index, found.len);
-    initialized = 1;
-    rooted_elements = elements[0..initialized];
+    // of duplicating it here and releasing a second owner in the caller. The
+    // barrier is the one `setFastArrayElement` takes for the same store: a
+    // minor inside the fill loop can promote this cell before the next
+    // capture, and an old cell gaining a young string is exactly the edge the
+    // generational barrier exists for.
+    cell[0] = try stringSliceValue(rt, input_value, found.index, found.len);
+    rt.gc.generationalBarrierValue(cell_header, cell[0]);
 
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const element_index = capture_index + 1;
         const capture = found.captureAt(capture_index);
-        if (capture.undefined) {
-            elements[element_index] = core.JSValue.undefinedValue();
-        } else {
-            const capture_value = try stringSliceValue(rt, input_value, capture.start, capture.len);
-            elements[element_index] = capture_value;
-        }
-        initialized += 1;
-        rooted_elements = elements[0..initialized];
+        if (capture.undefined) continue;
+        cell[element_index] = try stringSliceValue(rt, input_value, capture.start, capture.len);
+        rt.gc.generationalBarrierValue(cell_header, cell[element_index]);
     }
 
     if (groups) |groups_object| {
-        try populateRegExpGroupsFromCaptureValues(rt, groups_object, found, elements[0..element_count]);
+        try populateRegExpGroupsFromCaptureValues(rt, groups_object, found, cell);
     }
 
-    // TGC S4-b spec 2.2: the adopted buffer must be an `.array_storage` GC
-    // cell. Mint it here, where the staged values are still rooted through
-    // `rooted_elements` and nothing between the mint and the adopt can
-    // collect.
-    const cell = try core.Object.createArrayStorageSlice(rt, element_count);
-    @memcpy(cell, elements[0..element_count]);
     out.adoptDenseArrayElementsAssumingEmpty(rt, cell);
-    rooted_elements = elements[0..0];
     out.flags.may_have_indexed_properties = true;
 }
 

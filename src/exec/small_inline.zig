@@ -1480,7 +1480,18 @@ pub fn tryFusedConstructor(rt: *JSRuntime, site: *const InlinedSite, func: JSVal
     const stored = obj.asDataAt(site.proto_slot) orelse return null;
     const proto = object_ops.objectFromValue(stored) orelse return null;
     if (proto != expected_proto) return null;
-    const instance = core.Object.createPlainObject(rt, proto) catch return null;
+    // TGC R1: `createPlainObject` publishes a Shape, takes the pre-allocation
+    // collection boundary and then allocates the object cell -- three points
+    // where a minor can run -- while the prototype and the constructor it came
+    // from are held only as Zig locals of this frame. Name them. Production's
+    // container-only policy erases the scope, so the hot arm is unchanged;
+    // the declaration is what a precise-only root set needs (R3 item 2).
+    var proto_object: ?*Object = proto;
+    var ctor_object: ?*Object = obj;
+    var roots = core.runtime.rootObjects(.{ &proto_object, &ctor_object });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const instance = core.Object.createPlainObject(rt, proto_object) catch return null;
     return instance.value();
 }
 
