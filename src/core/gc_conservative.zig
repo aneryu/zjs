@@ -407,7 +407,7 @@ fn diagCaptureFrames(w: DiagWord) void {
 /// `*Object` the mutator was holding in x19 across a call is found in the
 /// frame of whatever the mutator called, so the owner frame alone reads as
 /// "pollGC" for a word the mutator owns. The pair separates the two.
-fn diagOwnerPcs(w: DiagWord) struct { owner: usize, caller: usize } {
+fn diagOwnerPcs(w: DiagWord) struct { owner: usize, caller: usize, frame_base: usize } {
     if (diag_frames_for_sp != w.sp or w.high == 0) diagCaptureFrames(w);
     const frames = diag_frames[0..diag_frame_count];
     // Ascending tops: the owner is the first frame whose base is at or above
@@ -418,10 +418,15 @@ fn diagOwnerPcs(w: DiagWord) struct { owner: usize, caller: usize } {
         const mid = lo + (hi - lo) / 2;
         if (frames[mid].top >= w.addr) hi = mid else lo = mid + 1;
     }
-    if (lo >= frames.len) return .{ .owner = 0, .caller = 0 };
+    if (lo >= frames.len) return .{ .owner = 0, .caller = 0, .frame_base = 0 };
+    // `frame_base` is what R1-b added: the owner frame's `fp`. A hit is only
+    // actionable once you know WHERE in the frame the word sat -- a prologue
+    // save slot (`fp - 16*k`) is the caller's register, a deep slot the
+    // compiler reused is residue, and neither of those is a missing root.
     return .{
         .owner = frames[lo].pc,
         .caller = if (lo + 1 < frames.len) frames[lo + 1].pc else 0,
+        .frame_base = frames[lo].top,
     };
 }
 
@@ -459,6 +464,57 @@ pub fn diagRegisterName(index: usize, buf: []u8) []const u8 {
 /// a per-runtime table could never aggregate a sweep, and a JS atom is only
 /// meaningful inside the runtime that minted it. Function names are therefore
 /// interned as bytes at note time, and the table outlives every runtime.
+/// One (owner frame pc, frame slot) site, tracked across every scan in the
+/// process.
+///
+/// The residue signature R1-a had to find by hand -- the same slot resolving
+/// to the same header collection after collection, in a frame phase that no
+/// longer writes it -- is exactly what this table measures. A live local
+/// changes what it points at as the mutator runs; a dead slot does not.
+const StabilityEntry = struct {
+    used: bool = false,
+    pc: usize = 0,
+    pc_index: u12 = 0,
+    slot_bucket: u16 = 0,
+    /// `run-test262` runs one runtime per worker thread on identical native
+    /// frames, so (pc, slot) alone names EIGHT different slots whose contents
+    /// have nothing to do with each other. Without this field the "same header
+    /// as last time" test is destroyed by interleaving: the 2026-09-05 corpus
+    /// read the known `eval` residue at 10% stability. Sites are per thread;
+    /// the report merges them back per slot.
+    thread_id: u32 = 0,
+    /// Header the previous hit at this site resolved to.
+    last_header: usize = 0,
+    hits: usize = 0,
+    /// Hits whose header equalled `last_header` at the time.
+    stable_hits: usize = 0,
+    exact_hits: usize = 0,
+    prefix_hits: usize = 0,
+    /// Bitmask over `gc.GcKind` of everything this slot ever resolved to.
+    ///
+    /// The second residue signature, and the sharper one: a Zig local has a
+    /// static type, so a real root slot resolves to ONE kind forever. A dead
+    /// slot holding a recycled address resolves to whatever cell now occupies
+    /// it -- a function object on one collection, property storage on the
+    /// next. Kind churn is the fingerprint of an address that means nothing.
+    kinds: u16 = 0,
+    /// Most recent offset bucket, for reporting.
+    offset_bucket: u8 = 0,
+
+    fn kindCount(self: StabilityEntry) usize {
+        return @popCount(self.kinds);
+    }
+};
+
+/// Dense per-thread id for the site table; 0 means "not yet assigned".
+var diag_thread_counter: std.atomic.Value(u32) = .init(0);
+threadlocal var diag_thread_id: u32 = 0;
+
+fn diagThreadId() u32 {
+    if (diag_thread_id == 0) diag_thread_id = diag_thread_counter.fetchAdd(1, .monotonic) +| 1;
+    return diag_thread_id;
+}
+
 pub const RootsDiagCensus = struct {
     /// Where the machine word that named the object lived.
     ///
@@ -493,7 +549,72 @@ pub const RootsDiagCensus = struct {
     pub const name_max = 48;
     pub const index_unknown: u12 = 0xFFF;
 
-    pub const Key = packed struct(u64) {
+    /// R1-b column 1: `word - header`, bucketed.
+    ///
+    /// `exact`/`prefix`/`interior` alone cannot separate a missing root from
+    /// junk: an interior word at a fixed distance is what a live *field*
+    /// pointer looks like, and so is a dead slot the compiler recycled. The
+    /// distance itself is the discriminator, so it goes in the key.
+    ///
+    /// Encoding: 0 = exact (`word == header`), 1 = the metadata prefix
+    /// (`header - 8`), 2 + n/8 for an interior word n bytes past the header
+    /// (saturating at `>= 256`), 255 for anything else below the header.
+    pub const offset_exact: u8 = 0;
+    pub const offset_prefix: u8 = 1;
+    pub const offset_interior_base: u8 = 2;
+    pub const offset_interior_max: u8 = offset_interior_base + 32;
+    pub const offset_below: u8 = 255;
+
+    pub fn offsetBucket(word: usize, header_addr: usize) u8 {
+        if (word == header_addr) return offset_exact;
+        if (word == header_addr - gc.metadata_prefix_size) return offset_prefix;
+        if (word < header_addr) return offset_below;
+        const delta = (word - header_addr) / @sizeOf(usize);
+        return @min(offset_interior_base + @as(u8, @intCast(@min(delta, 32))), offset_interior_max);
+    }
+
+    pub fn offsetBucketName(bucket: u8, buf: []u8) []const u8 {
+        return switch (bucket) {
+            offset_exact => "+0",
+            offset_prefix => "-8",
+            offset_below => "<hdr",
+            offset_interior_max => ">=256",
+            else => std.fmt.bufPrint(buf, "+{d}", .{@as(usize, bucket - offset_interior_base) * 8}) catch "?",
+        };
+    }
+
+    /// R1-b column 2: `frame_base - word_address` in 8-byte units, i.e. how
+    /// deep in the owner frame the slot sat. `slot_unknown` covers register
+    /// and below-`sp` hits, which have no owner frame.
+    pub const slot_unknown: u16 = 0xFFFF;
+
+    /// AAPCS64/SysV prologues save the CALLER's callee-saved registers into
+    /// the callee's own frame, immediately below the frame record, in pairs.
+    /// A hit in that band is "someone else's register", not a local of the
+    /// frame it is attributed to. Ten AArch64 GPR pairs (x19-x28) plus the
+    /// d8-d15 band fit in 160 bytes; the constant is deliberately generous,
+    /// because over-calling `likely_spill` only shortens the R1 worklist with
+    /// frames the caller has to own anyway.
+    pub const callee_saved_span: usize = 160;
+
+    /// Three-way reading of one (frame, slot) site.
+    pub const Verdict = enum {
+        /// Same slot, same header, scan after scan, and not a header-exact
+        /// word: a dead stack slot the compiler recycled. Rooting cannot fix
+        /// it; only scrubbing or a smaller frame can.
+        likely_residue,
+        /// A header-exact (or metadata-prefix) word inside the prologue save
+        /// band: the caller's register, spilled by the callee. The owner of
+        /// the reference is the caller, so the frame it is billed to is the
+        /// wrong place to look.
+        likely_spill,
+        /// Everything else: a word that behaves like a real reference held in
+        /// a real local. This is the R1 worklist.
+        candidate_root,
+    };
+    pub const verdict_count = @typeInfo(Verdict).@"enum".fields.len;
+
+    pub const Key = packed struct(u128) {
         /// Index into `names`, or `index_unknown`.
         name_index: u12,
         class_id: u16,
@@ -506,17 +627,29 @@ pub const RootsDiagCensus = struct {
         ptr_kind: u2,
         young: u1,
         native: u1,
+        offset_bucket: u8,
+        slot_bucket: u16,
+        // Stability is NOT part of the key: it is a property of the site over
+        // time, so folding it in would split one site's row in two. It rides
+        // alongside as `Slot.stable_count`.
+        _pad: u40 = 0,
     };
 
     const Slot = struct {
-        key: Key = @bitCast(@as(u64, 0)),
+        key: Key = @bitCast(@as(u128, 0)),
         count: usize = 0,
+        stable_count: usize = 0,
         used: bool = false,
     };
     // Sized for headroom, not for footprint: the census is `.bss`, so a wider
     // table costs the runtime nothing. 4096 saturated (`dropped keys 329`) on
     // one test262 directory once the scan range was corrected.
     const slots_len = 16384;
+    /// `.bss`, like the rest of the census, so a wide table is free. It lives
+    /// OUTSIDE the census struct because `diagCensusSnapshot` copies the
+    /// census by value for tests, and a megabyte of site table on a test
+    /// thread's stack is not worth the tidiness.
+    pub const stability_len = 65536;
 
     slots: [slots_len]Slot = @splat(.{}),
     /// `computeFullReachable` runs with the conservative arm on.
@@ -543,7 +676,13 @@ pub const RootsDiagCensus = struct {
     /// so the frame ranking survives key-table saturation.
     pcs: [pc_table_len]usize = @splat(0),
     pc_counts: [pc_table_len]usize = @splat(0),
+    pc_stable_counts: [pc_table_len]usize = @splat(0),
     pc_used: usize = 0,
+    /// Hits with no owner frame (register spill image, or below the scanner's
+    /// own `sp`); they have no slot geometry and stay out of the verdict.
+    unlocated: usize = 0,
+    /// Distinct (frame, slot) sites the stability table could not hold.
+    dropped_sites: usize = 0,
     names: [name_table_len][name_max]u8 = @splat(@splat(0)),
     name_lens: [name_table_len]u8 = @splat(0),
     names_used: usize = 0,
@@ -560,11 +699,15 @@ pub const RootsDiagCensus = struct {
         caller_pc: usize,
         function_name: []const u8,
         truncated: bool,
+        offset_bucket: u8,
+        slot_bucket: u16,
+        header_addr: usize,
     };
 
     fn hashKey(key: Key) usize {
-        const bits: u64 = @bitCast(key);
-        return @intCast((bits *% 0x9E37_79B9_7F4A_7C15) >> (64 - 12));
+        const bits: u128 = @bitCast(key);
+        const folded: u64 = @truncate(bits ^ (bits >> 64));
+        return @intCast((folded *% 0x9E37_79B9_7F4A_7C15) >> (64 - 12));
     }
 
     fn currentFunction(rt: *const JSRuntime) struct { name: []const u8, native: bool } {
@@ -628,6 +771,8 @@ pub const RootsDiagCensus = struct {
             .prefix
         else
             .interior;
+        const offset_bucket = offsetBucket(w.word, header_addr);
+        var slot_bucket: u16 = slot_unknown;
         var source: Source = undefined;
         var register_index: ?usize = null;
         var owner_pc: usize = 0;
@@ -641,6 +786,9 @@ pub const RootsDiagCensus = struct {
             const owners = diagOwnerPcs(w);
             owner_pc = owners.owner;
             caller_pc = owners.caller;
+            if (owners.frame_base >= w.addr) {
+                slot_bucket = @intCast(@min((owners.frame_base - w.addr) / @sizeOf(usize), slot_unknown - 1));
+            }
             const depth = w.addr -| w.sp;
             source = if (depth < 1024)
                 .stack_lt_1k
@@ -669,6 +817,8 @@ pub const RootsDiagCensus = struct {
                 .ptr_kind = @intFromEnum(ptr_kind),
                 .young = @intFromBool(meta.flags.young),
                 .native = @intFromBool(function.native),
+                .offset_bucket = offset_bucket,
+                .slot_bucket = slot_bucket,
             },
             .source = source,
             .ptr_kind = ptr_kind,
@@ -679,7 +829,93 @@ pub const RootsDiagCensus = struct {
             .caller_pc = caller_pc,
             .function_name = function.name,
             .truncated = diag_frames_truncated,
+            .offset_bucket = offset_bucket,
+            .slot_bucket = slot_bucket,
+            .header_addr = header_addr,
         };
+    }
+
+    /// Fold one hit into the (frame, slot) stability table and report whether
+    /// the site resolved to the same header as last time.
+    fn noteSite(self: *RootsDiagCensus, record: Record, pc_index: u12) bool {
+        if (record.owner_pc == 0 or record.slot_bucket == slot_unknown) {
+            self.unlocated += 1;
+            return false;
+        }
+        const thread_id = diagThreadId();
+        const kind_bit = @as(u16, 1) << @intCast(record.key.kind);
+        var index: usize = @intCast((record.owner_pc ^
+            (@as(usize, record.slot_bucket) *% 0x9E37_79B9) ^
+            (@as(usize, thread_id) *% 0x85EB_CA6B)) % stability_len);
+        var probed: usize = 0;
+        while (probed < stability_len) : (probed += 1) {
+            const entry = &diag_sites[index];
+            if (!entry.used) {
+                entry.* = .{
+                    .used = true,
+                    .pc = record.owner_pc,
+                    .pc_index = pc_index,
+                    .slot_bucket = record.slot_bucket,
+                    .thread_id = thread_id,
+                    .last_header = record.header_addr,
+                    .hits = 1,
+                    .stable_hits = 0,
+                    .exact_hits = @intFromBool(record.ptr_kind == .exact),
+                    .prefix_hits = @intFromBool(record.ptr_kind == .prefix),
+                    .kinds = kind_bit,
+                    .offset_bucket = record.offset_bucket,
+                };
+                return false;
+            }
+            if (entry.pc == record.owner_pc and
+                entry.slot_bucket == record.slot_bucket and
+                entry.thread_id == thread_id)
+            {
+                const stable = entry.last_header == record.header_addr;
+                entry.hits += 1;
+                if (stable) entry.stable_hits += 1;
+                if (record.ptr_kind == .exact) entry.exact_hits += 1;
+                if (record.ptr_kind == .prefix) entry.prefix_hits += 1;
+                entry.kinds |= kind_bit;
+                entry.last_header = record.header_addr;
+                entry.offset_bucket = record.offset_bucket;
+                return stable;
+            }
+            index = (index + 1) % stability_len;
+        }
+        self.dropped_sites += 1;
+        return false;
+    }
+
+    /// Distinct kinds above which a slot cannot be a typed Zig local.
+    ///
+    /// Two is not enough on its own: `?*Object` versus a payload cell, or a
+    /// rope versus a string, are both one source-level type. Three separate
+    /// GC kinds through one stack slot is not a type, it is an address.
+    pub const kind_churn_floor: usize = 3;
+
+    fn entryVerdict(entry: StabilityEntry) Verdict {
+        // A header-exact word is the one shape residue essentially never
+        // takes, so it is excluded from the residue arm outright.
+        const non_exact = entry.hits - entry.exact_hits;
+        if (non_exact * 2 > entry.hits) {
+            // Signature 1: same slot, same header, collection after
+            // collection -- the slot is not being written at all.
+            //
+            // The first hit at a site can never be stable, so a rate can only
+            // clear 90% honestly once the site has been seen a few times.
+            if (entry.hits >= 4 and entry.stable_hits * 10 > entry.hits * 9) return .likely_residue;
+            // Signature 2: the slot resolves to a different KIND of cell over
+            // time. This is the one that catches residue whose word is
+            // rewritten each script (the `eval` compile-phase slots), where
+            // header stability is diluted to nothing by construction.
+            if (entry.kindCount() >= kind_churn_floor) return .likely_residue;
+        }
+        const exactish = entry.exact_hits + entry.prefix_hits;
+        if (exactish * 2 > entry.hits and @as(usize, entry.slot_bucket) * @sizeOf(usize) <= callee_saved_span) {
+            return .likely_spill;
+        }
+        return .candidate_root;
     }
 
     fn apply(self: *RootsDiagCensus, record: Record) void {
@@ -694,20 +930,24 @@ pub const RootsDiagCensus = struct {
         self.by_kind[@intFromEnum(record.kind)] += 1;
         var key = record.key;
         key.name_index = self.internName(record.function_name);
-        key.pc_index = self.internPc(record.owner_pc);
+        const pc_index = self.internPc(record.owner_pc);
+        key.pc_index = pc_index;
         // Interned without a hit count: the frame ranking counts owners only,
         // so a caller does not double-count.
         key.caller_pc_index = self.internPcSilent(record.caller_pc);
+        const stable = self.noteSite(record, pc_index);
+        if (stable and pc_index != index_unknown) self.pc_stable_counts[pc_index] += 1;
         var index = hashKey(key);
         var probed: usize = 0;
         while (probed < slots_len) : (probed += 1) {
             const slot = &self.slots[index];
             if (!slot.used) {
-                slot.* = .{ .key = key, .count = 1, .used = true };
+                slot.* = .{ .key = key, .count = 1, .stable_count = @intFromBool(stable), .used = true };
                 return;
             }
-            if (@as(u64, @bitCast(slot.key)) == @as(u64, @bitCast(key))) {
+            if (@as(u128, @bitCast(slot.key)) == @as(u128, @bitCast(key))) {
                 slot.count += 1;
+                if (stable) slot.stable_count += 1;
                 return;
             }
             index = (index + 1) % slots_len;
@@ -718,6 +958,156 @@ pub const RootsDiagCensus = struct {
     fn nameAt(self: *const RootsDiagCensus, index: u12) []const u8 {
         if (index == index_unknown or index >= self.names_used) return "<no frame>";
         return self.names[index][0..self.name_lens[index]];
+    }
+
+    fn percent(part: usize, whole: usize) usize {
+        if (whole == 0) return 0;
+        return part * 100 / whole;
+    }
+
+    fn slotName(bucket: u16, buf: []u8) []const u8 {
+        if (bucket == slot_unknown) return "n/a";
+        return std.fmt.bufPrint(buf, "fp-{d}", .{@as(usize, bucket) * @sizeOf(usize)}) catch "?";
+    }
+
+    /// Sum the per-thread entries for one (frame, slot) back into a single
+    /// site. `last_header` is meaningless once merged and is left at zero.
+    fn mergeSite(pc: usize, slot_bucket: u16) StabilityEntry {
+        var merged: StabilityEntry = .{ .used = true, .pc = pc, .slot_bucket = slot_bucket };
+        for (diag_sites) |entry| {
+            if (!entry.used or entry.pc != pc or entry.slot_bucket != slot_bucket) continue;
+            merged.hits += entry.hits;
+            merged.stable_hits += entry.stable_hits;
+            merged.exact_hits += entry.exact_hits;
+            merged.prefix_hits += entry.prefix_hits;
+            merged.kinds |= entry.kinds;
+            merged.offset_bucket = entry.offset_bucket;
+            merged.pc_index = entry.pc_index;
+        }
+        return merged;
+    }
+
+    /// Distinct slots (not per-thread entries) the scan hit in this frame.
+    fn siteCountFor(pc: usize) usize {
+        var count: usize = 0;
+        for (diag_sites, 0..) |entry, index| {
+            if (!entry.used or entry.pc != pc) continue;
+            var duplicate = false;
+            for (diag_sites[0..index]) |earlier| {
+                if (earlier.used and earlier.pc == pc and earlier.slot_bucket == entry.slot_bucket) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) count += 1;
+        }
+        return count;
+    }
+
+    /// The R1-b payload for a frame: which slots in it the scan keeps hitting,
+    /// how sticky each one is, and the verdict that follows.
+    fn writeTopSites(writer: *std.Io.Writer, pc: usize, limit: usize) !void {
+        // Successive maxima over MERGED slots: the table is `.bss` and cannot
+        // be reordered, `limit` is 3, and per-thread entries for one slot must
+        // read as one line.
+        var printed: [8]u16 = @splat(slot_unknown);
+        var shown: usize = 0;
+        while (shown < limit and shown < printed.len) : (shown += 1) {
+            var best: ?StabilityEntry = null;
+            for (diag_sites) |entry| {
+                if (!entry.used or entry.pc != pc) continue;
+                if (std.mem.indexOfScalar(u16, printed[0..shown], entry.slot_bucket) != null) continue;
+                const merged = mergeSite(pc, entry.slot_bucket);
+                if (best) |current| {
+                    if (merged.hits <= current.hits) continue;
+                }
+                best = merged;
+            }
+            const entry = best orelse return;
+            printed[shown] = entry.slot_bucket;
+            var offset_buf: [16]u8 = undefined;
+            var slot_buf: [24]u8 = undefined;
+            try writer.print("      site slot={s} off={s} hits={d} stable={d}% exact={d} prefix={d} kinds={d} verdict={s}\n", .{
+                slotName(entry.slot_bucket, &slot_buf),
+                offsetBucketName(entry.offset_bucket, &offset_buf),
+                entry.hits,
+                percent(entry.stable_hits, entry.hits),
+                entry.exact_hits,
+                entry.prefix_hits,
+                entry.kindCount(),
+                @tagName(entryVerdict(entry)),
+            });
+        }
+    }
+
+    /// Per owner frame, split its hits three ways. This is the table R1 reads:
+    /// only the `candidate_root` column can be answered with a root.
+    fn reportVerdicts(self: *const RootsDiagCensus, writer: *std.Io.Writer) !void {
+        // Classified per THREAD entry rather than per merged slot: merging
+        // inside this loop would be quadratic in the site table, and each
+        // thread's entry already carries thousands of hits. The per-slot lines
+        // in the frame table above are merged and can therefore differ from
+        // the sum here when one slot's threads disagree.
+        var totals: [pc_table_len][verdict_count]usize = @splat(@splat(0));
+        var overall: [verdict_count]usize = @splat(0);
+        for (diag_sites) |entry| {
+            if (!entry.used) continue;
+            const verdict = entryVerdict(entry);
+            overall[@intFromEnum(verdict)] += entry.hits;
+            if (entry.pc_index == index_unknown or entry.pc_index >= self.pc_used) continue;
+            totals[entry.pc_index][@intFromEnum(verdict)] += entry.hits;
+        }
+        const located = overall[0] + overall[1] + overall[2];
+        try writer.print(
+            "gc: ===== R1-b verdict: located {d} (residue {d} = {d}%, spill {d} = {d}%, candidate {d} = {d}%), unlocated {d} =====\n",
+            .{
+                located,
+                overall[@intFromEnum(Verdict.likely_residue)],  percent(overall[@intFromEnum(Verdict.likely_residue)], located),
+                overall[@intFromEnum(Verdict.likely_spill)],    percent(overall[@intFromEnum(Verdict.likely_spill)], located),
+                overall[@intFromEnum(Verdict.candidate_root)],  percent(overall[@intFromEnum(Verdict.candidate_root)], located),
+                self.unlocated,
+            },
+        );
+        var order: [pc_table_len]usize = undefined;
+        var used: usize = 0;
+        while (used < self.pc_used) : (used += 1) order[used] = used;
+        const Sorter = struct {
+            fn frameTotal(row: [verdict_count]usize) usize {
+                return row[0] + row[1] + row[2];
+            }
+            fn more(all: *const [pc_table_len][verdict_count]usize, a: usize, b: usize) bool {
+                return frameTotal(all[a]) > frameTotal(all[b]);
+            }
+        };
+        std.mem.sort(usize, order[0..used], &totals, Sorter.more);
+        const shown = @min(used, 30);
+        try writer.print("gc: R1-b verdict top {d} owner frames (residue / spill / candidate)\n", .{shown});
+        for (order[0..shown], 1..) |index, rank| {
+            const row = totals[index];
+            const total = Sorter.frameTotal(row);
+            if (total == 0) break;
+            const dominant: Verdict = blk: {
+                var best: Verdict = .candidate_root;
+                var best_count: usize = 0;
+                inline for (0..verdict_count) |v| {
+                    if (row[v] > best_count) {
+                        best_count = row[v];
+                        best = @enumFromInt(v);
+                    }
+                }
+                break :blk best;
+            };
+            try writer.print("gc: R1-b verdict #{d} {d} residue={d} spill={d} candidate={d} => {s} pc=0x{x}\n", .{
+                rank,
+                total,
+                row[@intFromEnum(Verdict.likely_residue)],
+                row[@intFromEnum(Verdict.likely_spill)],
+                row[@intFromEnum(Verdict.candidate_root)],
+                @tagName(dominant),
+                self.pcs[index],
+            });
+            try writeOwnerPc(writer, self.pcs[index]);
+        }
     }
 
     fn writeOwnerPc(writer: *std.Io.Writer, pc: usize) !void {
@@ -737,8 +1127,8 @@ pub const RootsDiagCensus = struct {
 
     pub fn report(self: *const RootsDiagCensus, writer: *std.Io.Writer) !void {
         try writer.print(
-            "gc: conservative-only census probes {d}, direct {d} (young {d}), transitive {d}, dropped keys {d}, dropped pcs {d}, dropped names {d}, truncated walks {d}\n",
-            .{ self.probes, self.direct, self.direct_young, self.transitive, self.dropped_keys, self.dropped_pcs, self.dropped_names, self.truncated_walks },
+            "gc: conservative-only census probes {d}, direct {d} (young {d}), transitive {d}, dropped keys {d}, dropped pcs {d}, dropped names {d}, dropped sites {d}, truncated walks {d}, unlocated {d}\n",
+            .{ self.probes, self.direct, self.direct_young, self.transitive, self.dropped_keys, self.dropped_pcs, self.dropped_names, self.dropped_sites, self.truncated_walks, self.unlocated },
         );
         try writer.print("gc: conservative-only by source", .{});
         for (self.by_source, 0..) |count, source_index| {
@@ -781,35 +1171,58 @@ pub const RootsDiagCensus = struct {
             const shown = @min(used, 30);
             try writer.print("gc: conservative-only top {d} of {d} owner frames\n", .{ shown, used });
             for (order[0..shown], 1..) |index, rank| {
-                try writer.print("gc: conservative-only frame #{d} {d} pc=0x{x}\n", .{ rank, self.pc_counts[index], self.pcs[index] });
+                try writer.print("gc: conservative-only frame #{d} {d} stable={d}% sites={d} pc=0x{x}\n", .{
+                    rank,
+                    self.pc_counts[index],
+                    percent(self.pc_stable_counts[index], self.pc_counts[index]),
+                    siteCountFor(self.pcs[index]),
+                    self.pcs[index],
+                });
+                try writeTopSites(writer, self.pcs[index], 3);
                 try writeOwnerPc(writer, self.pcs[index]);
             }
         }
 
-        var ranked: [slots_len]Slot = undefined;
+        try self.reportVerdicts(writer);
+
+        // Indices, not copies: `Slot` grew past 32 bytes in R1-b and a
+        // by-value ranking array would put 640 KiB on the reporting thread's
+        // stack.
+        var ranked: [slots_len]u32 = undefined;
         var used: usize = 0;
-        for (self.slots) |slot| {
+        for (self.slots, 0..) |slot, slot_index| {
             if (!slot.used) continue;
-            ranked[used] = slot;
+            ranked[used] = @intCast(slot_index);
             used += 1;
         }
-        std.mem.sort(Slot, ranked[0..used], {}, struct {
-            fn moreHits(_: void, a: Slot, b: Slot) bool {
-                return a.count > b.count;
+        std.mem.sort(u32, ranked[0..used], &self.slots, struct {
+            fn moreHits(all: *const [slots_len]Slot, a: u32, b: u32) bool {
+                return all[a].count > all[b].count;
             }
         }.moreHits);
         const shown = @min(used, 30);
-        try writer.print("gc: conservative-only top {d} of {d} keys (function, kind/class, source, pointer, young, native, frame)\n", .{ shown, used });
-        for (ranked[0..shown], 1..) |slot, rank| {
+        try writer.print("gc: conservative-only top {d} of {d} keys (function, kind/class, source, pointer, offset, slot, stability, young, native, frame)\n", .{ shown, used });
+        for (ranked[0..shown], 1..) |slot_index, rank| {
+            const slot = self.slots[slot_index];
             const key = slot.key;
             const kind: gc.GcKind = @enumFromInt(key.kind);
             const source: Source = @enumFromInt(key.source);
             const ptr_kind: PtrKind = @enumFromInt(key.ptr_kind);
             const owner_pc: usize = if (key.pc_index == index_unknown) 0 else self.pcs[key.pc_index];
             const caller_pc: usize = if (key.caller_pc_index == index_unknown) 0 else self.pcs[key.caller_pc_index];
+            var offset_buf: [16]u8 = undefined;
+            var slot_buf: [24]u8 = undefined;
             try writer.print(
-                "gc: conservative-only #{d} {d} fn={s} kind={s} class={d} src={s} ptr={s} young={d} native={d} pc=0x{x} caller=0x{x}\n",
-                .{ rank, slot.count, self.nameAt(key.name_index), @tagName(kind), key.class_id, @tagName(source), @tagName(ptr_kind), key.young, key.native, owner_pc, caller_pc },
+                "gc: conservative-only #{d} {d} fn={s} kind={s} class={d} src={s} ptr={s} off={s} slot={s} stable={d}% young={d} native={d} pc=0x{x} caller=0x{x}\n",
+                .{
+                    rank,                              slot.count,
+                    self.nameAt(key.name_index),       @tagName(kind),
+                    key.class_id,                      @tagName(source),
+                    @tagName(ptr_kind),                offsetBucketName(key.offset_bucket, &offset_buf),
+                    slotName(key.slot_bucket, &slot_buf), percent(slot.stable_count, slot.count),
+                    key.young,                         key.native,
+                    owner_pc,                          caller_pc,
+                },
             );
             if (owner_pc != 0) try writeOwnerPc(writer, owner_pc);
             if (caller_pc != 0) {
@@ -821,6 +1234,8 @@ pub const RootsDiagCensus = struct {
 };
 
 var global: RootsDiagCensus = .{};
+/// See `RootsDiagCensus.stability_len`.
+var diag_sites: [RootsDiagCensus.stability_len]StabilityEntry = @splat(.{});
 
 /// Diagnostic-only spinlock. `std.Io.Mutex` needs an `Io` to unlock and the
 /// census is updated from the middle of a stop-the-world scan, which has none;
@@ -879,6 +1294,27 @@ pub fn reportGlobal(writer: *std.Io.Writer) !void {
     defer global_mutex.unlock();
     try writer.print("gc: ===== R3 process-wide conservative-only attribution =====\n", .{});
     try global.report(writer);
+}
+
+/// Verdict for the (frame, slot) site that last resolved to `header_addr`,
+/// or null if no site did.
+///
+/// For tests: each one allocates its own object, so the header address is a
+/// unique handle into the process-wide site table without needing a delta.
+pub fn diagVerdictForHeader(header_addr: usize) ?RootsDiagCensus.Verdict {
+    if (comptime !gc.roots_diag_enabled) return null;
+    global_mutex.lock();
+    defer global_mutex.unlock();
+    var best: ?StabilityEntry = null;
+    for (diag_sites) |entry| {
+        if (!entry.used or entry.last_header != header_addr) continue;
+        if (best) |current| {
+            if (entry.hits <= current.hits) continue;
+        }
+        best = entry;
+    }
+    const entry = best orelse return null;
+    return RootsDiagCensus.entryVerdict(entry);
 }
 
 /// Snapshot for tests, which must not race the shared table.
@@ -970,4 +1406,94 @@ test "R3 census names the native frame that rescued an unrooted stack JSValue" {
         }
     }
     try std.testing.expect(found_stack_key);
+}
+
+/// Run `count` scans from a frame that keeps `slot` alive, recording ONLY the
+/// hit whose word came out of `slot` itself.
+///
+/// `noinline` and the loop are both load-bearing: the site table keys on the
+/// return address plus the slot's distance from `fp`, and both have to be
+/// identical across iterations for a stability rate to mean anything. The
+/// address filter is what makes the assertion about one site rather than about
+/// whichever copy of the pointer the compiler left lying around.
+noinline fn diagRescanFixedSlot(rt: *JSRuntime, slot: *[1]usize, count: usize) void {
+    const Probe = struct {
+        rt: *JSRuntime,
+        slot: usize,
+
+        fn shade(context: *anyopaque, header: *gc.Header) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const w = diagCurrentWord();
+            if (w.addr != self.slot) return;
+            noteDirect(self.rt, header, w);
+        }
+    };
+    var probe: Probe = .{ .rt = rt, .slot = @intFromPtr(slot) };
+    var round: usize = 0;
+    while (round < count) : (round += 1) {
+        var metrics: Metrics = .{};
+        std.mem.doNotOptimizeAway(slot);
+        spillRegistersAndScan(rt, &metrics, Probe.shade, &probe);
+        std.mem.doNotOptimizeAway(slot);
+    }
+}
+
+test "R1-b verdict calls a stale interior slot residue" {
+    if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
+
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const object = try object_mod.Object.create(rt, @import("class.zig").ids.object, null);
+    const target: *gc.Header = object.gcHeader();
+
+    // The R1-a signature, reproduced deliberately: one stack slot holding an
+    // INTERIOR word into a heap cell, never rewritten between scans. No root
+    // can fix this shape, so the census has to say so rather than carry it on
+    // the R1 worklist as a missing root.
+    var stale: [1]usize = .{@intFromPtr(target) + @sizeOf(usize)};
+    diagRescanFixedSlot(rt, &stale, 16);
+    std.mem.doNotOptimizeAway(&stale);
+
+    try std.testing.expectEqual(
+        @as(?RootsDiagCensus.Verdict, .likely_residue),
+        diagVerdictForHeader(@intFromPtr(target)),
+    );
+}
+
+test "R1-b verdict calls a bare exact pointer in a deep slot a candidate root" {
+    if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
+
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // A fresh object per test: the header address is the handle the verdict
+    // lookup keys on, so two tests must not share one.
+    const first = try object_mod.Object.create(rt, @import("class.zig").ids.object, null);
+    const second = try object_mod.Object.create(rt, @import("class.zig").ids.object, null);
+
+    // Deep enough in the frame that the slot cannot be read as the prologue's
+    // callee-saved save band, chosen against the real `fp` rather than trusting
+    // the compiler to order locals.
+    var cells: [64]usize = @splat(0);
+    const frame_base = @frameAddress();
+    var index: usize = 0;
+    while (index < cells.len) : (index += 1) {
+        if (frame_base -| @intFromPtr(&cells[index]) > RootsDiagCensus.callee_saved_span) break;
+    }
+    if (index == cells.len) return error.SkipZigTest;
+    const slot: *[1]usize = @ptrCast(&cells[index]);
+
+    // A real unrooted local: header-exact, and naming a different object in
+    // the second half of the run. Changing what it points at is precisely what
+    // a live local does and dead residue does not.
+    slot[0] = @intFromPtr(first.gcHeader());
+    diagRescanFixedSlot(rt, slot, 3);
+    slot[0] = @intFromPtr(second.gcHeader());
+    diagRescanFixedSlot(rt, slot, 3);
+    std.mem.doNotOptimizeAway(&cells);
+
+    try std.testing.expectEqual(
+        @as(?RootsDiagCensus.Verdict, .candidate_root),
+        diagVerdictForHeader(@intFromPtr(second.gcHeader())),
+    );
 }

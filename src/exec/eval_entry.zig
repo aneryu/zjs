@@ -38,30 +38,55 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
     return evalScriptSource(ctx, source.items, options);
 }
 
-pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context.ContextEvalOptions) !core.JSValue {
-    const rt = ctx.runtime;
-    // Refresh the native C-stack recursion base at the outermost JS entry only
-    // (QuickJS JS_UpdateStackTop): a nested direct `eval()` runs while bytecode
-    // is executing (call_depth > 0) and must keep measuring against the true
-    // outermost base. Doing it here — on the thread that will run the parser and
-    // interpreter — makes the guard correct even when the runtime was
-    // constructed on a different thread's stack (test262 worker threads).
-    if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
-    const outermost = ctx.runtime.hot.call_depth == 0;
-    defer if (outermost) rt.clearWeakRefKeptAlive();
+/// Intern the module name, if this is a module at all.
+///
+/// `noinline` for the frame, not for the code: the `<eval>#N` fallback inlines
+/// `std.fmt.bufPrint`, which puts a 64-byte buffer AND an `std.Io.Writer`
+/// (whose `buffer.ptr` slot R1-a fingerprinted at `fp-272`) in whatever frame
+/// it lands in. That frame must not be the one the interpreter runs under.
+noinline fn resolveModuleName(ctx: *core.JSContext, options: core.context.ContextEvalOptions) !core.Atom {
+    if (options.mode != .module) return core.atom.null_atom;
     var module_name_buf: [64]u8 = undefined;
-    const module_name: core.Atom = if (options.mode == .module) blk: {
-        const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
-            std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{ctx.modules.count}) catch unreachable
-        else
-            options.filename;
-        break :blk try rt.internAtom(module_name_bytes);
-    } else core.atom.null_atom;
-    // TGC S3 §4 class B: bare id held across compilation and evaluation of
-    // the whole module body.
-    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
-    module_name_roots.activate(rt);
-    defer module_name_roots.deactivate(rt);
+    const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
+        std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{ctx.modules.count}) catch unreachable
+    else
+        options.filename;
+    return ctx.runtime.internAtom(module_name_bytes);
+}
+
+/// Everything `eval` needs from the compile phase, and nothing that phase
+/// allocated on the stack to produce it.
+const PreparedRoot = struct {
+    module_record: ?*core.module.ModuleRecord = null,
+    should_evaluate_module: bool = false,
+    function: ?*const bytecode.FunctionBytecode = null,
+    /// Owned by the caller from the moment this returns; `eval` roots it
+    /// before it can allocate again.
+    root_function_value: core.JSValue = core.JSValue.undefinedValue(),
+    root_function_object: ?*core.Object = null,
+    /// Start of the "first execute" timing window, which opens after
+    /// compilation and therefore has to be taken inside this helper.
+    first_execute_start: u64 = 0,
+};
+
+/// Compile, install and link, then publish the root function object.
+///
+/// The parse result is released HERE rather than at the end of `eval`. That is
+/// sound because both ownership transfers below empty it: `takeFunctionBytecodeValue`
+/// moves the sole FunctionBytecode reference into the closure object and
+/// `takeModuleArtifact` moves the module artifact into its record, each leaving
+/// `artifact = .none`, so the `deinit` that used to outlive the VM run had
+/// nothing left to free by then anyway. Keeping it here is what lets the whole
+/// phase -- parse result, link diagnostic, syntax-error surface and their
+/// inlined `Io.Writer`s -- live and die below `eval`'s frame.
+noinline fn prepareRootFunction(
+    ctx: *core.JSContext,
+    source_text: []const u8,
+    options: core.context.ContextEvalOptions,
+    module_name: core.Atom,
+) !PreparedRoot {
+    const rt = ctx.runtime;
+    var prepared: PreparedRoot = .{};
 
     var compile_timing: bytecode.CompileTiming = .{};
     const compile_start = platform_clock.monotonicNanos();
@@ -88,6 +113,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         timing.compile_frontend_ns += compile_timing.frontend_ns;
         timing.compile_finalize_ns += compile_timing.finalize_ns;
     }
+    // See the doc comment: safe to release before the VM runs.
     defer compiled.deinit();
     if (compiled.syntax_error) |*err| {
         const global = try zjs_vm.contextGlobal(ctx);
@@ -96,12 +122,15 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         // `at file:line:col` stack line (qjs JS_ThrowSyntaxError +
         // build_backtrace filename branch, quickjs.c:7553-7570).
         const parse_filename = rt.atoms.name(err.filename) orelse options.filename;
-        return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
+        // Always an error return; the `!JSValue` signature is for the other
+        // call sites.
+        _ = try error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
+        return error.SyntaxError;
     }
-    var module_record: ?*core.module.ModuleRecord = null;
-    var should_evaluate_module = false;
-    var function: ?*const bytecode.FunctionBytecode = null;
-    const first_execute_start = if (options.mode != .module and options.timing != null) platform_clock.monotonicNanos() else 0;
+    prepared.first_execute_start = if (options.mode != .module and options.timing != null)
+        platform_clock.monotonicNanos()
+    else
+        0;
     if (options.mode == .module) {
         const artifact = compiled.takeModuleArtifact() orelse return error.InvalidBytecode;
         const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
@@ -112,7 +141,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             referrer_path,
         );
         record.import_meta_main = true;
-        module_record = record;
+        prepared.module_record = record;
         switch (record.status) {
             .unlinked => {
                 var diagnostic: module_mod.LinkDiagnostic = .{};
@@ -121,9 +150,9 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
                     return module_graph.moduleResolutionError(err);
                 };
                 if (record.status != .linked) return error.InvalidBytecode;
-                should_evaluate_module = true;
+                prepared.should_evaluate_module = true;
             },
-            .linked => should_evaluate_module = true,
+            .linked => prepared.should_evaluate_module = true,
             .evaluating, .evaluated => {},
             .errored => {
                 const exception = record.eval_exception orelse return error.InvalidBytecode;
@@ -132,43 +161,78 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             },
             .linking => return error.ModuleLinkFailed,
         }
-        if (should_evaluate_module) {
-            function = try module_mod.moduleFunctionBytecode(record);
+        if (prepared.should_evaluate_module) {
+            prepared.function = try module_mod.moduleFunctionBytecode(record);
         }
     } else {
-        function = compiled.functionBytecode() orelse return error.InvalidBytecode;
+        prepared.function = compiled.functionBytecode() orelse return error.InvalidBytecode;
     }
 
     // Ordinary script/direct/indirect roots are real function objects, just as
     // JS_EvalFunctionInternal first calls js_closure. Move the Result's sole FB
     // owner into that object. Module roots were moved as one artifact into their
     // record above and linkModule published the persistent function/captures.
-    const root_function_publish_start = if (module_record == null and options.timing != null) platform_clock.monotonicNanos() else 0;
-    var root_function_value = core.JSValue.undefinedValue();
-    var root_function_object: ?*core.Object = null;
-    if (module_record == null) {
-        const root_function = function orelse return error.InvalidBytecode;
+    const root_function_publish_start = if (prepared.module_record == null and options.timing != null) platform_clock.monotonicNanos() else 0;
+    if (prepared.module_record == null) {
+        const root_function = prepared.function orelse return error.InvalidBytecode;
         const root_realm = root_function.realmContext() orelse return error.InvalidBuiltinRegistry;
         if (root_realm != ctx) return error.InvalidBytecode;
         const root_global = try zjs_vm.contextGlobal(root_realm);
         const owned_function = compiled.takeFunctionBytecodeValue() orelse return error.InvalidBytecode;
-        root_function_value = try object_ops.createRootBytecodeFunctionObject(
+        prepared.root_function_value = try object_ops.createRootBytecodeFunctionObject(
             ctx,
             root_global,
             owned_function,
             .root_global,
         );
-        root_function_object = object_ops.objectFromValue(root_function_value) orelse return error.InvalidBytecode;
-    }
-    var root_frame = core.runtime.rootValues(.{&root_function_value});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-    if (module_record == null) {
+        prepared.root_function_object = object_ops.objectFromValue(prepared.root_function_value) orelse return error.InvalidBytecode;
         if (options.timing) |timing| {
             timing.root_function_publish_ns += platform_clock.elapsedNanosSince(root_function_publish_start);
         }
     }
 
+    return prepared;
+}
+
+pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context.ContextEvalOptions) !core.JSValue {
+    const rt = ctx.runtime;
+    // Refresh the native C-stack recursion base at the outermost JS entry only
+    // (QuickJS JS_UpdateStackTop): a nested direct `eval()` runs while bytecode
+    // is executing (call_depth > 0) and must keep measuring against the true
+    // outermost base. Doing it here — on the thread that will run the parser and
+    // interpreter — makes the guard correct even when the runtime was
+    // constructed on a different thread's stack (test262 worker threads).
+    if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
+    const outermost = ctx.runtime.hot.call_depth == 0;
+    defer if (outermost) rt.clearWeakRefKeptAlive();
+    // R1-b: the compile and diagnostic phase runs in ITS OWN native frames.
+    //
+    // R3 ranked this function's frame first in the whole engine (158,240
+    // conservative-only hits over the R1-a corpus) and R1-a proved none of
+    // them were roots: they were dead words in `eval`'s 2,176-byte frame, in
+    // slots the compile phase had built and the VM phase never rewrites, still
+    // resolving to cells the collector had recycled underneath them. A root
+    // cannot fix that shape -- only getting the slots out of the frame that is
+    // live while the VM runs can, and a `noinline` callee costs nothing at
+    // runtime because the phase runs once per script either way.
+    const module_name = try resolveModuleName(ctx, options);
+    // TGC S3 §4 class B: bare id held across compilation and evaluation of
+    // the whole module body.
+    var module_name_roots = core.runtime.rootAtoms(.{&module_name});
+    module_name_roots.activate(rt);
+    defer module_name_roots.deactivate(rt);
+
+    const prepared = try prepareRootFunction(ctx, source_text, options, module_name);
+    const first_execute_start = prepared.first_execute_start;
+    const module_record = prepared.module_record;
+    const should_evaluate_module = prepared.should_evaluate_module;
+    const function = prepared.function;
+    var root_function_value = prepared.root_function_value;
+    const root_function_object = prepared.root_function_object;
+
+    var root_frame = core.runtime.rootValues(.{&root_function_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
     const result = if (module_record) |record| blk: {
         if (!should_evaluate_module) break :blk core.JSValue.undefinedValue();
         // Track the record through the evaluation status machine (mirrors
@@ -246,6 +310,24 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             timing.first_execute_ns += platform_clock.elapsedNanosSince(first_execute_start);
         }
     }
+    return drainAndFinish(ctx, options, result);
+}
+
+/// Root the completion, drain the microtask queue, apply the host result
+/// policy.
+///
+/// `noinline` for the same reason as `prepareRootFunction`: this phase's root
+/// frame, its slice array and its one-element value array are dead while the
+/// interpreter runs, and LLVM aliases the compile phase's leftovers onto
+/// exactly those slots. Their being in the frame that is live across the whole
+/// script is what turned them into the engine's largest block of
+/// conservative-only hits.
+noinline fn drainAndFinish(
+    ctx: *core.JSContext,
+    options: core.context.ContextEvalOptions,
+    result: core.JSValue,
+) !core.JSValue {
+    const rt = ctx.runtime;
     // The completion value is owned here while the post-run steps below can
     // still fail (e.g. OOM while draining promise jobs); release it on every
     // error exit (found by test-oom injection).
