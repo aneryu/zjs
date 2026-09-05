@@ -71,3 +71,12 @@
 
 ### 7.4 S5-b（进行中，worktree `s5-b`，基线 `99793e8b`）
 待记。
+
+（7.4 补记）S5-b 合入 main `899c5a7c`，净 −171 行（规格估 −250，差额是合并函数的文档注释）。
+- 项 1：`destroyCondemnedSlice(rt, budget_ns, sweep_string_extents)` 成唯一析构权威，STW = `budget = maxInt`；两条路径都走 `doomed_by_kind` 分桶，`residual_kinds`/`KindSet`/`tmp_obj_list`/`NonBlockObjectAuthority.temporary` 车道一并删除。可观测差异只有同 pause 内的 kind 析构次序（shape 严格最后）。
+- 项 2：`condemnListSweep(rt, sink, young_only)` + `SamePauseSink`/`FinishCondemnSink` 取代三处扫链；块 cell 位图半边不动。
+- 项 3：`drainSegmentedFrontier(budget_ns, comptime prefetch, comptime drain_work)` 合并 `incrementalMarkStep` 与 `drainBarrierQueue`（规格写的 `drain` 排的是 work list，与分段前沿不同形，已按实际同形函数落地）；`collectCycles` 多余的 `beginMajor` 删除（每次同步 major 少一次 epoch bump 与 `withdrawHotBlocks`）。
+- 项 4 STOP：`collectCycles` 收缩为增量路径会改返回值语义（析构计数 vs 凝判计数，单测断言精确常量）、`--gc-stats` 读数与析构时机，不是消融。
+- 门：test 2556/0 ×4、stress 2552/0、roots_diag 2560/0、test262 0/49778。Stage 0 vs S5-a 自建参照：六 bench insn 全在 ±0.07% 内；`residual_kinds` 捷径删除后 deltablue/raytrace STW 析构时间在复跑噪声内。
+- 待 owner 知悉：deltablue 稳定多 1 次 major（18→19），归因于项 1 改变析构次序 ⇒ cell 复用次序 ⇒ 阈值边界相位位移；insn/cycles/objectsFreed 均 <0.05%，且 S5-a 自身复跑包络已覆盖该读数。回退面只有分桶次序（合一的前提），不建议回退。
+- 合入 main 后补跑 `ZJS_GC_STRESS=1` test262（核 0-9，`reports/test262-s5b-stress`）：`Result: 0/49778 errors, passed 44584`。

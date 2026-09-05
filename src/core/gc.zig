@@ -1273,17 +1273,15 @@ fn verifyCircularHeaderList(
 /// meaning to allocation order.
 const NonBlockObjectAuthority = struct {
     items: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
-    /// Header-external condemnation lanes. Object's body remains entirely
+    /// Header-external condemnation lane. Object's body remains entirely
     /// semantic until its destructor strips resources, so neither live scalar
-    /// nor Shape words may be borrowed by the major morgue or STW worklist.
+    /// nor Shape words may be borrowed by the morgue.
     doomed: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
-    temporary: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
 
     fn prepare(self: *NonBlockObjectAuthority, allocator: std.mem.Allocator) !void {
         try self.items.ensureUnusedCapacity(allocator, 1);
-        const total_population = self.items.items.len + self.doomed.items.len + self.temporary.items.len + 1;
+        const total_population = self.items.items.len + self.doomed.items.len + 1;
         try self.doomed.ensureTotalCapacity(allocator, total_population);
-        try self.temporary.ensureTotalCapacity(allocator, total_population);
     }
 
     fn publish(self: *NonBlockObjectAuthority, header: *GCObjectHeader) void {
@@ -1305,21 +1303,16 @@ const NonBlockObjectAuthority = struct {
         return true;
     }
 
-    fn condemn(self: *NonBlockObjectAuthority, header: *GCObjectHeader, temporary: bool) void {
+    fn condemn(self: *NonBlockObjectAuthority, header: *GCObjectHeader) void {
         const index = self.indexOf(header) orelse unreachable;
         _ = self.items.swapRemove(index);
-        if (temporary)
-            self.temporary.appendAssumeCapacity(header)
-        else
-            self.doomed.appendAssumeCapacity(header);
+        self.doomed.appendAssumeCapacity(header);
     }
 
     fn deinit(self: *NonBlockObjectAuthority, allocator: std.mem.Allocator) void {
         std.debug.assert(self.doomed.items.len == 0);
-        std.debug.assert(self.temporary.items.len == 0);
         self.items.deinit(allocator);
         self.doomed.deinit(allocator);
-        self.temporary.deinit(allocator);
         self.* = .{};
     }
 };
@@ -1636,7 +1629,7 @@ pub const Registry = struct {
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
-    // qjs `rt->gc_obj_list` / `rt->tmp_obj_list`.
+    // qjs `rt->gc_obj_list`.
     // Published Objects are deliberately absent: block cells use allocation
     // bitmaps, and the rare non-block population uses a side authority.
     // Each intrusive list is a cyclic sentinel (list.h). Call `initLists` after
@@ -1650,7 +1643,6 @@ pub const Registry = struct {
     /// retaining this one per-runtime cursor lets a minor detach a young list
     /// suffix in O(young) rather than searching from the list head per corpse.
     young_predecessor: ?*Header = null,
-    tmp_obj_list: IntrusiveHeaderList = .{},
     // No live-object counter: qjs add_gc_object/remove_gc_object
     // (quickjs.c:6540/6548) are pure list splices with no count scalar.
     // Diagnostics (`liveCount`) derive the count by walking, like
@@ -1832,7 +1824,6 @@ pub const Registry = struct {
     pub fn initLists(self: *Registry) void {
         self.refreshBarrierGate();
         listInit(&self.gc_obj_list);
-        listInit(&self.tmp_obj_list);
         for (&self.doomed_by_kind) |*head| listInit(head);
     }
 
@@ -1979,7 +1970,6 @@ pub const Registry = struct {
         rt.shapes.deinit();
 
         listInit(&self.gc_obj_list);
-        listInit(&self.tmp_obj_list);
 
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
@@ -2710,7 +2700,7 @@ pub const Registry = struct {
             if (!isBlockCellHeader(h)) self.removeNonBlockObject(h);
             return;
         }
-        // Already unlinked, or condemned on tmp_obj_list / a partition list.
+        // Already unlinked, or condemned onto a morgue bucket.
         // qjs remove_gc_object is only called while the node is on gc_obj_list.
         if (!headerLinked(h) or headerCondemned(h)) return;
         self.removeGcObject(h);
@@ -3101,18 +3091,17 @@ pub const Registry = struct {
     ///
     /// This deliberately follows the old ledger's physical-lifetime meaning:
     /// condemnation proves logical death but does not return bytes. Block
-    /// corpses remain visible in the alloc bitmap, while delisted standalone
-    /// and non-block corpses live in `doomed_by_kind`; current callback slots
-    /// cover the interval after a bucket unlink and before the actual debit.
+    /// corpses remain visible in the alloc bitmap, while delisted carriers
+    /// live in `doomed_by_kind` and non-block Objects in the side authority's
+    /// doomed lane; current callback slots cover the interval after a bucket
+    /// unlink and before the actual debit.
     const HeapAccountingIterator = struct {
         live: GcObjectIterator,
         doomed_by_kind: *const [gc_kind_count]IntrusiveHeaderList,
         doomed_objects: []const *GCObjectHeader,
-        temporary_objects: []const *GCObjectHeader,
         doomed_kind_index: usize = 0,
         doomed_cursor: ?*GCObjectHeader = null,
         doomed_object_index: usize = 0,
-        temporary_object_index: usize = 0,
         sweep_current: ?*GCObjectHeader,
         current_yielded: bool = false,
 
@@ -3139,11 +3128,6 @@ pub const Registry = struct {
             while (self.doomed_object_index < self.doomed_objects.len) {
                 const current = self.doomed_objects[self.doomed_object_index];
                 self.doomed_object_index += 1;
-                if (current.metaConst().alloc_info.heap_accounted) return current;
-            }
-            while (self.temporary_object_index < self.temporary_objects.len) {
-                const current = self.temporary_objects[self.temporary_object_index];
-                self.temporary_object_index += 1;
                 if (current.metaConst().alloc_info.heap_accounted) return current;
             }
             if (self.current_yielded) return null;
@@ -3186,7 +3170,6 @@ pub const Registry = struct {
             .live = self.objectIterator(.all),
             .doomed_by_kind = &self.doomed_by_kind,
             .doomed_objects = if (authority) |value| value.doomed.items else &.{},
-            .temporary_objects = if (authority) |value| value.temporary.items else &.{},
             .sweep_current = self.sweep_current,
         };
     }
@@ -3426,16 +3409,16 @@ pub const Registry = struct {
         self.unregisterNonBlockObject(header);
     }
 
-    /// Move a live non-block Object into one of the two header-external
-    /// condemnation lanes. Publication pre-reserves both lanes for the whole
-    /// extant Object population, so the collector-side move cannot allocate.
-    pub fn condemnNonBlockObject(self: *Registry, header: *GCObjectHeader, temporary: bool) void {
+    /// Move a live non-block Object into the header-external condemnation
+    /// lane. Publication pre-reserves the lane for the whole extant Object
+    /// population, so the collector-side move cannot allocate.
+    pub fn condemnNonBlockObject(self: *Registry, header: *GCObjectHeader) void {
         self.assertFrontierAllowsReclaimKind(.object);
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!isBlockCellHeader(header));
         std.debug.assert(!headerCondemned(header));
         const authority = self.nonblock_objects orelse unreachable;
-        authority.condemn(header, temporary);
+        authority.condemn(header);
         self.unregisterNonBlockObject(header);
         stampHeaderCondemned(header);
     }
@@ -4813,15 +4796,6 @@ pub const Registry = struct {
     }
 
     fn verifyAuxiliaryIntrusiveLists(self: *Registry) InvariantError!void {
-        _ = try verifyCircularHeaderList(&self.tmp_obj_list, null, false);
-        var temporary_cursor = self.tmp_obj_list.sentinel.next_non_object;
-        while (temporary_cursor) |header| {
-            if (header == &self.tmp_obj_list.sentinel) break;
-            if (header.metaConst().flags.kind == .object)
-                return error.CorruptNonBlockObjectAuthority;
-            temporary_cursor = header.nextNonObject();
-        }
-
         var doomed_nodes: usize = 0;
         var cursor_found = self.doomed_cursor == null;
         for (&self.doomed_by_kind, 0..) |*head, kind_index| {
@@ -4843,7 +4817,6 @@ pub const Registry = struct {
         if (self.nonblock_objects) |authority| {
             const live = authority.items.items;
             const doomed = authority.doomed.items;
-            const temporary = authority.temporary.items;
             for (doomed, 0..) |header, index| {
                 const meta = header.metaConst();
                 if (meta.flags.kind != .object or isBlockCellHeader(header) or
@@ -4855,29 +4828,15 @@ pub const Registry = struct {
                     return error.CorruptNonBlockObjectAuthority;
                 for (doomed[0..index]) |candidate| if (candidate == header)
                     return error.CorruptNonBlockObjectAuthority;
-                for (temporary) |candidate| if (candidate == header)
-                    return error.CorruptNonBlockObjectAuthority;
-            }
-            for (temporary, 0..) |header, index| {
-                const meta = header.metaConst();
-                if (meta.flags.kind != .object or isBlockCellHeader(header) or
-                    !meta.alloc_info.heap_accounted or !headerCondemned(header))
-                {
-                    return error.CorruptNonBlockObjectAuthority;
-                }
-                for (live) |candidate| if (candidate == header)
-                    return error.CorruptNonBlockObjectAuthority;
-                for (temporary[0..index]) |candidate| if (candidate == header)
-                    return error.CorruptNonBlockObjectAuthority;
             }
         }
 
         const block_doomed = self.block_heap.doomed_blocks != null;
-        const temporary_objects = if (self.nonblock_objects) |authority|
-            authority.temporary.items.len != 0
+        const doomed_objects = if (self.nonblock_objects) |authority|
+            authority.doomed.items.len != 0
         else
             false;
-        if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null or temporary_objects) and
+        if ((doomed_nodes != 0 or block_doomed or self.doomed_cursor != null or doomed_objects) and
             !self.doomed_pending and self.phase != .tracer_destroy)
         {
             return error.DoomedPendingMismatch;
@@ -4973,9 +4932,6 @@ pub const Registry = struct {
         }
         if (self.nonblock_objects) |authority| {
             for (authority.doomed.items) |header| {
-                try self.verifyPublishedHeaderRepresentation(header, .object);
-            }
-            for (authority.temporary.items) |header| {
                 try self.verifyPublishedHeaderRepresentation(header, .object);
             }
         }
@@ -5234,15 +5190,16 @@ pub const Registry = struct {
         if (self.sweep_current == header) return true;
         if (self.nonblock_objects) |authority| {
             for (authority.doomed.items) |candidate| if (candidate == header) return true;
-            for (authority.temporary.items) |candidate| if (candidate == header) return true;
         }
         // Condemned-but-not-yet-destroyed nodes remain runtime-owned with
         // resources intact.
-        var condemned = self.tmp_obj_list.sentinel.next_non_object;
-        while (condemned) |candidate| {
-            if (candidate == &self.tmp_obj_list.sentinel) break;
-            if (candidate == header) return true;
-            condemned = candidate.nextNonObject();
+        for (&self.doomed_by_kind) |*bucket| {
+            var condemned = bucket.sentinel.next_non_object;
+            while (condemned) |candidate| {
+                if (candidate == &bucket.sentinel) break;
+                if (candidate == header) return true;
+                condemned = candidate.nextNonObject();
+            }
         }
         var iterator = self.objectIterator(.all);
         while (iterator.next()) |candidate| {

@@ -747,7 +747,9 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
     last_census_ns = 0;
     rt.gc.stats.collections += 1;
-    rt.gc.block_heap.beginMajor();
+    // The epoch bump and the hot-block withdrawal belong to `clearMarks`,
+    // which `Collector.run` reaches below; this entry used to do them a second
+    // time before it.
     var collector = try Collector.init(rt, extra_roots, scan);
     defer collector.deinit();
     // The synchronous major uses the same trace-coupled retirement contract as
@@ -937,7 +939,7 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // TGC S4-f (2): return this minor's holes to the allocator. Deliberately
     // AFTER `clearYoungBlocks` above -- `publishHotBlock` refuses a block that
     // still carries `flag_young`, and every block a minor touched carries it
-    // until that call. The doomed list is drained by `destroyCondemned` inside
+    // until that call. The doomed buckets are drained by the destruction slice inside
     // the sweep; since TGC S4-e there is no parked-free stack any more, so
     // that half of the major call site's precondition is vacuous (0).
     rt.gc.block_heap.publishCompletedHotBlocksSlice(
@@ -1083,38 +1085,15 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
 
 /// Drain up to `budget_ns` of the grey frontier. Returns true when the
 /// frontier is empty and the cycle is ready for its final remark.
-///
-/// The clock is sampled every 64 objects rather than per pop; a traceHeader
-/// is tens of nanoseconds and `nowNanos` is not free.
 pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
     std.debug.assert(rt.gc.concurrent.markingActive());
     var collector = try Collector.init(rt, null, .declared_only);
     defer collector.deinit();
     collector.shade_to_queue = true;
 
-    const queue = &rt.gc.concurrent_mark_queue;
-    const stack = &rt.gc.mark_stack;
-    try checkFrontierFailure(queue);
-    const started = profile.nowNanos();
-    var since_clock: usize = 0;
-    while (popSegmentedFrontier(stack, queue, true)) |header| {
-        // No validation needed: rc-managed kinds never enter the queue
-        // (see `shade`), and everything that can is freeable only by the
-        // collector itself, which does not run inside its own mutator
-        // windows. The pop used to revalidate through the address
-        // registry -- 4.3% of splay's runtime, paid per object against a
-        // hazard only shapes had.
-        try collector.traceHeader(header);
-        if (collector.err) |err| return err;
-        try checkFrontierFailure(queue);
-        since_clock += 1;
-        if (since_clock == 64) {
-            since_clock = 0;
-            if (profile.nowNanos() -| started >= budget_ns) break;
-        }
-    }
+    _ = try collector.drainSegmentedFrontier(budget_ns, true, false);
     rt.gc.concurrent.stats.increments += 1;
-    return stack.len == 0 and queue.isEmpty();
+    return rt.gc.mark_stack.len == 0 and rt.gc.concurrent_mark_queue.isEmpty();
 }
 
 /// Final remark and sweep (§8.6, mutator stopped). Re-seeds every root --
@@ -1207,56 +1186,9 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // nothing; free them now (rare, so the pause cost is negligible)
     // rather than teaching the sliced morgue a table-backed kind.
     condemned += string_mod.sweepExtents(rt);
-    var previous_node: *gc.Header = &rt.gc.gc_obj_list.sentinel;
-    var cursor_node = previous_node.next_non_object;
-    while (cursor_node) |header| {
-        if (header == &rt.gc.gc_obj_list.sentinel) break;
-        const next_node = header.nextNonObject();
-        if (rt.gc.headerMarked(header)) {
-            header.meta().flags.young = false;
-            previous_node = header;
-            cursor_node = next_node;
-            continue;
-        }
-        if (rt.gc.headerIsPinned(header)) {
-            header.meta().flags.young = false;
-            previous_node = header;
-            cursor_node = next_node;
-            continue;
-        }
-        doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
-        rt.gc.detachCycleCandidateAfter(previous_node, header);
-        gc.listAddTailTraversalOwned(&rt.gc.doomed_by_kind[@intFromEnum(header.meta().flags.kind)], header);
-        // A condemned shape must leave the transition table NOW, not at its
-        // destructor: the mutator runs before the destruction slices, and a
-        // table that still serves the corpse lets a live object adopt a shape
-        // that is already scheduled to be freed. Realms and modules sit on
-        // membership lists that only collections walk, and those are gated
-        // while the morgue is open; the shape table is the one engine-global
-        // structure the MUTATOR consults.
-        if (header.metaConst().flags.kind == .shape) {
-            rt.shapes.delistCondemnedShape(header);
-        }
-        condemned += 1;
-        cursor_node = next_node;
-    }
-    // Non-block Objects have no live-list node. Their unordered side authority
-    // is consumed in place: condemnation swap-removes, so the replacement at
-    // this index must be examined before advancing.
-    if (rt.gc.nonblock_objects) |authority| {
-        var object_index: usize = 0;
-        while (object_index < authority.items.items.len) {
-            const header = authority.items.items[object_index];
-            if (rt.gc.headerMarked(header) or rt.gc.headerIsPinned(header)) {
-                header.meta().flags.young = false;
-                object_index += 1;
-                continue;
-            }
-            doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
-            rt.gc.condemnNonBlockObject(header, false);
-            condemned += 1;
-        }
-    }
+    var sink = FinishCondemnSink{};
+    condemned += condemnListSweep(rt, &sink, false);
+    doomed_bytes +|= sink.doomed_bytes;
     // Reuse the pacing contract's settled-live estimate. `doomed_bytes` has
     // already converted block cell bytes to MemoryAccount units above, so this
     // subtraction does not mix physical cells with logical payload sizes.
@@ -1320,8 +1252,8 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     return condemned;
 }
 
-/// Destruction order for the morgue: identical to `destroyCondemned`'s five
-/// passes (qjs `gc_free_cycles`), spelled as a phase index so a bounded slice
+/// Destruction order for the morgue (qjs `gc_free_cycles`'s five passes),
+/// spelled as a phase index so a bounded slice
 /// can resume where its budget ran out. Objects first; realms, modules and
 /// function bytecode after; cells and shapes last, because earlier
 /// destructors still read them.
@@ -1355,7 +1287,7 @@ fn morgueIsEmpty(rt: *const JSRuntime) bool {
     if (rt.gc.doomed_cursor != null) return false;
     if (rt.gc.block_heap.doomed_blocks != null) return false;
     if (rt.gc.nonblock_objects) |authority| {
-        if (authority.doomed.items.len != 0 or authority.temporary.items.len != 0) return false;
+        if (authority.doomed.items.len != 0) return false;
     }
     for (&rt.gc.doomed_by_kind) |*bucket| {
         if (!gc.listEmpty(bucket)) return false;
@@ -1441,8 +1373,179 @@ fn assertMorgueEmptyBeforeCondemnation(rt: *const JSRuntime) void {
     std.debug.assert(morgueIsEmpty(rt));
 }
 
-pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
-    std.debug.assert(rt.gc.doomed_pending);
+/// Move a condemned non-object carrier onto its kind's morgue bucket.
+///
+/// TGC S5-b: every condemnation path -- both STW sweeps and the incremental
+/// finish -- publishes here, so the destruction slice has exactly one input
+/// representation. Objects never arrive: block cells are owned by the doomed
+/// bitmap and non-block Objects by the side authority's doomed lane.
+inline fn condemnIntoBucket(rt: *JSRuntime, header: *gc.Header) void {
+    const kind = header.metaConst().flags.kind;
+    std.debug.assert(kind != .object);
+    gc.listAddTailTraversalOwned(&rt.gc.doomed_by_kind[@intFromEnum(kind)], header);
+}
+
+/// The condemnation half of every sweep: detach the unmarked, unpinned
+/// carriers onto the morgue and retire the survivors' young bits.
+///
+/// TGC S5-b: this was written three times -- the synchronous major's whole
+/// list, the minor's young suffix, and the incremental finish's pause -- with
+/// the same four-case body (marked / pinned / dead list carrier / dead
+/// side-authority Object) and three different spellings of it. What actually
+/// differed is two axes, and they are the two parameters here:
+///
+///   `young_only` picks the range. The minor walks the young suffix from
+///   `young_head`, whose predecessor was captured at the first publication, so
+///   the detach stays O(young) instead of searching from the head per corpse;
+///   the majors walk the whole list from the sentinel. The side authority is
+///   unordered rather than a suffix in both cases, so its young half is a
+///   filter on the young bit rather than a range.
+///
+///   `sink` is the per-corpse extra work. The finish pause owes the pacing
+///   contract a byte total and owes the shape table an immediate delisting
+///   (the mutator runs before the destruction slices); the synchronous sweeps
+///   destroy in the same pause and owe neither.
+///
+/// The survivor arms retire the young bit rather than leaving it to a bulk
+/// pass: TGC S4-h (2) made the trace retire block cells as it loads them, but
+/// a LIST carrier cannot be retired by the trace without breaking
+/// `young_head`'s exact-suffix invariant while the suffix is still being
+/// walked -- so it is cleared here, where the walk is already O(young) and the
+/// header line is already loaded. A pinned-but-unmarked survivor needs it just
+/// as much: it leaves the suffix when `young_head` resets, and a stale young
+/// bit would make the barrier remember its owner on every store, forever.
+///
+/// Returns the number of headers condemned.
+fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
+    var condemned: usize = 0;
+
+    // List carriers are singly linked in trace. Walk them with an explicit
+    // predecessor so every condemnation is an O(1) splice.
+    const list_head: ?*gc.Header = if (young_only)
+        rt.gc.young_head
+    else
+        rt.gc.gc_obj_list.sentinel.next_non_object;
+    if (list_head) |head| {
+        var previous: *gc.Header = if (young_only)
+            rt.gc.young_predecessor orelse unreachable
+        else
+            &rt.gc.gc_obj_list.sentinel;
+        var cursor: ?*gc.Header = head;
+        while (cursor) |header| {
+            if (header == &rt.gc.gc_obj_list.sentinel) break;
+            const next = header.nextNonObject();
+            // The mark STAYS on a survivor. §8.2's sticky rule is
+            // `allocated && marked` is old, and that mark is what tells the
+            // next minor's `shadeExact` to stop at it -- clearing here made
+            // the first minor after every major find the whole heap unmarked
+            // and re-trace the entire live set from the roots (~29 ms per
+            // probe minor on splay, against a 1 ms target). The next major's
+            // `clearMarks` is the clearer.
+            if (rt.gc.headerMarked(header) or rt.gc.headerIsPinned(header)) {
+                header.meta().flags.young = false;
+                previous = header;
+                cursor = next;
+                continue;
+            }
+            sink.note(rt, header);
+            rt.gc.detachCycleCandidateAfter(previous, header);
+            condemnIntoBucket(rt, header);
+            condemned += 1;
+            cursor = next;
+        }
+    }
+
+    // Non-block Objects have no live-list node. Their unordered side authority
+    // is consumed in place: condemnation swap-removes, so the replacement at
+    // this index must be examined before advancing.
+    if (rt.gc.nonblock_objects) |authority| {
+        var object_index: usize = 0;
+        while (object_index < authority.items.items.len) {
+            const header = authority.items.items[object_index];
+            if (young_only and !header.metaConst().flags.young) {
+                object_index += 1;
+                continue;
+            }
+            if (rt.gc.headerMarked(header) or rt.gc.headerIsPinned(header)) {
+                header.meta().flags.young = false;
+                object_index += 1;
+                continue;
+            }
+            sink.note(rt, header);
+            rt.gc.condemnNonBlockObject(header);
+            condemned += 1;
+        }
+    }
+    return condemned;
+}
+
+/// The sink of a sweep that destroys in the same pause: nothing is owed
+/// between the condemnation and the teardown, so there is no extra per-corpse
+/// work at all.
+const SamePauseSink = struct {
+    fn note(_: *const @This(), _: *JSRuntime, _: *gc.Header) void {}
+};
+
+/// The sink of the incremental finish: the mutator runs between this
+/// condemnation and the destruction slices, so the byte total the pacing
+/// contract reads and the shape table the mutator consults must both be
+/// settled here.
+const FinishCondemnSink = struct {
+    doomed_bytes: usize = 0,
+
+    fn note(self: *@This(), rt: *JSRuntime, header: *gc.Header) void {
+        self.doomed_bytes +|= gc.Registry.heapByteSizeFromHeader(rt, header);
+        // A condemned shape must leave the transition table NOW, not at its
+        // destructor: a table that still serves the corpse lets a live object
+        // adopt a shape that is already scheduled to be freed. Realms and
+        // modules sit on membership lists that only collections walk, and
+        // those are gated while the morgue is open; the shape table is the one
+        // engine-global structure the MUTATOR consults.
+        if (header.metaConst().flags.kind == .shape) {
+            rt.shapes.delistCondemnedShape(header);
+        }
+    }
+};
+
+/// Outcome of one destruction slice. `morgue_empty` is the only thing the
+/// slice can report that its caller cannot re-derive cheaply: the budget may
+/// have run out mid-phase, and the resume state lives in the registry.
+const CondemnedSliceResult = struct {
+    destroyed: usize,
+    morgue_empty: bool,
+};
+
+/// Ordered teardown of the morgue, in one bounded slice.
+///
+/// TGC S5-b: the single destruction authority. The STW sweeps and the
+/// incremental morgue drain used to be two transcriptions of the same five
+/// kind passes -- one walking `tmp_obj_list` with a `residual_kinds` bitmap
+/// prescan, one walking the `doomed_by_kind` buckets with a budget -- and
+/// they had already drifted (`sweep_current` was published for a different
+/// subset of kinds on each side). Condemnation now feeds the buckets on
+/// every path, and a `budget_ns` of `maxInt` is exactly the old STW
+/// semantics: no clock check can trip, so the slice runs the morgue to
+/// empty.
+///
+/// The order is load-bearing (qjs `gc_free_cycles`): objects first, then
+/// realms, modules and function bytecode, and only then the cells and shapes
+/// whose contents those releases were still reading. Destroying under
+/// `.tracer_destroy` parks every struct free, so a destructor dereferencing a
+/// sibling already torn down in an earlier pass reads stripped-but-allocated
+/// memory rather than freed memory.
+///
+/// Every condemned kind is freed, not just `.object`: the minor used to
+/// condemn and destroy only objects, so a young var_ref that was equally
+/// unreachable survived while the object it held was freed. The condemned set
+/// has to be closed under "reachable only from other condemned nodes", and the
+/// only way to keep it closed is to free every kind the trace condemned.
+///
+/// `sweep_string_extents` runs the whole-table extent sweep after the block
+/// corpses: only a full major trace can prove an OLD extent dead, so the
+/// synchronous major asks for it and the minor (which sweeps young extents
+/// from `Heap.young_extents`) and the incremental drain (which swept them in
+/// the finish pause) do not.
+fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: bool) CondemnedSliceResult {
     const started = profile.nowNanos();
     var destroyed: usize = 0;
     var since_clock: usize = 0;
@@ -1454,7 +1557,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     // Block corpses first: they are all plain objects, which is exactly the
     // kind order's first pass, so draining them before the list phases keeps
     // "objects before realms before shapes" intact -- standalone objects on
-    // the list still get their turn in pass 0 below.
+    // the side authority still get their turn in pass 0 below.
     while (rt.gc.block_heap.doomed_blocks) |block| {
         // Geometry is immutable until `resetBlock`. Keep the base/stride
         // across callbacks instead of reloading both fields for every
@@ -1486,9 +1589,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
             if (since_clock == destroy_clock_cadence) {
                 since_clock = 0;
                 if (profile.nowNanos() -| started >= budget_ns) {
-                    rt.gc.doomed_destroyed += destroyed;
-                    rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
-                    return destroyed;
+                    return .{ .destroyed = destroyed, .morgue_empty = false };
                 }
             }
         }
@@ -1517,6 +1618,11 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         }
     }
 
+    // Whole-table extent sweep: only a full major trace can prove an OLD
+    // extent dead. Unbudgeted by construction -- the only caller that asks
+    // for it is the synchronous major, whose budget cannot trip.
+    if (sweep_string_extents) destroyed += string_mod.sweepExtents(rt);
+
     while (rt.gc.doomed_phase < doomed_phase_kinds.len + 1) {
         const final_pass = rt.gc.doomed_phase == doomed_phase_kinds.len;
         const phase_kind: gc.GcKind = if (final_pass) .shape else doomed_phase_kinds[rt.gc.doomed_phase];
@@ -1531,9 +1637,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
                     if (since_clock == destroy_clock_cadence) {
                         since_clock = 0;
                         if (profile.nowNanos() -| started >= budget_ns) {
-                            rt.gc.doomed_destroyed += destroyed;
-                            rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
-                            return destroyed;
+                            return .{ .destroyed = destroyed, .morgue_empty = false };
                         }
                     }
                 }
@@ -1598,9 +1702,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
                 since_clock = 0;
                 if (profile.nowNanos() -| started >= budget_ns) {
                     rt.gc.doomed_cursor = next;
-                    rt.gc.doomed_destroyed += destroyed;
-                    rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
-                    return destroyed;
+                    return .{ .destroyed = destroyed, .morgue_empty = false };
                 }
             }
             cursor = next;
@@ -1609,9 +1711,35 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         rt.gc.doomed_cursor = null;
     }
 
-    // Morgue empty.
-    rt.gc.doomed_destroyed += destroyed;
-    rt.gc.concurrent.stats.doomed_destroyed_objects +|= destroyed;
+    return .{ .destroyed = destroyed, .morgue_empty = true };
+}
+
+/// Run the STW twin of a destruction slice: the whole morgue, no budget, from
+/// a fresh phase cursor. Both synchronous sweeps condemn into the same buckets
+/// as the incremental finish, so the only difference left is the absence of a
+/// resume state and of the sliced transaction's bookkeeping.
+fn destroyCondemnedWhole(rt: *JSRuntime, sweep_string_extents: bool) usize {
+    rt.gc.doomed_phase = 0;
+    rt.gc.doomed_cursor = null;
+    const result = destroyCondemnedSlice(rt, std.math.maxInt(u64), sweep_string_extents);
+    std.debug.assert(result.morgue_empty);
+    return result.destroyed;
+}
+
+/// Destroy up to `budget_ns` of the morgue. Returns the number destroyed.
+///
+/// Runs under `.tracer_destroy`. TGC S4-e: a destructor releases its own
+/// storage, so there is no second pass to stretch across polls; the morgue is
+/// stable between slices because everything in it is unreachable,
+/// weak-cleared, and invisible to collections (which are gated while the
+/// morgue is open).
+pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
+    std.debug.assert(rt.gc.doomed_pending);
+    const result = destroyCondemnedSlice(rt, budget_ns, false);
+    rt.gc.doomed_destroyed += result.destroyed;
+    rt.gc.concurrent.stats.doomed_destroyed_objects +|= result.destroyed;
+    if (!result.morgue_empty) return result.destroyed;
+
     // TGC S4-e: a deferred class payload finalizer still retains JSValues into
     // this condemnation, so the transaction stays open until those callbacks
     // have run. Everything else that used to hold it open (the parked-free
@@ -1632,7 +1760,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         // re-interned id be retired under a live holder. See `sweepAtomTable`.
     }
     auditDoomedExitInvariant(rt);
-    return destroyed;
+    return result.destroyed;
 }
 
 /// Complete any pending sliced destruction synchronously. Explicit
@@ -2109,17 +2237,49 @@ const Collector = struct {
     /// stolen whole; exhaustion is an explicit collection failure, never an
     /// address-losing overflow followed by a whole-heap rescan.
     fn drainBarrierQueue(self: *Collector) CollectError!usize {
+        return self.drainSegmentedFrontier(std.math.maxInt(u64), false, true);
+    }
+
+    /// Trace the segmented frontier until it is empty or `budget_ns` runs
+    /// out; returns how many headers were traced. TGC S5-b: the incremental
+    /// increment and the final remark's barrier drain are this one loop.
+    ///
+    /// A pop needs no validation: rc-managed kinds never enter the queue (see
+    /// `shade`), and everything that can is freeable only by the collector
+    /// itself, which does not run inside its own mutator windows -- the pop
+    /// used to revalidate through the address registry, 4.3% of splay's
+    /// runtime, against a hazard only shapes had. `drain_work` is the remark's
+    /// extra obligation: its collector shades into the per-collection work
+    /// list rather than the queue, so each traced header's children are
+    /// flushed before the next pop. The clock is sampled every 64 objects
+    /// rather than per pop (a traceHeader is tens of nanoseconds and
+    /// `nowNanos` is not free); an unbudgeted caller skips the read.
+    fn drainSegmentedFrontier(
+        self: *Collector,
+        budget_ns: u64,
+        comptime prefetch: bool,
+        comptime drain_work: bool,
+    ) CollectError!usize {
         const queue = &self.rt.gc.concurrent_mark_queue;
+        const stack = &self.rt.gc.mark_stack;
         try checkFrontierFailure(queue);
-        var drained: usize = 0;
-        while (popSegmentedFrontier(&self.rt.gc.mark_stack, queue, false)) |header| {
-            drained += 1;
+        const budgeted = budget_ns != std.math.maxInt(u64);
+        const started = if (budgeted) profile.nowNanos() else 0;
+        var traced: usize = 0;
+        var since_clock: usize = 0;
+        while (popSegmentedFrontier(stack, queue, prefetch)) |header| {
+            traced += 1;
             try self.traceHeader(header);
             if (self.err) |err| return err;
-            try self.drain();
+            if (drain_work) try self.drain();
             try checkFrontierFailure(queue);
+            since_clock += 1;
+            if (since_clock == 64) {
+                since_clock = 0;
+                if (budgeted and profile.nowNanos() -| started >= budget_ns) break;
+            }
         }
-        return drained;
+        return traced;
     }
 
     fn drain(self: *Collector) CollectError!void {
@@ -2339,8 +2499,6 @@ const Collector = struct {
     }
 
     fn sweepUnmarkedYoung(self: *Collector, full_reachable: ?*const FullReachable) usize {
-        gc.listInit(&self.rt.gc.tmp_obj_list);
-
         // The production sweep consumes each dead header exactly once. Keep
         // a pointer snapshot only for the two diagnostics that need to inspect
         // the whole condemned set before mutation; allocating/growing this
@@ -2349,7 +2507,7 @@ const Collector = struct {
         var doomed: std.ArrayList(*gc.Header) = .empty;
         defer doomed.deinit(self.allocator());
         // Every condemned kind is freed, not just `.object` -- see
-        // `destroyCondemned`. A young var_ref or shape the trace did not reach
+        // `destroyCondemnedSlice`. A young var_ref or shape the trace did not reach
         // is exactly as dead as a young object it did not reach. The trace is
         // the liveness authority; rc cannot mask a missing root or barrier.
         if (snapshot_doomed) {
@@ -2397,53 +2555,10 @@ const Collector = struct {
                 self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
             );
             self.stampYoungBlockCorpses();
-            // The list population is a young suffix. Its predecessor was
-            // captured at the first publication, so deletion is O(young).
-            if (self.rt.gc.young_head) |young_head| {
-                var previous = self.rt.gc.young_predecessor orelse unreachable;
-                var cursor: ?*gc.Header = young_head;
-                while (cursor) |header| {
-                    if (header == &self.rt.gc.gc_obj_list.sentinel) break;
-                    const next = header.nextNonObject();
-                    if (self.rt.gc.headerMarked(header) or self.rt.gc.headerIsPinned(header)) {
-                        // TGC S4-h (2): the list half of promotion. The trace
-                        // deliberately does NOT retire list carriers -- that
-                        // would break `young_head`'s exact-suffix invariant
-                        // while the suffix is still being walked -- so the
-                        // survivor's bit is cleared here, where the walk is
-                        // O(young suffix) and the header is already loaded.
-                        header.meta().flags.young = false;
-                        previous = header;
-                        cursor = next;
-                        continue;
-                    }
-                    self.rt.gc.detachCycleCandidateAfter(previous, header);
-                    gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
-                    cursor = next;
-                }
-            }
-            // Side-authoritative Objects are unordered rather than a suffix.
-            // Removing one swap-fills its slot, so only survivors advance the
-            // cursor.
-            if (self.rt.gc.nonblock_objects) |authority| {
-                var object_index: usize = 0;
-                while (object_index < authority.items.items.len) {
-                    const header = authority.items.items[object_index];
-                    if (!header.metaConst().flags.young) {
-                        object_index += 1;
-                        continue;
-                    }
-                    if (self.rt.gc.headerMarked(header) or self.rt.gc.headerIsPinned(header)) {
-                        // Same promotion as the list half above: a side
-                        // authority is not the young suffix, so the trace
-                        // leaves it to this walk (TGC S4-h (2)).
-                        header.meta().flags.young = false;
-                        object_index += 1;
-                        continue;
-                    }
-                    self.rt.gc.condemnNonBlockObject(header, true);
-                }
-            }
+            // The list half is the young suffix and the side-authority half
+            // is filtered by the young bit; both are the shared walk.
+            var sink = SamePauseSink{};
+            _ = condemnListSweep(self.rt, &sink, true);
         }
         if (full_reachable) |reachable| {
             var violations: usize = 0;
@@ -2487,10 +2602,10 @@ const Collector = struct {
                     if (gc.Registry.isBlockCellHeader(header))
                         self.rt.gc.detachBlockObjectCandidate(header)
                     else
-                        self.rt.gc.condemnNonBlockObject(header, true);
+                        self.rt.gc.condemnNonBlockObject(header);
                 } else {
                     self.rt.gc.detachCycleCandidate(header);
-                    gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
+                    condemnIntoBucket(self.rt, header);
                 }
             }
             self.rt.memory.debitBlockBytes(
@@ -2502,8 +2617,8 @@ const Collector = struct {
         self.rt.gc.phase = .tracer_destroy;
         defer self.rt.gc.phase = old_phase;
 
-        // The extent half of the young set, FIRST. `destroyCondemned(false)`
-        // covers only the block/list carriers, and an extent is in neither;
+        // The extent half of the young set, FIRST. The destruction slice
+        // covers only the block/bucket carriers, and an extent is in neither;
         // without this a short-lived >128 B string had to survive to the next
         // major. It runs before the close because it reads both structures the
         // close retires (`young_extents` and the young bit).
@@ -2538,16 +2653,13 @@ const Collector = struct {
         if (snapshot_doomed) promoteYoungSurvivorsInBulk(self.rt);
         closeYoungGeneration(self.rt);
 
-        reclaimed += self.destroyCondemned(false);
-        gc.listInit(&self.rt.gc.tmp_obj_list);
+        reclaimed += destroyCondemnedWhole(self.rt, false);
 
         // Survivors keep their marks: that is what makes them old.
         return reclaimed;
     }
 
     fn sweepUnmarked(self: *Collector) usize {
-        gc.listInit(&self.rt.gc.tmp_obj_list);
-
         // Block Object corpses are stamped first, then published only through
         // the block doomed bitmap. No Object body word is list authority.
         var block_iterator = self.rt.gc.objectIterator(.dead_block);
@@ -2562,63 +2674,9 @@ const Collector = struct {
             self.rt.gc.block_heap.snapshotAllDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
         );
 
-        // List carriers are singly linked in trace. Walk them with an explicit
-        // predecessor so every condemnation is an O(1) splice.
-        var previous: *gc.Header = &self.rt.gc.gc_obj_list.sentinel;
-        var cursor = previous.next_non_object;
-        while (cursor) |header| {
-            if (header == &self.rt.gc.gc_obj_list.sentinel) break;
-            const next = header.nextNonObject();
-            if (self.rt.gc.headerMarked(header)) {
-                // The mark STAYS. §8.2's sticky rule is `allocated && marked`
-                // is old, and the survivor's mark is what tells the next
-                // minor's `shadeExact()` to stop at it -- clearing here made the
-                // first minor after every major find the whole heap unmarked
-                // and re-trace the entire live set from the roots (~29 ms per
-                // probe minor on splay, against a 1 ms target). The next
-                // major's `clearMarks` is the clearer; this used to clear a
-                // second time. Retiring the young bit rides the same walk,
-                // which is what deleted `clearYoungState`'s third whole-heap
-                // pass.
-                header.meta().flags.young = false;
-                previous = header;
-                cursor = next;
-                continue;
-            }
-            if (self.rt.gc.headerIsPinned(header)) {
-                // An unmarked-but-pinned survivor must retire its young bit
-                // too: it leaves the suffix when `young_head` resets below,
-                // and a stale young bit would make the barrier remember its
-                // owner on every store, forever.
-                header.meta().flags.young = false;
-                previous = header;
-                cursor = next;
-                continue;
-            }
-            self.rt.gc.detachCycleCandidateAfter(previous, header);
-            gc.listAddTailTraversalOwned(&self.rt.gc.tmp_obj_list, header);
-            cursor = next;
-        }
-
-        // The rare non-block Object population is side-authoritative, not an
-        // intrusive suffix. Retire survivors and swap-remove corpses in place.
-        if (self.rt.gc.nonblock_objects) |authority| {
-            var object_index: usize = 0;
-            while (object_index < authority.items.items.len) {
-                const header = authority.items.items[object_index];
-                if (self.rt.gc.headerMarked(header)) {
-                    header.meta().flags.young = false;
-                    object_index += 1;
-                    continue;
-                }
-                if (self.rt.gc.headerIsPinned(header)) {
-                    header.meta().flags.young = false;
-                    object_index += 1;
-                    continue;
-                }
-                self.rt.gc.condemnNonBlockObject(header, true);
-            }
-        }
+        // The whole live list plus the rare side-authoritative Objects.
+        var sink = SamePauseSink{};
+        _ = condemnListSweep(self.rt, &sink, false);
 
         // The compact trace header has no predecessor.  Close the retired
         // pre-sweep suffix here; any allocation performed by destruction opens
@@ -2629,7 +2687,7 @@ const Collector = struct {
         self.rt.gc.phase = .tracer_destroy;
         defer self.rt.gc.phase = old_phase;
 
-        const garbage_count = self.destroyCondemned(true);
+        const garbage_count = destroyCondemnedWhole(self.rt, true);
         sweepAtomTable(self.rt);
         if (!self.rt.hasPendingDeferredClassPayloadFinalizers()) {
             self.rt.gc.block_heap.publishCompletedHotBlocks();
@@ -2834,192 +2892,6 @@ const Collector = struct {
                 else => {},
             }
         }
-    }
-
-    /// One bit per `gc.GcKind`, so a whole condemned residue's kind census
-    /// fits in a register the object pass never has to spill.
-    const KindSet = std.meta.Int(.unsigned, gc.gc_kind_count);
-
-    inline fn kindBit(kind: gc.GcKind) KindSet {
-        return @as(KindSet, 1) << @intFromEnum(kind);
-    }
-
-    /// Checker for the `residual_kinds` gate. A skipped pass claims its kind is
-    /// absent from `tmp_obj_list`; this is the only thing standing between a
-    /// wrong claim and the final pass's `unreachable`, so it walks the list and
-    /// says so in safe builds. Compiled away in ReleaseFast, which is where the
-    /// gate is worth anything.
-    fn assertCondemnedKindAbsent(self: *Collector, kind: gc.GcKind) void {
-        if (comptime !std.debug.runtime_safety) return;
-        var cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
-        while (cursor) |h| {
-            if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-            std.debug.assert(h.metaConst().flags.kind != kind);
-            cursor = h.nextNonObject();
-        }
-    }
-
-    /// Ordered teardown of everything condemned onto `tmp_obj_list`.
-    ///
-    /// The order is load-bearing (qjs `gc_free_cycles`): objects first, then
-    /// realms, modules and function bytecode, and only then the cells and
-    /// shapes whose contents those releases were still reading. Destroying
-    /// under `.remove_cycles` parks every struct free, so a destructor
-    /// dereferencing a sibling already torn down in an earlier pass reads
-    /// stripped-but-allocated memory rather than freed memory.
-    ///
-    /// Both sweeps share this. They did not: the minor condemned and destroyed
-    /// only `.object`, so a young var_ref that was equally unreachable survived
-    /// the minor while the object it held was freed, and the next major's
-    /// var_ref teardown released a refcount through a dangling pointer. The
-    /// condemned set has to be closed under "reachable only from other
-    /// condemned nodes", and the only way to keep it closed is to free every
-    /// kind the trace condemned, not a subset.
-    ///
-    /// Passes two through four are gated on `residual_kinds`, the set of kinds
-    /// the object pass actually saw left behind. The order above is untouched;
-    /// what is skipped is only a walk over a residue that provably contains no
-    /// member of that pass's kind. On EarleyBoyer that residue is 73.6M
-    /// var_refs and the module pass finds zero of them on every one of the 2536
-    /// majors, so three full traversals of a 70M-node list were pure白工
-    /// (`.scratch/eb-alloc-account.md` §4 K1: 657M cycles, 19.0% of the EB
-    /// cycle gap). The kind is already loaded by the object test, so the set is
-    /// an in-register `orr` on the nodes the object pass skips anyway -- no new
-    /// per-object store, and no producer-side counter that could drift out of
-    /// step with the list.
-    fn destroyCondemned(self: *Collector, sweep_string_extents: bool) usize {
-        var garbage_count: usize = 0;
-
-        // Object is the first destruction kind. Block cells are owned by the
-        // doomed bitmap and standalone Objects by the temporary side lane;
-        // neither population ever enters `tmp_obj_list`.
-        while (self.rt.gc.block_heap.doomed_blocks) |block| {
-            const cells_base = @intFromPtr(block) + block.cells_offset + gc.metadata_prefix_size;
-            const cell_size: usize = block.cell_size;
-            // TGC S4-d spec 2.4: STW twin of `destroyDoomedSlice` -- only
-            // the finalizer subset is visited by hand.
-            while (block.takeDoomedFinalizerCell()) |index| {
-                const header: *gc.Header = @ptrFromInt(cells_base + @as(usize, index) * cell_size);
-                switch (header.metaConst().flags.kind) {
-                    .object => Object.destroyFromHeader(self.rt, header),
-                    .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(self.rt, header),
-                    else => unreachable,
-                }
-                garbage_count += 1;
-            }
-            const link = block.doomed_link;
-            block.doomed_link = 0;
-            self.rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
-            garbage_count += self.rt.gc.reclaimDoomedBlock(block);
-            if (gc.invariantChecksEnabled()) {
-                BlockHeapMod.Heap.verifyBlockAllocCount(block) catch
-                    @panic("STW Object destruction left block allocation accounting inconsistent");
-            }
-        }
-        // Whole-table extent sweep: only a full major trace can prove an
-        // OLD extent dead. The young ones a minor can prove are swept from
-        // `Heap.young_extents` by `sweepUnmarkedYoung` instead.
-        if (sweep_string_extents) garbage_count += string_mod.sweepExtents(self.rt);
-        if (self.rt.gc.nonblock_objects) |authority| {
-            while (authority.temporary.pop()) |header| {
-                self.rt.gc.sweep_current = header;
-                Object.destroyFromHeader(self.rt, header);
-                self.rt.gc.sweep_current = null;
-                garbage_count += 1;
-            }
-        }
-
-        var residual_kinds: KindSet = 0;
-        var previous: *gc.Header = &self.rt.gc.tmp_obj_list.sentinel;
-        var cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
-        while (cursor) |h| {
-            if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-            const kind = h.meta().flags.kind;
-            std.debug.assert(kind != .object);
-            residual_kinds |= kindBit(kind);
-            previous = h;
-            cursor = h.nextNonObject();
-        }
-        if (residual_kinds & kindBit(.realm_context) != 0) {
-            previous = &self.rt.gc.tmp_obj_list.sentinel;
-            cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
-            while (cursor) |h| {
-                if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-                const next = h.nextNonObject();
-                if (h.meta().flags.kind == .realm_context) {
-                    gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                    garbage_count += 1;
-                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                    self.rt.gc.sweep_current = h;
-                    context_mod.JSContext.destroyFromHeader(self.rt, h);
-                    self.rt.gc.sweep_current = null;
-                } else {
-                    previous = h;
-                }
-                cursor = next;
-            }
-        } else self.assertCondemnedKindAbsent(.realm_context);
-        if (residual_kinds & kindBit(.module) != 0) {
-            previous = &self.rt.gc.tmp_obj_list.sentinel;
-            cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
-            while (cursor) |h| {
-                if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-                const next = h.nextNonObject();
-                if (h.meta().flags.kind == .module) {
-                    gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                    garbage_count += 1;
-                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                    self.rt.gc.sweep_current = h;
-                    module_mod.ModuleRecord.destroyFromHeader(self.rt, h);
-                    self.rt.gc.sweep_current = null;
-                } else {
-                    previous = h;
-                }
-                cursor = next;
-            }
-        } else self.assertCondemnedKindAbsent(.module);
-        if (residual_kinds & kindBit(.function_bytecode) != 0) {
-            previous = &self.rt.gc.tmp_obj_list.sentinel;
-            cursor = self.rt.gc.tmp_obj_list.sentinel.next_non_object;
-            while (cursor) |h| {
-                if (h == &self.rt.gc.tmp_obj_list.sentinel) break;
-                const next = h.nextNonObject();
-                if (h.meta().flags.kind == .function_bytecode) {
-                    gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, previous, h);
-                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                    self.rt.gc.sweep_current = h;
-                    function_bytecode_mod.destroyFromHeader(self.rt, h);
-                    self.rt.gc.sweep_current = null;
-                } else {
-                    previous = h;
-                }
-                cursor = next;
-            }
-        } else self.assertCondemnedKindAbsent(.function_bytecode);
-        while (gc.listFirst(&self.rt.gc.tmp_obj_list)) |h| {
-            gc.listDelAfterTraversalOwned(&self.rt.gc.tmp_obj_list, &self.rt.gc.tmp_obj_list.sentinel, h);
-            switch (h.meta().flags.kind) {
-                .var_ref => {
-                    garbage_count += 1;
-                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                    self.rt.gc.sweep_current = h;
-                    var_ref_mod.VarRef.destroyFromHeader(self.rt, h);
-                    self.rt.gc.sweep_current = null;
-                },
-                .big_int => {
-                    garbage_count += 1;
-                    self.rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(self.rt, h));
-                    bigint_mod.BigInt.destroyFromHeader(self.rt, h);
-                },
-                .shape => {
-                    garbage_count += 1;
-                    if (!h.meta().flags.finalizing) self.rt.shapes.destroyFromHeader(h);
-                },
-                else => unreachable,
-            }
-        }
-
-        return garbage_count;
     }
 };
 
