@@ -314,6 +314,9 @@ test "embedding public NativeBinding failed realm install leaves binding absent"
     try ObjectType.install(ctx_a.core);
     const binding_a = try ObjectType.binding(ctx_a.core);
 
+    // TGC S4-b: sweep first so the limit is the live size (the limit-triggered
+    // retry collection can now reclaim property/array storage cells).
+    _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     if (ObjectType.install(ctx_b.core)) {
         rt.setMemoryLimit(null);

@@ -794,7 +794,8 @@ fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.objec
     // alive via the collection (same liveness the key/value kinds rely on).
     const pair = try core.Object.createArray(rt, prototype);
     errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
-    const elements = try rt.memory.alloc(core.JSValue, 2);
+    // TGC S4-b spec 2.2: `.array_storage` GC cell.
+    const elements = try core.Object.createArrayStorageSlice(rt, 2);
     elements[0] = entry.key;
     elements[1] = if (is_set) entry.key else entry.value;
     pair.adoptDenseArrayElementsAssumingEmpty(rt, elements);

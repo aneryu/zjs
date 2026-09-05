@@ -835,14 +835,22 @@ pub const Registry = struct {
         const new_shape = try self.memory.createWithFam(Shape, new_fam_bytes);
         errdefer self.memory.destroyWithFam(Shape, new_shape, new_fam_bytes);
         const Entry = property.Entry;
+        // TGC S4-c: a slots2 object that carries a class payload keeps its
+        // payload POINTER in the arm word the inline tail would occupy, so it
+        // can never be compacted back into that tail.
         const compact_to_tail = object.hasSlots2Layout() and
+            object.flags.class_payload_kind == .none and
             new_prop_size <= Object.trailing_property_capacity;
+        // TGC S4-b spec 2.2: the compacted buffer is a `.property_storage` GC
+        // cell. No errdefer free -- an abandoned cell is swept, not returned.
         var new_values: []Entry = &.{};
-        var new_values_owned = false;
-        errdefer if (new_values_owned) self.memory.free(Entry, new_values);
         if (!compact_to_tail) {
-            new_values = try self.memory.alloc(Entry, new_prop_size);
-            new_values_owned = true;
+            const cell = try self.gc_registry.createStorageCellPublished(
+                gc.representation.property_storage_kind_tag,
+                gc.metadata_prefix_size + new_prop_size * @sizeOf(Entry),
+            );
+            const base: [*]Entry = @ptrCast(@alignCast(cell));
+            new_values = base[0..new_prop_size];
         }
         const destination_values = if (compact_to_tail)
             object.trailingPropertyStorageEntries()[0..new_prop_size]
@@ -854,7 +862,6 @@ pub const Registry = struct {
         // otherwise overwrite the pointer and make the second source load
         // dereference property data as an address.
         const old_prop_size = old.prop_size;
-        const old_storage = object.propertyStorageBase();
         const old_values = object.propertyStorageEntries(old_prop_size);
 
         new_shape.* = .{
@@ -902,11 +909,15 @@ pub const Registry = struct {
         self.gc_registry.generationalBarrier(object.gcHeader(), &new_shape.header);
         if (compact_to_tail)
             object.setPropertyStorageInline()
-        else
+        else {
             object.setPropertyStorageExternal(new_values.ptr);
-        new_values_owned = false;
+            // A long-lived owner adopting a cell published moments ago is an
+            // old-to-young edge, exactly like the Shape adoption above.
+            self.gc_registry.rememberOwnerForBulkWrite(object.gcHeader());
+        }
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
-        if (object.propertyStoragePointerIsExternal(old_storage)) self.memory.free(Entry, old_values);
+        // TGC S4-b: the old property buffer is a GC cell; dropping the pointer
+        // is the whole release.
     }
 
     pub fn updatePropertyFlags(self: *Registry, shape: *Shape, index: usize, flags: u6) void {

@@ -756,34 +756,6 @@ pub const vm_helpers = struct {
         return helpers.runMutableVm(&vm, &function);
     }
 
-    /// Split half of `parseStmtAndRunWithTopLevelChildren` for tests that must
-    /// arm a GC probe over the RUN alone. Compilation allocates heavily and its
-    /// intermediate state lives in native locals, which the precise-only scan
-    /// (`forcePreciseRootScanForTest`) cannot see, so a probe that forces a
-    /// collection at every allocation must not be armed across it.
-    /// The caller owns `function` and must `deinit` it.
-    pub fn compileStmtWithTopLevelChildren(
-        rt: *core.JSRuntime,
-        ctx: *core.JSContext,
-        src: []const u8,
-        function: *engine.bytecode.Bytecode,
-    ) !void {
-        var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.initWithRuntime(rt, &lex, function);
-        defer state.deinit(rt);
-        state.top_level_functions_as_children = true;
-        state.top_level_lexical_as_global_ref = true;
-        state.function_def.is_eval = true;
-        state.function_def.is_global_var = true;
-        try state.beginProgramEmission();
-        try state.enableReturnCompletion();
-        while (state.token.val != engine.parser.token.TOK_EOF) {
-            try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-        }
-        try state.finalizeEvalReturn();
-        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(function, &state.function_def, .{ .realm = ctx });
-    }
-
     pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);

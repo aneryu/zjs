@@ -264,14 +264,14 @@ test "gc stress finalization registry dead target queues pending job" {
     dropGcPtr(&target);
 
     const collected = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 2), collected.freed_objects);
+    try std.testing.expectEqual(@as(usize, 3), collected.freed_objects);
     // `processWeak` enqueues the cleanup in the same collection that unreaches
     // the target.
     try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
     // cleanup + registry + held object + construction realm, plus the shared root shape and the
     // held object's one-property transition shape.
-    try std.testing.expectEqual(@as(usize, 6), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 7), rt.gc.liveCount());
 
     rt.clearPendingFinalizationJobs();
     registry_slot = null;

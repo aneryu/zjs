@@ -103,6 +103,22 @@ pub inline fn callVisitValue(vis: anytype, val_ptr: anytype) !void {
     }
 }
 
+/// TGC S4 spec 2.2: an owner's edge to a bare storage cell (property entries,
+/// array elements). Visitors that do not declare `storageCell` -- the root
+/// adaptors, which never enumerate heap edges -- compile this away entirely.
+pub inline fn callVisitStorageCell(vis: anytype, header: anytype) !void {
+    const VisType = @TypeOf(vis);
+    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+    if (comptime @hasDecl(CleanType, "storageCell")) {
+        const ReturnType = @typeInfo(@TypeOf(CleanType.storageCell)).@"fn".return_type.?;
+        if (comptime @typeInfo(ReturnType) == .error_union) {
+            try vis.storageCell(header);
+        } else {
+            vis.storageCell(header);
+        }
+    }
+}
+
 pub inline fn callVisitShape(vis: anytype, shape_ref: anytype) !void {
     const VisType = @TypeOf(vis);
     const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
@@ -179,6 +195,14 @@ pub fn destroyValueSlice(rt: *JSRuntime, slot: *[]JSValue) void {
 
 pub fn destroyValueSliceValuesOnly(_: *JSRuntime, slot: *[]JSValue) void {
     slot.* = &.{};
+}
+
+/// TGC S4-c: the collector header of a subordinate `.payload` cell -- the
+/// variable-length slice an a-class payload owns. Only valid where the owning
+/// payload says the slice names a cell (a non-zero capacity, or a non-empty
+/// fixed slice); the empty slice is a sentinel, not an allocation.
+pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.GCObjectHeader {
+    return @ptrCast(@alignCast(ptr));
 }
 
 /// Release the nullable module/ordinary closure slots and their single backing
@@ -705,12 +729,18 @@ pub const BoundFunctionPayload = struct {
     pub fn destroy(self: *BoundFunctionPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
         destroyOptionalValue(rt, &self.this_value);
-        destroyValueSlice(rt, &self.args);
+        // TGC S4-c: the argument array is a subordinate `.payload` cell; the
+        // sweep returns it once no edge names it.
+        destroyValueSliceValuesOnly(rt, &self.args);
     }
 
     pub fn traceChildEdges(self: *BoundFunctionPayload, visitor: anytype) !void {
         try traceOptValue(visitor, &self.target);
         try traceOptValue(visitor, &self.this_value);
+        // The argument array is fixed at creation, so a non-empty slice IS the
+        // cell (there is no over-allocated capacity to distinguish).
+        if (self.args.len != 0)
+            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.args.ptr));
         for (self.args) |*stored| try callVisitValue(visitor, stored);
     }
 };
@@ -734,10 +764,13 @@ pub const ArgumentsPayload = struct {
     var_refs: []JSValue = &.{}, // gc-slot: heap
 
     pub fn destroy(self: *ArgumentsPayload, rt: *JSRuntime) void {
-        destroyValueSlice(rt, &self.var_refs);
+        // TGC S4-c: the value slice is a subordinate `.payload` cell.
+        destroyValueSliceValuesOnly(rt, &self.var_refs);
     }
 
     pub fn traceChildEdges(self: *ArgumentsPayload, visitor: anytype) !void {
+        if (self.var_refs.len != 0)
+            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.var_refs.ptr));
         for (self.var_refs) |*stored| try callVisitValue(visitor, stored);
     }
 };
@@ -870,15 +903,9 @@ pub const DisposableStackPayload = struct {
     async_dispose_error: ?JSValue = null,
 
     pub fn destroy(self: *DisposableStackPayload, rt: *JSRuntime) void {
-        const old_resources = self.resources;
-        const old_capacity = self.resource_capacity;
+        // TGC S4-c: the resource list is a subordinate `.payload` cell.
         self.resources = &.{};
         self.resource_capacity = 0;
-        if (old_capacity != 0) {
-            rt.memory.free(DisposableResource, old_resources.ptr[0..old_capacity]);
-        } else if (old_resources.len != 0) {
-            rt.memory.free(DisposableResource, old_resources);
-        }
         destroyOptionalValue(rt, &self.async_dispose_resolve);
         destroyOptionalValue(rt, &self.async_dispose_reject);
         destroyOptionalValue(rt, &self.async_dispose_error);
@@ -886,6 +913,8 @@ pub const DisposableStackPayload = struct {
     }
 
     pub fn traceChildEdges(self: *DisposableStackPayload, visitor: anytype) !void {
+        if (self.resource_capacity != 0)
+            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.resources.ptr));
         for (self.resources) |*resource| {
             try callVisitValue(visitor, &resource.value);
             try callVisitValue(visitor, &resource.method);
@@ -951,7 +980,10 @@ pub const PromisePayload = struct {
         destroyOptionalValue(rt, &self.result);
         destroyOptionalValue(rt, &self.reaction_callback);
         destroyOptionalValue(rt, &self.reaction_arg);
-        destroyValueSliceWithCapacity(rt, &self.reactions, &self.reactions_capacity);
+        // TGC S4-c: the subscriber list is a subordinate `.payload` cell; the
+        // sweep returns it (and every superseded growth cell) on its own.
+        self.reactions = &.{};
+        self.reactions_capacity = 0;
         self.is_rejected = false;
         self.atomics_wait_async = false;
     }
@@ -960,6 +992,11 @@ pub const PromisePayload = struct {
         try traceOptValue(visitor, &self.result);
         try traceOptValue(visitor, &self.reaction_callback);
         try traceOptValue(visitor, &self.reaction_arg);
+        // `reactions_capacity != 0` is exactly "the slice names a cell": the
+        // live prefix may be shorter than the allocation, and an empty list
+        // holds the `&.{}` sentinel.
+        if (self.reactions_capacity != 0)
+            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.reactions.ptr));
         for (self.reactions) |*stored| try callVisitValue(visitor, stored);
     }
 };

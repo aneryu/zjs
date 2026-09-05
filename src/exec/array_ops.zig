@@ -2286,7 +2286,9 @@ pub fn arraySliceCall(
             defer root_frame.deactivate(ctx.runtime);
 
             if (count > 0) {
-                const elements = try ctx.runtime.memory.alloc(core.JSValue, count);
+                // TGC S4-b spec 2.2: an adopted dense buffer is an
+                // `.array_storage` GC cell, minted by the caller.
+                const elements = try core.Object.createArrayStorageSlice(ctx.runtime, count);
                 const src = object.arrayElements()[start .. start + count];
                 for (src, 0..) |v, i| elements[i] = v;
                 out.adoptDenseArrayElementsAssumingEmpty(ctx.runtime, elements);
@@ -2512,7 +2514,8 @@ fn fastDenseArraySplice(
     defer root_frame.deactivate(rt);
 
     if (actual_delete_count > 0) {
-        const elements = try rt.memory.alloc(core.JSValue, actual_delete_count);
+        // TGC S4-b: `.array_storage` GC cell (see the slice fast path).
+        const elements = try core.Object.createArrayStorageSlice(rt, actual_delete_count);
         const src = object.arrayElements()[actual_start .. actual_start + actual_delete_count];
         for (src, 0..) |v, i| elements[i] = v;
         removed.adoptDenseArrayElementsAssumingEmpty(rt, elements);
@@ -6434,7 +6437,8 @@ pub fn objectEntryArrayValue(
     // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array, not two
     // per-element createDataPropertyOrThrow (atomFromUInt32 + Descriptor + define).
     // The slice alloc precedes the dups; key_value/value stay rooted via root_frame.
-    const elements = try ctx.runtime.memory.alloc(core.JSValue, 2);
+    // TGC S4-b: `.array_storage` GC cell.
+    const elements = try core.Object.createArrayStorageSlice(ctx.runtime, 2);
     elements[0] = key_value;
     elements[1] = value;
     entry.adoptDenseArrayElementsAssumingEmpty(ctx.runtime, elements);

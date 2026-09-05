@@ -832,6 +832,9 @@ comptime {
     std.debug.assert(@intFromEnum(GcKind.payload) == 10 and @intFromEnum(GcKind.rope) == 11);
     std.debug.assert(@intFromEnum(GcKind.rope) == representation.rope_kind_tag);
     std.debug.assert(@intFromEnum(GcKind.string_buffer) == representation.string_buffer_kind_tag);
+    std.debug.assert(@intFromEnum(GcKind.property_storage) == representation.property_storage_kind_tag);
+    std.debug.assert(@intFromEnum(GcKind.array_storage) == representation.array_storage_kind_tag);
+    std.debug.assert(@intFromEnum(GcKind.payload) == representation.payload_kind_tag);
 }
 
 /// The two owner facts that let a generational write barrier do nothing, as
@@ -1425,12 +1428,17 @@ pub const InvariantError = error{
     InvalidTrailingPropertyClass,
     InvalidTrailingPropertyLayout,
     InvalidTrailingPropertyCapacity,
-    DanglingSlots2PayloadOwner,
     InvalidSlots2PayloadOwner,
-    InvalidSlots2PayloadSlot,
-    MissingSlots2PayloadSlot,
     UndersizedTrailingObjectCell,
     ObjectCellSizeClassMismatch,
+    /// TGC S4-b: `prop_values` / `arrayArm().values` must name a published
+    /// storage cell of the matching kind. A raw (non-cell) buffer installed
+    /// there has no collector prefix, so the sweep would read a neighbouring
+    /// allocation's bytes as a header.
+    DanglingPropertyStorageCell,
+    InvalidPropertyStorageKind,
+    DanglingArrayStorageCell,
+    InvalidArrayStorageKind,
     DeferredPayloadRootNotLive,
     DeferredPayloadRootDoomed,
 };
@@ -2628,9 +2636,20 @@ pub const Registry = struct {
             },
             .string, .rope => string.accountedAllocationSizeFromHeader(h),
             .string_buffer => string.accountedStorageSizeFromHeader(h),
-            // TGC S4-b/S4-c: storage cells carry their own size query when
-            // they start being allocated; nothing mints one yet.
-            .property_storage, .array_storage, .payload => unreachable,
+            // TGC S4-b: a storage cell is not self-describing -- its body is
+            // the owner's raw array -- so the carrier answers instead. A block
+            // cell reports its size class; an extent over the u16 stamp
+            // reports the table's `user_bytes` (the stamp itself already
+            // returned above through `storedHeapBytes`).
+            // TGC S4-c joins `.payload` to the same answer: an a-class class
+            // payload (and the slices it owns) is a bare storage cell too.
+            .property_storage, .array_storage, .payload => blk: {
+                if (isBlockCellHeader(h)) {
+                    break :blk storageCellBlockTotalBytes(h) - metadata_prefix_size;
+                }
+                const base = @intFromPtr(h) - metadata_prefix_size;
+                break :blk (rt.gc.block_heap.extentUserBytes(base) orelse unreachable) - metadata_prefix_size;
+            },
             .big_int => blk: {
                 const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
                 break :blk big.accountedAllocationSize();
@@ -2791,6 +2810,54 @@ pub const Registry = struct {
     /// bitmap-owned (no list link, no occupant-table entry), so this is the
     /// byte debit plus the remembered-owner release -- the string twin of
     /// what `unregisterObjectWithBytes` does for an Object cell.
+    /// TGC S4-b spec 2.2: the ONE allocation + publication funnel for a bare
+    /// storage cell (property entries, array elements, and in S4-c a-class
+    /// payloads). Returns the BODY pointer (`base + 8`); the cell carries no
+    /// out-edges and no destructor, so publication is all the collector needs
+    /// before an owner's `storageCell` edge can name it.
+    ///
+    /// The body is left UNINITIALIZED: the caller fills it before any tracer
+    /// or mutator can read it. That is sound because a storage cell is a leaf
+    /// -- `traceHeaderEdges` returns immediately for these kinds -- and the
+    /// window between this call and the owner's install is covered by the
+    /// conservative stack scan resolving the caller's local to the cell
+    /// itself (S4 spec 5 (4)).
+    pub fn createStorageCellPublished(
+        self: *Registry,
+        comptime kind_tag: u8,
+        total_bytes: usize,
+    ) ![*]u8 {
+        const cell = try self.memory.createStorageCell(kind_tag, total_bytes);
+        const body = cell.base + metadata_prefix_size;
+        self.addInitializedWithSizeNoFail(@ptrCast(@alignCast(body)), cell.accounted_bytes);
+        return body;
+    }
+
+    /// Sweep-time return of a condemned storage BLOCK CELL. Pure memory: a
+    /// storage cell owns no edges, no atom entry and no external resource, so
+    /// unlike `string.destroyCellFromHeader` there is no handshake -- only the
+    /// registry unpublish and the allocator free. The byte count comes from
+    /// the block geometry rather than from the body, because a storage cell is
+    /// not self-describing (its body IS the caller's array).
+    ///
+    /// The extent twin is the storage arm of `string.destroyDeadStringExtent`,
+    /// which is handed `user_bytes` by `Heap.sweepExtents`.
+    pub fn destroyStorageCell(self: *Registry, h: *GCObjectHeader) void {
+        comptime std.debug.assert(block_heap_enabled);
+        std.debug.assert(isBlockCellHeader(h));
+        std.debug.assert(kindIsPrefixCarrier(h.metaConst().flags.kind));
+        const total = storageCellBlockTotalBytes(h);
+        self.unpublishStringCell(h, BlockHeapMod.accountedBodyBytesForRequest(total, metadata_prefix_size).?);
+        self.memory.destroyStringCell(h, total);
+    }
+
+    /// Allocation size (prefix included) of a storage cell served by a block
+    /// cell: the size class it was handed, not the request it was born from.
+    inline fn storageCellBlockTotalBytes(h: *const GCObjectHeader) usize {
+        const cell = @intFromPtr(h) - metadata_prefix_size;
+        return BlockHeapMod.Block.fromCellTrusted(cell).cell_size;
+    }
+
     pub fn unpublishStringCell(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         std.debug.assert(isBlockCellHeader(h));
         self.recordHeapFreeWithBytes(h, bytes);
@@ -3279,14 +3346,40 @@ pub const Registry = struct {
             } else if (owner.propertyStorageIsInline()) {
                 return error.InvalidTrailingPropertyLayout;
             }
-            const has_side_payload = rt.slots2_payloads.contains(@constCast(owner));
-            if (slots2 and owner.flags.class_payload_kind == .ordinary) {
-                if (!has_side_payload) return error.MissingSlots2PayloadSlot;
-            } else if (has_side_payload) {
+            // TGC S4-c: a slots2 body's arm word IS its payload slot, so a
+            // payload-bearing slots2 object must have spilled its property
+            // storage out of line first (`spillInlinePropertyStorageForPayload`).
+            // Inline storage plus a payload means the payload pointer and the
+            // first property entry are the same eight bytes.
+            if (slots2 and owner.flags.class_payload_kind != .none and
+                owner.propertyStorageIsInline())
+            {
                 return error.InvalidSlots2PayloadOwner;
             }
             if (owner.shape_ref.prop_count != 0 and !owner.hasPropertyStorage())
                 return error.MissingObjectPropertyStorage;
+            // TGC S4-b: an EXTERNAL property buffer is a `.property_storage`
+            // GC cell, so the pointer must land on a published cell of that
+            // kind. This is the audit that catches an install that skipped
+            // `createPropertyStorageCell` (a raw `allocRuntime` buffer has no
+            // prefix, so the sweep would read a neighbouring allocation's
+            // bytes as a header).
+            if (owner.propertyStoragePointerIsExternal(storage)) {
+                const cell_header: *const GCObjectHeader = @ptrCast(@alignCast(storage));
+                if (!self.containsHeader(cell_header)) return error.DanglingPropertyStorageCell;
+                if (cell_header.metaConst().flags.kind != .property_storage)
+                    return error.InvalidPropertyStorageKind;
+            }
+            // The dense element buffer answers the same two questions.
+            if (owner.flags.fast_array or owner.class_id == class.ids.mapped_arguments) {
+                if (owner.arrayArm().*.capacity != 0) {
+                    const cell_header: *const GCObjectHeader =
+                        @ptrCast(@alignCast(owner.arrayArm().*.values));
+                    if (!self.containsHeader(cell_header)) return error.DanglingArrayStorageCell;
+                    if (cell_header.metaConst().flags.kind != .array_storage)
+                        return error.InvalidArrayStorageKind;
+                }
+            }
             if (owner.shape_ref.prop_count > owner.shape_ref.prop_size)
                 return error.InvalidTrailingPropertyCapacity;
 
@@ -3312,22 +3405,6 @@ pub const Registry = struct {
             }
         }
 
-        // Validate membership before dereferencing a key. A skipped destroy-
-        // side removal leaves raw Object identity in this table after its cell
-        // has returned to the allocator; the address registry is the authority
-        // that makes that stale key safe to diagnose rather than dereference.
-        var payload_iterator = rt.slots2_payloads.iterator();
-        while (payload_iterator.next()) |entry| {
-            const owner = entry.key_ptr.*;
-            const header: *const GCObjectHeader = @ptrCast(owner);
-            if (!self.containsHeader(header)) return error.DanglingSlots2PayloadOwner;
-            if (!owner.hasSlots2Layout() or owner.class_id != class.ids.object or
-                owner.flags.class_payload_kind != .ordinary)
-            {
-                return error.InvalidSlots2PayloadOwner;
-            }
-            if (entry.value_ptr.* == null) return error.InvalidSlots2PayloadSlot;
-        }
     }
 
     /// qjs `list_add_tail` (quickjs.c:6545).

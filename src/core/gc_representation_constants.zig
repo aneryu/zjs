@@ -24,6 +24,19 @@ pub const rope_kind_tag: u8 = 11;
 /// out-edges and no destructor, so the allocator writes the tag and nothing
 /// else ever interprets its body as a header.
 pub const string_buffer_kind_tag: u8 = 12;
+/// TGC S4-b: an object's external property-entry buffer (`prop_values`) and an
+/// array/arguments element buffer as bare storage cells. Same contract as the
+/// tail buffer above -- the allocator writes the tag, the owner's `storageCell`
+/// edge marks the cell, and the bitmap/extent sweep returns it with no
+/// destructor. Nothing ever reads their bodies as a header.
+pub const property_storage_kind_tag: u8 = 8;
+pub const array_storage_kind_tag: u8 = 9;
+/// TGC S4-c: an a-class (pure-memory) object payload, and the variable-length
+/// slices such a payload owns (promise reactions, bound arguments, disposable
+/// resources, arguments var-refs, bytecode capture arrays). Same contract as
+/// the two above: the allocator writes the tag, the owner's `storageCell` edge
+/// marks the cell, and the sweep returns it with no destructor.
+pub const payload_kind_tag: u8 = 10;
 
 /// The kind occupies the low nibble of the flags byte (TGC S4-a widened it
 /// from three bits into the retired `mark` bit). Raw readers of the byte

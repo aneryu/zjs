@@ -309,6 +309,33 @@ pdfjs.fixed（同机对照）：wall 6.70 → **4.62s**、major 908 → **24**�
 
 通用原语：kind 12 `string_buffer`（不进 `isStringFamily`；进 `kindIsBlockCellKind`）；`memory.createStorageCell(comptime kind_tag, bytes)` = 块 cell → `createExtent(kind_tag)` 唯一漏斗（`createStringExtent` 变包装）；`Heap.sweepExtents/sweepYoungExtents/retireYoungExtents` kind 化（单回调内按 kind 分派）；storage cell 无出边无析构；`visitor.storageCell(ptr)` + `callVisitStorageCell` 壳；新谓词 `kindIsPrefixCarrier`（无链字）与 `kindIsExtentCapable`（可进 extent 表），替换 6 处冒充这两个问题的 `isStringFamily`。尾缓冲：`StringRope{buffer: ?*StringBuffer, extensible}`（48→56B）；`StringBuffer{capacity, is_wide, FAM}`；`stringAddStringsOwned` 两条新臂在 QJS 短右合并臂之前（视图的 `right` 是 undefined）；seed 阈值 `tail_buffer_seed_len = 512`、seed 容量 1.5×、增长 2×（128 → regexp maxrss 139MB，2048 → pdfjs 2.62s，512 两头不亏）；`flatten` 对视图是拷贝（`String` 的 FAM 约定不允许零拷贝），`.length`/索引/比较/hash/再拼接零拷贝；flatten 后节点断 buffer 边并失去追加权。**偏离**：`storageCell = shadeExact` 而非 NoPush（NoPush 跳过 `retireTracedYoung`，young 位永不退休）。**规格外真缺陷**：`publishInitialized` 以 `isStringFamily` 决定 occupant 占表，而 S2-h1 后 `unpublishStringExtent` 不再 `Table.remove` → 任何新 extent kind 泄漏 occupant 条目 → 保守扫描把已释放页解析成活对象（首次开关即崩）；改 `kindIsExtentCapable` 并在 `headerMarked` extent 臂加 `assert(containsExtent)` 哨兵——**S4-b 三个 kind 同样致命，已封**。门 test 2544/0、stress 2540/0、test262 0/49778、快照重生成。读数（ReleaseFast，对照 5b418bc6）：pdfjs.fixed wall **3.93 → 2.55s（−35%）**、maxrss 142 → 112MB；micro `s += "ab"` O(n²) 区间 −5×；raytrace/regexp 中性；perf：基线 `memcpy` 12.6% 中 11.75% 是本账。未决：阈值三常量未按 Stage 0 重定；`shadeExactNoPush` 留给 S4-b 百万级 cell 时做；nightly tier 未跑。
 
+### 7.13 S2-h2 定价（2026-09-05 上午，`h2-nursery-20260905` = 3369b258 + 8393ae69，**未合入，KILLED**）
+
+机制：`generation.stats.young_bytes`（发布时由漏斗透传 bytes 累加，`retireYoungSet` 清零，mutator forget 不减——「本 epoch 穿过 nursery 的体积」）；`shouldTryMinor` 改读字节，`minor_young_count_cap = 256K` 守卫，`minor_crossing_young_floor_bytes = /16`，`small_heap_major_headroom_bytes = minor_young_bytes`。定价（ReleaseFast，CPU19，空闲守卫，min-of-3，六负载几何平均）：
+
+| 配置 | wall gm | maxrss gm | minor STW gm | 单负载极值 |
+|---|---:|---:|---:|---|
+| base（16K 计数） | 1.000 | 1.000 | 1.000 | — |
+| 1 MiB | 1.005 | 0.934 | 1.060 | raytrace maxrss 0.71 |
+| 2 MiB | 1.001 | 1.058 | 1.005 | regexp maxrss 1.36，eb 1.16 |
+| 4 MiB | 0.995 | 1.094 | 0.941 | **earley-boyer maxrss 1.63**（79→129MB，归因臂证明是 nursery 推迟晋升而非 headroom） |
+| 8 MiB | 0.990 | 1.376 | 0.932 | eb 2.17 |
+
+裁决（driver）：无配置支配现状；wall 全档只跨 1.1%，低于 ±0.684% 验收尺；4 MiB 的 cadence 收益（eb minor 10655→4014）被单负载 +63% 足迹抵消。**不合入**，分支保留。**归因更正**：pdfjs 单次发布 ≈1KB，16K 计数本就 ≈16MB nursery；minor STW 1067ms 是每次 minor 的工作量（young set 大小/根扫描）而非频次——砍它靠 S4-d「young block 位图 sweep 不摸 header」与 S2-h1 已做的 extent 退注册表，不靠 nursery。**测量纪律**：并行 lane 编译时 wall A/B 漂移 4×（与 2026-08-28 记录同构），定价必须带「无 >30% CPU 进程」守卫 + 3 rep。
+
+### 7.14 Stage 0（main 55ecc38a = S2-i 合入后，`.scratch/stage0/s2i-20260905`）
+
+| workload | insn | cycles | minflt | maxrss | committed |
+|---|---:|---:|---:|---:|---:|
+| deltablue | 0.900 | 0.984 | 0.672 | 1.047 | 1.520 |
+| earley-boyer | 0.887 | 0.938 | 0.957 | 1.163 | 0.925 |
+| **pdfjs** | **0.834** | **0.824** | 1.149 | 1.098 | 2.712 |
+| raytrace | 0.890 | 0.924 | 0.879 | 1.275 | 1.601 |
+| regexp | 0.988 | 1.010 | 4.597 | 2.930 | 4.818 |
+| splay | **1.218** | **1.331** | 0.752 | 0.744 | 1.043 |
+
+pdfjs 轨迹（cycles）：275.4 → 2.35 → 1.56 → **0.82**（S2-i 尾缓冲把 `s = s + x` 的 O(n²) 拷贝拿掉后低于 rc 基线）。STOP 只剩 splay。splay 符号差：`shadeExact +261`、`GcObjectIterator.nextInBlock +143`、`MemoryAccount.free +126`（每对象析构释放，S4-b/d 消）、`traceHeader +83`、`seedConservativeRoots +75`、**`opCall +73`**（H4 的 `retreatToCallRegionFrom` 落在调用热路径，需单独记账）、`destroyDoomedSlice +44`、`collectMinor +40`——即 804 次 minor 的 young set 追踪 + 逐对象析构；对策 = S4-b（存储 cell）/ S4-d（位图 sweep 不摸头、块级计账、删析构机器）。regexp/raytrace 的 committed/minflt 漂移是 extent 与 medium 页粒度的足迹账（未在 STOP 判据内），S4 后重看。
+
 ### 7.4 S3 余项
 
 

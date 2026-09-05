@@ -10293,6 +10293,9 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     helpers.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
 
+    // TGC S4-b: sweep first -- the limit-triggered retry collection can now
+    // reclaim storage cells, so the baseline must already be the live size.
+    _ = js.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
     defer js.runtime.setMemoryLimit(null);
     try std.testing.expectError(
@@ -10505,7 +10508,7 @@ test "thenable job reservation OOM leaves resolving function retryable" {
     ));
 
     try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
-    try std.testing.expect(!state.promiseAlreadyResolved(js.runtime));
+    try std.testing.expect(!state.promiseAlreadyResolved());
     try std.testing.expect(promise.promiseResult() == null);
 
     js.runtime.setMemoryLimit(null);
@@ -10519,7 +10522,7 @@ test "thenable job reservation OOM leaves resolving function retryable" {
         null,
     );
 
-    try std.testing.expect(state.promiseAlreadyResolved(js.runtime));
+    try std.testing.expect(state.promiseAlreadyResolved());
     try std.testing.expect(promise.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .promise_thenable);
@@ -10549,6 +10552,9 @@ test "published Promise resolution survives resolver collection through typed FI
     // Reserve the durable continuation node, then force reaction-batch
     // preparation to fail after the resolving once-guard has committed.
     try js.runtime.job_queue.ensureCapacity(1);
+    // TGC S4-b: sweep first -- the limit-triggered retry collection can now
+    // reclaim storage cells, so the baseline must already be the live size.
+    _ = js.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
     _ = try engine.exec.promise_ops.promiseResolvingFunctionCall(
         js.context,

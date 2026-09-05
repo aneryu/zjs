@@ -2471,14 +2471,19 @@ pub const Heap = struct {
                     // String-family cells share the block heap with Objects
                     // and carry kinds 6 (flat body) / 11 (rope node) / 12
                     // (TGC S2-i tail buffer) in the same prefix byte -- the
-                    // kind is the low nibble since TGC S4-a.
+                    // kind is the low nibble since TGC S4-a. TGC S4-b adds the
+                    // bare storage cells 8 (property entries) / 9 (array
+                    // elements), TGC S4-c the a-class payload cells (10).
                     const cell_kind = flags & gc_representation.kind_mask;
                     const prefix_valid = !standalone and
                         alloc_info & gc_representation.alloc_info_class_mask == block_cell_marker and
                         (cell_kind == object_kind or
                             cell_kind == gc_representation.string_kind_tag or
                             cell_kind == gc_representation.rope_kind_tag or
-                            cell_kind == gc_representation.string_buffer_kind_tag);
+                            cell_kind == gc_representation.string_buffer_kind_tag or
+                            cell_kind == gc_representation.property_storage_kind_tag or
+                            cell_kind == gc_representation.array_storage_kind_tag or
+                            cell_kind == gc_representation.payload_kind_tag);
                     if (!accounted and prefix_valid) {
                         const allowed = if (allowance) |candidate|
                             candidate.classify(candidate.context, cell)

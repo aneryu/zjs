@@ -1383,9 +1383,11 @@ pub const JSRuntime = struct {
     /// identity and weak lookups are O(1) instead of a full heap scan.
     weak_object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     weak_id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
-    /// Cold owner-only payload slot for the slots2 Object layout, whose body
-    /// spends offset 24 onward on Entry[2] instead of a class-payload arm.
-    slots2_payloads: std.AutoHashMapUnmanaged(*Object, class.Payload) = .empty,
+    /// TGC S4-c retired the `slots2_payloads` side table: a slots2 object that
+    /// attaches a class payload now spills its two inline property entries into
+    /// a `.property_storage` cell, which frees the arm word at body+24 to be
+    /// the payload slot every other layout already has. This counter stays as
+    /// the observable for that (rare) spill.
     slots2_payload_attach_count: usize = 0,
     next_weak_id: usize = 1,
     borrowed_weak_cleanup_active: bool = false,
@@ -1577,7 +1579,6 @@ pub const JSRuntime = struct {
         rt.borrowed_weak_cleanup_identity_set = .empty;
         rt.weak_object_ids = .empty;
         rt.weak_id_objects = .empty;
-        rt.slots2_payloads = .empty;
         rt.slots2_payload_attach_count = 0;
         rt.next_weak_id = 1;
         rt.borrowed_weak_cleanup_active = false;
@@ -1735,8 +1736,6 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_identity_set.deinit(self.memory.persistent_allocator);
         self.weak_object_ids.deinit(self.memory.persistent_allocator);
         self.weak_id_objects.deinit(self.memory.persistent_allocator);
-        std.debug.assert(self.slots2_payloads.count() == 0);
-        self.slots2_payloads.deinit(self.memory.persistent_allocator);
         for (self.auto_init_descriptors.items) |stored| self.destroyRuntime(property.AutoInit, stored);
         self.auto_init_descriptors.deinit(self.memory.persistent_allocator);
         self.shapes.deinit();

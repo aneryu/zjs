@@ -200,7 +200,7 @@ test "createResolvingFunction roots promise and state while allocating slots" {
     try std.testing.expect(stored_target.same(promise_value));
     const stored_state = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state_object = core.Object.fromHeader(stored_state.refHeader() orelse return error.TypeError);
-    try std.testing.expect(!state_object.promiseAlreadyResolved(rt));
+    try std.testing.expect(!state_object.promiseAlreadyResolved());
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);

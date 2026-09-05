@@ -740,7 +740,7 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
         .resolveModule = resolveGraphModule,
         .loadModule = loadGraphModule,
     };
-    const value = try module_graph.evalFileModuleGraphWithHostHooks(
+    _ = try module_graph.evalFileModuleGraphWithHostHooks(
         rt,
         ctx,
         \\import { double } from './dep.js';
@@ -912,7 +912,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
         defer ctx.destroy();
         var wrapper = BindingContext.borrowCore(ctx);
 
-        if (wrapper.eval(snippet.source, .{ .mode = snippet.mode, .filename = corpus_filename })) |value| {} else |err| switch (err) {
+        if (wrapper.eval(snippet.source, .{ .mode = snippet.mode, .filename = corpus_filename })) |_| {} else |err| switch (err) {
             error.OutOfMemory => {},
             error.JSException => {
                 if (!ctx.hasException()) return error.TestUnexpectedResult;
@@ -922,7 +922,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
             else => return err,
         }
         if (ctx.hasException()) {
-            const pending = ctx.takePendingException();
+            _ = ctx.takePendingException();
         }
 
         if (snippet.drain_jobs) {
@@ -935,10 +935,10 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
                 else => return err,
             };
             if (ctx.hasException()) {
-                const pending = ctx.takePendingException();
+                _ = ctx.takePendingException();
             }
             if (ctx.hasUnhandledRejection()) {
-                const rejection = ctx.takeUnhandledRejection();
+                _ = ctx.takeUnhandledRejection();
             }
         }
         if (snippet.collect_cycles) _ = rt.runObjectCycleRemoval();
@@ -1201,6 +1201,10 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
     // All inline tables and exact code belong to the same createWithFam call.
     // Leave that full charge one byte short: no partial shell/table owner may
     // become visible in either accounting or the GC registry.
+    // Injecting an allocation failure, not testing the collector: see
+    // `suppressLimitCollectionForTest`.
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
     rt.setMemoryLimit(baseline_bytes + request_bytes - 1);
     if (zjs.bytecode.FunctionBytecode.createFixture(rt, fixture_options)) |unexpected| {
         rt.setMemoryLimit(null);

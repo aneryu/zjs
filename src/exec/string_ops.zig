@@ -678,11 +678,11 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
         if (index > std.math.maxInt(u32)) break;
         const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
         const site = objectFromValue(site_value) orelse continue;
-        if (!site.isCallSite(ctx.runtime)) continue;
+        if (!site.isCallSite()) continue;
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
-        if (site.callSiteIsNative(ctx.runtime)) {
+        if (site.callSiteIsNative()) {
             try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
             emitted += 1;
             continue;
@@ -694,7 +694,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
         const suffix = try std.fmt.allocPrint(
             ctx.runtime.memory.allocator,
             " ({s}:{}:{})",
-            .{ filename_bytes.items, site.callSiteLine(ctx.runtime), site.callSiteColumn(ctx.runtime) },
+            .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
         );
         defer ctx.runtime.memory.allocator.free(suffix);
         try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
@@ -2434,9 +2434,15 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     std.debug.assert(out.arrayElementsCapacity() == 0);
 
     const element_count = found.capture_count + 1;
+    // The staging buffer stays NATIVE memory, deliberately, even though TGC
+    // S4-b makes the buffer an adopt installs an `.array_storage` GC cell: the
+    // fill loop below allocates on every iteration, and a bare cell has no
+    // precise root to survive those boundaries on (`createArrayStorageSlice`
+    // documents the same rule -- mint and install must be adjacent). So the
+    // cell is minted after the loop and the staged prefix is copied into it.
     const elements = try rt.memory.alloc(core.JSValue, element_count);
+    defer rt.memory.free(core.JSValue, elements);
     var initialized: usize = 0;
-    var transferred = false;
     // The staging buffer is native memory, so the collector cannot see it:
     // it is neither a traced carrier nor a range the conservative scan walks,
     // and only the machine word holding the LAST substring is a root. Every
@@ -2453,12 +2459,6 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     var elements_root = ValueSliceRoot{};
     elements_root.init(rt, &rooted_elements);
     defer elements_root.deinit();
-    errdefer {
-        if (!transferred) {
-            rooted_elements = elements[0..0];
-            rt.memory.free(core.JSValue, elements);
-        }
-    }
 
     // QuickJS writes each newly-created substring straight into the expanded
     // fast array. Let the dense array own this value directly as well, instead
@@ -2485,9 +2485,14 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
         try populateRegExpGroupsFromCaptureValues(rt, groups_object, found, elements[0..element_count]);
     }
 
-    out.adoptDenseArrayElementsAssumingEmpty(rt, elements[0..element_count]);
+    // TGC S4-b spec 2.2: the adopted buffer must be an `.array_storage` GC
+    // cell. Mint it here, where the staged values are still rooted through
+    // `rooted_elements` and nothing between the mint and the adopt can
+    // collect.
+    const cell = try core.Object.createArrayStorageSlice(rt, element_count);
+    @memcpy(cell, elements[0..element_count]);
+    out.adoptDenseArrayElementsAssumingEmpty(rt, cell);
     rooted_elements = elements[0..0];
-    transferred = true;
     out.flags.may_have_indexed_properties = true;
 }
 

@@ -2355,7 +2355,8 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
 
     var dense_elements: []core.JSValue = &.{};
     if (args.len != 0) {
-        dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
+        // TGC S4-b spec 2.2: `.array_storage` GC cell.
+        dense_elements = try core.Object.createArrayStorageSlice(ctx.runtime, args.len);
         for (args, 0..) |_, index| dense_elements[index] = args[index];
     }
     object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);

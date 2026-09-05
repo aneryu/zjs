@@ -426,23 +426,17 @@ pub fn appendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reactio
     const capacity_slot = promise.promiseReactionsCapacitySlot();
     if (slot.*.len == capacity_slot.*) {
         const current = slot.*;
-        const old_capacity = capacity_slot.*;
-        const next_capacity = if (old_capacity == 0) @as(usize, 4) else old_capacity * 2;
-        const next = try rt.memory.alloc(core.JSValue, next_capacity);
-        var rooted_next: []core.JSValue = next[0..0];
-        var next_root = ValueSliceRoot{};
-        next_root.init(rt, &rooted_next);
-        defer next_root.deinit();
-
+        const next_capacity = if (capacity_slot.* == 0) @as(usize, 4) else capacity_slot.* * 2;
+        // TGC S4-c: the subscriber list is a subordinate `.payload` GC cell.
+        // Mint adjacent to the install -- only the memcpy separates them --
+        // and leave the SUPERSEDED cell to the sweep instead of freeing it.
+        const next = try core.Object.createPayloadSliceCell(rt, core.JSValue, next_capacity);
         @memcpy(next[0..current.len], current);
-        rooted_next = next[0..current.len];
         slot.* = next[0..current.len];
         capacity_slot.* = next_capacity;
-        if (old_capacity != 0) {
-            rt.memory.free(core.JSValue, current.ptr[0..old_capacity]);
-        } else if (current.len != 0) {
-            rt.memory.free(core.JSValue, current);
-        }
+        // A pending promise is usually the older of the two, and the cell was
+        // published moments ago.
+        rt.gc.rememberOwnerForBulkWrite(promise.gcHeader());
     }
 
     // Past the last fallible step: the append itself is a no-fail publish into
@@ -509,10 +503,10 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     try std.testing.expect(rt.atoms.name(on_rejected_symbol) != null);
     try std.testing.expect(rt.atoms.name(resolve_symbol) != null);
     try std.testing.expect(rt.atoms.name(reject_symbol) != null);
-    try std.testing.expectEqual(on_fulfilled_symbol, record.promiseReactionOnFulfilled(rt).?.asSymbolAtom().?);
-    try std.testing.expectEqual(on_rejected_symbol, record.promiseReactionOnRejected(rt).?.asSymbolAtom().?);
-    try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve(rt).?.asSymbolAtom().?);
-    try std.testing.expectEqual(reject_symbol, record.promiseReactionReject(rt).?.asSymbolAtom().?);
+    try std.testing.expectEqual(on_fulfilled_symbol, record.promiseReactionOnFulfilled().?.asSymbolAtom().?);
+    try std.testing.expectEqual(on_rejected_symbol, record.promiseReactionOnRejected().?.asSymbolAtom().?);
+    try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve().?.asSymbolAtom().?);
+    try std.testing.expectEqual(reject_symbol, record.promiseReactionReject().?.asSymbolAtom().?);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(on_fulfilled_symbol) == null);
@@ -608,7 +602,6 @@ pub const PreparedPromiseReactionJobs = struct {
     }
 
     pub fn commit(self: *PreparedPromiseReactionJobs, ctx: *core.JSContext, promise: *core.Object) void {
-        const reactions = promise.promiseReactions();
         if (self.initialized == 0) {
             std.debug.assert(self.reserved_entries == 0);
             self.* = .{};
@@ -617,14 +610,10 @@ pub const PreparedPromiseReactionJobs = struct {
         std.debug.assert(self.reserved_entries == self.initialized);
 
         const capacity_slot = promise.promiseReactionsCapacitySlot();
-        const capacity = capacity_slot.*;
         promise.promiseReactionsSlot().* = &.{};
         capacity_slot.* = 0;
-        if (capacity != 0) {
-            ctx.runtime.memory.free(core.JSValue, reactions.ptr[0..capacity]);
-        } else {
-            ctx.runtime.memory.free(core.JSValue, reactions);
-        }
+        // TGC S4-c: the drained subscriber list is a `.payload` cell -- the
+        // sweep returns it; dropping the pointer is the whole release.
 
         for (self.jobs[0..self.initialized]) |job| {
             ctx.runtime.job_queue.enqueueReserved(job);
@@ -938,7 +927,7 @@ pub fn promiseResolvingFunctionCall(
     const state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
     if (target.promiseResult() != null) return core.JSValue.undefinedValue();
-    if (state.promiseAlreadyResolved(ctx.runtime)) {
+    if (state.promiseAlreadyResolved()) {
         // A prior call won the shared once-guard. Any allocation-sensitive
         // completion that could not settle synchronously is owned by the
         // Runtime FIFO, so later calls are true no-ops rather than an
@@ -1018,6 +1007,11 @@ const PromiseJobOomProbe = struct {
         const self: *PromiseJobOomProbe = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         const rt = invocation.realm.runtime;
+        // TGC S4-b: sweep (with the conservative net, the caller's frames are
+        // live) so the limit below is the LIVE size -- storage cells are
+        // collected carriers now, so `checkAllocation`'s retry collection
+        // would otherwise find real bytes to give back.
+        _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
         rt.setMemoryLimit(rt.memory.allocated_bytes);
         if (self.fail) return error.TypeError;
         return core.JSValue.int32(77);
@@ -1129,6 +1123,8 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     // already available, while preparing the target's reaction batch cannot
     // allocate.
     try rt.job_queue.ensureCapacity(1);
+    // TGC S4-b: see `PromiseJobOomProbe.call`.
+    _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     _ = (try promiseResolvingFunctionCall(
         ctx,
@@ -1270,7 +1266,7 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
 
     _ = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expect(state.promiseAlreadyResolved(rt));
+    try std.testing.expect(state.promiseAlreadyResolved());
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
@@ -1486,12 +1482,12 @@ pub fn promiseReactionJobCall(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     const reaction = objectFromValue(payload.reaction) orelse return error.TypeError;
-    const resolve_value = reaction.promiseReactionResolve(ctx.runtime) orelse return error.TypeError;
-    const reject_value = reaction.promiseReactionReject(ctx.runtime) orelse return error.TypeError;
+    const resolve_value = reaction.promiseReactionResolve() orelse return error.TypeError;
+    const reject_value = reaction.promiseReactionReject() orelse return error.TypeError;
 
     invoke: {
         if (payload.phase == .invoke) {
-            const handler_value = if (payload.rejected) reaction.promiseReactionOnRejected(ctx.runtime) else reaction.promiseReactionOnFulfilled(ctx.runtime);
+            const handler_value = if (payload.rejected) reaction.promiseReactionOnRejected() else reaction.promiseReactionOnFulfilled();
             const handler = handler_value orelse core.JSValue.undefinedValue();
 
             // perform_promise_then canonicalizes non-callable handlers to
@@ -1600,8 +1596,8 @@ pub const PromiseCapabilityVm = struct {
 pub fn promiseCapabilityExecutorCall(ctx: *core.JSContext, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
     const slot_value = function_object.functionPromiseCapabilitySlot() orelse return null;
     const slot = objectFromValue(slot_value) orelse return error.TypeError;
-    const current_resolve = slot.promiseCapabilityResolve(ctx.runtime);
-    const current_reject = slot.promiseCapabilityReject(ctx.runtime);
+    const current_resolve = slot.promiseCapabilityResolve();
+    const current_reject = slot.promiseCapabilityReject();
     if ((current_resolve != null and !current_resolve.?.isUndefined()) or
         (current_reject != null and !current_reject.?.isUndefined()))
     {
@@ -1639,7 +1635,7 @@ pub fn promiseCombinatorElementCall(
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
-    const values_value = state.promiseCombinatorValues(ctx.runtime) orelse return error.TypeError;
+    const values_value = state.promiseCombinatorValues() orelse return error.TypeError;
     const values = objectFromValue(values_value) orelse return error.TypeError;
 
     const index = function_object.functionPromiseCombinatorIndex();
@@ -1655,13 +1651,13 @@ pub fn promiseCombinatorElementCall(
         .any_reject => try promiseSetArrayIndex(ctx.runtime, values, index, payload),
     }
 
-    const remaining = state.promiseCombinatorRemaining(ctx.runtime);
+    const remaining = state.promiseCombinatorRemaining();
     const next_remaining = remaining - 1;
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining != 0) return core.JSValue.undefinedValue();
 
-    const resolve_value = state.promiseCombinatorResolve(ctx.runtime) orelse return error.TypeError;
-    const reject_value = state.promiseCombinatorReject(ctx.runtime) orelse return error.TypeError;
+    const resolve_value = state.promiseCombinatorResolve() orelse return error.TypeError;
+    const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
             _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
@@ -1671,7 +1667,7 @@ pub fn promiseCombinatorElementCall(
             };
         },
         .all_keyed_resolve, .all_settled_keyed_fulfill, .all_settled_keyed_reject => {
-            const keys_value = state.promiseCombinatorKeys(ctx.runtime) orelse return error.TypeError;
+            const keys_value = state.promiseCombinatorKeys() orelse return error.TypeError;
             const keys = objectFromValue(keys_value) orelse return error.TypeError;
             const keyed_result = try promiseKeyedResult(ctx.runtime, keys, values);
             _ = callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{keyed_result}, caller_function, caller_frame) catch |err| {
@@ -1731,8 +1727,8 @@ pub fn promiseCapability(
 
     promise_value = try constructValueOrBytecode(ctx, output, global, constructor_value, &.{executor_value}, caller_function, caller_frame);
 
-    resolve_value = if (slot.promiseCapabilityResolve(ctx.runtime)) |stored| stored else core.JSValue.undefinedValue();
-    reject_value = if (slot.promiseCapabilityReject(ctx.runtime)) |stored| stored else core.JSValue.undefinedValue();
+    resolve_value = if (slot.promiseCapabilityResolve()) |stored| stored else core.JSValue.undefinedValue();
+    reject_value = if (slot.promiseCapabilityReject()) |stored| stored else core.JSValue.undefinedValue();
     if (!isCallableValue(resolve_value) or !isCallableValue(reject_value)) return error.TypeError;
     return .{
         .promise = promise_value,
@@ -1907,7 +1903,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
     defer if (state_alive) core.Object.destroyFromHeader(rt, state.gcHeader());
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = state.promiseCombinatorResolve(rt) orelse return error.TypeError;
+    const stored = state.promiseCombinatorResolve() orelse return error.TypeError;
     try std.testing.expect(stored.same(resolve_value));
 
     // The zero threshold opened an incremental mark while constructing the
@@ -2138,7 +2134,7 @@ pub fn promiseCombinatorCall(
         };
 
         if (state) |state_object| {
-            const remaining = state_object.promiseCombinatorRemaining(ctx.runtime);
+            const remaining = state_object.promiseCombinatorRemaining();
             try promiseSetArrayIndex(ctx.runtime, values.?, index, core.JSValue.undefinedValue());
             (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
         }
@@ -2185,7 +2181,7 @@ pub fn promiseCombinatorCall(
     }
 
     if (state) |state_object| {
-        const remaining = state_object.promiseCombinatorRemaining(ctx.runtime);
+        const remaining = state_object.promiseCombinatorRemaining();
         const next_remaining = remaining - 1;
         (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
         if (next_remaining == 0) {
@@ -2259,7 +2255,7 @@ pub fn promiseKeyedCombinatorCall(
         };
         try promiseSetArrayIndex(ctx.runtime, keys, index, key_value);
 
-        const remaining = state.promiseCombinatorRemaining(ctx.runtime);
+        const remaining = state.promiseCombinatorRemaining();
         try promiseSetArrayIndex(ctx.runtime, values, index, core.JSValue.undefinedValue());
         (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
 
@@ -2290,7 +2286,7 @@ pub fn promiseKeyedCombinatorCall(
         index += 1;
     }
 
-    const remaining = state.promiseCombinatorRemaining(ctx.runtime);
+    const remaining = state.promiseCombinatorRemaining();
     const next_remaining = remaining - 1;
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining == 0) {
@@ -3202,6 +3198,10 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
     try std.testing.expect(ctx.hasException());
     try std.testing.expect(ctx.runtime.current_exception.sameValue(reason));
 
+    // TGC S4-b: storage buffers are collected carriers now, so the
+    // limit-triggered retry collection inside `checkAllocation` can free real
+    // bytes. Sweep first so the baseline is the LIVE size.
+    _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     const baseline = rt.memory.allocated_bytes;
     rt.setMemoryLimit(baseline);
     try std.testing.expectError(error.OutOfMemory, performPromiseThen(
@@ -3465,13 +3465,13 @@ pub fn drainPendingPromiseJobs(
     }
 }
 
-fn promiseReactionInternalSettleCanRetry(rt: *const core.JSRuntime, payload: *const jobs_mod.PromiseReactionPayload) bool {
+fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactionPayload) bool {
     if (payload.phase == .invoke) return false;
     const reaction = objectFromValue(payload.reaction) orelse return false;
     const settle = switch (payload.phase) {
         .invoke => unreachable,
-        .resolve => reaction.promiseReactionResolve(rt),
-        .reject => reaction.promiseReactionReject(rt),
+        .resolve => reaction.promiseReactionResolve(),
+        .reject => reaction.promiseReactionReject(),
     } orelse return false;
     const function = objectFromValue(settle) orelse return false;
     return function.internalCallableTag() == .promise_resolving;
@@ -3527,7 +3527,7 @@ pub fn drainOnePendingJob(
             const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
             ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
             result = promiseReactionJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
-                if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(ctx.runtime, payload)) {
+                if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(payload)) {
                     std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before + 1);
                     ctx.runtime.job_queue.prependReserved(entry);
                     entry_owned = false;

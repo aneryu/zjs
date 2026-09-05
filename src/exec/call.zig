@@ -496,8 +496,8 @@ fn promiseResolvingFunctionCall(rt: *core.JSRuntime, function_object: *core.Obje
 fn promiseCapabilityExecutorCall(rt: *core.JSRuntime, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
     const slot_value = function_object.functionPromiseCapabilitySlot() orelse return null;
     const slot = thisObject(slot_value) orelse return error.TypeError;
-    const current_resolve = slot.promiseCapabilityResolve(rt);
-    const current_reject = slot.promiseCapabilityReject(rt);
+    const current_resolve = slot.promiseCapabilityResolve();
+    const current_reject = slot.promiseCapabilityReject();
     if ((current_resolve != null and !current_resolve.?.isUndefined()) or
         (current_reject != null and !current_reject.?.isUndefined()))
     {
@@ -537,7 +537,7 @@ fn promiseCombinatorElementCall(
 
     const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
     const state = thisObject(state_value) orelse return error.TypeError;
-    const values_value = state.promiseCombinatorValues(ctx.runtime) orelse return error.TypeError;
+    const values_value = state.promiseCombinatorValues() orelse return error.TypeError;
     const values = thisObject(values_value) orelse return error.TypeError;
     const index = function_object.functionPromiseCombinatorIndex();
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -551,13 +551,13 @@ fn promiseCombinatorElementCall(
         .any_reject => try setArrayIndex(ctx.runtime, values, index, value),
     }
 
-    const remaining = state.promiseCombinatorRemaining(ctx.runtime);
+    const remaining = state.promiseCombinatorRemaining();
     const next_remaining = remaining - 1;
     (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining != 0) return core.JSValue.undefinedValue();
 
-    const resolve_value = state.promiseCombinatorResolve(ctx.runtime) orelse return error.TypeError;
-    const reject_value = state.promiseCombinatorReject(ctx.runtime) orelse return error.TypeError;
+    const resolve_value = state.promiseCombinatorResolve() orelse return error.TypeError;
+    const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
             _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), resolve_value, &.{values_value});
@@ -653,8 +653,8 @@ fn createPromiseCapability(
         promise_val = next_promise_val;
     }
 
-    resolve_val = if (capability_slot.promiseCapabilityResolve(ctx.runtime)) |stored| stored else core.JSValue.undefinedValue();
-    reject_val = if (capability_slot.promiseCapabilityReject(ctx.runtime)) |stored| stored else core.JSValue.undefinedValue();
+    resolve_val = if (capability_slot.promiseCapabilityResolve()) |stored| stored else core.JSValue.undefinedValue();
+    reject_val = if (capability_slot.promiseCapabilityReject()) |stored| stored else core.JSValue.undefinedValue();
     if (!isCallableObjectValue(resolve_val) or !isCallableObjectValue(reject_val)) return error.TypeError;
     return .{
         .promise = promise_val,
@@ -870,7 +870,7 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     defer if (state_alive) core.Object.destroyFromHeader(rt, state.gcHeader());
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = state.promiseCombinatorResolve(rt) orelse return error.TypeError;
+    const stored = state.promiseCombinatorResolve() orelse return error.TypeError;
     try std.testing.expect(stored.same(resolve_value));
 
     // The zero threshold opened an incremental mark while constructing the
@@ -971,7 +971,7 @@ pub fn callHostGlobalNativeFunctionRecord(
         @intFromEnum(core.function.HostGlobalMethod.callsite_is_native),
         => {
             const receiver = thisObject(this_value) orelse return error.TypeError;
-            return exception_ops.callSiteMethodById(ctx.runtime, receiver, @enumFromInt(id)) orelse error.TypeError;
+            return exception_ops.callSiteMethodById(receiver, @enumFromInt(id)) orelse error.TypeError;
         },
         else => error.TypeError,
     };
@@ -1611,28 +1611,29 @@ fn createBoundFunction(
     // Bound wrappers keep caller semantics. The recursive call selects a realm
     // only after it reaches the final bytecode/C-function target.
     if (rooted_bound_args.len != 0) {
-        const owned_bound_args = try rt.memory.alloc(core.JSValue, rooted_bound_args.len);
+        // TGC S4-c: the bound-argument array is a subordinate `.payload` GC
+        // cell. The mint is the LAST fallible step and only the (allocation
+        // free) copy loop separates it from the install below -- a bare cell
+        // has no precise root. An abandoned cell is swept, never hand-freed,
+        // so no errdefer owns it.
+        const owned_bound_args = try core.Object.createPayloadSliceCell(
+            rt,
+            core.JSValue,
+            rooted_bound_args.len,
+        );
         var rooted_owned_bound_args: []core.JSValue = owned_bound_args[0..0];
         var owned_bound_args_root = ValueSliceRoot{};
         owned_bound_args_root.init(rt, &rooted_owned_bound_args);
         defer owned_bound_args_root.deinit();
         var initialized: usize = 0;
-        var bound_args_owned = true;
-        errdefer if (bound_args_owned) {
-            for (owned_bound_args[0..initialized]) |*stored| {
-                stored.* = core.JSValue.undefinedValue();
-            }
-            rooted_owned_bound_args = &.{};
-            rt.memory.free(core.JSValue, owned_bound_args);
-        };
         for (rooted_bound_args, 0..) |arg, index| {
             owned_bound_args[index] = arg;
             initialized += 1;
             rooted_owned_bound_args = owned_bound_args[0..initialized];
         }
-        bound_args_owned = false;
         object.boundArgsSlot().* = owned_bound_args;
         rooted_owned_bound_args = &.{};
+        rt.gc.rememberOwnerForBulkWrite(object.gcHeader());
     }
     try defineDataPropertyWithFlags(rt, object, core.atom.ids.name, name_value, false, false, true);
     try defineDataPropertyWithFlags(rt, object, core.atom.ids.length, length_value, false, false, true);

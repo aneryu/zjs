@@ -5406,6 +5406,10 @@ test "host map closure releases appended value when entry allocation fails" {
         .{ .name = map_name, .value = map_value },
     };
 
+    // TGC S4-b: sweep first -- storage cells are collected carriers, so the
+    // limit-triggered retry collection would otherwise drop the account below
+    // the captured baseline.
+    _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
@@ -5439,6 +5443,10 @@ test "host map closure rolls back appended entry when size update fails" {
 
     const old_len = map_object.collectionEntries().len;
     const old_active = map_object.collectionActiveCount();
+    // TGC S4-b: sweep first -- storage cells are collected carriers, so the
+    // limit-triggered retry collection would otherwise drop the account below
+    // the captured baseline.
+    _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     const old_bytes = rt.memory.allocated_bytes;
 
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);

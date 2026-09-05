@@ -447,32 +447,35 @@ test "slots2 spill OOM rollback restores inline representation" {
     try rt.gc.verifyObjectPropertyStorageLayouts(rt);
 }
 
-test "M-cut slots2 payload-arm and side-table deletion mutants are rejected" {
+test "M-cut slots2 payload-spill deletion mutant is rejected" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.createPlainObjectReserved2(rt, null);
 
-    // Mutant 2 deliberately asks the no-arm layout for `storage.payload`;
-    // payloadArm's assertion is the required failure boundary.
-    object.injectSlots2PayloadArmMutationForTest();
+    // TGC S4-c: a slots2 body has no payload arm of its own -- attaching one
+    // spills the two inline property entries into a `.property_storage` cell
+    // so the word at body+24 becomes the payload slot. The payload itself is a
+    // `.payload` GC cell with no destructor.
     _ = try object.ensureOrdinaryPayload(rt);
+    try std.testing.expect(!object.propertyStorageIsInline());
     try object.setErrorStack(rt, object.value());
-    try std.testing.expect(object.errorStack(rt).?.same(object.value()));
-    try std.testing.expectEqual(@as(usize, 1), rt.slots2_payloads.count());
+    try std.testing.expect(object.errorStack().?.same(object.value()));
     try std.testing.expectEqual(@as(usize, 1), rt.slots2_payload_attach_count);
     try rt.gc.verifyObjectPropertyStorageLayouts(rt);
 
-    // Normal destruction removes the sparse entry exactly once. Mutant 3
-    // skips that removal; the audit must reject the stale key without first
-    // dereferencing memory that has already returned to the allocator.
-    helpers.reclaimNow(rt);
+    // Mutant 2 puts the storage pointer back on the inline tail, i.e. aliases
+    // the payload pointer with the first property entry. The layout audit is
+    // the required failure boundary.
+    object.injectSlots2PayloadArmMutationForTest();
     rt.gc.verifyObjectPropertyStorageLayouts(rt) catch |err| {
-        if (core.gc.m_cut_inject == 3) {
-            std.debug.panic("gc: M-CUT SIDE TABLE AUDIT: {s}", .{@errorName(err)});
-        }
+        if (core.gc.m_cut_inject == 2) return;
         return err;
     };
-    try std.testing.expectEqual(@as(usize, 0), rt.slots2_payloads.count());
+    if (core.gc.m_cut_inject == 2) {
+        std.debug.panic("gc: M-CUT SLOTS2 PAYLOAD SPILL AUDIT accepted the mutant", .{});
+    }
+    helpers.reclaimNow(rt);
+    try rt.gc.verifyObjectPropertyStorageLayouts(rt);
 }
 
 test "plain object destroy slim frees two data slots and the value buffer" {
@@ -4235,7 +4238,7 @@ test "runtime cycle removal follows class payload mark hooks" {
     try std.testing.expect(rt.classes.unregisterPending(payloadless_id));
     try std.testing.expect(rt.classes.unregisterPending(external_id));
 
-    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(2));
@@ -4354,7 +4357,7 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
     external_slot = null;
     child_slot = null;
 
-    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -4807,7 +4810,10 @@ test "bound function state uses payload storage" {
     try std.testing.expectEqual(core.class.PayloadKind.bound_function, bound.flags.class_payload_kind);
     bound.boundTargetSlot().* = core.JSValue.int32(11);
     bound.boundThisSlot().* = core.JSValue.int32(22);
-    const args = try rt.memory.alloc(core.JSValue, 2);
+    // TGC S4-c: the bound-argument array is a subordinate `.payload` GC cell,
+    // so the fixture has to mint one -- a raw buffer installed here would sit
+    // behind a `storageCell` edge with no collector prefix.
+    const args = try core.Object.createPayloadSliceCell(rt, core.JSValue, 2);
     args[0] = core.JSValue.int32(33);
     args[1] = core.JSValue.int32(44);
     bound.boundArgsSlot().* = args;
@@ -4883,7 +4889,7 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
     try std.testing.expect(!arguments.isArray());
 
     arguments.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, core.JSValue.int32(2));
-    const elements = try rt.memory.alloc(core.JSValue, 2);
+    const elements = try core.Object.createArrayStorageSlice(rt, 2);
     elements[0] = core.JSValue.int32(31);
     elements[1] = core.JSValue.int32(32);
     arguments.adoptDenseUnmappedArgumentsElementsAssumingEmpty(rt, elements);
@@ -6832,13 +6838,17 @@ test "runtime exposes stable gc stats snapshot" {
         owner.allocationSize(&rt) +
         child.allocationSize(&rt) +
         owner.shape_ref.allocationSize() +
-        child.shape_ref.allocationSize();
+        child.shape_ref.allocationSize() +
+        // TGC S4-b: an external property buffer is a GC cell and is charged
+        // like every other carrier.
+        externalPropertyStorageBytes(&rt, owner) +
+        externalPropertyStorageBytes(&rt, child);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), snapshot.large_object_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 4), snapshot.old_alloc_count);
+    try std.testing.expectEqual(@as(usize, 5), snapshot.old_alloc_count);
     try std.testing.expectEqual(@as(usize, 32), snapshot.external_bytes);
     try std.testing.expectEqual(@as(usize, 1), snapshot.external_alloc_count);
     try std.testing.expectEqual(@as(usize, 1), snapshot.external_token_count);
@@ -8250,14 +8260,29 @@ test "cycle scan preserves a deeply rooted object chain without recursion" {
 
 const live_empty_object_gc_count: usize = 2;
 const single_object_self_cycle_reclaimed_count: usize = 2;
-const closed_property_cycle_reclaimed_count: usize = 5;
+/// Same graph, but the single object owns one external storage cell -- a named
+/// property's `.property_storage` buffer or a dense array's `.array_storage`
+/// buffer -- which TGC S4-b made a collected carrier.
+const single_object_self_cycle_with_storage_count: usize = 3;
+/// TGC S4-b: plus the two objects' external `.property_storage` cells.
+const closed_property_cycle_reclaimed_count: usize = 7;
 /// Same two-object cycle, but a third live object still holds the empty root
 /// shape: two JS objects plus their two transition shapes.
-const closed_property_cycle_root_kept_reclaimed_count: usize = 4;
+const closed_property_cycle_root_kept_reclaimed_count: usize = 6;
 /// Fast array + plain object: the two objects, the object's transition shape
 /// and the array's own root shape; the plain-object root was unshared and
 /// freed the moment the object left it.
-const iterator_next_cache_cycle_reclaimed_count: usize = 4;
+/// TGC S4-b adds the plain object's `.property_storage` cell.
+const iterator_next_cache_cycle_reclaimed_count: usize = 5;
+
+/// Accounted bytes of an object's external `.property_storage` cell, zero when
+/// the storage is the empty sentinel or the inline slots2 tail (TGC S4-b).
+fn externalPropertyStorageBytes(rt: anytype, obj: *const core.Object) usize {
+    const storage = obj.prop_values;
+    if (!obj.propertyStoragePointerIsExternal(storage)) return 0;
+    const header: *const core.gc.Header = @ptrCast(@alignCast(storage));
+    return core.gc.Registry.heapByteSizeFromHeader(rt, header);
+}
 
 fn expectNoLiveGc(rt: *core.JSRuntime) !void {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -8266,7 +8291,10 @@ fn expectNoLiveGc(rt: *core.JSRuntime) !void {
 
 fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, actual: usize) !void {
     // Shapes are GC objects now, so cycle reclaim counts include collected
-    // object shapes in addition to the JS objects themselves.
+    // object shapes in addition to the JS objects themselves. TGC S4-b added
+    // the property/element storage cells and TGC S4-c the a-class payload
+    // cells (`.ordinary`, `.promise`, `.proxy`, `.bound_function`, ...), so a
+    // reclaimed payload-bearing object contributes one more than before.
     try std.testing.expectEqual(@as(usize, expected), actual);
     try expectNoLiveGc(rt);
 }
@@ -8578,7 +8606,8 @@ test "bound function payload self-cycle is released by runtime cycle removal" {
     // Pins BoundFunction target/this/args edges, object.zig:8575-8578.
     bound.boundTargetSlot().* = bound.value();
     bound.boundThisSlot().* = bound.value();
-    const args = try rt.memory.alloc(core.JSValue, 1);
+    // TGC S4-c: subordinate `.payload` cell (see `createPayloadSliceCell`).
+    const args = try core.Object.createPayloadSliceCell(rt, core.JSValue, 1);
     args[0] = bound.value();
     bound.boundArgsSlot().* = args;
 
@@ -8600,7 +8629,8 @@ test "arguments payload value-slice cycle is released by runtime cycle removal" 
 
     // Pins ArgumentsPayload.var_refs value-slice edges, object.zig:8670-8672.
     const payload: *core.object.ArgumentsPayload = @ptrCast(@alignCast(arguments.payloadArm().*.?));
-    payload.var_refs = try rt.memory.alloc(core.JSValue, 1);
+    // TGC S4-c: subordinate `.payload` cell (see `createPayloadSliceCell`).
+    payload.var_refs = try core.Object.createPayloadSliceCell(rt, core.JSValue, 1);
     payload.var_refs[0] = target.value();
     try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
 
@@ -10075,9 +10105,9 @@ test "weak persistent value clears object cycle target during gc" {
     var weak = try rt.createWeakPersistentValue(target.value(), weakPersistentCounterCallback, &clear_count);
     defer weak.deinit();
 
-    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_with_storage_count), rt.gc.liveCount());
 
-    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_with_storage_count, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
     // `processWeak` notifies in the same collection that unmarks the target.
     try std.testing.expectEqual(@as(usize, 1), clear_count);
@@ -10120,7 +10150,7 @@ test "function home object cycle is released by runtime cycle removal" {
     try function.setFunctionHomeObject(rt, home);
     try home.defineOwnProperty(rt, method_key, core.Descriptor.data(function.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "async continuation function cycle is released by runtime cycle removal" {
@@ -10134,7 +10164,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
     (try continuation.functionAsyncContinuationSlot(rt)).* = promise.value();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
 
 test "async generator promise cycle is released by runtime cycle removal" {
@@ -10148,7 +10178,7 @@ test "async generator promise cycle is released by runtime cycle removal" {
     generator.generatorAsyncPromiseSlot().* = promise.value();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(generator.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
 
 test "materialized native function cycle is released by runtime cycle removal" {
@@ -10208,7 +10238,7 @@ test "function bytecode constant object cycle is released by runtime cycle remov
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
     try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "runtime destroy releases callback bytecode before object registries" {
@@ -10347,7 +10377,7 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     try captured.defineOwnProperty(rt, first_key, core.Descriptor.data(first.value(), true, true, true));
     try captured.defineOwnProperty(rt, second_key, core.Descriptor.data(second.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
 
 test "cycle teardown frees bytecode function captures before FB metadata" {
@@ -10409,7 +10439,7 @@ test "nested function bytecode constant object cycle is released by runtime cycl
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&outer.header));
     try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "cyclic internal function bytecode references are released by runtime cycle removal" {
@@ -10446,7 +10476,7 @@ test "cyclic internal function bytecode references are released by runtime cycle
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&outer.header));
     try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "class payload function bytecode constant object cycle is released by runtime cycle removal" {
@@ -10482,7 +10512,7 @@ test "class payload function bytecode constant object cycle is released by runti
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
 
-    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
@@ -10698,7 +10728,7 @@ test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
     // Realm -> global -> holder -> typed AUTOINIT Realm, plus the two
     // one-property shapes.
     // 5 -> 6 with tracer-owned shapes: the shared empty root shape is swept too.
-    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 9, rt.runObjectCycleRemoval());
 }
 
 test "ordinary and object-data payloads ignore generic realm assignment" {
@@ -11874,7 +11904,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
 
     keys[0] = null;
     first_key_released = true;
-    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_with_storage_count), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 7), map.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, 7), rt.gcStats().weak_ref_count);
@@ -11979,7 +12009,7 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     dropGcPtr(&target);
 
     const collected = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), collected.freed_objects);
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_with_storage_count), collected.freed_objects);
     try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
 
     const enqueued = try rt.tryRunObjectCycleRemoval();
@@ -12313,7 +12343,7 @@ test "proxy target handler cycle is released by runtime cycle removal" {
     proxy.proxyHandlerSlot().* = target.value();
     try target.defineOwnProperty(rt, key, core.Descriptor.data(proxy.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
 
 test "runtime cycle removal preserves externally rooted outgoing objects" {
@@ -12337,7 +12367,7 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 
     dropGcPtr(&left);
     dropGcPtr(&right);
-    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 6), rt.runObjectCycleRemoval());
     ext_slot = null;
     dropGcPtr(&external);
     helpers.reclaimNow(rt);
@@ -12358,7 +12388,7 @@ test "module namespace shape VarRef cycle is released by runtime cycle removal" 
     try namespace.defineModuleVarRefProperty(rt, export_name, cell);
 
     // 5 -> 6 with tracer-owned shapes: the shared empty root shape is swept too.
-    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 8, rt.runObjectCycleRemoval());
 }
 
 test "mapped arguments var-ref cycle is released by runtime cycle removal" {
@@ -12374,7 +12404,7 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
     try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
 
     // arguments -> VarRef -> target -> arguments, plus the two object shapes.
-    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 7, rt.runObjectCycleRemoval());
 }
 
 test "array element self-cycle is released by runtime cycle removal" {
@@ -12385,7 +12415,7 @@ test "array element self-cycle is released by runtime cycle removal" {
     const index = core.atom.atomFromUInt32(0);
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, array.value()));
 
-    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_with_storage_count, rt.runObjectCycleRemoval());
 }
 
 test "typed-array buffer self-cycle is released by runtime cycle removal" {
@@ -15611,6 +15641,83 @@ test "the whole-heap iterator enumerates string extents and a major removes the 
     dropGcPtr(&kept);
 }
 
+/// TGC S3: an atom entry is not a heap object, so no `objectIterator` can save
+/// or restore it -- its liveness is a stamp compared against `Heap.mark_epoch`.
+/// One known id is a sharper probe than a table-wide count: the minor's own
+/// trace re-stamps whatever it reaches, and a count would hide a lost stamp
+/// behind that work.
+fn atomMarkEpochForTest(rt: *core.JSRuntime, id: anytype) ?u64 {
+    for (rt.atoms.entries) |*entry| {
+        if (!entry.occupied) continue;
+        if (entry.id == id) return entry.mark_epoch;
+    }
+    return null;
+}
+
+test "the full-reachable verifier restores extent marks and atom epoch stamps" {
+    if (comptime !core.gc.block_heap_enabled or !core.gc.generation_enabled) return error.SkipZigTest;
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+
+    const key = try rt.internAtom("verifier-restores-this-atom");
+    const owner = try core.Object.createPlainObject(rt, null);
+    var owner_slot: ?*core.Object = owner;
+    var object_roots = core.runtime.rootObjects(.{&owner_slot});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
+
+    // Over the small-cell ceiling, so this body is an EXTENT: its mark is a
+    // row in the extent table, not a header epoch and not a block bitmap.
+    var kept = try core.string.String.createLatin1(rt, "k" ** extent_latin1_len);
+    const kept_header = kept.header();
+    const kept_base = @intFromPtr(kept_header) - core.gc.metadata_prefix_size;
+    try owner.defineOwnProperty(rt, key, core.Descriptor.data(kept.value(), true, true, true));
+
+    var kept_value = kept.value();
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &kept_value }};
+    const roots = core.runtime.ValueRootFrame{ .values = &root_values };
+
+    // The major is what stamps both halves for this epoch: the extent row and
+    // the atom entry the shape key names.
+    _ = try core.gc_trace_stw.collectCycles(rt, &roots, .declared_only);
+    const epoch_before = rt.gc.block_heap.mark_epoch;
+    try std.testing.expect(rt.gc.headerMarked(kept_header));
+    try std.testing.expect(rt.gc.block_heap.extentIsMarked(kept_base, epoch_before));
+    try std.testing.expectEqual(@as(?u64, epoch_before), atomMarkEpochForTest(rt, key));
+
+    // `ZJS_GC_VERIFY_MINOR=1`'s entry point. Its `computeFullReachable` clears
+    // and re-marks the whole heap twice, moving `mark_epoch` under everything
+    // that is keyed by it, and must hand the cycle back unchanged.
+    const saved_verify = core.gc.verify_minor;
+    core.gc.verify_minor = true;
+    defer core.gc.verify_minor = saved_verify;
+    var young = try core.string.String.createLatin1(rt, "y" ** extent_latin1_len);
+    dropGcPtr(&young);
+    try std.testing.expect(rt.gc.generation.stats.young_count != 0);
+    _ = try core.gc_trace_stw.collectMinor(rt, &roots, .declared_only);
+
+    // Pin the premise: with no epoch move there is nothing to restore and the
+    // assertions below would hold vacuously.
+    const epoch_after = rt.gc.block_heap.mark_epoch;
+    try std.testing.expect(epoch_after != epoch_before);
+
+    try std.testing.expect(rt.gc.block_heap.containsExtent(kept_base));
+    try std.testing.expect(rt.gc.headerMarked(kept_header));
+    try std.testing.expect(rt.gc.block_heap.extentIsMarked(kept_base, epoch_after));
+    try std.testing.expectEqual(@as(usize, extent_latin1_len), kept.len());
+    // The table half. An id this cycle marked has to read live at the epoch the
+    // verifier leaves behind, or the next `sweepAtomTable` retires a key a live
+    // shape still holds -- which is how `ZJS_GC_VERIFY_MAJOR_ALL=1` killed
+    // pdfjs inside `getLineNumber`.
+    try std.testing.expectEqual(@as(?u64, epoch_after), atomMarkEpochForTest(rt, key));
+
+    dropGcPtr(&kept);
+}
+
 test "incremental begin preserves list-young suffix until finish retirement" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -15940,7 +16047,7 @@ test "a dense buffer adopted by an aged array is remembered for the next minor" 
 
     // Deletion probe: drop `rememberOwnerForBulkWrite` from
     // `adoptDenseArrayElementsAssumingEmpty` and the minor below reclaims 2.
-    const elements = try rt.memory.alloc(core.JSValue, 2);
+    const elements = try core.Object.createArrayStorageSlice(rt, 2);
     elements[0] = (try core.string.String.createLatin1(rt, "adopted-element-zero")).value();
     elements[1] = (try core.string.String.createLatin1(rt, "adopted-element-one")).value();
     try std.testing.expect(elements[0].cycleMarkHeader().?.metaConst().flags.young);
@@ -17501,4 +17608,468 @@ test "needs_finalizer is recorded in both the header and the block bitmap" {
         }
         try std.testing.expectEqual(@as(usize, 0), others);
     }
+}
+
+// ---------------------------------------------------------------------------
+// TGC S4-b (spec 2.2): `prop_values` and the dense element buffer are
+// owner-marked, destructor-free GC cells. What these tests pin down is the
+// three things that changed shape at once: the buffer is now RECLAIMED by the
+// sweep (nobody frees it), it is kept alive ONLY by the owner's `storageCell`
+// edge, and an owner that outlived a minor has to remember a buffer minted
+// after its promotion.
+// ---------------------------------------------------------------------------
+
+/// Give `obj` `count` named data properties, which grows it past the inline
+/// slots2 tail into an external `.property_storage` cell.
+fn defineS4bNamedProperties(rt: *core.JSRuntime, obj: *core.Object, prefix: []const u8, count: usize) !void {
+    var buf: [64]u8 = undefined;
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const name = try std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, index });
+        const key = try rt.internAtom(name);
+        try obj.defineOwnProperty(rt, key, core.Descriptor.data(
+            core.JSValue.int32(@intCast(index)),
+            true,
+            true,
+            true,
+        ));
+    }
+}
+
+fn expectS4bNamedProperties(rt: *core.JSRuntime, obj: *core.Object, prefix: []const u8, count: usize) !void {
+    var buf: [64]u8 = undefined;
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const name = try std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, index });
+        const key = try rt.internAtom(name);
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try obj.getProperty(key)).asInt32());
+    }
+}
+
+/// Append `count` dense elements one at a time, which walks
+/// `ensureArrayBufferCapacity` up its whole 1.5x growth ladder.
+fn fillS4bDenseArray(rt: *core.JSRuntime, arr: *core.Object, count: u32) !void {
+    var index: u32 = 0;
+    while (index < count) : (index += 1) {
+        // One slot at a time, so the buffer walks the whole growth ladder
+        // instead of jumping straight to the final capacity.
+        try arr.fastArrayEnsureCapacity(rt, index + 1);
+        try std.testing.expectEqual(
+            engine.exec.array_ops.DenseArrayOverwriteFastResult.handled,
+            engine.exec.array_ops.putDenseArrayElementOverwriteOwnedFast(
+                rt,
+                arr.value(),
+                core.JSValue.int32(@intCast(index)),
+                core.JSValue.int32(@intCast(index)),
+            ),
+        );
+    }
+}
+
+test "TGC S4-b: an external property buffer survives with its owner and dies one major later" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var owner_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var owner_roots = core.runtime.rootObjects(.{&owner_slot});
+    owner_roots.activate(rt);
+    defer owner_roots.deactivate(rt);
+    try defineS4bNamedProperties(rt, owner_slot.?, "s4b-live-", 6);
+
+    // Growth left the superseded buffers on the heap: nothing frees a cell.
+    try std.testing.expect(rt.gc.liveCountKind(.property_storage) > 1);
+    const storage: *core.gc.Header = @ptrCast(@alignCast(owner_slot.?.prop_values));
+    try std.testing.expect(owner_slot.?.propertyStoragePointerIsExternal(owner_slot.?.prop_values));
+
+    // Deletion probe: drop the `storageCell` edge from
+    // `tracePropertyEdgesFallible` and this major reclaims the buffer under a
+    // live owner (the reads below then walk a recycled cell).
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.property_storage));
+    try std.testing.expect(rt.gc.containsHeader(storage));
+    try expectS4bNamedProperties(rt, owner_slot.?, "s4b-live-", 6);
+
+    owner_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.property_storage));
+}
+
+test "TGC S4-b: an aged owner remembers a property buffer minted after its promotion" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var owner_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var owner_roots = core.runtime.rootObjects(.{&owner_slot});
+    owner_roots.activate(rt);
+    defer owner_roots.deactivate(rt);
+
+    // Promote the owner before it owns any external storage: the minor's
+    // sticky marks stop the trace at an old object, so from here every buffer
+    // it adopts is an old-to-young edge that only a barrier can record.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!owner_slot.?.gcHeader().metaConst().flags.young);
+
+    try defineS4bNamedProperties(rt, owner_slot.?, "s4b-grow-", 8);
+    const storage: *core.gc.Header = @ptrCast(@alignCast(owner_slot.?.prop_values));
+    try std.testing.expect(storage.metaConst().flags.young);
+
+    // Deletion probe: drop `rememberOwnerForBulkWrite` from
+    // `appendPreparedPropertyEntryWork` / `ensurePropertyCapacity` and this
+    // minor condemns the buffer while `prop_values` still names it.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(storage));
+    try expectS4bNamedProperties(rt, owner_slot.?, "s4b-grow-", 8);
+}
+
+test "TGC S4-b: a growing dense array leaves every superseded element cell to the sweep" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var array_roots = core.runtime.rootObjects(.{&array_slot});
+    array_roots.activate(rt);
+    defer array_roots.deactivate(rt);
+
+    // The 1.5x ladder from an empty array takes well over four steps to reach
+    // 40 slots, so the heap is holding a stack of superseded buffers: growth
+    // no longer frees the old one.
+    try fillS4bDenseArray(rt, array_slot.?, 40);
+    try std.testing.expect(rt.gc.liveCountKind(.array_storage) > 4);
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+    try std.testing.expectEqual(@as(usize, 40), array_slot.?.arrayElements().len);
+    for (array_slot.?.arrayElements(), 0..) |element, index| {
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), element.asInt32());
+    }
+
+    array_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+}
+
+test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var arguments_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
+    var target_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var roots = core.runtime.rootObjects(.{ &arguments_slot, &target_slot });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    const refs = try arguments_slot.?.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 2);
+    refs[0] = try core.VarRef.createClosed(rt, target_slot.?.value());
+    refs[1] = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+
+    // The owner's trace reads the SAME cell as `?*VarRef` rather than
+    // `JSValue`; the cell itself has no self-interpretation to disagree with.
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+    const live_refs = arguments_slot.?.argumentsVarRefs();
+    try std.testing.expectEqual(@as(usize, 2), live_refs.len);
+    try std.testing.expect(live_refs[0].?.varRefValue().sameValue(target_slot.?.value()));
+    try std.testing.expectEqual(@as(?i32, 7), live_refs[1].?.varRefValue().asInt32());
+
+    arguments_slot = null;
+    target_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+}
+
+test "TGC S4-b: storage over the block-cell ceiling takes the extent route and is swept" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var owner_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var roots = core.runtime.rootObjects(.{ &owner_slot, &array_slot });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // 3760 bytes is the small-class ceiling (TGC S2-f), so both of these run
+    // off the end of it and land in the block heap's extent tables instead.
+    try defineS4bNamedProperties(rt, owner_slot.?, "s4b-extent-", 200);
+    try fillS4bDenseArray(rt, array_slot.?, 400);
+
+    const property_storage: *core.gc.Header = @ptrCast(@alignCast(owner_slot.?.prop_values));
+    const array_storage: *core.gc.Header = @ptrCast(@alignCast(array_slot.?.arrayElements().ptr));
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(property_storage));
+    try std.testing.expect(property_storage.metaConst().alloc_info.standalone);
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(array_storage));
+    try std.testing.expect(array_storage.metaConst().alloc_info.standalone);
+
+    // An extent's mark lives in the extent table, not a block bitmap: the same
+    // `storageCell` edge has to reach it, and `sweepExtents` has to give it
+    // back on the kind-dispatched pure-memory arm.
+    _ = rt.runObjectCycleRemoval();
+    try expectS4bNamedProperties(rt, owner_slot.?, "s4b-extent-", 200);
+    try std.testing.expectEqual(@as(usize, 400), array_slot.?.arrayElements().len);
+    try std.testing.expectEqual(@as(?i32, 399), array_slot.?.arrayElements()[399].asInt32());
+
+    owner_slot = null;
+    array_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.property_storage));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+}
+
+/// Register a dynamic class whose only interesting property is the a-class
+/// payload kind it selects, for the kinds no standard class declares.
+fn registerS4cPayloadClass(
+    rt: *core.JSRuntime,
+    name: []const u8,
+    payload_kind: core.class.PayloadKind,
+) !core.class.ClassId {
+    const id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(id, .{ .class_name = name, .payload_kind = payload_kind });
+    return id;
+}
+
+test "TGC S4-c: every a-class payload is a cell that dies one major after its owner" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+
+    const arguments_class = try registerS4cPayloadClass(rt, "S4cArguments", .arguments);
+    defer rt.classes.unregisterDynamic(arguments_class);
+    const var_ref_class = try registerS4cPayloadClass(rt, "S4cVarRef", .var_ref);
+    defer rt.classes.unregisterDynamic(var_ref_class);
+    const regexp_class = try registerS4cPayloadClass(rt, "S4cRegExp", .regexp);
+    defer rt.classes.unregisterDynamic(regexp_class);
+
+    // One owner per a-class payload kind. `.ordinary`, `.global` and `.proxy`
+    // attach lazily; the rest are minted by `createInternal`.
+    var ordinary_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var arguments_slot: ?*core.Object = try core.Object.create(rt, arguments_class, null);
+    var object_data_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.string, null);
+    var bound_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bound_function, null);
+    var proxy_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.proxy, null);
+    var var_ref_slot: ?*core.Object = try core.Object.create(rt, var_ref_class, null);
+    var promise_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
+    var stack_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.disposable_stack, null);
+    var global_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.global_object, null);
+    var regexp_slot: ?*core.Object = try core.Object.create(rt, regexp_class, null);
+    var roots = core.runtime.rootObjects(.{
+        &ordinary_slot,   &arguments_slot, &object_data_slot, &bound_slot,
+        &proxy_slot,      &var_ref_slot,   &promise_slot,     &stack_slot,
+        &global_slot,     &regexp_slot,
+    });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    _ = try ordinary_slot.?.ensureOrdinaryPayload(rt);
+    try proxy_slot.?.ensureProxyPayload(rt);
+    _ = try global_slot.?.ensureGlobalPayload(rt);
+
+    // Contents that must survive: each payload holds one strong edge back to
+    // an object only the payload names.
+    var target_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var target_roots = core.runtime.rootObjects(.{&target_slot});
+    target_roots.activate(rt);
+    defer target_roots.deactivate(rt);
+    try ordinary_slot.?.setErrorStack(rt, target_slot.?.value());
+    object_data_slot.?.objectDataSlot().* = target_slot.?.value();
+    bound_slot.?.boundTargetSlot().* = target_slot.?.value();
+    proxy_slot.?.proxyTargetSlot().* = target_slot.?.value();
+    promise_slot.?.promiseResultSlot().* = target_slot.?.value();
+
+    const expected_payloads: usize = 10;
+    try std.testing.expectEqual(expected_payloads, rt.gc.liveCountKind(.payload));
+
+    // Deletion probe: drop the `storageCell(payload)` edge from
+    // `traceChildEdgesFallible` and this major reclaims every payload under a
+    // live owner.
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(expected_payloads, rt.gc.liveCountKind(.payload));
+    try std.testing.expect(ordinary_slot.?.errorStack().?.same(target_slot.?.value()));
+    try std.testing.expect(object_data_slot.?.objectData().?.same(target_slot.?.value()));
+    try std.testing.expect(bound_slot.?.boundTarget().?.same(target_slot.?.value()));
+    try std.testing.expect(proxy_slot.?.proxyTarget().?.same(target_slot.?.value()));
+    try std.testing.expect(promise_slot.?.promiseResult().?.same(target_slot.?.value()));
+
+    ordinary_slot = null;
+    arguments_slot = null;
+    object_data_slot = null;
+    bound_slot = null;
+    proxy_slot = null;
+    var_ref_slot = null;
+    promise_slot = null;
+    stack_slot = null;
+    global_slot = null;
+    regexp_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+}
+
+test "TGC S4-c: a bytecode function's rare/aux record is a payload cell" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+    var roots = core.runtime.rootObjects(.{&function_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // Touching any rare slot materializes `BytecodeFunctionAux` behind the
+    // low-bit-tagged `home_or_aux` word.
+    _ = try function_slot.?.arrayBuiltinMarkerSlot(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.payload));
+
+    var source_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var source_roots = core.runtime.rootObjects(.{&source_slot});
+    source_roots.activate(rt);
+    defer source_roots.deactivate(rt);
+    (try function_slot.?.functionSourceSlot(rt)).* = source_slot.?.value();
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.payload));
+    try std.testing.expect(function_slot.?.functionSource().?.same(source_slot.?.value()));
+
+    function_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+}
+
+test "TGC S4-c: an aged promise remembers a reaction cell minted after its promotion" {
+    if (comptime !core.gc.generation_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var promise_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
+    var target_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var roots = core.runtime.rootObjects(.{ &promise_slot, &target_slot });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // Promote the promise (and its payload cell) before it owns a reaction
+    // list, so every subsequent growth cell is an old-to-young edge.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!promise_slot.?.gcHeader().metaConst().flags.young);
+
+    // Six subscribers walk past the initial capacity of four, so the live list
+    // lives in a SECOND cell and the first is superseded garbage.
+    var index: usize = 0;
+    while (index < 6) : (index += 1) {
+        try engine.exec.promise_ops.appendPromiseReaction(rt, promise_slot.?, target_slot.?.value());
+    }
+    const reactions_cell: *core.gc.Header = @ptrCast(@alignCast(promise_slot.?.promiseReactions().ptr));
+    try std.testing.expect(reactions_cell.metaConst().flags.young);
+
+    // Deletion probe: drop `rememberOwnerForBulkWrite` from
+    // `appendPromiseReaction` and this minor condemns the reaction list while
+    // the promise payload still names it.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(reactions_cell));
+    try std.testing.expectEqual(@as(usize, 6), promise_slot.?.promiseReactions().len);
+    for (promise_slot.?.promiseReactions()) |reaction| {
+        try std.testing.expect(reaction.same(target_slot.?.value()));
+    }
+}
+
+test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cross a major" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const arguments_class = try registerS4cPayloadClass(rt, "S4cArgumentsSlice", .arguments);
+    defer rt.classes.unregisterDynamic(arguments_class);
+
+    var bound_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bound_function, null);
+    var stack_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.disposable_stack, null);
+    var arguments_slot: ?*core.Object = try core.Object.create(rt, arguments_class, null);
+    var target_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var roots = core.runtime.rootObjects(.{
+        &bound_slot, &stack_slot, &arguments_slot, &target_slot,
+    });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    const args = try core.Object.createPayloadSliceCell(rt, core.JSValue, 2);
+    args[0] = target_slot.?.value();
+    args[1] = core.JSValue.int32(7);
+    bound_slot.?.boundArgsSlot().* = args;
+
+    // Six resources walk the 4 -> 8 growth step, so the live list is a second
+    // cell and the first is superseded garbage.
+    var index: usize = 0;
+    while (index < 6) : (index += 1) {
+        try stack_slot.?.appendDisposableResource(
+            rt,
+            target_slot.?.value(),
+            core.JSValue.undefinedValue(),
+            .defer_,
+            .sync,
+            .direct,
+        );
+    }
+
+    const arguments_payload: *core.object.ArgumentsPayload =
+        @ptrCast(@alignCast(arguments_slot.?.payloadArm().*.?));
+    arguments_payload.var_refs = try core.Object.createPayloadSliceCell(rt, core.JSValue, 1);
+    arguments_payload.var_refs[0] = target_slot.?.value();
+
+    // Deletion probe: drop any of the three `storageCell` edges in
+    // `object_payloads.zig` and this major reclaims the slice under a live
+    // owner.
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 2), bound_slot.?.boundArgs().len);
+    try std.testing.expect(bound_slot.?.boundArgs()[0].same(target_slot.?.value()));
+    try std.testing.expectEqual(@as(?i32, 7), bound_slot.?.boundArgs()[1].asInt32());
+    var popped: usize = 0;
+    while (stack_slot.?.popDisposableResource()) |resource| {
+        try std.testing.expect(resource.value.same(target_slot.?.value()));
+        popped += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), popped);
+    try std.testing.expectEqual(@as(usize, 1), arguments_payload.var_refs.len);
+    try std.testing.expect(arguments_payload.var_refs[0].same(target_slot.?.value()));
+
+    bound_slot = null;
+    stack_slot = null;
+    arguments_slot = null;
+    target_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+}
+
+test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent route" {
+    if (comptime !core.gc.block_heap_enabled) return error.SkipZigTest;
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var bound_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bound_function, null);
+    var target_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var roots = core.runtime.rootObjects(.{ &bound_slot, &target_slot });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // 3760 bytes is the small-class ceiling (TGC S2-f). The payload STRUCTS
+    // all fit a cell; only a subordinate slice can run off the end of it.
+    const args = try core.Object.createPayloadSliceCell(rt, core.JSValue, 400);
+    for (args) |*slot| slot.* = target_slot.?.value();
+    bound_slot.?.boundArgsSlot().* = args;
+
+    const storage: *core.gc.Header = @ptrCast(@alignCast(args.ptr));
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(storage));
+    try std.testing.expect(storage.metaConst().alloc_info.standalone);
+
+    // An extent's mark lives in the extent table, not a block bitmap: the
+    // payload's `storageCell` edge has to reach it, and `sweepExtents` has to
+    // give it back on the pure-memory arm rather than reading it as a String.
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.gc.containsHeader(storage));
+    try std.testing.expectEqual(@as(usize, 400), bound_slot.?.boundArgs().len);
+    try std.testing.expect(bound_slot.?.boundArgs()[399].same(target_slot.?.value()));
+
+    bound_slot = null;
+    target_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }

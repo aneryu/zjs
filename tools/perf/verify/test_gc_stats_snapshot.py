@@ -48,8 +48,8 @@ gc: incremental major cycles completed 8, aborted 1, forced 0, mark steps 37, cy
 gc: cycle envelope measured 7, skipped 1, max-P/T S 1000, T 1750, B 1751, P 1764, B/T-x1000000 1000572, P/T-x1000000 1008000, P/S-x1000000 1764000, forced 0
 gc: incremental STW phase-segment max ns begin 5, increment 6, destroy 7, finish 8
 gc: incremental STW phase totals begin 40 ns/41 segments, increment 42 ns/43 segments, destroy 44 ns/45 segments, finish 46 ns/47 segments
-gc: marked-set census majors 9, headers 100, block headers 60, refcount-removed headers 85
-gc: marked-set kinds object 70, function-bytecode 5, var-ref 5, realm-context 5, module 5, shape 10
+gc: marked-set census majors 9, headers 100, block headers 60, refcount-removed headers 100
+gc: marked-set kinds object 70, function-bytecode 5, var-ref 5, realm-context 5, module 5, shape 6, big-int 1, string 3
 gc: marked-set trace classes ordinary-object 40, fast-array 10, bytecode-function 5, exotic-object 15, non-object 30
 gc: mark storage base allocation-touches 100, allocated-bytes 7200, touched-cache-lines 180
 gc: mark storage shape allocation-touches 70, allocated-bytes 6000, touched-cache-lines 140
@@ -107,6 +107,11 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(parsed["pauseNs"]["minor"]["total"], 36)
         self.assertEqual(parsed["pauseNs"]["minorPhaseTotals"]["sweepDestroy"], 6)
         self.assertEqual(parsed["markFootprint"]["markedHeaders"], 100)
+        # TGC S1/S2: every gc.Header kind is tracer-owned, so the
+        # refcount-removed column equals the whole marked set, and the kinds
+        # row carries the big-int/string columns the emitter prints today.
+        self.assertEqual(parsed["markFootprint"]["refcountRemovedHeaders"], 100)
+        self.assertEqual(parsed["markFootprint"]["byKind"]["string"], 3)
         self.assertEqual(parsed["markFootprint"]["markedPerMajorX1000"], 11111)
         self.assertEqual(parsed["markFootprint"]["allocationTouches"], 245)
         self.assertEqual(parsed["markFootprint"]["allocationTouchesPerMarkedX1000"], 2450)
@@ -202,7 +207,7 @@ class GcStatsSnapshotTests(unittest.TestCase):
 
     def test_inconsistent_marked_partition_fails_closed(self) -> None:
         inconsistent = PANEL.replace(
-            "shape 10", "shape 9"
+            "shape 6, big-int 1", "shape 5, big-int 1"
         )
         with self.assertRaisesRegex(snapshot.SnapshotError, "marked kind partition"):
             snapshot.parse_gc_stats(inconsistent)

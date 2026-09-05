@@ -1674,6 +1674,19 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
         destroyStringBufferCell(rt, header);
         return;
     }
+    // TGC S4-b/S4-c: teardown walks this funnel over every PREFIX CARRIER,
+    // which now includes the property/array storage cells and the a-class
+    // payload cells. They are pure memory. A missing arm here does not merely
+    // leak -- the flat-body arm below would read a payload's bytes as a
+    // `String` -- so the set must stay exactly `kindIsPrefixCarrier` minus the
+    // string family.
+    if (meta.flags.kind == .property_storage or
+        meta.flags.kind == .array_storage or
+        meta.flags.kind == .payload)
+    {
+        rt.gc.destroyStorageCell(header);
+        return;
+    }
     if (metaIsRope(meta)) {
         const node: *StringRope = @ptrCast(@alignCast(header));
         rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
@@ -1715,7 +1728,9 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
     // restart the walk over a strictly smaller population. Progress is at
     // least one cell per pass, so this terminates with zero spare memory.
     cells.ensureTotalCapacity(std.heap.page_allocator, rt.gc.liveCountKind(.string) +
-        rt.gc.liveCountKind(.rope) + rt.gc.liveCountKind(.string_buffer)) catch {};
+        rt.gc.liveCountKind(.rope) + rt.gc.liveCountKind(.string_buffer) +
+        rt.gc.liveCountKind(.property_storage) + rt.gc.liveCountKind(.array_storage) +
+        rt.gc.liveCountKind(.payload)) catch {};
     while (true) {
         cells.clearRetainingCapacity();
         var overflow: ?*gc.GCObjectHeader = null;
@@ -1767,11 +1782,21 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize) void
     // answers are a flat body (atom handshake) and a tail buffer (pure
     // memory).
     std.debug.assert(meta.alloc_info.standalone);
-    if (meta.flags.kind == .string_buffer) {
-        const buffer_header: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
-        const buf: *StringBuffer = @ptrCast(@alignCast(buffer_header));
-        rt.gc.unpublishStringExtent(buffer_header, user_bytes - gc.string_prefix_size);
-        rt.memory.destroyStringExtent(buf, user_bytes);
+    if (meta.flags.kind == .string_buffer or
+        meta.flags.kind == .property_storage or
+        meta.flags.kind == .array_storage or
+        meta.flags.kind == .payload)
+    {
+        // TGC S2-i tail buffer, the TGC S4-b storage cells and the TGC S4-c
+        // payload cells share one answer: unpublish, then hand the mapping
+        // back. None owns an atom entry, an edge or an external resource, and
+        // `user_bytes` from the extent table is the only size record a bare
+        // carrier has. (An a-class payload STRUCT always fits a block cell;
+        // the extent route is reachable through the subordinate slices --
+        // a bound-argument array or reaction list past the 3760B ceiling.)
+        const body: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+        rt.gc.unpublishStringExtent(body, user_bytes - gc.string_prefix_size);
+        rt.memory.destroyStringExtent(body, user_bytes);
         return;
     }
     std.debug.assert(meta.flags.kind == .string);

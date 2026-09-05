@@ -1635,9 +1635,30 @@ pub const AtomTable = struct {
     /// keeps the body alive. A string atom's `str` is a droppable cache and is
     /// deliberately not shaded.
     pub fn markAtomAtEpoch(self: *AtomTable, id: Atom, epoch: u64) ?*string.String {
+        return self.atomEdge(id, epoch, .stamp);
+    }
+
+    /// The same edge WITHOUT the entry write, for `computeFullReachable`.
+    ///
+    /// The verifier's probe re-walks every edge the cycle just walked. It has
+    /// to shade what an id edge keeps alive -- a value symbol's body is its
+    /// identity, and a probe that skipped it would report the body as garbage
+    /// the cycle wrongly kept -- but it must not touch the entry, for the same
+    /// reason it does not run `processWeak`: the stamp it would write is its
+    /// OWN epoch, which overwrites the cycle's stamp beyond recovery and makes
+    /// the probe's roots, not the cycle's, decide which atoms survive. The
+    /// audit counters are writes too, and the real walk already made them.
+    pub fn atomEdgeBodyWithoutStamp(self: *AtomTable, id: Atom) ?*string.String {
+        return self.atomEdge(id, 0, .observe);
+    }
+
+    const EdgeMode = enum { stamp, observe };
+
+    fn atomEdge(self: *AtomTable, id: Atom, epoch: u64, mode: EdgeMode) ?*string.String {
         if (id == null_atom or isConst(id) or isTaggedInt(id)) return null;
         const entry = self.findDynamic(id) orelse return null;
         if (!entry.occupied) {
+            if (mode == .observe) return null;
             // §2.6, post-flip form. Reaching a retired slot through a holder
             // edge means the holder outlived the entry it names -- the exact
             // stale-id shape `check_borrowed_atoms.js` and the
@@ -1656,7 +1677,7 @@ pub const AtomTable = struct {
             }
             return null;
         }
-        if (entry.mark_epoch != epoch) entry.mark_epoch = epoch;
+        if (mode == .stamp and entry.mark_epoch != epoch) entry.mark_epoch = epoch;
         // The BODY is offered on every edge, stamped or not. Gating it on the
         // stamp lost bodies two ways: `stampBirthEpoch` (§2.3 black
         // allocation) stamps an entry interned inside the marking window
@@ -1687,6 +1708,33 @@ pub const AtomTable = struct {
     noinline fn shadeAtomBarrierSlow(self: *AtomTable, rt: *runtime_mod.JSRuntime, id: Atom) void {
         const epoch = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
         if (self.markAtomAtEpoch(id, epoch)) |body| rt.gc.shadeCellForAtomBarrier(body.header());
+    }
+
+    /// §2.4 companion for `gc_trace_stw.computeFullReachable`.
+    ///
+    /// Atom liveness is a stamp compared against `Heap.mark_epoch`, and the
+    /// verifier's probe advances that epoch to get a mark space of its own.
+    /// Every stamp the real cycle laid down therefore reads stale by the time
+    /// `sweepAtomTable` runs, and the sweep retires the whole live table --
+    /// with `ZJS_GC_VERIFY_MAJOR_ALL=1` pdfjs loses shape keys mid-lookup and
+    /// dies in `getLineNumber`. The header half of the probe is undone by
+    /// re-marking the saved set; this is the table half, and it makes the same
+    /// promise: leave the epoch-keyed liveness exactly as it was found.
+    ///
+    /// This is a pure translation of the epoch, not a re-decision: `from`
+    /// stamps become `to` stamps and nothing else moves. It is exact because
+    /// the probe walks its edges through `atomEdgeBodyWithoutStamp` and the
+    /// insertion barrier is disarmed for its duration, so no entry can carry a
+    /// stamp the probe wrote -- there is nothing to tell apart afterwards.
+    pub fn restampTraceEpoch(self: *AtomTable, from: u64, to: u64) void {
+        if (from == to) return;
+        var idx: EntryIndex = 0;
+        while (idx < self.entries.len) : (idx += 1) {
+            const entry = &self.entries[idx];
+            if (!entry.slotOccupied()) continue;
+            if (entry.mark_epoch == from) entry.mark_epoch = to;
+            if (entry.born_epoch == from) entry.born_epoch = to;
+        }
     }
 
     /// §2.3 black allocation: an atom interned inside an open marking window

@@ -132,7 +132,7 @@ test "missing-argument abrupt teardown releases supplied args and pads exactly o
     _ = js.runtime.runObjectCycleRemoval();
     const baseline_objects = js.runtime.gc.liveCount();
 
-    const result = try js.eval("exercisePaddedLeafThrow()");
+    _ = try js.eval("exercisePaddedLeafThrow()");
     _ = js.runtime.runObjectCycleRemoval();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());

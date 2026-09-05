@@ -115,7 +115,9 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
         .big_int => return,
         // Storage cells are marked by their owner's edge and have no
         // out-edges of their own: TGC S2-i's tail buffer is reported by
-        // `traceRopeEdges`, and the S4-b/S4-c kinds are not minted yet.
+        // `traceRopeEdges`, the S4-b property/array buffers by
+        // `Object.traceChildEdgesFallible`, and S4-c's payload kind is not
+        // minted yet.
         .string_buffer, .property_storage, .array_storage, .payload => return,
     }
 
@@ -425,8 +427,26 @@ const FullReachable = struct {
 /// Mark exactly what the roots reach, with no sticky-old shortcut and no
 /// remembered set, and hand back the set. Leaves every mark bit as it found it:
 /// the minor that runs next depends on the sticky marks this has to disturb.
+///
+/// "Every mark bit" is two populations, not one. `objectIterator(.all)` covers
+/// the first -- non-block headers, block cells, side objects, and (since TGC
+/// S2) the string/`string_buffer`/`property_storage`/`array_storage`/`payload`
+/// extents, whose mark lives in the extent table row rather than in a header
+/// or a block bitmap; `setHeaderMarked` routes each of those back to the same
+/// place `headerMarked` reads it from, so the save/restore below is exact for
+/// all of them. `.rope` is a block cell by comptime assertion and needs no
+/// extent arm.
+///
+/// The second population is the atom table, which is NOT a heap object and so
+/// is in no iterator: its liveness is a stamp compared against
+/// `Heap.mark_epoch`, the very counter `clearMarks` advances to give the probe
+/// a private mark space. `AtomTable.restampTraceEpoch` is the restore for that
+/// half -- without it the epoch this function returns under is four ahead of
+/// every stamp the cycle made, `sweepAtomTable` finds the whole table dead,
+/// and the run this is supposed to be auditing dies of missing property keys.
 fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReachable {
     const allocator = rt.memory.persistent_allocator;
+    const entry_epoch: u64 = if (comptime gc.block_heap_enabled) rt.gc.block_heap.mark_epoch else 0;
     var reachable: FullReachable = .{ .allocator = allocator };
     errdefer reachable.deinit();
 
@@ -449,6 +469,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
 
     var probe = try Collector.init(rt, null, scan);
     defer probe.deinit();
+    probe.atom_stamps_frozen = true;
     probe.clearMarks();
     try probe.seedRoots();
     try probe.drain();
@@ -504,6 +525,9 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
 
     probe.clearMarks();
     for (saved.items) |header| rt.gc.setHeaderMarked(header);
+    if (comptime gc.block_heap_enabled) {
+        rt.atoms.restampTraceEpoch(entry_epoch, rt.gc.block_heap.mark_epoch);
+    }
     return reachable;
 }
 
@@ -1407,6 +1431,10 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
                     // String-family cells (TGC S2) share the block heap; the
                     // string side frees the rope tail / atom entry itself.
                     .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(rt, header),
+                    // TGC S4-b/S4-c: bare storage cells (property entries,
+                    // array elements, a-class payloads and the slices they
+                    // own) -- no destructor, only unpublish + free.
+                    .property_storage, .array_storage, .payload => rt.gc.destroyStorageCell(header),
                     else => unreachable,
                 }
                 destroyed += 1;
@@ -1650,6 +1678,11 @@ const Collector = struct {
     /// as roots -- it is the collection that is entitled to retire a symbol
     /// whose last holder died in the cycle that created it.
     minor_mode: bool = false,
+    /// `computeFullReachable`'s probe: walk the atom edges for their shading
+    /// effect but write nothing into the table. Its epoch is not the cycle's,
+    /// so a stamp here would destroy the verdict the probe exists to check
+    /// (`AtomTable.atomEdgeBodyWithoutStamp`).
+    atom_stamps_frozen: bool = false,
 
     fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1868,6 +1901,12 @@ const Collector = struct {
     /// rides along (the id holder must be able to hand the JSValue back out).
     /// A string atom's `str` is a droppable cache and is left to the mark.
     pub fn visitAtom(self: *Collector, id: atom_mod.Atom) void {
+        if (self.atom_stamps_frozen) {
+            // Diagnostic probe: shade the body the edge keeps alive, leave the
+            // entry alone (`AtomTable.atomEdgeBodyWithoutStamp`).
+            if (self.rt.atoms.atomEdgeBodyWithoutStamp(id)) |body| self.shadeExact(body.header());
+            return;
+        }
         const epoch = if (comptime gc.block_heap_enabled) self.rt.gc.block_heap.mark_epoch else 0;
         if (self.rt.atoms.markAtomAtEpoch(id, epoch)) |body| self.shadeExact(body.header());
     }
@@ -2453,7 +2492,7 @@ const Collector = struct {
                                 if (v.cycleMarkHeader() == child) where = "dense";
                             }
                         }
-                        if (o.ordinaryPayloadForAudit(a.rt)) |op| {
+                        if (o.ordinaryPayloadForAudit()) |op| {
                             const fields = .{
                                 .{ "ordinary.callsite_file", op.callsite_file },
                                 .{ "ordinary.callsite_function", op.callsite_function },
@@ -2663,6 +2702,8 @@ const Collector = struct {
                     switch (header.metaConst().flags.kind) {
                         .object => Object.destroyFromHeader(self.rt, header),
                         .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(self.rt, header),
+                        // TGC S4-b/S4-c storage cells: pure memory, no destructor.
+                        .property_storage, .array_storage, .payload => self.rt.gc.destroyStorageCell(header),
                         else => unreachable,
                     }
                     garbage_count += 1;

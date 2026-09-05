@@ -358,21 +358,21 @@ pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, messa
     return error.SyntaxError;
 }
 
-pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
-    return object.isCallSite(rt);
+pub fn isCallSiteObject(object: *core.Object) bool {
+    return object.isCallSite();
 }
 
 /// CallSite prototype methods dispatched by `.host` native-record id; the
 /// receiver must be a CallSite object (the metadata lives in internal slots).
-pub fn callSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
-    if (!isCallSiteObject(rt, object)) return null;
+pub fn callSiteMethodById(object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
+    if (!isCallSiteObject(object)) return null;
     return switch (id) {
         .callsite_get_function => core.JSValue.nullValue(),
-        .callsite_get_function_name => if (object.callSiteFunctionName(rt)) |value| value else core.JSValue.nullValue(),
-        .callsite_get_file_name => if (object.callSiteFile(rt)) |value| value else core.JSValue.nullValue(),
-        .callsite_get_line_number => if (object.callSiteIsNative(rt)) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteLine(rt)),
-        .callsite_get_column_number => if (object.callSiteIsNative(rt)) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteColumn(rt)),
-        .callsite_is_native => core.JSValue.boolean(object.callSiteIsNative(rt)),
+        .callsite_get_function_name => if (object.callSiteFunctionName()) |value| value else core.JSValue.nullValue(),
+        .callsite_get_file_name => if (object.callSiteFile()) |value| value else core.JSValue.nullValue(),
+        .callsite_get_line_number => if (object.callSiteIsNative()) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteLine()),
+        .callsite_get_column_number => if (object.callSiteIsNative()) core.JSValue.nullValue() else core.JSValue.int32(object.callSiteColumn()),
+        .callsite_is_native => core.JSValue.boolean(object.callSiteIsNative()),
         else => null,
     };
 }

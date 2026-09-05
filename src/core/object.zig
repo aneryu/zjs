@@ -158,6 +158,9 @@ const createGeneratorExecutionStateWithStorage = generator_state.createGenerator
 const destroyGeneratorExecutionState = generator_state.destroyGeneratorExecutionState;
 const empty_suspended_execution_state = generator_state.empty_suspended_execution_state;
 
+/// TGC S4-c: the a-class arms release the payload's CONTENTS and stop. Their
+/// allocation is a `.payload` GC cell -- it is never hand-returned; the sweep
+/// takes it once no owner edge names it.
 pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payload_kind: class.PayloadKind, payload: *class.Payload) void {
     const ptr = payload.* orelse return;
     payload.* = null;
@@ -165,7 +168,6 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         .ordinary => {
             const typed: *OrdinaryPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(OrdinaryPayload, typed);
         },
         .iterator => {
             const typed: *IteratorPayload = @ptrCast(@alignCast(ptr));
@@ -191,12 +193,10 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         .disposable_stack => {
             const typed: *DisposableStackPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(DisposableStackPayload, typed);
         },
         .global => {
             const typed: *GlobalPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(GlobalPayload, typed);
         },
         .realm_record => {
             const typed: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
@@ -216,27 +216,22 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         .regexp => {
             const typed: *RegExpPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(RegExpPayload, typed);
         },
         .bound_function => {
             const typed: *BoundFunctionPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(BoundFunctionPayload, typed);
         },
         .proxy => {
             const typed: *ProxyPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(ProxyPayload, typed);
         },
         .arguments => {
             const typed: *ArgumentsPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(ArgumentsPayload, typed);
         },
         .object_data => {
             const typed: *ObjectDataPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(ObjectDataPayload, typed);
         },
         .weak_ref => {
             const typed: *WeakRefPayload = @ptrCast(@alignCast(ptr));
@@ -246,12 +241,10 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         .var_ref => {
             const typed: *VarRefPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(VarRefPayload, typed);
         },
         .promise => {
             const typed: *PromisePayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(PromisePayload, typed);
         },
         .generator => {
             const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
@@ -1070,16 +1063,18 @@ pub const Object = extern struct {
         // test-injected collection inside this allocation must not see an
         // allocated-but-unpublished block cell.
         const property_capacity: usize = initial_shape.prop_size;
-        var property_storage: []property.Entry = &.{};
-        var property_storage_owned = false;
-        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
-        if (property_capacity != 0) {
-            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
-            property_storage_owned = true;
-        }
+        // TGC S4-b spec 2.2: the buffer is a `.property_storage` GC cell,
+        // minted immediately before the object cell so that NOTHING that can
+        // collect runs between its publication and the install below -- a bare
+        // cell has no precise root. There is no errdefer free either: a cell is
+        // never hand-returned, an abandoned one is swept.
+        var property_storage: [*]property.Entry = undefined;
 
         const alloc_size = objectBodyBytes(class.ids.array, false);
         rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        if (property_capacity != 0) {
+            property_storage = try createPropertyStorageCell(rt, property_capacity);
+        }
         const self = try allocCellConst(rt, class.ids.array, false);
         var initialized = false;
         errdefer if (initialized)
@@ -1103,13 +1098,12 @@ pub const Object = extern struct {
             },
             .shape_ref = initial_shape,
         };
-        self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr;
+        self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage;
         // Null first word = qjs empty array pointer + no-payload sentinel;
         // count/capacity/length stay zero (see createInternal's array arm).
         self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         std.debug.assert(self.shape_ref.prop_count == 0);
-        property_storage_owned = false;
         initialized = true;
         try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
         initialized = false;
@@ -1341,12 +1335,12 @@ pub const Object = extern struct {
         // cell so an allocation-triggered collection sees no unpublished cell.
         const property_capacity: usize = initial_shape.prop_size;
         std.debug.assert(property_capacity >= entries.len and entries.len != 0);
-        const property_storage = try rt.allocRuntime(property.Entry, property_capacity);
-        var property_storage_owned = true;
-        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
-
         const alloc_size = objectBodyBytes(class_id, false);
         rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        // TGC S4-b: a `.property_storage` GC cell, minted immediately before the
+        // object cell (see the optional-capacity constructors); no errdefer
+        // free, an abandoned cell is swept.
+        const property_storage = try createPropertyStorageCell(rt, property_capacity);
         const self = try allocCell(rt, class_id, false);
         var initialized = false;
         errdefer if (initialized)
@@ -1362,14 +1356,13 @@ pub const Object = extern struct {
             },
             .shape_ref = initial_shape,
         };
-        self.prop_values = property_storage.ptr;
+        self.prop_values = property_storage;
         // Null first word: qjs's empty fast-array union (quickjs.c:
         // 5695-5697) doubling as the no-payload sentinel — identical to
         // createInternal's arguments storage arm.
         self.initArmPayload(null);
         std.debug.assert(!self.isWeakReferenceHolderClass());
         @memcpy(self.propertyStorageEntries(entries.len), entries);
-        property_storage_owned = false;
         self.refreshTraceShapeSummary();
         initialized = true;
         try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
@@ -1404,19 +1397,21 @@ pub const Object = extern struct {
         shape_ref.markShared();
 
         const property_capacity: usize = shape_ref.prop_size;
-        var property_storage: []property.Entry = &.{};
-        var property_storage_owned = false;
-        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
-        if (property_capacity != 0) {
-            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
-            property_storage_owned = true;
-        }
+        // TGC S4-b spec 2.2: the buffer is a `.property_storage` GC cell,
+        // minted immediately before the object cell so that NOTHING that can
+        // collect runs between its publication and the install below -- a bare
+        // cell has no precise root. There is no errdefer free either: a cell is
+        // never hand-returned, an abandoned one is swept.
+        var property_storage: [*]property.Entry = undefined;
 
         // Side storage is the only fallible preparation after retaining the
         // shape. Finish it first, then service the qjs object boundary and take
         // the block cell immediately before initialization/publication.
         const alloc_size = objectBodyBytes(template.class_id, false);
         rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        if (property_capacity != 0) {
+            property_storage = try createPropertyStorageCell(rt, property_capacity);
+        }
         const self = try allocCell(rt, template.class_id, false);
         var initialized = false;
         errdefer if (initialized)
@@ -1432,11 +1427,10 @@ pub const Object = extern struct {
             },
             .shape_ref = shape_ref,
         };
-        self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr;
+        self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage;
         self.initArmPayload(null);
         @memcpy(self.propertyStorageEntries(entries.len), entries);
 
-        property_storage_owned = false;
         self.refreshTraceShapeSummary();
         initialized = true;
         try rt.registerObjectWithBytes(self, self.accountedBodyBytesForPhysical(alloc_size));
@@ -1497,13 +1491,12 @@ pub const Object = extern struct {
             try rt.shapes.createObjectRootWithPropertyCapacityReserved(prototype, property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.dropUnshared(shape_ref);
-        var property_storage: []property.Entry = &.{};
-        var property_storage_owned = false;
-        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
-        if (property_capacity != 0) {
-            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
-            property_storage_owned = true;
-        }
+        // TGC S4-b spec 2.2: the buffer is a `.property_storage` GC cell,
+        // minted immediately before the object cell so that NOTHING that can
+        // collect runs between its publication and the install below -- a bare
+        // cell has no precise root. There is no errdefer free either: a cell is
+        // never hand-returned, an abandoned one is swept.
+        var property_storage: [*]property.Entry = undefined;
         var class_payload: class.Payload = null;
         var class_payload_kind: class.PayloadKind = .none;
         const payload_kind = definition.payload_kind;
@@ -1521,6 +1514,9 @@ pub const Object = extern struct {
         // cleanup is a single by-kind free (mirror of the per-arm
         // `errdefer destroy`).
         var class_payload_allocated = false;
+        // TGC S4-c: `.none` unless this construction owes an a-class `.payload`
+        // cell, which is minted below (adjacent to its install).
+        var deferred_cell_kind: class.PayloadKind = .none;
         errdefer if (class_payload_allocated) freeClassPayloadAllocation(rt, class_payload, class_payload_kind);
         if (class_id == class.ids.regexp) {
             // qjs initializes `JSObject.u.regexp` in the object allocation;
@@ -1531,12 +1527,21 @@ pub const Object = extern struct {
             // qjs stores bytecode callable state directly in JSObject.u.func.
             class_payload_kind = .function;
         } else if (payloadKindAllocates(payload_kind)) {
-            class_payload = if (payload_kind == .function)
-                try allocFunctionPayload(rt)
-            else
-                try allocClassPayload(rt, payload_kind);
             class_payload_kind = payload_kind;
-            class_payload_allocated = true;
+            // TGC S4-c: an a-class payload is a bare `.payload` GC cell with
+            // no precise root, so it is NOT minted here -- it is minted below,
+            // immediately before the object cell, exactly like S4-b's property
+            // buffer. b/c-class payloads keep the `allocRuntime` allocation
+            // (and therefore the pre-`initialized` errdefer free) they had.
+            if (payloadKindIsTracerOwnedCell(payload_kind)) {
+                deferred_cell_kind = payload_kind;
+            } else {
+                class_payload = if (payload_kind == .function)
+                    try allocFunctionPayload(rt)
+                else
+                    try allocClassPayload(rt, payload_kind);
+                class_payload_allocated = true;
+            }
         }
 
         // zjs's property buffer and out-of-line class payload can each invoke
@@ -1551,6 +1556,19 @@ pub const Object = extern struct {
         else
             alloc_size;
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, accounted_alloc_size);
+        // TGC S4-c: two bare cells are live-but-unrooted across the window
+        // below, so EVERY allocation-pressure request has to precede the FIRST
+        // mint. `createPropertyStorageCell` takes its own (nothing is minted
+        // yet when it runs); the payload cell's is taken here so its mint,
+        // which follows the property mint, cannot trigger a collection that
+        // would sweep the property cell out from under this constructor.
+        if (deferred_cell_kind != .none) rt.requestGCForAllocation(classPayloadCellBytes(deferred_cell_kind));
+        if (property_capacity != 0) {
+            property_storage = try createPropertyStorageCell(rt, property_capacity);
+        }
+        if (deferred_cell_kind != .none) {
+            class_payload = try allocClassPayloadCell(rt, deferred_cell_kind);
+        }
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
             // MemoryAccount directly so this same allocation does not request
@@ -1610,7 +1628,7 @@ pub const Object = extern struct {
             },
             .shape_ref = shape_ref,
         };
-        self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage.ptr;
+        self.prop_values = if (property_capacity == 0) emptyPropertyStorageBase() else property_storage;
         switch (class_id) {
             class.ids.bytecode_function,
             class.ids.generator_function,
@@ -1632,7 +1650,6 @@ pub const Object = extern struct {
             @memcpy(self.propertyStorageEntries(template.entries.len), template.entries);
         }
         if (inline_layout != null) self.initInlineClassPayloadGcPrefix();
-        property_storage_owned = false;
         shape_owned = false;
         if (property_template != null) {
             self.refreshTraceShapeSummary();
@@ -1662,6 +1679,153 @@ pub const Object = extern struct {
         return switch (payload_kind) {
             .none, .ordinary, .global => false,
             else => true,
+        };
+    }
+
+    /// TGC S4-c spec 2.3: the a-class payload kinds -- pure memory, no external
+    /// resource, no weak semantics, no cursor. They are allocated as `.payload`
+    /// GC cells, marked by the owner Object's `storageCell` edge and returned
+    /// by the bitmap/extent sweep with NO destructor. Everything else (b class:
+    /// external resources; c class: weak semantics / cursors) keeps its
+    /// `allocRuntime` allocation and its finalizer.
+    ///
+    /// `.regexp` is listed because a dynamic class may select it and then take
+    /// the out-of-line arm; `class.ids.regexp` itself keeps the payload INLINE
+    /// in `regexpArm()` and is never a cell (checked at every use below).
+    /// `.function` is listed for its BYTECODE arm only -- `class_id` is the
+    /// discriminator, and the native arm is b class.
+    pub inline fn payloadKindIsTracerOwnedCell(payload_kind: class.PayloadKind) bool {
+        return switch (payload_kind) {
+            .ordinary,
+            .arguments,
+            .object_data,
+            .bound_function,
+            .proxy,
+            .var_ref,
+            .promise,
+            .disposable_stack,
+            .global,
+            .regexp,
+            => true,
+            .none,
+            .function,
+            .generator,
+            .iterator,
+            .collection,
+            .buffer,
+            .typed_array,
+            .finalization_registry,
+            .std_file,
+            .realm_record,
+            .weak_ref,
+            => false,
+        };
+    }
+
+    /// True iff this object's `u.payload` word names a `.payload` GC CELL.
+    /// The two exclusions are representational, not classificatory: an inline
+    /// `regexpArm()` payload is part of the Object allocation, and a slots2
+    /// object's arm word is only a payload word once the ordinary payload is
+    /// attached (`payloadSlot`).
+    pub inline fn payloadKindIsTracerOwnedCellOrNone(payload_kind: class.PayloadKind) bool {
+        return payload_kind == .none or payloadKindIsTracerOwnedCell(payload_kind);
+    }
+
+    pub inline fn hasTracerOwnedPayloadCell(self: *const Object) bool {
+        if (!payloadKindIsTracerOwnedCell(self.flags.class_payload_kind)) return false;
+        return self.class_id != class.ids.regexp;
+    }
+
+    /// TGC S4-c: mint a zero-initialized a-class payload as a `.payload` GC
+    /// cell. The caller MUST install the returned pointer into its owner
+    /// before anything that can collect runs -- a bare cell has no precise
+    /// root (the S4-b rule, `createPropertyStorageCell`). This variant takes
+    /// NO allocation-pressure boundary of its own precisely so a caller that
+    /// already holds another bare cell can order all pressure requests before
+    /// the first mint.
+    fn mintPayloadCell(rt: *JSRuntime, comptime T: type) !*T {
+        comptime std.debug.assert(@alignOf(T) <= gc.metadata_prefix_size);
+        const body = try rt.gc.createStorageCellPublished(
+            gc.representation.payload_kind_tag,
+            gc.metadata_prefix_size + @sizeOf(T),
+        );
+        const typed: *T = @ptrCast(@alignCast(body));
+        typed.* = .{};
+        return typed;
+    }
+
+    /// Standalone form for the lazy attach sites: record the allocation
+    /// pressure FIRST (the boundary `createRuntime` used to give this payload),
+    /// then mint. Nothing may collect between the return and the install.
+    fn createPayloadCell(rt: *JSRuntime, comptime T: type) !*T {
+        rt.requestGCForAllocation(@sizeOf(T));
+        return mintPayloadCell(rt, T);
+    }
+
+    /// The collector header of an a-class payload cell.
+    pub inline fn payloadCellHeader(ptr: *anyopaque) *gc.GCObjectHeader {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    /// TGC S4-c spec 2.3: the VARIABLE-LENGTH slices an a-class payload owns
+    /// (promise reactions, bound arguments, disposable resources) become
+    /// SUBORDINATE `.payload` cells, reported by their payload's own
+    /// `traceChildEdges` and returned by the sweep with no destructor. Same
+    /// rules as every storage cell: the body is left UNINITIALIZED, and the
+    /// caller keeps the mint adjacent to the install because a bare cell has
+    /// no precise root. On growth the caller copies into the new cell and
+    /// LEAVES THE OLD ONE to the sweep.
+    pub fn createPayloadSliceCell(rt: *JSRuntime, comptime T: type, capacity: usize) ![]T {
+        comptime std.debug.assert(@alignOf(T) <= gc.metadata_prefix_size);
+        std.debug.assert(capacity != 0);
+        const payload_bytes = std.math.mul(usize, capacity, @sizeOf(T)) catch
+            return error.OutOfMemory;
+        const total = std.math.add(usize, gc.metadata_prefix_size, payload_bytes) catch
+            return error.OutOfMemory;
+        rt.requestGCForAllocation(payload_bytes);
+        const body = try rt.gc.createStorageCellPublished(
+            gc.representation.payload_kind_tag,
+            total,
+        );
+        const base: [*]T = @ptrCast(@alignCast(body));
+        return base[0..capacity];
+    }
+
+    /// Mint the `.payload` cell selected by an a-class `payload_kind`. The
+    /// out-of-line twin of `allocClassPayload`, kept `noinline` for the same
+    /// reason: the union of every arm's frame must not reach the hot
+    /// construction path.
+    noinline fn allocClassPayloadCell(rt: *JSRuntime, payload_kind: class.PayloadKind) !class.Payload {
+        return switch (payload_kind) {
+            .ordinary => @ptrCast(try mintPayloadCell(rt, OrdinaryPayload)),
+            .arguments => @ptrCast(try mintPayloadCell(rt, ArgumentsPayload)),
+            .object_data => @ptrCast(try mintPayloadCell(rt, ObjectDataPayload)),
+            .bound_function => @ptrCast(try mintPayloadCell(rt, BoundFunctionPayload)),
+            .proxy => @ptrCast(try mintPayloadCell(rt, ProxyPayload)),
+            .var_ref => @ptrCast(try mintPayloadCell(rt, VarRefPayload)),
+            .promise => @ptrCast(try mintPayloadCell(rt, PromisePayload)),
+            .disposable_stack => @ptrCast(try mintPayloadCell(rt, DisposableStackPayload)),
+            .global => @ptrCast(try mintPayloadCell(rt, GlobalPayload)),
+            .regexp => @ptrCast(try mintPayloadCell(rt, RegExpPayload)),
+            else => unreachable,
+        };
+    }
+
+    /// Byte count `allocClassPayloadCell` is about to request, for the caller
+    /// that must take the allocation-pressure boundary before its FIRST mint.
+    inline fn classPayloadCellBytes(payload_kind: class.PayloadKind) usize {
+        return switch (payload_kind) {
+            .ordinary => @sizeOf(OrdinaryPayload),
+            .arguments => @sizeOf(ArgumentsPayload),
+            .object_data => @sizeOf(ObjectDataPayload),
+            .bound_function => @sizeOf(BoundFunctionPayload),
+            .proxy => @sizeOf(ProxyPayload),
+            .var_ref => @sizeOf(VarRefPayload),
+            .promise => @sizeOf(PromisePayload),
+            .disposable_stack => @sizeOf(DisposableStackPayload),
+            .global => @sizeOf(GlobalPayload),
+            .regexp => @sizeOf(RegExpPayload),
+            else => unreachable,
         };
     }
 
@@ -1711,43 +1875,8 @@ pub const Object = extern struct {
                 payload.* = .{};
                 return @ptrCast(payload);
             },
-            .regexp => {
-                const payload = try rt.createRuntime(RegExpPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
-            .bound_function => {
-                const payload = try rt.createRuntime(BoundFunctionPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
-            .proxy => {
-                const payload = try rt.createRuntime(ProxyPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
-            .arguments => {
-                const payload = try rt.createRuntime(ArgumentsPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
-            .object_data => {
-                const payload = try rt.createRuntime(ObjectDataPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
             .weak_ref => {
                 const payload = try rt.createRuntime(WeakRefPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
-            .var_ref => {
-                const payload = try rt.createRuntime(VarRefPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
-            .promise => {
-                const payload = try rt.createRuntime(PromisePayload);
                 payload.* = .{};
                 return @ptrCast(payload);
             },
@@ -1771,17 +1900,26 @@ pub const Object = extern struct {
                 payload.* = .{};
                 return @ptrCast(payload);
             },
-            .disposable_stack => {
-                const payload = try rt.createRuntime(DisposableStackPayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
             .realm_record => {
                 const payload = try rt.createRuntime(RealmRecordPayload);
                 payload.* = .{};
                 return @ptrCast(payload);
             },
-            .none, .ordinary, .global => unreachable,
+            // TGC S4-c: every a-class kind is minted by `allocClassPayloadCell`
+            // instead, adjacent to its install. Reaching this helper with one
+            // would put a non-cell allocation behind a `storageCell` edge.
+            .none,
+            .ordinary,
+            .global,
+            .regexp,
+            .bound_function,
+            .proxy,
+            .arguments,
+            .object_data,
+            .var_ref,
+            .promise,
+            .disposable_stack,
+            => unreachable,
         }
     }
 
@@ -1789,6 +1927,10 @@ pub const Object = extern struct {
     /// fails before the object is `initialized` (i.e. before `destroyFromHeader`
     /// owns teardown). Mirrors the per-arm `errdefer rt.memory.destroy(T, ...)`
     /// of the former inline switch — a single by-kind `destroy`.
+    /// TGC S4-c: the a-class arms are `{}`. Their payload is a `.payload` GC
+    /// cell -- never hand-returned, and never reached from here either, since
+    /// an a-class cell is minted after the last fallible step of construction
+    /// (adjacent to its install) and so is not covered by this errdefer.
     noinline fn freeClassPayloadAllocation(rt: *JSRuntime, payload: class.Payload, payload_kind: class.PayloadKind) void {
         const ptr = payload orelse return;
         switch (payload_kind) {
@@ -1796,14 +1938,14 @@ pub const Object = extern struct {
             .collection => rt.memory.destroy(CollectionPayload, @ptrCast(@alignCast(ptr))),
             .buffer => rt.memory.destroy(BufferPayload, @ptrCast(@alignCast(ptr))),
             .typed_array => rt.memory.destroy(TypedArrayPayload, @ptrCast(@alignCast(ptr))),
-            .regexp => rt.memory.destroy(RegExpPayload, @ptrCast(@alignCast(ptr))),
-            .bound_function => rt.memory.destroy(BoundFunctionPayload, @ptrCast(@alignCast(ptr))),
-            .proxy => rt.memory.destroy(ProxyPayload, @ptrCast(@alignCast(ptr))),
-            .arguments => rt.memory.destroy(ArgumentsPayload, @ptrCast(@alignCast(ptr))),
-            .object_data => rt.memory.destroy(ObjectDataPayload, @ptrCast(@alignCast(ptr))),
+            .regexp => {},
+            .bound_function => {},
+            .proxy => {},
+            .arguments => {},
+            .object_data => {},
             .weak_ref => rt.memory.destroy(WeakRefPayload, @ptrCast(@alignCast(ptr))),
-            .var_ref => rt.memory.destroy(VarRefPayload, @ptrCast(@alignCast(ptr))),
-            .promise => rt.memory.destroy(PromisePayload, @ptrCast(@alignCast(ptr))),
+            .var_ref => {},
+            .promise => {},
             .generator => {
                 const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
                 typed.destroy(rt);
@@ -1812,7 +1954,7 @@ pub const Object = extern struct {
             .function => rt.memory.destroy(FunctionPayload, @ptrCast(@alignCast(ptr))),
             .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
             .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
-            .disposable_stack => rt.memory.destroy(DisposableStackPayload, @ptrCast(@alignCast(ptr))),
+            .disposable_stack => {},
             .realm_record => rt.destroyRuntime(RealmRecordPayload, @ptrCast(@alignCast(ptr))),
             .none, .ordinary, .global => {},
         }
@@ -2017,23 +2159,52 @@ pub const Object = extern struct {
     }
 
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
-        if (self.ordinaryPayload(rt)) |payload| return payload;
+        if (self.ordinaryPayload()) |payload| return payload;
         std.debug.assert(self.flags.class_payload_kind == .none);
-        const payload = try rt.createRuntime(OrdinaryPayload);
-        errdefer rt.destroyRuntime(OrdinaryPayload, payload);
-        payload.* = .{};
+        // TGC S4-c: a slots2 body's two inline property entries occupy the
+        // payload word. Move them out of line FIRST so the arm word is the
+        // payload slot for every layout; the side table this replaced is gone.
         if (self.hasSlots2Layout()) {
-            std.debug.assert(self.class_id == class.ids.object);
-            const entry = try rt.slots2_payloads.getOrPut(rt.memory.persistent_allocator, self);
-            if (entry.found_existing) @panic("slots2 payload entry exists without payload kind");
-            entry.value_ptr.* = @ptrCast(payload);
+            try self.spillInlinePropertyStorageForPayload(rt);
             rt.slots2_payload_attach_count +|= 1;
-        } else {
-            std.debug.assert(self.payloadArm().* == null);
-            self.payloadArm().* = @ptrCast(payload);
         }
+        const payload = try createPayloadCell(rt, OrdinaryPayload);
+        self.payloadSlot().* = @ptrCast(payload);
         self.flags.class_payload_kind = .ordinary;
+        // A long-lived object just adopted a cell published moments ago.
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
         return payload;
+    }
+
+    /// TGC S4-c: free a slots2 Object's arm word for a payload pointer.
+    ///
+    /// A slots2 Object has no payload arm: `trailing_property_capacity` inline
+    /// property entries start at exactly `@sizeOf(Object)`. Attaching a class
+    /// payload therefore moves the property storage out of line into a
+    /// `.property_storage` cell (S4-b) and leaves the arm word free. From here
+    /// on `propertyStorageIsInline()` is false for this object forever --
+    /// `Shape.compactProperties` refuses to compact a payload-bearing object
+    /// back into the tail.
+    fn spillInlinePropertyStorageForPayload(self: *Object, rt: *JSRuntime) !void {
+        std.debug.assert(self.hasSlots2Layout());
+        std.debug.assert(self.class_id == class.ids.object);
+        if (!self.propertyStorageIsInline()) return;
+        const capacity: usize = self.shape_ref.prop_size;
+        if (capacity == 0) {
+            // No storage to move: the inline base was only a placeholder.
+            std.debug.assert(self.shape_ref.prop_count == 0);
+            self.prop_values = emptyPropertyStorageBase();
+            return;
+        }
+        std.debug.assert(capacity <= trailing_property_capacity);
+        const live: usize = self.shape_ref.prop_count;
+        // Mint adjacent to the install: only the memcpy separates them, and it
+        // cannot collect.
+        const storage = try createPropertyStorageCell(rt, capacity);
+        @memcpy(storage[0..live], self.propertyStorageEntries(live));
+        self.setPropertyStorageExternal(storage);
+        // An old owner just took a young cell.
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
     }
 
     pub fn globalLexicals(self: *const Object, rt: *const JSRuntime) ?*Object {
@@ -2063,10 +2234,10 @@ pub const Object = extern struct {
     pub fn ensureGlobalPayload(self: *Object, rt: *JSRuntime) !*GlobalPayload {
         if (self.globalPayload()) |payload| return payload;
         std.debug.assert(self.class_id == class.ids.global_object);
-        const payload = try rt.createRuntime(GlobalPayload);
-        payload.* = .{};
+        const payload = try createPayloadCell(rt, GlobalPayload);
         self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .global;
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
         return payload;
     }
 
@@ -2120,13 +2291,16 @@ pub const Object = extern struct {
     fn ensureFunctionRarePayload(self: *Object, rt: *JSRuntime) !*FunctionRarePayload {
         if (class.isBytecodeFunctionClass(self.class_id)) {
             if (self.bytecodeFunctionAux()) |aux| return &aux.rare;
-            const aux = try rt.createRuntime(BytecodeFunctionAux);
-            aux.* = .{};
+            // TGC S4-c: the bytecode arm's rare/aux record is an a-class
+            // payload -- a `.payload` GC cell reported by this object's
+            // `storageCell` edge and returned by the sweep with no destructor.
+            const aux = try createPayloadCell(rt, BytecodeFunctionAux);
             if (self.bytecodeArm().*.home_or_aux) |stored| {
                 std.debug.assert((@intFromPtr(stored) & bytecode_function_aux_tag) == 0);
                 aux.home_object = @ptrCast(@alignCast(stored));
             }
             self.bytecodeArm().*.home_or_aux = encodeBytecodeFunctionAux(aux);
+            rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
             return &aux.rare;
         }
         const payload = self.functionPayload() orelse {
@@ -2287,8 +2461,13 @@ pub const Object = extern struct {
         // this arm never skips table cleanup the general path still owns.
         // The general teardown is outlined — leaving it in this function
         // would keep the 0xf0 prologue on every sc_Pair.
+        // TGC S4-c: the gate widened from `payload none` to `payload none OR
+        // a class`. An a-class payload is a `.payload` GC cell with no
+        // destructor, so the fast arm skipping it is the CORRECT release --
+        // the sweep returns the cell. (For `class.ids.object` the admitted
+        // a-class kind is `.ordinary`.)
         if (self.class_id == class.ids.object and
-            self.flags.class_payload_kind == .none and
+            payloadKindIsTracerOwnedCellOrNone(self.flags.class_payload_kind) and
             weakReferenceCountFromState(weakref_state) == 0 and
             !self.flags.has_weak_id and
             !self.flags.is_borrowed_reference_holder)
@@ -2330,13 +2509,12 @@ pub const Object = extern struct {
         self.gcHeader().meta().flags.finalizing = true;
 
         const object_shape = self.shape_ref;
-        const old_storage = self.prop_values;
         const alloc_size = objectBodyBytes(self.class_id, has_slots2_layout);
         const accounted_size = self.accountedBodyBytesForPhysical(alloc_size);
-        const old_property_capacity = self.propertyStorageCapacity();
-        const old_storage_entries = self.propertyStorageEntries(old_property_capacity);
+        // TGC S4-b: `prop_values` is a GC cell. Dropping the pointer is the
+        // whole release -- the sweep returns the cell. (S4-d deletes this
+        // destructor outright.)
         self.setPropertyStorageEmptyForDestroy();
-        if (propertyStoragePointerIsExternal(self, old_storage)) rt.memory.free(property.Entry, old_storage_entries);
         // js_free_shape (quickjs.c:5320-5325): an unshared shape dies with
         // its only holder; shared ones wait for the sweep.
         rt.shapes.dropUnshared(object_shape);
@@ -2426,11 +2604,8 @@ pub const Object = extern struct {
         // for non-global; pure dispatch-shape change, zero behavioral risk.)
         if (self.isGlobal() and rt.borrowed_reference_holders.len != 0) clearBorrowedReferencesForDestroyedObject(rt, self);
         if (self.flags.class_payload_kind == .std_file) self.enqueueDeferredStdFileClose(rt);
-        const old_storage = self.prop_values;
-        const old_property_capacity = self.propertyStorageCapacity();
-        const old_storage_entries = self.propertyStorageEntries(old_property_capacity);
+        // TGC S4-b: see the fast arm -- the storage cell is swept, not freed.
         self.setPropertyStorageEmptyForDestroy();
-        if (propertyStoragePointerIsExternal(self, old_storage)) rt.memory.free(property.Entry, old_storage_entries);
         rt.shapes.dropUnshared(self.shape_ref);
         self.shape_ref = finalizingShape();
         self.refreshTraceShapeSummary();
@@ -2447,7 +2622,7 @@ pub const Object = extern struct {
         // by the Array class finalizer, after the shape/prototype edge. Keep the
         // same order for zjs's direct dense-storage teardown. The iterator cache
         // is likewise class-specific state rather than an own-property slot.
-        self.destroyArrayElements(rt);
+        self.destroyArrayElements();
         if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         // The non-array class payloads all share the single `u.payload`
         // union slot, discriminated by `class_payload_kind` — at most ONE is
@@ -2623,7 +2798,7 @@ pub const Object = extern struct {
 
     fn finalizeClassPayload(self: *Object, rt: *JSRuntime, generation: u64, inline_payload: bool) void {
         const payload_kind = self.flags.class_payload_kind;
-        const payload_slot = self.payloadSlot(rt);
+        const payload_slot = self.payloadSlot();
         const finalized = rt.classes.runPayloadFinalizer(
             self.class_id,
             generation,
@@ -3483,16 +3658,16 @@ pub const Object = extern struct {
         };
         if (payload.resources.len == payload.resource_capacity) {
             const new_capacity = if (payload.resource_capacity == 0) @as(usize, 4) else payload.resource_capacity * 2;
-            const next = try rt.allocRuntime(DisposableResource, new_capacity);
-            errdefer rt.memory.free(DisposableResource, next);
-            if (payload.resources.len != 0) {
-                @memcpy(next[0..payload.resources.len], payload.resources);
-            }
-            const old_resources = payload.resources;
-            const old_capacity = payload.resource_capacity;
-            payload.resources = next[0..payload.resources.len];
+            // TGC S4-c: the resource list is a subordinate `.payload` cell.
+            // The mint is adjacent to the install (only the memcpy separates
+            // them) and the OLD cell is left to the sweep, not freed.
+            const next = try createPayloadSliceCell(rt, DisposableResource, new_capacity);
+            const live = payload.resources.len;
+            if (live != 0) @memcpy(next[0..live], payload.resources);
+            payload.resources = next[0..live];
             payload.resource_capacity = new_capacity;
-            if (old_capacity != 0) rt.memory.free(DisposableResource, old_resources.ptr[0..old_capacity]);
+            // The stack may be old and the cell was published moments ago.
+            rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
         }
         const index = payload.resources.len;
         payload.resources = payload.resources.ptr[0 .. index + 1];
@@ -3562,12 +3737,15 @@ pub const Object = extern struct {
             std.debug.assert(target.flags.class_payload_kind == .disposable_stack);
             unreachable;
         };
-        _ = rt;
         std.debug.assert(target_payload.resources.len == 0 and target_payload.resource_capacity == 0);
         target_payload.resources = source_payload.resources;
         target_payload.resource_capacity = source_payload.resource_capacity;
         source_payload.resources = &.{};
         source_payload.resource_capacity = 0;
+        // TGC S4-c: the resource list is a `.payload` cell and its owner just
+        // changed. The adopting stack may be older than the cell.
+        if (target_payload.resource_capacity != 0)
+            rt.gc.rememberOwnerForBulkWrite(target.gcHeader());
     }
 
     pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
@@ -4059,10 +4237,10 @@ pub const Object = extern struct {
     pub fn ensureProxyPayload(self: *Object, rt: *JSRuntime) !void {
         std.debug.assert(self.isProxy());
         if (self.proxyPayload() != null) return;
-        const payload = try rt.createRuntime(ProxyPayload);
-        payload.* = .{};
+        const payload = try createPayloadCell(rt, ProxyPayload);
         self.payloadArm().* = @ptrCast(payload);
         self.flags.class_payload_kind = .proxy;
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
     }
 
     pub fn proxyTargetSlot(self: *Object) *?JSValue {
@@ -4099,8 +4277,10 @@ pub const Object = extern struct {
         std.debug.assert(self.arrayArm().*.count == 0 and self.arrayArm().*.capacity == 0);
         if (count == 0) return &.{};
 
-        const backing = try rt.memory.alloc(JSValue, count);
-        self.arrayArm().*.values = backing.ptr;
+        // TGC S4-b: the same `.array_storage` cell an array element buffer
+        // uses; only this owner's trace interprets the body as `?*VarRef`.
+        const backing = try createArrayStorageCell(rt, count);
+        self.arrayArm().*.values = backing;
         self.arrayArm().*.count = @intCast(count);
         self.arrayArm().*.capacity = @intCast(count);
         self.arrayArm().*.length = @intCast(count);
@@ -4231,9 +4411,45 @@ pub const Object = extern struct {
         return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.count))];
     }
 
-    fn allocatedArrayElements(self: *Object) []JSValue {
-        if (self.arrayArm().*.capacity == 0) return &.{};
-        return self.arrayArm().*.values[0..@as(usize, @intCast(self.arrayArm().*.capacity))];
+    /// TGC S4-b spec 2.2: allocate and publish a dense element buffer as an
+    /// `.array_storage` GC cell. The body is `arrayArm().values`; slots are
+    /// left UNINITIALIZED, exactly as `allocRuntime` left them, and the owner
+    /// only exposes `[0..count]` after it has written them.
+    ///
+    /// `mapped_arguments` uses the same kind: the owner's trace interprets the
+    /// body per class (`?*VarRef` there, `JSValue` for arrays), and a storage
+    /// cell has no self-interpretation to disagree with.
+    ///
+    /// Public because the two adopt sites now allocate through here instead of
+    /// handing in a `rt.memory.alloc` slice.
+    pub fn createArrayStorageCell(rt: *JSRuntime, capacity: usize) ![*]JSValue {
+        std.debug.assert(capacity != 0);
+        const payload_bytes = std.math.mul(usize, capacity, @sizeOf(JSValue)) catch
+            return error.OutOfMemory;
+        const total = std.math.add(usize, gc.metadata_prefix_size, payload_bytes) catch
+            return error.OutOfMemory;
+        // Pressure boundary before the mint; see `createPropertyStorageCell`
+        // for why nothing may collect after it.
+        rt.requestGCForAllocation(payload_bytes);
+        const body = try rt.gc.createStorageCellPublished(
+            gc.representation.array_storage_kind_tag,
+            total,
+        );
+        return @ptrCast(@alignCast(body));
+    }
+
+    /// Slice form of `createArrayStorageCell` for the adopt callers, which
+    /// think in `[]JSValue`.
+    pub fn createArrayStorageSlice(rt: *JSRuntime, capacity: usize) ![]JSValue {
+        const base = try createArrayStorageCell(rt, capacity);
+        return base[0..capacity];
+    }
+
+    /// The collector header of a dense element buffer. Only valid when
+    /// `arrayArm().capacity != 0` -- an empty arm's `values` is the null
+    /// no-payload sentinel, not a cell.
+    inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.GCObjectHeader {
+        return @ptrCast(@alignCast(values));
     }
 
     pub fn arrayElementsCapacity(self: *const Object) usize {
@@ -4374,7 +4590,10 @@ pub const Object = extern struct {
         return self.arrayArm().*.values[@intCast(self.arrayArm().*.count)];
     }
 
-    fn destroyArrayElements(self: *Object, rt: *JSRuntime) void {
+    /// TGC S4-b: the element buffer is an `.array_storage` GC cell, so this is
+    /// now only the dense-extent reset the class arms need; the memory is the
+    /// sweep's. (S4-d deletes the caller.)
+    fn destroyArrayElements(self: *Object) void {
         // Only these classes activate the dense-array union arm. Other class
         // arms may legitimately use all three words (notably inline RegExp's
         // second string pointer), so their bytes must never be interpreted as
@@ -4383,31 +4602,28 @@ pub const Object = extern struct {
             self.class_id != class.ids.arguments and
             self.class_id != class.ids.mapped_arguments) return;
         if (self.class_id == class.ids.mapped_arguments) {
-            const allocated = self.allocatedArrayElements();
             self.arrayArm().*.count = 0;
             self.arrayArm().*.capacity = 0;
             self.arrayArm().*.length = 0;
-            if (allocated.len != 0) rt.memory.free(JSValue, allocated);
             return;
         }
         if (!self.flags.fast_array and self.arrayArm().*.capacity == 0) return;
         if (self.flags.fast_array) {} else {
             std.debug.assert(self.arrayArm().*.capacity == 0);
         }
-        const allocated = self.allocatedArrayElements();
         self.arrayArm().*.count = 0;
         self.arrayArm().*.capacity = 0;
         self.arrayArm().*.length = 0;
         self.flags.fast_array = false;
-        if (allocated.len != 0) rt.memory.free(JSValue, allocated);
     }
 
-    fn freeArrayElementBufferAfterMove(self: *Object, rt: *JSRuntime) void {
+    /// TGC S4-b: dropping the dense extent is the whole release -- the
+    /// `.array_storage` cell the arm pointed at is returned by the sweep once
+    /// `capacity == 0` stops the owner's edge from reporting it.
+    fn freeArrayElementBufferAfterMove(self: *Object) void {
         std.debug.assert(!self.flags.fast_array or self.arrayArm().*.count == 0);
-        const allocated = self.allocatedArrayElements();
         self.arrayArm().*.capacity = 0;
         self.flags.fast_array = false;
-        if (allocated.len != 0) rt.memory.free(JSValue, allocated);
     }
 
     fn ensureArrayBufferCapacity(self: *Object, rt: *JSRuntime, needed_len: usize) !void {
@@ -4427,26 +4643,23 @@ pub const Object = extern struct {
             next_capacity += growth;
         }
         if (next_capacity > std.math.maxInt(u32)) return error.OutOfMemory;
-        const old_allocated = self.allocatedArrayElements();
-        if (old_allocated.len != 0) {
-            // Slab-backed small buffers cannot be remapped by the backing
-            // allocator, and some allocators decline relocation; keep the
-            // copy/free fallback for those cases.
-            if (try rt.remapRuntime(JSValue, old_allocated, next_capacity)) |next| {
-                self.arrayArm().*.values = next.ptr;
-                self.arrayArm().*.capacity = @intCast(next_capacity);
-                return;
-            }
-        }
-        const next = try rt.allocRuntime(JSValue, next_capacity);
-        errdefer rt.memory.free(JSValue, next);
+        // TGC S4-b spec 2.2: the remap arm is gone. A GC cell has a collector
+        // Metadata prefix and a bitmap/extent identity, so it cannot be grown
+        // in place by the backing allocator; growth is always a fresh cell
+        // plus a copy, and the old cell is left to the sweep.
+        const next = try createArrayStorageCell(rt, next_capacity);
         if (self.flags.fast_array and self.arrayArm().*.count != 0) {
             const count: usize = @intCast(self.arrayArm().*.count);
             @memcpy(next[0..count], self.arrayArm().*.values[0..count]);
         }
-        self.arrayArm().*.values = next.ptr;
+        self.arrayArm().*.values = next;
         self.arrayArm().*.capacity = @intCast(next_capacity);
-        if (old_allocated.len != 0) rt.memory.free(JSValue, old_allocated);
+        // A long-lived array adopting a cell published moments ago is an
+        // old-to-young edge; the minor's sticky marks stop at the owner.
+        // (`appendUninitializedFastArraySlot` and the other entries remember
+        // the owner too, but `fastArrayEnsureCapacity` can be called on its
+        // own and the cell must survive the next minor either way.)
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
     }
 
     pub fn appendUninitializedFastArraySlot(self: *Object, rt: *JSRuntime) !*JSValue {
@@ -5585,33 +5798,33 @@ pub const Object = extern struct {
         rt.gc.generationalBarrier(self.gcHeader(), next_file.cycleMarkHeader());
     }
 
-    pub fn isCallSite(self: *const Object, rt: *const JSRuntime) bool {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.is_callsite;
+    pub fn isCallSite(self: *const Object) bool {
+        if (self.ordinaryPayloadConst()) |payload| return payload.is_callsite;
         return false;
     }
 
-    pub fn callSiteFile(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.callsite_file;
+    pub fn callSiteFile(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.callsite_file;
         return null;
     }
 
-    pub fn callSiteFunctionName(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.callsite_function;
+    pub fn callSiteFunctionName(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.callsite_function;
         return null;
     }
 
-    pub fn callSiteLine(self: *const Object, rt: *const JSRuntime) i32 {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.callsite_line;
+    pub fn callSiteLine(self: *const Object) i32 {
+        if (self.ordinaryPayloadConst()) |payload| return payload.callsite_line;
         return 1;
     }
 
-    pub fn callSiteColumn(self: *const Object, rt: *const JSRuntime) i32 {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.callsite_column;
+    pub fn callSiteColumn(self: *const Object) i32 {
+        if (self.ordinaryPayloadConst()) |payload| return payload.callsite_column;
         return 1;
     }
 
-    pub fn callSiteIsNative(self: *const Object, rt: *const JSRuntime) bool {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.is_callsite and payload.callsite_is_native;
+    pub fn callSiteIsNative(self: *const Object) bool {
+        if (self.ordinaryPayloadConst()) |payload| return payload.is_callsite and payload.callsite_is_native;
         return false;
     }
 
@@ -5631,8 +5844,8 @@ pub const Object = extern struct {
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
     }
 
-    pub fn errorStack(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.error_stack;
+    pub fn errorStack(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.error_stack;
         return null;
     }
 
@@ -5648,13 +5861,13 @@ pub const Object = extern struct {
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
     }
 
-    pub fn errorStackSites(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.error_stack_sites;
+    pub fn errorStackSites(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.error_stack_sites;
         return null;
     }
 
-    pub fn errorStackSiteCount(self: *const Object, rt: *const JSRuntime) usize {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.error_stack_site_count;
+    pub fn errorStackSiteCount(self: *const Object) usize {
+        if (self.ordinaryPayloadConst()) |payload| return payload.error_stack_site_count;
         return 0;
     }
 
@@ -5668,8 +5881,8 @@ pub const Object = extern struct {
         return &payload.promise_reaction_on_fulfilled;
     }
 
-    pub fn promiseReactionOnFulfilled(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_reaction_on_fulfilled;
+    pub fn promiseReactionOnFulfilled(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_on_fulfilled;
         return null;
     }
 
@@ -5682,8 +5895,8 @@ pub const Object = extern struct {
         return &payload.promise_reaction_on_rejected;
     }
 
-    pub fn promiseReactionOnRejected(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_reaction_on_rejected;
+    pub fn promiseReactionOnRejected(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_on_rejected;
         return null;
     }
 
@@ -5696,8 +5909,8 @@ pub const Object = extern struct {
         return &payload.promise_reaction_resolve;
     }
 
-    pub fn promiseReactionResolve(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_reaction_resolve;
+    pub fn promiseReactionResolve(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_resolve;
         return null;
     }
 
@@ -5710,8 +5923,8 @@ pub const Object = extern struct {
         return &payload.promise_reaction_reject;
     }
 
-    pub fn promiseReactionReject(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_reaction_reject;
+    pub fn promiseReactionReject(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_reject;
         return null;
     }
 
@@ -5724,8 +5937,8 @@ pub const Object = extern struct {
         return &payload.promise_already_resolved;
     }
 
-    pub fn promiseAlreadyResolved(self: *const Object, rt: *const JSRuntime) bool {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_already_resolved;
+    pub fn promiseAlreadyResolved(self: *const Object) bool {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_already_resolved;
         return false;
     }
 
@@ -5734,8 +5947,8 @@ pub const Object = extern struct {
         return &payload.promise_capability_resolve;
     }
 
-    pub fn promiseCapabilityResolve(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_capability_resolve;
+    pub fn promiseCapabilityResolve(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_capability_resolve;
         return null;
     }
 
@@ -5744,8 +5957,8 @@ pub const Object = extern struct {
         return &payload.promise_capability_reject;
     }
 
-    pub fn promiseCapabilityReject(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_capability_reject;
+    pub fn promiseCapabilityReject(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_capability_reject;
         return null;
     }
 
@@ -5768,8 +5981,8 @@ pub const Object = extern struct {
         return &payload.promise_combinator_resolve;
     }
 
-    pub fn promiseCombinatorResolve(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_combinator_resolve;
+    pub fn promiseCombinatorResolve(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_resolve;
         return null;
     }
 
@@ -5782,8 +5995,8 @@ pub const Object = extern struct {
         return &payload.promise_combinator_reject;
     }
 
-    pub fn promiseCombinatorReject(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_combinator_reject;
+    pub fn promiseCombinatorReject(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_reject;
         return null;
     }
 
@@ -5796,8 +6009,8 @@ pub const Object = extern struct {
         return &payload.promise_combinator_values;
     }
 
-    pub fn promiseCombinatorValues(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_combinator_values;
+    pub fn promiseCombinatorValues(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_values;
         return null;
     }
 
@@ -5810,8 +6023,8 @@ pub const Object = extern struct {
         return &payload.promise_combinator_keys;
     }
 
-    pub fn promiseCombinatorKeys(self: *const Object, rt: *const JSRuntime) ?JSValue {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_combinator_keys;
+    pub fn promiseCombinatorKeys(self: *const Object) ?JSValue {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_keys;
         return null;
     }
 
@@ -5824,8 +6037,8 @@ pub const Object = extern struct {
         return &payload.promise_combinator_remaining;
     }
 
-    pub fn promiseCombinatorRemaining(self: *const Object, rt: *const JSRuntime) i32 {
-        if (self.ordinaryPayloadConst(rt)) |payload| return payload.promise_combinator_remaining;
+    pub fn promiseCombinatorRemaining(self: *const Object) i32 {
+        if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_remaining;
         return 0;
     }
 
@@ -5960,58 +6173,53 @@ pub const Object = extern struct {
     }
 
     /// Payload slot for call sites whose class may be the slots2 ordinary
-    /// Object. All other class arms stay resident at body+24.
-    pub inline fn payloadSlot(self: *Object, rt: *JSRuntime) *class.Payload {
-        if (!self.hasSlots2Layout()) return self.payloadArm();
-        std.debug.assert(self.class_id == class.ids.object);
-        return rt.slots2_payloads.getPtr(self) orelse
-            @panic("slots2 payload kind has no side-table entry");
+    /// Object.
+    ///
+    /// TGC S4-c: this used to be a `rt.slots2_payloads` side-table probe,
+    /// because a slots2 body has no payload arm -- its two inline property
+    /// entries begin at exactly body+24. The side table is gone: attaching a
+    /// payload to a slots2 object now SPILLS those entries into a
+    /// `.property_storage` cell first (`spillInlinePropertyStorageForPayload`),
+    /// which frees the arm word for the payload pointer. So the slot is at the
+    /// same offset for every layout, and the only thing that changes is the
+    /// invariant behind it: a slots2 object with `class_payload_kind != .none`
+    /// never has inline property storage (audited by
+    /// `verifyObjectPropertyStorageLayouts`).
+    pub inline fn payloadSlot(self: *const Object) *class.Payload {
+        return @ptrFromInt(@intFromPtr(self) + @sizeOf(Object));
     }
 
-    /// Test-only deletion mutant: route a slots2 object into the resident arm
-    /// that its 56-byte body deliberately does not own. `payloadArm` is the
-    /// production assertion boundary for every such accidental route.
+    /// Test-only deletion mutant: skip the TGC S4-c spill, so a slots2
+    /// object's payload pointer would be written on top of its first inline
+    /// property entry. `verifyObjectPropertyStorageLayouts` is the production
+    /// audit boundary for that state.
     pub fn injectSlots2PayloadArmMutationForTest(self: *Object) void {
-        if (comptime !builtin.is_test) @compileError("test-only M-cut slots2 payload-arm mutation");
-        if (gc.mCutInjection(2)) _ = self.payloadArm().*;
-    }
-
-    inline fn payloadValueConst(self: *const Object, rt: *const JSRuntime) class.Payload {
-        if (!self.hasSlots2Layout()) return self.payloadArm().*;
-        std.debug.assert(self.class_id == class.ids.object);
-        return rt.slots2_payloads.get(@constCast(self)) orelse
-            @panic("slots2 payload kind has no side-table entry");
+        if (comptime !builtin.is_test) @compileError("test-only M-cut slots2 payload-spill mutation");
+        if (gc.mCutInjection(2)) self.setPropertyStorageInline();
     }
 
     /// Read-only view for the minor audit's edge naming (`gc_trace_stw`).
-    pub fn ordinaryPayloadForAudit(self: *const Object, rt: *const JSRuntime) ?*const OrdinaryPayload {
-        return self.ordinaryPayloadConst(rt);
+    pub fn ordinaryPayloadForAudit(self: *const Object) ?*const OrdinaryPayload {
+        return self.ordinaryPayloadConst();
     }
 
-    fn ordinaryPayload(self: *Object, rt: *JSRuntime) ?*OrdinaryPayload {
+    fn ordinaryPayload(self: *const Object) ?*OrdinaryPayload {
         if (self.flags.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.payloadSlot(rt).*.?));
+        return @ptrCast(@alignCast(self.payloadSlot().*.?));
     }
 
-    fn ordinaryPayloadConst(self: *const Object, rt: *const JSRuntime) ?*const OrdinaryPayload {
+    fn ordinaryPayloadConst(self: *const Object) ?*const OrdinaryPayload {
         if (self.flags.class_payload_kind != .ordinary) return null;
-        return @ptrCast(@alignCast(self.payloadValueConst(rt).?));
+        return @ptrCast(@alignCast(self.payloadSlot().*.?));
     }
 
     fn destroyOrdinaryPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.ordinaryPayload(rt) orelse return;
-        if (self.hasSlots2Layout()) {
-            if (!gc.mCutInjection(3)) {
-                const removed = rt.slots2_payloads.fetchRemove(self) orelse
-                    @panic("slots2 payload destroy lost side-table entry");
-                std.debug.assert(removed.value == @as(class.Payload, @ptrCast(payload)));
-            }
-        } else {
-            self.payloadArm().* = null;
-        }
+        const payload = self.ordinaryPayload() orelse return;
+        self.payloadSlot().* = null;
         self.flags.class_payload_kind = .none;
+        // TGC S4-c: the payload is a `.payload` GC cell. Dropping the pointer
+        // is the whole release -- the sweep returns the cell.
         payload.destroy(rt);
-        rt.destroyRuntime(OrdinaryPayload, payload);
     }
 
     fn iteratorPayload(self: *Object) ?*IteratorPayload {
@@ -6186,7 +6394,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(DisposableStackPayload, payload);
     }
 
     fn globalPayload(self: *Object) ?*GlobalPayload {
@@ -6206,7 +6413,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.destroyRuntime(GlobalPayload, payload);
     }
 
     fn destroyRealmRecordPayload(self: *Object, rt: *JSRuntime) void {
@@ -6282,7 +6488,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(RegExpPayload, payload);
     }
 
     fn boundFunctionPayload(self: *Object) ?*BoundFunctionPayload {
@@ -6302,7 +6507,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(BoundFunctionPayload, payload);
     }
 
     fn proxyPayload(self: *Object) ?*ProxyPayload {
@@ -6322,7 +6526,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(ProxyPayload, payload);
     }
 
     fn argumentsPayload(self: *Object) ?*ArgumentsPayload {
@@ -6342,7 +6545,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(ArgumentsPayload, payload);
     }
 
     fn objectDataPayload(self: *Object) ?*ObjectDataPayload {
@@ -6362,7 +6564,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(ObjectDataPayload, payload);
     }
 
     fn varRefPayload(self: *Object) ?*VarRefPayload {
@@ -6380,7 +6581,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(VarRefPayload, payload);
     }
 
     pub fn promisePayload(self: *Object) ?*PromisePayload {
@@ -6398,7 +6598,6 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(PromisePayload, payload);
     }
 
     fn generatorPayload(self: *Object) ?*GeneratorPayload {
@@ -6441,8 +6640,9 @@ pub const Object = extern struct {
 
             if (self.bytecodeFunctionAux()) |aux| {
                 self.bytecodeArm().*.home_or_aux = null;
+                // TGC S4-c: the aux record is a `.payload` cell; the sweep
+                // returns it.
                 aux.destroy(rt);
-                rt.memory.destroy(BytecodeFunctionAux, aux);
             } else if (self.functionHomeObject()) |_| {
                 self.bytecodeArm().*.home_or_aux = null;
             }
@@ -6485,11 +6685,13 @@ pub const Object = extern struct {
         // payload pointer — do not pun the union into markPayload.
         if (self.isArray() or class.isBytecodeFunctionClass(self.class_id)) return false;
         if (self.hasSlots2Layout()) {
-            // slots2 owns no resident arm: the only payload it can carry is an
-            // attached ordinary payload living in the side table. External and
+            // A slots2 body's arm word is a payload word only once a payload
+            // has been attached (TGC S4-c spill); with no payload it still
+            // holds the first inline property entry, so the discriminator --
+            // not a null probe -- is what admits the slot here. External and
             // dynamic classes never get the slots2 layout.
             if (self.flags.class_payload_kind == .none) return false;
-            const payload_slot = self.payloadSlot(rt);
+            const payload_slot = self.payloadSlot();
             if (payload_slot.* == null) return false;
             return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), payload_slot, visitor);
         }
@@ -6713,7 +6915,7 @@ pub const Object = extern struct {
 
         switch (self.flags.class_payload_kind) {
             .none => {},
-            .ordinary => if (self.ordinaryPayloadConst(rt)) |payload| {
+            .ordinary => if (self.ordinaryPayloadConst()) |payload| {
                 Helper.allocation(recorder, .trace_payload, payload, @sizeOf(OrdinaryPayload), @sizeOf(OrdinaryPayload));
             },
             .iterator => if (self.iteratorPayloadConst()) |payload| {
@@ -6851,6 +7053,17 @@ pub const Object = extern struct {
     }
 
     inline fn tracePropertyEdgesFallible(self: *Object, visitor: anytype) !void {
+        // TGC S4-b spec 2.2: an EXTERNAL property buffer is a
+        // `.property_storage` GC cell with no edges of its own, so the owner's
+        // trace is the only thing that can keep it alive. The empty sentinel
+        // and the inline slots2 tail are not cells, which is exactly what
+        // `propertyStoragePointerIsExternal` answers. Reported here rather
+        // than in `traceChildEdgesFallible` because BOTH the ordinary-object
+        // early return and the general path funnel through this one call.
+        const storage = self.prop_values;
+        if (propertyStoragePointerIsExternal(self, storage)) {
+            try object_payloads.callVisitStorageCell(visitor, propertyStorageCellHeader(storage));
+        }
         // A mutator barrier may publish remembered bit7 between open
         // incremental/concurrent mark slices. The semantic accessor masks
         // that independent membership cache; begin-time clearing alone is
@@ -6914,6 +7127,15 @@ pub const Object = extern struct {
             }
             return;
         }
+        // TGC S4-c spec 2.3: an a-class payload is a `.payload` GC cell whose
+        // ONLY keeper is this edge. The cell is a leaf to the collector
+        // (`traceHeaderEdges` returns for `.payload`); its CONTENTS are still
+        // walked by the payload's own `traceChildEdges` in the dispatch below,
+        // which is why one report here covers every a-class kind.
+        if (self.hasTracerOwnedPayloadCell()) {
+            if (self.payloadSlot().*) |payload_ptr|
+                try object_payloads.callVisitStorageCell(visitor, payloadCellHeader(payload_ptr));
+        }
         if (self.flags.class_payload_kind == .realm_record) {
             const ptr = self.payloadArm().* orelse unreachable;
             const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
@@ -6943,8 +7165,22 @@ pub const Object = extern struct {
         // is a freshly-created object that is not yet a cycle member, so skipping
         // it for this trace cannot collect it prematurely.
         try self.tracePropertyEdgesFallible(visitor);
-        if (self.ordinaryPayload(rt)) |payload| {
+        if (self.ordinaryPayload()) |payload| {
             try payload.traceChildEdges(visitor);
+        }
+        // TGC S4-b spec 2.2: the dense element buffer is an `.array_storage`
+        // GC cell with no edges of its own. `capacity != 0` is exactly "the
+        // arm names a cell" -- an empty arm holds the null no-payload
+        // sentinel. `mapped_arguments` shares both the arm and the kind (its
+        // body is read as `?*VarRef`), so one guard covers both owners; it is
+        // the same predicate `recordTraceStorageFootprint` uses.
+        if (self.flags.fast_array or self.class_id == class.ids.mapped_arguments) {
+            if (self.arrayArm().*.capacity != 0) {
+                try object_payloads.callVisitStorageCell(
+                    visitor,
+                    arrayStorageCellHeader(self.arrayArm().*.values),
+                );
+            }
         }
         for (self.arrayElements()) |*stored| {
             try Helper.callVisitValue(visitor, stored);
@@ -6997,9 +7233,11 @@ pub const Object = extern struct {
             }
             // zjs-only aux (source / realm_global / promise slots). Absent in
             // qjs 6262; keep so rare cycle edges stay live. Then return: the
-            // class mark is done.
-            if (self.functionRarePayload()) |rare| {
-                try rare.traceChildEdges(visitor);
+            // class mark is done. TGC S4-c: the aux record is a `.payload`
+            // cell, so report the cell before walking its contents.
+            if (self.bytecodeFunctionAux()) |aux| {
+                try object_payloads.callVisitStorageCell(visitor, payloadCellHeader(aux));
+                try aux.rare.traceChildEdges(visitor);
             }
             return;
         }
@@ -9725,7 +9963,7 @@ pub const Object = extern struct {
             try self.addProperty(rt, atom_id, descriptor.Descriptor.data(stored, true, true, true));
         }
         self.arrayArm().*.count = 0;
-        self.freeArrayElementBufferAfterMove(rt);
+        self.freeArrayElementBufferAfterMove();
         // Sparse array: count stays 0, length is the JS-observable `.length`.
         self.arrayArm().*.length = saved_length;
         self.flags.is_std_array_prototype = false;
@@ -9967,7 +10205,6 @@ pub const Object = extern struct {
         const old_len = self.shape_ref.prop_count;
         const old_storage = self.prop_values;
         const old_capacity = self.propertyStorageCapacity();
-        const old_properties = self.propertyStorageEntries(old_capacity);
         var current_capacity = old_capacity;
         var grew_properties = false;
         if (old_len + 1 > old_capacity) {
@@ -9985,15 +10222,23 @@ pub const Object = extern struct {
                 shape.propertyCapacityForNeeded(old_len + 1),
                 @as(usize, self.shape_ref.prop_size),
             );
-            const next = try rt.allocRuntime(property.Entry, next_capacity);
-            errdefer rt.memory.free(property.Entry, next);
+            // TGC S4-b spec 2.2: the replacement buffer is a
+            // `.property_storage` GC cell. The OLD cell is not freed -- once
+            // the pointer below is overwritten nothing names it and the sweep
+            // returns it.
+            const next = try createPropertyStorageCell(rt, next_capacity);
             // The dominant grow is a fresh object's FIRST property (old_len ==
             // 0, no storage yet): skip the memcpy-runtime call for the empty
             // copy instead of paying a zero-length `bl memcpy` per literal.
             if (old_len != 0) {
                 @memcpy(next[0..old_len], self.propertyStorageEntries(old_len));
             }
-            self.setPropertyStorageExternal(next.ptr);
+            self.setPropertyStorageExternal(next);
+            // A long-lived owner adopting a cell published moments ago is an
+            // old-to-young edge like the Shape adoption below: the minor's
+            // sticky marks stop the trace at the owner, so without this the
+            // cell is condemned while `prop_values` still points at it.
+            rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
             current_capacity = next_capacity;
             grew_properties = true;
         }
@@ -10031,8 +10276,10 @@ pub const Object = extern struct {
                         new_properties[0..old_len],
                     );
                 }
+                // TGC S4-b: the abandoned replacement cell is left to the
+                // sweep; only the pointer (and the inline copy above) is
+                // rolled back.
                 self.restorePropertyStorage(old_storage);
-                rt.memory.free(property.Entry, new_properties);
             }
         };
 
@@ -10065,8 +10312,6 @@ pub const Object = extern struct {
         // Shape. Publish its trace projection before any later safepoint can
         // observe the object; no fallible operation remains in this append.
         self.commitTraceShapeAppend(old_len, entry_flags);
-        if (grew_properties and propertyStoragePointerIsExternal(self, old_storage))
-            rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
 
@@ -10114,7 +10359,6 @@ pub const Object = extern struct {
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
-        const old_storage = self.prop_values;
         const old_capacity = self.propertyStorageCapacity();
         if (needed <= old_capacity) return;
         // Same invariant as the append path: the buffer must come out equal to
@@ -10125,19 +10369,28 @@ pub const Object = extern struct {
             shape.propertyCapacityForNeeded(needed),
             @as(usize, self.shape_ref.prop_size),
         );
-        const next = try rt.allocRuntime(property.Entry, next_capacity);
-        errdefer rt.memory.free(property.Entry, next);
+        // TGC S4-b: replacement `.property_storage` cell; the old one is left
+        // to the sweep once the pointer below stops naming it.
+        //
+        // The copy and the INSTALL both precede `reserveProperties`, which
+        // allocates: a bare cell has no precise root, so it may not be left
+        // sitting in a local across a collection boundary. Installing early is
+        // safe in both directions -- the live prefix is already copied, and if
+        // `reserveProperties` fails the object simply keeps a buffer wider than
+        // the `prop_size` it advertises, which every reader clamps to.
+        const next = try createPropertyStorageCell(rt, next_capacity);
         const used = self.shape_ref.prop_count;
         @memcpy(next[0..used], self.propertyEntries());
-        const old_properties = self.propertyStorageEntries(old_capacity);
+        self.setPropertyStorageExternal(next);
+        // Old owner, freshly published (young) cell -- same obligation the
+        // append path takes.
+        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
         try rt.shapes.reserveProperties(&self.shape_ref, next_capacity);
         // Every write to `shape_ref` is an owner adopting a Shape: the clone or
         // relocation this call may perform produces a fresh, young one, and a
         // long-lived owner reaching it is an old-to-young edge the minor's
         // sticky marks would otherwise stop short of.
         rt.gc.generationalBarrier(self.gcHeader(), &self.shape_ref.header);
-        self.setPropertyStorageExternal(next.ptr);
-        if (propertyStoragePointerIsExternal(self, old_storage)) rt.memory.free(property.Entry, old_properties);
     }
 
     fn propertyStorageCapacity(self: *const Object) usize {
@@ -10159,6 +10412,47 @@ pub const Object = extern struct {
     pub inline fn trailingPropertyStorageBase(self: *const Object) [*]property.Entry {
         std.debug.assert(self.hasSlots2Layout());
         return @ptrFromInt(@intFromPtr(self) + slots2_property_storage_offset);
+    }
+
+    /// TGC S4-b spec 2.2: allocate and publish an external property buffer as
+    /// a `.property_storage` GC cell. The cell BODY is `prop_values`, so
+    /// `@offsetOf(Object, "prop_values") == 16`, the empty sentinel and the
+    /// inline slots2 tail are all unchanged, and `propertyEntry()` keeps
+    /// reloading one pointer.
+    ///
+    /// Entries are left UNINITIALIZED, exactly as `allocRuntime` left them:
+    /// every caller fills or memcpys the live prefix before the object can be
+    /// traced, and a storage cell is a leaf so the tracer never reads a body
+    /// it did not have to. The threshold request mirrors `allocRuntime`'s --
+    /// it records pressure and does NOT collect -- so this batch introduces no
+    /// new collection boundary on any property path.
+    pub fn createPropertyStorageCell(rt: *JSRuntime, capacity: usize) ![*]property.Entry {
+        std.debug.assert(capacity != 0);
+        const payload_bytes = std.math.mul(usize, capacity, @sizeOf(property.Entry)) catch
+            return error.OutOfMemory;
+        const total = std.math.add(usize, gc.metadata_prefix_size, payload_bytes) catch
+            return error.OutOfMemory;
+        // Same allocation-pressure boundary `allocRuntime` gave the raw buffer
+        // this replaces, and it is taken BEFORE the cell exists. That ordering
+        // is the whole safety rule for a storage cell: between the mint and the
+        // owner's install its only reference is the caller's local, and the
+        // PRECISE root set has no way to name a bare cell
+        // (`forcePreciseRootScanForTest` builds exercise exactly that), so
+        // every caller keeps mint and install adjacent and nothing in this
+        // funnel can collect after the mint.
+        rt.requestGCForAllocation(payload_bytes);
+        const body = try rt.gc.createStorageCellPublished(
+            gc.representation.property_storage_kind_tag,
+            total,
+        );
+        return @ptrCast(@alignCast(body));
+    }
+
+    /// The collector header of an external property buffer. Only valid when
+    /// `propertyStoragePointerIsExternal` says so: the empty sentinel and the
+    /// inline slots2 tail are not cells.
+    pub inline fn propertyStorageCellHeader(ptr: [*]property.Entry) *gc.GCObjectHeader {
+        return @ptrCast(@alignCast(ptr));
     }
 
     pub inline fn propertyStoragePointerIsExternal(self: *const Object, ptr: [*]property.Entry) bool {
@@ -11044,7 +11338,8 @@ fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*
     // qjs js_create_array (quickjs.c:9601): pre-sized dense fast array instead of
     // two per-element defineOwnProperty. key_value/rooted_value stay rooted (the
     // root_frame above + the local defer) across the slice alloc; dups precede adopt.
-    const elements = try rt.memory.alloc(JSValue, 2);
+    // TGC S4-b spec 2.2: `.array_storage` GC cell.
+    const elements = try Object.createArrayStorageSlice(rt, 2);
     elements[0] = key_value;
     elements[1] = rooted_value;
     arr.adoptDenseArrayElementsAssumingEmpty(rt, elements);
