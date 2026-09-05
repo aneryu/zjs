@@ -144,8 +144,19 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     // It is a crash/invariant smoke, not a measurement; the CPUs are the
     // big cores of both L3 domains by default and `-Dgate-smoke-cpus` overrides.
     const gate_smoke_cpus = b.option([]const u8, "gate-smoke-cpus", "Comma-separated CPUs for the parallel fixed-work smoke (default 5,6,7,8,15,16)") orelse "5,6,7,8,15,16";
+    // One ordinary run per workload, not the script's default three: the
+    // arena-audit/stats run is the stronger half, and on the merge gate the
+    // smoke is the critical path (earley-boyer alone: 3 x 22 s + 30 s audit
+    // on one X925 core). Every batch re-runs it, so a scheduling-dependent
+    // crash still gets its repeats across batches. `-Dgate-smoke-runs=3`
+    // restores the old shape.
+    const gate_smoke_runs = b.option([]const u8, "gate-smoke-runs", "Ordinary runs per workload before the arena-audit run (default 1)") orelse "1";
+    const gate_smoke_corpus = b.option([]const u8, "gate-smoke-corpus", "Fixed-work corpus directory (default /tmp/gcgap-fixed)") orelse "/tmp/gcgap-fixed";
     const run_gate_smoke = b.addSystemCommand(&.{"tools/perf/gate_smoke.sh"});
     run_gate_smoke.addArtifactArg(zjs_exe);
+    // Positional: corpus, then a CPU the script validates but does not use
+    // in parallel mode, then the ordinary-run count.
+    run_gate_smoke.addArgs(&.{ gate_smoke_corpus, "5", gate_smoke_runs });
     run_gate_smoke.setEnvironmentVariable("ZJS_GATE_PARALLEL_CPUS", gate_smoke_cpus);
     run_gate_smoke.step.dependOn(&install_zjs.step);
     // The script's own stale-binary guard compares against source mtimes and
