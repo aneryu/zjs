@@ -214,6 +214,8 @@ pub fn callValueOrBytecodeRoot(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    var rooted_this = this_value;
+    var rooted_func = func;
     var inline_args: [8]core.JSValue = undefined;
     var args_buffer: core.runtime.ValueRootBuffer = .{};
     defer args_buffer.deinit(ctx.runtime);
@@ -222,10 +224,38 @@ pub fn callValueOrBytecodeRoot(
         rooted_args = inline_args[0..args.len];
         @memcpy(rooted_args, args);
     } else {
+        // `initCopy` allocates, and an allocation is a collection point. The
+        // caller's `args` window is the only storage naming these values until
+        // the copy lands, so it has to be a declared root for the duration of
+        // the copy -- the destination buffer does not exist yet.
+        var source_slices = [_]core.runtime.ValueRootSlice{
+            .{ .borrowed = args },
+        };
+        var source_frame = core.runtime.ValueRootFrame{ .slices = &source_slices };
+        source_frame.activate(ctx.runtime);
+        defer source_frame.deactivate(ctx.runtime);
         args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, args);
         rooted_args = args_buffer.values;
     }
-    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, rooted_args, caller_function, caller_frame, true);
+    // The copy above -- not the caller's window -- is the authoritative
+    // storage for the whole call, so the root frame has to name it and stay
+    // active until the callee returns. Without this the "Root" in the name was
+    // a copy and nothing else: the callee's allocations could collect an
+    // argument that only this frame still held.
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_this },
+        .{ .value = &rooted_func },
+    };
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        .{ .mutable = &rooted_args },
+    };
+    var root_frame = core.runtime.ValueRootFrame{
+        .values = &root_values,
+        .slices = &root_slices,
+    };
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
+    return callValueOrBytecodeDispatch(ctx, output, global, rooted_this, rooted_func, rooted_args, caller_function, caller_frame, true);
 }
 
 /// Eagerly coerce a receiver for suspended async/generator state, whose `this`

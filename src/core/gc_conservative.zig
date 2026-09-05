@@ -895,22 +895,33 @@ pub const RootsDiagCensus = struct {
     pub const kind_churn_floor: usize = 3;
 
     fn entryVerdict(entry: StabilityEntry) Verdict {
-        // A header-exact word is the one shape residue essentially never
-        // takes, so it is excluded from the residue arm outright.
+        // Signature 1: same slot, same header, collection after collection --
+        // the slot is not being written at all.
+        //
+        // Gated on non-exactness: a header-exact word is the one shape residue
+        // essentially never takes, and an exact word that keeps naming the same
+        // header is the signature of a long-lived REAL root, which must stay on
+        // the worklist.
+        //
+        // The first hit at a site can never be stable, so a rate can only clear
+        // 90% honestly once the site has been seen a few times.
         const non_exact = entry.hits - entry.exact_hits;
         if (non_exact * 2 > entry.hits) {
-            // Signature 1: same slot, same header, collection after
-            // collection -- the slot is not being written at all.
-            //
-            // The first hit at a site can never be stable, so a rate can only
-            // clear 90% honestly once the site has been seen a few times.
             if (entry.hits >= 4 and entry.stable_hits * 10 > entry.hits * 9) return .likely_residue;
-            // Signature 2: the slot resolves to a different KIND of cell over
-            // time. This is the one that catches residue whose word is
-            // rewritten each script (the `eval` compile-phase slots), where
-            // header stability is diluted to nothing by construction.
-            if (entry.kindCount() >= kind_churn_floor) return .likely_residue;
         }
+        // Signature 2: the slot resolves to a different KIND of cell over time.
+        // This is the one that catches residue whose word is rewritten each
+        // script (the `eval` compile-phase slots), where header stability is
+        // diluted to nothing by construction.
+        //
+        // Deliberately OUTSIDE the non-exact gate (R1-d). A real root slot is a
+        // typed Zig local, so its static type pins the kind no matter how the
+        // word was formed; kind drift and pointer exactness are independent
+        // facts. Under the old gate an exact-and-churning slot -- `stringCall`
+        // fp-488, 1103 hits, 79% stable, five kinds -- could never be called
+        // anything but `candidate`, so the R1 worklist carried dead slots that
+        // no root can fix.
+        if (entry.kindCount() >= kind_churn_floor) return .likely_residue;
         const exactish = entry.exact_hits + entry.prefix_hits;
         if (exactish * 2 > entry.hits and @as(usize, entry.slot_bucket) * @sizeOf(usize) <= callee_saved_span) {
             return .likely_spill;
@@ -1450,6 +1461,11 @@ test "R1-b verdict calls a stale interior slot residue" {
     // INTERIOR word into a heap cell, never rewritten between scans. No root
     // can fix this shape, so the census has to say so rather than carry it on
     // the R1 worklist as a missing root.
+    //
+    // This is signature 1 specifically: the word is interior (so the non-exact
+    // gate opens) and the header never changes. One kind throughout, so the
+    // kind-churn arm stays silent and the verdict below is the stability arm's
+    // alone.
     var stale: [1]usize = .{@intFromPtr(target) + @sizeOf(usize)};
     diagRescanFixedSlot(rt, &stale, 16);
     std.mem.doNotOptimizeAway(&stale);
@@ -1486,6 +1502,11 @@ test "R1-b verdict calls a bare exact pointer in a deep slot a candidate root" {
     // A real unrooted local: header-exact, and naming a different object in
     // the second half of the run. Changing what it points at is precisely what
     // a live local does and dead residue does not.
+    //
+    // Both halves name an `object`, so the site sees exactly one kind. That is
+    // what keeps this a candidate now that the kind-churn arm runs outside the
+    // non-exact gate: a typed local's kind does not drift, and neither does
+    // this one.
     slot[0] = @intFromPtr(first.gcHeader());
     diagRescanFixedSlot(rt, slot, 3);
     slot[0] = @intFromPtr(second.gcHeader());
@@ -1495,5 +1516,44 @@ test "R1-b verdict calls a bare exact pointer in a deep slot a candidate root" {
     try std.testing.expectEqual(
         @as(?RootsDiagCensus.Verdict, .candidate_root),
         diagVerdictForHeader(@intFromPtr(second.gcHeader())),
+    );
+}
+
+test "R1-b verdict calls an exact slot with drifting kinds residue" {
+    if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
+
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Three DIFFERENT kinds through one header-exact slot. Exactness and kind
+    // drift are independent facts: a typed Zig local is exact AND single-kind,
+    // so drift alone convicts the slot even when every word was a clean header
+    // pointer. This is the R1-c `stringCall` fp-488 shape (exact, 79% stable,
+    // five kinds) that the pre-R1-d rule could only ever call a candidate.
+    const object = try object_mod.Object.create(rt, @import("class.zig").ids.object, null);
+    const shape_ref = try rt.shapes.create(null);
+    rt.shapes.publish(shape_ref);
+    const cell = try @import("var_ref.zig").VarRef.createClosed(rt, @import("value.zig").JSValue.undefinedValue());
+
+    var cells: [64]usize = @splat(0);
+    const frame_base = @frameAddress();
+    var index: usize = 0;
+    while (index < cells.len) : (index += 1) {
+        if (frame_base -| @intFromPtr(&cells[index]) > RootsDiagCensus.callee_saved_span) break;
+    }
+    if (index == cells.len) return error.SkipZigTest;
+    const slot: *[1]usize = @ptrCast(&cells[index]);
+
+    slot[0] = @intFromPtr(&shape_ref.header);
+    diagRescanFixedSlot(rt, slot, 3);
+    slot[0] = @intFromPtr(&cell.header);
+    diagRescanFixedSlot(rt, slot, 3);
+    slot[0] = @intFromPtr(object.gcHeader());
+    diagRescanFixedSlot(rt, slot, 3);
+    std.mem.doNotOptimizeAway(&cells);
+
+    try std.testing.expectEqual(
+        @as(?RootsDiagCensus.Verdict, .likely_residue),
+        diagVerdictForHeader(@intFromPtr(object.gcHeader())),
     );
 }
