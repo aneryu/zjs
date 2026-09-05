@@ -1051,10 +1051,15 @@ pub const Registry = struct {
     /// Skips mirror the old release guards: during `gc.deinit` the teardown
     /// pass owns every shape, and a condemned (cycle-visited) shape is freed
     /// by the morgue's shape pass after all its objects.
+    ///
+    /// TGC S4-h: the condemnation test is the reserved mark epoch, which is
+    /// what a list carrier's `mark_epoch` field carries once the sweep has
+    /// pulled it off `gc_obj_list` -- the O(1) membership answer the intrusive
+    /// list cannot give.
     pub fn dropUnshared(self: *Registry, shape: *Shape) void {
         if (shape.isShared()) return;
         if (self.gc_registry.phase == .deinit) return;
-        if (shape.header.metaConst().flags.cycle_visited) return;
+        if (gc.headerCondemned(&shape.header)) return;
         self.destroyShape(shape);
     }
 

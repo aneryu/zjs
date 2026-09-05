@@ -1931,7 +1931,7 @@ pub const JSRuntime = struct {
         // rediscover facts already established by condemnation; retain its
         // mandatory byte debit without paying the outlined call. RC does not
         // compile this arm.
-        if (object.gcHeaderConst().metaConst().flags.cycle_visited) {
+        if (gc.headerCondemned(object.gcHeaderConst())) {
             self.gc.recordDetachedHeapFreeWithBytes(object.gcHeader(), bytes);
             return;
         }
@@ -2235,7 +2235,7 @@ pub const JSRuntime = struct {
                 .constructing => ctx.construction_next,
             };
             if (self.gc.phase != .tracer_destroy or
-                !ctx.header.metaConst().flags.cycle_visited)
+                !gc.headerCondemned(&ctx.header))
             {
                 return context_mod.RealmRef.retain(ctx);
             }

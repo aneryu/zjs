@@ -9444,7 +9444,9 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     var retained_realm = core.RealmRef.retain(fresh_ctx);
     defer retained_realm.deinit();
     try std.testing.expect(!rt.gc.headerMarked(&fresh_ctx.header));
-    rt.gc.header_mark_epoch = std.math.maxInt(u16);
+    // One short of the reserved condemnation stamp (TGC S4-h): the wrap
+    // path must fire before `header_mark_epoch` could ever equal it.
+    rt.gc.header_mark_epoch = core.gc.condemned_mark_epoch - 1;
     rt.gc.setHeaderMarked(header);
     rt.gc.setHeaderMarked(&fresh_ctx.header);
 

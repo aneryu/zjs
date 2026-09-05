@@ -54,11 +54,15 @@ pub const block_cell_alloc_info: u8 = block_cell_size_class;
 
 /// A freed block cell retains its successor in the low 16 bits.  The entire
 /// high half is poison, chosen so reading the word as live metadata yields an
-/// unaccounted, non-block, cycle-visited prefix whose kind reads `.string`
-/// (6).  The kind is not what protects the poison -- `heap_accounted` = 0 and
-/// `cycle_visited` = 1 are, and both survived S2 joining strings to the
-/// tracer and S4-a widening the kind into bit 3 (which the poison leaves
-/// clear, so the low nibble still reads 6).
+/// unaccounted, non-block prefix whose kind reads `.string` (6).  The kind is
+/// not what protects the poison -- `heap_accounted` = 0 is, and it survived S2
+/// joining strings to the tracer and S4-a widening the kind into bit 3 (which
+/// the poison leaves clear, so the low nibble still reads 6).  Bit 7 was the
+/// `cycle_visited` second guard until TGC S4-h retired the flag; the bit is
+/// kept SET so the poison byte is unchanged (the allocator's free path is
+/// byte-identical), and it now lands in `BlockFlags.reserved`, where nothing
+/// reads it.  The condemnation guard itself did not move out of the free
+/// cell: it lives in the lifetime word, which the free path never writes.
 pub const free_cell_link_mask: u32 = 0x0000_ffff;
 pub const free_cell_poison: u32 = 0x8600_0000;
 

@@ -726,7 +726,7 @@ pub const BlockFlags = packed struct(u8) {
     kind: GcKind = .object,
     /// Padding: former `in_cycle_list`. Membership is the cyclic list itself
     /// (qjs `list_add_tail` / `list_del`, quickjs.c:6545/6548). Kept so
-    /// `finalizing` / `cycle_visited` stay at their historical bit positions
+    /// `finalizing` / the spare bit stay at their historical bit positions
     /// — `memory.zig` writes this flags byte by layout.
     /// Was `in_cycle_list`, then padding. Now carries the sticky generation
     /// bit: set on publication, cleared when a collection lets the object
@@ -753,10 +753,16 @@ pub const BlockFlags = packed struct(u8) {
     ///
     /// D-S4-4: set-only. Cleared only when the cell itself is released.
     needs_finalizer: bool = false,
-    /// Condemned-garbage flag after gc_scan. qjs derives the same state from
-    /// `tmp_obj_list` membership; query sites (`headerIsCycleGarbage`, realm
-    /// walk, var_ref release) cannot walk the list, so the bit stays.
-    cycle_visited: bool = false,
+    /// TGC S4-h: spare. `cycle_visited` retired into the lifetime word --
+    /// condemnation is now the reserved mark epoch `condemned_mark_epoch`
+    /// (see `headerCondemned`), which is the same fact in the field that
+    /// already answers "is this header marked" and is therefore free.
+    ///
+    /// The free-cell poison still sets this bit (`free_cell_poison` byte 3 =
+    /// 0x86); it is inert there, and what rejects a free cell read as a
+    /// header is `heap_accounted == 0` plus the condemnation stamp the cell
+    /// carried into the free list.
+    reserved: bool = false,
 };
 
 /// Byte 2 of the metadata prefix = the allocator's `block_size_idx` byte (qjs
@@ -857,7 +863,7 @@ comptime {
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .young = true })) == representation.metadata_young_mask);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .finalizing = true })) == 1 << 5);
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .needs_finalizer = true })) == 1 << 6);
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .cycle_visited = true })) == 1 << 7);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .reserved = true })) == 1 << 7);
     // The kind occupies the low nibble; the raw readers mask with it.
     std.debug.assert(@bitSizeOf(GcKind) == 4);
     std.debug.assert(@as(u8, std.math.maxInt(std.meta.Tag(GcKind))) == representation.kind_mask);
@@ -1041,6 +1047,57 @@ pub const object_deferred_link_body_offset: usize = 8;
 /// a whole block without touching a single header.
 pub inline fn headerNeedsFinalizer(h: *const Header) bool {
     return h.metaConst().flags.needs_finalizer;
+}
+
+/// TGC S4-h: the condemnation stamp.
+///
+/// A header is condemned when the sweep has removed it from every live
+/// membership structure (`gc_obj_list`, `nonblock_objects.items`, the block
+/// allocation bitmap's live meaning) and parked it for its destruction slice.
+/// Until S4-h that fact was `BlockFlags.cycle_visited`, the last flag standing
+/// between the byte and its terminal layout.
+///
+/// It is stored as a RESERVED VALUE of the mark epoch rather than as a bit:
+///
+///   * "condemned" and "marked" are mutually exclusive by construction -- a
+///     header is condemned precisely because the remark did not mark it -- so
+///     the two facts are one tri-state and belong in one field. Writing the
+///     stamp cannot destroy information: the epoch it overwrites is, by the
+///     condemnation predicate itself, a stale one.
+///   * `advanceHeaderMarkEpoch` never produces this value (it scrubs and wraps
+///     one short of it), so `headerMarked` reads false for a condemned header
+///     on every kind, which is what all ~20 read sites already assumed.
+///   * It costs nothing: `lifetime.mark_epoch` is dead storage for a block
+///     cell (the mark authority is the block bitmap) and for an extent (the
+///     extent table), which is exactly the population `cycle_visited` cost a
+///     byte-wide read-modify-write on.
+///   * Every allocation route zeroes the four-byte lifetime word
+///     (`initGcPrefix`, `initGcPrefixBlockCell`, `createStringCell`,
+///     `createExtent`), so the stamp is cleared by cell reuse the same way the
+///     bit was -- and a cell sitting in the free list keeps it, which is a
+///     strictly stronger free-cell guard than the poison bit it replaces.
+///
+/// The alternatives were: a dedicated `condemned_epoch` field (impossible --
+/// `Metadata` is eight bytes and full), a parity/odd-sentinel scheme on the
+/// mark epoch (needs the stamp to be re-derived per collection, and a corpse
+/// whose destruction slice spans a collection would silently lose it), and the
+/// per-population authorities the S4-e note proposed: the block doomed bitmap
+/// is drained by `takeDoomedCell` and overwritten by the next
+/// `snapshotDoomed`, so it is not a stable predicate, and
+/// `nonblock_objects.doomed` is an ArrayList whose membership test is O(n).
+pub const condemned_mark_epoch: u16 = std.math.maxInt(u16);
+
+/// O(1) condemnation test, valid for every kind: block cell, extent, non-block
+/// Object and list carrier alike.
+pub inline fn headerCondemned(h: *const Header) bool {
+    return @atomicLoad(u16, &h.metaConst().lifetime.mark_epoch, .monotonic) == condemned_mark_epoch;
+}
+
+/// The single writer of the stamp, called by the four detach/condemn entry
+/// points. Atomic for the same reason `setHeaderMarked` is: a concurrent
+/// marker may be loading the same word.
+pub inline fn stampHeaderCondemned(h: *Header) void {
+    @atomicStore(u16, &h.meta().lifetime.mark_epoch, condemned_mark_epoch, .monotonic);
 }
 
 inline fn assertInitialHeaderLifetime(h: *const Header) void {
@@ -1452,7 +1509,7 @@ pub fn verifyMetadataSemantics(
                 meta.alloc_info.heap_accounted or meta.alloc_info.standalone or
                 meta.flags.young or
                 meta.flags.finalizing or
-                meta.flags.cycle_visited or !initial_lifetime)
+                meta.flags.reserved or !initial_lifetime)
             {
                 return error.RepresentationPrefixFieldMismatch;
             }
@@ -2399,7 +2456,7 @@ pub const Registry = struct {
     ) void {
         assertInitialHeaderLifetime(h);
         std.debug.assert(!h.meta().flags.finalizing);
-        std.debug.assert(!h.meta().flags.cycle_visited);
+        std.debug.assert(!headerCondemned(h));
         std.debug.assert(!h.meta().alloc_info.heap_accounted);
         // String-family carriers have no TraceHeader link word (the body
         // starts at the handle), so "unlinked" is only meaningful for list
@@ -2692,7 +2749,7 @@ pub const Registry = struct {
         // Condemnation detached this header before its resource destructor.
         // Let that structural stamp answer before kind, list, and generation
         // work.
-        if (h.meta().flags.cycle_visited) return;
+        if (headerCondemned(h)) return;
         if (!isCycleCandidate(h)) return;
         if (h.metaConst().flags.kind == .object) {
             if (!isBlockCellHeader(h)) self.removeNonBlockObject(h);
@@ -2700,7 +2757,7 @@ pub const Registry = struct {
         }
         // Already unlinked, or condemned on tmp_obj_list / a partition list.
         // qjs remove_gc_object is only called while the node is on gc_obj_list.
-        if (!headerLinked(h) or h.meta().flags.cycle_visited) return;
+        if (!headerLinked(h) or headerCondemned(h)) return;
         self.removeGcObject(h);
     }
 
@@ -2711,10 +2768,10 @@ pub const Registry = struct {
     /// destructor can therefore skip the later generic unlink boundary
     /// entirely; only the byte ledger remains. Keeping this as a separate
     /// contract also prevents a future caller from accidentally treating the
-    /// `cycle_visited` stamp as permission to omit accounting.
+    /// condemnation stamp as permission to omit accounting.
     pub inline fn recordDetachedHeapFreeWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         if (comptime std.debug.runtime_safety) {
-            std.debug.assert(h.metaConst().flags.cycle_visited);
+            std.debug.assert(headerCondemned(h));
         }
         self.recordHeapFreeWithBytes(h, bytes);
     }
@@ -3282,7 +3339,7 @@ pub const Registry = struct {
         const meta = header.metaConst();
         if (meta.alloc_info.heap_accounted or
             !meta.flags.finalizing or
-            !meta.flags.cycle_visited or
+            !headerCondemned(header) or
             meta.flags.kind != .object or
             !isBlockCellHeader(header))
         {
@@ -3437,11 +3494,11 @@ pub const Registry = struct {
         self.assertFrontierAllowsReclaimKind(.object);
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!isBlockCellHeader(header));
-        std.debug.assert(!header.metaConst().flags.cycle_visited);
+        std.debug.assert(!headerCondemned(header));
         const authority = self.nonblock_objects orelse unreachable;
         authority.condemn(header, temporary);
         self.unregisterNonBlockObject(header);
-        header.meta().flags.cycle_visited = true;
+        stampHeaderCondemned(header);
     }
 
     /// Publication marks a freshly appended carrier young immediately after
@@ -3510,7 +3567,7 @@ pub const Registry = struct {
             const meta = header.metaConst();
             if (!frontierEpochSafe(meta.flags.kind))
                 @panic("gc: FRONTIER SAFETY: unsafe kind entered frontier");
-            if (!meta.alloc_info.heap_accounted or meta.flags.cycle_visited)
+            if (!meta.alloc_info.heap_accounted or headerCondemned(header))
                 @panic("gc: FRONTIER SAFETY: unpublished header entered frontier");
             // Frontier agreement covers the immutable/shared carrier prefix.
             // The whole representation audit additionally checks Object's
@@ -3680,7 +3737,7 @@ pub const Registry = struct {
         // is worth failing loudly on.
         if (std.debug.runtime_safety) {
             std.debug.assert(h.metaConst().alloc_info.heap_accounted);
-            std.debug.assert(!h.metaConst().flags.cycle_visited);
+            std.debug.assert(!headerCondemned(h));
         }
         if (comptime block_heap_enabled) {
             if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
@@ -3705,7 +3762,9 @@ pub const Registry = struct {
     /// O(1) whole-population unmark for the ordinary case. One wrap scrub is
     /// required before reusing epoch 1; 0 always remains newborn/unmarked.
     pub fn advanceHeaderMarkEpoch(self: *Registry) void {
-        if (self.header_mark_epoch != std.math.maxInt(u16)) {
+        // One short of `condemned_mark_epoch`: the reserved stamp must never
+        // be produced as a live mark epoch (TGC S4-h).
+        if (self.header_mark_epoch < condemned_mark_epoch - 1) {
             self.header_mark_epoch += 1;
             return;
         }
@@ -3726,13 +3785,13 @@ pub const Registry = struct {
 
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
         self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
-        std.debug.assert(!header.meta().flags.cycle_visited);
+        std.debug.assert(!headerCondemned(header));
         if (header.metaConst().flags.kind == .object) {
             if (!isBlockCellHeader(header)) self.removeNonBlockObject(header);
         } else {
             self.removeGcObject(header);
         }
-        header.meta().flags.cycle_visited = true;
+        stampHeaderCondemned(header);
     }
 
     /// Detach for a header produced by a block-only iterator. Allocation
@@ -3741,21 +3800,21 @@ pub const Registry = struct {
     pub inline fn detachBlockObjectCandidate(self: *Registry, header: *GCObjectHeader) void {
         if (comptime std.debug.runtime_safety) {
             self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
-            std.debug.assert(!header.metaConst().flags.cycle_visited);
+            std.debug.assert(!headerCondemned(header));
             const cell_kind = header.metaConst().flags.kind;
             std.debug.assert(kindIsBlockCellKind(cell_kind));
             std.debug.assert(isBlockCellHeader(header));
         }
-        header.meta().flags.cycle_visited = true;
+        stampHeaderCondemned(header);
     }
 
     /// Sequential-sweep twin of `detachCycleCandidate`; the predecessor must
     /// still name the live-list node immediately before `header`.
     pub fn detachCycleCandidateAfter(self: *Registry, previous: *GCObjectHeader, header: *GCObjectHeader) void {
         self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
-        std.debug.assert(!header.meta().flags.cycle_visited);
+        std.debug.assert(!headerCondemned(header));
         self.removeGcObjectAfter(previous, header);
-        header.meta().flags.cycle_visited = true;
+        stampHeaderCondemned(header);
     }
 
     /// Discard an open incremental cycle so a full STW collection can run.
@@ -4002,9 +4061,9 @@ pub const Registry = struct {
         // account ballooned, and the 1.75x threshold amplified it into a
         // five-fold heap. What made the gate necessary -- a minor's
         // conservative scan resolving a parked corpse -- is handled at the
-        // one point every scan funnels through: `shade` refuses
-        // `cycle_visited` headers, the bit `detachCycleCandidate` already
-        // stamps on everything in the morgue.
+        // one point every scan funnels through: `shade` refuses condemned
+        // headers, the mark-epoch stamp `detachCycleCandidate` already writes
+        // on everything in the morgue.
         return self.generation.stats.young_trigger_count >= minor_young_threshold;
     }
 
@@ -4844,7 +4903,7 @@ pub const Registry = struct {
         for (nonblock_items, 0..) |header, index| {
             const meta = header.metaConst();
             if (meta.flags.kind != .object or isBlockCellHeader(header) or
-                !meta.alloc_info.heap_accounted or meta.flags.cycle_visited)
+                !meta.alloc_info.heap_accounted or headerCondemned(header))
             {
                 return error.CorruptNonBlockObjectAuthority;
             }
@@ -4889,7 +4948,7 @@ pub const Registry = struct {
             for (doomed, 0..) |header, index| {
                 const meta = header.metaConst();
                 if (meta.flags.kind != .object or isBlockCellHeader(header) or
-                    !meta.alloc_info.heap_accounted or !meta.flags.cycle_visited)
+                    !meta.alloc_info.heap_accounted or !headerCondemned(header))
                 {
                     return error.CorruptNonBlockObjectAuthority;
                 }
@@ -4903,7 +4962,7 @@ pub const Registry = struct {
             for (temporary, 0..) |header, index| {
                 const meta = header.metaConst();
                 if (meta.flags.kind != .object or isBlockCellHeader(header) or
-                    !meta.alloc_info.heap_accounted or !meta.flags.cycle_visited)
+                    !meta.alloc_info.heap_accounted or !headerCondemned(header))
                 {
                     return error.CorruptNonBlockObjectAuthority;
                 }

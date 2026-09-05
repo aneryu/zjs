@@ -6,7 +6,7 @@
 Metadata size=8 align=8 size_class=0 alloc_info=2 flags=3 lifetime=4
 TraceHeader size=8 align=8 next_non_object=0
 AllocInfo class_mask=0x1f reserved=0x20 accounted=0x40 standalone=0x80
-BlockFlags kind_mask=0x0f young=0x10 finalizing=0x20 needs_finalizer=0x40 cycle_visited=0x80
+BlockFlags kind_mask=0x0f young=0x10 finalizing=0x20 needs_finalizer=0x40 reserved=0x80
 carrier block_cell_class=0x1f slab_class_range=0..30 standalone_class=0
 free_cell link_mask=0x0000ffff poison=0x86000000 encoded_word=poison|(next&link_mask)
 
@@ -17,8 +17,9 @@ alloc_info.reserved unused
 alloc_info.heap_accounted registry-publication-bit; false for string/big_int and construction shell
 flags.kind valid for Metadata kinds; string/rope are one allocation family with distinct kinds and distinct JSValue tags
 flags.kind string_buffer is a bare code-unit carrier of that same family: no JSValue names it, no edges, no destructor
-flags.young/finalizing/needs_finalizer/cycle_visited valid for registry kinds only
+flags.young/finalizing/needs_finalizer valid for registry kinds only; flags bit7 reserved (free-cell poison sets it, nothing reads it)
 lifetime offset4=mark_epoch:u16+object_shape_summary:u7+remembered:u1+reserved:u8 for all carriers
+lifetime.mark_epoch 0=newborn/unmarked; 0xffff=condemned (reserved, never a live epoch); else non-block mark epoch
 
 [kind-contracts]
 kind.object tag=0 allocation=block_slab_or_standalone registry=yes

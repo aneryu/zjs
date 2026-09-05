@@ -131,9 +131,12 @@ pub const decommit_bytes: usize = blk: {
 /// a cleverly-chosen 32-bit terminator could not manage. The poison is
 /// chosen so a free cell read as a header is rejected by every path that
 /// matters: `block_size_idx` reads 0 (not a block cell), `heap_accounted`
-/// reads 0 (the iterators and `shade` refuse it), and `cycle_visited` reads 1
-/// (`shade` refuses it again). The kind nibble reads `.string`; that is
-/// incidental, `heap_accounted`/`cycle_visited` are what reject the word.
+/// reads 0 (the iterators and `shade` refuse it). TGC S4-h retired the second
+/// guard's home -- the flags byte's bit 7, once `cycle_visited` -- but not the
+/// guard: the condemnation stamp now lives in the lifetime word, which the
+/// free path does not overwrite, so every cell that reached the free list
+/// through a collection still reads condemned. The kind nibble reads
+/// `.string`; that is incidental, `heap_accounted` is what rejects the word.
 pub const free_nil: u32 = 0xFFFF;
 pub const free_link_mask: u32 = gc_representation.free_cell_link_mask;
 pub const free_poison: u32 = gc_representation.free_cell_poison;

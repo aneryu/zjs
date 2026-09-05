@@ -1826,8 +1826,8 @@ const Collector = struct {
         // cleared its identities -- so the only way here is conservative
         // stack residue resolving a parked slab block that still reads
         // `heap_accounted`. Shading it would trace freed payloads.
-        // `detachCycleCandidate` already stamps the bit; this is the read.
-        if (header.meta().flags.cycle_visited) return;
+        // `detachCycleCandidate` already writes the stamp; this is the read.
+        if (gc.headerCondemned(header)) return;
         self.rt.gc.setHeaderMarked(header);
         if (self.shade_to_queue) {
             // rc-managed kinds (shapes and realms still refcount under the
@@ -1917,7 +1917,7 @@ const Collector = struct {
         if (self.err != null) return;
         if (self.rt.gc.headerMarked(header)) return;
         if (!header.meta().alloc_info.heap_accounted) return;
-        if (header.meta().flags.cycle_visited) return;
+        if (gc.headerCondemned(header)) return;
         // The leaf claim is only sound for a kind `traceHeaderEdges` returns
         // from. An extent-carried storage cell is admitted too: its mark goes
         // to the extent table and `retireTracedYoung` skips it, which is what
@@ -2264,7 +2264,7 @@ const Collector = struct {
     /// The two header tests kept per corpse are the ones `nextInBlock`'s young
     /// filter used to supply: an UNPUBLISHED cell (allocated, `heap_accounted`
     /// still clear) is not an object yet, and a corpse left over from an
-    /// earlier condemnation still carries `cycle_visited` -- re-detaching it
+    /// earlier condemnation still carries the stamp -- re-detaching it
     /// would trip `detachBlockObjectCandidate`'s own assertion.
     fn stampYoungBlockCorpses(self: *Collector) void {
         comptime std.debug.assert(gc.block_heap_enabled);
@@ -2281,7 +2281,7 @@ const Collector = struct {
                     const header: *gc.Header = @ptrFromInt(block.cellBase(index) + gc.metadata_prefix_size);
                     const meta = header.metaConst();
                     if (!meta.alloc_info.heap_accounted) continue;
-                    if (meta.flags.cycle_visited) continue;
+                    if (gc.headerCondemned(header)) continue;
                     if (self.rt.gc.headerIsPinned(header)) continue;
                     self.rt.gc.detachBlockObjectCandidate(header);
                 }

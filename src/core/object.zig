@@ -7214,13 +7214,14 @@ pub const Object = extern struct {
     }
 
     /// True when `child` is condemned garbage in the current cycle-removal round
-    /// (it stayed `cycle_visited` after gc_scan, i.e. was not resurrected).
+    /// (it carried the condemnation stamp after gc_scan, i.e. was not
+    /// resurrected).
     inline fn objectIsCycleGarbage(child: *const Object) bool {
-        return child.header.metaConst().flags.cycle_visited;
+        return gc.headerCondemned(&child.header);
     }
 
     inline fn headerIsCycleGarbage(header: *const gc.Header) bool {
-        return header.metaConst().flags.cycle_visited;
+        return gc.headerCondemned(header);
     }
 
     // `clearValueReferenceToVisited` / `clearFunctionBytecodeReferencesToVisited`
