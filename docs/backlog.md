@@ -110,6 +110,19 @@ guard has to follow `assertArmReadable`, not the class id alone. Gate: the
 deletion-probe test sketch is a fast array, `flags.fast_array = false`, one
 major, `liveCountKind(.array_storage)` still 1.
 
+### Q22 — storage-cell corpse possibly debited twice
+
+`Registry.reclaimDoomedBlock` calls `unpublishStringCell → recordHeapFreeWithBytes`
+per corpse when the remembered map is non-empty (or under the lifecycle
+audit), and `Heap.reclaimDoomedCells` then debits the block's `bitmap_bytes`
+for the same cells in one batch. Whether a corpse that owes no finalizer is
+charged on both paths is an accounting question, not a cycles one (the
+S5-end splay profile puts the whole destruction family below the rc
+baseline; see `tracing-gc-completion-account.md` §6b). Gate: a Debug
+`MemoryAccount` invariant test that frees a block whose owners sit in the
+remembered map and checks `allocated_bytes` returns to the pre-allocation
+value exactly once. Pair with Q21.
+
 ## `call_runtime.zig` candidate domains
 
 The `src/exec/call_runtime.zig` decomposition map was executed through

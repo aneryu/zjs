@@ -76,6 +76,52 @@ S2-h2 nursery 按字节触发（无配置支配 16K 计数，4MiB 让 eb maxrss 
    - 顺手补上的两处屏障（按代码自己的约定应有）：`allocateMappedArgumentsVarRefsAssumingEmpty` 采纳 var-ref 表后 `rememberOwnerForBulkWrite`；`createArgumentsObject` 填完表再登记一次。环境开关证明它们与本次失败无关，保留为防御。
    - 未动的疑点（入 backlog）：`Object.traceChildEdges` 只在 `fast_array` 时访问元素 cell，而 `recomputeArrayStorageMode` 可以在 capacity 不变的情况下把 `fast_array` 清掉再置回；理论上存在"非 fast 期间 extent 被 major 回收、再 fast 后悬空"的窗口。按 class+capacity 访问的尝试在 pdfjs 上 SIGSEGV（疑为 `arguments` 类的 arm 与 payload 重叠），需要先把 arm 可读性判据弄清再改。
 
+## 6b. Splay 余刀关账（2026-09-06，driver；owner 同日批「性能账关门」）
+
+依据 S5 末 Stage 0 的符号剖面（`.scratch/stage0/s5-final/symbol-profile/`，
+cycles/u，两侧各 ≈2K 样本，事件计数 7.31G → 9.54G），按类别闭合 splay 的
+剩余差距（单位：样本；baseline = 冻结 rc `main-d944f26d`）：
+
+| 类别 | rc 基线 | 候选 | Δ | 备注 |
+|---|---:|---:|---:|---|
+| 标记（shadeExact / storageCell / traceHeaderEdges / collectMinor / incrementalMarkStep） | 197 | 686 | **+489** | 差距本体；tracing 相对 rc 即时释放的结构账 |
+| 分配/发布（allocCell / addInitializedWithSizeNoFail / createWithFam / memset / findCellState / createObjectRootReserved） | ≈289 | ≈338 | +49 | `findCellState` 41 = 位图回收后重建空闲区间 |
+| 写屏障（generationalBarrierSlow） | 21 | 56 | +35 | |
+| 解释器（op_get_field 等） | ≈197 | ≈236 | +39 | 缓存效应，非代码差 |
+| 析构/回收（destroyCondemnedSlice / sweepUnmarkedYoung / destroyShape / freeSmall） | ≈261 | ≈154 | **−107** | 已反超 rc |
+
+余刀逐条：
+
+1. **`opCall +66/+70` = 符号差工具的伪影，关账无工作。** 两侧都有三个
+   `opCall__struct_N.h` 实例（fixed-arity comptime 实例），基线
+   `__struct_138912.h` 72 样本、候选 `__struct_139059.h` 70 样本；
+   `symbol-diff.json` 按序号而非内容配对 `__struct_N`，把 72→70 记成
+   0→70。S4 §7「`opCall` 定价」项据此撤销。
+2. **`reclaimDoomedBlock` header 载入残留**：S5-b 后该符号并入
+   `destroyCondemnedSlice`（118），而析构/回收整类已比 rc 少 107 样本；残留
+   上限 ≤118 样本且只在 remembered map 非空时走 header。不再单独立项。
+3. **promote 走位图当权**：S4-i 已让 `nextInBlock` 从剖面消失，minor 侧只剩
+   `collectMinor` 75（3.4%）；原定价「净 +2.5%」的前提（逐 header promote）
+   已不存在，低于 2pp 立项线，关闭。
+4. **存储 cell 重复计价**（`unpublishStringCell → recordHeapFreeWithBytes` 与
+   `bitmap_bytes` 整批 debit）：记账正确性疑点，不在 cycles 账上；转
+   backlog（Q22），与 Q21 一起清。
+5. **存储 cell 内联更多槽**：`storageCell` 139 样本（6%）是唯一非纯结构的大项，
+   但与 M 终态 64B Object 冲突，属表示实验（vm-value-representation-contract
+   禁区），不做。
+6. **block 级 black allocation 上限**：标记期发布本身只有
+   `publishGreyCold` 13 + `publishInitializedCold` 9 = 22 样本（≈1%）；要过
+   2pp 线需 `shadeExact` 中 ≥25% 来自标记窗口内新对象的 major 复标（minor 侧
+   的 young 标记不受 black alloc 影响）。无「标记期发布计数」无法闭合该上限；
+   按 gc-v2-completion-and-pivot 的预注册线（≥2pp 才立项）与本账的 1% 硬下限，
+   **KILLED（不加计数、不做实验）**。
+
+裁决：splay 1.26× 的余额全部在标记类，是结构账；已定价余刀无一越线。
+Octane vs qjs 自此降为回归门（≥0.95 不退），性能线关门；主力转
+构建/测试/门禁迭代效率（owner 2026-09-05 裁决）。五引擎 17 项钉住快照
+（zlib 契约变更后的新基线）2026-09-06 由 `10966b12` 二进制在跑，读数落
+`docs/perf/bench-v8-status.md`。
+
 ## 7. S5 收官摘要
 
 S5-a 恒真门/过期面板（−294）、S5-b 析构与凝判路径合一（−171）、S5-c `concurrent→incremental`（+9）、S5-d Registry 拆分（gc.zig 5,444→3,988 行，`@sizeOf(Registry)` 不变，屏障读仍单条 `ldr`，整机 −263 指令）、atom ownership audit 单槽隔离缺陷修复。细节与门见 `tracing-gc-s5-spec.md` §7。GC 战役收官，下一方向按 `type-directed-optimization-plan.md` v1.3 校准批转 TS/AOT。
