@@ -1606,26 +1606,53 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
-test "ownership audit quarantines the most recently freed atom slot" {
+test "ownership audit quarantines every atom slot the last sweep retired" {
     // Liveness check for `-Dzjs_ownership_audit` (docs/borrowed_atom_audit.md
     // §7). Without it the audit build could stop quarantining and every audit
     // run would stay green while detecting nothing — the same silent masking
     // the option exists to break.
     if (!core.atom.ownership_audit_enabled) return error.SkipZigTest;
 
+    // Since TGC S3 `sweepDead` is the only place a dynamic entry dies, so a
+    // sweep — not a single `free` — is what the quarantine has to survive.
+    // This table is standalone: it caches no string body (`AtomTable.runtime`
+    // stays null) and has no collector of its own, so the sweep verdict is
+    // decided purely by the stamps the table wrote itself — every entry is
+    // born in epoch 0, so a sweep at any later epoch retires all of them. The
+    // runtime is handed to `sweepDead` only because it asks it about cached
+    // bodies; it owns none of these atoms.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
     var account = core.memory.MemoryAccount.init(std.testing.allocator);
     var atoms = core.atom.AtomTable.init(&account);
 
     const first = try atoms.internString("zjs-ownership-audit-first");
-    // The next intern must not be handed the slot that just died: that reuse
-    // is exactly what makes a borrowed-atom use-after-free look alive.
     const second = try atoms.internString("zjs-ownership-audit-second");
     try std.testing.expect(second != first);
 
-    // Recycling is delayed, not disabled: the quarantined slot is released as
-    // soon as another slot dies, so the table does not grow without bound.
+    // One sweep retires both. Neither may be handed back while that sweep is
+    // the most recent round: that reuse is exactly what makes a borrowed-atom
+    // use-after-free look alive. A quarantine holding only the last slot of
+    // the batch would hand `first` straight back here.
+    atoms.sweepDead(rt, 1);
+    try std.testing.expect(atoms.name(first) == null);
+    try std.testing.expect(atoms.name(second) == null);
+
     const third = try atoms.internString("zjs-ownership-audit-third");
-    try std.testing.expectEqual(first, third);
+    const fourth = try atoms.internString("zjs-ownership-audit-fourth");
+    try std.testing.expect(third != first and third != second);
+    try std.testing.expect(fourth != first and fourth != second);
+    try std.testing.expect(third != fourth);
+
+    // Recycling is delayed, not disabled: the next round releases the whole
+    // quarantined batch, so the table does not grow without bound.
+    atoms.sweepDead(rt, 2);
+    const fifth = try atoms.internString("zjs-ownership-audit-fifth");
+    const sixth = try atoms.internString("zjs-ownership-audit-sixth");
+    try std.testing.expect(fifth == first or fifth == second);
+    try std.testing.expect(sixth == first or sixth == second);
+    try std.testing.expect(fifth != sixth);
 
     atoms.deinit();
     try std.testing.expect(!account.hasOutstandingAllocations());

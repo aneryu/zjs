@@ -97,3 +97,41 @@
 - init/deinit：`Registry.init` 不可失败（无部分构造），回滚义务在 JSRuntime 一层；各子结构 `deinit` 幂等（test-oom 22/0 覆盖）。
 - 门：test 2558/0、test-oom 22/0、roots_diag 2562/0、五个 exe 步全绿；`-Dzjs_ownership_audit=true` **1 红**（`ownership audit quarantines the most recently freed atom slot` expected 693 found 695 + `atom.internDynamic` 泄漏报告）——在基线 `fc21a7dd` 同样红，**预存缺陷**，已另立 lane 查（见 7.7）。
 - 记录不改：`HeapAccountingIterator` 自带 `doomed_by_kind/doomed_cursor/sweep_current` 与 Registry 旧名同名（迭代器游标，命名陷阱）；`last_settled_live_bytes` 仍 write-only（B03）。
+
+### 7.7 `-Dzjs_ownership_audit` 预存红测试（修复 lane，基线 `575c2f03`）
+- 根因：`db8f899e`（S2/S3 part 2，atom 表活性转 tracer）删除 `AtomTable.free` 时把测试里三行 `atoms.free(...)` 机械删掉，测试退化为「连 intern 三个、无死亡、却断言复用」（expected 693 found 695）；`internDynamic` 泄漏报告是失败早退的后果，不是独立缺陷。`1f3d495d` 绿、`53bc1a21` 红；S5-a 未碰该路径。
+- 逻辑确有洞：S3 后 atom 死亡变成 `sweepDead` 一个 pause 内批量退休，而 `OwnershipAuditState` 仍是**单槽**隔离（`finalizeDeadEntry` 每次把上一个隔离槽放回 free list），一批 n 个死槽只隔离最后一个，n−1 个可立即复用——审计报绿却漏 stale borrow。
+- 修法：`quarantined_slot` → `quarantined_head`（穿 `DynamicAtom.next_free` 的第二条 free list），审计臂只压栈，`sweepDead` 入口 `releaseQuarantinedSlots()` 整批 splice 回真 free list；语义从「延后一次死亡」变为「延后一个 sweep 轮次」。默认构建 codegen 不变（改动全在 `comptime ownership_audit_enabled` 臂）。测试重写为 standalone `AtomTable` + `sweepDead` 真死亡路径，mutant（恢复单槽）确认能红。`docs/borrowed_atom_audit.md` §7.1 与 build 选项文案同步。
+- 门：ownership_audit 2559/0、test 2558/0。记录不改：`borrowed_atom_audit.md` §1.1/§7.3/§7.4 仍描述 rc 世界的 `free/dup` API。
+
+### 7.8 S5 阶段末门（main `5bf1e85e`，audit 修复合入前）
+| 门 | 结果 |
+|---|---|
+| test-gc-stress | 2554 passed / 0 failed |
+| test `-Dzjs_gc_roots_diag=true` | 2562 / 0 |
+| test-oom | 22 / 0 |
+| test-leak-census | 1570 / 0 |
+| test262 script | 0/49778 errors, passed 44584 |
+| `ZJS_GC_STRESS=1` test262 | 0/49778 errors, passed 44584 |
+Stage 0 与代码量对账见 7.9。
+
+### 7.9 S5 收官：Stage 0 与代码量对账（main `f005aee7`）
+Stage 0（`.scratch/stage0/s5-final`，对冻结 rc 基线 `shared-h_pre0/main-d944f26d`，含 S5-a/b/c/d + audit 修复）：
+
+| workload | insn C/B | cycles C/B | 对 S4-i（6253b239）insn 变动 |
+|---|---:|---:|---:|
+| deltablue | 0.8991 | 0.9928 | −0.04% |
+| earley-boyer | 0.8984 | 0.9106 | −0.23% |
+| pdfjs | 0.8062 | 0.8289 | 0.00% |
+| raytrace | 0.8973 | 0.9233 | −0.24% |
+| regexp | 0.9754 | 0.9916 | +0.03% |
+| splay | 1.1683 | 1.2571 | +0.27%（STOP，结构账，S4-i 已记 1.17/1.26） |
+
+判决：S5 对 insn 中立（六项均在 ±0.3%），唯一 STOP 是既有的 splay cycles，非本阶段引入。
+
+代码量对账（6253b239 → f005aee7）：
+- `src/`：34 files changed, 3846 insertions(+), 3783 deletions(-)
+- `src/core/gc.zig`：5444 → 3988 行；`gc*.zig` 全家族：16549 → 16569 行（S5-d 拆出 5 个 `gc_registry_*.zig`，家族总量含新文件）
+- `src/` 总行数：299948 → 299725
+- 分批（`git diff --shortstat -- src build tools tests`）：S5-a −294、S5-b −171、S5-c +9、S5-d +379（拆分带来的模块头/文档注释，净删 0 属预期）、audit 修复 +72；合计 −5。
+- 两种尺不一致（shortstat 计改行、wc 计存量），以 `src/` wc 为准：全阶段 −223 行；剔除 S5-d（+379）后消融净删 **≈ −600 行**，达成规格 §3「≥ 400 行（不含 S5-d）」；按 shortstat 尺（含 tools/tests）剔除 S5-d 为 −384，略低于线。gc.zig 单文件 −1,456 行是可维护性主收益。

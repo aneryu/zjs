@@ -1160,26 +1160,38 @@ pub const AtomTable = struct {
     /// dead slot on a LIFO free list keeping its id, and `internDynamic` pops
     /// that head first, so "free an atom, immediately re-intern the identical
     /// string" hands the same id straight back and a stale borrow looks alive.
-    /// Quarantining exactly one slot means the next intern can never reclaim
-    /// the slot that just died: a stale id then names either an empty slot
-    /// (`name` reports it dead) or, one intern later, a different string
-    /// (the wrong-value outcome, which the caller's own checks surface).
+    /// Quarantining every slot retired since the previous release point means
+    /// no intern can reclaim a slot that died in the current round: a stale id
+    /// then names either an empty slot (`name` reports it dead) or, a round
+    /// later, a different string (the wrong-value outcome, which the caller's
+    /// own checks surface).
     ///
-    /// One slot rather than "stop recycling entirely" is deliberate. Recycling
-    /// still happens, only delayed by one death, so the table's steady-state
-    /// size grows by at most the single quarantined slot instead of growing
-    /// monotonically with intern/free churn; entry count, `next_id` growth and
-    /// the `deinit` teardown invariants therefore stay the ones the default
-    /// build has, and the audit cannot itself turn a churn-heavy test into an
-    /// out-of-memory or a different-table-geometry failure.
+    /// **The round is a sweep, not a single death** (TGC S3). Before the
+    /// tracer owned atom liveness, entries died one at a time under
+    /// `AtomTable.free`, and holding back exactly one slot was enough: the
+    /// slot that just died was by definition the whole of the last round.
+    /// `sweepDead` now retires a whole batch inside one pause, so a one-slot
+    /// quarantine would hand back every slot of that batch but the last to the
+    /// very next intern -- the audit would keep reporting green while masking
+    /// n-1 of every n stale borrows. The quarantine is therefore a second free
+    /// list, threaded through the same `next_free` link, that `sweepDead`
+    /// splices onto the real free list on its way in.
+    ///
+    /// Delaying reuse by one round rather than "stop recycling entirely" is
+    /// deliberate. Recycling still happens, so the table's steady-state size
+    /// grows by at most one round's worth of dead slots instead of growing
+    /// monotonically with intern/free churn; `next_id` growth and the `deinit`
+    /// teardown invariants stay the ones the default build has, and the audit
+    /// cannot itself turn a churn-heavy test into an out-of-memory or a
+    /// different-table-geometry failure.
     ///
     /// When the option is off this is an empty struct: the field, the
     /// quarantine code and even the names are absent from the binary.
     pub const OwnershipAuditState = if (ownership_audit_enabled) struct {
-        /// Slot released by the most recent `finalizeDeadEntry`, held back
-        /// from the free list until the next slot dies. `no_free_slot` while
-        /// nothing is quarantined.
-        quarantined_slot: EntryIndex = no_free_slot,
+        /// LIFO head of the slots retired since the last
+        /// `releaseQuarantinedSlots`, held back from the free list. Linked
+        /// through `DynamicAtom.next_free`; `no_free_slot` when empty.
+        quarantined_head: EntryIndex = no_free_slot,
     } else struct {};
 
     memory: *memory.MemoryAccount,
@@ -1783,6 +1795,11 @@ pub const AtomTable = struct {
     /// bound would let `cachedString`/`createAtomBacked` hand a condemned cell
     /// back to the mutator during the destruction run.
     pub fn sweepDead(self: *AtomTable, rt: *runtime_mod.JSRuntime, epoch: u64) void {
+        // A sweep is the audit's quarantine round (see `OwnershipAuditState`):
+        // the batch retired by the PREVIOUS sweep becomes recyclable here, and
+        // everything this sweep retires goes into the now-empty quarantine.
+        // Comptime-off, so the default build enters the loop as before.
+        if (comptime ownership_audit_enabled) self.releaseQuarantinedSlots();
         var idx: EntryIndex = 0;
         while (idx < self.entries.len) : (idx += 1) {
             const entry = &self.entries[idx];
@@ -2333,23 +2350,38 @@ pub const AtomTable = struct {
         // Recycle the slot: nobody holds the id anymore, so the next
         // intern may rebind it. See `internDynamic` for the pop side.
         //
-        // Audit builds hold this slot back one death (see
-        // `OwnershipAuditState`) so the next intern cannot hand its id
+        // Audit builds hold this slot back one round (see
+        // `OwnershipAuditState`) so no intern of this round can hand its id
         // straight back and mask a borrowed-atom use-after-free. The branch
         // is written inline, and the default arm below is left exactly as it
         // was, so the default build's codegen is untouched: a `self`+`idx`
         // helper made LLVM reload `self.entries.ptr` here and cost +0.03%
         // instructions on the code-load compile micro.
         if (comptime ownership_audit_enabled) {
-            const released = self.ownership_audit.quarantined_slot;
-            self.ownership_audit.quarantined_slot = idx;
-            if (released == no_free_slot) return;
-            self.entries[released].next_free = self.free_slot_head;
-            self.free_slot_head = released;
+            entry.next_free = self.ownership_audit.quarantined_head;
+            self.ownership_audit.quarantined_head = idx;
             return;
         }
         entry.next_free = self.free_slot_head;
         self.free_slot_head = idx;
+    }
+
+    /// End the current audit quarantine round: every slot retired since the
+    /// last call joins the real free list, and the quarantine restarts empty.
+    /// Only reachable from audit builds (`sweepDead`); the default build never
+    /// references it, so it is never even analyzed.
+    fn releaseQuarantinedSlots(self: *AtomTable) void {
+        comptime std.debug.assert(ownership_audit_enabled);
+        var idx = self.ownership_audit.quarantined_head;
+        self.ownership_audit.quarantined_head = no_free_slot;
+        while (idx != no_free_slot) {
+            const entry = &self.entries[idx];
+            std.debug.assert(!entry.slotOccupied());
+            const next = entry.next_free;
+            entry.next_free = self.free_slot_head;
+            self.free_slot_head = idx;
+            idx = next;
+        }
     }
 
     fn findDynamic(self: *AtomTable, atom: Atom) ?*DynamicAtom {

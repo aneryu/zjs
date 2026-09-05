@@ -256,29 +256,42 @@ the same option distribution as `zjs_force_gc`.
 
 ### 7.1 What it does
 
-A slot freed by `finalizeDeadEntry` waits one round in a **one-slot
-quarantine** and only joins the free list after the next slot dies. So
-"free an atom, then immediately re-intern the same string" can no longer
-recover the same id, and §1.1 case 1's "luck of slot reuse" is gone: a
-stale id whose borrow crossed its owner either points at an empty slot
-(`dup` hits `hasLiveValue`; Debug / ReleaseSafe panic immediately) or,
-after one more intern, points at another string (wrong value, exposed by
-the caller's own checks).
+A slot retired by `finalizeDeadEntry` waits one **round** in quarantine and
+only joins the free list when the next round starts. So "kill an atom, then
+immediately re-intern the same string" can no longer recover the same id,
+and §1.1 case 1's "luck of slot reuse" is gone: a stale id whose borrow
+crossed its owner either points at an empty slot (`name` reports it dead;
+an id edge into it is counted by `atom_audit_stale_edge`) or, one round
+later, points at another string (wrong value, exposed by the caller's own
+checks).
 
-**Why one slot instead of turning reuse off** (also in the code comment):
-reuse is only delayed by one death, so table size, `next_id` growth, and
-`deinit` teardown invariants stay the default-build ones. Turning reuse off
-entirely would let the table grow monotonically with intern/free churn; the
-audit itself could then turn a high-churn test into an OOM under a
-different table geometry, and what it found would not be trustworthy.
+**The round is a sweep, not a single death.** Before TGC S3 moved atom
+liveness to the tracer, entries died one at a time under `AtomTable.free`
+and holding back exactly one slot was the whole of the last round.
+`sweepDead` now retires a whole batch inside one pause, so a one-slot
+quarantine would hand every slot of that batch but the last straight back
+to the next intern — the audit would report green while masking n−1 of
+every n stale borrows. The quarantine is therefore a second free list
+(`OwnershipAuditState.quarantined_head`, threaded through the same
+`next_free` link) that `sweepDead` splices onto the real free list on its
+way in.
+
+**Why one round instead of turning reuse off** (also in the code comment):
+reuse is only delayed by one round, so the table grows by at most one
+round's worth of dead slots; `next_id` growth and `deinit` teardown
+invariants stay the default-build ones. Turning reuse off entirely would
+let the table grow monotonically with intern/free churn; the audit itself
+could then turn a high-churn test into an OOM under a different table
+geometry, and what it found would not be trustworthy.
 
 `src/tests/core.zig` has a liveness self-check (`ownership audit
-quarantines the most recently freed atom slot`): `SkipZigTest` when the
-audit is off; when on, it asserts the just-dead slot is not taken by the
-next intern but is reused after one more slot dies. Flip the quarantine
-back to a direct free-list push and this test goes red immediately —
-without it, the audit mode could be broken while CI stays green, exactly
-the silence this option exists to kill.
+quarantines every atom slot the last sweep retired`): `SkipZigTest` when the
+audit is off; when on, it sweeps two atoms dead at once and asserts that
+*neither* slot is taken by the interns that follow, and that both are reused
+after the next sweep. Flip the quarantine back to a direct free-list push
+— or back to the pre-S3 one-slot form — and this test goes red
+immediately; without it, the audit mode could be broken while CI stays
+green, exactly the silence this option exists to kill.
 
 ### 7.2 Cost tier
 
