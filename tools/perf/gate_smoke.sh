@@ -47,6 +47,13 @@ if [[ ! -x "$BIN" ]]; then
     echo "fixed-work smoke: binary is not executable: $BIN" >&2
     exit 2
 fi
+# The corpus lives in /tmp by convention; a durable copy sits next to the
+# frozen baselines (~/zjs-frozen/gcgap-fixed, 2026-09-06) so a reboot does
+# not turn the merge gate red. Restore from it when the default is missing.
+if [[ ! -d "$CORPUS" && "$CORPUS" == /tmp/gcgap-fixed && -d "$HOME/zjs-frozen/gcgap-fixed" ]]; then
+    mkdir -p "$CORPUS" && cp "$HOME/zjs-frozen/gcgap-fixed"/*.js "$CORPUS"/
+    echo "fixed-work smoke: restored $CORPUS from ~/zjs-frozen/gcgap-fixed" >&2
+fi
 if [[ ! -d "$CORPUS" ]]; then
     echo "fixed-work smoke: corpus directory does not exist: $CORPUS" >&2
     exit 2
