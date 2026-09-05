@@ -32,18 +32,18 @@
 
 ## 3. Stage 0 轨迹（对冻结基线 main-d944f26d，insn / cycles）
 
-| workload | S2 翻开关 | S2-f | S2-i | S4 a–f | **S4 收口** |
-|---|---|---|---|---|---|
-| pdfjs | 111.9 / 275.4 | 1.40 / 2.35 | 0.83 / 0.82 | 0.85 / 0.88 | **0.82 / 0.85** |
-| splay | 1.17 / 1.29 | 1.21 / 1.34 | 1.22 / 1.33 | 1.33 / 1.36 | **1.22 / 1.32** |
-| regexp | 1.20 / 1.47 | 0.99 / 0.99 | 0.99 / 1.01 | 0.99 / 1.03 | 0.98 / 1.01 |
-| earley-boyer | 0.89 / 0.93 | 0.89 / 0.93 | 0.89 / 0.94 | 0.96 / 1.01 | 0.92 / 0.96 |
-| raytrace | 0.90 / 0.93 | 0.90 / 0.93 | 0.89 / 0.92 | 0.96 / 1.00 | 0.92 / 0.95 |
-| deltablue | 0.89 / 0.98 | 0.90 / 0.99 | 0.90 / 0.98 | 0.91 / 1.00 | 0.90 / 1.00 |
+| workload | S2 翻开关 | S2-f | S2-i | S4 a–f | S4 收口 | **S4-i** |
+|---|---|---|---|---|---|---|
+| pdfjs | 111.9 / 275.4 | 1.40 / 2.35 | 0.83 / 0.82 | 0.85 / 0.88 | 0.82 / 0.85 | **0.81 / 0.83** |
+| splay | 1.17 / 1.29 | 1.21 / 1.34 | 1.22 / 1.33 | 1.33 / 1.36 | 1.22 / 1.32 | **1.17 / 1.26** |
+| regexp | 1.20 / 1.47 | 0.99 / 0.99 | 0.99 / 1.01 | 0.99 / 1.03 | 0.98 / 1.01 | 0.98 / 1.02 |
+| earley-boyer | 0.89 / 0.93 | 0.89 / 0.93 | 0.89 / 0.94 | 0.96 / 1.01 | 0.92 / 0.96 | **0.90 / 0.92** |
+| raytrace | 0.90 / 0.93 | 0.90 / 0.93 | 0.89 / 0.92 | 0.96 / 1.00 | 0.92 / 0.95 | **0.90 / 0.92** |
+| deltablue | 0.89 / 0.98 | 0.90 / 0.99 | 0.90 / 0.98 | 0.91 / 1.00 | 0.90 / 1.00 | 0.90 / 0.99 |
 
 足迹（maxrss，S4 收口）：raytrace **0.35**、regexp 0.72、eb 0.92、pdfjs 0.91、splay 0.80、deltablue 0.97。
 
-**唯一 STOP = splay cycles 1.32**：tracing 相对「rc 即时释放 = 完美 nursery」的结构账（2026-08-31 结构评审的中心假设）叠加 S4 每对象一个存储 cell 的标记成本。可继续的刀见 s4-spec §7 末段。
+**唯一 STOP = splay cycles 1.26（S4-i 后）**：tracing 相对「rc 即时释放 = 完美 nursery」的结构账（2026-08-31 结构评审的中心假设）叠加 S4 每对象一个存储 cell 的标记成本。可继续的刀见 s4-spec §7 末段。
 
 ## 4. 战役中修掉的真缺陷（均有回归测试）
 
@@ -56,7 +56,7 @@ S2-h2 nursery 按字节触发（无配置支配 16K 计数，4MiB 让 eb maxrss 
 ## 6. 待 owner 的裁决
 
 1. ~~`cycle_visited` 删除~~ → S4-h 已用 `mark_epoch` 保留值完成；余：`unlinkObjectWithBytes`/`recordDetachedHeapFreeWithBytes` 读点仍在。
-2. splay 剩余刀：minor 内 trace-coupled retirement 已实现并定价（splay +4.2%/wall −6.9%）但 ReleaseFast 不健全（raytrace/eb 提前回收函数对象，仅非 stress 调度下暴露），留分支 `s4-h-20260906` b0d2411b 待 ReleaseSafe 复现 + minor 收尾常开不变式；promote 走位图当权（+2.5%）与 `opCall +66` 定价仍待。
+2. ~~trace-coupled retirement~~ → S4-i 已修根因并合入（三条不经 frontier 的 mark claim 在窗口前触达），splay +5.4%/raytrace +2.4%/eb +3.2%；余：promote 走位图当权与 `opCall +66` 定价。
 3. ~~OOM 注入对块堆 cell 级仍不可见~~ → harness lane 已加独立 cell 级钩子（不计 backing、非粘性，同一 `fail_index` 空间；retry sweep 62→72、64→74；parse 窗口零 cell 分配故 lookahead canary 不变）；`builtin.is_test` 粗粒度门是否收窄为 oom artifact 选项仍待裁。
 4. ~~run-test262 用绝对路径 `-d` 静默丢 override manifest~~ → 已归一到 test262 根并对越界绝对路径硬错；余：known-error 文件未归一、相对越界选择器仍静默（保 `-d built-ins/Object` 用法）。
 5. ~~`byKind.bigInt` 未进 JSON；schema 长期方案~~ → `SCHEMA_VERSION = 8` + `SCHEMA_ADDED_LEAVES` 版本映射，候选多出未登记 leaf 改为硬错；余：冻结基线的 v7 戳其实早于 v7 内容（用「stamp N 可缺 N 的新增」规则容纳，更干净是重标 v6）。
