@@ -33,7 +33,7 @@ pub const Stats = struct {
     /// Cumulative stop-the-world nanoseconds by attributed phase, over the whole
     /// run. The per-cycle total answers §1.3's row; this answers "which
     /// phase owns the stopped time", which is the question a decision about
-    /// concurrent marking turns on.
+    /// future parallel marking turns on.
     total_stw_by_kind: [4]u64 = @splat(0),
     total_segments_by_kind: [4]u64 = @splat(0),
     max_cycle_stw_ns: u64 = 0,
@@ -94,12 +94,29 @@ pub fn ratioMillionthsCeil(numerator: usize, denominator: usize) usize {
 }
 
 pub const State = struct {
-    /// Only changes while the runtime is stopped (§8.4), so a plain acquire
-    /// load is enough on the mutator side.
-    major_marking_active: std.atomic.Value(bool) = .init(false),
+    /// Single-threaded, deliberately: a plain `bool`, not an atomic.
+    ///
+    /// The incremental major is driven to completion on the runtime's owner
+    /// thread (`JSRuntime.owner_thread_id`), and no GC source file spawns a
+    /// thread -- there is no marker worker, and parallel marking (S4-b) was
+    /// withdrawn. Every reader and the single writer
+    /// (`Registry.setMajorMarkingActive`) therefore run on that one thread,
+    /// so there is nothing to synchronise with and no ordering to name.
+    ///
+    /// It is also the write barrier's hot path: `markingActive` runs tens of
+    /// millions of times per benchmark (55.8M on earley-boyer). When a real
+    /// marker thread lands, this becomes JSC's threshold protocol -- a plain
+    /// byte the collector rewrites at phase boundaries with the world
+    /// stopped, fences only in the slow path (HeapInlines.h:106,
+    /// Heap.cpp:2871) -- which is a plain byte then too.
+    major_marking_active: bool = false,
     /// Running STW accumulator for the open cycle; drained into
     /// `stats.last_cycle_stw_ns` at completion.
     cycle_stw_ns: u64 = 0,
+    /// Settled live estimate after the last major, in account bytes; the
+    /// threshold for the next cycle is priced off it. Pacing input, hence its
+    /// place here rather than beside the marked-set census.
+    last_settled_live_bytes: usize = 0,
     /// The next cycle consumes the S/T pair established by the preceding
     /// successful major's threshold reset. A manual threshold invalidates it.
     envelope_baseline_valid: bool = false,
@@ -112,16 +129,7 @@ pub const State = struct {
     envelope_cycle_peak_bytes: usize = 0,
     stats: Stats = .{},
 
-    pub fn markingActive(self: *const State) bool {
-        // `.monotonic`, deliberately, and this is the write barrier's hot
-        // path: `.acquire` compiles to an `ldar` on aarch64, and the barrier
-        // runs tens of millions of times per benchmark (55.8M on
-        // earley-boyer). Today there is exactly one thread -- marking is
-        // driven to completion on the owner -- so there is no ordering to
-        // acquire. When a real marker thread lands, this becomes JSC's
-        // threshold protocol: a plain byte the collector rewrites at phase
-        // boundaries with the world stopped, fences only in the slow path
-        // (HeapInlines.h:106, Heap.cpp:2871).
-        return self.major_marking_active.load(.monotonic);
+    pub inline fn markingActive(self: *const State) bool {
+        return self.major_marking_active;
     }
 };

@@ -6887,7 +6887,7 @@ pub const Object = extern struct {
             try object_payloads.callVisitStorageCell(visitor, propertyStorageCellHeader(storage));
         }
         // A mutator barrier may publish remembered bit7 between open
-        // incremental/concurrent mark slices. The semantic accessor masks
+        // incremental mark slices. The semantic accessor masks
         // that independent membership cache; begin-time clearing alone is
         // not a sufficient phase invariant for a raw marker read.
         const summary = self.traceShapeSummary();

@@ -197,9 +197,10 @@ fn readStressFromEnv() void {
     if (parsed > 1) stress_cadence = parsed;
 }
 
-/// Concurrent-major barrier and safepoint handshake (§8.4). The marker thread
-/// that uses it arrives separately.
-pub const concurrent = @import("gc_concurrent.zig");
+/// Incremental-major barrier state and stats (§8.4). Marking is driven to
+/// completion on the owner thread; a future parallel marker would arrive
+/// separately.
+pub const incremental = @import("gc_incremental.zig");
 /// Unbounded segmented private/shared mark frontier (§8.4).
 pub const mark_queue = @import("gc_mark_queue.zig");
 
@@ -209,7 +210,7 @@ pub const mark_queue = @import("gc_mark_queue.zig");
 const gc_trace_stw_reports = @import("gc_trace_stw.zig");
 const conservative_mod = @import("gc_conservative.zig");
 pub const generation = @import("gc_generation.zig");
-const ConcurrentState = concurrent.State;
+const IncrementalState = incremental.State;
 
 /// Young objects required before a minor is worth its root scan.
 ///
@@ -1061,7 +1062,7 @@ pub inline fn headerCondemned(h: *const Header) bool {
 }
 
 /// The single writer of the stamp, called by the four detach/condemn entry
-/// points. Atomic for the same reason `setHeaderMarked` is: a concurrent
+/// points. Atomic for the same reason `setHeaderMarked` is: a future parallel
 /// marker may be loading the same word.
 inline fn stampHeaderCondemned(h: *Header) void {
     @atomicStore(u16, &h.meta().lifetime.mark_epoch, condemned_mark_epoch, .monotonic);
@@ -1698,20 +1699,21 @@ pub const Registry = struct {
     /// Publication-size histogram for Stage 4 class freeze.
     space_histogram: SpaceHistogram = .{},
 
-    // The concurrent mark queue and marker worker are *not* fields here.
+    // A marker worker is deliberately *not* a field here.
     //
-    // Embedding them made the OOM canary "binding Realm construction
+    // Embedding one made the OOM canary "binding Realm construction
     // rollback and retry" abort: a partially constructed Registry that is
     // rolled back after an injected allocation failure has to be safe to tear
-    // down, and every field added to it widens that obligation. Neither has a
-    // production caller yet -- the concurrent major is driven on the owner
-    // thread -- so the honest place for them is beside the collector that
-    // will own them, allocated when a concurrent cycle starts.
+    // down, and every field added to it widens that obligation. It has no
+    // production caller either -- the incremental major is driven to
+    // completion on the owner thread -- so the honest place for a future
+    // parallel marker is beside the collector that will own it, allocated
+    // when a cycle starts.
     //
     // This is the same lesson as the 32 KB embedded ring, one level up: what
     // a Registry contains is paid for by every runtime, including the ones
     // that fail halfway through construction.
-    concurrent: ConcurrentState = .{},
+    incremental: IncrementalState = .{},
     /// Current mark epoch for non-block trace carriers. Epoch 0 is reserved
     /// for newborn/unmarked; a major advances this scalar, while minors keep
     /// it fixed so sticky survivor marks remain valid. Unlike a global parity
@@ -1762,7 +1764,7 @@ pub const Registry = struct {
     /// traced. Whole 4 KiB segments move between this shared chain and the
     /// private tracer stacks. Lives on the Registry so the barrier reaches it
     /// without an import cycle through `gc_mark_queue`.
-    concurrent_mark_queue: mark_queue.Queue = .{},
+    incremental_mark_queue: mark_queue.Queue = .{},
     /// The owner's segmented private LIFO. It persists across slices; old
     /// whole segments are donated for parallel work while the hot top stays
     /// local. Allocation failure aborts the cycle before sweep.
@@ -1832,7 +1834,7 @@ pub const Registry = struct {
         self.invalidateCycleEnvelopeBaseline();
         // Close the epoch before any destructor can condemn or raw-free a
         // queued address, then return every private/shared segment.
-        self.closeMarkingAndDrainFrontier(.monotonic);
+        self.closeMarkingAndDrainFrontier();
         self.phase = .deinit;
 
         // Phase 0: unpublished construction-root shells (detached generator
@@ -2000,7 +2002,7 @@ pub const Registry = struct {
         self.address_registry.deinit(addressRegistryAllocator());
         self.generation.deinit(addressRegistryAllocator());
         self.mark_stack.deinitStack();
-        self.concurrent_mark_queue.deinit(addressRegistryAllocator());
+        self.incremental_mark_queue.deinit(addressRegistryAllocator());
         self.block_heap.deinit();
         if (comptime heap_accounting_oracle_enabled) {
             std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
@@ -2393,7 +2395,7 @@ pub const Registry = struct {
     /// tail call that costs the frame nothing.
     inline fn publicationNeedsColdArm(self: *const Registry, is_large: bool, standalone: bool) bool {
         if (is_large or standalone) return true;
-        if (self.concurrent.markingActive()) return true;
+        if (self.incremental.markingActive()) return true;
         return false;
     }
 
@@ -3516,10 +3518,10 @@ pub const Registry = struct {
     }
 
     fn frontierHasEntriesForSafety(self: *Registry) bool {
-        if (self.mark_stack.len != 0 or !self.concurrent_mark_queue.isEmpty()) return true;
+        if (self.mark_stack.len != 0 or !self.incremental_mark_queue.isEmpty()) return true;
         // Helper-private stacks share this pool. An active segment is never
         // empty: the last pop releases it immediately.
-        return self.concurrent_mark_queue.segmentPool().stats().active_segments != 0;
+        return self.incremental_mark_queue.segmentPool().stats().active_segments != 0;
     }
 
     /// Condemnation/raw-free entry guard for O2-B's generation omission. Shape
@@ -3529,13 +3531,13 @@ pub const Registry = struct {
     pub fn assertFrontierAllowsReclaimKind(self: *Registry, kind: GcKind) void {
         if (comptime !std.debug.runtime_safety) return;
         if (!frontierEpochSafe(kind)) return;
-        if (self.concurrent.markingActive() and self.frontierHasEntriesForSafety())
+        if (self.incremental.markingActive() and self.frontierHasEntriesForSafety())
             @panic("gc: FRONTIER SAFETY: reclaim began with live frontier");
     }
 
     pub fn assertFrontierDrainedBeforeReclaim(self: *Registry) void {
         if (comptime !std.debug.runtime_safety) return;
-        if (self.concurrent.markingActive())
+        if (self.incremental.markingActive())
             @panic("gc: FRONTIER SAFETY: reclaim began while marking active");
         if (self.frontierHasEntriesForSafety())
             @panic("gc: FRONTIER SAFETY: reclaim began before frontier drain");
@@ -3740,25 +3742,22 @@ pub const Registry = struct {
     /// knew, so nothing is lost but the work already done.
     pub fn abortIncrementalCycle(self: *Registry) void {
         self.abortCycleEnvelope();
-        if (!self.concurrent.markingActive()) return;
-        self.closeMarkingAndDrainFrontier(.monotonic);
+        if (!self.incremental.markingActive()) return;
+        self.closeMarkingAndDrainFrontier();
         // The trace already promoted whatever it reached; the young
         // structures still describe those cells as young. Minors stay closed
         // until a major commits and makes the two agree again.
         self.generation.abandonMajorRetirement();
-        self.concurrent.stats.cycles_aborted += 1;
+        self.incremental.stats.cycles_aborted += 1;
     }
 
-    fn closeMarkingAndDrainFrontier(
-        self: *Registry,
-        comptime order: std.builtin.AtomicOrder,
-    ) void {
-        // Ordering is the invariant: no reclamation may see marking active
+    fn closeMarkingAndDrainFrontier(self: *Registry) void {
+        // Sequence is the invariant: no reclamation may see marking active
         // after entries begin disappearing, and teardown may not proceed until
         // every shared/private segment is back in the pool cache.
-        if (self.concurrent.markingActive()) self.setMajorMarkingActive(false, order);
+        if (self.incremental.markingActive()) self.setMajorMarkingActive(false);
         self.mark_stack.reset();
-        self.concurrent_mark_queue.reset();
+        self.incremental_mark_queue.reset();
         self.assertFrontierDrainedBeforeReclaim();
     }
 
@@ -3767,67 +3766,67 @@ pub const Registry = struct {
     /// keeping it intact is what makes the later S/T/P tuple same-domain.
     pub fn noteCycleEnvelopeBaseline(self: *Registry, start_bytes: usize, threshold_bytes: usize) void {
         if (!gc_trace_stw_reports.detailed_reports) return;
-        std.debug.assert(!self.concurrent.envelope_active);
-        if (self.concurrent.envelope_baseline_valid) self.memory.endCyclePeakTracking();
-        self.concurrent.envelope_next_start_bytes = start_bytes;
-        self.concurrent.envelope_next_threshold_bytes = threshold_bytes;
-        self.concurrent.envelope_cycle_peak_bytes = start_bytes;
-        self.concurrent.envelope_baseline_valid = threshold_bytes != 0;
-        if (self.concurrent.envelope_baseline_valid) {
-            self.memory.beginCyclePeakTracking(&self.concurrent.envelope_cycle_peak_bytes);
+        std.debug.assert(!self.incremental.envelope_active);
+        if (self.incremental.envelope_baseline_valid) self.memory.endCyclePeakTracking();
+        self.incremental.envelope_next_start_bytes = start_bytes;
+        self.incremental.envelope_next_threshold_bytes = threshold_bytes;
+        self.incremental.envelope_cycle_peak_bytes = start_bytes;
+        self.incremental.envelope_baseline_valid = threshold_bytes != 0;
+        if (self.incremental.envelope_baseline_valid) {
+            self.memory.beginCyclePeakTracking(&self.incremental.envelope_cycle_peak_bytes);
         }
     }
 
     /// A caller-supplied threshold has no settled S selected by the growth
     /// policy, so the next cycle must not be presented as §1.3 evidence.
     pub fn invalidateCycleEnvelopeBaseline(self: *Registry) void {
-        if (self.concurrent.envelope_active) {
+        if (self.incremental.envelope_active) {
             self.memory.endCyclePeakTracking();
-            self.concurrent.envelope_active = false;
-            self.concurrent.stats.envelope_skipped_cycles +|= 1;
-        } else if (self.concurrent.envelope_baseline_valid) {
+            self.incremental.envelope_active = false;
+            self.incremental.stats.envelope_skipped_cycles +|= 1;
+        } else if (self.incremental.envelope_baseline_valid) {
             self.memory.endCyclePeakTracking();
         }
-        self.concurrent.envelope_baseline_valid = false;
+        self.incremental.envelope_baseline_valid = false;
     }
 
     /// Consume the preceding reset's S/T pair and begin exact account-peak
     /// tracking before any initial-mark allocation can occur.
     pub fn beginCycleEnvelope(self: *Registry, threshold_bytes: usize) void {
         if (!gc_trace_stw_reports.detailed_reports) return;
-        std.debug.assert(!self.concurrent.envelope_active);
-        if (!self.concurrent.envelope_baseline_valid or
-            self.concurrent.envelope_next_threshold_bytes != threshold_bytes)
+        std.debug.assert(!self.incremental.envelope_active);
+        if (!self.incremental.envelope_baseline_valid or
+            self.incremental.envelope_next_threshold_bytes != threshold_bytes)
         {
             self.invalidateCycleEnvelopeBaseline();
-            self.concurrent.stats.envelope_skipped_cycles +|= 1;
+            self.incremental.stats.envelope_skipped_cycles +|= 1;
             return;
         }
-        self.concurrent.envelope_baseline_valid = false;
-        self.concurrent.envelope_cycle_start_bytes = self.concurrent.envelope_next_start_bytes;
-        self.concurrent.envelope_cycle_threshold_bytes = threshold_bytes;
-        self.concurrent.envelope_cycle_begin_bytes = self.memory.allocated_bytes;
-        self.concurrent.envelope_active = true;
+        self.incremental.envelope_baseline_valid = false;
+        self.incremental.envelope_cycle_start_bytes = self.incremental.envelope_next_start_bytes;
+        self.incremental.envelope_cycle_threshold_bytes = threshold_bytes;
+        self.incremental.envelope_cycle_begin_bytes = self.memory.allocated_bytes;
+        self.incremental.envelope_active = true;
     }
 
     fn abortCycleEnvelope(self: *Registry) void {
-        if (!self.concurrent.envelope_active) return;
+        if (!self.incremental.envelope_active) return;
         self.memory.endCyclePeakTracking();
-        self.concurrent.envelope_active = false;
+        self.incremental.envelope_active = false;
     }
 
     fn finishCycleEnvelope(self: *Registry) void {
-        if (!self.concurrent.envelope_active) return;
+        if (!self.incremental.envelope_active) return;
         self.memory.endCyclePeakTracking();
-        self.concurrent.envelope_active = false;
+        self.incremental.envelope_active = false;
 
-        const start = self.concurrent.envelope_cycle_start_bytes;
-        const threshold = self.concurrent.envelope_cycle_threshold_bytes;
-        const begin = self.concurrent.envelope_cycle_begin_bytes;
-        const peak = self.concurrent.envelope_cycle_peak_bytes;
+        const start = self.incremental.envelope_cycle_start_bytes;
+        const threshold = self.incremental.envelope_cycle_threshold_bytes;
+        const begin = self.incremental.envelope_cycle_begin_bytes;
+        const peak = self.incremental.envelope_cycle_peak_bytes;
         std.debug.assert(threshold != 0);
         std.debug.assert(peak >= threshold);
-        const stats = &self.concurrent.stats;
+        const stats = &self.incremental.stats;
         stats.envelope_measured_cycles +|= 1;
         const replaces_max = stats.envelope_max_threshold_bytes == 0 or
             @as(u128, peak) * stats.envelope_max_threshold_bytes >
@@ -3844,25 +3843,25 @@ pub const Registry = struct {
     /// symbol's body is a tracer-owned string cell with no owner header on the
     /// barrier's side (the holder stored a bare `u32` id), so this is
     /// `publishGreyCold`'s mark-and-queue without the owner-requeue arm that
-    /// `shadeForConcurrentMark` needs for rc-managed targets.
+    /// `shadeForIncrementalMark` needs for rc-managed targets.
     pub fn shadeCellForAtomBarrier(self: *Registry, header: *GCObjectHeader) void {
         if (self.headerMarked(header)) return;
         // An unpublished cell greys itself at publication; naming it now would
         // put a still-failable construction on the queue.
         if (!header.meta().alloc_info.heap_accounted) return;
         self.setHeaderMarked(header);
-        _ = self.concurrent_mark_queue.push(self.frontierSafeHeaderAfterMarkClaim(header));
+        _ = self.incremental_mark_queue.push(self.frontierSafeHeaderAfterMarkClaim(header));
     }
 
-    pub inline fn shadeForConcurrentMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
+    pub inline fn shadeForIncrementalMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
         // The exit split is a --gc-stats structural guardrail, not collector
         // policy. Keep the default tracing build's hot barrier at lane-e's
         // counter-free cost; tests and explicitly requested detailed reports
         // retain lane-f's complete call accounting.
         const report = builtin.is_test or gc_trace_stw_reports.detailed_reports;
-        if (report) self.concurrent.stats.barrier_calls += 1;
+        if (report) self.incremental.stats.barrier_calls += 1;
         if (self.headerMarked(target)) {
-            if (report) self.concurrent.stats.barrier_marked_target += 1;
+            if (report) self.incremental.stats.barrier_marked_target += 1;
             return;
         }
         // rc-managed targets (shape adoption is the live case: a black object
@@ -3881,14 +3880,14 @@ pub const Registry = struct {
         // construction's errdefer-destroy left the queue naming a recycled
         // cell.
         if (!owner.meta().alloc_info.heap_accounted) {
-            if (report) self.concurrent.stats.barrier_unpublished_owner += 1;
+            if (report) self.incremental.stats.barrier_unpublished_owner += 1;
             return;
         }
         // Mirror rule for the target: an unpublished target queues itself
         // grey at publication, and pushing it now would name a cell whose
         // construction can still fail and free it.
         if (!target.meta().alloc_info.heap_accounted) {
-            if (report) self.concurrent.stats.barrier_unpublished_target += 1;
+            if (report) self.incremental.stats.barrier_unpublished_target += 1;
             return;
         }
         const kind = target.meta().flags.kind;
@@ -3912,8 +3911,8 @@ pub const Registry = struct {
                             const proto_header = proto.gcHeader();
                             if (!self.headerMarked(proto_header)) {
                                 self.setHeaderMarked(proto_header);
-                                self.concurrent.stats.shaded += 1;
-                                _ = self.concurrent_mark_queue.push(
+                                self.incremental.stats.shaded += 1;
+                                _ = self.incremental_mark_queue.push(
                                     self.frontierSafeHeaderAfterMarkClaim(proto_header),
                                 );
                             }
@@ -3921,17 +3920,17 @@ pub const Registry = struct {
                     }
                     return;
                 }
-                self.concurrent_mark_queue.invalidateBarrier();
+                self.incremental_mark_queue.invalidateBarrier();
                 return;
             }
-            if (report) self.concurrent.stats.barrier_requeued_owner += 1;
+            if (report) self.incremental.stats.barrier_requeued_owner += 1;
             const frontier_owner = self.frontierSafeHeaderForRequeue(owner) orelse return;
-            _ = self.concurrent_mark_queue.push(frontier_owner);
+            _ = self.incremental_mark_queue.push(frontier_owner);
             return;
         }
         self.setHeaderMarked(target);
-        self.concurrent.stats.shaded += 1;
-        _ = self.concurrent_mark_queue.push(
+        self.incremental.stats.shaded += 1;
+        _ = self.incremental_mark_queue.push(
             self.frontierSafeHeaderAfterMarkClaim(target),
         );
     }
@@ -3958,7 +3957,7 @@ pub const Registry = struct {
         // §8.6 Prepare: "close admission of a new minor request". While a
         // major cycle is open every young object is black-published anyway,
         // so a minor would trace roots to reclaim nothing.
-        if (self.concurrent.markingActive()) return false;
+        if (self.incremental.markingActive()) return false;
         // S4-f (1): the size question is asked of `young_trigger_count`, which
         // excludes the owned storage cells S4-b/c/S2-i moved into the heap. A
         // property buffer that grows 4 -> 8 -> 16 entries publishes three
@@ -3999,7 +3998,7 @@ pub const Registry = struct {
         if (stress_collect) return self.generation.stats.young_count != 0;
         if (self.generation.stats.young_trigger_count < minor_crossing_young_floor) return false;
         if (self.generation.minorSuspended()) return false;
-        if (self.concurrent.markingActive()) return false;
+        if (self.incremental.markingActive()) return false;
         return true;
     }
 
@@ -4017,7 +4016,7 @@ pub const Registry = struct {
     /// the minor would otherwise skip; missing one frees a live object.
     ///
     /// The marking arm RE-QUEUES THE OWNER. An earlier version said the
-    /// concurrent arm was "deliberately absent" because a choke point cannot
+    /// marking arm was "deliberately absent" because a choke point cannot
     /// shade the exact target -- true, and it did not need to: re-tracing the
     /// owner finds every child the bulk write installed, including the new
     /// one. What "absent" actually meant was that a black array's appends
@@ -4037,12 +4036,12 @@ pub const Registry = struct {
 
     fn rememberOwnerForBulkWriteSlow(self: *Registry, owner: *GCObjectHeader) void {
         @branchHint(.cold);
-        if (self.concurrent.markingActive()) {
+        if (self.incremental.markingActive()) {
             // Same publication rule as the value barrier: an unpublished
             // owner's edges are covered by its published-grey trace.
             if (owner.meta().alloc_info.heap_accounted) {
                 if (self.frontierSafeHeaderForRequeue(owner)) |frontier_owner|
-                    _ = self.concurrent_mark_queue.push(frontier_owner);
+                    _ = self.incremental_mark_queue.push(frontier_owner);
             }
             return;
         }
@@ -4062,7 +4061,7 @@ pub const Registry = struct {
     inline fn expectedBarrierGate(self: *const Registry) u64 {
         // Marking wants the exact-target shading arm on every store, so no
         // owner state may buy an exit.
-        if (self.concurrent.markingActive()) return 0;
+        if (self.incremental.markingActive()) return 0;
         // `--gc-stats` wants every call counted, including the ones the gate
         // would have retired for free. Closing the gate is how the counter
         // block stays exact without a second global load on the hot path.
@@ -4084,7 +4083,7 @@ pub const Registry = struct {
     /// The only writer of the marking phase flag.
     ///
     /// Publishing the flag and republishing the derived gate is ONE
-    /// transaction. A bare `major_marking_active.store` would leave the
+    /// transaction. A bare `major_marking_active` store would leave the
     /// barrier taking steady-state exits while a major is marking -- i.e.
     /// dropping shades -- so the raw store must not be spelled anywhere else.
     ///
@@ -4092,8 +4091,8 @@ pub const Registry = struct {
     /// bare store leaves the gate stale and the next barrier call panics.
     /// Injection-verified at `beginIncrementalCycle`'s publication, which is
     /// the one whose window really contains mutator stores.
-    pub fn setMajorMarkingActive(self: *Registry, active: bool, comptime order: std.builtin.AtomicOrder) void {
-        self.concurrent.major_marking_active.store(active, order);
+    pub fn setMajorMarkingActive(self: *Registry, active: bool) void {
+        self.incremental.major_marking_active = active;
         self.refreshBarrierGate();
     }
 
@@ -4266,7 +4265,7 @@ pub const Registry = struct {
     ///
     /// The exact-target shading arm stays a real arm rather than being folded
     /// into the gate: §8.4's tearing premise is what makes owner-only records
-    /// unsound under a real concurrent marker, and JSC's 8-byte atomic escape
+    /// unsound under a real parallel marker, and JSC's 8-byte atomic escape
     /// hatch does not exist for a 16-byte JSValue. The gate carries the PHASE
     /// decision; the arm carries the semantics.
     fn generationalBarrierSlow(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void {
@@ -4275,8 +4274,8 @@ pub const Registry = struct {
         // new target instead of taking the generational path. The two are
         // alternatives, not a sequence -- a shaded object is reachable for
         // this cycle, so remembering its owner as well would be redundant.
-        if (self.concurrent.markingActive()) {
-            self.shadeForConcurrentMark(owner, target);
+        if (self.incremental.markingActive()) {
+            self.shadeForIncrementalMark(owner, target);
             return;
         }
         // The counter block is diagnostic, not policy, and it was two
@@ -4462,11 +4461,11 @@ pub const Registry = struct {
         is_block_cell: bool,
         comptime arm: PublicationArm,
     ) void {
-        // §8.6 concurrent mark: "new objects are black-published AND ALL
+        // §8.6 incremental mark: "new objects are black-published AND ALL
         // INITIAL STRONG EDGES ARE SHADED". Both halves, and the second is
         // load-bearing: field initialisation happens BEFORE publication, so
         // the write barrier fires on an owner that is not yet a real object
-        // -- and the barrier must skip those (see shadeForConcurrentMark),
+        // -- and the barrier must skip those (see shadeForIncrementalMark),
         // because queueing an unpublished owner plants a landmine: its
         // errdefer-destroy on a failed construction frees the cell while the
         // queue still names it, and the reused cell is a half-constructed
@@ -4479,8 +4478,8 @@ pub const Registry = struct {
             // spelled with an explicit safety gate because `markingActive`
             // is an atomic load that ReleaseFast may not delete even with
             // its result discarded (it left a dead `ldrb wzr` behind).
-            if (comptime std.debug.runtime_safety) std.debug.assert(!self.concurrent.markingActive());
-        } else if (self.concurrent.markingActive()) {
+            if (comptime std.debug.runtime_safety) std.debug.assert(!self.incremental.markingActive());
+        } else if (self.incremental.markingActive()) {
             @branchHint(.unlikely);
             self.publishGreyCold(header);
         }
@@ -4539,7 +4538,7 @@ pub const Registry = struct {
 
     /// The published-grey arm of `markPublishedYoungClassified`, outlined.
     /// `setHeaderMarked` and `pushSingle` are the publication funnel's other
-    /// two calls; concurrent marking is inactive for the overwhelming majority
+    /// two calls; incremental marking is inactive for the overwhelming majority
     /// of publications, so keeping them inline only bought the hot path a
     /// callee-saved prologue it never used.
     noinline fn publishGreyCold(self: *Registry, header: *GCObjectHeader) void {
@@ -4558,7 +4557,7 @@ pub const Registry = struct {
         // popped mid-construction.
         if (header.meta().flags.kind == .object) {
             self.setHeaderMarked(header);
-            _ = self.concurrent_mark_queue.push(
+            _ = self.incremental_mark_queue.push(
                 self.frontierSafeHeaderAfterMarkClaim(header),
             );
         }
@@ -4643,11 +4642,11 @@ pub const Registry = struct {
 
     pub fn recordMajorSlicePause(self: *Registry, ns: u64, kind: SliceKind) void {
         self.recordPauseSample(ns);
-        self.concurrent.cycle_stw_ns += ns;
-        const slot = &self.concurrent.stats.segment_max_ns[@intFromEnum(kind)];
+        self.incremental.cycle_stw_ns += ns;
+        const slot = &self.incremental.stats.segment_max_ns[@intFromEnum(kind)];
         if (ns > slot.*) slot.* = ns;
-        self.concurrent.stats.total_stw_by_kind[@intFromEnum(kind)] +|= ns;
-        self.concurrent.stats.total_segments_by_kind[@intFromEnum(kind)] +|= 1;
+        self.incremental.stats.total_stw_by_kind[@intFromEnum(kind)] +|= ns;
+        self.incremental.stats.total_segments_by_kind[@intFromEnum(kind)] +|= 1;
     }
 
     /// Cycle-completion accounting for an incremental major. Mirrors
@@ -4659,17 +4658,17 @@ pub const Registry = struct {
         self.stats.last_failure = .none;
         self.stats.cycle_gc_count +|= 1;
         self.stats.freed_objects +|= result.freed_objects;
-        const total = self.concurrent.cycle_stw_ns;
+        const total = self.incremental.cycle_stw_ns;
         // `result.duration_ns` is intentionally the completion poll's
         // pause for the host-facing call. The stats fields promise major
         // collection time, so they own the whole cycle's accumulated STW.
         self.stats.last_collection_time_ns = total;
         self.stats.cycle_gc_time_ns +|= total;
-        self.concurrent.stats.last_cycle_stw_ns = total;
-        if (total > self.concurrent.stats.max_cycle_stw_ns) {
-            self.concurrent.stats.max_cycle_stw_ns = total;
+        self.incremental.stats.last_cycle_stw_ns = total;
+        if (total > self.incremental.stats.max_cycle_stw_ns) {
+            self.incremental.stats.max_cycle_stw_ns = total;
         }
-        self.concurrent.cycle_stw_ns = 0;
+        self.incremental.cycle_stw_ns = 0;
     }
 
     /// Credit a MINOR collection without putting its pause in the major ring.

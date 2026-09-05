@@ -244,14 +244,6 @@ pub const MarkStorageAggregate = struct {
     touched_cache_lines: usize = 0,
 };
 
-/// Per-runtime incremental-major state that survives across cycles.
-pub const IncrementalMarkState = struct {
-    footprint: MarkFootprint = .{},
-    /// Settled live estimate after the last major, in account bytes; the
-    /// threshold for the next cycle is priced off it.
-    last_settled_live_bytes: usize = 0,
-};
-
 pub const MarkFootprint = struct {
     pub const cache_line_bytes: usize = 64;
     pub const inline_limits = [_]usize{ 1, 2, 4 };
@@ -452,9 +444,9 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
     // still published. Its fresh root walk must not black-publish into the
     // production queue it is auditing. The mutator is stopped here; suppress
     // the barrier mode for the diagnostic and restore it before returning.
-    const marking_was_active = rt.gc.concurrent.markingActive();
-    if (marking_was_active) rt.gc.setMajorMarkingActive(false, .monotonic);
-    defer if (marking_was_active) rt.gc.setMajorMarkingActive(true, .monotonic);
+    const marking_was_active = rt.gc.incremental.markingActive();
+    if (marking_was_active) rt.gc.setMajorMarkingActive(false);
+    defer if (marking_was_active) rt.gc.setMajorMarkingActive(true);
 
     var saved: std.ArrayList(*gc.Header) = .empty;
     defer saved.deinit(allocator);
@@ -720,7 +712,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
     const started = censusStart();
     defer censusEnd(started);
 
-    const footprint = &rt.gc_mark_pool.footprint;
+    const footprint = &rt.gc_mark_footprint;
     footprint.major_censuses +|= 1;
     var marked = rt.gc.objectIterator(.all);
     while (marked.next()) |header| {
@@ -1028,14 +1020,14 @@ fn clearYoungState(rt: *JSRuntime) void {
 /// Clears marks, seeds every precise and conservative root GREY and publishes
 /// `major_marking_active`; the frontier drains at subsequent polls.
 pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!void {
-    std.debug.assert(!rt.gc.concurrent.markingActive());
-    rt.gc.concurrent_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
-    rt.gc.mark_stack.ensure(rt.gc.concurrent_mark_queue.segmentPool());
+    std.debug.assert(!rt.gc.incremental.markingActive());
+    rt.gc.incremental_mark_queue.ensureCapacity(gc.Registry.markQueueAllocator());
+    rt.gc.mark_stack.ensure(rt.gc.incremental_mark_queue.segmentPool());
     rt.gc.mark_stack.reset();
-    rt.gc.concurrent_mark_queue.reset();
+    rt.gc.incremental_mark_queue.reset();
     errdefer {
         rt.gc.mark_stack.reset();
-        rt.gc.concurrent_mark_queue.reset();
+        rt.gc.incremental_mark_queue.reset();
     }
     // Freeze the decision at major start. The settled account is the live
     // estimate that set this cycle's threshold; current allocation bytes also
@@ -1059,11 +1051,11 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     try collector.seedRoots();
     const t1b = profile.nowNanos();
     if (collector.conservative_on) try collector.seedConservativeRoots();
-    try checkFrontierFailure(&rt.gc.concurrent_mark_queue);
+    try checkFrontierFailure(&rt.gc.incremental_mark_queue);
     const t2 = profile.nowNanos();
-    rt.gc.concurrent.stats.phase_begin_clear_ns +|= t1 -| t0;
-    rt.gc.concurrent.stats.phase_begin_precise_seed_ns +|= t1b -| t1;
-    rt.gc.concurrent.stats.phase_begin_conservative_seed_ns +|= t2 -| t1b;
+    rt.gc.incremental.stats.phase_begin_clear_ns +|= t1 -| t0;
+    rt.gc.incremental.stats.phase_begin_precise_seed_ns +|= t1b -| t1;
+    rt.gc.incremental.stats.phase_begin_conservative_seed_ns +|= t2 -| t1b;
 
     // Non-block young objects keep their exact list suffix throughout the
     // open major. The mandatory finish condemnation pass retires every list
@@ -1075,25 +1067,25 @@ pub fn beginIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.Va
     const young_blocks = rt.gc.block_heap.clearYoungBlocks();
     rt.gc.retireGenerationalYoungSet();
     const retire_ns = profile.nowNanos() -| t_retire;
-    rt.gc.concurrent.stats.phase_begin_retire_ns +|= retire_ns;
-    rt.gc.concurrent.stats.phase_retired_young_blocks +|= young_blocks;
-    rt.gc.concurrent.stats.phase_retired_remembered_sets +|=
+    rt.gc.incremental.stats.phase_begin_retire_ns +|= retire_ns;
+    rt.gc.incremental.stats.phase_retired_young_blocks +|= young_blocks;
+    rt.gc.incremental.stats.phase_retired_remembered_sets +|=
         rt.gc.generation.stats.remembered_clears -| remembered_clears_before;
 
-    rt.gc.setMajorMarkingActive(true, .monotonic);
+    rt.gc.setMajorMarkingActive(true);
 }
 
 /// Drain up to `budget_ns` of the grey frontier. Returns true when the
 /// frontier is empty and the cycle is ready for its final remark.
 pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
-    std.debug.assert(rt.gc.concurrent.markingActive());
+    std.debug.assert(rt.gc.incremental.markingActive());
     var collector = try Collector.init(rt, null, .declared_only);
     defer collector.deinit();
     collector.shade_to_queue = true;
 
     _ = try collector.drainSegmentedFrontier(budget_ns, true, false);
-    rt.gc.concurrent.stats.increments += 1;
-    return rt.gc.mark_stack.len == 0 and rt.gc.concurrent_mark_queue.isEmpty();
+    rt.gc.incremental.stats.increments += 1;
+    return rt.gc.mark_stack.len == 0 and rt.gc.incremental_mark_queue.isEmpty();
 }
 
 /// Final remark and sweep (§8.6, mutator stopped). Re-seeds every root --
@@ -1101,7 +1093,7 @@ pub fn incrementalMarkStep(rt: *JSRuntime, budget_ns: u64) CollectError!bool {
 /// white objects referenced only from native frames -- drains what that and
 /// the barrier produced, then runs the ordinary weak/sweep tail.
 pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
-    std.debug.assert(rt.gc.concurrent.markingActive());
+    std.debug.assert(rt.gc.incremental.markingActive());
     rt.gc.stats.collections += 1;
     const t_enter = profile.nowNanos();
 
@@ -1113,11 +1105,11 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // this pause with whatever the previous collection's walks cost.
     last_census_ns = 0;
     const t_remark = profile.nowNanos();
-    rt.gc.concurrent.stats.phase_finish_init_ns +|= t_remark -| t_enter;
+    rt.gc.incremental.stats.phase_finish_init_ns +|= t_remark -| t_enter;
     try collector.seedRoots();
     const t_remark_cons = profile.nowNanos();
     if (collector.conservative_on) try collector.seedConservativeRoots();
-    rt.gc.concurrent.stats.phase_finish_conservative_seed_ns +|= profile.nowNanos() -| t_remark_cons;
+    rt.gc.incremental.stats.phase_finish_conservative_seed_ns +|= profile.nowNanos() -| t_remark_cons;
     try collector.drain();
     _ = try collector.drainBarrierQueue();
     try collector.ephemeronFixedPoint();
@@ -1136,7 +1128,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     }
 
     // Marking is over before anything is freed (§8.6 step 12 before 13).
-    rt.gc.setMajorMarkingActive(false, .monotonic);
+    rt.gc.setMajorMarkingActive(false);
     rt.gc.assertFrontierDrainedBeforeReclaim();
 
     const t_weak = profile.nowNanos();
@@ -1192,7 +1184,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Reuse the pacing contract's settled-live estimate. `doomed_bytes` has
     // already converted block cell bytes to MemoryAccount units above, so this
     // subtraction does not mix physical cells with logical payload sizes.
-    rt.gc_mark_pool.last_settled_live_bytes = rt.memory.allocated_bytes -| doomed_bytes;
+    rt.gc.incremental.last_settled_live_bytes = rt.memory.allocated_bytes -| doomed_bytes;
     // Every pre-existing list survivor was retired by tracing/condemnation.
     // From here on a non-null anchor belongs to a post-mark publication, so a
     // forward walk is the exact replacement for the old header.prev tail walk.
@@ -1201,10 +1193,10 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     rt.gc.doomed_cursor = null;
     rt.gc.doomed_destroyed = 0;
     rt.gc.doomed_bytes = doomed_bytes;
-    rt.gc.concurrent.stats.doomed_condemned_headers +|= condemned;
+    rt.gc.incremental.stats.doomed_condemned_headers +|= condemned;
     rt.gc.doomed_pending = condemned != 0;
     if (rt.gc.block_heap.doomed_blocks != null) rt.gc.doomed_pending = true;
-    if (!rt.gc.doomed_pending) rt.gc.concurrent.stats.cycles_completed += 1;
+    if (!rt.gc.doomed_pending) rt.gc.incremental.stats.cycles_completed += 1;
     // TGC S3 §2.4. The verdict and its application must share one pause: see
     // `sweepAtomTable`. This used to be deferred to the point the morgue
     // empties, on the pre-flip reasoning that a condemned holder still holds
@@ -1227,9 +1219,9 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     const census_ns = last_census_ns;
     std.debug.assert(census_ns <= raw_remark_ns);
     if (detailed_reports) last_finish_remark_raw_ns = raw_remark_ns;
-    rt.gc.concurrent.stats.phase_finish_remark_ns +|= raw_remark_ns -| census_ns;
-    rt.gc.concurrent.stats.phase_finish_weak_ns +|= t_sweep -| t_weak;
-    rt.gc.concurrent.stats.phase_finish_condemn_ns +|= t_end -| t_sweep;
+    rt.gc.incremental.stats.phase_finish_remark_ns +|= raw_remark_ns -| census_ns;
+    rt.gc.incremental.stats.phase_finish_weak_ns +|= t_sweep -| t_weak;
+    rt.gc.incremental.stats.phase_finish_condemn_ns +|= t_end -| t_sweep;
 
     // Commit the retirement transaction. Condemnation retired surviving
     // list carriers; `clearYoungState` catches allocations published during
@@ -1248,7 +1240,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // retirement walk and (safety builds only) the invariant sweep. Timed so
     // the subphase row reconciles with the STW `finish` row instead of
     // leaving a residual nobody can name.
-    rt.gc.concurrent.stats.phase_finish_tail_ns +|= profile.nowNanos() -| t_end;
+    rt.gc.incremental.stats.phase_finish_tail_ns +|= profile.nowNanos() -| t_end;
     return condemned;
 }
 
@@ -1737,7 +1729,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
     std.debug.assert(rt.gc.doomed_pending);
     const result = destroyCondemnedSlice(rt, budget_ns, false);
     rt.gc.doomed_destroyed += result.destroyed;
-    rt.gc.concurrent.stats.doomed_destroyed_objects +|= result.destroyed;
+    rt.gc.incremental.stats.doomed_destroyed_objects +|= result.destroyed;
     if (!result.morgue_empty) return result.destroyed;
 
     // TGC S4-e: a deferred class payload finalizer still retains JSValues into
@@ -1753,7 +1745,7 @@ pub fn destroyDoomedSlice(rt: *JSRuntime, budget_ns: u64) usize {
         rt.gc.block_heap.publishCompletedHotBlocks();
         rt.gc.doomed_pending = false;
         rt.gc.doomed_cursor = null;
-        rt.gc.concurrent.stats.cycles_completed += 1;
+        rt.gc.incremental.stats.cycles_completed += 1;
         // TGC S3 §2.4: the atom sweep is NOT here. It belongs to the pause that
         // took the verdict (`finishIncrementalCycle`); running it after the
         // mutator has had a whole destruction run's worth of polls lets a
@@ -1788,12 +1780,12 @@ pub fn finishPendingDestruction(rt: *JSRuntime) void {
     auditDoomedExitInvariant(rt);
 }
 
-/// Drain the concurrent barrier queue the way the final remark does, for
+/// Drain the incremental barrier queue the way the final remark does, for
 /// tests that construct a mutator interleaving between marking phases.
 /// Returns the number of grey entries traced.
 pub fn remarkBarrierQueueForTest(rt: *JSRuntime) CollectError!usize {
     if (!builtin.is_test) @compileError("test-only helper");
-    rt.gc.mark_stack.ensure(rt.gc.concurrent_mark_queue.segmentPool());
+    rt.gc.mark_stack.ensure(rt.gc.incremental_mark_queue.segmentPool());
     var collector = try Collector.init(rt, null, .declared_only);
     defer collector.deinit();
     return collector.drainBarrierQueue();
@@ -2022,7 +2014,7 @@ const Collector = struct {
             // also fails, fail the cycle closed before sweep.
             const frontier_header = self.rt.gc.frontierSafeHeaderAfterMarkClaim(header);
             if (!self.rt.gc.mark_stack.push(frontier_header)) {
-                if (!self.rt.gc.concurrent_mark_queue.push(frontier_header)) {
+                if (!self.rt.gc.incremental_mark_queue.push(frontier_header)) {
                     self.err = error.OutOfMemory;
                 }
             }
@@ -2260,7 +2252,7 @@ const Collector = struct {
         comptime prefetch: bool,
         comptime drain_work: bool,
     ) CollectError!usize {
-        const queue = &self.rt.gc.concurrent_mark_queue;
+        const queue = &self.rt.gc.incremental_mark_queue;
         const stack = &self.rt.gc.mark_stack;
         try checkFrontierFailure(queue);
         const budgeted = budget_ns != std.math.maxInt(u64);

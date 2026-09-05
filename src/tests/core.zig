@@ -3224,9 +3224,9 @@ test "side authority swap-remove condemnation drains every non-block object exac
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -9870,9 +9870,9 @@ test "an unrequested threshold crossing is still serviced at a scheduler poll" {
     // completion counter moves at that last poll, not the first.
     const collections_before = rt.gc.stats.collections;
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -14683,7 +14683,7 @@ test "incremental retirement clears remembered cache before the next generation"
     // the following generation would skip its first insertion.
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.remembered.count());
     try std.testing.expectEqual(@as(u8, 0), owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask);
 
@@ -14695,7 +14695,7 @@ test "incremental retirement clears remembered cache before the next generation"
     try std.testing.expectEqual(@as(u8, 0), owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask);
 
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -14902,14 +14902,14 @@ test "the barrier gate closes on every phase that needs a richer arm" {
     // young owner included, so the gate must be zero -- this is the property
     // that replaces the per-call atomic `markingActive` load.
     {
-        rt.gc.setMajorMarkingActive(true, .release);
-        defer rt.gc.setMajorMarkingActive(false, .release);
+        rt.gc.setMajorMarkingActive(true);
+        defer rt.gc.setMajorMarkingActive(false);
         try std.testing.expectEqual(@as(u64, 0), rt.gc.barrier_gate);
         try std.testing.expect(!rt.gc.barrierOwnerSkips(young_owner.gcHeader()));
         rt.gc.setHeaderUnmarked(child.gcHeader());
-        const shaded_before = rt.gc.concurrent.stats.shaded;
+        const shaded_before = rt.gc.incremental.stats.shaded;
         rt.gc.generationalBarrierValue(young_owner.gcHeader(), child.value());
-        try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
+        try std.testing.expect(rt.gc.incremental.stats.shaded > shaded_before);
     }
     try std.testing.expectEqual(core.gc.barrier_skip_bits, rt.gc.barrier_gate);
 
@@ -14947,16 +14947,16 @@ test "the barrier shades exact targets while marking and remembers owners otherw
     const child = try core.Object.createPlainObject(rt, null);
 
     // Marking inactive: the generational path runs, nothing is shaded.
-    const shaded_before = rt.gc.concurrent.stats.shaded;
+    const shaded_before = rt.gc.incremental.stats.shaded;
     rt.gc.generationalBarrierValue(owner.gcHeader(), child.value());
-    try std.testing.expectEqual(shaded_before, rt.gc.concurrent.stats.shaded);
+    try std.testing.expectEqual(shaded_before, rt.gc.incremental.stats.shaded);
 
     // Marking active: the same write shades its exact target instead.
     rt.gc.setHeaderUnmarked(child.gcHeader());
-    rt.gc.setMajorMarkingActive(true, .release);
-    defer rt.gc.setMajorMarkingActive(false, .release);
+    rt.gc.setMajorMarkingActive(true);
+    defer rt.gc.setMajorMarkingActive(false);
     rt.gc.generationalBarrierValue(owner.gcHeader(), child.value());
-    try std.testing.expect(rt.gc.concurrent.stats.shaded > shaded_before);
+    try std.testing.expect(rt.gc.incremental.stats.shaded > shaded_before);
     try std.testing.expect(rt.gc.headerMarked(child.gcHeader()));
 }
 
@@ -14974,19 +14974,19 @@ test "the barrier shades a target the marker had already passed" {
     // The interleaving the barrier exists for: the mutator stores a reference
     // after the marker already walked the owner, so nothing will re-trace it.
     // Only the shading keeps the target in this cycle's live set.
-    rt.gc.setMajorMarkingActive(true, .release);
-    const shaded_before = rt.gc.concurrent.stats.shaded;
-    rt.gc.shadeForConcurrentMark(target.gcHeader(), target.gcHeader());
-    rt.gc.setMajorMarkingActive(false, .release);
+    rt.gc.setMajorMarkingActive(true);
+    const shaded_before = rt.gc.incremental.stats.shaded;
+    rt.gc.shadeForIncrementalMark(target.gcHeader(), target.gcHeader());
+    rt.gc.setMajorMarkingActive(false);
 
     try std.testing.expect(rt.gc.headerMarked(target.gcHeader()));
-    try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
+    try std.testing.expectEqual(shaded_before + 1, rt.gc.incremental.stats.shaded);
 
     // Shading twice is idempotent: an already-marked target costs a check,
     // not a second queue entry.
-    rt.gc.shadeForConcurrentMark(target.gcHeader(), target.gcHeader());
-    try std.testing.expectEqual(shaded_before + 1, rt.gc.concurrent.stats.shaded);
-    const barrier = rt.gc.concurrent.stats;
+    rt.gc.shadeForIncrementalMark(target.gcHeader(), target.gcHeader());
+    try std.testing.expectEqual(shaded_before + 1, rt.gc.incremental.stats.shaded);
+    const barrier = rt.gc.incremental.stats;
     try std.testing.expectEqual(
         barrier.barrier_calls,
         barrier.barrier_marked_target + barrier.barrier_unpublished_owner +
@@ -15068,32 +15068,32 @@ test "frontier requeue admission checks a prior claim without executing one" {
     defer ctx.destroy();
 
     const owner = try core.Object.createPlainObject(rt, null);
-    rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.incremental_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
 
     rt.gc.setHeaderUnmarked(owner.gcHeader());
     try std.testing.expect(rt.gc.frontierSafeHeaderForRequeue(owner.gcHeader()) == null);
     try std.testing.expect(!rt.gc.headerMarked(owner.gcHeader()));
 
-    rt.gc.setMajorMarkingActive(true, .release);
+    rt.gc.setMajorMarkingActive(true);
     defer {
-        rt.gc.setMajorMarkingActive(false, .release);
-        rt.gc.concurrent_mark_queue.reset();
+        rt.gc.setMajorMarkingActive(false);
+        rt.gc.incremental_mark_queue.reset();
     }
 
     // A bulk write through a white owner performs no hidden claim and stores
     // no raw address. Its normal first trace will see the updated edges.
     rt.gc.rememberOwnerForBulkWrite(owner.gcHeader());
     try std.testing.expect(!rt.gc.headerMarked(owner.gcHeader()));
-    try std.testing.expect(rt.gc.concurrent_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
 
     // Once the ordinary mark path has claimed the owner, the same requeue
     // path may produce the typed entry without another mark store/RMW.
     rt.gc.setHeaderMarked(owner.gcHeader());
     rt.gc.rememberOwnerForBulkWrite(owner.gcHeader());
-    const entry = rt.gc.concurrent_mark_queue.pop() orelse
+    const entry = rt.gc.incremental_mark_queue.pop() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(owner.gcHeader(), entry);
-    try std.testing.expect(rt.gc.concurrent_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
 }
 
 test "Shape barrier requeues only an owner with a prior mark claim" {
@@ -15104,30 +15104,30 @@ test "Shape barrier requeues only an owner with a prior mark claim" {
 
     const owner = try core.Object.createPlainObject(rt, null);
     const shape_header = &owner.shape_ref.header;
-    rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.incremental_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
 
     rt.gc.setHeaderUnmarked(owner.gcHeader());
     rt.gc.setHeaderUnmarked(shape_header);
-    rt.gc.setMajorMarkingActive(true, .release);
+    rt.gc.setMajorMarkingActive(true);
     defer {
-        rt.gc.setMajorMarkingActive(false, .release);
-        rt.gc.concurrent_mark_queue.reset();
+        rt.gc.setMajorMarkingActive(false);
+        rt.gc.incremental_mark_queue.reset();
     }
 
-    const attempts_before = rt.gc.concurrent.stats.barrier_requeued_owner;
-    rt.gc.shadeForConcurrentMark(owner.gcHeader(), shape_header);
+    const attempts_before = rt.gc.incremental.stats.barrier_requeued_owner;
+    rt.gc.shadeForIncrementalMark(owner.gcHeader(), shape_header);
     try std.testing.expect(!rt.gc.headerMarked(owner.gcHeader()));
     try std.testing.expect(!rt.gc.headerMarked(shape_header));
-    try std.testing.expect(rt.gc.concurrent_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
 
     rt.gc.setHeaderMarked(owner.gcHeader());
-    rt.gc.shadeForConcurrentMark(owner.gcHeader(), shape_header);
-    const entry = rt.gc.concurrent_mark_queue.pop() orelse
+    rt.gc.shadeForIncrementalMark(owner.gcHeader(), shape_header);
+    const entry = rt.gc.incremental_mark_queue.pop() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(owner.gcHeader(), entry);
     try std.testing.expectEqual(
         attempts_before + 2,
-        rt.gc.concurrent.stats.barrier_requeued_owner,
+        rt.gc.incremental.stats.barrier_requeued_owner,
     );
 }
 
@@ -15143,17 +15143,17 @@ test "incremental abort disables marking before draining every frontier segment"
     defer rt.gc.unpinHeader(root.gcHeader());
 
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     try std.testing.expect(rt.gc.mark_stack.len != 0 or
-        !rt.gc.concurrent_mark_queue.isEmpty());
+        !rt.gc.incremental_mark_queue.isEmpty());
 
     rt.gc.abortIncrementalCycle();
-    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(!rt.gc.incremental.markingActive());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.mark_stack.len);
-    try std.testing.expect(rt.gc.concurrent_mark_queue.isEmpty());
+    try std.testing.expect(rt.gc.incremental_mark_queue.isEmpty());
     try std.testing.expectEqual(
         @as(usize, 0),
-        rt.gc.concurrent_mark_queue.segmentPool().stats().active_segments,
+        rt.gc.incremental_mark_queue.segmentPool().stats().active_segments,
     );
 }
 
@@ -15606,7 +15606,7 @@ test "incremental begin preserves list-young suffix until finish retirement" {
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
 
     // Epoch clear is O(1): begin leaves the exact suffix intact while minors
     // are closed. The mandatory finish condemnation walk is the pass that
@@ -15623,7 +15623,7 @@ test "incremental begin preserves list-young suffix until finish retirement" {
     try rt.gc.verifyIntrusiveList();
 
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -15735,7 +15735,7 @@ test "a crossing a minor cannot answer is still answered by a major" {
     // The threshold's answer is an incremental major cycle; drive it to its
     // remark so the completion counter can move.
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16274,9 +16274,9 @@ test "marking barrier shades grey, not black: the stored object's children survi
     rt.gc.setHeaderMarked(a.gcHeader());
     rt.gc.setHeaderUnmarked(b.gcHeader());
     rt.gc.setHeaderUnmarked(c.gcHeader());
-    rt.gc.concurrent_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
-    rt.gc.setMajorMarkingActive(true, .release);
-    defer rt.gc.setMajorMarkingActive(false, .release);
+    rt.gc.incremental_mark_queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.setMajorMarkingActive(true);
+    defer rt.gc.setMajorMarkingActive(false);
 
     rt.gc.generationalBarrier(a.gcHeader(), b.gcHeader());
 
@@ -16340,22 +16340,22 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     try std.testing.expectEqual(core.gc.generation.MajorRetirement.tracing, rt.gc.generation.major_retirement);
 
     const failed_before = rt.gc.stats.failed_collections;
     const completed_before = rt.gc.stats.cycle_gc_count;
     const retirement_commits_before = rt.gc.generation.stats.retirement_commits;
-    rt.gc.concurrent_mark_queue.failBackingAllocationsForTest(2);
+    rt.gc.incremental_mark_queue.failBackingAllocationsForTest(2);
     try std.testing.expectError(error.OutOfMemory, rt.pollGC(null, .safepoint));
 
-    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(!rt.gc.incremental.markingActive());
     try std.testing.expectEqual(failed_before + 1, rt.gc.stats.failed_collections);
     try std.testing.expectEqual(core.gc.FailureKind.out_of_memory, rt.gc.stats.last_failure);
     try std.testing.expectEqual(core.gc.generation.MajorRetirement.needs_major, rt.gc.generation.major_retirement);
     const request = rt.gc.pendingMajorRequest().?;
     try std.testing.expectEqual(core.gc.RequestReason.collection_failed, request.reason.?);
-    try std.testing.expect(rt.gc.concurrent_mark_queue.stats().pool.allocation_failures >= 2);
+    try std.testing.expect(rt.gc.incremental_mark_queue.stats().pool.allocation_failures >= 2);
 
     // This is the ordinary allocation boundary that swallowed the failed
     // incremental poll in the reviewer call graph. The pending failure is not
@@ -16402,15 +16402,15 @@ test "incremental marking preserves a frontier beyond both former 65K bounds" {
     defer rt.gc.unpinHeader(root.gcHeader());
 
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
-    defer if (rt.gc.concurrent.markingActive()) rt.gc.abortIncrementalCycle();
+    defer if (rt.gc.incremental.markingActive()) rt.gc.abortIncrementalCycle();
     var increments: usize = 0;
     while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {
         increments += 1;
         try std.testing.expect(increments < 16);
     }
 
-    try std.testing.expectEqual(core.gc.mark_queue.Failure.none, rt.gc.concurrent_mark_queue.failure());
-    const frontier = rt.gc.concurrent_mark_queue.stats().pool;
+    try std.testing.expectEqual(core.gc.mark_queue.Failure.none, rt.gc.incremental_mark_queue.failure());
+    const frontier = rt.gc.incremental_mark_queue.stats().pool;
     try std.testing.expect(frontier.peak_active_segments * core.gc.mark_queue.segment_bytes > former_combined_capacity * @sizeOf(*core.gc.Header));
     for (root.arrayElements()) |value| {
         const header = value.cycleMarkHeader().?;
@@ -16444,38 +16444,38 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     const freed_before = rt.gc.stats.freed_objects;
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
 
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
     try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 256);
     try std.testing.expect(rt.gc.containsHeader(keeper.gcHeader()));
-    try std.testing.expect(rt.gc.concurrent.stats.cycles_completed >= 1);
-    try std.testing.expect(rt.gc.concurrent.stats.doomed_condemned_headers >= 256);
-    try std.testing.expect(rt.gc.concurrent.stats.doomed_destroyed_objects >= 256);
+    try std.testing.expect(rt.gc.incremental.stats.cycles_completed >= 1);
+    try std.testing.expect(rt.gc.incremental.stats.doomed_condemned_headers >= 256);
+    try std.testing.expect(rt.gc.incremental.stats.doomed_destroyed_objects >= 256);
     // TGC S4-e: the physical-free pass has ONE exit for a plain object -- the
     // bitmap reclaim. Pass-A settlement and the Pass-B parked drain are gone,
     // so the counter that used to be a union of two routes is now the whole
     // population.
     try std.testing.expect(rt.gc.block_heap.stats.bitmap_reclaimed_cells >= 256);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.doomed_parked_entries_drained);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.incremental.stats.doomed_parked_entries_drained);
     // Compact trace epochs clear marks without walking the non-block list,
     // and its young bits retire in the mandatory finish condemnation walk.
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.phase_retired_nonblock_headers);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.concurrent.stats.phase_cleared_nonblock_headers);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.incremental.stats.phase_retired_nonblock_headers);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.incremental.stats.phase_cleared_nonblock_headers);
     try std.testing.expectEqual(
-        rt.gc.concurrent.stats.last_cycle_stw_ns,
+        rt.gc.incremental.stats.last_cycle_stw_ns,
         rt.gc.stats.last_collection_time_ns,
     );
     var attributed_stw: u64 = 0;
-    for (rt.gc.concurrent.stats.total_stw_by_kind) |ns| attributed_stw += ns;
-    try std.testing.expectEqual(rt.gc.concurrent.stats.last_cycle_stw_ns, attributed_stw);
+    for (rt.gc.incremental.stats.total_stw_by_kind) |ns| attributed_stw += ns;
+    try std.testing.expectEqual(rt.gc.incremental.stats.last_cycle_stw_ns, attributed_stw);
     const increment_index = @intFromEnum(core.gc.Registry.SliceKind.increment);
-    try std.testing.expect(rt.gc.concurrent.stats.total_segments_by_kind[increment_index] >= 1);
-    try std.testing.expectEqual(@as(u64, 0), untouched.gc.concurrent.stats.phase_begin_clear_ns);
+    try std.testing.expect(rt.gc.incremental.stats.total_segments_by_kind[increment_index] >= 1);
+    try std.testing.expectEqual(@as(u64, 0), untouched.gc.incremental.stats.phase_begin_clear_ns);
 }
 
 test "object allocation boundaries pace incremental assists by allocation debt" {
@@ -16487,20 +16487,20 @@ test "object allocation boundaries pace incremental assists by allocation debt" 
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
 
     const increment_index = @intFromEnum(core.gc.Registry.SliceKind.increment);
-    const increments_before = rt.gc.concurrent.stats.total_segments_by_kind[increment_index];
+    const increments_before = rt.gc.incremental.stats.total_segments_by_kind[increment_index];
     rt.collectBeforeObjectAllocation(core.gc.incremental_assist_interval_bytes - 1);
     try std.testing.expectEqual(
         increments_before,
-        rt.gc.concurrent.stats.total_segments_by_kind[increment_index],
+        rt.gc.incremental.stats.total_segments_by_kind[increment_index],
     );
 
     rt.collectBeforeObjectAllocation(1);
     try std.testing.expectEqual(
         increments_before + 1,
-        rt.gc.concurrent.stats.total_segments_by_kind[increment_index],
+        rt.gc.incremental.stats.total_segments_by_kind[increment_index],
     );
     helpers.finishGcCycles(rt);
 }
@@ -16516,16 +16516,16 @@ fn driveOneIncrementalMajorForCensusTest(rt: *core.JSRuntime, garbage: usize) !u
         _ = try core.Object.create(rt, core.class.ids.object, null);
     }
     const finish_index = @intFromEnum(core.gc.Registry.SliceKind.finish);
-    const finishes_before = rt.gc.concurrent.stats.total_segments_by_kind[finish_index];
+    const finishes_before = rt.gc.incremental.stats.total_segments_by_kind[finish_index];
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
-    return rt.gc.concurrent.stats.total_segments_by_kind[finish_index] - finishes_before;
+    return rt.gc.incremental.stats.total_segments_by_kind[finish_index] - finishes_before;
 }
 
 test "condemning many shapes leaves the transition table exactly consistent" {
@@ -16564,8 +16564,8 @@ test "condemning many shapes leaves the transition table exactly consistent" {
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     var polls: usize = 0;
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    try std.testing.expect(rt.gc.incremental.markingActive());
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16614,15 +16614,15 @@ test "the marked-set census is its own opt-in, not a rider on the stats panel" {
     defer ctx.destroy();
 
     try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 256));
-    try std.testing.expectEqual(@as(u64, 0), rt.gc_mark_pool.footprint.major_censuses);
-    try std.testing.expectEqual(@as(u64, 0), rt.gc_mark_pool.footprint.marked_headers);
+    try std.testing.expectEqual(@as(u64, 0), rt.gc_mark_footprint.major_censuses);
+    try std.testing.expectEqual(@as(u64, 0), rt.gc_mark_footprint.marked_headers);
 
     // ... and the opt-in must actually reach the walk, or the assertion above
     // would pass just as well against a census that no flag can turn on.
     core.gc_trace_stw.mark_footprint_census = true;
     try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 256));
-    try std.testing.expectEqual(@as(u64, 1), rt.gc_mark_pool.footprint.major_censuses);
-    try std.testing.expect(rt.gc_mark_pool.footprint.marked_headers > 0);
+    try std.testing.expectEqual(@as(u64, 1), rt.gc_mark_footprint.major_censuses);
+    try std.testing.expect(rt.gc_mark_footprint.marked_headers > 0);
 }
 
 test "the incremental finish reports a remark segment net of its census walk" {
@@ -16645,9 +16645,9 @@ test "the incremental finish reports a remark segment net of its census walk" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const remark_before = rt.gc.concurrent.stats.phase_finish_remark_ns;
+    const remark_before = rt.gc.incremental.stats.phase_finish_remark_ns;
     try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 2048));
-    const reported = rt.gc.concurrent.stats.phase_finish_remark_ns - remark_before;
+    const reported = rt.gc.incremental.stats.phase_finish_remark_ns - remark_before;
 
     // The census ran, so there is something to deduct; a zero here would make
     // the equality below hold for a build that deducts nothing.
@@ -16685,7 +16685,7 @@ test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
     const crossing = try rt.memory.allocNoTrigger(u8, crossing_bytes);
     defer rt.memory.free(u8, crossing);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
 
     // This credit happens after begin and must therefore move P. Sampling
     // only collection boundaries would miss a grow-and-free sequence here.
@@ -16694,12 +16694,12 @@ test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
     rt.memory.free(u8, during);
 
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
 
-    const stats = rt.gc.concurrent.stats;
+    const stats = rt.gc.incremental.stats;
     try std.testing.expectEqual(@as(usize, 1), stats.envelope_measured_cycles);
     try std.testing.expectEqual(@as(usize, 0), stats.envelope_skipped_cycles);
     try std.testing.expectEqual(expected_start, stats.envelope_max_start_bytes);
@@ -16730,9 +16730,9 @@ test "synchronous incremental destruction drains more than one parked-free budge
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16778,9 +16778,9 @@ test "terminal pending stats count accounted block and standalone corpses" {
     // destruction slice. Both carriers are accounted corpses in one morgue.
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16832,9 +16832,9 @@ test "pending class finalizer keeps the incremental morgue open" {
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16882,9 +16882,9 @@ test "incremental block finalizer observes its object without sweep publication"
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive()) : (polls += 1) {
+    while (rt.gc.incremental.markingActive()) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16912,7 +16912,7 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
 
     // Keep the cycle open across the mutation window.
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -16923,12 +16923,12 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
     // floating-garbage guarantee -- the strong form of barrier evidence,
     // since a holder that still referenced B would keep it trivially.
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(b.value(), true, true, true));
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     var polls: usize = 0;
-    while (rt.gc.concurrent.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
+    while (rt.gc.incremental.markingActive() or rt.gc.doomed_pending) : (polls += 1) {
         try std.testing.expect(polls < 10_000);
         _ = try rt.pollGC(null, .safepoint);
     }
@@ -16950,7 +16950,7 @@ test "an explicit collection supersedes an open incremental cycle with full prec
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     // Lift the threshold so allocation-boundary polls stop firing; otherwise
     // a heap this small finishes its cycle inside the loop below, which is
     // correct behaviour but not the interleaving this test needs to hold open.
@@ -16965,12 +16965,12 @@ test "an explicit collection supersedes an open incremental cycle with full prec
         try std.testing.expect(rt.gc.headerMarked(dead.gcHeader()));
     }
 
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     const freed_before = rt.gc.stats.freed_objects;
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(!rt.gc.incremental.markingActive());
     try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 64);
-    try std.testing.expect(rt.gc.concurrent.stats.cycles_aborted >= 1);
+    try std.testing.expect(rt.gc.incremental.stats.cycles_aborted >= 1);
 }
 
 test "an urgent poll aborts the open cycle and collects fully" {
@@ -16982,7 +16982,7 @@ test "an urgent poll aborts the open cycle and collects fully" {
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     rt.setGCThreshold(std.math.maxInt(usize));
 
     var index: usize = 0;
@@ -16990,10 +16990,10 @@ test "an urgent poll aborts the open cycle and collects fully" {
         _ = try core.Object.create(rt, core.class.ids.object, null);
     }
 
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     const freed_before = rt.gc.stats.freed_objects;
     _ = try rt.forceGC(null);
-    try std.testing.expect(!rt.gc.concurrent.markingActive());
+    try std.testing.expect(!rt.gc.incremental.markingActive());
     try std.testing.expect(rt.gc.stats.freed_objects - freed_before >= 64);
 }
 
@@ -17307,7 +17307,7 @@ test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
     defer rt.gc.unpinHeader(object.gcHeader());
 
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     const epoch = s3MarkEpoch(rt);
 
     // Interned INSIDE the window, so §2.3 black allocation stamps the entry at
@@ -17407,7 +17407,7 @@ test "TGC S3: the insertion barrier shades an atom stored during marking" {
     const key = try rt.internAtom("zjsS3BarrierKey");
 
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
-    try std.testing.expect(rt.gc.concurrent.markingActive());
+    try std.testing.expect(rt.gc.incremental.markingActive());
     const epoch = s3MarkEpoch(rt);
     try std.testing.expect(s3AtomEntry(rt, key).mark_epoch != epoch);
 

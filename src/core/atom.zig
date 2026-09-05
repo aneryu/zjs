@@ -1698,7 +1698,7 @@ pub const AtomTable = struct {
     /// it. Outside a marking window this is one relaxed byte load.
     pub inline fn shadeAtomIfMarking(self: *AtomTable, id: Atom) void {
         const rt = self.owner_runtime orelse return;
-        if (rt.gc.concurrent.markingActive()) {
+        if (rt.gc.incremental.markingActive()) {
             @branchHint(.unlikely);
             self.shadeAtomBarrierSlow(rt, id);
         }
@@ -1745,7 +1745,7 @@ pub const AtomTable = struct {
         entry.host_pins = 0;
         entry.mark_epoch = 0;
         const rt = self.owner_runtime orelse return;
-        if (rt.gc.concurrent.markingActive()) entry.mark_epoch = epoch;
+        if (rt.gc.incremental.markingActive()) entry.mark_epoch = epoch;
     }
 
     /// §2.2 compile scope: record `id` in the innermost active

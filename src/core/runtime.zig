@@ -1292,9 +1292,19 @@ pub const JSRuntime = struct {
     memory: memory.MemoryAccount,
     compact_state: RuntimeCompactState = .{},
     gc: gc.Registry,
-    /// Incremental-major state that outlives one cycle: the mark-footprint
-    /// census and the settled-live estimate the next cycle's threshold uses.
-    gc_mark_pool: @import("gc_trace_stw.zig").IncrementalMarkState = .{},
+    /// Marked-set census of the last major, for `--gc-mark-footprint`.
+    ///
+    /// Diagnostics only: nothing in a shipped run reads it, and only
+    /// `gc_trace_stw.censusMarkedSet` -- itself gated on
+    /// `mark_footprint_census` -- writes it.
+    ///
+    /// It stays a JSRuntime field rather than joining `gc.stats`: at 680
+    /// bytes it displaces `Registry.barrier_gate` off `phase`'s pinned front
+    /// cache line under Zig's auto layout (measured: offset 16 -> 2432),
+    /// which is exactly the K4 regression `phase align(64)` exists to
+    /// prevent. Same reasoning as `gc_conservative.RootsDiagCensus`: a
+    /// diagnostic must not move the hot layout it observes.
+    gc_mark_footprint: @import("gc_trace_stw.zig").MarkFootprint = .{},
     /// Allocation-debt pacing for object-boundary incremental mark/destruction
     /// assists. Scheduler/callback/idle polls bypass this counter.
     gc_assist_debt_bytes: usize = 0,
@@ -3120,7 +3130,7 @@ pub const JSRuntime = struct {
                 return self.destroySlicePoll();
             }
         }
-        if (self.gc.concurrent.markingActive() and !self.gc_running and self.gc.phase == .none) {
+        if (self.gc.incremental.markingActive() and !self.gc_running and self.gc.phase == .none) {
             if (mode == .urgent) {
                 self.gc.abortIncrementalCycle();
             } else {
@@ -3380,7 +3390,7 @@ pub const JSRuntime = struct {
             return mapped;
         };
         if (forced and !frontier_empty) {
-            self.gc.concurrent.stats.forced_finishes += 1;
+            self.gc.incremental.stats.forced_finishes += 1;
             while (!frontier_empty) {
                 frontier_empty = stw.incrementalMarkStep(self, std.math.maxInt(u64)) catch |err| {
                     self.gc.abortIncrementalCycle();
@@ -3398,7 +3408,7 @@ pub const JSRuntime = struct {
         // empty the frontier. Attributing the emptying slice's marking to
         // `.finish` made earley-boyer read as 64 ms of marking against 1.44 s
         // of finish, when in fact most of that finish WAS marking -- and a
-        // decision about concurrent marking turns on exactly that split.
+        // decision about future parallel marking turns on exactly that split.
         const marked_until = profile.nowNanos();
         if (!frontier_empty) {
             self.gc.recordMajorSlicePause(marked_until -| began, .increment);
@@ -3410,10 +3420,10 @@ pub const JSRuntime = struct {
         // but give both phases time/count/max ownership below.
         const mark_ns = marked_until -| began;
         const increment_index = @intFromEnum(gc.Registry.SliceKind.increment);
-        self.gc.concurrent.stats.total_stw_by_kind[increment_index] +|= mark_ns;
-        self.gc.concurrent.stats.total_segments_by_kind[increment_index] +|= 1;
-        self.gc.concurrent.stats.segment_max_ns[increment_index] =
-            @max(self.gc.concurrent.stats.segment_max_ns[increment_index], mark_ns);
+        self.gc.incremental.stats.total_stw_by_kind[increment_index] +|= mark_ns;
+        self.gc.incremental.stats.total_segments_by_kind[increment_index] +|= 1;
+        self.gc.incremental.stats.segment_max_ns[increment_index] =
+            @max(self.gc.incremental.stats.segment_max_ns[increment_index], mark_ns);
 
         // Frontier empty: final remark and weak processing, then CONDEMN --
         // destruction runs in bounded slices at later polls, because the
@@ -3451,14 +3461,14 @@ pub const JSRuntime = struct {
         // is one stop" and "which phase owns the stopped time" -- get
         // different, correct answers.
         const finish_index = @intFromEnum(gc.Registry.SliceKind.finish);
-        const prior_finish_max = self.gc.concurrent.stats.segment_max_ns[finish_index];
+        const prior_finish_max = self.gc.incremental.stats.segment_max_ns[finish_index];
         self.gc.recordMajorSlicePause(slice, .finish);
-        self.gc.concurrent.stats.total_stw_by_kind[finish_index] -|= mark_ns;
+        self.gc.incremental.stats.total_stw_by_kind[finish_index] -|= mark_ns;
         // `recordMajorSlicePause` sees the whole pause so the pause ring and
         // per-cycle STW stay honest. Its generic max update therefore also
         // sees the whole pause; restore the prior maximum and compare it with
         // only the finish-owned tail, just as the cumulative row does above.
-        self.gc.concurrent.stats.segment_max_ns[finish_index] =
+        self.gc.incremental.stats.segment_max_ns[finish_index] =
             @max(prior_finish_max, slice -| mark_ns);
         if (!self.gc.doomed_pending) return self.finishDoomedCompletion(slice);
         // Reset the threshold NOW, pricing the morgue's bytes as already
@@ -3941,7 +3951,7 @@ pub const JSRuntime = struct {
         // the account may be UNDER it while the morgue still holds memory --
         // the explicit `doomed_pending` term is what keeps the slices moving.
         if (!self.gc.doomed_pending and !self.gc.hasPendingMajorRequest()) return;
-        const cycle_open = self.gc.doomed_pending or self.gc.concurrent.markingActive();
+        const cycle_open = self.gc.doomed_pending or self.gc.incremental.markingActive();
         if (cycle_open) {
             self.gc_assist_debt_bytes +|= size;
             if (self.gc_assist_debt_bytes < gc.incremental_assist_interval_bytes) return;

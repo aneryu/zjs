@@ -80,3 +80,11 @@
 - 门：test 2556/0 ×4、stress 2552/0、roots_diag 2560/0、test262 0/49778。Stage 0 vs S5-a 自建参照：六 bench insn 全在 ±0.07% 内；`residual_kinds` 捷径删除后 deltablue/raytrace STW 析构时间在复跑噪声内。
 - 待 owner 知悉：deltablue 稳定多 1 次 major（18→19），归因于项 1 改变析构次序 ⇒ cell 复用次序 ⇒ 阈值边界相位位移；insn/cycles/objectsFreed 均 <0.05%，且 S5-a 自身复跑包络已覆盖该读数。回退面只有分桶次序（合一的前提），不建议回退。
 - 合入 main 后补跑 `ZJS_GC_STRESS=1` test262（核 0-9，`reports/test262-s5b-stress`）：`Result: 0/49778 errors, passed 44584`。
+
+### 7.5 S5-c 代码半边（合入 main `fc21a7dd`）
+- `gc_concurrent.zig` → `gc_incremental.zig`、`gc.concurrent` → `gc.incremental`、`Registry.concurrent` → `incremental`、`ConcurrentState` → `IncrementalState`、`concurrent_mark_queue` → `incremental_mark_queue`、`shadeForConcurrentMark` → `shadeForIncrementalMark`。净 +9 行（310+/301−）。
+- §1 勘误：`compiler/tests.zig` 的两处与 `tests/helpers.zig:824` 都是 `gc.concurrent.markingActive()` 轮询，属 GC 命中，已改；真正无关的只有 atomics_ops、run_test262 runner/reporter、两处 python。表达「将来并行标记」意图的注释保留并改写为 future parallel marking（condemn 戳 atomic store、块位图 epoch CAS、`generationalBarrierSlow` 撕裂前提、两块 STW-split 面板）。
+- `major_marking_active` 去 atomic：`src/core/gc*.zig` 无 `std.Thread`，S4-b 并行标记已撤回而非默认关，唯一写方 `setMajorMarkingActive` 全在 owner 线程；`comptime order` 形参随之删除。
+- `IncrementalMarkState` 拆：`last_settled_live_bytes` → `gc.incremental.State`（仍是 write-only，B03 消融候选，未删）；`footprint`（680B）**未进 Registry**——实测进 Registry 会把 `barrier_gate` 从 offset 16 推到 2432、`@sizeOf(Registry)` 6080→6784（正是 K4 要防的），改放 `JSRuntime.gc_mark_footprint`，Registry 字节等同。
+- 门：test 2558/0、roots_diag 2562/0、check + 五个 exe 步 18/18；`--gc-stats` 标签无 `concurrent`，schema 不动。
+- 工具教训：`git worktree add` 后主树 `test262` 已作为目录存在，再 `ln -s` 会把软链套进目录一层导致两条 run_test262 单测 FileNotFound；正确做法 `rm -rf <wt>/test262 && ln -s`。

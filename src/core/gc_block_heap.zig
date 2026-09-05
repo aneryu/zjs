@@ -849,7 +849,7 @@ pub const Block = extern struct {
     }
 
     /// Lazily clear a stale mark bitmap for the new epoch, safely against
-    /// concurrent markers. Heap epochs advance by 2 (always even); the odd
+    /// future parallel markers. Heap epochs advance by 2 (always even); the odd
     /// value `epoch | 1` is the transition lock. Exactly one thread wins the
     /// CAS from the stale value, zeroes the bitmap with plain stores (losers
     /// spin and never touch the bitmap until the release store below), and
@@ -3998,8 +3998,8 @@ fn bitMask(index: u32) u64 {
     return @as(u64, 1) << @intCast(index % 64);
 }
 
-/// Atomic bit ops: 64 cells share a word, and a marker worker and the
-/// mutator's barrier can shade neighbours concurrently -- plain RMW lost
+/// Atomic bit ops: 64 cells share a word, and a future parallel marker worker
+/// and the mutator's barrier can shade neighbours at once -- plain RMW lost
 /// marks the moment the worker existed (caught by its own unit test). The
 /// header-bit era was immune only because every object owned its byte.
 /// Plain (non-atomic) bitmap helpers, for the ALLOC bitmap only.

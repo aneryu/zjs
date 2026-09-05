@@ -963,7 +963,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
     } else {
         try writer.print("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n", .{});
     }
-    const cs = registry.concurrent.stats;
+    const cs = registry.incremental.stats;
     try writer.print(
         "gc: exact-target marking barrier calls {d}, exit marked-target {d}, exit unpublished-owner {d}, exit unpublished-target {d}, requeued-owner {d}, shaded-target {d}\n",
         .{
@@ -994,9 +994,9 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
             cs.envelope_max_threshold_bytes,
             cs.envelope_max_begin_bytes,
             cs.envelope_max_peak_bytes,
-            engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes),
-            engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes),
-            engine.core.gc.concurrent.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes),
+            engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes),
+            engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes),
+            engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes),
             cs.forced_finishes,
         },
     );
@@ -1086,7 +1086,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
 }
 
 fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    const ph = registry.concurrent.stats;
+    const ph = registry.incremental.stats;
     // Row format is parsed by tools/perf/gc_stats_snapshot.py (Stage 0); the
     // two finish-side timers added by TGC S0 go on the reconciliation row
     // below so this row keeps its eight fields.
@@ -1122,7 +1122,7 @@ fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
 }
 
 fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
-    const fp = rt.gc_mark_pool.footprint;
+    const fp = rt.gc_mark_footprint;
     // An all-zero panel reads like "nothing was marked", which is a wrong
     // answer rather than a missing one. Say which it is.
     if (!engine.core.gc_trace_stw.mark_footprint_census) {
