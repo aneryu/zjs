@@ -109,7 +109,7 @@ SCHEMA_ADDED_LEAVES: dict[int, tuple[str, ...]] = {
         "atomAudit.overMarked",
         "markFootprint.byKind.string",
     ),
-    8: ("markFootprint.byKind.bigInt",),
+    8: ("markFootprint.byKind.bigInt", "markFootprint.byKind.storage"),
 }
 
 # The inline-property rows carry seven columns; only these three are held to
