@@ -49,8 +49,6 @@ sys.path.insert(0, str(PERF_DIR))
 from measure_fields import field_metadata, lock_attested, single_cpu  # noqa: E402
 
 # Benchmark name -> vendored suite files, in load order after base.js.
-# zlib is absent: it is skip-listed for a real zjs engine gap
-# (docs/perf/bench-v8-status.md) and cannot execute at all under zjs.
 BENCH_FILES: dict[str, list[str]] = {
     "richards": ["richards.js"],
     "deltablue": ["deltablue.js"],
@@ -65,6 +63,7 @@ BENCH_FILES: dict[str, list[str]] = {
     "gbemu": ["gbemu-part1.js", "gbemu-part2.js"],
     "code-load": ["code-load.js"],
     "box2d": ["box2d.js"],
+    "zlib": ["zlib.js", "zlib-data.js"],
     "typescript": ["typescript.js", "typescript-input.js", "typescript-compiler.js"],
 }
 DEFAULT_BENCHES = list(BENCH_FILES)

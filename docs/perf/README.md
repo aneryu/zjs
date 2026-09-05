@@ -54,9 +54,10 @@ acceptance; reserve 4 for rough intermediate looks.
 ## bench-v8 (Octane 2.0, v9) — the public-metric tooling
 
 The vendored suite in `tools/perf/bench_v8/suite/` is full Octane 2.0
-(since 2026-08-25; zlib skip-listed — see
+(since 2026-08-25; all 17 results since 2026-09-05, when zlib's shell
+`read` shim landed — see
 [tools/perf/bench_v8/README.md](../../tools/perf/bench_v8/README.md) for the
-skip contract and provenance). The three entry points:
+shim and provenance). The three entry points:
 
 ```sh
 zig build perf-bench-v8                                # single-engine local diagnostic

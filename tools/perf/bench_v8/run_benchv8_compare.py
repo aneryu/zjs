@@ -121,11 +121,11 @@ RESULT_RE = re.compile(r"^([A-Za-z0-9]+): (\d+(?:\.\d+)?)$")
 SKIP_RE = re.compile(r"^([A-Za-z0-9]+): Skipped$")
 SCORE_RE = re.compile(r"^Score \(version 9\): (\d+(?:\.\d+)?)$")
 
-# zlib is skip-listed in driver.js pending a zjs engine fix (see
-# docs/perf/bench-v8-status.md): indirect eval() of emscripten-generated
-# code throws. Skipped suites report no numeric score for either engine, so
-# they are excluded from the ratio table rather than expected as numeric.
-SKIPPED_SUITES = {"zlib"}
+# Suites driver.js skip-lists (Octane prints `<name>: Skipped` and scores
+# them at the neutral default 1). Empty since 2026-09-05: zlib, skipped
+# 2026-08-25 for a suspected engine gap, only needed the d8-style `read`
+# global that driver.js now shims for every engine.
+SKIPPED_SUITES: set[str] = set()
 EXPECTED_SUITES = 17 - len(SKIPPED_SUITES)  # 15 BenchmarkSuite registrations + SplayLatency + MandreelLatency
 
 
@@ -154,6 +154,7 @@ SUBSET_RESULT_NAMES = {
     "gbemu": ["Gameboy"],
     "code-load": ["CodeLoad"],
     "box2d": ["Box2D"],
+    "zlib": ["zlib"],
     "typescript": ["Typescript"],
 }
 

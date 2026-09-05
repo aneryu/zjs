@@ -15,21 +15,20 @@ numbers**, which report version 7's narrower 8-benchmark suite — Octane's
 own `base.js` states scores are not comparable across versions. A qjs
 comparison under this tool is now a fresh local run against the same v9
 suite, not the bellard.org published number. See `docs/perf/bench-v8-status.md`
-for current status, including a known-blocked benchmark (below).
+for current status and the zlib shell-shim note (below).
 
-## Known gap: zlib
+## zlib and the shell `read` shim
 
-`zlib` errors out of the zjs run (`ReferenceError: not defined`, thrown
-from inside the benchmark's giant indirect `eval()` of emscripten-generated
-code in `zlib-data.js`) — looks like a genuine zjs engine gap (indirect
-eval / global-scope binding semantics), not a suite or tooling issue. Owner
-decision 2026-08-25: skip-list it rather than block the other 16. `driver.js`
-calls `BenchmarkSuite.RunSuites(runner, ['zlib'])`, which pushes Octane's own
-neutral default score (1) for zlib into the composite and prints
-`zlib: Skipped` — visible in the output, not silently dropped.
-`run_benchv8_compare.py` expects exactly this skip (`SKIPPED_SUITES`) and
-raises if a run skips anything else or fails to skip zlib. The underlying
-engine bug is still open; un-skip zlib once it's fixed.
+The emscripten prologue in `zlib-data.js` classifies the host as a
+*shell* (not browser / node / worker) and then runs `Module.read = read`
+eagerly, so it throws `ReferenceError` on any shell without a d8-style
+global `read(path)` — QuickJS, Hermes and zjs alike (d8, the SpiderMonkey
+shell and jsc define it). The benchmark never calls `read`; its input
+is embedded. `driver.js` therefore defines a throwing `read` shim when the
+global is absent, identically for every engine, so zlib runs and scores
+everywhere. It was skip-listed from 2026-08-25 to 2026-09-05 under a
+mistaken engine-gap diagnosis; the runners' `SKIPPED_SUITES` contract is
+now empty and a run that prints any `Skipped` line is rejected.
 
 ## Provenance and license
 

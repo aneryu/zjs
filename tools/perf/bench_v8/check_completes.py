@@ -28,10 +28,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from run_benchv8_compare import SUITE_ORDER, build_combined
+from run_benchv8_compare import build_combined
+from run_fixed_pmu import BENCH_FILES
 
-# `base.js` is the harness the others are written against, not a benchmark.
-BENCHMARKS = [name for name in SUITE_ORDER if name != "base.js"]
+# Benchmark name -> its suite files (multi-file benchmarks such as gbemu,
+# zlib and typescript must load together; `base.js` is prepended by
+# build_subset).
+BENCHMARKS = list(BENCH_FILES)
 
 RESULT_RE = re.compile(r"^([A-Za-z]+): (-?\d+(?:\.\d+)?)$")
 SCORE_RE = re.compile(r"^Score \(version \d+\): (\d+(?:\.\d+)?)$")
@@ -111,7 +114,7 @@ def main() -> int:
             if name == "<combined>":
                 build_combined(suite_dir, driver, script)
             else:
-                build_subset(suite_dir, driver, script, [name])
+                build_subset(suite_dir, driver, script, BENCH_FILES[name])
             ok, detail = run(binary, script, args.timeout)
         finally:
             script.unlink(missing_ok=True)

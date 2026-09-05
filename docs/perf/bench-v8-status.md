@@ -1,5 +1,38 @@
 # bench-v8 status
 
+## 2026-09-05: zlib un-skipped (never an engine gap)
+
+The 2026-08-25 diagnosis below ("genuine zjs engine gap: indirect eval /
+global-scope binding") was wrong. The benchmark's emscripten prologue
+classifies the host as a *shell* (not browser / node / worker) and then
+executes `Module.read = read` eagerly, so it throws `ReferenceError` on
+any shell without a d8-style global `read()`. QuickJS fails at the same
+character (`'read' is not defined`) and so does Hermes; d8, the SpiderMonkey
+shell and jsc define it. The benchmark never calls `read` (its
+input is embedded), so `driver.js` now defines a throwing `read` shim
+when the global is absent, identically for every engine, and no longer
+passes a skip list. `run_benchv8_compare.py` / `run_benchv8_multiengine.py`
+expect 17 numeric results and no `Skipped` line; `run_fixed_pmu.py` and
+`check_completes.py` know `zlib` = `zlib.js` + `zlib-data.js`.
+
+Two things hid this for eleven days: zjs reports every `ReferenceError`
+as the bare message `not defined` (QuickJS names the identifier), and
+zjs's `print` renders any object argument as `[object Object]` without
+calling its `toString` (QuickJS's `print` dumps it). Both are open
+diagnostics debts, not correctness.
+
+Single unpinned run, parallel with other work, so not a gate number:
+
+| Benchmark | zjs | QuickJS | zjs / qjs |
+| --- | ---: | ---: | ---: |
+| zlib | 4921 | 3932 | 1.25 |
+| Score (version 9), 17 suites | 5578 | 5724 | 0.9745 |
+
+Composites are **not comparable with the 16-suite records below**: zlib
+now contributes its real score instead of Octane's neutral default (1),
+which lifts every engine's composite. The five-engine pinned snapshot
+needs a re-run under the new contract before it is quoted again.
+
 ## 2026-08-25 evening: reference-binary drift adjudicated (zjs did not regress)
 
 The apparent −6~7pp system-wide shift between the 2026-08-19 zoo-r0
@@ -64,15 +97,14 @@ this file on 2026-08-25; see "History (version 7)" at the end for what they
 were and where to recover them. Everything else in this file is a version-9
 record.
 
-**Known gap:** `zlib` throws (`ReferenceError: not defined`) from inside its
-giant indirect `eval()` of emscripten-generated code — looks like a genuine
-zjs engine gap (indirect eval / global-scope binding semantics), not a
-suite or tooling issue. 16/17 benchmarks run cleanly. Owner decision
-2026-08-25: skip-list zlib (`driver.js` passes `['zlib']` to
-`BenchmarkSuite.RunSuites`) rather than block the other 16 — it prints
-`zlib: Skipped` and contributes Octane's own neutral default score (1) to
-the composite, visibly, not silently dropped. The underlying eval bug is
-still open.
+**Known gap (superseded 2026-09-05, see top):** `zlib` throws
+(`ReferenceError: not defined`) from inside its giant indirect `eval()` of
+emscripten-generated code — at the time read as a zjs engine gap. Owner
+decision 2026-08-25: skip-list zlib (`driver.js` passed `['zlib']` to
+`BenchmarkSuite.RunSuites`) rather than block the other 16 — it printed
+`zlib: Skipped` and contributed Octane's neutral default score (1) to the
+composite. Resolved 2026-09-05: the missing piece was the d8 shell global
+`read`, which every non-d8 engine lacks; driver.js shims it.
 
 Single-engine diagnostic (`zig build perf-bench-v8` / `run_local.py`,
 unpinned, no gate value) on the current head, 2026-08-25, zjs only:
