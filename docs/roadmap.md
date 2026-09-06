@@ -228,9 +228,12 @@ Track B 定性:最大架构风险退休项与表示定型点,非产品交付解�
 > 基线 `main-d944f26d` 的 Stage 0 固定功 insn/cycles 筛(六负载中
 > 仅 splay cycles 1.26 为 STOP,已判结构账)加四门全绿。
 > gc_merge_policy.json 留档为历史协议;G2-GC-MERGE 标 done、无
-> verdict。S4b 并行标记 2026-09-03 已落 main、默认关(
-> `docs/gc-v2-s4b-parallel-marking-gate.md`),GC-PARALLEL-MARK 余
-> 下的是开启裁决,不再是分支车道。
+> verdict。S4b 并行标记 2026-09-03 曾落 main 默认关
+> (`docs/gc-v2-s4b-parallel-marking-gate.md`),随后在 TGC 合入
+> (`e972c4b5`)中**撤回删除**(`gc_parallel_mark.zig` 已不存在,
+> `gc_incremental.zig` State 注释记 "parallel marking (S4-b) was
+> withdrawn");GC-PARALLEL-MARK 若重开须按该门控设计重建,不再是
+> 分支车道。
 
 **PERF-SHAPE-ID 合同形态(已裁)**:双域——动态可变 shape 用 u64
 identity/version(mutation/relocation/ABA;**计数器作用域=

@@ -493,7 +493,7 @@ items:
     state: ready
     wip_slot: implementation
     hard_prerequisites: []
-    notes: "Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. GC v2 S4b landed a parallel-marking implementation on main 2026-09-03 with the default OFF (docs/gc-v2-s4b-parallel-marking-gate.md); what remains is the enablement decision and its gate, no longer a branch lane."
+    notes: "Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. GC v2 S4b landed a parallel-marking implementation on main 2026-09-03 with the default OFF (docs/gc-v2-s4b-parallel-marking-gate.md) and it was WITHDRAWN in the TGC landing e972c4b5 (gc_parallel_mark.zig deleted; gc_incremental.zig State doc: 'parallel marking (S4-b) was withdrawn' -- the 2026-09-01 calibration read splay cycles +14.6% / EB +7.2% with helpers on Octane-sized live sets). Reopening means rebuilding behind that document's live-size gate; no longer a branch lane."
     authority: {file: docs/tracing-gc-design.md, section: "9 / pause plan"}
   - id: GC-MULTIRT-GATE
     title: Multi-runtime GC acceptance batch 2 (TSan as gate, concurrent create/destroy, N-runtime concurrent collect)
