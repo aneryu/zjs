@@ -32,7 +32,7 @@ rule 2 (or the cheaper identity gates of rule 4 where noted).
 
 From the 2026-08-21 implementation-quality review. As of 2026-08-25 only
 these three threads remain open; everything else (Q1–Q10, Q14–Q20, G1–G6)
-is closed. Q21 (2026-09-05) closed 2026-09-06; Q22 is open.
+is closed. Q21 and Q22 (filed 2026-09-05) closed 2026-09-06.
 
 ### Q11 T3/T4 — `object.zig` split, remaining tranches
 
@@ -115,18 +115,30 @@ trace, `containsHeader` false). Gates: unified suite + gc-stress green;
 fixed-work PMU screen vs the pre-change ReleaseFast binary:
 insn 0.9976–1.0003 on raytrace / splay / earley-boyer / deltablue / pdfjs (2 samples each, ABBA), neutral at the 0.5% screen line.
 
-### Q22 — storage-cell corpse possibly debited twice
+### Q22 — closed 2026-09-06: no double debit; invariant test guards it
 
-`Registry.reclaimDoomedBlock` calls `unpublishStringCell → recordHeapFreeWithBytes`
-per corpse when the remembered map is non-empty (or under the lifecycle
-audit), and `Heap.reclaimDoomedCells` then debits the block's `bitmap_bytes`
-for the same cells in one batch. Whether a corpse that owes no finalizer is
-charged on both paths is an accounting question, not a cycles one (the
-S5-end splay profile puts the whole destruction family below the rc
-baseline; see `tracing-gc-completion-account.md` §6b). Gate: a Debug
-`MemoryAccount` invariant test that frees a block whose owners sit in the
-remembered map and checks `allocated_bytes` returns to the pre-allocation
-value exactly once. Pair with Q21.
+The suspicion was that a corpse owing no finalizer is charged on both
+routes. It is not: the two routes touch different ledgers.
+`Registry.reclaimDoomedBlock` (`gc.zig:2228`) calls `unpublishStringCell`
+per corpse only to run `recordHeapFreeWithBytes` (`gc.zig:2094`), which
+clears the header's `heap_accounted` bit, records the test-build
+accounting oracle (`HeapAccountingOracle.recordUnpublish`,
+`gc_carrier.zig:296`, itself asserting the entry is still published) and
+the carrier lifecycle -- it never calls `MemoryAccount.debitAlloc`.
+The byte ledger (`MemoryAccount.allocated_bytes`) is debited once per
+condemnation by `debitBlockBytes(snapshot.bitmap_bytes)`
+(`gc_trace_stw.zig:1173`, and the young-snapshot sites at 2546 / 2603 /
+2665), where `bitmap_bytes` already excludes the finalizer-owing corpses
+(`recordDoomedBlock`, `gc_block_heap.zig:2222`); those are taken out of the
+doomed set before the block reclaim and debited by their own destructor
+through `destroyStringCell` (`memory.zig:1835`). `Heap.reclaimDoomedCells`
+(`gc_block_heap.zig:1807`) and `freeSmall` (`3041`) maintain bitmaps and
+free lists only. Guard: "Q22: a bitmap-reclaimed storage cell leaves the
+byte ledger exactly once" (`src/tests/core.zig`) -- an old array owner in
+the remembered map adopts a ladder of element cells, the superseded cells
+and then the owner go through majors, and `allocated_bytes` must return
+to the exact pre-allocation value (a second debit injected into
+`unpublishStringCell` turns it red).
 
 ## `call_runtime.zig` candidate domains
 

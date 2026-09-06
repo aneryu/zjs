@@ -20,7 +20,7 @@ ruling and never run (no verdict); the merge basis was the Stage 0
 fixed-work screen against the frozen rc baseline plus four green gates
 (`docs/tracing-gc-completion-account.md`). Still owed after the merge:
 VM-CONTRACT-GC (the representation contract is v2, exported from the
-branch before S1–S5), backlog Q21/Q22, and the conservative-root residue
+branch before S1–S5) and the conservative-root residue
 R1.
 BASE-G0 (measurement freeze) completed 2026-08-26: the official QuickJS
 yardstick is the GCC-16 build recorded in
@@ -155,16 +155,18 @@ class-payload pointer; the payload-kind term is the guard. Deletion probe:
 gc-stress green; fixed-work PMU screen vs the pre-change binary
 insn 0.9976–1.0003 on raytrace / splay / earley-boyer / deltablue / pdfjs (neutral). Priced entry: `docs/backlog.md` Q21 (closed).
 
-### Open 2026-09-06: Q22 — storage-cell corpse possibly debited twice
+### Closed 2026-09-06: Q22 — storage-cell corpse possibly debited twice
 
-An accounting suspicion, not a memory-safety one: `Registry.reclaimDoomedBlock`
-debits each corpse through `unpublishStringCell → recordHeapFreeWithBytes`
-when the remembered map is non-empty (or under the lifecycle audit), and
-`Heap.reclaimDoomedCells` then debits the block's `bitmap_bytes` for the
-same cells in one batch, so a corpse that owes no finalizer may be charged
-on both paths. Affects the `MemoryAccount` byte ledger only; the S5-end
-splay profile puts the whole destruction family below the rc baseline.
-Entry and proposed Debug invariant test: `docs/backlog.md` Q22.
+Not a defect. The per-corpse walk in `Registry.reclaimDoomedBlock`
+(`unpublishStringCell → recordHeapFreeWithBytes`) clears the header's
+accounting bit and feeds the test-build oracle and carrier lifecycle; it
+never touches the `MemoryAccount` byte ledger. That ledger is debited once
+per condemnation by `debitBlockBytes` with a snapshot that already excludes
+finalizer-owing corpses, which are debited by their own destructor. An
+invariant test now guards it: "Q22: a bitmap-reclaimed storage cell leaves
+the byte ledger exactly once" (`src/tests/core.zig`), red when a second
+debit is injected into the per-corpse path. Code-level trail:
+`docs/backlog.md` Q22 (closed).
 
 ### Fixed 2026-08-22: frame teardown read its bytecode after releasing it
 

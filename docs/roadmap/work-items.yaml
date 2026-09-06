@@ -308,7 +308,7 @@ items:
     wip_slot: none
     completion_commit: f005aee7
     hard_prerequisites: []
-    notes: "Landed on main by the 2026-09-03 owner ruling (see G2-GC-MERGE): first landing e972c4b5 (2026-09-04, S0-S2, 127 commits squashed), S5 closeout f005aee7 (2026-09-05). Gates at closeout: zig build test 2558/0, test-gc-stress 2554/0, test262 0/49778 also under ZJS_GC_STRESS=1, leak-census 1570/0, test-oom 22/0, test-stress 6/0 (docs/tracing-gc-completion-account.md section 2). Pushed to origin 2026-09-06 (ca537eca). Open post-merge items: VM-CONTRACT-GC (contract revision), backlog Q21/Q22, conservative-root residue R1 (completion account section 6.6)."
+    notes: "Landed on main by the 2026-09-03 owner ruling (see G2-GC-MERGE): first landing e972c4b5 (2026-09-04, S0-S2, 127 commits squashed), S5 closeout f005aee7 (2026-09-05). Gates at closeout: zig build test 2558/0, test-gc-stress 2554/0, test262 0/49778 also under ZJS_GC_STRESS=1, leak-census 1570/0, test-oom 22/0, test-stress 6/0 (docs/tracing-gc-completion-account.md section 2). Pushed to origin 2026-09-06 (ca537eca). Open post-merge items: VM-CONTRACT-GC (contract revision) and the conservative-root residue R1 (completion account section 6.6); backlog Q21 and Q22 closed 2026-09-06."
     authority: {file: docs/roadmap.md, section: "2"}
 
   # ---- serialization ----

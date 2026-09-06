@@ -17605,6 +17605,53 @@ test "TGC S4-b: an aged owner remembers a property buffer minted after its promo
     try expectS4bNamedProperties(rt, owner_slot.?, "s4b-grow-", 8);
 }
 
+test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var array_slot: ?*core.Object = null;
+    var array_roots = core.runtime.rootObjects(.{&array_slot});
+    array_roots.activate(rt);
+    defer array_roots.deactivate(rt);
+
+    // Round 0 warms every lazily created persistent (the realm's initial
+    // array shape, atoms); round 1 is the measured one, and its ledger must
+    // return to the exact pre-allocation value. A corpse debited on both
+    // routes (`reclaimDoomedBlock`'s per-corpse unpublish and the
+    // `debitBlockBytes` batch) would land below it; a missed debit above.
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        const before_owner = rt.memory.allocated_bytes;
+        array_slot = try core.Object.createArray(rt, null);
+        // Promote the owner first: every cell it adopts from here is an
+        // old-to-young bulk write, so `rememberOwnerForBulkWrite` puts the
+        // owner in the remembered map -- the condition that makes
+        // `reclaimDoomedBlock` walk the corpses (test builds walk them
+        // unconditionally under the lifecycle audit as well).
+        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        try std.testing.expect(!array_slot.?.gcHeader().metaConst().flags.young);
+        const before_cells = rt.memory.allocated_bytes;
+
+        try fillS4bDenseArray(rt, array_slot.?, 40);
+        try std.testing.expect(rt.gc.generation.rememberedCount() != 0);
+        try std.testing.expect(rt.gc.liveCountKind(.array_storage) > 4);
+        const grown = rt.memory.allocated_bytes;
+        try std.testing.expect(grown > before_cells);
+
+        // The superseded buffers owe no destructor: bitmap route only.
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+        const one_cell = rt.memory.allocated_bytes;
+        try std.testing.expect(one_cell < grown);
+        try std.testing.expect(one_cell > before_cells);
+
+        array_slot = null;
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+        if (round == 1) try std.testing.expectEqual(before_owner, rt.memory.allocated_bytes);
+    }
+}
+
 test "TGC S4-b: a growing dense array leaves every superseded element cell to the sweep" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
