@@ -45,7 +45,7 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 |---|---|---:|---|
 | **Stage 0 快筛**(commit 后立刻,强制) | warm ReleaseFast 构建候选;`tools/perf/gc_stats_snapshot.py compare`(候选 vs 缓存的基线快照,阈值 ±10%:hot reuse/reopened/deferred runs/major+minor 次数/minor STW/committed/bitmap reclaimed cells);`run_fixed_pmu.py --samples 2`(runner 最小合法 paired ABBA)候选 vs 基线二进制,场 A(CPU9,可与他人并行),标 `resolution>=0.5%` | ≤15 min | STOP 线:任一负载 **insn >+0.5%**,或 **cycles >+2%**(场 A 2 样本同 SHA 自比 EB 单腿可漂 +2.85%,cycles 在 Stage 0 只作粗指示;0.5%~2% 区间记「待正式」),或确定性指标越阈 → **先 perf 符号差分归因并修**(≤30 min),不进任何后续门禁;否则 → Stage 1 |
 | Stage 1 | `zig build test`(Debug;16 分片跑在 18 核运行池 + 默认 strip + 大核编译池,引擎源码改动后 ~21 s = 18 s 编译 + ≤3 s 运行,2026-09-06) | ~0.5 min | 绿 → Stage 2 |
-| Stage 2 | **一轮** `mise run batch-gate`(= `zig build merge-gate -j32`,引擎改动后端到端 **~91 s**,2026-09-06;它已含 `zig build test`;关键路径 = ReleaseFast zjs 编译 58 s + earley-boyer arena-audit 30 s,test262 支路 55+29 s 并行) | ~1.5 min | 绿 → Stage 3 |
+| Stage 2 | **一轮** `mise run batch-gate`(= `zig build merge-gate -j32`,引擎改动后端到端 **~91 s**,2026-09-06;它已含 `zig build test`;关键路径 = ReleaseFast zjs 编译 58 s + earley-boyer arena-audit 30 s,test262 支路 55 s 编译 + ~10 s 运行并行) | ~1.5 min | 绿 → Stage 3 |
 | Stage 3 正式 | **1×1** 冷构建 ABBA(CPU19 静场,0.1% 制度) | ~40 min | 全部过线 → GO;任一负载落在线 ±0.5% 内 → 才加 2×2 总中位裁布局噪声;明显超线 → NO-GO,不追加功率 |
 | 整合批 | 第二轮 batch-gate、settled 两轮 | — | 只在 integration 分支合并后做一次,不在每个 lane 迭代做 |
 

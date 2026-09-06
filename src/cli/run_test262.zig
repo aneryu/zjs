@@ -216,6 +216,12 @@ const WorkerShared = struct {
     timeout_ms: ?u32,
     global_module: bool,
     reporter: ?*Reporter,
+    /// `Progress: n/N` lines every 1000 tests, only when stderr is a
+    /// terminal. Under the build graph stderr is a pipe the runner echoes
+    /// back verbatim under a "failed command" heading whenever it is
+    /// non-empty -- on 2026-09-06 a green test262 read as red for exactly
+    /// that reason -- so a non-interactive run keeps stderr for failures.
+    show_progress: bool,
 };
 
 /// Per-thread ownership kept separate from the shared run description.
@@ -287,13 +293,15 @@ fn runSelectedTestsWithReporterMode(
     else
         @intCast(config.threads);
     const worker_count = @max(@as(usize, 1), @min(requested_threads, prepared.tests.items.len));
-    var test_gpa = std.heap.DebugAllocator(.{
-        .safety = false,
-        .stack_trace_frames = 0,
-        .thread_safe = false,
-    }){};
-    defer _ = test_gpa.deinit();
-    const test_allocator = test_gpa.allocator();
+    // The workers' allocator is the one the zjs CLI runs on in ReleaseFast
+    // (`std.process.Init.gpa` = smp_allocator): per-thread slabs that keep
+    // freed memory resident. The per-worker `DebugAllocator(.{ .safety =
+    // false })` it replaces mapped every bucket page fresh and unmapped it on
+    // free -- in one process with 18 worker threads, each munmap is a TLB
+    // shootdown across the others and every fault takes the shared mmap
+    // lock: the full sweep spent 82 s of system time against 90 s of user
+    // time and scaled to 7.2 of 18 cores (2026-09-06).
+    const test_allocator = std.heap.smp_allocator;
     var next_index: std.atomic.Value(usize) = .init(0);
     const worker_shared = WorkerShared{
         .io = io,
@@ -309,6 +317,7 @@ fn runSelectedTestsWithReporterMode(
         .timeout_ms = config.timeout_ms,
         .global_module = config.module,
         .reporter = &reporter,
+        .show_progress = std.Io.File.stderr().isTty(io) catch false,
     };
     if (worker_count == 1) {
         try runWorkerLoop(
@@ -318,17 +327,6 @@ fn runSelectedTestsWithReporterMode(
             &current_failures,
         );
     } else {
-        var worker_gpas = try allocator.alloc(std.heap.DebugAllocator(.{
-            .safety = false,
-            .stack_trace_frames = 0,
-            .thread_safe = false,
-        }), worker_count);
-        defer allocator.free(worker_gpas);
-        for (worker_gpas) |*gpa| gpa.* = .{};
-        defer for (worker_gpas) |*gpa| {
-            _ = gpa.deinit();
-        };
-
         var results = try allocator.alloc(WorkerResult, worker_count);
         defer allocator.free(results);
         var contexts = try allocator.alloc(WorkerThreadContext, worker_count);
@@ -336,7 +334,7 @@ fn runSelectedTestsWithReporterMode(
         var threads = try allocator.alloc(std.Thread, worker_count);
         defer allocator.free(threads);
 
-        for (results, 0..) |*result, i| result.* = WorkerResult.init(worker_gpas[i].allocator());
+        for (results) |*result| result.* = WorkerResult.init(test_allocator);
         defer for (results) |*result| result.deinit();
 
         {
@@ -347,7 +345,7 @@ fn runSelectedTestsWithReporterMode(
             }
             while (spawned < worker_count) : (spawned += 1) {
                 contexts[spawned] = .{
-                    .allocator = worker_gpas[spawned].allocator(),
+                    .allocator = test_allocator,
                     .shared = &worker_shared,
                     .result = &results[spawned],
                 };
@@ -389,11 +387,19 @@ fn runWorkerLoop(
 ) !void {
     var harness_cache = HarnessCache.init(allocator, shared.io, shared.harnessdir);
     defer harness_cache.deinit();
+    // One arena per worker, reset (capacity retained) between tests rather
+    // than created and destroyed per test: the per-test arena drew fresh
+    // pages for every harness-prelude + source copy (~160 page faults per
+    // test, memcpy into never-touched memory the top page-fault site of the
+    // sweep, 2026-09-06) and gave them back on every deinit. Retained, the
+    // same resident pages serve every test this worker runs.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
     while (true) {
         const index = shared.next_index.fetchAdd(1, .monotonic);
         if (index >= shared.tests.len) break;
-        if (index > 0 and index % 1000 == 0) {
+        if (shared.show_progress and index > 0 and index % 1000 == 0) {
             if (shared.reporter) |reporter| {
                 reporter.lockedPrint(shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, shared.tests.len, index * 100 / shared.tests.len }) catch {};
             } else {
@@ -404,8 +410,7 @@ fn runWorkerLoop(
 
         var run_err: ?anyerror = null;
         const result, const is_known = blk: {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
+            defer _ = arena.reset(.retain_capacity);
             const arena_allocator = arena.allocator();
 
             var stderr_text: []const u8 = "";
@@ -1395,6 +1400,7 @@ test "selected known failure that now passes is counted as fixed" {
         .timeout_ms = null,
         .global_module = false,
         .reporter = null,
+        .show_progress = false,
     };
     try runWorkerLoop(
         &worker_shared,

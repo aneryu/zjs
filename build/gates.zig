@@ -46,6 +46,12 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     run_test262_exec.addArg("100000");
     run_test262_exec.addArg("-R");
     run_test262_exec.addArg("reports/test262-latest");
+    // `-v`: failing cases print `FAIL <path>: <detail>` to stdout (passes stay
+    // silent), so the stdout the check prints on a red run names them; at
+    // verbose 0 they only reach reports/test262-latest/test262-failures.log,
+    // which the next green run overwrites (2026-09-06: one red test262 under
+    // full gate load lost its failure text exactly that way).
+    run_test262_exec.addArg("-v");
     run_test262_exec.expectStdOutMatch("Result: 0/");
     const test262_check_step = b.step("test262-check", "Run the full test262 suite; any failed or newly-fixed case fails the step");
     test262_check_step.dependOn(&run_test262_exec.step);
