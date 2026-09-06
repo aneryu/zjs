@@ -92,7 +92,12 @@ slower than on the X925 cores (ReleaseFast zjs 111 s -> 57 s, unified test
 coarse resolution. The small-core pool `0-4,10-14` remains the
 **overlap-safe** pool: the rows below were calibrated on it and only on it,
 so a build that must coexist with an instruction-count screen sets
-`ZJS_BUILD_CPUS=0-4,10-14` explicitly. Each pool half shares an L3 with its
+`ZJS_BUILD_CPUS=0-4,10-14` explicitly (the build graph's Run steps -- test
+shards, test262, the fixed-work smoke -- follow `ZJS_BUILD_CPUS` when it is
+set; otherwise they spread over `0-8,10-18`, never 9 or 19; see
+`docs/testing-graph.md` "Run pool vs compile pool"). Stage 0's warm build
+holds the host token exclusively, so it uses the default pool too
+(2026-09-06; it had been on `0-4,10-14`). Each pool half shares an L3 with its
 field, so a cycles job may coexist only with compilation confined to the
 **opposite** domain: cycles@A forbids CPUs 0-4 (and 5-8), cycles@B forbids
 CPUs 10-14 (and 15-18). A host window forbids all compilation. Because §4 did not admit either tested compile

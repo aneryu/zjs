@@ -38,7 +38,7 @@ from typing import Sequence
 
 
 HOST_LOCK = "/tmp/zjs-host-heavy.lock"
-BUILD_CPUS = (0, 1, 2, 3, 4, 10, 11, 12, 13, 14)
+BUILD_CPUS = (5, 6, 7, 8, 15, 16, 17, 18)
 
 
 @dataclass(frozen=True)

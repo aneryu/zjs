@@ -78,7 +78,7 @@ must never import it.
 |---|---|---|
 | `zjs` / `zjs-profile` / `zjs-dev` | `src/cli/zjs.zig` → `engine.config_signature.attest("zjs CLI")` | |
 | `run-test262` / `run-test262-dev` | `src/cli/run_test262.zig` attests `"run-test262 / test-runner"` | |
-| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 8) parallel `--shard i/N` run processes with captured stderr |
+| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 16) parallel `--shard i/N` run processes with captured stderr, pinned to the run pool (`-Dgate-run-cpus`, default `0-8,10-18`) |
 | scoped Class-B shells | `@import("zjs").config_signature.attest("test-X")` | Debug-pinned |
 | scoped Class-A shells | `@import("config_signature.zig").attest("test-X")` | Debug-pinned |
 | `test-runner` shell | attests the same string as `run_test262.zig` | Two attestations of one value are harmless |
@@ -145,6 +145,31 @@ What it does not prove: anything a machine-code backend decides
 (`@call(.always_tail)` lowering, the `.space` tombstones) and any behaviour
 whatsoever. **`check` is not a gate and no gate depends on it.**
 `zig build test` remains the checkpoint dependency.
+
+## Run pool vs compile pool
+
+`zig build` is launched on the compile pool (mise: `taskset -c
+${ZJS_BUILD_CPUS:-5-8,15-18}`, the eight X925 cores) because every compile
+is one single-threaded LLVM job. The graph's Run steps -- the unified
+shards, gc-stress, the stress tier, test262, the fixed-work smoke -- are
+re-pinned by `build/config.zig gateRunCpus` (`taskset -c`, Linux only) to
+the run pool: `-Dgate-run-cpus`, else `ZJS_GATE_RUN_CPUS`, else
+`ZJS_BUILD_CPUS` when an operator narrowed the compile pool, else every
+core but the measurement cores 9 and 19 (`0-8,10-18`).
+
+Two build-runner facts decide the shape of a gate (2026-09-06):
+
+- The runner's worker pool is `cpu_count - 1` threads and a step dispatched
+  past it runs inline on the main thread, which is still dispatching the
+  initial steps. Gates therefore go through mise, which passes `-j32`.
+- A Run step with inherited stdio holds the runner's stderr lock for its
+  whole duration. test262 and gate_smoke run in `.check` mode
+  (`expectStdOutMatch` on their summary line; a red run prints the whole
+  log) and the shards capture stderr, so none of them serialise.
+
+`mise run gate-timeline -- merge-gate` draws the per-process Gantt
+(`tools/gates/timeline.py`); it is the headless substitute for
+`--time-report` and also times the Run steps.
 
 ## What CI runs
 

@@ -161,6 +161,7 @@ pub fn build(b: *std.Build) void {
         .engine_options = engine_options,
         .engine_options_fast = engine_options_fast,
         .engine_options_dev = engine_options_dev,
+        .gate_run_cpus = config.gateRunCpus(b),
     };
     const engine_artifacts = artifacts.addEngineArtifacts(ctx);
     const test_graph = tests_graph.addTestGraph(ctx, engine_artifacts);

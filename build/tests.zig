@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_config = @import("config.zig");
 const artifacts_mod = @import("artifacts.zig");
+const runArtifactOnCpus = @import("gates.zig").runArtifactOnCpus;
 
 pub const TestGraph = struct {
     test_step: *std.Build.Step,
@@ -44,7 +45,10 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // larger half of `zig build test` and it parallelises where the
     // single-module compile cannot. A filtered run stays a single process so
     // its output reads as one list.
-    const test_shards_option = b.option(usize, "test-shards", "Run the unified suite as this many parallel shard processes (default 8; 1 = unsharded)") orelse 8;
+    // 16 shards over the 18-core run pool (`-Dgate-run-cpus`): the run
+    // phase is bounded by its longest shard, and finer shards balance the
+    // few heavy tests (2026-09-06: 8 shards, longest 7.7 s of a ~8 s phase).
+    const test_shards_option = b.option(usize, "test-shards", "Run the unified suite as this many parallel shard processes (default 16; 1 = unsharded)") orelse 16;
     const test_shards: usize = if (test_filter != null or test_shards_option == 0) 1 else test_shards_option;
     // Debug info is half of the unified compile (measured 2026-09-05: ~60 s
     // with DWARF, ~30 s without). A stripped binary still names the failing
@@ -89,7 +93,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     unified_tests.root_module.addIncludePath(b.path("src"));
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
     for (0..test_shards) |shard| {
-        const run_unified_tests = b.addRunArtifact(unified_tests);
+        const run_unified_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
         run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
         run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
         run_unified_tests.addArgs(&.{ "--skip-prefix", "tests.stress." });
@@ -118,7 +122,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // a gate rather than a log. Measured 55 s on 2026-09-03.
     const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
     for (0..test_shards) |shard| {
-        const run_gc_stress_tests = b.addRunArtifact(unified_tests);
+        const run_gc_stress_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
         run_gc_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
         run_gc_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
         run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_STRESS", "1");
@@ -143,7 +147,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // the old `src/stress_tests.zig` root cost every gate (~37 s CPU,
     // 2026-09-06). One process, not sharded: five tests, and
     // `--require-tests` must be able to see them.
-    const run_stress_tests = b.addRunArtifact(unified_tests);
+    const run_stress_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
     run_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
     run_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
     run_stress_tests.addArgs(&.{ "--only-prefix", "tests.stress.", "--require-tests" });

@@ -34,7 +34,12 @@ import run_fixed_pmu as fixed_pmu  # noqa: E402
 
 
 GC_HEAVY_SIX = tuple(gc_snapshot.GC_HEAVY_SIX)
-BUILD_CPUS = "0-4,10-14"
+# The warm build holds the host lock exclusively (measure_fields.HOST_LOCK,
+# LOCK_EX; every field job takes it LOCK_SH), so nothing measures while it
+# runs and the overlap-safe small-core pool bought nothing here except a
+# ~2x slower ReleaseFast compile (111 s vs 57 s on the X925 pool, 2026-09-06).
+# Same default and override as the mise build tasks; never CPU 9 or 19.
+BUILD_CPUS = os.environ.get("ZJS_BUILD_CPUS", "5-8,15-18")
 INSTRUCTION_STOP_LIMIT = 1.005
 CYCLES_PENDING_LIMIT = 1.005
 CYCLES_STOP_LIMIT = 1.020

@@ -3,17 +3,29 @@ zig = "0.16.0"
 node = "24"
 bun = "1"
 
+# Every `zig build` here passes `-j32`. The build runner's worker pool is
+# `cpu_count - 1` threads (7 on the eight-core pool), and a step dispatched
+# past that limit runs INLINE on the runner's main thread -- which is still
+# in the loop that dispatches the initial steps. On 2026-09-06 the merge
+# gate's ReleaseFast `run-test262` compile therefore started only after the
+# ReleaseFast `zjs` compile (56 s) had finished on the main thread: two
+# compiles that share no dependency ran back to back. `-j` only sizes the
+# runner's threads; the CPU work is whatever the graph spawns, so a high
+# value costs nothing. Measure a gate with `mise run gate-timeline`.
+[env]
+ZJS_BUILD_JOBS = "-j32"
+
 [tasks.quick-gate]
 description = "Run the Debug inner-loop gate once"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate --summary all'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate "$ZJS_BUILD_JOBS" --summary all'
 
 [tasks.checkpoint-gate]
 description = "Run the checkpoint gate"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build checkpoint-gate --summary all'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build checkpoint-gate "$ZJS_BUILD_JOBS" --summary all'
 
 [tasks.quick-watch]
 description = "Keep the Debug quick-gate compiler alive for faster incremental edit feedback"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate --watch -fincremental --summary new'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'
 
 # Resident incremental compiler for ANY build step. The engine-wide Debug
 # targets (unified test ~60s, zjs-dev ~35s cold) are the ones worth keeping
@@ -21,7 +33,7 @@ run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18
 # watch mode). Example: mise run watch -- test-exec
 [tasks.watch]
 description = "Keep a resident incremental compiler on a named build step (mise run watch -- test-exec)"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build --watch -fincremental --summary new'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'
 
 # Fixed-work instruction/cycle screen of zig-out/bin/zjs against pinned
 # QuickJS. This is the per-candidate screening instrument (~30s/benchmark at
@@ -94,8 +106,16 @@ ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 1000
 # the old overlap-safe pool back for a concurrent screen.
 [tasks.batch-gate]
 description = "Per-merge-batch gate: zig build merge-gate (one parallel graph: suites, stress, gc-stress, smoke-dev, architecture, test262, fixed-work smoke)"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build merge-gate --summary all'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build merge-gate "$ZJS_BUILD_JOBS" --summary all'
+
+# Gantt of one gate: which step ran when, so the critical path is visible
+# (`zig build --time-report` needs the web UI and does not time Run steps).
+# Append the build step after `--`, e.g. `mise run gate-timeline -- merge-gate`.
+[tasks.gate-timeline]
+description = "Run a build step under tools/gates/timeline.py (per-process start/duration; default merge-gate)"
+usage = 'arg "[step]" default="merge-gate"'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" python3 tools/gates/timeline.py -- zig build {{arg(name="step")}} "$ZJS_BUILD_JOBS" --summary all'
 
 [tasks.production-gate]
 description = "Release gate: engine-production-gate (adds the ReleaseFast zjs-profile smoke and the full test-embedding run)"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build engine-production-gate --summary all'
+run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build engine-production-gate "$ZJS_BUILD_JOBS" --summary all'

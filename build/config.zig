@@ -15,7 +15,31 @@ pub const Ctx = struct {
     engine_options: *std.Build.Step.Options,
     engine_options_fast: *std.Build.Step.Options,
     engine_options_dev: *std.Build.Step.Options,
+    /// taskset CPU list for the graph's Run steps (test shards, test262,
+    /// the fixed-work smoke); "" leaves them on whatever `zig build` got.
+    gate_run_cpus: []const u8,
 };
+
+/// The CPU list the graph's Run steps are pinned to. `zig build` itself is
+/// launched on the compile pool (mise: `taskset -c ${ZJS_BUILD_CPUS:-5-8,15-18}`,
+/// the eight X925 cores), which is the right place for the single-threaded
+/// LLVM compiles and the wrong place for the test262 sweep, the shards and
+/// the smoke: they scale with cores and had been sharing eight while ten
+/// A725 cores idled. Resolution order:
+///   -Dgate-run-cpus=<list>   explicit (empty string = no pinning)
+///   ZJS_GATE_RUN_CPUS        environment
+///   ZJS_BUILD_CPUS           an operator who narrowed the compile pool (to
+///                            keep a measurement field quiet) narrowed the
+///                            run pool with it
+///   default                  every core but the measurement cores 9 and 19
+/// Linux only (taskset); elsewhere the Run steps are unpinned.
+pub fn gateRunCpus(b: *std.Build) []const u8 {
+    const opt = b.option([]const u8, "gate-run-cpus", "taskset CPU list for the graph's Run steps: test shards, test262, fixed-work smoke (default: ZJS_GATE_RUN_CPUS, else ZJS_BUILD_CPUS, else 0-8,10-18; empty = unpinned)");
+    if (opt) |v| return v;
+    if (b.graph.environ_map.get("ZJS_GATE_RUN_CPUS")) |v| return v;
+    if (b.graph.environ_map.get("ZJS_BUILD_CPUS")) |v| return v;
+    return "0-8,10-18";
+}
 
 /// QCP-1 configuration settings, in the canonical order the ruling names them.
 /// Keep this list, `configSignature` below, and `src/config_signature.zig`

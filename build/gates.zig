@@ -1,6 +1,19 @@
+const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("config.zig");
 const artifacts_mod = @import("artifacts.zig");
 const tests_mod = @import("tests.zig");
+
+/// Run `exe` under `taskset -c cpus` (Linux) so a gate's Run steps can use
+/// more cores than the compile pool the whole `zig build` was launched on.
+/// `cpus` empty (or a non-Linux host) is a plain `addRunArtifact`.
+pub fn runArtifactOnCpus(b: *std.Build, cpus: []const u8, exe: *std.Build.Step.Compile) *std.Build.Step.Run {
+    if (cpus.len == 0 or builtin.os.tag != .linux) return b.addRunArtifact(exe);
+    const run = b.addSystemCommand(&.{ "taskset", "-c", cpus });
+    run.addArtifactArg(exe);
+    run.setName(b.fmt("run {s} (cpus {s})", .{ exe.name, cpus }));
+    return run;
+}
 
 pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph: tests_mod.TestGraph) void {
     const b = ctx.b;
@@ -14,8 +27,16 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     const smoke_dev_step = test_graph.smoke_dev_step;
     const embedding_step = test_graph.embedding_step;
 
-    // Add actual test262 execution step.
-    const run_test262_exec = b.addRunArtifact(run_test262_exe);
+    // Add actual test262 execution step. Pinned to the gate's run pool
+    // (`-Dgate-run-cpus`; every core but the two measurement cores 9/19 by
+    // default) rather than the compile pool `zig build` was started on: the
+    // runner takes one worker thread per core it can see, and the compiles
+    // are what the big cores are for. Check mode, not inherited stdio: a Run
+    // step that inherits stdio holds the build runner's stderr lock for its
+    // whole duration, which serialised this 28 s run behind (or ahead of)
+    // the 53 s fixed-work smoke on every merge gate until 2026-09-06. The
+    // summary line is asserted on stdout, so a red run shows the full log.
+    const run_test262_exec = runArtifactOnCpus(b, ctx.gate_run_cpus, run_test262_exe);
     run_test262_exec.step.dependOn(&install_run_test262.step);
     run_test262_exec.addArg("-c");
     run_test262_exec.addArg("test262.conf");
@@ -25,6 +46,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     run_test262_exec.addArg("100000");
     run_test262_exec.addArg("-R");
     run_test262_exec.addArg("reports/test262-latest");
+    run_test262_exec.expectStdOutMatch("Result: 0/");
     const test262_check_step = b.step("test262-check", "Run the full test262 suite; any failed or newly-fixed case fails the step");
     test262_check_step.dependOn(&run_test262_exec.step);
 
@@ -141,9 +163,9 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     // the suites -- instead of after the whole graph as a second command
     // (the 2026-08-30 batch-gate accounting had the serial sweep at ~8 of
     // ~12 minutes; parallel mode brought it down, the serial position stayed).
-    // It is a crash/invariant smoke, not a measurement; the CPUs are the
-    // big cores of both L3 domains by default and `-Dgate-smoke-cpus` overrides.
-    const gate_smoke_cpus = b.option([]const u8, "gate-smoke-cpus", "Comma-separated CPUs for the parallel fixed-work smoke (default 5,6,7,8,15,16)") orelse "5,6,7,8,15,16";
+    // It is a crash/invariant smoke, not a measurement; the runs share the
+    // gate's run pool (`-Dgate-run-cpus`) and `-Dgate-smoke-cpus` overrides.
+    const gate_smoke_cpus = b.option([]const u8, "gate-smoke-cpus", "taskset CPU list for the parallel fixed-work smoke (default: the gate run pool)") orelse ctx.gate_run_cpus;
     // One ordinary run per workload, not the script's default three: the
     // arena-audit/stats run is the stronger half, and on the merge gate the
     // smoke is the critical path (earley-boyer alone: 3 x 22 s + 30 s audit
@@ -157,12 +179,15 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     // Positional: corpus, then a CPU the script validates but does not use
     // in parallel mode, then the ordinary-run count.
     run_gate_smoke.addArgs(&.{ gate_smoke_corpus, "5", gate_smoke_runs });
-    run_gate_smoke.setEnvironmentVariable("ZJS_GATE_PARALLEL_CPUS", gate_smoke_cpus);
+    if (gate_smoke_cpus.len != 0) run_gate_smoke.setEnvironmentVariable("ZJS_GATE_PARALLEL_CPUS", gate_smoke_cpus);
     run_gate_smoke.step.dependOn(&install_zjs.step);
-    // The script's own stale-binary guard compares against source mtimes and
-    // the build graph is the authority here; it still re-runs whenever the
-    // zjs artifact changes because the artifact path is an input.
-    run_gate_smoke.has_side_effects = true;
+    // Check mode (the script's closing line is asserted on stdout; a red
+    // run prints the whole log) instead of inherited stdio, which would hold
+    // the runner's stderr lock and serialise the smoke against test262. The
+    // step keys on the zjs artifact's content hash, so it re-runs for every
+    // engine change and is a cache hit when the binary is byte-identical --
+    // the script's own stale-binary guard covers the out-of-graph callers.
+    run_gate_smoke.expectStdOutMatch("fixed-work smoke: all clean");
     const gate_smoke_step = b.step("gate-smoke", "Run the fixed-work corpus smoke (ordinary runs + arena-audit stats run per workload) against the built zjs");
     gate_smoke_step.dependOn(&run_gate_smoke.step);
 

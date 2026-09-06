@@ -52,7 +52,7 @@ class MeasureFieldTests(unittest.TestCase):
         self.assertEqual((5, 6, 7, 8), fields.cpus_for(fields.FIELDS["a"], "topology"))
         self.assertEqual((19,), fields.cpus_for(fields.FIELDS["b"], "single"))
         self.assertEqual((15, 16, 17, 18), fields.cpus_for(fields.FIELDS["b"], "topology"))
-        self.assertEqual((0, 1, 2, 3, 4, 10, 11, 12, 13, 14), fields.BUILD_CPUS)
+        self.assertEqual((5, 6, 7, 8, 15, 16, 17, 18), fields.BUILD_CPUS)
 
     def test_host_is_exclusive_and_fields_use_shared_host_token(self) -> None:
         host = fields.field_metadata(fields.FIELDS["host"], "single")

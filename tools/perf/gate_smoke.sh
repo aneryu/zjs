@@ -103,10 +103,13 @@ fi
 outputs=$(mktemp -d)
 trap 'rm -rf -- "$outputs"' EXIT
 
-# One benchmark's full treatment: the ordinary runs, then one deliberately
+# One benchmark's full treatment: the ordinary runs, plus one deliberately
 # expensive pass with the whole-heap arena/invariant audit and --gc-stats so
-# the gate proves completion state, not merely exit status.
-run_bench() {
+# the gate proves completion state, not merely exit status. The two halves
+# are independent processes; parallel mode runs them concurrently (the
+# earley-boyer chain, 22 s ordinary then 30 s audit, was the merge gate's
+# tail until 2026-09-06), serial mode keeps the ordinary-then-audit order.
+ordinary_runs() {
     local name="$1" js="$2" cpu="$3" run
     for ((run = 1; run <= RUNS; run += 1)); do
         if ! taskset -c "$cpu" "$BIN" "$js" >/dev/null 2>&1; then
@@ -114,6 +117,11 @@ run_bench() {
             return 1
         fi
     done
+    return 0
+}
+
+audit_run() {
+    local name="$1" js="$2" cpu="$3"
     if ! env ZJS_GC_ARENA_AUDIT=1 taskset -c "$cpu" \
         "$BIN" --gc-gate-settle --gc-stats "$js" >"$outputs/$name.stdout" 2>"$outputs/$name.stderr"; then
         echo "FAIL $name arena-audit stats run"
@@ -123,26 +131,32 @@ run_bench() {
     return 0
 }
 
+run_bench() {
+    local name="$1" js="$2" cpu="$3"
+    ordinary_runs "$name" "$js" "$cpu" || return 1
+    audit_run "$name" "$js" "$cpu"
+}
+
 fail=0
 if [[ -n "${ZJS_GATE_PARALLEL_CPUS:-}" ]]; then
-    # Parallel mode: one benchmark per CPU from the list, all at once. This is
-    # a crash/invariant smoke, not a measurement -- shared-cache contention
-    # cannot fake a pass, and every per-benchmark artifact is still written
-    # and checked. Serial remains the default; the 2026-08-30 batch-gate
-    # accounting found the serial sweep dominating the whole gate (~8 of ~12
-    # minutes).
-    if [[ ! "$ZJS_GATE_PARALLEL_CPUS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-        echo "fixed-work smoke: ZJS_GATE_PARALLEL_CPUS must be a comma-separated CPU list" >&2
+    # Parallel mode: every run pinned to the whole CPU list (a taskset list,
+    # ranges allowed), all benchmarks and both halves at once, the kernel
+    # balances. This is a crash/invariant smoke, not a measurement --
+    # shared-cache contention cannot fake a pass, and every per-benchmark
+    # artifact is still written and checked. Serial remains the default; the
+    # 2026-08-30 batch-gate accounting found the serial sweep dominating the
+    # whole gate (~8 of ~12 minutes).
+    if [[ ! "$ZJS_GATE_PARALLEL_CPUS" =~ ^[0-9]+([,-][0-9]+)*$ ]]; then
+        echo "fixed-work smoke: ZJS_GATE_PARALLEL_CPUS must be a taskset CPU list" >&2
         exit 2
     fi
-    IFS=',' read -r -a parallel_cpus <<< "$ZJS_GATE_PARALLEL_CPUS"
     pids=()
-    idx=0
     for js in "${scripts[@]}"; do
         name=$(basename "$js" .js)
-        run_bench "$name" "$js" "${parallel_cpus[idx % ${#parallel_cpus[@]}]}" &
+        ordinary_runs "$name" "$js" "$ZJS_GATE_PARALLEL_CPUS" &
         pids+=($!)
-        idx=$((idx + 1))
+        audit_run "$name" "$js" "$ZJS_GATE_PARALLEL_CPUS" &
+        pids+=($!)
     done
     for pid in "${pids[@]}"; do
         if ! wait "$pid"; then fail=$((fail + 1)); fi

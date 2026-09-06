@@ -44,8 +44,8 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 | 阶段 | 内容 | 成本 | 通过线 → 下一阶段 |
 |---|---|---:|---|
 | **Stage 0 快筛**(commit 后立刻,强制) | warm ReleaseFast 构建候选;`tools/perf/gc_stats_snapshot.py compare`(候选 vs 缓存的基线快照,阈值 ±10%:hot reuse/reopened/deferred runs/major+minor 次数/minor STW/committed/bitmap reclaimed cells);`run_fixed_pmu.py --samples 2`(runner 最小合法 paired ABBA)候选 vs 基线二进制,场 A(CPU9,可与他人并行),标 `resolution>=0.5%` | ≤15 min | STOP 线:任一负载 **insn >+0.5%**,或 **cycles >+2%**(场 A 2 样本同 SHA 自比 EB 单腿可漂 +2.85%,cycles 在 Stage 0 只作粗指示;0.5%~2% 区间记「待正式」),或确定性指标越阈 → **先 perf 符号差分归因并修**(≤30 min),不进任何后续门禁;否则 → Stage 1 |
-| Stage 1 | `zig build test`(Debug;分片并行 + 默认 strip + 大核池,引擎源码改动后 ~23 s,2026-09-06) | ~0.5 min | 绿 → Stage 2 |
-| Stage 2 | **一轮** `mise run batch-gate`(= `zig build merge-gate`,引擎改动后端到端 ~135 s,2026-09-06;它已含 `zig build test`) | ~2.5 min | 绿 → Stage 3 |
+| Stage 1 | `zig build test`(Debug;16 分片跑在 18 核运行池 + 默认 strip + 大核编译池,引擎源码改动后 ~21 s = 18 s 编译 + ≤3 s 运行,2026-09-06) | ~0.5 min | 绿 → Stage 2 |
+| Stage 2 | **一轮** `mise run batch-gate`(= `zig build merge-gate -j32`,引擎改动后端到端 **~91 s**,2026-09-06;它已含 `zig build test`;关键路径 = ReleaseFast zjs 编译 58 s + earley-boyer arena-audit 30 s,test262 支路 55+29 s 并行) | ~1.5 min | 绿 → Stage 3 |
 | Stage 3 正式 | **1×1** 冷构建 ABBA(CPU19 静场,0.1% 制度) | ~40 min | 全部过线 → GO;任一负载落在线 ±0.5% 内 → 才加 2×2 总中位裁布局噪声;明显超线 → NO-GO,不追加功率 |
 | 整合批 | 第二轮 batch-gate、settled 两轮 | — | 只在 integration 分支合并后做一次,不在每个 lane 迭代做 |
 
@@ -74,14 +74,20 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 ## 每合并批(driver 侧)做的
 
 1. 合并载荷审查(`git log trunk..candidate`,合并 commit = 合并其全部祖先);
-2. 批门禁一轮:`mise run batch-gate` = `zig build merge-gate` 单构建图:
+2. 批门禁一轮:`mise run batch-gate` = `zig build merge-gate -j32` 单构建图:
    统一套件(含 stress 层)+ gc-stress + Debug CLI smoke + 架构检查 +
    ReleaseFast zjs/run-test262 + 全量 test262 + gate_smoke(每负载含一次
    arena-audit run)全部并行;引擎编译 2 ReleaseFast + 2 Debug。相比
    engine-production-gate(发布门,`mise run production-gate`)少了
    ReleaseFast `zjs-profile` 的 smoke 与 `test-embedding` 的第二个 Debug 引擎
    编译(改为 sema-only `check-embedding`;运行期 pin 在统一套件里跑)。默认
-   构建 affinity 为大核池 `5-8,15-18` 且构建阶段持 host 排他锁;
+   构建 affinity 为大核池 `5-8,15-18` 且构建阶段持 host 排他锁;图内的
+   Run step(test 分片、test262、gate_smoke)由 `-Dgate-run-cpus` 放到
+   18 核运行池 `0-8,10-18`(留 9/19 给测量;显式 `ZJS_BUILD_CPUS` 时运行池
+   随之收窄)。**门禁一律走 mise 任务**:裸 `zig build merge-gate` 只有
+   `核数−1` 个 runner 线程,超出的初始步骤会在主线程内联执行,两个互不依赖的
+   ReleaseFast 编译会串行(2026-09-06 实录 139 s vs 91 s);
+   `mise run gate-timeline -- <step>` 出每个进程的起止甘特图;
 3. 失败 → 按批内 commit bisect,只对肇事 commit 追加验证;
 4. cycles/L2D 终裁攒安静窗口一次做:用 measurement contract 的 field/host
    锁作仲裁并保存 mpstat/进程诊断。当前校准没有批准任何跨场或编译重叠的
