@@ -309,7 +309,7 @@ test "short BigInt induction sum range fast path preserves exact results" {
         \\let skipped = 7n;
         \\for (let i = 5n; i < 3n; i++) skipped += i;
         \\print(skipped);
-    , "49995000 bigint\n10\n9223372036854775809\n7\n");
+    , "49995000n bigint\n10n\n9223372036854775809n\n7n\n");
 }
 
 test "simple numeric bytecode call range fast path preserves side effect fallback" {
@@ -1299,7 +1299,7 @@ test "array map simple callback range preserves closed induction and completion"
         \\print(out.length, out[0], out[9]);
         \\print(eval("const e=[1,2]; let r; for (let j=0; j<4; j++) r=e.map(x=>x+1);"));
         \\print(eval("const s=[1,2]; let r; for (let k=4; k<4; k++) r=s.map(x=>x+1);"));
-    , "10 2 11\n2,3\nundefined\n");
+    , "10 2 11\n[ 2, 3 ]\nundefined\n");
 }
 
 test "global var induction add range preserves completion" {
@@ -1340,7 +1340,7 @@ test "short BigInt induction add range preserves completion" {
         \\print(x);
         \\print(eval("let y=0n; for (let j=0n; j<4n; j++) y += j;"));
         \\print(eval("let z=0n; for (let k=4n; k<4n; k++) z += k;"));
-    , "6\n6\nundefined\n");
+    , "6n\n6n\nundefined\n");
 }
 
 const EscapedEvalImportHost = struct {

@@ -4001,6 +4001,12 @@ pub const Object = extern struct {
         return self.typedArrayPayloadConst();
     }
 
+    /// Read-only Map/Set payload view for the CLI print inspector (entry
+    /// order, active flags, live count); no mutation, no cursor.
+    pub fn collectionPayloadBorrowed(self: *const Object) ?*const CollectionPayload {
+        return self.collectionPayloadConst();
+    }
+
     pub fn typedArrayKindSlot(self: *Object) *u8 {
         if (self.typedArrayPayload()) |payload| return &payload.kind;
         std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));

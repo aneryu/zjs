@@ -1739,6 +1739,16 @@ fn setDateValue(_: *core.JSRuntime, object: *core.Object, ms: f64) !void {
     slot.* = core.JSValue.float64(ms);
 }
 
+/// CLI print inspector hook (qjs js_print_object JS_CLASS_DATE arm,
+/// quickjs.c:14153: `get_date_string(..., 0x23)`): the toISOString text of a
+/// Date object with no side effect, or null when the time value is NaN (qjs
+/// then falls back to the generic object dump).
+pub fn isoStringForInspector(rt: *core.JSRuntime, object: *const core.Object) !?core.JSValue {
+    const ms = dateValue(object) catch return null;
+    if (std.math.isNan(ms)) return null;
+    return try getDateStringValue(rt, ms, 0x23);
+}
+
 fn dateValue(object: *const core.Object) !f64 {
     const value = object.objectData() orelse return error.TypeError;
     return numberValue(value) orelse error.TypeError;

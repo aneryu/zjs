@@ -11188,7 +11188,7 @@ test "Engine direct eval captures the caller arguments binding" {
         \\print(open1(), open2());
         \\var noInit = parameterClosureNoInit();
         \\print(parameterClosure(), noInit[0], noInit[1], noInit[2]);
-    , "41 42\n41 replaced false [object Arguments]\ninside inside inside\ninside inside\nfalse false true false\n");
+    , "41 42\n41 replaced false Arguments {  }\ninside inside inside\ninside inside\nfalse false true false\n");
 }
 
 test "Engine arguments writes prefer the current function binding over outer lexical bindings" {
@@ -11909,7 +11909,7 @@ test "Engine eval template interpolation calls object toString" {
 }
 
 test "Engine eval executes simple arrays and map" {
-    try helpers.expectPrints("const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", "1,2,3\n3\n1\n2,4,6\n");
+    try helpers.expectPrints("const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", "[ 1, 2, 3 ]\n3\n1\n[ 2, 4, 6 ]\n");
 }
 
 test "Engine eval executes simple functions and arrows" {
@@ -21128,19 +21128,91 @@ test "an unresolved binding names its identifier in the ReferenceError message (
     );
 }
 
-test "print converts object arguments with ToString instead of the raw [object Object] fallback" {
+test "print / console.log dump objects like QuickJS JS_PrintValue (qjs-generated expectations, 36 shapes)" {
+    // Expected text is the output of the pinned QuickJS yardstick binary on
+    // the same source (tools: print_inspector.zig mirrors quickjs.c
+    // 13678-14432). Stacks are assigned explicitly because qjs and zjs
+    // differ in the eval frame text, not in the dump.
     try helpers.expectPrints(
-        \\print(new TypeError("boom"));
-        \\print({ toString() { return "custom"; } }, [1, [2, 3]], { [Symbol.toPrimitive]() { return "prim"; } });
-        \\print({}, { valueOf() { return 7; } });
-        \\try { print({ toString() { throw new RangeError("r"); } }); } catch (e) { print(e.name); }
-        \\print(1, "a", null, undefined, true, Symbol("s"));
+        \\(function () {
+        \\print({ a: 1, b: "s", c: null, d: undefined, e: true, f: 1.5, g: -0, h: NaN, i: 1e21, j: 123n, k: -Infinity });
+        \\print([ 1, 2, 3 ], [], {}, [ [ 1, [ 2, [ 3 ] ] ] ], { a: { b: { c: 1 } } });
+        \\var c = { name: "c" }; c.self = c; c.arr = [c, { inner: c }]; print(c);
+        \\print([1,,3], new Array(3), [1,2,,]);
+        \\var sp = [1,2,3]; sp[10] = 4; var ap = [1,2]; ap.foo = "bar"; print(sp, ap);
+        \\print("raw top-level string", { s: "quote\"d 'single' \\ back\nnl\ttab\x01ctl\x7fé\u{1F600}\ud800" });
+        \\print({ "key with space": 1, "0": 2, 5: 3, "$ok_1": 4, "1abc": 5, "": 6, "é": 7 });
+        \\var sym = Symbol("sd"); var o = {}; o[sym] = 1; o[Symbol()] = 2; print(o, sym, Symbol(), Symbol.iterator);
+        \\print({ get g() { return 1; }, set s(v) {}, get gs() { return 1; }, set gs(v) {} });
+        \\var e1 = new Error("boom"); Object.defineProperty(e1, "stack", { value: "    at fake (f.js:1:1)\n", writable: true, enumerable: false, configurable: true }); print(e1);
+        \\var e2 = new TypeError("t"); Object.defineProperty(e2, "stack", { value: "    at fake", writable: true, enumerable: false, configurable: true }); e2.code = 42; print(e2);
+        \\var e3 = new RangeError(""); Object.defineProperty(e3, "stack", { value: "    at fake", writable: true, enumerable: false, configurable: true }); print(e3, { e: e3 });
+        \\class Foo { constructor() { this.x = 1; } m() {} } print(new Foo(), Foo, Foo.prototype.m);
+        \\print(function named() {}, function () {}, () => 1, async function af() {}, function* gen() {}, class {}, Math.max);
+        \\var bf = function base() {}; print(bf.bind(null), (() => 1).bind(null));
+        \\var fp = function fp() {}; fp.extra = 1; print(fp);
+        \\print(new Map([["a", 1], [{ k: 1 }, [2]]]), new Set([1, "two", { three: 3 }]), new Map(), new Set());
+        \\var m = new Map([[1,1],[2,2],[3,3]]); m.delete(2); print(m);
+        \\print(new Date(0), new Date(NaN), new Date(Date.UTC(2026, 8, 6, 12, 30, 0, 7)));
+        \\print(/ab+c/gi, /a\/b[/]\n/su, new RegExp(""), new RegExp("a/b"), /x/dy, /(?<n>x)/);
+        \\print(new Uint8Array([1, 2, 3]), new Float64Array([1.5, -0, NaN]), new Int8Array(0), new BigInt64Array([1n, -2n]), new Float32Array([0.1]), new Uint8ClampedArray([300]), new Int16Array([-2]));
+        \\print(new ArrayBuffer(4), new DataView(new ArrayBuffer(2)), new Proxy({ a: 1 }, {}), new Proxy(function () {}, {}));
+        \\print(Object.create(null), Object.assign(Object.create(null), { z: 1 }));
+        \\print(new Number(1), new String("s"), new Boolean(false), Object(Symbol("q")), Object(1n));
+        \\print(Promise.resolve(1), new WeakMap(), new WeakSet(), new WeakRef({}));
+        \\(function () { print(arguments); })(1, "a");
+        \\(function () { "use strict"; print(arguments); })(1, "a");
+        \\print([1, 2, 3].values(), (function* () {})(), new Map().entries());
+        \\var deep = {}; var cur = deep; for (var i = 0; i < 12; i++) { cur.n = {}; cur = cur.n; } print(deep);
+        \\var big = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101]; print(big);
+        \\var bigo = {}; for (var i = 0; i < 101; i++) bigo["k" + i] = i; print(bigo);
+        \\print({ s: "z".repeat(1002) }, { s: "y".repeat(1001) });
+        \\print(Object.defineProperty({ vis: 1 }, "hidden", { value: 2, enumerable: false }));
+        \\print(undefined, null, true, 1, -0, 1.25, 10n, -5n, "top", Symbol("t"), 2 ** 53, 1e-7);
+        \\print(new (class Bar extends Array {})(), [undefined, null, function () {}, Symbol("in")]);
+        \\print({ nested: { arr: [ { deep: [1] } ] } }, Math, JSON);
+        \\})();
     ,
-        \\TypeError: boom
-        \\custom 1,2,3 prim
-        \\[object Object] [object Object]
+        \\{ a: 1, b: "s", c: null, d: undefined, e: true, f: 1.5, g: -0, h: NaN, i: 1e+21, j: 123n, k: -Infinity }
+        \\[ 1, 2, 3 ] [  ] {  } [ [ 1, [Array] ] ] { a: { b: [Object] } }
+        \\{ name: "c", self: [circular 0], arr: [ [circular 0], [Object] ] }
+        \\[ 0: 1, 2: 3 ] [ <3 empty items> ] [ 1, 2, <1 empty item> ]
+        \\[ 0: 1, 1: 2, 2: 3, 10: 4 ] [ 1, 2, foo: "bar" ]
+        \\raw top-level string { s: "quote\"d 'single' \\ back\nnl\ttab\u0001ctl\u007fé😀\ud800" }
+        \\{ "key with space": 1, 0: 2, 5: 3, $ok_1: 4, "1abc": 5, "": 6, "é": 7 }
+        \\{ sd: 1, "": 2 } Symbol(sd) Symbol("") Symbol("Symbol.iterator")
+        \\{ g: [Getter], s: [Setter], gs: [Getter/Setter] }
+        \\Error: boom
+        \\    at fake (f.js:1:1)
+        \\TypeError: t
+        \\    at fake { code: 42 }
         \\RangeError
-        \\1 a null undefined true Symbol(s)
+        \\    at fake { e: RangeError
+        \\    at fake }
+        \\{ x: 1 } [Function Foo] [Function m]
+        \\[Function named] [Function (anonymous)] [Function (anonymous)] [Function af] [Function gen] [Function (anonymous)] [Function max]
+        \\[Function bound base] [Function bound ]
+        \\[Function fp] { extra: 1 }
+        \\Map(2) { "a" => 1, { k: 1 } => [ 2 ] } Set(3) { 1, "two", { three: 3 } } Map(0) {  } Set(0) {  }
+        \\Map(2) { 1 => 1, 3 => 3 }
+        \\1970-01-01T00:00:00.000Z Date {  } 2026-09-06T12:30:00.007Z
+        \\/ab+c/gi /a\/b[/]\n/su /(?:)/ /a\/b/ /x/yd /(?<n>x)/v
+        \\Uint8Array(3) [ 1, 2, 3 ] Float64Array(3) [ 1.5, -0, NaN ] Int8Array(0) [  ] BigInt64Array(2) [ 1, -2 ] Float32Array(1) [ 0.10000000149011612 ] Uint8ClampedArray(1) [ 255 ] Int16Array(1) [ -2 ]
+        \\ArrayBuffer {  } DataView {  } Object {  } Object {  }
+        \\{  } { z: 1 }
+        \\Number {  } String {  } Boolean {  } Symbol {  } BigInt {  }
+        \\Promise {  } WeakMap {  } WeakSet {  } WeakRef {  }
+        \\Arguments {  }
+        \\Arguments {  }
+        \\"Array Iterator" {  } Generator {  } "Map Iterator" {  }
+        \\{ n: { n: [Object] } }
+        \\[ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, ... 2 more items ]
+        \\{ k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8, k9: 9, k10: 10, k11: 11, k12: 12, k13: 13, k14: 14, k15: 15, k16: 16, k17: 17, k18: 18, k19: 19, k20: 20, k21: 21, k22: 22, k23: 23, k24: 24, k25: 25, k26: 26, k27: 27, k28: 28, k29: 29, k30: 30, k31: 31, k32: 32, k33: 33, k34: 34, k35: 35, k36: 36, k37: 37, k38: 38, k39: 39, k40: 40, k41: 41, k42: 42, k43: 43, k44: 44, k45: 45, k46: 46, k47: 47, k48: 48, k49: 49, k50: 50, k51: 51, k52: 52, k53: 53, k54: 54, k55: 55, k56: 56, k57: 57, k58: 58, k59: 59, k60: 60, k61: 61, k62: 62, k63: 63, k64: 64, k65: 65, k66: 66, k67: 67, k68: 68, k69: 69, k70: 70, k71: 71, k72: 72, k73: 73, k74: 74, k75: 75, k76: 76, k77: 77, k78: 78, k79: 79, k80: 80, k81: 81, k82: 82, k83: 83, k84: 84, k85: 85, k86: 86, k87: 87, k88: 88, k89: 89, k90: 90, k91: 91, k92: 92, k93: 93, k94: 94, k95: 95, k96: 96, k97: 97, k98: 98, k99: 99, ... 1 more item }
+        \\{ s: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"... 2 more characters } { s: "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"... 1 more character }
+        \\{ vis: 1 }
+        \\undefined null true 1 -0 1.25 10n -5n top Symbol(t) 9007199254740992 1e-7
+        \\[  ] [ undefined, null, [Function (anonymous)], Symbol(in) ]
+        \\{ nested: { arr: [Array] } } {  } {  }
         \\
     );
 }
