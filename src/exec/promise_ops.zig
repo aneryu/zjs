@@ -1029,8 +1029,7 @@ fn promiseJobOomProbeFunction(
     });
     const function = try core.function.nativeFunction(ctx, name, 0);
     const object = objectFromValue(function) orelse return error.TypeError;
-    object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    object.externalHostFunctionIdSlot().* = external_id;
+    object.installExternalHostFunction(ctx.runtime, external_id);
     return function;
 }
 
@@ -1054,8 +1053,7 @@ fn promiseBareCapabilityErrorFunction(
     });
     const function = try core.function.nativeFunction(ctx, "bareCapabilityError", 0);
     const object = objectFromValue(function) orelse return error.TypeError;
-    object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    object.externalHostFunctionIdSlot().* = external_id;
+    object.installExternalHostFunction(ctx.runtime, external_id);
     return function;
 }
 

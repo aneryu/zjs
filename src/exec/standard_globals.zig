@@ -19,6 +19,7 @@ const atomics_builtin = @import("atomics_ops.zig");
 const reflect_builtin = @import("reflect_proxy_ops.zig");
 const typed_array_names = core.typed_array_names;
 const internal_builtins = @import("internal_builtins.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
@@ -1734,6 +1735,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     configureRuntime(rt);
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
     rt.internal_builtins = &internal_builtins.table;
+    rt.external_host_record = &builtin_dispatch.external_host_record;
     // Constructing realms are not roots via `context_head`. Name the global
     // for the bootstrap window so properties published onto it stay live
     // under exact-mark (test-oom STW canary).

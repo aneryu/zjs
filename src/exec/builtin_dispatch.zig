@@ -227,6 +227,7 @@ pub const ExecDirectCallFn = *const fn (
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    func_obj: ?*core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
@@ -249,6 +250,97 @@ pub inline fn nativeFromHostResult(
 /// `ExecDirectCallFn` ABI that `callExecDirectRecord` casts back to.
 pub fn execDirectFunction(comptime implementation: ExecDirectCallFn) *const anyopaque {
     return @ptrCast(implementation);
+}
+
+/// The one dispatch record every external host function (embedder
+/// `createExternalFunction`, plugin bindings, host-installed callbacks)
+/// carries in its `call_cache`. It makes those functions indistinguishable
+/// from builtins on the VM's record arms (`op_call_method` native arm,
+/// `vmNativeCallableDispatch .resolved_record`): the hot path resolves the
+/// registry entry from the function object's external id and calls it, with
+/// no name lookup and no per-kind branch. `length` stays 0 (the registry
+/// protocol never padded arguments).
+pub const external_host_record: core.host_function.InternalRecord = .{
+    .length = 0,
+    .cproto = .generic,
+    .native_function = .{ .generic = externalHostGenericFallback },
+    .exec_direct = execDirectFunction(&externalHostDirect),
+};
+
+fn externalHostDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func_obj: ?*core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) NativeBits {
+    _ = caller_function;
+    _ = caller_frame;
+    const function_object = func_obj orelse return nativeFromHostError(ctx, global, error.TypeError);
+    return nativeFromHostResult(ctx, global, callExternalHostRecord(ctx, output, global, function_object, this_value, args));
+}
+
+/// Generic-ABI twin for the paths that dispatch the record through the
+/// typed cproto switch (they carry the function object in the environment).
+fn externalHostGenericFallback(ctx: *core.JSContext, this_value: core.JSValue, args: []const core.JSValue) HostError!core.JSValue {
+    const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
+    const function_object = env.func_obj orelse return error.TypeError;
+    const global = env.global orelse ctx.global orelse return error.TypeError;
+    return callExternalHostRecord(ctx, env.output, global, function_object, this_value, args);
+}
+
+/// Call an external host function's registry record. `ctx` is the callable's
+/// own realm (the registry protocol's `ExternalCall.realm`).
+pub fn callExternalHostRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func_obj: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    const record = ctx.runtime.externalHostFunction(func_obj.externalHostFunctionId()) orelse return error.TypeError;
+    return record.call(record.ptr, .{
+        .realm = ctx,
+        .output = output,
+        .func_obj = func_obj,
+        .this_value = this_value,
+        .args = args,
+    }) catch |err| return throwExternalHostError(ctx, global, err);
+}
+
+/// Translate a Zig error escaping an external host function into the JS
+/// exception the caller observes (named error from the Zig error name; the
+/// hard/control errors pass through untouched).
+pub fn throwExternalHostError(ctx: *core.JSContext, global: *core.Object, err: anyerror) HostError!core.JSValue {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (err == error.ProcessExit) return error.ProcessExit;
+    if (err == error.Interrupted) return error.Interrupted;
+    if (err == error.Timeout) return error.Timeout;
+    if (err == error.StackOverflow) return error.StackOverflow;
+    if (err == error.UnhandledPromiseRejection) return error.UnhandledPromiseRejection;
+    if (ctx.hasException()) return error.JSException;
+
+    const error_info = externalHostErrorInfo(err);
+    const error_value = exception_ops.createNamedError(ctx, global, error_info.name, error_info.message) catch |create_err|
+        return @errorCast(create_err);
+    if (ctx.hasException()) ctx.clearException();
+    _ = ctx.throwValue(error_value);
+    return error.JSException;
+}
+
+fn externalHostErrorInfo(err: anyerror) struct { name: []const u8, message: []const u8 } {
+    const name = @errorName(err);
+    if (std.mem.eql(u8, name, "TypeError")) return .{ .name = "TypeError", .message = "" };
+    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "" };
+    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "" };
+    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "" };
+    if (std.mem.eql(u8, name, "EvalError")) return .{ .name = "EvalError", .message = "" };
+    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "" };
+    return .{ .name = "Error", .message = name };
 }
 
 inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
@@ -496,45 +588,6 @@ pub inline fn callInternalRecordDirect(
     return callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame);
 }
 
-/// K1: `op_call_method` already proved `func_obj.class_id == c_function`.
-/// Skip the class re-admit in preflight and realm switch (qjs reads
-/// `p->u.cfunc` directly after the class.call hook).
-pub inline fn callInternalRecordDirectAssumeCFunction(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    func_obj: *core.Object,
-    this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
-    args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) NativeValue {
-    preflightCFunctionCallAssumeCFunction(ctx, global, func_obj, record.length) catch |err| {
-        return nativeFromBits(nativeFromHostError(ctx, global, err));
-    };
-    const realm = func_obj.nativeFunctionRealmAssumeCFunction() orelse
-        return nativeFromBits(nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry));
-    const realm_global = realm.global orelse
-        return nativeFromBits(nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry));
-    const view: FinalCallEnvironment = .{
-        .ctx = realm,
-        .global = realm_global,
-        .globals = empty_realm_globals[0..],
-        .callable_realm = .{ .realm = realm, .global = realm_global },
-    };
-    // Stay on NativeValue through the exec_direct terminal so assume does not
-    // re-wrap a 24B error union for NMFD (qjs js_call_c_function returns
-    // JSValue in x0+x1). The typed/env path is not the NMFD hot arm.
-    if (record.exec_direct) |direct_ptr| {
-        return callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
-    }
-    const result = callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame) catch |err| {
-        return nativeFromBits(nativeFromHostError(view.ctx, view.global, err));
-    };
-    return nativeOk(result);
-}
-
 /// Final C-function terminal for a dispatcher that already loaded the record
 /// and RealmContext together from the function payload.  No generic realm
 /// resolver or caller-global transport is consulted after this boundary.
@@ -610,12 +663,65 @@ inline fn callInternalRecordDirectWithEnvironment(
     };
 }
 
-/// Thin exec_direct terminal for an already-resolved C_FUNCTION object.
-/// This function must not mention `NativeCallEnvironment`: a caller that
-/// only takes this path keeps the pre-constitution frame (the 0x1c0
-/// lesson — constitution inlined the env stores and grew FastDispatch
-/// 0x1c0→0x1d0). Preflight + realm switch + native backtrace sf match
-/// `js_call_c_function` (quickjs.c:17575-17590 / 17580 / 17586).
+/// VM-originated native call core (P3, native-boundary plan). The receiver
+/// and `args` are the machine's operand window, which the active invocation
+/// already traces as roots, so no ValueRootFrame is built; the typed result
+/// is converted to NativeBits exactly once, with the exception thrown here.
+/// The dispatchers fetch record and realm from the function payload in one
+/// go (`nativeCallTarget`), so the payload is not walked twice. One `bl`
+/// from the dispatcher to the native body, like qjs `js_call_c_function`.
+pub inline fn callRecordFromVmInRealm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func_obj: *core.Object,
+    record: *const core.host_function.InternalRecord,
+    realm: *core.RealmContext,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) NativeBits {
+    // Native stack preflight (qjs js_call_c_function's js_check_stack_overflow
+    // with the arg_buf reservation): `length` is a u8, so the byte count
+    // cannot overflow -- no checked multiply.
+    const planned_stack_bytes: usize = @as(usize, record.length) * @sizeOf(core.JSValue);
+    if (ctx.runtime.checkNativeStackOverflow(planned_stack_bytes)) {
+        throwCFunctionStackOverflow(ctx, global) catch |err| return nativeFromHostError(ctx, global, err);
+        return nativeFromHostError(ctx, global, error.StackOverflow);
+    }
+    const realm_global = realm.global orelse
+        return nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry);
+    // Native backtrace frame, pushed directly (no scope object, no active
+    // flag): the qjs `sf` link of js_call_c_function.
+    var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
+    var bt_frame: core.ActiveBacktraceFrame = .{ .data = &bt_data, .resolver = resolveNativeBacktrace };
+    realm.pushActiveBacktraceFrame(&bt_frame);
+    defer realm.popActiveBacktraceFrame(&bt_frame);
+    if (record.exec_direct) |direct_ptr| {
+        const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
+        return direct(realm, output, realm_global, func_obj, this_value, args, caller_function, caller_frame);
+    }
+    const native_env: NativeCallEnvironment = .{
+        .callable_realm = .{ .realm = realm, .global = realm_global },
+        .output = output,
+        .global = realm_global,
+        .globals = empty_realm_globals[0..],
+        .func_obj = func_obj,
+        .is_constructor = false,
+        .new_target = null,
+        .caller_function = caller_function,
+        .caller_frame = caller_frame,
+    };
+    const previous_native_call = realm.runtime.active_native_call;
+    realm.runtime.active_native_call = &native_env;
+    defer realm.runtime.active_native_call = previous_native_call;
+    const result = dispatchTypedRecord(realm, this_value, record, args) catch |err| {
+        return nativeFromHostError(realm, realm_global, err);
+    };
+    return nativeToBits(result);
+}
+
 pub fn callResolvedExecDirect(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -653,12 +759,13 @@ inline fn callExecDirectRecord(
     native_scope.push();
     defer native_scope.deinit();
 
-    return invokeExecDirectRecord(view, output, this_value, direct_ptr, args, caller_function, caller_frame);
+    return invokeExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
 }
 
 inline fn invokeExecDirectRecord(
     view: FinalCallEnvironment,
     output: ?*std.Io.Writer,
+    func_obj: ?*core.Object,
     this_value: core.JSValue,
     direct_ptr: *const anyopaque,
     args: []const core.JSValue,
@@ -672,7 +779,7 @@ inline fn invokeExecDirectRecord(
     const realm_view = view.callable_realm orelse
         return nativeFromBits(nativeFromHostError(view.ctx, view.global, error.InvalidBuiltinRegistry));
     const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
-    return nativeFromBits(direct(realm_view.realm, output, realm_view.global, this_value, args, caller_function, caller_frame));
+    return nativeFromBits(direct(realm_view.realm, output, realm_view.global, func_obj, this_value, args, caller_function, caller_frame));
 }
 
 inline fn invokeResolvedInternalRecord(
@@ -717,6 +824,17 @@ noinline fn callTypedInternalRecordDirect(
     call_roots.activate(ctx.runtime);
     defer call_roots.deactivate(ctx.runtime);
 
+    return dispatchTypedRecord(ctx, this_value, record, args);
+}
+
+/// The cproto switch shared by the rooted terminal above and the VM-window
+/// terminal (`callRecordFromVmInRealm`). `ctx` is the callable's own realm.
+inline fn dispatchTypedRecord(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
     const native = record.native_function orelse return error.TypeError;
     // `InternalRecord` is engine-owned and its table builder guarantees that
     // the function union tag equals `cproto`. QuickJS likewise stores an

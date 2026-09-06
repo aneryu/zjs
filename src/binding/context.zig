@@ -466,6 +466,11 @@ pub const JSContext = struct {
         };
         root_frame.activate(self.core.runtime);
         defer root_frame.deactivate(self.core.runtime);
+        // Resident host invocation first (P4): an eligible bytecode callee
+        // enters like a builtin callback, no fresh execution root.
+        const resident = exec.call_runtime.callFromHost(self.core, options.output, global, rooted_this, rooted_callee, args) catch |err|
+            return self.restoreUncaughtOutOfMemory(err);
+        if (resident) |value| return value;
         return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, rooted_this, rooted_callee, args, null, null) catch |err|
             self.restoreUncaughtOutOfMemory(err);
     }
@@ -694,8 +699,7 @@ pub const JSContext = struct {
             .call = call,
             .finalizer = finalizer,
         });
-        function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-        function_object.externalHostFunctionIdSlot().* = id;
+        function_object.installExternalHostFunction(rt, id);
 
         return function_value;
     }

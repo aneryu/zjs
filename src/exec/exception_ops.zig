@@ -392,6 +392,14 @@ pub inline fn pollInterrupt(ctx: *core.JSContext, global: *core.Object) !void {
     return throwInterrupted(ctx, global);
 }
 
+/// The slow half of `pollInterrupt` for callers that inline the counter tick
+/// themselves (`ctx.pollInterruptTick()`): reset, GC safepoint, interrupt
+/// handler, and the throw when the handler asked for it.
+pub noinline fn pollInterruptSlowLeg(ctx: *core.JSContext, global: *core.Object) core.errors.HostError!void {
+    if (!ctx.pollInterruptSlowPublic()) return;
+    return throwInterrupted(ctx, global) catch |err| return @errorCast(err);
+}
+
 pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
     const error_value = try createNamedError(ctx, global, "ReferenceError", message);
     _ = ctx.throwValue(error_value);

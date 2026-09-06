@@ -25,6 +25,7 @@ const exception_ops = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const inline_calls = @import("inline_calls.zig");
+const host_invocation_mod = @import("host_invocation.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const vm_call = @import("vm_call.zig");
@@ -202,6 +203,47 @@ pub fn tryCatchInFrame(
     frame.pc = target;
     catch_target.* = restored;
     return true;
+}
+
+/// Embedder -> JS through the resident host invocation (P4, native-boundary
+/// plan). Returns null when the call cannot take the resident route (the
+/// callee is not an eligible plain bytecode function of the caller's own
+/// Realm); the caller then takes the authoritative root path. Nothing is
+/// published for a callee that would take the root path anyway. The
+/// interrupt poll happens here.
+pub fn callFromHost(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+) HostError!?core.JSValue {
+    if (inline_calls.activeInvocation(ctx.runtime) != null) {
+        // Nested host -> JS from inside a running invocation (a host
+        // function called by JS calling back): the builtin-callback route,
+        // which itself falls back to the root path when ineligible.
+        return try callValueOrBytecodeSyncInternal(ctx, output, global, this_value, func, args, null, null);
+    }
+    // The resident machine runs under the caller's context; the root path
+    // switches to the callee's Realm, so only same-Realm callees qualify
+    // (resolveInlineFunction also rejects a callee whose Realm global is not
+    // `global`).
+    const ctx_global = ctx.global orelse return null;
+    if (ctx_global != global) return null;
+    const resolved = inline_calls.resolveInlineFunction(global, func) orelse return null;
+    const host = try host_invocation_mod.HostInvocation.acquire(ctx.runtime, ctx, output, global);
+    host.publish(ctx);
+    defer host.unpublish(ctx);
+    var route: SyncInlineRoute = .{
+        .invocation = &host.invocation,
+        .target = resolved.bind(this_value, func),
+    };
+    try exception_ops.pollInterrupt(ctx, global);
+    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
+        return try runSyncInlineRouteCopiedArgs(&route, global, args);
+    }
+    return try runSyncInlineRouteOwnedCopy(&route, ctx, global, this_value, func, args);
 }
 
 pub fn callValueOrBytecodeRoot(

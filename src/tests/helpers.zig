@@ -415,8 +415,7 @@ pub const TestEngine = struct {
         const function_value = try engine.core.function.nativeFunction(self.context, name, length);
 
         const function_object = try engine.exec.property_ops.expectObject(function_value);
-        function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-        function_object.externalHostFunctionIdSlot().* = id;
+        function_object.installExternalHostFunction(self.runtime, id);
         return function_value;
     }
 
@@ -583,8 +582,7 @@ fn releaseSharedEngineBaselineSnapshot(_: *core.JSRuntime) void {
         shared_engine_baseline_properties = null;
     }
     if (shared_engine_baseline_shape_props) |baseline_shape_props| {
-        for (baseline_shape_props) |_| {
-        }
+        for (baseline_shape_props) |_| {}
         std.heap.page_allocator.free(baseline_shape_props);
         shared_engine_baseline_shape_props = null;
     }

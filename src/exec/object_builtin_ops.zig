@@ -165,6 +165,17 @@ fn prototypeEntry(comptime name: []const u8, comptime length: u8, comptime metho
     return objectEntry(name, length, @intFromEnum(method));
 }
 
+fn prototypeExecDirectEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime method: PrototypeMethod,
+    comptime direct: builtin_dispatch.ExecDirectCallFn,
+) core.host_function.InternalEntry {
+    var entry = prototypeEntry(name, length, method);
+    entry.exec_direct = builtin_dispatch.execDirectFunction(direct);
+    return entry;
+}
+
 fn objectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
@@ -219,7 +230,7 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     prototypeEntry("toString", 0, .to_string),
     prototypeEntry("toLocaleString", 0, .to_locale_string),
     prototypeEntry("valueOf", 0, .value_of),
-    prototypeEntry("hasOwnProperty", 1, .has_own_property),
+    prototypeExecDirectEntry("hasOwnProperty", 1, .has_own_property, &objectHasOwnPropertyDirect),
     prototypeEntry("isPrototypeOf", 1, .is_prototype_of),
     prototypeEntry("propertyIsEnumerable", 1, .property_is_enumerable),
     prototypeEntry("__defineGetter__", 2, .define_getter),
@@ -652,6 +663,80 @@ pub fn objectHasOwnCall(
     // route through the full getOwnPropertyDescriptor trap inside the wrapper.
     const present = try proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
     return core.JSValue.boolean(present);
+}
+
+/// Exec-direct arm of `Object.prototype.hasOwnProperty` (qjs
+/// `js_object_hasOwnProperty`, quickjs.c:40536: JS_ToPropertyKey, then
+/// JS_GetOwnPropertyInternal with desc==NULL). Hot leg: an ordinary object
+/// receiver (no proxy trap, no typed-array canonical-index rule) and a key
+/// that is already an atom (`propertyKeyAtomIfReady`), so neither the
+/// ToPropertyKey nor the interning step can run or throw; the existence
+/// probe is the same `existsOwnProperty` the generic path reaches. Everything
+/// else is the unchanged `objectPrototypeOwnPropertyCall`.
+fn objectHasOwnPropertyDirect(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    _: ?*core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) builtin_dispatch.NativeBits {
+    if (objectFromValue(this_value)) |object| {
+        if (args.len >= 1) {
+            if (property_ops.propertyKeyAtomIfReady(args[0])) |atom_id| {
+                // Same exotic handling as the generic arm (typed-array
+                // canonical index, Proxy trap): one predicate, not two.
+                const present = object_ops.proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame) catch |err|
+                    return builtin_dispatch.nativeFromHostError(ctx, global, err);
+                return builtin_dispatch.nativeToBits(core.JSValue.boolean(present));
+            }
+        }
+    }
+    return builtin_dispatch.nativeFromHostResult(ctx, global, objectHasOwnPropertyHost(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+        caller_function,
+        caller_frame,
+    ));
+}
+
+fn objectHasOwnPropertyHost(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    return (try objectPrototypeOwnPropertyCall(
+        ctx,
+        output,
+        global,
+        this_value,
+        @intFromEnum(PrototypeMethod.has_own_property),
+        args,
+        caller_function,
+        caller_frame,
+    )) orelse error.TypeError;
+}
+
+test "Object.prototype.hasOwnProperty uses exec_direct on the shared object handler" {
+    var found = false;
+    for (internal_entries) |entry| {
+        if (entry.id != @intFromEnum(PrototypeMethod.has_own_property)) continue;
+        found = true;
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &objectCall);
+        try std.testing.expect(entry.exec_direct != null);
+        try std.testing.expect(entry.exec_direct.? ==
+            builtin_dispatch.execDirectFunction(&objectHasOwnPropertyDirect));
+    }
+    try std.testing.expect(found);
 }
 
 pub fn objectPrototypeOwnPropertyCall(

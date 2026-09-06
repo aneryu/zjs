@@ -598,6 +598,11 @@ pub const JSContext = struct {
         return self.interrupt_counter <= 0;
     }
 
+    /// Public name of the slow leg for dispatchers that tick inline.
+    pub fn pollInterruptSlowPublic(self: *JSContext) bool {
+        return self.pollInterruptSlow();
+    }
+
     noinline fn pollInterruptSlow(self: *JSContext) bool {
         self.interrupt_counter = interrupt_counter_reset;
         // The young budget's safepoint: the interpreter's own cadence, between
@@ -1238,8 +1243,7 @@ pub const JSContext = struct {
     }
 
     pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void {
-        for (frames) |_| {
-        }
+        for (frames) |_| {}
         if (frames.len != 0) self.runtime.memory.free(BacktraceFrame, frames);
     }
 

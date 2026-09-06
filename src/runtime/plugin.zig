@@ -783,8 +783,7 @@ fn createBindingFunction(ctx: *core.JSContext, plugin: *InstalledPlugin, descrip
     });
     record_registered = true;
 
-    function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    function_object.externalHostFunctionIdSlot().* = external_id;
+    function_object.installExternalHostFunction(rt, external_id);
     return .{ function_value, external_id };
 }
 
@@ -814,7 +813,6 @@ fn rollbackDefinedProperties(rt: *core.JSRuntime, target: *core.Object, atoms: [
         }
     }
 }
-
 
 fn errorFromStatus(status: ffi.Status) anyerror {
     return switch (status) {

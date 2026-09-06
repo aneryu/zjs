@@ -9429,8 +9429,7 @@ test "external C function preflight uses caller realm and callback errors use ca
     });
     const native_value = try core.function.nativeFunction(callee, "realmProbe", 0);
     const native_object = try core.Object.expect(native_value);
-    native_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    native_object.externalHostFunctionIdSlot().* = external_id;
+    native_object.installExternalHostFunction(js.runtime, external_id);
 
     js.runtime.setNativeStackSize(1);
     defer js.runtime.setNativeStackSize(0);
@@ -16867,8 +16866,7 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     });
     const callback = try core.function.nativeFunction(callback_realm, "finalizationRealmProbe", 1);
     const callback_object = try core.Object.expect(callback);
-    callback_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    callback_object.externalHostFunctionIdSlot().* = external_id;
+    callback_object.installExternalHostFunction(rt, external_id);
 
     const registry_value = try object_ops.constructFinalizationRegistryWithPrototype(
         registry_realm,
@@ -16955,8 +16953,7 @@ test "event-loop caller reaches external C function with one callee realm view" 
     });
     const native_value = try core.function.nativeFunction(callee_realm, "realmProbe", 0);
     const native_object = try core.Object.expect(native_value);
-    native_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    native_object.externalHostFunctionIdSlot().* = external_id;
+    native_object.installExternalHostFunction(js.runtime, external_id);
 
     const escaped_key = try js.runtime.internAtom("__escapedNative");
     try caller_global.defineOwnProperty(

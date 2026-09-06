@@ -5126,6 +5126,14 @@ pub const Object = extern struct {
         };
     }
 
+    /// Publish an external host function: kind, registry id, and the shared
+    /// exec dispatch record, so the VM's record arms hit it like a builtin.
+    pub fn installExternalHostFunction(self: *Object, rt: *JSRuntime, external_id: u32) void {
+        self.hostFunctionKindSlot().* = host_function.ids.external_host;
+        self.externalHostFunctionIdSlot().* = external_id;
+        if (self.class_id == class.ids.c_function) self.nativeRecordSlot().* = rt.external_host_record;
+    }
+
     pub fn externalHostFunctionIdSlot(self: *Object) *u32 {
         std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));
         if (self.functionPayload()) |payload| return &payload.native.external_host_function_id;
@@ -7799,7 +7807,7 @@ pub const Object = extern struct {
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
         if (info.external_host_function_id != 0) {
             if (info.host_function_kind != host_function.ids.external_host) return error.InvalidBuiltinRegistry;
-            function_object.externalHostFunctionIdSlot().* = info.external_host_function_id;
+            function_object.installExternalHostFunction(rt, info.external_host_function_id);
         }
         if (info.host_function_prototype) {
             const object_proto_value = try objectPrototypeValueForAutoInit(realm);

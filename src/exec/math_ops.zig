@@ -33,8 +33,8 @@ pub const sum_precise_method_id: u32 = 37;
 /// magic pattern for its js_math_op entries). Entry order is the namespace
 /// property definition order (kept from the former centralized install table).
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    mathOpEntry("min", 2, 7),
-    mathOpEntry("max", 2, 8),
+    mathMinMaxEntry("min", 7, false),
+    mathMinMaxEntry("max", 8, true),
     mathUnaryEntry("abs", 1),
     mathUnaryEntry("floor", 2),
     mathUnaryEntry("ceil", 3),
@@ -74,6 +74,80 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
 
 fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return mathEntryWithHandler(name, length, id, &mathOpCall);
+}
+
+/// `Math.min` / `Math.max`: the shared `mathOpCall` record plus an exec_direct
+/// arm (`js_call_c_function` shape) whose hot leg is qjs `js_math_min_max`
+/// (quickjs.c:46952) over int32 / float64 arguments only.
+fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32, comptime is_max: bool) core.host_function.InternalEntry {
+    var entry = mathOpEntry(name, 2, id);
+    entry.exec_direct = builtin_dispatch.execDirectFunction(mathMinMaxDirect(is_max));
+    return entry;
+}
+
+/// Exec-direct twin of the `mathOpCall` min/max arm. `is_max` is baked at
+/// comptime (qjs passes it as `magic`); the miss leg (any argument that is
+/// not an int32 / float64) is the unchanged realm path `preparedOpCall`, so
+/// ToPrimitive / ToNumber ordering and exceptions stay with the generic code.
+fn mathMinMaxDirect(comptime is_max: bool) builtin_dispatch.ExecDirectCallFn {
+    return &struct {
+        fn direct(
+            ctx: *core.JSContext,
+            output: ?*std.Io.Writer,
+            global: *core.Object,
+            _: ?*core.Object,
+            this_value: core.JSValue,
+            args: []const core.JSValue,
+            caller_function: ?*const builtin_dispatch.Bytecode,
+            caller_frame: ?*builtin_dispatch.Frame,
+        ) builtin_dispatch.NativeBits {
+            _ = this_value;
+            _ = caller_function;
+            _ = caller_frame;
+            if (mathMinMaxNumberFast(args, is_max)) |value| return builtin_dispatch.nativeToBits(value);
+            return builtin_dispatch.nativeFromHostResult(ctx, global, preparedOpCall(ctx, output, global, if (is_max) 8 else 7, args));
+        }
+    }.direct;
+}
+
+/// qjs `js_math_min_max` (quickjs.c:46952-47003) restricted to arguments that
+/// are already numbers: an int32 prefix folds with `max_int` / `min_int` and
+/// returns `JS_NewInt32`; the first non-int32 argument switches to the
+/// float64 leg (`generic_case`) with qjs's NaN sticky rule and the `js_fmax` /
+/// `js_fmin` signed-zero rules, returning through `JS_NewFloat64` (int-valued
+/// doubles collapse back to int32, as `numberToValue` does). Any other
+/// argument type returns null so the caller takes the ToNumber path.
+pub fn mathMinMaxNumberFast(args: []const core.JSValue, comptime is_max: bool) ?core.JSValue {
+    if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
+    var index: usize = 1;
+    var result: f64 = undefined;
+    if (args[0].asInt32()) |first| {
+        var int_result = first;
+        while (index < args.len) : (index += 1) {
+            const next = args[index].asInt32() orelse break;
+            int_result = if (is_max) @max(int_result, next) else @min(int_result, next);
+        }
+        if (index == args.len) return core.JSValue.int32(int_result);
+        result = @floatFromInt(int_result);
+    } else {
+        result = args[0].asFloat64() orelse return null;
+    }
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        const number: f64 = if (arg.asInt32()) |int_value|
+            @floatFromInt(int_value)
+        else
+            arg.asFloat64() orelse return null;
+        if (!std.math.isNan(result)) {
+            result = if (std.math.isNan(number))
+                number
+            else if (is_max)
+                fmax(result, number)
+            else
+                fmin(result, number);
+        }
+    }
+    return value_ops.numberToValue(result);
 }
 
 fn mathEntryWithHandler(
@@ -646,4 +720,48 @@ fn numberValue(value: core.JSValue) !f64 {
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);
     return error.TypeError;
+}
+
+test "Math.min/max entries carry the exec_direct arm on the shared handler" {
+    var seen: u8 = 0;
+    for (internal_entries) |entry| {
+        if (entry.id != 7 and entry.id != 8) continue;
+        seen += 1;
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &mathOpCall);
+        try std.testing.expect(entry.exec_direct != null);
+        const expected = if (entry.id == 8)
+            builtin_dispatch.execDirectFunction(mathMinMaxDirect(true))
+        else
+            builtin_dispatch.execDirectFunction(mathMinMaxDirect(false));
+        try std.testing.expect(entry.exec_direct.? == expected);
+    }
+    try std.testing.expectEqual(@as(u8, 2), seen);
+}
+
+test "mathMinMaxNumberFast mirrors js_math_min_max over int32/float64 and misses otherwise" {
+    const int = core.JSValue.int32;
+    const flt = core.JSValue.float64;
+    // int32 prefix folds with max_int / min_int and returns JS_NewInt32.
+    try std.testing.expectEqual(@as(?i32, 7), mathMinMaxNumberFast(&.{ int(3), int(7), int(2) }, true).?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), mathMinMaxNumberFast(&.{ int(3), int(7), int(2) }, false).?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 5), mathMinMaxNumberFast(&.{int(5)}, true).?.asInt32());
+    // No arguments: +/-Infinity as a float.
+    try std.testing.expect(std.math.isNegativeInf(mathMinMaxNumberFast(&.{}, true).?.asFloat64().?));
+    try std.testing.expect(std.math.isPositiveInf(mathMinMaxNumberFast(&.{}, false).?.asFloat64().?));
+    // Mixed int / float leg: the int prefix switches to the float leg.
+    try std.testing.expectEqual(@as(?f64, 7.5), mathMinMaxNumberFast(&.{ int(3), flt(7.5), int(2) }, true).?.asNumber());
+    try std.testing.expectEqual(@as(?i32, 2), mathMinMaxNumberFast(&.{ int(3), flt(7.5), int(2) }, false).?.asInt32());
+    // Int-valued double collapses to int32 like JS_NewFloat64.
+    try std.testing.expectEqual(@as(?i32, 9), mathMinMaxNumberFast(&.{ flt(9.0), int(4) }, true).?.asInt32());
+    // NaN is sticky once seen, in either position.
+    try std.testing.expect(std.math.isNan(mathMinMaxNumberFast(&.{ int(1), flt(std.math.nan(f64)), int(9) }, true).?.asFloat64().?));
+    try std.testing.expect(std.math.isNan(mathMinMaxNumberFast(&.{ flt(std.math.nan(f64)), int(9) }, false).?.asFloat64().?));
+    // Signed zero: max(-0, +0) is +0, min(+0, -0) is -0.
+    try std.testing.expectEqual(@as(?i32, 0), mathMinMaxNumberFast(&.{ flt(-0.0), int(0) }, true).?.asInt32());
+    try std.testing.expect(std.math.isNegativeZero(mathMinMaxNumberFast(&.{ int(0), flt(-0.0) }, false).?.asFloat64().?));
+    try std.testing.expect(std.math.isNegativeZero(mathMinMaxNumberFast(&.{ flt(-0.0), flt(0.0) }, false).?.asFloat64().?));
+    // Anything that needs ToNumber misses to the generic path.
+    try std.testing.expect(mathMinMaxNumberFast(&.{ int(1), core.JSValue.boolean(true) }, true) == null);
+    try std.testing.expect(mathMinMaxNumberFast(&.{core.JSValue.undefinedValue()}, false) == null);
+    try std.testing.expect(mathMinMaxNumberFast(&.{ flt(1.5), core.JSValue.nullValue() }, true) == null);
 }

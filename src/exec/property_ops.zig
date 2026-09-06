@@ -49,6 +49,22 @@ pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: co
     return core.JSValue.boolean(found);
 }
 
+/// Allocation-free prefix of `propertyKeyAtom`: the atom when `value` is
+/// already a property key that needs no interning work (a symbol, a string
+/// whose atom is bound, or a non-negative int32 index); null otherwise so the
+/// caller takes `propertyKeyAtom`. Keep the arms in lockstep with it.
+pub fn propertyKeyAtomIfReady(value: core.JSValue) ?core.Atom {
+    if (value.asSymbolAtom()) |atom_id| return atom_id;
+    if (value.asStringBody()) |string_value| {
+        if (string_value.atom_id != core.string.String.no_atom_id) return string_value.atom_id;
+        return null;
+    }
+    if (value.asInt32()) |index| {
+        if (index >= 0) return core.atom.atomFromUInt32(@intCast(index));
+    }
+    return null;
+}
+
 pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
     if (value.asSymbolAtom()) |atom_id| return atom_id;
     if (value.isString()) {

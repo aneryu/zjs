@@ -199,4 +199,25 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     if (b.args) |args| run_perf_direct.addArgs(args);
     const perf_direct_step = b.step("perf-direct", "Run zjs versus pinned QuickJS direct/core benchmarks");
     perf_direct_step.dependOn(&run_perf_direct.step);
+
+    // JS<->native boundary microbench on the public embedding surface
+    // (tools/perf/native_boundary). Build-only; the sampler drives it.
+    const boundary_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/native_boundary/zjs_boundary_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = internal_fast_mod },
+        },
+    });
+    const boundary_exe = b.addExecutable(.{
+        .name = "zjs-boundary-bench",
+        .root_module = boundary_mod,
+    });
+    forceLlvmBackendOnDebug(boundary_exe);
+    const install_boundary = b.addInstallArtifact(boundary_exe, .{});
+    const boundary_step = b.step("perf-native-boundary-build", "Build the JS<->native boundary microbench harness and the runtime plugin fixture");
+    boundary_step.dependOn(&install_boundary.step);
+    boundary_step.dependOn(&artifacts.install_runtime_plugin_fixture.step);
 }

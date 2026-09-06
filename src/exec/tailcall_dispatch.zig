@@ -1196,6 +1196,14 @@ inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm,
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    // Native-boundary return (builtin callback / embedder call): hand the
+    // value straight back to the driver instead of detouring through the
+    // scratch slot and op_return_slow (P4, native-boundary plan).
+    if (dying.isNativeBoundaryReturn()) {
+        machine.popReturnedNativeBoundary(vm.rt);
+        vm.return_value = value;
+        return .native_returned;
+    }
     if (dying.isEmptyLeaf()) {
         // No operand-window guard on this arm: zero-arg empty-leaf
         // publication requires the static return-balance proof
@@ -1512,7 +1520,15 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
             if (live_bytes >= total * @sizeOf(JSValue)) {
                 const region_start = sp - total;
                 const func = region_start[0];
-                if (inline_calls.resolveInlineFunction(vm.global, func)) |resolved| {
+                // Shared unpacking (as op_call_method): one objectFromValue,
+                // then branch on class_id -- bytecode targets go to the
+                // inline resolver, natives to the record arm below.
+                const func_obj_opt = object_ops.objectFromValue(func);
+                const resolved_opt: ?inline_calls.ResolvedInlineFunction = if (func_obj_opt) |o|
+                    (if (o.class_id == core.class.ids.bytecode_function) inline_calls.resolveInlineFunctionFromObject(vm.global, o) else null)
+                else
+                    null;
+                if (resolved_opt) |resolved| {
                     vm.stack.retreatToCallRegionFrom(sp, region_start);
                     const execution = resolved.call_facts.execution;
                     if (argc == 0 and execution.simple_inline_empty_leaf) {
@@ -1618,6 +1634,20 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     // those handlers stop carrying ~200 insn of constructor
                     // body (r12-KNIFE §c / R6-K I-cache).
                     return pushAndEnter(vb, vm, &target, region_start, argc, .plain);
+                }
+                // Native callee arm (P2, native-boundary plan): a builtin or
+                // host function called as `f(...)` used to fall through to
+                // execCall's four-layer generic path. Mirror the
+                // op_call_method c_function arm: record resolve + direct
+                // dispatch, misses continue below unchanged.
+                if (func_obj_opt) |func_obj| {
+                    if (func_obj.class_id == core.class.ids.c_function) {
+                        vm.stack.setTopPtr(sp);
+                        switch (vm_call.nativePlainFastDispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, func_obj, argc) catch |e| return vm.fail(e)) {
+                            .hit, .caught => return coldNext(vb, vm),
+                            .miss => {},
+                        }
+                    }
                 }
             }
             vm.stack.setTopPtr(sp);

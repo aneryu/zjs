@@ -4737,20 +4737,45 @@ pub const ArraySortEntry = struct {
     }
 };
 
-/// `entries` is a malloc'd ArrayList of JSValues. Conservative scan sees the
+/// Sort-lifetime temporary storage. qjs's sort scratch (the `ValueSlot`
+/// array, quickjs.c:43428) is one malloc per sort; zjs takes it from the
+/// runtime's `VmStackArena` (the alloca-shaped per-call scratch the VM's
+/// frames already bump through) so a sort costs no heap round trip at all,
+/// falling back to the heap only when the arena cannot serve the request
+/// (oversized window or arena exhausted). The caller brackets every acquire
+/// with `vm_stack.mark()` / `restore()`; the arena is strictly LIFO, and the
+/// comparator's own frames are carved above and released below this window.
+fn SortScratch(comptime T: type) type {
+    return struct {
+        items: []T = &.{},
+        heap: bool = false,
+
+        fn acquire(rt: *core.JSRuntime, n: usize) !@This() {
+            if (rt.vm_stack.carveTyped(&rt.memory, T, n)) |window| return .{ .items = window };
+            return .{ .items = try rt.memory.alloc(T, n), .heap = true };
+        }
+
+        fn release(self: @This(), rt: *core.JSRuntime) void {
+            if (self.heap) rt.memory.free(T, self.items);
+        }
+    };
+}
+
+/// `entries` lives in arena or malloc'd storage. Conservative scan sees the
 /// buffer pointer, not the values behind it, so CLI STW needs a native window
-/// from collection through comparator/writeback.
+/// from collection through comparator/writeback. The rooted copy is arena
+/// scratch too: the caller must hold a `vm_stack` mark around this window.
 const SortEntryRootWindow = struct {
-    rooted_values: []core.JSValue = &.{},
+    rooted_values: SortScratch(core.JSValue) = .{},
     slices: [1]core.runtime.ValueRootSlice = undefined,
     frame: core.runtime.ValueRootFrame = .{},
 
-    fn activate(self: *@This(), rt: *core.JSRuntime, entries: []const ArraySortEntry) !void {
+    inline fn activate(self: *@This(), rt: *core.JSRuntime, entries: []const ArraySortEntry) !void {
         if (comptime !core.runtime.value_root_frames_enabled) return;
         if (entries.len == 0) return;
-        self.rooted_values = try rt.memory.alloc(core.JSValue, entries.len);
-        for (entries, 0..) |entry, i| self.rooted_values[i] = entry.value;
-        self.slices[0] = .{ .borrowed = self.rooted_values };
+        self.rooted_values = try SortScratch(core.JSValue).acquire(rt, entries.len);
+        for (entries, 0..) |entry, i| self.rooted_values.items[i] = entry.value;
+        self.slices[0] = .{ .borrowed = self.rooted_values.items };
         self.frame.slices = &self.slices;
         self.frame.activate(rt);
     }
@@ -4760,10 +4785,10 @@ const SortEntryRootWindow = struct {
         // that was never pushed is a LIFO violation under precise-root
         // builds (found by the `-Dzjs_gc_roots_diag` test262 run on
         // `[].sort()`; production's containers-only policy masked it).
-        if (self.rooted_values.len == 0) return;
+        if (self.rooted_values.items.len == 0) return;
         self.frame.deactivate(rt);
-        rt.memory.free(core.JSValue, self.rooted_values);
-        self.rooted_values = &.{};
+        self.rooted_values.release(rt);
+        self.rooted_values = .{};
     }
 };
 
@@ -4805,34 +4830,99 @@ pub fn arraySortCall(
         break :blk try toLengthIndex(ctx, output, global, length_value);
     };
 
-    var entries = std.ArrayList(ArraySortEntry).empty;
-    defer {
-        for (entries.items) |entry| entry.freeEntry(ctx);
-        entries.deinit(ctx.runtime.memory.allocator);
-    }
+    const rt = ctx.runtime;
+    const scratch_mark = rt.vm_stack.mark();
+    defer rt.vm_stack.restore(scratch_mark);
+
+    // Storage for the collected slots. A fully dense ordinary array (the
+    // receiver IS the array, every index in [0, length) is an own dense data
+    // element, no exotic [[Get]]/[[Set]]) takes one exact-capacity arena
+    // window; anything else grows a list through the observable [[HasProperty]]
+    // / [[Get]] walk exactly as before.
+    var entries_list = std.ArrayList(ArraySortEntry).empty;
+    defer entries_list.deinit(rt.memory.allocator);
+    var entries_scratch: SortScratch(ArraySortEntry) = .{};
+    defer entries_scratch.release(rt);
+    var entries: []ArraySortEntry = &.{};
+    defer for (entries) |entry| entry.freeEntry(ctx);
+
+    const dense_receiver = !is_typed_array and
+        objectFromValue(receiver) == object and
+        object.isFastArray() and
+        !object.hasExoticMethods() and
+        @as(usize, @intCast(object.fastArrayCount())) == length;
 
     var undefined_count: usize = 0;
     var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-        defer key.deinit(ctx.runtime);
-        if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-        const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-        if (value.isUndefined()) {
-            undefined_count += 1;
-            continue;
+    if (dense_receiver) {
+        // Dense elements are plain writable data properties (any define on an
+        // index demotes the array to sparse first), so [[HasProperty]] is true
+        // for every index and [[Get]] is the slot read. Values stay reachable
+        // through the array until the root window below is active.
+        entries_scratch = try SortScratch(ArraySortEntry).acquire(rt, length);
+        var filled: usize = 0;
+        for (object.fastArrayValues(), 0..) |value, element_index| {
+            if (value.isUndefined()) {
+                undefined_count += 1;
+                continue;
+            }
+            entries_scratch.items[filled] = .{ .value = value, .order = element_index };
+            filled += 1;
         }
-        try entries.append(ctx.runtime.memory.allocator, .{ .value = value, .order = index });
+        entries = entries_scratch.items[0..filled];
+    } else {
+        while (index < length) : (index += 1) {
+            const key = try propertyAtomFromLengthIndex(rt, index);
+            defer key.deinit(rt);
+            if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+            const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
+            if (value.isUndefined()) {
+                undefined_count += 1;
+                continue;
+            }
+            try entries_list.append(rt.memory.allocator, .{ .value = value, .order = index });
+        }
+        entries = entries_list.items;
     }
 
     var sort_window: SortEntryRootWindow = .{};
-    try sort_window.activate(ctx.runtime, entries.items);
-    defer sort_window.deactivate(ctx.runtime);
+    try sort_window.activate(rt, entries);
+    defer sort_window.deactivate(rt);
 
-    try stableArraySortEntries(ctx, output, global, is_typed_method, comparator, entries.items, caller_function, caller_frame);
+    try stableArraySortEntries(ctx, output, global, is_typed_method, comparator, entries, caller_function, caller_frame);
 
     index = 0;
-    for (entries.items, 0..) |entry, sorted_index| {
+    // The comparator may have reshaped the receiver (length change, define on
+    // an index, push). Only when the array is still the same fully dense
+    // extent is every write below the in-bounds fast-array arm of qjs
+    // JS_SetPropertyInternal (a `set_value` on the slot, quickjs.c:9741):
+    // store straight into the slot. Otherwise every index goes through the
+    // generic [[Set]] as before.
+    if (dense_receiver and
+        object.isFastArray() and
+        !object.hasExoticMethods() and
+        @as(usize, @intCast(object.fastArrayCount())) == length and
+        @as(usize, @intCast(object.arrayLength())) == length)
+    {
+        var wrote = false;
+        for (entries, 0..) |entry, sorted_index| {
+            if (entry.order == sorted_index) continue;
+            const stored = object.setFastArrayElementDup(rt, @intCast(sorted_index), entry.value);
+            std.debug.assert(stored);
+            wrote = true;
+        }
+        index = entries.len;
+        while (index < entries.len + undefined_count) : (index += 1) {
+            const stored = object.setFastArrayElementDup(rt, @intCast(index), core.JSValue.undefinedValue());
+            std.debug.assert(stored);
+            wrote = true;
+        }
+        if (wrote) object.markIndexedProperties(rt);
+        // A dense receiver has no holes: entries + undefineds cover [0, length).
+        std.debug.assert(index == length);
+        return receiver_object_value;
+    }
+    for (entries, 0..) |entry, sorted_index| {
         // Faithful to quickjs.c:43476: when the slot's original position equals
         // its final sorted index the receiver already holds this value at this
         // index, so skip the write entirely (matching qjs, which also skips the
@@ -4844,7 +4934,7 @@ pub fn arraySortCall(
         }
         index += 1;
     }
-    while (index < entries.items.len + undefined_count) : (index += 1) {
+    while (index < entries.len + undefined_count) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
         try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
@@ -4867,15 +4957,39 @@ pub fn arraySortCompare(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !i32 {
-    const result = try comparator_call.call(&.{ lhs.value, rhs.value });
-    const number_value = try toNumberForDateMethod(ctx, output, global, result, caller_function, caller_frame);
-    const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
-    if (std.math.isNan(number) or number == 0) {
+    // The result is read in place through the error union's payload pointer:
+    // copying the 16-byte JSValue into a local goes through a q register and
+    // the scalar tag load right after it then waits on store forwarding the
+    // core cannot do (vector store -> GPR load), a stall that showed as the
+    // hottest instructions of the sort loop.
+    // qjs js_array_cmp_generic (quickjs.c:43378): bit-identical elements
+    // never reach the comparator; they keep their original order.
+    if (lhs.value.repr.payload == rhs.value.repr.payload and lhs.value.repr.tag == rhs.value.repr.tag) {
         if (lhs.order < rhs.order) return -1;
         if (lhs.order > rhs.order) return 1;
         return 0;
     }
-    return if (number < 0) -1 else 1;
+    var call_result = comparator_call.call(&.{ lhs.value, rhs.value });
+    const result: *const core.JSValue = if (call_result) |*value| value else |err| return err;
+    // qjs js_array_cmp_generic (quickjs.c:43385-43393): a JS_TAG_INT result is
+    // compared as an integer, no float conversion; everything else goes
+    // through JS_ToFloat64Free, whose ToPrimitive(number) + bigint TypeError
+    // shape is `toNumberForDateMethod`. The float64 tag is read inline too so
+    // `a - b` style comparators past int32 stay off the generic ToNumber call.
+    const cmp: i32 = if (result.asInt32()) |int_value|
+        @as(i32, @intFromBool(int_value > 0)) - @as(i32, @intFromBool(int_value < 0))
+    else blk: {
+        const number = result.asFloat64() orelse inner: {
+            const number_value = try toNumberForDateMethod(ctx, output, global, result.*, caller_function, caller_frame);
+            break :inner value_ops.numberValue(number_value) orelse std.math.nan(f64);
+        };
+        // `(val > 0) - (val < 0)`: NaN and both zeros give 0, the stable tie.
+        break :blk @as(i32, @intFromBool(number > 0)) - @as(i32, @intFromBool(number < 0));
+    };
+    if (cmp != 0) return cmp;
+    if (lhs.order < rhs.order) return -1;
+    if (lhs.order > rhs.order) return 1;
+    return 0;
 }
 
 pub fn stableArraySortEntries(
@@ -4889,8 +5003,13 @@ pub fn stableArraySortEntries(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (entries.len < 2) return;
-    const temp = try ctx.runtime.memory.allocator.alloc(ArraySortEntry, entries.len);
-    defer ctx.runtime.memory.allocator.free(temp);
+    // Merge scratch from the VM stack arena (heap only when the arena cannot
+    // serve it); released with the watermark, never per call.
+    const scratch_mark = ctx.runtime.vm_stack.mark();
+    defer ctx.runtime.vm_stack.restore(scratch_mark);
+    const temp_scratch = try SortScratch(ArraySortEntry).acquire(ctx.runtime, entries.len);
+    defer temp_scratch.release(ctx.runtime);
+    const temp = temp_scratch.items;
     var comparator_call: ?SyncInternalCallSite = if (!comparator.isUndefined())
         SyncInternalCallSite.init(
             ctx,
@@ -4904,6 +5023,17 @@ pub fn stableArraySortEntries(
     else
         null;
 
+    // Bottom-up merge, ping-ponging between the two buffers: each pass reads
+    // `src` and writes `dst` whole, then the roles swap, so a run is copied
+    // once per pass instead of once into `temp` and once back. The sequence of
+    // comparator calls is exactly the copy-back form's (it depends only on the
+    // run structure), so nothing observable changes.
+    var src: []ArraySortEntry = entries;
+    var dst: []ArraySortEntry = temp;
+    // A comparator (or default ToString) exception leaves a pass half written
+    // into `dst`; `src` still holds every element, with its cached key, exactly
+    // once, and that is what the caller's per-entry cleanup must see.
+    errdefer if (src.ptr != entries.ptr) @memcpy(entries, src);
     var width: usize = 1;
     while (width < entries.len) : (width *= 2) {
         var start: usize = 0;
@@ -4920,11 +5050,11 @@ pub fn stableArraySortEntries(
                 // lower original run. Take the right run only on a strictly
                 // positive result so equal elements keep the left-first
                 // (stable) order, matching qjs's a_idx<b_idx tie-break.
-                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, if (comparator_call) |*call_site| call_site else null, &entries[left], &entries[right], caller_function, caller_frame) > 0) {
-                    temp[out_index] = entries[right];
+                if (try arrayByCopySortCompare(ctx, output, global, typed_numeric_default, comparator, if (comparator_call) |*call_site| call_site else null, &src[left], &src[right], caller_function, caller_frame) > 0) {
+                    dst[out_index] = src[right];
                     right += 1;
                 } else {
-                    temp[out_index] = entries[left];
+                    dst[out_index] = src[left];
                     left += 1;
                 }
             }
@@ -4932,17 +5062,18 @@ pub fn stableArraySortEntries(
                 left += 1;
                 out_index += 1;
             }) {
-                temp[out_index] = entries[left];
+                dst[out_index] = src[left];
             }
             while (right < end) : ({
                 right += 1;
                 out_index += 1;
             }) {
-                temp[out_index] = entries[right];
+                dst[out_index] = src[right];
             }
-            @memcpy(entries[start..end], temp[start..end]);
         }
+        std.mem.swap([]ArraySortEntry, &src, &dst);
     }
+    if (src.ptr != entries.ptr) @memcpy(entries, src);
 }
 
 pub fn arrayByCopyCall(
@@ -5023,6 +5154,9 @@ pub fn arrayByCopyCall(
     if (mode == .to_sorted) {
         const comparator = if (args.len >= 1 and !args[0].isUndefined()) args[0] else core.JSValue.undefinedValue();
         const out = try createArrayByCopyOutput(ctx.runtime, global, length);
+        // The root window below takes its rooted copy from the VM stack arena.
+        const scratch_mark = ctx.runtime.vm_stack.mark();
+        defer ctx.runtime.vm_stack.restore(scratch_mark);
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
             for (entries.items) |entry| entry.freeEntry(ctx);

@@ -467,8 +467,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             });
             runtime_owned = false;
 
-            function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-            function_object.externalHostFunctionIdSlot().* = external_id;
+            function_object.installExternalHostFunction(rt, external_id);
             return function_value;
         }
 

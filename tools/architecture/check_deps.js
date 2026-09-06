@@ -232,6 +232,7 @@ const TEST_ROOTS = [
   // they are build-graph roots, not orphans).
   'tools/perf/same_runtime/zjs_same_runtime.zig',
   'tools/perf/direct/zjs_direct_bench.zig',
+  'tools/perf/native_boundary/zjs_boundary_bench.zig',
   'tests/fixtures/runtime_plugin_fixture.zig',
   'tests/fixtures/runtime_empty_plugin_fixture.zig',
 ];

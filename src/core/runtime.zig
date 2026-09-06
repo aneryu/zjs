@@ -1271,6 +1271,11 @@ pub const JSRuntime = struct {
     /// a core -> exec import cycle. Routing reads it on every eligible native
     /// callback, so keep it adjacent to the hot execution cache line.
     active_invocation: ?*anyopaque = null,
+    /// Exec-owned resident execution root for embedder -> JS calls
+    /// (`exec/host_invocation.zig`), created on first use and retired
+    /// through `host_invocation_retire` before the destroy invariants run.
+    host_invocation: ?*anyopaque = null,
+    host_invocation_retire: ?*const fn (*JSRuntime, *anyopaque) void = null,
     /// R-1 small-function-inlining budget: published production bytecode bytes
     /// and bytes consumed by specialized copies. Exec reads these; core only
     /// accounts.
@@ -1472,6 +1477,11 @@ pub const JSRuntime = struct {
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
     external_host_functions_capacity: usize = 0,
+    /// Shared dispatch record for external host functions (exec-owned
+    /// trampoline, installed with the internal builtin tables). Null until
+    /// exec registers it; a function published before that keeps the
+    /// record-less host path.
+    external_host_record: ?*const host_function.InternalRecord = null,
     cached_iterator_next_entries: []CachedIteratorNextEntry = &.{},
     cached_iterator_next_entries_capacity: usize = 0,
     /// Static internal-builtin record table, indexed
@@ -1636,6 +1646,9 @@ pub const JSRuntime = struct {
         rt.cached_iterator_next_entries = &.{};
         rt.cached_iterator_next_entries_capacity = 0;
         rt.internal_builtins = &.{};
+        rt.external_host_record = null;
+        rt.host_invocation = null;
+        rt.host_invocation_retire = null;
         rt.memory.profile_alloc_count = null;
         rt.memory.useIndependentSmallObjectSlabArenaBacking();
         rt.memory.enableSmallObjectSlab();
@@ -1665,13 +1678,21 @@ pub const JSRuntime = struct {
     pub fn deinit(self: *JSRuntime) void {
         self.assertOwnerThread();
         self.assertIdleForTeardown();
+        // The resident host invocation (exec/host_invocation.zig) is only ever
+        // published for the duration of a call, so an idle runtime retires it
+        // here; a runtime destroyed mid-call fails the assertion above first.
+        if (self.host_invocation) |host_invocation| {
+            const retire = self.host_invocation_retire.?;
+            self.host_invocation = null;
+            self.host_invocation_retire = null;
+            retire(self, host_invocation);
+        }
         self.vm_stack.deinit(&self.memory);
         const backtrace_frames = self.backtrace_frames;
         const backtrace_capacity = self.backtrace_capacity;
         self.backtrace_frames = &.{};
         self.backtrace_capacity = 0;
-        for (backtrace_frames) |_| {
-        }
+        for (backtrace_frames) |_| {}
         if (backtrace_capacity != 0) {
             self.memory.free(context_mod.BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
         }

@@ -306,8 +306,7 @@ pub const ReturnContinuation = struct {
     payload: u32,
 
     pub fn deinit(self: *ReturnContinuation, _: *core.JSRuntime) void {
-        if (self.action == .proxy_get and self.payload != core.atom.null_atom) {
-        }
+        if (self.action == .proxy_get and self.payload != core.atom.null_atom) {}
         self.action = .next;
         self.payload = 0;
     }
@@ -1112,6 +1111,21 @@ pub const Machine = struct {
         };
     }
 
+    /// Free the chunk storage of an idle machine through the runtime
+    /// account directly (the resident host invocation may outlive the
+    /// JSContext its `ctx` field last pointed at).
+    pub fn deinitStorage(self: *Machine, rt: *core.JSRuntime) void {
+        std.debug.assert(self.depth == 0);
+        for (self.chunks[0..self.chunk_count]) |chunk| {
+            rt.memory.destroy(@TypeOf(chunk.*), chunk);
+        }
+        self.chunk_count = 0;
+        if (self.chunks.len != 0) {
+            rt.memory.free(*[entries_per_chunk]Entry, self.chunks);
+            self.chunks = &.{};
+        }
+    }
+
     /// Drains any leftover inline frames (error propagation out of the
     /// dispatch loop without a catch handler) and releases chunk storage.
     pub fn deinit(self: *Machine) void {
@@ -1119,14 +1133,7 @@ pub const Machine = struct {
             var continuation = self.popFrame();
             continuation.deinit(self.ctx.runtime);
         }
-        for (self.chunks[0..self.chunk_count]) |chunk| {
-            self.ctx.runtime.memory.destroy(@TypeOf(chunk.*), chunk);
-        }
-        self.chunk_count = 0;
-        if (self.chunks.len != 0) {
-            self.ctx.runtime.memory.free(*[entries_per_chunk]Entry, self.chunks);
-            self.chunks = &.{};
-        }
+        self.deinitStorage(self.ctx.runtime);
     }
 
     /// The current Entry — the cached `top` pointer (qjs reads

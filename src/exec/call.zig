@@ -358,47 +358,7 @@ fn callHostFunction(
 }
 
 fn hostCallExternalHostFunction(call: HostCall) HostError!core.JSValue {
-    const id = call.func_obj.externalHostFunctionId();
-    const record = call.realm.realm.runtime.externalHostFunction(id) orelse return error.TypeError;
-    return record.call(record.ptr, .{
-        .realm = call.realm.realm,
-        .output = call.output,
-        .func_obj = call.func_obj,
-        .this_value = call.this_value,
-        .args = call.args,
-    }) catch |err| return throwExternalHostError(call, err);
-}
-
-fn throwExternalHostError(call: HostCall, err: anyerror) HostError!core.JSValue {
-    if (err == error.OutOfMemory) return error.OutOfMemory;
-    if (err == error.ProcessExit) return error.ProcessExit;
-    if (err == error.Interrupted) return error.Interrupted;
-    if (err == error.Timeout) return error.Timeout;
-    if (err == error.StackOverflow) return error.StackOverflow;
-    if (err == error.UnhandledPromiseRejection) return error.UnhandledPromiseRejection;
-    if (call.realm.realm.hasException()) return error.JSException;
-
-    const error_info = externalHostErrorInfo(err);
-    const error_value = try hostResult(exception_ops.createNamedError(
-        call.realm.realm,
-        call.realm.global,
-        error_info.name,
-        error_info.message,
-    ));
-    if (call.realm.realm.hasException()) call.realm.realm.clearException();
-    _ = call.realm.realm.throwValue(error_value);
-    return error.JSException;
-}
-
-fn externalHostErrorInfo(err: anyerror) struct { name: []const u8, message: []const u8 } {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "TypeError")) return .{ .name = "TypeError", .message = "" };
-    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "" };
-    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "" };
-    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "" };
-    if (std.mem.eql(u8, name, "EvalError")) return .{ .name = "EvalError", .message = "" };
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "" };
-    return .{ .name = "Error", .message = name };
+    return builtin_dispatch.callExternalHostRecord(call.realm.realm, call.output, call.realm.global, call.func_obj, call.this_value, call.args);
 }
 
 pub fn callHostFunctionObjectForVm(
