@@ -11188,7 +11188,7 @@ test "Engine direct eval captures the caller arguments binding" {
         \\print(open1(), open2());
         \\var noInit = parameterClosureNoInit();
         \\print(parameterClosure(), noInit[0], noInit[1], noInit[2]);
-    , "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\nfalse false true false\n");
+    , "41 42\n41 replaced false [object Arguments]\ninside inside inside\ninside inside\nfalse false true false\n");
 }
 
 test "Engine arguments writes prefer the current function binding over outer lexical bindings" {
@@ -21124,6 +21124,23 @@ test "an unresolved binding names its identifier in the ReferenceError message (
         \\'zjsUndeclaredInner' is not defined
         \\undefined true
         \\1
+        \\
+    );
+}
+
+test "print converts object arguments with ToString instead of the raw [object Object] fallback" {
+    try helpers.expectPrints(
+        \\print(new TypeError("boom"));
+        \\print({ toString() { return "custom"; } }, [1, [2, 3]], { [Symbol.toPrimitive]() { return "prim"; } });
+        \\print({}, { valueOf() { return 7; } });
+        \\try { print({ toString() { throw new RangeError("r"); } }); } catch (e) { print(e.name); }
+        \\print(1, "a", null, undefined, true, Symbol("s"));
+    ,
+        \\TypeError: boom
+        \\custom 1,2,3 prim
+        \\[object Object] [object Object]
+        \\RangeError
+        \\1 a null undefined true Symbol(s)
         \\
     );
 }

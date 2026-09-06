@@ -23,6 +23,7 @@ const array_ops = @import("array_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("exception_ops.zig");
+const string_ops = @import("string_ops.zig");
 const object_ops = @import("object_ops.zig");
 const dtoa = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
@@ -2239,7 +2240,17 @@ fn hostOutputValues(
         while (i < values.len) : (i += 1) {
             if (i != 0) writer.writeByte(' ') catch |err|
                 return exception_ops.throwHostError(ctx, global, err);
-            printValue(rt, writer, values[i]) catch |err| switch (err) {
+            // An object argument goes through ToString (toString / valueOf /
+            // Symbol.toPrimitive, with the realm's own conversions), so
+            // `print(err)` reads "TypeError: ..." rather than the raw
+            // "[object Object]" the value-string fallback produced. qjs's
+            // print takes a further step (JS_PrintValue's inspector dump:
+            // `{ a: 1 }`, `[Function f]`); that port is not done here.
+            const printable = if (values[i].isObject())
+                string_ops.toStringForAnnexB(ctx, output, global, values[i], null, null) catch |err| return @errorCast(err)
+            else
+                values[i];
+            printValue(rt, writer, printable) catch |err| switch (err) {
                 error.WriteFailed => return exception_ops.throwHostError(ctx, global, error.WriteFailed),
                 else => |other| return other,
             };
