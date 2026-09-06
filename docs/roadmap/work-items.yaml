@@ -299,7 +299,7 @@ items:
     state: ready
     wip_slot: decision
     hard_prerequisites: [GC-MERGE]
-    notes: "ORDER INVERTED by the 2026-09-03 owner ruling: the merge happened first, so the contract revision is now a post-merge debt. docs/vm-value-representation-contract.md is still v2 (2026-08-26), exported from the gc/tracing branch at 5bc8373b with an errata block; it predates S1-S5 (header bits, block cells for strings/storage/payload kinds, atom weakening, rc removal). The owed deliverable is v3 of that contract exported from main, with layout_epoch bumped if the representation actually changed."
+    notes: "ORDER INVERTED by the 2026-09-03 owner ruling: the merge happened first, so the contract revision is a post-merge debt. v3 DRAFT DELIVERED 2026-09-06 (driver, exported from main 8be2ca7d): errata block folded into the body, Slot protocol and the rc-default clause retired, new sections for the Metadata/kind byte, Object layout M, the 13-kind carrier family with the storage-cell owner-edge authority, the publish+barrier protocol, the gate-folded barrier, the production conservative scan and the pin ledger; layout_epoch 1 -> 2 (BigInt tag -9 -> -4 in e972c4b5, refcount removal changes managed-plugin ownership semantics; abi_encoding_revision stays 1). Awaiting owner review; until then the epoch bump lives only in the two documents (no code constant carries layout_epoch)."
     authority: {file: docs/vm-value-representation-contract.md, section: "all"}
   - id: GC-MERGE
     title: Tracing GC production merge into main

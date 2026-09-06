@@ -33,9 +33,10 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
   artifact 存在之前,实现期发现的冻结面实质缺陷可经正式复审修订并
   重新冻结;之后只许 append-only minor 或 major。
 - 验收门同 commit 完成:表示契约 v2 落地 fingerprint→FNABI tuple
-  过渡(§28.1 第 4 条),并定义 **layout_epoch**(现值 1,与契约
-  文档版号解耦)为 `FUN_VALUE_ABI` 第一分量——编辑性修版不再
-  构成 ABI 事件;§11.3 同步。
+  过渡(§28.1 第 4 条),并定义 **layout_epoch**(v2 时值 1;契约 v3
+  2026-09-06 递增为 **2**:BigInt tag −9→−4 与引用计数退出,见契约
+  changelog C3;与契约文档版号解耦)为 `FUN_VALUE_ABI` 第一分量——
+  编辑性修版不再构成 ABI 事件;§11.3 同步。
 - 排除项重申:side-by-side 语义、Host 表内部内容(v1 opaque,随 M1
   追加定义)、handle scope、事件通道原语均不在冻结面内(各自裁决
   见 0.6/0.7)。
@@ -811,8 +812,9 @@ Fast Call ABI 不定义 JS `Number` 到 `i32` 的具体转换语义；该语义�
 
 ```text
 FUN_VALUE_ABI = (layout_epoch, JSValue.abi_encoding_revision)
-// layout_epoch:表示契约 v2 定义,现值 1;只在真实表示变化
-// (布局/tag 语义/地址稳定性)时递增,与契约文档版号解耦
+// layout_epoch:表示契约 v2 定义,现值 2(v3,2026-09-06:BigInt tag
+// −9→−4、引用计数退出/所有权语义变化);只在真实表示变化
+// (布局/tag 语义/地址稳定性/所有权语义)时递增,与契约文档版号解耦
 ```
 
 zjs 已有 `JSValue.abi_encoding_revision`（进 plugin ABI fingerprint）；FNABI 直接复用该机制，不另设编号。规则：
@@ -3155,7 +3157,7 @@ Zig SDK：
 
 - [x] 表示契约修订完成评审：契约 v2（2026-08-26）执行「plugin ABI
   fingerprint」→ FNABI ABI tuple 过渡（§28.1 第 4 条），并定义
-  layout_epoch=1 为 tuple 第一分量。
+  layout_epoch=1 为 tuple 第一分量(契约 v3,2026-09-06,递增为 2)。
 - [x] ABI 兼容规则和 v1 freeze decision（§34 清单）通过评审
   （owner 批复 2026-08-26；§34 第 33 条已随 0.7 修正）。
 - [x] FN-M0F 前未发布任何第三方可依赖的 FNABI v1。
