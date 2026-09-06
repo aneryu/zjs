@@ -63,8 +63,12 @@ expect 17 numeric results and no `Skipped` line; `run_fixed_pmu.py` and
 Two things hid this for eleven days: zjs reports every `ReferenceError`
 as the bare message `not defined` (QuickJS names the identifier), and
 zjs's `print` renders any object argument as `[object Object]` without
-calling its `toString` (QuickJS's `print` dumps it). Both are open
-diagnostics debts, not correctness.
+calling its `toString` (QuickJS's `print` dumps it). Both were
+diagnostics debts, not correctness; both closed 2026-09-06 —
+`ReferenceError: 'read' is not defined` now names the identifier on every
+unresolved-binding exit, and `print` runs object arguments through
+ToString (`Error: x`, custom `toString`; QuickJS's inspector dump is not
+ported).
 
 Single unpinned run, parallel with other work, so not a gate number:
 
