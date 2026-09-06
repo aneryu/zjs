@@ -17632,6 +17632,42 @@ test "TGC S4-b: a growing dense array leaves every superseded element cell to th
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
 }
 
+test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var array_roots = core.runtime.rootObjects(.{&array_slot});
+    array_roots.activate(rt);
+    defer array_roots.deactivate(rt);
+
+    try fillS4bDenseArray(rt, array_slot.?, 40);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+    const cell = core.Object.arrayStorageCellHeader(array_slot.?.arrayArm().*.values);
+    try std.testing.expect(rt.gc.containsHeader(cell));
+
+    // A dense-mode transition that leaves the buffer attached. No production
+    // path does this today (both clears go through
+    // `freeArrayElementBufferAfterMove`), but the flag is a semantics bit and
+    // the collector's edge must come from the arm: with the trace guarded on
+    // `flags.fast_array` this major sweeps the cell the arm still names.
+    array_slot.?.flags.fast_array = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.gc.containsHeader(cell));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+
+    array_slot.?.flags.fast_array = true;
+    try std.testing.expectEqual(@as(usize, 40), array_slot.?.arrayElements().len);
+    for (array_slot.?.arrayElements(), 0..) |element, index| {
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), element.asInt32());
+    }
+
+    array_slot = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+}
+
 test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -32,7 +32,7 @@ rule 2 (or the cheaper identity gates of rule 4 where noted).
 
 From the 2026-08-21 implementation-quality review. As of 2026-08-25 only
 these three threads remain open; everything else (Q1–Q10, Q14–Q20, G1–G6)
-is closed.
+is closed. Q21 (2026-09-05) closed 2026-09-06; Q22 is open.
 
 ### Q11 T3/T4 — `object.zig` split, remaining tranches
 
@@ -93,22 +93,27 @@ functions (emission byte-identical); the lexer lifted verbatim to
 `src/lexer.zig` (parser.zig 20,769 → 17,408). Remaining work is the
 `parser_core` split itself, under emission-identity.
 
-### Q21 — dense-array element cell traced only while `fast_array`
+### Q21 — closed 2026-09-06: the element cell's edge is derived from the arm
 
-`Object.traceChildEdges` visits the `.array_storage` cell behind
-`arrayArm().values` only when `flags.fast_array` is set (or the owner is a
-mapped arguments object). `updateArrayStorageMode` clears the flag with the
-arm intact and `recomputeArrayStorageMode` sets it again over the same
-buffer, so an array that spends a major in the non-fast state can have its
-element extent swept and then read through it once dense again. Found while
-chasing the 2026-09-05 gate_smoke false positive (which turned out to be a
-doomed owner, not this); not reproduced on a workload yet. A first cut that
-guarded on `isArray() or arguments or mapped_arguments` plus `capacity != 0`
-and traced `values[0..count]` segfaulted on pdfjs -- most likely an
-`arguments`-class object whose arm word is a payload pointer, so the class
-guard has to follow `assertArmReadable`, not the class id alone. Gate: the
-deletion-probe test sketch is a fast array, `flags.fast_array = false`, one
-major, `liveCountKind(.array_storage)` still 1.
+The collector's edge to the `.array_storage` cell behind the array arm was
+guarded on `flags.fast_array` (or the mapped-arguments class). The flag is
+the dense-mode semantics bit; every production clear of it goes through
+`freeArrayElementBufferAfterMove` (capacity → 0), so the dangling state
+was unreachable in the current tree, but a semantics transition that left
+the buffer attached would have dropped the collector's only edge to it.
+Fixed by `Object.denseArmNamesStorageCell` — class ∈ {array,
+mapped_arguments, arguments-with-no-class-payload} and `capacity != 0` —
+used by the trace, the footprint recorder and the property-storage audit
+alike. The earlier SIGSEGV on pdfjs is explained: an `arguments` object
+carrying a class payload keeps the payload pointer in the arm's first
+word, so the class id alone does not make the arm readable as
+`DenseArrayStorage`; the `class_payload_kind == .none` term is the guard.
+Deletion probe: "Q21: the element cell is kept alive by the arm, not by
+flags.fast_array" (`src/tests/core.zig`) — a filled array with the flag
+cleared by hand keeps its cell across a major (red on the flag-guarded
+trace, `containsHeader` false). Gates: unified suite + gc-stress green;
+fixed-work PMU screen vs the pre-change ReleaseFast binary:
+insn 0.9976–1.0003 on raytrace / splay / earley-boyer / deltablue / pdfjs (2 samples each, ABBA), neutral at the 0.5% screen line.
 
 ### Q22 — storage-cell corpse possibly debited twice
 

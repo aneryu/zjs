@@ -136,22 +136,24 @@ Recorded rather than fixed, with the reproduction that found them. Entries
 that have since been fixed keep their attribution trail here until the next
 release notes absorb them.
 
-### Open 2026-09-06: Q21 — dense-array element cell traced only while `fast_array`
+### Fixed 2026-09-06: Q21 — dense-array element cell traced only while `fast_array`
 
-`Object.traceChildEdges` visits the `.array_storage` cell behind the array
-arm only while `flags.fast_array` is set (or the owner is a mapped
-arguments object). `updateArrayStorageMode` clears the flag with the arm
-intact and `recomputeArrayStorageMode` sets it again over the same buffer,
-so in principle an array that spends a major in the non-fast state can
-have its element extent swept and then be read through it once dense
-again. Not observed as a wrong result; the 2026-09-05 pdfjs arena-audit
-red (`DanglingArrayStorageCell`, layout-sensitive) was traced to a
-different cause (an audit false positive on owners condemned by the cycle
-being closed) and fixed. A first attempt to trace by class + capacity
-instead SIGSEGVs on pdfjs, most likely an `arguments`-class object whose
-arm word is a payload pointer (the guard must follow `assertArmReadable`,
-not the class id alone). Priced entry and current hypotheses:
-`docs/backlog.md` Q21. Being worked on main as of 2026-09-06.
+`Object.traceChildEdges` visited the `.array_storage` cell behind the array
+arm only while `flags.fast_array` was set (or the owner was a mapped
+arguments object). The flag is the dense-mode semantics bit; in the current
+tree every clear goes through `freeArrayElementBufferAfterMove` (capacity
+→ 0), so no production path reached the dangling state, but a transition
+that left the buffer attached would have dropped the collector's only edge
+to the cell. The edge is now derived from the arm itself
+(`Object.denseArmNamesStorageCell`: class ∈ {array, mapped_arguments,
+arguments without a class payload} and `capacity != 0`), shared by the
+trace, the footprint recorder and the property-storage audit. The first
+attempt's SIGSEGV on pdfjs was an `arguments` object whose arm word is a
+class-payload pointer; the payload-kind term is the guard. Deletion probe:
+"Q21: the element cell is kept alive by the arm, not by flags.fast_array"
+(`src/tests/core.zig`), red on the old guard. Gates: unified suite and
+gc-stress green; fixed-work PMU screen vs the pre-change binary
+insn 0.9976–1.0003 on raytrace / splay / earley-boyer / deltablue / pdfjs (neutral). Priced entry: `docs/backlog.md` Q21 (closed).
 
 ### Open 2026-09-06: Q22 — storage-cell corpse possibly debited twice
 

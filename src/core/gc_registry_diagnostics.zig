@@ -236,26 +236,26 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
             if (cell_header.metaConst().flags.kind != .property_storage)
                 return error.InvalidPropertyStorageKind;
         }
-        // The dense element buffer answers the same two questions.
-        if (owner.flags.fast_array or owner.class_id == class.ids.mapped_arguments) {
-            if (owner.arrayArm().*.capacity != 0) {
-                const cell_header: *const GCObjectHeader =
-                    @ptrCast(@alignCast(owner.arrayArm().*.values));
-                if (!self.containsHeader(cell_header)) {
-                    // Name the owner: the audit fires long after the write
-                    // that caused it, and the class is the first clue to
-                    // which adoption path forgot its barrier.
-                    // The cell may be unmapped memory by now: name it, do not
-                    // read it.
-                    std.debug.print(
-                        "gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n",
-                        .{ owner.class_id, owner.flags.fast_array, owner.arrayArm().*.capacity, header.metaConst().flags.young, @intFromPtr(cell_header) },
-                    );
-                    return error.DanglingArrayStorageCell;
-                }
-                if (cell_header.metaConst().flags.kind != .array_storage)
-                    return error.InvalidArrayStorageKind;
+        // The dense element buffer answers the same two questions. Same
+        // arm-derived predicate as the trace (Q21): a cell the arm names
+        // must be published whether or not the owner is in dense mode.
+        if (owner.denseArmNamesStorageCell()) {
+            const cell_header: *const GCObjectHeader =
+                @ptrCast(@alignCast(owner.arrayArm().*.values));
+            if (!self.containsHeader(cell_header)) {
+                // Name the owner: the audit fires long after the write
+                // that caused it, and the class is the first clue to
+                // which adoption path forgot its barrier.
+                // The cell may be unmapped memory by now: name it, do not
+                // read it.
+                std.debug.print(
+                    "gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n",
+                    .{ owner.class_id, owner.flags.fast_array, owner.arrayArm().*.capacity, header.metaConst().flags.young, @intFromPtr(cell_header) },
+                );
+                return error.DanglingArrayStorageCell;
             }
+            if (cell_header.metaConst().flags.kind != .array_storage)
+                return error.InvalidArrayStorageKind;
         }
         if (owner.shape_ref.prop_count > owner.shape_ref.prop_size)
             return error.InvalidTrailingPropertyCapacity;

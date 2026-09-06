@@ -4330,6 +4330,26 @@ pub const Object = extern struct {
         return if (self.flags.fast_array) .dense else .sparse;
     }
 
+    /// The union arm is a `DenseArrayStorage` whose `values` names an
+    /// `.array_storage` GC cell. Derived from the class and the arm alone,
+    /// never from `flags.fast_array` (backlog Q21): the flag is the
+    /// dense-mode *semantics* bit, and a semantics transition that leaves
+    /// the buffer attached (today none does -- both clears go through
+    /// `freeArrayElementBufferAfterMove`) must not be able to drop the
+    /// collector's only edge to the cell. `capacity != 0` is exactly "the
+    /// arm names a cell": an empty arm holds the null no-payload sentinel.
+    /// `mapped_arguments` shares the arm and the kind (its body is read as
+    /// `?*VarRef`); an `arguments` object with a class payload keeps a
+    /// payload pointer in the arm's first word instead, so the kind check
+    /// is what makes the arm readable as `DenseArrayStorage` there.
+    pub inline fn denseArmNamesStorageCell(self: *const Object) bool {
+        return switch (self.class_id) {
+            class.ids.array, class.ids.mapped_arguments => self.arrayArm().*.capacity != 0,
+            class.ids.arguments => self.flags.class_payload_kind == .none and self.arrayArm().*.capacity != 0,
+            else => false,
+        };
+    }
+
     pub fn arrayElements(self: *const Object) []JSValue {
         if (!self.flags.fast_array or self.arrayArm().*.count == 0) return &.{};
         std.debug.assert(self.arrayArm().*.capacity >= self.arrayArm().*.count);
@@ -6704,7 +6724,7 @@ pub const Object = extern struct {
 
         // Fast arrays and mapped arguments share the same allocation-bearing
         // union arm. The latter stores VarRef pointers in JSValue-sized cells.
-        if (self.flags.fast_array or self.class_id == class.ids.mapped_arguments) {
+        if (self.denseArmNamesStorageCell()) {
             const capacity: usize = self.arrayArm().*.capacity;
             const live: usize = self.arrayArm().*.count;
             if (capacity != 0 and live != 0) {
@@ -6985,18 +7005,15 @@ pub const Object = extern struct {
             try payload.traceChildEdges(visitor);
         }
         // TGC S4-b spec 2.2: the dense element buffer is an `.array_storage`
-        // GC cell with no edges of its own. `capacity != 0` is exactly "the
-        // arm names a cell" -- an empty arm holds the null no-payload
-        // sentinel. `mapped_arguments` shares both the arm and the kind (its
-        // body is read as `?*VarRef`), so one guard covers both owners; it is
-        // the same predicate `recordTraceStorageFootprint` uses.
-        if (self.flags.fast_array or self.class_id == class.ids.mapped_arguments) {
-            if (self.arrayArm().*.capacity != 0) {
-                try object_payloads.callVisitStorageCell(
-                    visitor,
-                    arrayStorageCellHeader(self.arrayArm().*.values),
-                );
-            }
+        // GC cell with no edges of its own. The guard is the arm-derived
+        // `denseArmNamesStorageCell` (Q21: not `flags.fast_array`), the same
+        // predicate `recordTraceStorageFootprint` and the property-storage
+        // audit use.
+        if (self.denseArmNamesStorageCell()) {
+            try object_payloads.callVisitStorageCell(
+                visitor,
+                arrayStorageCellHeader(self.arrayArm().*.values),
+            );
         }
         for (self.arrayElements()) |*stored| {
             try Helper.callVisitValue(visitor, stored);
