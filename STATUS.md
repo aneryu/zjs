@@ -6,10 +6,22 @@ this page and the documents it names win.
 
 ## Roadmap governance
 
-Current roadmap: `docs/roadmap.md` **v1.9** (registry
+Current roadmap: `docs/roadmap.md` **v2.0** (registry
 `docs/roadmap/work-items.yaml`), approval status: **approved execution
 baseline** (all §0.3 hard conditions met 2026-08-26; owner ratified the
 yardstick ruling and the main required-checks ruleset the same day).
+v2.0 (2026-09-06) records a fact, not a design: the tracing collector is
+the only collector in the tree. Owner ruled 2026-09-03 to finish the
+tracing GC and adapt the object model completely; TGC S0–S5 landed on
+main 2026-09-04→05 (`e972c4b5` → `f005aee7`), refcounting left the
+object model, and the `gc/tracing` branch and the dual-session split are
+retired. The G2-GC-MERGE statistical protocol was superseded by that
+ruling and never run (no verdict); the merge basis was the Stage 0
+fixed-work screen against the frozen rc baseline plus four green gates
+(`docs/tracing-gc-completion-account.md`). Still owed after the merge:
+VM-CONTRACT-GC (the representation contract is v2, exported from the
+branch before S1–S5), backlog Q21/Q22, and the conservative-root residue
+R1.
 BASE-G0 (measurement freeze) completed 2026-08-26: the official QuickJS
 yardstick is the GCC-16 build recorded in
 `reports/evidence/BASE-G0/manifest.json`, the tracing-GC candidate is
@@ -22,8 +34,10 @@ repository-admin bypass keeps the owner's direct-push workflow).
 
 ## test262
 
-Checked report date: 2026-08-22 (full-suite run recorded under Known defects
-below; `COMPATIBILITY.md` carries the same numbers).
+Checked report date: 2026-09-06 (merge-gate run on `ca537eca`; the numbers
+are unchanged since 2026-08-22 and `COMPATIBILITY.md` carries the same
+numbers; the same result holds under `ZJS_GC_STRESS=1` since the S5
+closeout).
 
 - 49,778 prepared / 44,584 pass / 0 checked-in known failures / 0 unexpected failures / 5,194 feature skips
 - Configuration = repository `test262.conf` + submodule pin `4249661388e5d3f92a85186213da140a6481490f`
@@ -36,9 +50,16 @@ source-phase imports, and PTC.
 
 The authoritative score source is `docs/perf/bench-v8-status.md`; this page
 does not maintain its own copy of the numbers. Since 2026-08-25 the vendored
-suite (`tools/perf/bench_v8/`) is Octane 2.0 (V8 suite version 9); the
-current five-engine snapshot there reads zjs/qjs composite 0.9611 against a
-GCC 16.0.1 reference build. Per the 2026-08-25 reference-drift adjudication,
+suite (`tools/perf/bench_v8/`) is Octane 2.0 (V8 suite version 9). The
+current five-engine snapshot (2026-09-06, 17 results, zlib scored, zjs
+`10966b12` with the tracing collector) reads zjs/qjs composite **0.9666**
+against the GCC 16.0.1 reference build: 11 of 17 results at or above
+QuickJS; the gap is Splay 0.62 / SplayLatency 0.69 (the structural
+marking account closed in `docs/tracing-gc-completion-account.md` §6b),
+then EarleyBoyer 0.85 and PdfJS 0.89. **Owner ruling 2026-09-06: the
+performance line is closed; Octane vs QuickJS is a regression gate at
+≥ 0.95 from here.** Routine snapshots run zjs + QuickJS only; the other
+three engines are re-run only when the suite contract changes. Per the 2026-08-25 reference-drift adjudication,
 every published record must carry the reference binary's fingerprint
 (hash + compiler); ratios are not comparable across suite versions or
 reference binaries. The official yardstick was ruled 2026-08-26 (BASE-G0,
@@ -76,18 +97,34 @@ Measurement contract: `tools/compare/measurement_contract.js` with
 ## Gates
 
 The dated cells below are snapshots from the runs they name, not continuous
-results. The most recent full-suite evidence is 2026-08-22: full suite 2332
-passed / 1 skipped / 0 failed, test262 `0/49778 errors, passed 44584` (see
-the frame-teardown entry under Known defects).
+results. The most recent evidence is 2026-09-06 on `ca537eca` (the first
+push of the tracing-collector main; see the two 2026-09-06 rows).
+
+Wall-clock as of 2026-09-06 (build pool on the big cores, see `mise.toml`):
+`zig build check` 7 s, `zig build test` 21 s, `mise run checkpoint-gate`
+26 s, `mise run merge-gate` 91 s, full test262 9.8 s standalone.
 
 | Gate | What it covers | This lane |
 |------|----------------|-----------|
+| `mise run merge-gate` | one build graph: unified Debug suite (16 shards), stress tier, gc-stress, Debug CLI smoke, architecture lints, full test262, fixed-work smoke (ordinary + arena-audit runs per workload) | 2026-09-06, `ca537eca` (main): PASS, 91 s. test262 `0/49778 errors, passed 44584`. |
+| nightly tiers, run locally | `zig build test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, `test-stress`, `zig build test -Dzjs_ownership_audit=true` | 2026-09-06, `ca537eca` (main, local): all five PASS — ReleaseSafe full suite 24/24 steps, test-oom 22 passed / 0 failed, leak-census 1570 passed / 0 failed, test-stress 9/9 steps, ownership-audit 24/24 steps. |
 | `zig build engine-production-gate --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture lints (including compiler-stage `nm`), OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-check: `0/49775 errors, passed 44581`. Historical row also named `architecture-check` and `config-drift-gate`; those steps are gone. |
 | `zig build test -Doptimize=ReleaseSafe --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
 | `zig build test-oom --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | instrumentation tier; runs nightly. 2026-08-19: PASS, 21 passed / 0 failed — after fixing two pre-existing defects this target had been silently failing on (it had not been run in a long time). |
 | `zig build test -Dzjs_ownership_audit=true --summary all` | borrowed-atom use-after-free audit (see `docs/borrowed_atom_audit.md`) | instrumentation tier; runs nightly. 2026-08-19: PASS, 2275 passed / 0 failed. |
 | `mise run checkpoint-gate` | unified Debug suite, Debug CLI smoke, source-side architecture | handoff gate; does not compile ReleaseFast `zjs` |
 | `zig build test262-check --summary all` | full test262, zero-failure | runs on every PR (linux-arm64) |
+
+Nightly note (2026-09-06): the GitHub `Nightly` workflow was red for
+eleven consecutive nights (2026-08-26 → 2026-09-05; last green
+2026-08-25). Every run built the stale `origin/main` (`6b9458ef`,
+2026-09-01, and older): `engine-production-gate` passed 35/35 there, the
+failing step was `zig build test -Doptimize=ReleaseSafe` on
+`tests.oom_cap` "exhausted-heap OOM delivery to JS catch allocates
+nothing", and fail-fast meant the OOM / leak-census / stress /
+ownership-audit tiers did not run in CI for that period. The failure does
+not reproduce on `ca537eca` (the row above); main was pushed 2026-09-06
+and the next nightly is the confirmation.
 
 Gate note (2026-08-20): `mise run checkpoint-gate` now also runs the
 public-API surface snapshot. It previously fired only on the production gate,
@@ -98,6 +135,34 @@ and four commits landed past a stale `JSValue` pin before anyone noticed.
 Recorded rather than fixed, with the reproduction that found them. Entries
 that have since been fixed keep their attribution trail here until the next
 release notes absorb them.
+
+### Open 2026-09-06: Q21 — dense-array element cell traced only while `fast_array`
+
+`Object.traceChildEdges` visits the `.array_storage` cell behind the array
+arm only while `flags.fast_array` is set (or the owner is a mapped
+arguments object). `updateArrayStorageMode` clears the flag with the arm
+intact and `recomputeArrayStorageMode` sets it again over the same buffer,
+so in principle an array that spends a major in the non-fast state can
+have its element extent swept and then be read through it once dense
+again. Not observed as a wrong result; the 2026-09-05 pdfjs arena-audit
+red (`DanglingArrayStorageCell`, layout-sensitive) was traced to a
+different cause (an audit false positive on owners condemned by the cycle
+being closed) and fixed. A first attempt to trace by class + capacity
+instead SIGSEGVs on pdfjs, most likely an `arguments`-class object whose
+arm word is a payload pointer (the guard must follow `assertArmReadable`,
+not the class id alone). Priced entry and current hypotheses:
+`docs/backlog.md` Q21. Being worked on main as of 2026-09-06.
+
+### Open 2026-09-06: Q22 — storage-cell corpse possibly debited twice
+
+An accounting suspicion, not a memory-safety one: `Registry.reclaimDoomedBlock`
+debits each corpse through `unpublishStringCell → recordHeapFreeWithBytes`
+when the remembered map is non-empty (or under the lifecycle audit), and
+`Heap.reclaimDoomedCells` then debits the block's `bitmap_bytes` for the
+same cells in one batch, so a corpse that owes no finalizer may be charged
+on both paths. Affects the `MemoryAccount` byte ledger only; the S5-end
+splay profile puts the whole destruction family below the rc baseline.
+Entry and proposed Debug invariant test: `docs/backlog.md` Q22.
 
 ### Fixed 2026-08-22: frame teardown read its bytecode after releasing it
 

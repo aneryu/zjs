@@ -1,9 +1,19 @@
 # zjs / fun 统一路线图
 
-版本:1.9  
-日期:2026-08-26  
+版本:2.0  
+日期:2026-09-06  
 状态:**approved execution baseline**(§0.3 硬条件 2026-08-26 全数
 达成;owner 同日批复 qjs 尺裁定与 required-checks ruleset)。
+v2.0 = **tracing GC 合入 main 的事实入册**:owner 2026-09-03 裁决
+「先不管性能,把 tracing GC 做到底、对象模型完全适配」,TGC S0–S5
+2026-09-04→05 落在 main(`e972c4b5`→`f005aee7`),rc 退出对象模型,
+tracing 收集器成为树中唯一收集器;G2-GC-MERGE 的 n=32 统计协议
+**被该裁决取代、未运行、无 verdict**(合入尺 = 对冻结 rc 基线的
+Stage 0 固定功筛 + 四门全绿,见
+`docs/tracing-gc-completion-account.md`);GC-P3/GC-MERGE 转 done,
+VM-CONTRACT-GC 由「合入前置」倒置为**合入后欠账**(表示契约仍 v2,
+待从 main 导出 v3);gc/tracing 分支与「双会话分工」退役;性能线
+2026-09-06 owner 关门,Octane vs qjs **≥0.95 回归门**。无新增设计。
 v1.9 = BASE-G0 测量冻结完成(官方 qjs 尺裁定、三枚 zjs 冻结二进制、
 套件逐 case 指纹、tracing 公开 tag、gc_merge_policy + 四份 spike
 policy 预注册、evidence 登记册落地),无新增设计。v1.8 = 语义闭合 +
@@ -100,7 +110,7 @@ PERF-VMABI + PERF-OPCODE-SPACE -> PERF-JIT
 PERF-TYPED-IR + PERF-VMABI -> PERF-AOT
 PERF-OPCODE-SPACE -> PERF-ASM-1A
 PERF-ASM-1A + GC-MERGE -> PERF-ASM-1B
-VM-CONTRACT-GC -> GC-MERGE
+GC-MERGE -> VM-CONTRACT-GC
 SER-CORE + PERF-OPCODE-SPACE -> SER-ARTIFACT
 SER-CORE -> SER-SNAPSHOT
 SER-CORE + SER-TRANSFER -> SER-MESSAGE
@@ -135,7 +145,6 @@ PERF-JIT: G1-JIT=eligible & BACKEND-ORDER≠both_later
 PERF-AOT: G1-AOT=eligible & BACKEND-ORDER≠both_later
 GC-GAP: BASE-G0.done
 GC-P3: G1-GC=continue
-VM-CONTRACT-GC: G2-GC-MERGE=pass
 PROC-D7: G1-LIGHT-PROCESS-WORKLOAD=exists
 ```
 <!-- END GENERATED: DAG -->
@@ -147,9 +156,10 @@ PROC-D7: G1-LIGHT-PROCESS-WORKLOAD=exists
 - FN-M1B/FN-M1C 是并行分支,先后按产品价值排。
 - RT-LIFECYCLE 是共享生命周期原语,消费者=PROC-D5B、HR-P2A、FN-M4
   (v1.8 起三条边全部入 DAG,防三线各自实现)。
-- GC 链三拆(v1.8):G2-GC-MERGE(统计 gate)→ VM-CONTRACT-GC
-  (契约修订,独立 review)→ GC-MERGE(合入动作);PROC-D7 依赖的
-  是合入动作。
+- GC 链(v1.8 三拆:G2-GC-MERGE → VM-CONTRACT-GC → GC-MERGE)在
+  v2.0 已按事实倒置:GC-MERGE 已完成(owner 2026-09-03 裁决,
+  `f005aee7`),VM-CONTRACT-GC 现在硬依赖 GC-MERGE、是合入后的契约
+  修订欠账;PROC-D7/PERF-ASM-1B 依赖的合入动作已满足。
 - incubator(不在 active DAG):PERF-ASM-1A/PERF-ASM-1B(激活=
   iOS 执行窗口+GC 表示定型);P2 eval 缓存(typed v1.2,fun 真实
   负载达线后回归)。
@@ -207,10 +217,20 @@ activation canary(最小机制覆盖量,冻结在 policy 里):
 
 吞吐三角已裁(2026-08-26,G1-GC/Option B,记录在
 gc_merge_policy.json v2):**parallel marking 升正式计划项
-(GC-PARALLEL-MARK,GC 会话车道)**,内存包络维持 growth 1.75x /
+(GC-PARALLEL-MARK)**,内存包络维持 growth 1.75x /
 cycle peak-over-live 1.8(方案 A 定价证伪:1.75→2.5x 只赎回约 1/3
 gap);分层判据(方案 C)弃,与「GC 打磨好才合入」常任裁决一致。
 Track B 定性:最大架构风险退休项与表示定型点,非产品交付解锁器。
+
+> **v2.0 事实注(2026-09-06)**:上面的合入 gate 规格**没有被执行**。
+> owner 2026-09-03 裁决改为「把 tracing GC 做到底、对象模型完全
+> 适配,性能其次」,TGC S0–S5 直接落在 main;合入尺变成对冻结 rc
+> 基线 `main-d944f26d` 的 Stage 0 固定功 insn/cycles 筛(六负载中
+> 仅 splay cycles 1.26 为 STOP,已判结构账)加四门全绿。
+> gc_merge_policy.json 留档为历史协议;G2-GC-MERGE 标 done、无
+> verdict。S4b 并行标记 2026-09-03 已落 main、默认关(
+> `docs/gc-v2-s4b-parallel-marking-gate.md`),GC-PARALLEL-MARK 余
+> 下的是开启裁决,不再是分支车道。
 
 **PERF-SHAPE-ID 合同形态(已裁)**:双域——动态可变 shape 用 u64
 identity/version(mutation/relocation/ABA;**计数器作用域=
@@ -251,7 +271,9 @@ owner-decision: PERF-OPCODE-SPACE(driver 会话)**已升为最高优先级
                 序列化/手写 opcode 的项现在都硬依赖本项:PERF-T1、
                 FN-M1A、PERF-P05、PERF-JIT、PERF-ASM-1A、SER-ARTIFACT。
                 FN-M0F 已裁并冻结(2026-08-26,FNABI v0.8+表示契约 v2)
-implementation: GC-P3(GC 专属会话,分支 gc/tracing,不碰 main);
+implementation: (GC-P3 已 done,v2.0:GC 线 2026-09-05 在 main 收官,
+                槽位释放;owner 2026-09-05 裁决 TS/AOT「顺延不取消」,
+                先清 GC 余项与迭代效率,两者 2026-09-06 均已关门)
                 PERF-T-SPIKE **重开**(driver 会话):08-26 的 FAIL 判定
                 08-27 撤回——受控 demo 证明首轮负载(混浮点)会完全
                 掩盖该机制,属性密集负载重测得 +8.9%/+15.7%,越过
@@ -262,10 +284,11 @@ measurement:    (空;队列下一位 = PERF-T-SPIKE,占 implementation
                 槽,开工前须批 policy 中 basis=proposed 阈值)
 ```
 
-**双会话分工(2026-08-26 入册)**:GC 线(gc/tracing 分支、GC-P3、
-两笔 GC-GAP 归因债、pause plan 文档)= GC 专属会话;其余全部
-(治理/registry、FN/HR/SER 线、spike 与测量队列、evidence 登记册、
-G2 合入 gate 的统计机器)= driver 会话。G1-GC 已裁 continue
+**双会话分工(2026-08-26 入册,v2.0 退役)**:曾为 GC 线(gc/tracing
+分支、GC-P3、两笔 GC-GAP 归因债、pause plan 文档)= GC 专属会话;其余
+= driver 会话。2026-09-03 起 GC 线由 driver 在 main 上亲自完成
+(owner 09-03「不派 codex,你自己来」),gc/tracing 分支已退役,
+分工不再存在。G1-GC 已裁 continue
 (GC-GAP 账在案:fixed-work geomean 1.206、suite 0.832、splay pause
 p99 6.87ms vs rc 42.4ms、splay RSS 3.63x;裁决时欠账=非劣效 margin
 与吞吐三角答案,须在 G2 首个 look 前写入 gc_merge_policy.json)。
@@ -276,7 +299,8 @@ p99 6.87ms vs rc 42.4ms、splay RSS 3.63x;裁决时欠账=非劣效 margin
 > 了二进制,只能当先后两个基值读。⚠️ GC-GAP 的停顿列**没有**受 08-29 那个
 > 「普查落在计时窗内」的仪器缺陷影响(缺陷 08-28 才引入,晚于该候选臂三天),
 > 核查见 `reports/evidence/GC-GAP/ERRATA-2026-08-29.md`。
-HR-P1 让出 WIP 槽排队(root-handle 与 GC 耦合,亦宜等 GC 线收敛)。
+HR-P1 让出 WIP 槽排队(root-handle 与 GC 耦合;GC 线 2026-09-05 已
+收敛,阻碍解除,仍按 WIP 空位安插)。
 
 **证据购买(implementation slot 释放后;测量队列串行)**
 ```
@@ -300,7 +324,7 @@ PROC-D5A、RT-LIFECYCLE。(PERF-OPCODE-SPACE 已不在此列——它占
 owner-decision 槽且是最高优先级前置项,见上。)
 
 **Later**:SER 三 profile 下游、FN-M1A→M1B/M1C、HR-P2A/P2B/P3、
-PROC-D3→D4→D6、G2-GC-MERGE→VM-CONTRACT-GC→GC-MERGE→PROC-D7、
+PROC-D3→D4→D6、VM-CONTRACT-GC(合入后欠账)→PROC-D7、
 FN-M2..M6。SER-TRANSFER/GC-MULTIRT-GATE/VM-WEAK-REGISTRY 随 WIP
 空位安插(均 ready);G1-LIGHT-PROCESS-WORKLOAD 的负载表调查可
 提前做。
@@ -341,12 +365,12 @@ fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B F
 
 <!-- BEGIN GENERATED: STATUS -->
 ```
-now        PERF-T-SPIKE PERF-OPCODE-SPACE GC-P3
-ready      G1-LIGHT-PROCESS-WORKLOAD PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-SIDECAR SER-CORE SER-TRANSFER HR-P1 DBG-W2 RT-LIFECYCLE GC-PARALLEL-MARK GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
-gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT VM-CONTRACT-GC
-blocked    G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE PERF-JIT-SPIKE GC-MERGE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE HR-P2A HR-P2B HR-P3 FN-M1A FN-M1B FN-M1C PROC-D3 PROC-D4 PROC-D5B PROC-D6 PROC-D7
+now        PERF-T-SPIKE PERF-OPCODE-SPACE
+ready      G1-LIGHT-PROCESS-WORKLOAD PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-SIDECAR VM-CONTRACT-GC SER-CORE SER-TRANSFER HR-P1 DBG-W2 RT-LIFECYCLE GC-PARALLEL-MARK GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
+gated      PERF-SHAPE-ID PERF-TYPED-IR PERF-T1 PERF-P05 PERF-JIT PERF-AOT
+blocked    G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER PERF-JIT-SPIKE SER-ARTIFACT SER-SNAPSHOT SER-MESSAGE HR-P2A HR-P2B HR-P3 FN-M1A FN-M1B FN-M1C PROC-D3 PROC-D4 PROC-D5B PROC-D6 PROC-D7
 later      FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 incubator  PERF-ASM-1A PERF-ASM-1B
-done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 G1-GC GC-GAP FN-M0D FN-M0I FN-M0F
+done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 G1-GC G2-GC-MERGE GC-GAP GC-P3 GC-MERGE FN-M0D FN-M0I FN-M0F
 ```
 <!-- END GENERATED: STATUS -->

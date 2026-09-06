@@ -12,7 +12,7 @@
 #   hard_prerequisites are the only DAG edges (acyclic).
 
 schema_version: 2
-roadmap_version: "1.9"
+roadmap_version: "2.0"
 roadmap_status: approved
 
 items:
@@ -65,7 +65,7 @@ items:
     wip_slot: none
     completion_commit: e08fdac0
     hard_prerequisites: [GC-GAP]
-    notes: "ruled continue 2026-08-26 (owner assigned a dedicated GC session to carry the line forward with the GC-GAP account on the table). STILL OWED at this gate per gc_merge_policy: the frozen non-inferiority margin + the throughput-triangle answer (ledger 20.2a) — must be written into gc_merge_policy.json before the first G2-GC-MERGE look."
+    notes: "ruled continue 2026-08-26 (owner assigned a dedicated GC session to carry the line forward with the GC-GAP account on the table). The margin + throughput-triangle debts owed here were overtaken: owner ruled 2026-09-03 to complete the tracing collector regardless of the statistical gate (see G2-GC-MERGE / GC-MERGE)."
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-TYPED
     title: "Typed interpreter verdict after T-spike"
@@ -111,10 +111,11 @@ items:
     title: "GC merge statistical gate (three-state, per gc_merge_policy.json)"
     type: gate
     verdicts: [pass, fail, inconclusive]
-    state: blocked
+    state: done
     wip_slot: none
+    completion_commit: e972c4b5
     hard_prerequisites: [GC-P3]
-    notes: inconclusive at n=32 forbids merge; branch retained; reopen only on substantive change
+    notes: "SUPERSEDED, no verdict recorded (none of pass/fail/inconclusive applies): the n=8->16->32 non-inferiority protocol of gc_merge_policy.json was never run. Owner ruling chain: 2026-09-03 'finish the tracing GC and adapt the object model completely, performance second' (docs/tracing-gc-completion-plan.md v0.1, D1-D6) -> 2026-09-04 S0-S2 land on main as e972c4b5 -> 2026-09-05 S5 closeout (f005aee7; all stage-end gates green incl. ZJS_GC_STRESS test262 0/49778) -> 2026-09-06 performance line closed (Octane vs qjs >= 0.95 is a regression gate from here). The merge basis that replaced this gate is the Stage 0 fixed-work insn/cycles screen against the frozen rc baseline main-d944f26d (docs/tracing-gc-completion-account.md section 3: only splay cycles 1.26 remains, a structural account) plus the four correctness gates. gc_merge_policy.json stays on file as the historical protocol."
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-LIGHT-PROCESS-WORKLOAD
     title: "Lightweight-process value gate: does the many-idle-resident workload exist?"
@@ -285,26 +286,29 @@ items:
   - id: GC-P3
     title: Lazy sweep + versioned marks + throughput-tax recovery
     type: implementation
-    state: now
-    wip_slot: implementation
+    state: done
+    wip_slot: none
+    completion_commit: f005aee7
     activation: {all: [{item: G1-GC, verdict: continue}]}
     hard_prerequisites: []
-    notes: "LANE: dedicated GC session (separate Claude), branch gc/tracing only — no main-side edits. Lazy sweep landed on-branch (9ff52b2a: splay major p99 1.007ms); remaining: throughput-tax recovery + the two GC-GAP attribution debts (SplayLatency 0.805 under rc on the branch arm; splay 544MB allocator retention). Branch tip has moved past the BASE-G0 frozen candidate — re-freeze rule applies before any G2 look."
+    notes: "Lazy sweep landed on-branch (9ff52b2a: splay major p99 1.007ms); the two GC-GAP attribution debts were settled 2026-08-26 (SplayLatency 0.805 = bimodal sampling artefact; splay RSS = peak footprint). The dedicated-session / gc-tracing-branch lane was retired when the line moved to main: the throughput-tax recovery became the TGC S0-S5 completion campaign (docs/tracing-gc-completion-plan.md, docs/tracing-gc-completion-account.md), closed 2026-09-05 on main at f005aee7. Since then the tracing collector is the only collector in the tree (refcounting left the object model in S1-S4)."
     authority: {file: docs/tracing-gc-design.md, section: "pause plan 5"}
   - id: VM-CONTRACT-GC
     title: Representation-contract revision for the tracing switch (versioned, reviewed)
     type: spec
-    state: gated
+    state: ready
     wip_slot: decision
-    activation: {all: [{item: G2-GC-MERGE, verdict: pass}]}
-    hard_prerequisites: []
+    hard_prerequisites: [GC-MERGE]
+    notes: "ORDER INVERTED by the 2026-09-03 owner ruling: the merge happened first, so the contract revision is now a post-merge debt. docs/vm-value-representation-contract.md is still v2 (2026-08-26), exported from the gc/tracing branch at 5bc8373b with an errata block; it predates S1-S5 (header bits, block cells for strings/storage/payload kinds, atom weakening, rc removal). The owed deliverable is v3 of that contract exported from main, with layout_epoch bumped if the representation actually changed."
     authority: {file: docs/vm-value-representation-contract.md, section: "all"}
   - id: GC-MERGE
     title: Tracing GC production merge into main
     type: implementation
-    state: blocked
-    wip_slot: implementation
-    hard_prerequisites: [VM-CONTRACT-GC]
+    state: done
+    wip_slot: none
+    completion_commit: f005aee7
+    hard_prerequisites: []
+    notes: "Landed on main by the 2026-09-03 owner ruling (see G2-GC-MERGE): first landing e972c4b5 (2026-09-04, S0-S2, 127 commits squashed), S5 closeout f005aee7 (2026-09-05). Gates at closeout: zig build test 2558/0, test-gc-stress 2554/0, test262 0/49778 also under ZJS_GC_STRESS=1, leak-census 1570/0, test-oom 22/0, test-stress 6/0 (docs/tracing-gc-completion-account.md section 2). Pushed to origin 2026-09-06 (ca537eca). Open post-merge items: VM-CONTRACT-GC (contract revision), backlog Q21/Q22, conservative-root residue R1 (completion account section 6.6)."
     authority: {file: docs/roadmap.md, section: "2"}
 
   # ---- serialization ----
@@ -489,7 +493,7 @@ items:
     state: ready
     wip_slot: implementation
     hard_prerequisites: []
-    notes: "LANE: dedicated GC session, branch gc/tracing. Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. Expected to close the residual G2 throughput gap; G2 looks before it land as INCONCLUSIVE per policy."
+    notes: "Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. GC v2 S4b landed a parallel-marking implementation on main 2026-09-03 with the default OFF (docs/gc-v2-s4b-parallel-marking-gate.md); what remains is the enablement decision and its gate, no longer a branch lane."
     authority: {file: docs/tracing-gc-design.md, section: "9 / pause plan"}
   - id: GC-MULTIRT-GATE
     title: Multi-runtime GC acceptance batch 2 (TSan as gate, concurrent create/destroy, N-runtime concurrent collect)
