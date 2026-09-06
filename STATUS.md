@@ -102,11 +102,11 @@ push of the tracing-collector main; see the two 2026-09-06 rows).
 
 Wall-clock as of 2026-09-06 (build pool on the big cores, see `mise.toml`):
 `zig build check` 7 s, `zig build test` 21 s, `mise run checkpoint-gate`
-26 s, `mise run merge-gate` 91 s, full test262 9.8 s standalone.
+26 s, `mise run batch-gate` (= `zig build merge-gate`) 91 s, full test262 9.8 s standalone.
 
 | Gate | What it covers | This lane |
 |------|----------------|-----------|
-| `mise run merge-gate` | one build graph: unified Debug suite (16 shards), stress tier, gc-stress, Debug CLI smoke, architecture lints, full test262, fixed-work smoke (ordinary + arena-audit runs per workload) | 2026-09-06, `ca537eca` (main): PASS, 91 s. test262 `0/49778 errors, passed 44584`. |
+| `mise run batch-gate` (= `zig build merge-gate`) | one build graph: unified Debug suite (16 shards), stress tier, gc-stress, Debug CLI smoke, architecture lints, full test262, fixed-work smoke (ordinary + arena-audit runs per workload) | 2026-09-06, `ca537eca` (main): PASS, 91 s. test262 `0/49778 errors, passed 44584`. |
 | nightly tiers, run locally | `zig build test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, `test-stress`, `zig build test -Dzjs_ownership_audit=true` | 2026-09-06, `ca537eca` (main, local): all five PASS — ReleaseSafe full suite 24/24 steps, test-oom 22 passed / 0 failed, leak-census 1570 passed / 0 failed, test-stress 9/9 steps, ownership-audit 24/24 steps. |
 | `zig build engine-production-gate --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture lints (including compiler-stage `nm`), OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-check: `0/49775 errors, passed 44581`. Historical row also named `architecture-check` and `config-drift-gate`; those steps are gone. |
 | `zig build test -Doptimize=ReleaseSafe --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
