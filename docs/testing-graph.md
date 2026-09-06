@@ -167,6 +167,11 @@ Two build-runner facts decide the shape of a gate (2026-09-06):
   (`expectStdOutMatch` on their summary line; a red run prints the whole
   log) and the shards capture stderr, so none of them serialise.
 
+The edit loop: `zig build check` (~7 s, sema only) rejects a non-compiling
+edit; `mise run watch -- test` keeps an incremental compiler resident and
+turns an edit into a ~11 s rebuild-and-run (cold `zig build test` ~21 s: the
+difference is sema; the LLVM Debug codegen + link is the floor either way).
+
 `mise run gate-timeline -- merge-gate` draws the per-process Gantt
 (`tools/gates/timeline.py`); it is the headless substitute for
 `--time-report` and also times the Run steps.

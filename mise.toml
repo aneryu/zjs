@@ -28,9 +28,11 @@ description = "Keep the Debug quick-gate compiler alive for faster incremental e
 run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'
 
 # Resident incremental compiler for ANY build step. The engine-wide Debug
-# targets (unified test ~60s, zjs-dev ~35s cold) are the ones worth keeping
-# resident; one-shot -fincremental does not help (state only persists in
-# watch mode). Example: mise run watch -- test-exec
+# targets are the ones worth keeping resident: `mise run watch -- test`
+# rebuilds and re-runs the shards ~11 s after an edit against ~21 s for a
+# cold `zig build test` (2026-09-06; incremental skips sema, LLVM still
+# regenerates the whole module). One-shot -fincremental does not help
+# (state only persists in watch mode). Example: mise run watch -- test-exec
 [tasks.watch]
 description = "Keep a resident incremental compiler on a named build step (mise run watch -- test-exec)"
 run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'

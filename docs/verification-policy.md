@@ -11,7 +11,10 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 
 ## 每次改动(implementer 侧)必须做的
 
-1. 迭代验证用 `zig build check`(纯 sema,~80s),不用完整构建;
+1. 迭代验证用 `zig build check`(纯 sema,~7 s,2026-09-06)判编译错误;要跑测试的
+   编辑循环用常驻增量编译器 `mise run watch -- test`(`--watch -fincremental`;
+   实测每次改动后重建+跑分片 **~11 s**,冷 `zig build test` ~21 s。增量只省 sema,
+   LLVM 仍整模块重生成,所以 11 s 是 Debug 代码生成+链接的地板);
 2. 为改动写针对性测试(新行为/新不变量);
 3. 收尾跑**一次** `zig build test`(pipefail)全绿;
 4. 注入验证:**仅**对守护新不变量的检查器;用「一次构建多注入点」模式
