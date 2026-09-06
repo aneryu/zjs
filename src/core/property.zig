@@ -12,6 +12,7 @@ const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const VarRef = @import("var_ref.zig").VarRef;
+const native_entry = @import("native_entry.zig");
 const module_auto_init = @import("module_auto_init.zig");
 const std = @import("std");
 
@@ -277,7 +278,8 @@ pub const AutoInit = struct {
     kind: AutoInitKind = .native_function,
     // Kind-specific payload reused by host function autoinit.
     host_function_kind: i32 = 0,
-    external_host_function_id: u32 = 0,
+    /// NB2: entry-backed host function (print/console, embedder lazies).
+    native_entry: ?*const native_entry.NativeEntry = null,
     host_function_prototype: bool = false,
     native_builtin_id: i32 = 0,
     array_builtin_marker: ArrayBuiltinMarker = .none,
@@ -297,7 +299,7 @@ pub const AutoInit = struct {
             self.length == other.length and
             self.kind == other.kind and
             self.host_function_kind == other.host_function_kind and
-            self.external_host_function_id == other.external_host_function_id and
+            self.native_entry == other.native_entry and
             self.host_function_prototype == other.host_function_prototype and
             self.native_builtin_id == other.native_builtin_id and
             self.array_builtin_marker == other.array_builtin_marker and

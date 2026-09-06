@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
+const native = @import("native.zig");
 const exec = @import("../exec/root.zig");
 const platform_clock = @import("../platform_clock.zig");
 
@@ -447,32 +448,25 @@ pub const JSContext = struct {
     }
 
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
-        const global = options.realm_global orelse try self.globalObject();
-        var rooted_callee = callee;
-        var rooted_this = options.this_value orelse JSValue.undefinedValue();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_callee },
-            .{ .value = &rooted_this },
+        const global = options.realm_global orelse blk: {
+            ensureStandardGlobalsRegistered(self.core.runtime);
+            break :blk try exec.zjs_vm.contextGlobalFast(self.core);
         };
-        // The public embedding boundary borrows raw JSValues from native
-        // caller storage. Keep that window, plus the scalar callee/receiver,
-        // exact through the dispatch poll and the complete synchronous call.
-        // A slice descriptor links this frame in production tracing builds
-        // even when `args` itself is empty; default RC erases the frame.
-        var root_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = args }};
-        var root_frame = core.runtime.ValueRootFrame{
-            .values = &root_values,
-            .slices = &root_slices,
-        };
-        root_frame.activate(self.core.runtime);
-        defer root_frame.deactivate(self.core.runtime);
-        // Resident host invocation first (P4): an eligible bytecode callee
-        // enters like a builtin callback, no fresh execution root.
-        const resident = exec.call_runtime.callFromHost(self.core, options.output, global, rooted_this, rooted_callee, args) catch |err|
+        // NB2 contract C2 (design §7): the callee, the receiver and `args` are
+        // the embedder's; values in native stack memory are covered by the
+        // conservative scan, heap-held arrays must be pinned by the embedder.
+        // No per-call root frame is linked here (qjs JS_Call links none).
+        const rooted_callee = callee;
+        const rooted_this = options.this_value orelse JSValue.undefinedValue();
+        // One-shot CallSite route (native-boundary design section 6): an
+        // eligible bytecode callee enters through the resident host Machine
+        // (or the active one when this is a nested host -> JS call) like a
+        // builtin callback; everything else takes the authoritative root path.
+        // Embedders that call the same function repeatedly keep a `CallSite`.
+        var out: JSValue = undefined;
+        exec.call_site.callOnceInto(self.core, options.output, global, rooted_this, rooted_callee, args, null, null, &out) catch |err|
             return self.restoreUncaughtOutOfMemory(err);
-        if (resident) |value| return value;
-        return exec.call_runtime.callValueOrBytecodeRoot(self.core, options.output, global, rooted_this, rooted_callee, args, null, null) catch |err|
-            self.restoreUncaughtOutOfMemory(err);
+        return exec.call_site.pinnedLoad(&out);
     }
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
@@ -645,42 +639,41 @@ pub const JSContext = struct {
         };
     }
 
-    pub fn defineGlobalFunction(
-        self: *JSContext,
-        name: []const u8,
-        length: i32,
-        ptr: *anyopaque,
-        call: core.ExternalHostCallFn,
-        finalizer: ?core.ExternalHostFinalizer,
-    ) !void {
+    /// NB2 (design §9.1): install a native function built by
+    /// `zjs.native.managed` (or the leaf / class generators) as a global.
+    pub fn defineFunction(self: *JSContext, name: []const u8, spec: native.Spec, options: native.Options) !JSValue {
         const rt = self.core.runtime;
         const global_object = try self.globalObject();
-        const function_value = try self.createExternalFunction(name, length, ptr, call, finalizer, .{ .realm_global = global_object });
-
+        var opts = options;
+        if (opts.realm_global == null) opts.realm_global = global_object;
+        const function_value = try self.createFunction(name, spec, opts);
         const property_name = try rt.internAtom(name);
         // TGC S3 §4 class B.
         var name_roots = core.runtime.rootAtoms(.{&property_name});
         name_roots.activate(rt);
         defer name_roots.deactivate(rt);
         try global_object.defineOwnProperty(rt, property_name, Descriptor.data(function_value, true, false, true));
+        return function_value;
     }
 
-    pub fn createExternalFunction(
-        self: *JSContext,
-        name: []const u8,
-        length: i32,
-        ptr: *anyopaque,
-        call: core.ExternalHostCallFn,
-        finalizer: ?core.ExternalHostFinalizer,
-        options: core.ExternalFunctionOptions,
-    ) !JSValue {
+    /// NB2: create a native function object without installing it.
+    pub fn createFunction(self: *JSContext, name: []const u8, spec: native.Spec, options: native.Options) !JSValue {
         const rt = self.core.runtime;
         const realm_global = options.realm_global orelse try self.globalObject();
         const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
         const function_proto = realm.cached_function_proto orelse return error.InvalidEngineState;
+        var template = spec.template;
+        template.state = options.state;
+        if (options.length) |length| template.arity = length;
+        // Publish the ownership registration before anything can fail after
+        // it; the entry itself is immortal until teardown.
+        if (options.finalize) |finalize| {
+            const state = options.state orelse return error.InvalidEngineState;
+            try rt.registerNativeEntryFinalizer(state, finalize);
+        }
+        const entry = try rt.allocNativeEntry(template);
         const function_capacity: usize = 2 + @as(usize, @intFromBool(options.with_prototype));
-        const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, function_capacity);
-
+        const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, @intCast(template.arity), function_capacity);
         const function_object = try Object.expect(function_value);
         if (options.with_prototype) {
             const object_proto_value = realm_global.cachedRealmValue(rt, .object_prototype) orelse return error.InvalidEngineState;
@@ -690,18 +683,105 @@ pub const JSContext = struct {
             try prototype.defineOwnPropertyAssumingNew(rt, atom.ids.constructor, Descriptor.data(function_value, true, false, true));
             try function_object.defineOwnPropertyAssumingNew(rt, atom.ids.prototype, Descriptor.data(prototype_value, true, false, false));
         }
-
-        // Publish the host record only after the complete JS-visible function
-        // graph exists. A later allocation failure must not leave an
-        // unreachable registered callback behind.
-        const id = try rt.registerExternalHostFunction(.{
-            .ptr = ptr,
-            .call = call,
-            .finalizer = finalizer,
-        });
-        function_object.installExternalHostFunction(rt, id);
-
+        function_object.installNativeEntry(entry);
         return function_value;
+    }
+
+    /// NB2 (design §8.1 / §9.2): register a `zjs.native.Class` in this
+    /// runtime (once per runtime; the class id is process-global) and
+    /// install its prototype + constructor in this context's realm (once per
+    /// realm). Returns the handle used to wrap host pointers.
+    pub fn defineClass(self: *JSContext, comptime C: type, options: native.ClassOptions) !C.Handle {
+        const rt = self.core.runtime;
+        const class_id = try C.classId();
+        const native_type = try core.native_object.registerType(rt, class_id, C.name, C.finalize_fn);
+        const realm_global = options.realm_global orelse try self.globalObject();
+        const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
+        if (realm.classPrototypeObject(class_id) == null) {
+            try self.installClassInRealm(C, native_type, realm, realm_global, options);
+        }
+        return .{ .native_type = native_type };
+    }
+
+    fn installClassInRealm(self: *JSContext, comptime C: type, native_type: *const core.NativeType, realm: *core.JSContext, realm_global: *Object, options: native.ClassOptions) !void {
+        const rt = self.core.runtime;
+        const class_id = native_type.class_id;
+        const object_proto_value = realm_global.cachedRealmValue(rt, .object_prototype) orelse return error.InvalidEngineState;
+        const object_proto = try Object.expect(object_proto_value);
+        const member_count = C.methods.len + C.getters.len + C.setters.len + 1;
+        const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, object_proto, member_count);
+        // The realm's class-prototype slot is a traced root: publish first so
+        // every allocation below runs with the prototype reachable.
+        try realm.setClassPrototype(class_id, prototype);
+        errdefer realm.clearClassPrototype(class_id);
+
+        inline for (C.methods) |member| {
+            var spec = member.spec;
+            spec.template.class_id = class_id;
+            var function_value = try self.createFunction(member.name, spec, .{ .realm_global = realm_global });
+            var roots = core.runtime.rootValues(.{&function_value});
+            roots.activate(rt);
+            defer roots.deactivate(rt);
+            try defineMemberProperty(rt, prototype, member.name, Descriptor.data(function_value, true, false, true));
+        }
+        inline for (C.getters) |getter| {
+            var getter_spec = getter.spec;
+            getter_spec.template.class_id = class_id;
+            var getter_value = try self.createFunction("get " ++ getter.name, getter_spec, .{ .realm_global = realm_global });
+            var setter_value = JSValue.undefinedValue();
+            var roots = core.runtime.rootValues(.{ &getter_value, &setter_value });
+            roots.activate(rt);
+            defer roots.deactivate(rt);
+            inline for (C.setters) |setter| {
+                if (comptime std.mem.eql(u8, setter.name, getter.name)) {
+                    var setter_spec = setter.spec;
+                    setter_spec.template.class_id = class_id;
+                    setter_value = try self.createFunction("set " ++ setter.name, setter_spec, .{ .realm_global = realm_global });
+                }
+            }
+            try defineMemberProperty(rt, prototype, getter.name, Descriptor.accessor(getter_value, setter_value, false, true));
+        }
+        inline for (C.setters) |setter| {
+            const paired = comptime blk: {
+                for (C.getters) |getter| {
+                    if (std.mem.eql(u8, getter.name, setter.name)) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!paired) {
+                var setter_spec = setter.spec;
+                setter_spec.template.class_id = class_id;
+                var setter_value = try self.createFunction("set " ++ setter.name, setter_spec, .{ .realm_global = realm_global });
+                var roots = core.runtime.rootValues(.{&setter_value});
+                roots.activate(rt);
+                defer roots.deactivate(rt);
+                try defineMemberProperty(rt, prototype, setter.name, Descriptor.accessor(JSValue.undefinedValue(), setter_value, false, true));
+            }
+        }
+
+        // Constructor: a host entry function owning `prototype` is what the
+        // construct path accepts (`isHostEntryFunction` + own `prototype`).
+        var ctor_spec = C.constructor_spec;
+        ctor_spec.template.class_id = class_id;
+        var ctor_value = try self.createFunction(C.name, ctor_spec, .{ .realm_global = realm_global, .state = @ptrCast(@constCast(native_type)), .length = C.constructor_length });
+        var ctor_roots = core.runtime.rootValues(.{&ctor_value});
+        ctor_roots.activate(rt);
+        defer ctor_roots.deactivate(rt);
+        const ctor_object = try Object.expect(ctor_value);
+        try ctor_object.defineOwnPropertyAssumingNew(rt, atom.ids.prototype, Descriptor.data(prototype.value(), false, false, false));
+        try prototype.defineOwnPropertyAssumingNew(rt, atom.ids.constructor, Descriptor.data(ctor_value, true, false, true));
+        if (options.global_name) |global_name| {
+            try defineMemberProperty(rt, realm_global, global_name, Descriptor.data(ctor_value, true, false, true));
+        }
+    }
+
+    fn defineMemberProperty(rt: *JSRuntime, target: *Object, name: []const u8, desc: Descriptor) !void {
+        const property_name = try rt.internAtom(name);
+        // TGC S3 §4 class B.
+        var name_roots = core.runtime.rootAtoms(.{&property_name});
+        name_roots.activate(rt);
+        defer name_roots.deactivate(rt);
+        try target.defineOwnProperty(rt, property_name, desc);
     }
 
     pub fn formatException(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) ![]const u8 {
@@ -780,3 +860,77 @@ test "JSContext.toString performs ECMAScript ToString instead of tag assertion" 
     const converted = try wrapper.toString(object);
     try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().?.latin1);
 }
+
+/// A resolved native -> JS call target for embedders that call one function
+/// repeatedly (event handlers, comparators, plugin callbacks): the callee
+/// class check, inline eligibility and Realm match are done once in `init`,
+/// and every `call` pays only the interrupt poll, the frame push and the
+/// dispatch loop. The callee and receiver are pinned in the runtime's
+/// persistent root ledger until `deinit`. `output` is the writer `print` /
+/// `console.log` use for the calls made through this site (null = process
+/// stdout, as for `JSContext.callFunction`).
+///
+/// A site may be used from the embedder's own stack (no JS running) and from
+/// inside a host function that JS called; both enter the resident dispatch
+/// loop. Callees that are not plain bytecode functions of the context's Realm
+/// (bound functions, proxies, natives, generators, other Realms) still work
+/// through the authoritative root path.
+pub const CallSite = struct {
+    ctx: *JSContext,
+    site: exec.call_site.CallSite,
+
+    pub const Options = struct {
+        this_value: ?JSValue = null,
+        output: ?*std.Io.Writer = null,
+    };
+
+    pub fn init(ctx: *JSContext, callee: JSValue, options: Options) !CallSite {
+        const global = try ctx.globalObject();
+        const this_value = options.this_value orelse JSValue.undefinedValue();
+        return .{
+            .ctx = ctx,
+            .site = try exec.call_site.CallSite.init(ctx.core, options.output, global, this_value, callee),
+        };
+    }
+
+    pub fn deinit(self: *CallSite) void {
+        self.site.deinit();
+    }
+
+    pub fn call(self: *CallSite, args: []const JSValue) !JSValue {
+        var out: JSValue = undefined;
+        self.site.callInto(args, &out) catch |err| return self.ctx.restoreUncaughtOutOfMemory(err);
+        return exec.call_site.pinnedLoad(&out);
+    }
+
+    pub inline fn call0(self: *CallSite) !JSValue {
+        return self.callFixed(0, &.{});
+    }
+
+    pub inline fn call1(self: *CallSite, a0: JSValue) !JSValue {
+        var args: [1]JSValue = undefined;
+        exec.call_site.pinnedStore(&args[0], a0);
+        return self.callFixed(1, &args);
+    }
+
+    pub inline fn call2(self: *CallSite, a0: JSValue, a1: JSValue) !JSValue {
+        var args: [2]JSValue = undefined;
+        exec.call_site.pinnedStore(&args[0], a0);
+        exec.call_site.pinnedStore(&args[1], a1);
+        return self.callFixed(2, &args);
+    }
+
+    inline fn callFixed(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue) !JSValue {
+        var out: JSValue = undefined;
+        self.site.callFixedInto(argc, args, &out) catch |err| return self.ctx.restoreUncaughtOutOfMemory(err);
+        return exec.call_site.pinnedLoad(&out);
+    }
+
+    /// Same callee, a different receiver for this call only. `this_value`
+    /// must stay reachable from the host for the duration of the call.
+    pub fn callWithThis(self: *CallSite, this_value: JSValue, args: []const JSValue) !JSValue {
+        var out: JSValue = undefined;
+        self.site.callWithThisInto(this_value, args, &out) catch |err| return self.ctx.restoreUncaughtOutOfMemory(err);
+        return exec.call_site.pinnedLoad(&out);
+    }
+};

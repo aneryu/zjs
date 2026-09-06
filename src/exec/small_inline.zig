@@ -217,8 +217,7 @@ pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
     const state = callerStateMut(fb) orelse return;
     setCallerState(fb, null);
     var i: u8 = 0;
-    while (i < state.inlined_len) : (i += 1) {
-    }
+    while (i < state.inlined_len) : (i += 1) {}
     setBorrowedRealm(fb, null);
     rt.memory.destroy(CallerState, state);
 }
@@ -671,8 +670,12 @@ fn emitLocOp(out: *Rewrite, get: bool, slot: u16) bool {
 
 fn emitCallMethodApplyFwd(out: *Rewrite, argc: u16) bool {
     if (!emitByte(out, op.call_method_apply_fwd)) return false;
-    var buf: [2]u8 = undefined;
-    std.mem.writeInt(u16, &buf, argc, .little);
+    var buf: [3]u8 = undefined;
+    std.mem.writeInt(u16, buf[0..2], argc, .little);
+    // The rewritten site lives in the caller's specialized copy, whose
+    // cache-index space belongs to the caller's own sites; a callee-body
+    // index would alias one of them. No slot for the forwarded call.
+    buf[2] = bytecode.CallSiteCache.no_cache_idx;
     return emitSlice(out, &buf);
 }
 
@@ -1116,6 +1119,9 @@ fn cloneAndExpand(
         new_var_count,
         src_layout.closure_var_count,
         new_len,
+        // The copy keeps the caller's `cache_idx` operands byte for byte, so
+        // it needs the same slot count (its own fresh, empty slots).
+        src_layout.call_site_count,
     ) catch return null;
 
     const spec = FunctionBytecode.createProductionShell(&rt.memory, new_layout) catch return null;
@@ -1448,12 +1454,14 @@ pub inline fn applyForwardTakeOk(
     return applyForwardGuardHolds(rt, global, ctor, fwd.method_atom);
 }
 
-/// After the 3-byte apply-fwd instruction, recover the site (or null).
-/// Used to attach `Entry.native_caller` (D8-L1) without an InlinedSite ghost.
+/// After the apply-fwd instruction (`argc:u16 cache_idx:u8`), recover the
+/// site (or null). Used to attach `Entry.native_caller` (D8-L1) without an
+/// InlinedSite ghost.
 pub fn applyForwardSiteAfterCall(fb: *const FunctionBytecode, pc_after: u32) ?*const InlinedSite {
     if (!fb.call_facts_mirror.execution.apply_forward_inlined) return null;
-    if (pc_after < 3) return null;
-    const call_pc = pc_after - 3;
+    const insn_size = bytecode.opcode.decode.sizeOfForm(.call_method_apply_fwd);
+    if (pc_after < insn_size) return null;
+    const call_pc = pc_after - insn_size;
     const site = siteForPc(fb, call_pc) orelse return null;
     const state = callerState(fb) orelse return null;
     if (applyForwardColdOf(state, site).call_pc == call_pc) return site;

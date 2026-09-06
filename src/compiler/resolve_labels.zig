@@ -509,6 +509,10 @@ const Resolver = struct {
     fuse_b4: u8 = 0,
     fuse_op4: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
+    /// Call sites written so far (native-boundary design 5.5): each final
+    /// call/call0..3/tail_call/call_method/tail_call_method takes the next
+    /// `cache_idx` in emission order; sites past 255 get the no-cache index.
+    call_sites_emitted: u32 = 0,
 
     fn deinit(self: *Resolver) void {
         if (self.output_atom_capacity != 0)
@@ -1857,6 +1861,7 @@ const Resolver = struct {
         op_id: u8,
         idx: u16,
     ) Error!void {
+        std.debug.assert(op_id != op.call and op_id != op.tail_call);
         if (layout == .short) {
             if (opcode.decode.selectSlotShortForm(formOf(op_id), idx)) |short_form| {
                 const short_op = opId(short_form);
@@ -1884,6 +1889,46 @@ const Resolver = struct {
         }
         try self.appendByte(op_id);
         try self.appendU16(idx);
+    }
+
+    /// Next `cache_idx` operand (0.. in emission order, 255 once the slot
+    /// budget is spent). The FunctionBytecode gets `min(sites, 255)` slots.
+    fn nextCallSiteIndex(self: *Resolver) u8 {
+        const no_cache = bytecode.CallSiteCache.no_cache_idx;
+        const idx: u8 = if (self.call_sites_emitted < no_cache)
+            @intCast(self.call_sites_emitted)
+        else
+            no_cache;
+        self.call_sites_emitted += 1;
+        return idx;
+    }
+
+    fn callSiteCount(self: *const Resolver) u16 {
+        return @intCast(@min(self.call_sites_emitted, bytecode.CallSiteCache.no_cache_idx));
+    }
+
+    /// Final writer for the plain-call family (`call` / `tail_call`): the
+    /// burned-arity `call0..3` short forms carry only the cache index; the
+    /// wide forms carry `argc:u16 idx:u8`. `putShortCode` cannot serve these
+    /// rows because its one payload byte is the slot index, not a cache id.
+    fn putCallCode(
+        self: *Resolver,
+        comptime layout: LayoutMode,
+        op_id: u8,
+        argc: u16,
+    ) Error!void {
+        std.debug.assert(op_id == op.call or op_id == op.tail_call);
+        const idx = self.nextCallSiteIndex();
+        if (layout == .short) {
+            if (opcode.decode.selectSlotShortForm(formOf(op_id), argc)) |short_form| {
+                try self.appendByte(opId(short_form));
+                try self.appendByte(idx);
+                return;
+            }
+        }
+        try self.appendByte(op_id);
+        try self.appendU16(argc);
+        try self.appendByte(idx);
     }
 
     /// qjs:34715 push_short_int, using zjs's explicit push_minus1 row.
@@ -2157,7 +2202,7 @@ const Resolver = struct {
         try self.attachSource();
         const position_next = position + instruction.size;
         if (instruction.form == .call) {
-            try self.putShortCode(layout, op.call, try readU16(self.code, position));
+            try self.putCallCode(layout, op.call, try readU16(self.code, position));
         } else if (isShortSlotFamily(instruction.form)) {
             try self.putShortCode(
                 layout,
@@ -2177,6 +2222,13 @@ const Resolver = struct {
             }
             const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
+            // The method-call family copies through with its placeholder
+            // `cache_idx` byte; assign the real index in the output.
+            if (instruction.form == .call_method or instruction.form == .tail_call_method or
+                instruction.form == .call_method_apply_fwd)
+            {
+                self.output[pc + 3] = self.nextCallSiteIndex();
+            }
             if (comptime layout == .short) {
                 if (first == op.lt or first == op.push_this or
                     first == op.get_field2 or first == op.eq or
@@ -2361,15 +2413,14 @@ const Resolver = struct {
                         null;
                     if (matched) |_| {
                         try self.attachSource();
-                        const tail_op: u8 = if (instruction.form == .call)
-                            op.tail_call
-                        else
-                            op.tail_call_method;
-                        try self.putShortCode(
-                            layout,
-                            tail_op,
-                            try readU16(self.code, position),
-                        );
+                        const argc = try readU16(self.code, position);
+                        if (instruction.form == .call) {
+                            try self.putCallCode(layout, op.tail_call, argc);
+                        } else {
+                            try self.appendByte(op.tail_call_method);
+                            try self.appendU16(argc);
+                            try self.appendByte(self.nextCallSiteIndex());
+                        }
                         try self.consumeInstructionAtom(position, instruction, true);
                         // Keep the following `return` (do not skipDeadCode it).
                         // zjs inline frames resume the caller at the next pc;
@@ -3612,6 +3663,7 @@ const Resolver = struct {
     /// operation is allocation-free and infallible, so no observable
     /// half-install can escape by construction.
     fn commit(self: *Resolver) void {
+        self.function.call_site_count = self.callSiteCount();
         const owned_code = self.output[0..self.output_len];
         const owned_code_capacity = self.output_capacity;
         self.output = &.{};

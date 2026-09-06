@@ -56,7 +56,6 @@ const Test262AgentCoordinator = struct {
 
 var test262_agents = Test262AgentCoordinator{};
 threadlocal var current_test262_agent: ?*Test262Agent = null;
-var test262_external_host_context: u8 = 0;
 
 var test262_gpa = std.heap.DebugAllocator(.{
     .safety = false,
@@ -527,20 +526,20 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
     const agent_methods = [_]struct {
         name: []const u8,
         length: i32,
-        call: zjs.ExternalHostCallFn,
+        spec: zjs.native.Spec,
     }{
-        .{ .name = "start", .length = 1, .call = wrapExternal(test262AgentStart) },
-        .{ .name = "broadcast", .length = 1, .call = wrapExternal(test262AgentBroadcast) },
-        .{ .name = "receiveBroadcast", .length = 0, .call = wrapExternal(test262AgentReceiveBroadcast) },
-        .{ .name = "report", .length = 1, .call = wrapExternal(test262AgentReport) },
-        .{ .name = "getReport", .length = 0, .call = wrapExternal(test262AgentGetReport) },
-        .{ .name = "leaving", .length = 0, .call = wrapExternal(test262AgentLeaving) },
-        .{ .name = "sleep", .length = 1, .call = wrapExternal(test262AgentSleep) },
-        .{ .name = "monotonicNow", .length = 0, .call = wrapExternal(test262AgentMonotonicNow) },
+        .{ .name = "start", .length = 1, .spec = wrapExternal(test262AgentStart) },
+        .{ .name = "broadcast", .length = 1, .spec = wrapExternal(test262AgentBroadcast) },
+        .{ .name = "receiveBroadcast", .length = 0, .spec = wrapExternal(test262AgentReceiveBroadcast) },
+        .{ .name = "report", .length = 1, .spec = wrapExternal(test262AgentReport) },
+        .{ .name = "getReport", .length = 0, .spec = wrapExternal(test262AgentGetReport) },
+        .{ .name = "leaving", .length = 0, .spec = wrapExternal(test262AgentLeaving) },
+        .{ .name = "sleep", .length = 1, .spec = wrapExternal(test262AgentSleep) },
+        .{ .name = "monotonicNow", .length = 0, .spec = wrapExternal(test262AgentMonotonicNow) },
     };
 
     inline for (agent_methods) |m| {
-        const func_val = try createExternalHostFunction(rt, ctx, m.name, m.length, m.call);
+        const func_val = try createExternalHostFunction(rt, ctx, m.name, m.length, m.spec);
         try ctx.defineDataProperty(agent_val, m.name, func_val, .{ .enumerable = false });
     }
 
@@ -585,15 +584,15 @@ fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Obj
     const methods = [_]struct {
         name: []const u8,
         length: i32,
-        call: zjs.ExternalHostCallFn,
+        spec: zjs.native.Spec,
     }{
-        .{ .name = "sameValue", .length = 2, .call = wrapExternal(hostCallAssertSameValue) },
-        .{ .name = "notSameValue", .length = 2, .call = wrapExternal(hostCallAssertNotSameValue) },
-        .{ .name = "compareArray", .length = 2, .call = wrapExternal(hostCallCompareArray) },
-        .{ .name = "throws", .length = 2, .call = wrapExternal(hostCallAssertThrows) },
+        .{ .name = "sameValue", .length = 2, .spec = wrapExternal(hostCallAssertSameValue) },
+        .{ .name = "notSameValue", .length = 2, .spec = wrapExternal(hostCallAssertNotSameValue) },
+        .{ .name = "compareArray", .length = 2, .spec = wrapExternal(hostCallCompareArray) },
+        .{ .name = "throws", .length = 2, .spec = wrapExternal(hostCallAssertThrows) },
     };
     inline for (methods) |method| {
-        const method_val = try createExternalHostFunction(rt, ctx, method.name, method.length, method.call);
+        const method_val = try createExternalHostFunction(rt, ctx, method.name, method.length, method.spec);
         try ctx.defineDataProperty(assert_val, method.name, method_val, .{});
     }
     try ctx.defineDataProperty(global.value(), "assert", assert_val, .{});
@@ -605,7 +604,7 @@ fn defineGlobalExternalHostFunction(
     global: *zjs.Object,
     name: []const u8,
     length: i32,
-    call: zjs.ExternalHostCallFn,
+    call: zjs.native.Spec,
     with_prototype: bool,
 ) !void {
     const func_val = try createExternalHostFunctionWithRealm(rt, ctx, name, length, call, with_prototype, global);
@@ -962,32 +961,31 @@ fn test262Gc(
     return zjs.JSValue.undefinedValue();
 }
 
-fn wrapExternal(comptime f: anytype) zjs.ExternalHostCallFn {
-    return struct {
-        fn call(ptr: *anyopaque, c: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-            _ = ptr;
-            var ctx = zjs.JSContext.borrowCore(c.realm);
-            const global = c.realm.global;
-            return f(&ctx, c.output, global, c.args) catch |err| {
+fn wrapExternal(comptime f: anytype) zjs.native.Spec {
+    return zjs.native.managed(struct {
+        fn call(c: *zjs.native.Call) anyerror!zjs.JSValue {
+            var ctx = c.ctx;
+            const global = c.global();
+            return f(&ctx, c.output(), global, c.args()) catch |err| {
                 try ensureTest262HarnessException(&ctx, global, err);
                 return err;
             };
         }
-    }.call;
+    }.call);
 }
 
-fn wrapExternalWithFunc(comptime f: anytype) zjs.ExternalHostCallFn {
-    return struct {
-        fn call(ptr: *anyopaque, c: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-            _ = ptr;
-            var ctx = zjs.JSContext.borrowCore(c.realm);
-            const global = c.realm.global orelse return error.TypeError;
-            return f(&ctx, c.output, global, c.func_obj, c.args) catch |err| {
+fn wrapExternalWithFunc(comptime f: anytype) zjs.native.Spec {
+    return zjs.native.managed(struct {
+        fn call(c: *zjs.native.Call) anyerror!zjs.JSValue {
+            var ctx = c.ctx;
+            const global = c.global() orelse return error.TypeError;
+            const func_obj = c.func_obj orelse return error.TypeError;
+            return f(&ctx, c.output(), global, func_obj, c.args()) catch |err| {
                 try ensureTest262HarnessException(&ctx, global, err);
                 return err;
             };
         }
-    }.call;
+    }.call);
 }
 
 fn ensureTest262HarnessException(ctx: *zjs.JSContext, global: ?*zjs.Object, err: anyerror) !void {
@@ -1011,9 +1009,9 @@ fn createExternalHostFunction(
     context: *zjs.JSContext,
     name: []const u8,
     length: i32,
-    call: zjs.ExternalHostCallFn,
+    spec: zjs.native.Spec,
 ) !zjs.JSValue {
-    return createExternalHostFunctionWithRealm(runtime, context, name, length, call, false, null);
+    return createExternalHostFunctionWithRealm(runtime, context, name, length, spec, false, null);
 }
 
 fn createExternalHostFunctionWithRealm(
@@ -1021,12 +1019,13 @@ fn createExternalHostFunctionWithRealm(
     context: *zjs.JSContext,
     name: []const u8,
     length: i32,
-    call: zjs.ExternalHostCallFn,
+    spec: zjs.native.Spec,
     with_prototype: bool,
     realm_global: ?*zjs.Object,
 ) !zjs.JSValue {
     std.debug.assert(runtime == context.runtimePtr());
-    return context.createExternalFunction(name, length, &test262_external_host_context, call, null, .{
+    return context.createFunction(name, spec, .{
+        .length = @intCast(@max(length, 0)),
         .with_prototype = with_prototype,
         .realm_global = realm_global,
     });

@@ -217,7 +217,6 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     });
     forceLlvmBackendOnDebug(boundary_exe);
     const install_boundary = b.addInstallArtifact(boundary_exe, .{});
-    const boundary_step = b.step("perf-native-boundary-build", "Build the JS<->native boundary microbench harness and the runtime plugin fixture");
+    const boundary_step = b.step("perf-native-boundary-build", "Build the JS<->native boundary microbench harness");
     boundary_step.dependOn(&install_boundary.step);
-    boundary_step.dependOn(&artifacts.install_runtime_plugin_fixture.step);
 }

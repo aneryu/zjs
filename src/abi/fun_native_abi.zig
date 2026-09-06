@@ -122,6 +122,21 @@ pub const signatures = [_]Signature{
     .{ .name = "ASYNC_VALUE2", .id = 23 },
     .{ .name = "ASYNC_VALUE3", .id = 24 },
     .{ .name = "ASYNC_VALUE4", .id = 25 },
+    // v1 minor append (FNABI §11.1 append-only): NB2 phase B leaf with state.
+    .{ .name = "STATE_I32_TO_I32", .id = 26 },
+    // v1 minor append: NB2 lane K prim_self leaves (design §4.3) -- a
+    // primitive string receiver plus one canonical i32 index. Both share the
+    // C prototype `fn(*const String, i32) i32` (negative = take the fallback);
+    // the arm boxes the result as an int32 or as a one-code-unit string.
+    .{ .name = "STRING_I32_TO_I32", .id = 27 },
+    .{ .name = "STRING_I32_TO_STRING", .id = 28 },
+    // v1 minor append: NB2 phase D K2 method leaves (design §4.3): `self` is
+    // the NativeObject payload pointer (`SELF_TO_F64` / `SELF_F64_TO_VOID` /
+    // `SELF_F64_F64_TO_VOID` above are the v1 originals).
+    .{ .name = "SELF_I32_TO_I32", .id = 29 },
+    .{ .name = "SELF_TO_I32", .id = 30 },
+    .{ .name = "SELF_I32_TO_VOID", .id = 31 },
+    .{ .name = "SELF_TO_VOID", .id = 32 },
 };
 
 // ---- opaque ABI types (§13.1; M0I acceptance: defined or explicitly opaque)

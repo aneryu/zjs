@@ -22,6 +22,7 @@ const exception_ops = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const object_ops = @import("object_ops.zig");
 const call_runtime = @import("call_runtime.zig");
+const tailcall_dispatch = @import("tailcall_dispatch.zig");
 const forof_ops = @import("forof_ops.zig");
 const stack_mod = @import("stack.zig");
 const vm_call = @import("vm_call.zig");
@@ -487,7 +488,10 @@ pub const Entry = struct {
         std.debug.assert(self.return_action == .next);
         std.debug.assert(self.continuation_payload == 0);
         self.return_action = continuation.action;
-        self.continuation_payload = continuation.payload;
+        // A tail call that reuses a lean native-boundary Entry's storage
+        // rebuilds it as a generic frame: drop the lean pop marker so the
+        // fence return takes the authoritative teardown.
+        self.continuation_payload = if (continuation.action == .native_boundary) 0 else continuation.payload;
         if (continuation.action == .native_boundary) {
             self.teardown.special_return = true;
         }
@@ -504,8 +508,15 @@ pub const Entry = struct {
     /// ordinary return requires rather than one it excludes, and `copy_argv`
     /// only prices the frame's bytecode-stack charge and has no completion
     /// effect at all.
+    ///
+    /// `has_native_caller` is NOT an extended completion on its own: with the
+    /// tracing collector the synthetic native `call` / `apply` record needs no
+    /// release at return, so a frame that carries one only for backtrace
+    /// order (`target -> call (native) -> caller`, the §5.4 window-rewrite
+    /// arms) retires through the plain epilogue. The bit still classifies
+    /// extended when paired with `special_return` (the O3 forwarded leaf) or
+    /// `constructor_completion` (the fallback instance slot).
     const extended_completion_flags: TeardownFlags = .{
-        .has_native_caller = true,
         .empty_leaf = true,
         .exact_args_leaf = true,
         // Merge resolution: main generalized the phase branch's
@@ -520,7 +531,7 @@ pub const Entry = struct {
     };
 
     comptime {
-        const ordinary_compatible: TeardownFlags = .{ .simple = true, .copy_argv = true };
+        const ordinary_compatible: TeardownFlags = .{ .simple = true, .copy_argv = true, .has_native_caller = true };
         const covered = @as(u8, @bitCast(extended_completion_flags)) |
             @as(u8, @bitCast(ordinary_compatible));
         if (covered != std.math.maxInt(u8))
@@ -959,6 +970,25 @@ pub const ActiveInvocation = struct {
         if (core.runtime.value_root_frames_enabled) null else {},
 };
 
+/// Copy one JSValue slot as two 64-bit words, pinned on AArch64 so LLVM
+/// cannot re-merge the pair into a `q` access (a 16-byte mem-to-mem copy is
+/// otherwise vectorized, and a `q` access does not forward against the
+/// 64-bit stores the native caller used to write the value moments ago;
+/// measured double-digit cycles per element at the native boundary).
+pub inline fn copyValueSlotPinned(dst: *core.JSValue, src: *const core.JSValue) void {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        asm volatile (
+            \\ldp x9, x10, [%[src]]
+            \\stp x9, x10, [%[dst]]
+            :
+            : [src] "r" (src),
+              [dst] "r" (dst),
+            : .{ .x9 = true, .x10 = true, .memory = true });
+        return;
+    }
+    core.JSValue.storeSlotAsIntPair(dst, core.JSValue.loadSlotAsIntPair(src));
+}
+
 pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {
     const invocation_ptr = rt.active_invocation orelse return null;
     return @ptrCast(@alignCast(invocation_ptr));
@@ -985,16 +1015,43 @@ pub const NativeBoundaryScope = struct {
     view: MachineBacktraceView,
     frame: core.ActiveBacktraceFrame = undefined,
     fence_depth: usize,
+    /// The outer dispatch level's register bundle at the fence, restored by
+    /// `finish`/`deinit` (the callback re-enters the same resident
+    /// `machine.vm`; see `tailcall_dispatch.Vm.EntryState`). A snapshot
+    /// rather than a re-derivation from the Machine: the restore is eight
+    /// independent forwarding-eligible loads instead of the
+    /// machine -> top -> frame -> function -> code dependent chain.
+    vm_entry: tailcall_dispatch.Vm.EntryState,
+    /// `initIdle`: the fence is an idle Machine (the embedder's resident host
+    /// invocation at depth 0). Nothing is suspended in a native frame, so no
+    /// dispatch state has to survive the callback, and the invocation's own
+    /// live root view (bottom-less, published by `HostInvocation.publish`)
+    /// already enumerates exactly the callback segment, so no nested
+    /// backtrace node is installed either.
+    idle: bool,
     validation: NativeBoundaryValidation,
 
     pub fn init(invocation: *ActiveInvocation) NativeBoundaryScope {
+        return initMode(invocation, false);
+    }
+
+    pub fn initIdle(invocation: *ActiveInvocation) NativeBoundaryScope {
+        std.debug.assert(invocation.machine.depth == 0);
+        std.debug.assert(invocation.current_backtrace_view.live and
+            invocation.current_backtrace_view.bottom_exclusive == null);
+        return initMode(invocation, true);
+    }
+
+    inline fn initMode(invocation: *ActiveInvocation, comptime idle: bool) NativeBoundaryScope {
         const machine = invocation.machine;
         return .{
             .invocation = invocation,
             .outer_view = invocation.current_backtrace_view,
             .rt = machine.ctx.runtime,
-            .view = MachineBacktraceView.segment(machine, machine.top),
+            .view = if (idle) undefined else MachineBacktraceView.segment(machine, machine.top),
             .fence_depth = machine.depth,
+            .vm_entry = if (idle) undefined else machine.vm.saveEntryState(),
+            .idle = idle,
             .validation = if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) blk: {
                 const stack = machine.currentLevel().stack;
                 break :blk .{
@@ -1010,6 +1067,7 @@ pub const NativeBoundaryScope = struct {
     }
 
     pub fn push(self: *NativeBoundaryScope) void {
+        if (self.idle) return;
         self.outer_view.freeze(self.view.bottom_exclusive);
         self.frame = .{
             .data = &self.view,
@@ -1026,7 +1084,7 @@ pub const NativeBoundaryScope = struct {
             machine.discardToDepth(self.fence_depth);
         }
         std.debug.assert(machine.depth == self.fence_depth);
-        std.debug.assert(machine.top == self.view.bottom_exclusive);
+        std.debug.assert(self.idle or machine.top == self.view.bottom_exclusive);
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             const stack = machine.currentLevel().stack;
             std.debug.assert(stack.len() == self.validation.stack_len);
@@ -1039,6 +1097,8 @@ pub const NativeBoundaryScope = struct {
             std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
         }
 
+        if (self.idle) return;
+        machine.vm.restoreEntryState(&self.vm_entry);
         self.popBacktrace();
     }
 
@@ -1048,7 +1108,7 @@ pub const NativeBoundaryScope = struct {
     pub fn finish(self: *NativeBoundaryScope) void {
         const machine = self.invocation.machine;
         std.debug.assert(machine.depth == self.fence_depth);
-        std.debug.assert(machine.top == self.view.bottom_exclusive);
+        std.debug.assert(self.idle or machine.top == self.view.bottom_exclusive);
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             const stack = machine.currentLevel().stack;
             std.debug.assert(stack.len() == self.validation.stack_len);
@@ -1060,6 +1120,8 @@ pub const NativeBoundaryScope = struct {
             std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.validation.native_call_depth);
             std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
         }
+        if (self.idle) return;
+        machine.vm.restoreEntryState(&self.vm_entry);
         self.popBacktrace();
     }
 
@@ -1082,6 +1144,93 @@ pub const NativeBoundaryScope = struct {
     }
 };
 
+/// The lean native-boundary frame (native-boundary design section 6): a
+/// site-owned Entry whose geometry and every invariant field are decided once
+/// (`init`), so a call pays only the arena carve, the argument copy, the
+/// arena-dependent window fields, one depth/bytes increment and the chain
+/// link -- and the fence return (`Machine.popReturnedNativeBoundary`, lean
+/// arm) only the arena restore, the budget release and the unlink. Shapes:
+/// the published empty leaf and the exact-args leaf (the two warm
+/// native-boundary constructors); everything else keeps the generic push.
+/// The Entry lives in the CallSite, not in the Machine's chunk array; it is
+/// linked through `prev`/`top` like any other Entry, so the GC root walk,
+/// backtraces, unwind and tail-call reuse see an ordinary simple frame.
+pub const LeanFrame = struct {
+    /// `continuation_payload` value that marks a live lean frame for the
+    /// fence return arm (every other native-boundary frame carries 0).
+    pub const marker: u32 = 1;
+
+    entry: Entry,
+    planned_stack_bytes: usize,
+    /// Declared parameter window (0 for the empty leaf, `arg_count` for the
+    /// exact-args leaf); the operand stack follows it in the carve.
+    frame_arg_count: usize,
+    total_words: usize,
+    /// Reentrancy guard: a site called again while its frame is live (the
+    /// callback re-entered the same host site) takes the generic push.
+    in_use: bool = false,
+
+    /// The template is intact: a tail call inside the callee that reused the
+    /// physical Entry rebuilt it as a generic frame and cleared the marker
+    /// (`adoptContinuation`); the owner must re-initialize before reuse.
+    pub inline fn isIntact(self: *const LeanFrame) bool {
+        return self.entry.continuation_payload == marker;
+    }
+
+    /// Initialize in place (an optional returned by value would copy the
+    /// 300-byte frame through q registers). Returns false when the shape is
+    /// not lean-eligible.
+    pub inline fn initInPlace(lean: *LeanFrame, rt: *core.JSRuntime, target: *const InlineTarget) bool {
+        const function = target.fb;
+        const execution = target.call_facts.execution;
+        if (!Machine.nativeBoundarySimpleEligible(target)) return false;
+        if (function.openVarRefCount() != 0) return false;
+        const empty_leaf = execution.simple_inline_empty_leaf or execution.raw_this_inline_empty_leaf;
+        if (!empty_leaf and execution.exact_args_leaf_kind == .none) return false;
+        const frame_arg_count: usize = if (empty_leaf) 0 else @intCast(function.arg_count);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, true);
+        const captures = target.captureSlice();
+        if (empty_leaf and captures.len != 0) return false;
+        lean.planned_stack_bytes = planned_stack_bytes;
+        lean.frame_arg_count = frame_arg_count;
+        lean.total_words = frame_arg_count + stack_count;
+        lean.in_use = false;
+        const entry = &lean.entry;
+        entry.return_action = .native_boundary;
+        entry.continuation_payload = marker;
+        entry.catch_target = null;
+        entry.arena_mark = undefined;
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .actual_arg_count = 0,
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
+            .locals = &.{},
+            .args = &.{},
+            .var_refs = captures,
+            .storage_values = &.{},
+            .ownership = .{
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = .borrowed,
+            },
+        };
+        // Geometry that never changes per call: the argument window length
+        // and the operand-stack capacity (the pointers are carved per call).
+        entry.frame.args = @as([*]core.JSValue, undefined)[0..frame_arg_count];
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, @as([*]core.JSValue, undefined)[0..stack_count]);
+        entry.teardown = .{
+            .simple = true,
+            .special_return = true,
+            .copy_argv = true,
+        };
+        entry.native_caller = core.JSValue.undefinedValue();
+        entry.prev = null;
+        return true;
+    }
+};
+
 pub const Machine = struct {
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1101,14 +1250,36 @@ pub const Machine = struct {
     /// for accounting (L0 boundary tests, backtrace length, slot reuse).
     /// Maintained in lockstep with `depth` by pushFrame/popFrame.
     top: ?*Entry = null,
+    /// The resident dispatch-loop register bundle (native-boundary design
+    /// section 6.2). `zjs_vm.runTC` used to build a fresh 24-field `Vm` on
+    /// the C stack for every entry -- 84 instructions per builtin callback
+    /// or embedder call. The bundle now lives here: invariant fields are
+    /// written once by `init`/`retarget`, each entry publishes only the
+    /// per-level fields, and a nested native boundary saves/restores those
+    /// through `NativeBoundaryScope`. Layout of the bundle itself is the
+    /// measured one in tailcall_dispatch.zig.
+    vm: tailcall_dispatch.Vm,
     pub fn init(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, l0: *const L0State) Machine {
         if (comptime builtin.is_test) TestMetricStorage.metrics.machine_inits += 1;
-        return .{
+        var machine: Machine = .{
             .ctx = ctx,
             .output = output,
             .global = global,
             .l0 = l0,
+            .vm = undefined,
         };
+        machine.vm.initResident(ctx, output, global);
+        return machine;
+    }
+
+    /// Re-target an idle machine to another context of the same runtime
+    /// (the resident host invocation is per runtime).
+    pub fn retarget(self: *Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) void {
+        std.debug.assert(self.depth == 0);
+        self.ctx = ctx;
+        self.global = global;
+        self.output = output;
+        self.vm.retarget(ctx, output, global);
     }
 
     /// Free the chunk storage of an idle machine through the runtime
@@ -3375,6 +3546,70 @@ pub const Machine = struct {
         return self.pushNativeBoundarySimple(true, global, target, args, args);
     }
 
+    /// Push a site-owned lean frame (`LeanFrame`). A null result is a pure
+    /// miss (reentrant use, depth/bytes budget, arena chunk exhausted) with
+    /// every budget and watermark unchanged; the caller takes the generic
+    /// native-boundary push. `this_value` is the receiver for this call (a
+    /// site's own receiver, or `callWithThis`'s override).
+    pub inline fn pushLeanEntry(
+        self: *Machine,
+        comptime fixed_argc: ?usize,
+        rt: *core.JSRuntime,
+        lean: *LeanFrame,
+        this_value: *const core.JSValue,
+        args: []const core.JSValue,
+    ) ?*Entry {
+        std.debug.assert(rt == self.ctx.runtime);
+        if (fixed_argc) |argc| std.debug.assert(args.len == argc);
+        if (lean.in_use) return null;
+        const planned = lean.planned_stack_bytes;
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned)) return null;
+        const carve = rt.vm_stack.carveActiveMarked(lean.total_words) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned);
+            return null;
+        };
+        const frame_arg_count = lean.frame_arg_count;
+        const frame_args = carve.window[0..frame_arg_count];
+        const stack_window = carve.window[frame_arg_count..];
+        if (fixed_argc) |argc| {
+            // Fixed-arity form (`call0..call4`): the copy unrolls and the
+            // padding branch is the only runtime decision.
+            if (argc <= frame_arg_count) {
+                inline for (0..argc) |arg_index| copyValueSlotPinned(&frame_args[arg_index], &args[arg_index]);
+                if (frame_arg_count > argc) @memset(frame_args[argc..], core.JSValue.undefinedValue());
+            } else {
+                for (args[0..frame_arg_count], 0..) |*arg, arg_index| copyValueSlotPinned(&frame_args[arg_index], arg);
+            }
+        } else {
+            const copied_arg_count = @min(args.len, frame_arg_count);
+            for (args[0..copied_arg_count], 0..) |*arg, arg_index| {
+                copyValueSlotPinned(&frame_args[arg_index], arg);
+            }
+            @memset(frame_args[copied_arg_count..], core.JSValue.undefinedValue());
+        }
+
+        const entry = &lean.entry;
+        std.debug.assert(entry.continuation_payload == LeanFrame.marker);
+        std.debug.assert(entry.return_action == .native_boundary);
+        copyValueSlotPinned(&entry.frame.this_value, this_value);
+        entry.frame.pc = 0;
+        entry.frame.actual_arg_count = @intCast(args.len);
+        std.debug.assert(entry.frame.args.len == frame_arg_count and entry.stack.capacity == stack_window.len);
+        entry.frame.args.ptr = frame_args.ptr;
+        entry.frame.locals.ptr = stack_window.ptr;
+        entry.arena_mark = carve.mark;
+        entry.stack.values = stack_window.ptr;
+        entry.stack.top_ptr = stack_window.ptr;
+        lean.in_use = true;
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        if (comptime builtin.is_test) {
+            TestMetricStorage.metrics.max_depth = @max(TestMetricStorage.metrics.max_depth, self.depth);
+        }
+        return entry;
+    }
+
     /// Allocation-free native-fence prologue for already-warmed Entry and VM
     /// arena storage. A null result is a pure miss: budgets, ownership, arena
     /// watermarks, and Machine links are unchanged, so the caller must take
@@ -3471,8 +3706,8 @@ pub const Machine = struct {
         entry.arena_mark = carve.mark;
         entry.frame = .{
             .function = function,
-            .this_value = target.this_value,
-            .current_function = target.callable,
+            .this_value = undefined,
+            .current_function = undefined,
             .actual_arg_count = @intCast(actual_arg_count),
             .planned_stack_bytes = @intCast(planned_stack_bytes),
             .locals = carve.window[0..0],
@@ -3481,6 +3716,8 @@ pub const Machine = struct {
                 .storage = .borrowed,
             },
         };
+        copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
+        copyValueSlotPinned(&entry.frame.current_function, &target.callable);
         entry.stack = stack_mod.Stack.initArenaWindow(
             &rt.memory,
             rt.vm_stack_arena_policy,
@@ -3540,11 +3777,19 @@ pub const Machine = struct {
 
         const frame_args = carve.window[0..frame_arg_count];
         const stack_window = carve.window[frame_arg_count..];
+        // Integer-pair copies: the native caller wrote its argument window
+        // (and the resolved target's receiver/callable) with 64-bit stores
+        // moments ago; a 128-bit SIMD copy would miss store-to-load
+        // forwarding on every element (double-digit cycles each).
         if (move_args) {
-            @memcpy(frame_args[0..copied_arg_count], moved_args[0..copied_arg_count]);
+            for (moved_args[0..copied_arg_count], 0..) |*arg, arg_index| {
+                copyValueSlotPinned(&frame_args[arg_index], arg);
+            }
             @memset(moved_args[0..copied_arg_count], core.JSValue.undefinedValue());
         } else {
-            for (args[0..copied_arg_count], 0..) |arg, arg_index| frame_args[arg_index] = arg;
+            for (args[0..copied_arg_count], 0..) |*arg, arg_index| {
+                copyValueSlotPinned(&frame_args[arg_index], arg);
+            }
         }
         @memset(frame_args[copied_arg_count..], core.JSValue.undefinedValue());
         const captures = target.captureSlice();
@@ -3554,8 +3799,8 @@ pub const Machine = struct {
         entry.arena_mark = carve.mark;
         entry.frame = .{
             .function = function,
-            .this_value = target.this_value,
-            .current_function = target.callable,
+            .this_value = undefined,
+            .current_function = undefined,
             .actual_arg_count = @intCast(args.len),
             .locals = stack_window[0..0],
             .args = frame_args,
@@ -3567,6 +3812,8 @@ pub const Machine = struct {
                 .storage = .borrowed,
             },
         };
+        copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
+        copyValueSlotPinned(&entry.frame.current_function, &target.callable);
         entry.stack = stack_mod.Stack.initArenaWindow(
             &rt.memory,
             rt.vm_stack_arena_policy,
@@ -3656,7 +3903,7 @@ pub const Machine = struct {
 
         @memset(locals, core.JSValue.undefinedValue());
         if (open_var_refs.len != 0) @memset(open_var_refs, null);
-        @memcpy(frame_args[0..actual_arg_count], moved_args);
+        for (moved_args, 0..) |*arg, arg_index| copyValueSlotPinned(&frame_args[arg_index], arg);
         @memset(moved_args, core.JSValue.undefinedValue());
         @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
 
@@ -3667,8 +3914,8 @@ pub const Machine = struct {
         entry.arena_mark = carve.mark;
         entry.frame = .{
             .function = function,
-            .this_value = target.this_value,
-            .current_function = target.callable,
+            .this_value = undefined,
+            .current_function = undefined,
             .actual_arg_count = @intCast(actual_arg_count),
             .locals = locals,
             .args = frame_args,
@@ -3681,6 +3928,8 @@ pub const Machine = struct {
                 .storage = .borrowed,
             },
         };
+        copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
+        copyValueSlotPinned(&entry.frame.current_function, &target.callable);
         entry.stack = stack_mod.Stack.initArenaWindow(
             &rt.memory,
             rt.vm_stack_arena_policy,
@@ -4610,7 +4859,12 @@ pub const Machine = struct {
         const dying = self.topEntry();
         std.debug.assert(rt == self.ctx.runtime);
         std.debug.assert(dying.isNativeBoundaryReturn());
-        std.debug.assert(dying.continuation_payload == 0);
+        std.debug.assert(dying.continuation_payload == 0 or dying.continuation_payload == LeanFrame.marker);
+
+        if (dying.continuation_payload == LeanFrame.marker) {
+            self.popReturnedLean(rt, dying);
+            return;
+        }
 
         const chain_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
             dying.tailChainBudgetSlot().*
@@ -4632,6 +4886,29 @@ pub const Machine = struct {
         std.debug.assert(rt.hot.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
         rt.hot.call_depth -= chain_budget.extra_depth;
         rt.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
+        self.depth -= 1;
+        self.top = dying.prev;
+    }
+
+    /// Fence return of a lean frame (`LeanFrame`): geometry and ownership
+    /// were fixed at the site, so the return is the arena restore, the
+    /// budget release and the unlink. The three facts simple teardown
+    /// depends on -- no FrameCold, borrowed storage, arena window -- are
+    /// static for this shape: FrameCold is only installed at frame
+    /// construction (new.target, an original-args snapshot), storage
+    /// ownership only changes at construction, and the arena-window policy
+    /// is only flipped by the generator park (not a simple leaf). A tail
+    /// call that reuses the physical Entry rebuilds it as a generic frame and
+    /// drops the marker (`adoptContinuation`).
+    pub inline fn popReturnedLean(self: *Machine, rt: *core.JSRuntime, dying: *Entry) void {
+        std.debug.assert(dying == self.topEntry());
+        std.debug.assert(dying.return_action == .native_boundary);
+        std.debug.assert(dying.continuation_payload == LeanFrame.marker);
+        std.debug.assert(dying.canUseSimpleTeardown());
+        std.debug.assert(!dying.teardown.tail_chain);
+        std.debug.assert(dying.frame.function.openVarRefCount() == 0);
+        rt.vm_stack.restore(dying.arena_mark);
+        vm_call.leaveInlineCallDepthBytesRt(rt, dying.frame.planned_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }

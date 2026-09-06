@@ -7,6 +7,8 @@ const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
+const call_site_mod = @import("call_site.zig");
+const CallSite = call_site_mod.CallSite;
 const coercion_ops = @import("coercion_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
@@ -364,7 +366,6 @@ const JsonParseRecord = union(enum) {
             },
         }
     }
-
 };
 
 const JsonParseRecordEntry = struct {
@@ -1564,7 +1565,7 @@ const SimpleJsonStringifyError = std.mem.Allocator.Error || error{
 
 const JsonStringifyVmOptions = struct {
     replacer: core.JSValue = core.JSValue.undefinedValue(),
-    replacer_call: ?*call_runtime.SyncInternalCallSite = null,
+    replacer_call: ?*CallSite = null,
     property_list: []const core.Atom = &.{},
     has_property_list: bool = false,
     gap: []const u8 = "",
@@ -1585,8 +1586,7 @@ const SimpleJsonResult = enum {
     fallback,
 };
 
-fn deinitLengthIndexAtom(_: *core.JSRuntime, _: anytype) void {
-}
+fn deinitLengthIndexAtom(_: *core.JSRuntime, _: anytype) void {}
 
 pub fn jsonParseCall(
     ctx: *core.JSContext,
@@ -1642,7 +1642,7 @@ pub fn jsonParseCall(
     try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(parsed, true, true, true));
     parsed = core.JSValue.undefinedValue();
 
-    var reviver_call = call_runtime.SyncInternalCallSite.init(
+    var reviver_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -1699,7 +1699,7 @@ pub fn jsonInternalizeProperty(
     holder_value: core.JSValue,
     key: core.Atom,
     reviver: core.JSValue,
-    reviver_call: *call_runtime.SyncInternalCallSite,
+    reviver_call: *CallSite,
     record: ?*const JsonParseRecord,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -1789,7 +1789,7 @@ pub fn jsonInternalizeChild(
     holder: *core.Object,
     key: core.Atom,
     reviver: core.JSValue,
-    reviver_call: *call_runtime.SyncInternalCallSite,
+    reviver_call: *CallSite,
     record: ?*const JsonParseRecord,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -1887,9 +1887,9 @@ pub fn jsonStringifyCall(
     defer property_list.deinit(ctx.runtime);
     var gap = try jsonStringifyGap(ctx, output, global, space, caller_function, caller_frame);
     defer gap.deinit(ctx.runtime.memory.allocator);
-    var replacer_call_storage: call_runtime.SyncInternalCallSite = undefined;
-    const replacer_call: ?*call_runtime.SyncInternalCallSite = if (call_runtime.isCallableValue(replacer)) blk: {
-        replacer_call_storage = call_runtime.SyncInternalCallSite.init(
+    var replacer_call_storage: CallSite = undefined;
+    const replacer_call: ?*CallSite = if (call_runtime.isCallableValue(replacer)) blk: {
+        replacer_call_storage = CallSite.initInternal(
             ctx,
             output,
             global,

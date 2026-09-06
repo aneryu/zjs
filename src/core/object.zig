@@ -15,6 +15,7 @@ const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
+const native_entry = @import("native_entry.zig");
 const object_gc = @import("object_gc.zig");
 const object_payloads = @import("object_payloads.zig");
 const property = @import("property.zig");
@@ -274,7 +275,12 @@ pub const ObjectFlags = packed struct(u32) {
     /// with the flags; the head is still 24 bytes because the word at offset 0
     /// was pointer-alignment padding either way.
     slots2_layout: bool = false,
-    reserved: u15 = 0,
+    /// NB2 §8.1: a `NativeObject` (embedder class instance): the payload arm
+    /// word is the opaque `self` pointer (null once disposed) and the class
+    /// record carries the `NativeType`. Lets `nativeSelf` answer without a
+    /// class-table probe.
+    is_native_object: bool = false,
+    reserved: u14 = 0,
 };
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
@@ -2428,6 +2434,40 @@ pub const Object = extern struct {
         std.debug.assert(self.arrayArm().*.count == 0);
         std.debug.assert(self.arrayArm().*.capacity == 0);
         std.debug.assert(self.arrayArm().*.length == 0);
+    }
+
+    /// NB2 §8.1: the opaque `self` of a `NativeObject`, or null when the
+    /// object is not one (or was disposed). One flag test + one load.
+    pub inline fn nativeSelf(self: *const Object) ?*anyopaque {
+        if (!self.flags.is_native_object) return null;
+        return self.payloadArm().*;
+    }
+
+    /// K2 receiver unwrap after the caller matched `class_id` against the
+    /// entry's NativeType id (design §4.3 step 2): the class check already
+    /// proved the family, so this is the single load.
+    pub inline fn nativeSelfAssumeClass(self: *const Object) ?*anyopaque {
+        std.debug.assert(self.flags.is_native_object);
+        return self.payloadArm().*;
+    }
+
+    /// Publish `self` on a freshly created NativeObject instance (class
+    /// registered with a `NativeType`). The class payload finalizer hands the
+    /// pointer to `NativeType.finalize` at sweep.
+    pub fn installNativeSelf(self: *Object, rt: *JSRuntime, self_ptr: *anyopaque) void {
+        self.installExternalClassPayload(rt, self_ptr);
+        self.flags.is_native_object = true;
+    }
+
+    /// Dispose: detach `self` so every later method / accessor call throws
+    /// TypeError (design §4.3 step 2). Returns the detached pointer (the
+    /// finalizer will not see it again).
+    pub fn takeNativeSelf(self: *Object) ?*anyopaque {
+        if (!self.flags.is_native_object) return null;
+        const arm = self.payloadArm();
+        const taken = arm.*;
+        arm.* = null;
+        return taken;
     }
 
     pub fn externalClassPayload(self: *Object) ?*anyopaque {
@@ -5126,25 +5166,19 @@ pub const Object = extern struct {
         };
     }
 
-    /// Publish an external host function: kind, registry id, and the shared
-    /// exec dispatch record, so the VM's record arms hit it like a builtin.
-    pub fn installExternalHostFunction(self: *Object, rt: *JSRuntime, external_id: u32) void {
-        self.hostFunctionKindSlot().* = host_function.ids.external_host;
-        self.externalHostFunctionIdSlot().* = external_id;
-        if (self.class_id == class.ids.c_function) self.nativeRecordSlot().* = rt.external_host_record;
+    /// NB2: an embedder-defined native function (entry-backed, not a builtin
+    /// id, not an engine host kind). Constructible iff it owns `prototype`.
+    pub fn isHostEntryFunction(self: *const Object) bool {
+        if (self.class_id != class.ids.c_function) return false;
+        return self.nativeRecord() != null and self.nativeFunctionId() == 0 and self.hostFunctionKind() == 0;
     }
 
-    pub fn externalHostFunctionIdSlot(self: *Object) *u32 {
-        std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));
-        if (self.functionPayload()) |payload| return &payload.native.external_host_function_id;
-        std.debug.assert(self.flags.class_payload_kind == .function);
-        unreachable;
-    }
-
-    pub fn externalHostFunctionId(self: *const Object) u32 {
-        if (class.isBytecodeFunctionClass(self.class_id)) return 0;
-        if (self.functionPayloadConst()) |payload| return payload.native.external_host_function_id;
-        return 0;
+    /// NB2: bind a host `NativeEntry` to a plain `c_function` object. The
+    /// VM's record arms then dispatch it exactly like a builtin; no host
+    /// kind, no registry id.
+    pub fn installNativeEntry(self: *Object, entry: *const native_entry.NativeEntry) void {
+        std.debug.assert(self.class_id == class.ids.c_function);
+        self.nativeRecordSlot().* = entry;
     }
 
     pub fn functionIteratorWrapMethodSlot(self: *Object, rt: *JSRuntime) !*u8 {
@@ -7805,10 +7839,7 @@ pub const Object = extern struct {
         const function_value = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, function_capacity);
         const function_object = try Object.expect(function_value);
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
-        if (info.external_host_function_id != 0) {
-            if (info.host_function_kind != host_function.ids.external_host) return error.InvalidBuiltinRegistry;
-            function_object.installExternalHostFunction(rt, info.external_host_function_id);
-        }
+        if (info.native_entry) |entry| function_object.installNativeEntry(entry);
         if (info.host_function_prototype) {
             const object_proto_value = try objectPrototypeValueForAutoInit(realm);
             const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 0);
@@ -7833,7 +7864,7 @@ pub const Object = extern struct {
         name: []const u8,
         length: i32,
         host_function_kind: i32,
-        external_host_function_id: u32,
+        entry: ?*const native_entry.NativeEntry,
         realm_global: ?*Object,
     ) !void {
         const key = try rt.internAtom(name);
@@ -7841,7 +7872,7 @@ pub const Object = extern struct {
         var key_roots = runtime_mod.rootAtoms(.{&key});
         key_roots.activate(rt);
         defer key_roots.deactivate(rt);
-        try target.defineHostAutoInitPropertyWithExternalId(
+        try target.defineHostAutoInitPropertyWithEntry(
             rt,
             key,
             name,
@@ -7850,7 +7881,7 @@ pub const Object = extern struct {
             host_function_kind,
             false,
             realm_global,
-            external_host_function_id,
+            entry,
         );
     }
 
@@ -7863,7 +7894,7 @@ pub const Object = extern struct {
         const console_value = console.value();
         const methods = [_][]const u8{ "log", "warn", "error" };
         for (methods) |name| {
-            try defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, realm_global);
+            try defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.native_entry, realm_global);
         }
         return console_value;
     }
@@ -8576,10 +8607,9 @@ pub const Object = extern struct {
         atom_id: atom.Atom,
         flags: property.Flags,
         host_function_kind: i32,
-        external_host_function_id: u32,
+        entry: ?*const native_entry.NativeEntry,
     ) !void {
         std.debug.assert(host_function_kind != 0);
-        std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.extensible);
@@ -8588,7 +8618,7 @@ pub const Object = extern struct {
             .length = 0,
             .kind = .console,
             .host_function_kind = host_function_kind,
-            .external_host_function_id = external_host_function_id,
+            .native_entry = entry,
         }) });
     }
 
@@ -8699,7 +8729,7 @@ pub const Object = extern struct {
         host_function_prototype: bool,
         realm_global: ?*Object,
     ) !void {
-        try self.defineHostAutoInitPropertyWithExternalId(
+        try self.defineHostAutoInitPropertyWithEntry(
             rt,
             atom_id,
             name,
@@ -8708,11 +8738,11 @@ pub const Object = extern struct {
             host_function_kind,
             host_function_prototype,
             realm_global,
-            0,
+            null,
         );
     }
 
-    pub fn defineHostAutoInitPropertyWithExternalId(
+    pub fn defineHostAutoInitPropertyWithEntry(
         self: *Object,
         rt: *JSRuntime,
         atom_id: atom.Atom,
@@ -8722,10 +8752,9 @@ pub const Object = extern struct {
         host_function_kind: i32,
         host_function_prototype: bool,
         realm_global: ?*Object,
-        external_host_function_id: u32,
+        entry: ?*const native_entry.NativeEntry,
     ) !void {
         std.debug.assert(host_function_kind != 0);
-        std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
@@ -8734,7 +8763,7 @@ pub const Object = extern struct {
             .name = name,
             .length = length,
             .host_function_kind = host_function_kind,
-            .external_host_function_id = external_host_function_id,
+            .native_entry = entry,
             .host_function_prototype = host_function_prototype,
         }) });
     }

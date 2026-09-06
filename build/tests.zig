@@ -31,10 +31,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const install_zjs = artifacts.install_zjs;
     const install_zjs_profile = artifacts.install_zjs_profile;
     const install_zjs_dev = artifacts.install_zjs_dev;
-    const runtime_plugin_fixture = artifacts.runtime_plugin_fixture;
-    const install_runtime_plugin_fixture = artifacts.install_runtime_plugin_fixture;
-    const runtime_empty_plugin_fixture = artifacts.runtime_empty_plugin_fixture;
-    const install_runtime_empty_plugin_fixture = artifacts.install_runtime_empty_plugin_fixture;
 
     // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
     // `-Dtest-filter=<substring>` narrows the unified run to matching test
@@ -81,11 +77,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // share one options object either -- that reuse is exactly how a Debug
     // artifact would have ended up attesting a ReleaseSafe configuration.
     const test_options = addEngineOptions(b, engine_option_inputs);
-    test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
-    test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
     const scoped_test_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
-    scoped_test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
-    scoped_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
     // FNABI C/Zig round-trip (src/tests/abi_layout.zig) @cImports the
@@ -94,8 +86,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
     for (0..test_shards) |shard| {
         const run_unified_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
-        run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-        run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
         run_unified_tests.addArgs(&.{ "--skip-prefix", "tests.stress." });
         if (test_shards != 1) {
             run_unified_tests.addArgs(&.{ "--shard", b.fmt("{d}/{d}", .{ shard, test_shards }) });
@@ -123,8 +113,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
     for (0..test_shards) |shard| {
         const run_gc_stress_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
-        run_gc_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-        run_gc_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
         run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_STRESS", "1");
         run_gc_stress_tests.setEnvironmentVariable("ZJS_GC_VERIFY_MINOR", "fatal");
         run_gc_stress_tests.setEnvironmentVariable("ZJS_MINOR_AUDIT", "fatal");
@@ -148,8 +136,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // 2026-09-06). One process, not sharded: five tests, and
     // `--require-tests` must be able to see them.
     const run_stress_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
-    run_stress_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-    run_stress_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
     run_stress_tests.addArgs(&.{ "--only-prefix", "tests.stress.", "--require-tests" });
     run_stress_tests.setName("run test unified-tests (stress tier)");
     _ = run_stress_tests.captureStdErr(.{});
@@ -296,10 +282,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         };
         const run_scoped_tests = b.addRunArtifact(scoped_tests);
         run_scoped_tests.addArg("--require-tests");
-        if (config.needs_plugin_fixtures) {
-            run_scoped_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-            run_scoped_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
-        }
+        if (config.needs_plugin_fixtures) {}
         if (b.args) |args| run_scoped_tests.addArgs(args);
         const scoped_step = b.step(config.name, config.description);
         scoped_step.dependOn(&run_scoped_tests.step);
@@ -344,10 +327,12 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .optimize = .Debug,
         .link_libc = true,
     });
-    embedding_zjs_mod.addOptions("build_options", embedding_engine_options);
-    const embedding_test_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
-    embedding_test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
-    embedding_test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
+    // One options module shared by the engine and the test root: with
+    // identical contents Zig generates one file, and one file may only be the
+    // root of one module (the plugin fixture path that once told them apart
+    // is gone), so both import the same module object.
+    const embedding_options_mod = embedding_engine_options.createModule();
+    embedding_zjs_mod.addImport("build_options", embedding_options_mod);
     const embedding_root = b.createModule(.{
         .root_source_file = b.path("src/embedding_tests.zig"),
         .target = target,
@@ -357,7 +342,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
             .{ .name = "zjs", .module = embedding_zjs_mod },
         },
     });
-    embedding_root.addOptions("build_options", embedding_test_options);
+    embedding_root.addImport("build_options", embedding_options_mod);
     const embedding_tests = b.addTest(.{
         .name = "test-embedding",
         .root_module = embedding_root,
@@ -370,8 +355,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     };
     const run_embedding_tests = b.addRunArtifact(embedding_tests);
     run_embedding_tests.addArg("--require-tests");
-    run_embedding_tests.step.dependOn(&install_runtime_plugin_fixture.step);
-    run_embedding_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
     if (b.args) |args| run_embedding_tests.addArgs(args);
     const embedding_step = b.step("test-embedding", "Run focused public-module embedding tests");
     embedding_step.dependOn(&run_embedding_tests.step);

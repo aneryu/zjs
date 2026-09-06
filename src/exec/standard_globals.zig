@@ -1735,7 +1735,6 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     configureRuntime(rt);
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
     rt.internal_builtins = &internal_builtins.table;
-    rt.external_host_record = &builtin_dispatch.external_host_record;
     // Constructing realms are not roots via `context_head`. Name the global
     // for the bootstrap window so properties published onto it stay live
     // under exact-mark (test-oom STW canary).
@@ -3515,8 +3514,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
 
         try std.testing.expectEqual(core.function.nativeBuiltinId(item.domain, item.id), function_object.nativeFunctionId());
         const record = function_object.nativeRecord() orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(core.host_function.NativeCProto.generic_magic, record.cproto);
-        try std.testing.expect(record.native_function != null);
+        try std.testing.expectEqual(core.native_entry.Kind.managed, record.kind);
     }
 
     const escape_key = try temporaryStringAtom(rt, "escape");

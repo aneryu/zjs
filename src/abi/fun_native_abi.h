@@ -94,6 +94,13 @@ typedef void (*FunNativeCodePtr)(void);
 #define FUN_SIG_ASYNC_VALUE2 23u
 #define FUN_SIG_ASYNC_VALUE3 24u
 #define FUN_SIG_ASYNC_VALUE4 25u
+#define FUN_SIG_STATE_I32_TO_I32 26u
+#define FUN_SIG_STRING_I32_TO_I32 27u
+#define FUN_SIG_STRING_I32_TO_STRING 28u
+#define FUN_SIG_SELF_I32_TO_I32 29u
+#define FUN_SIG_SELF_TO_I32 30u
+#define FUN_SIG_SELF_I32_TO_VOID 31u
+#define FUN_SIG_SELF_TO_VOID 32u
 
 /* ---- opaque ABI types (design §13.1) ----
  * Pointer-only for plugins: never dereferenced, never sized. */

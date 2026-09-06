@@ -10,7 +10,9 @@ pub const JSRuntime = zjs_binding.JSRuntime;
 pub const GCStats = zjs_binding.GCStats;
 pub const GCPauseDistribution = zjs_binding.GCPauseDistribution;
 pub const JSContext = zjs_binding.JSContext;
-pub const ffi = zjs_binding.ffi;
+/// Resolved-once native -> JS call target for repeated calls to one function
+/// (`zjs.CallSite.init` / `call` / `deinit`); see docs/public-api-contract.md.
+pub const CallSite = zjs_binding.CallSite;
 pub const JSValue = zjs_binding.JSValue;
 pub const RuntimeOptions = zjs_binding.RuntimeOptions;
 pub const RuntimeMemoryUsage = zjs_binding.RuntimeMemoryUsage;
@@ -117,11 +119,10 @@ pub const value = struct {
     }
 };
 
+/// NB2 native function API (docs/perf/native-boundary-design.md §9).
+pub const native = zjs_binding.native;
+
 pub const host = struct {
-    pub const Call = zjs_binding.ExternalHostCall;
-    pub const Function = zjs_binding.ExternalHostCallFn;
-    pub const Finalizer = zjs_binding.ExternalHostFinalizer;
-    pub const FunctionOptions = zjs_binding.ExternalFunctionOptions;
     pub const NativeBinding = zjs_binding.binding;
     pub const NativeObject = object.Object;
     pub const PropName = zjs_binding.PropNameID;
@@ -1196,8 +1197,6 @@ test "public root exposes only the explicit runtime surface" {
     try std.testing.expect(@hasDecl(runtime, "detachArrayBuffer"));
     try std.testing.expect(@hasDecl(runtime, "evalFileModuleGraphWithOutput"));
     try std.testing.expect(@hasDecl(runtime, "resolveModuleSpecifier"));
-    try std.testing.expect(@hasDecl(runtime, "Plugin"));
-    try std.testing.expect(@hasDecl(runtime, "PluginInstallOptions"));
     try std.testing.expect(@typeInfo(object.Object) == .@"opaque");
     try std.testing.expect(!@hasDecl(object.Object, "value"));
     try std.testing.expect(!@hasDecl(@This(), "JSValueHandle"));

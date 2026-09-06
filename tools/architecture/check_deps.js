@@ -233,8 +233,6 @@ const TEST_ROOTS = [
   'tools/perf/same_runtime/zjs_same_runtime.zig',
   'tools/perf/direct/zjs_direct_bench.zig',
   'tools/perf/native_boundary/zjs_boundary_bench.zig',
-  'tests/fixtures/runtime_plugin_fixture.zig',
-  'tests/fixtures/runtime_empty_plugin_fixture.zig',
 ];
 const orphanAllowlistPath = path.join(repoRoot, 'tools/architecture/orphan-allowlist.json');
 

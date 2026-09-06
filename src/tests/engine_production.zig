@@ -16,19 +16,16 @@ const InterruptState = struct {
 const HostFunctionState = struct {
     value: i32,
 
-    fn call(ptr: *anyopaque, call_info: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-        _ = call_info;
-        const self: *HostFunctionState = @ptrCast(@alignCast(ptr));
-        return zjs.JSValue.int32(self.value);
+    fn call(c: *zjs.native.Call) zjs.JSValue {
+        return zjs.JSValue.int32(c.state(HostFunctionState).value);
     }
 };
 
 const HostFinalizerState = struct {
     calls: usize = 0,
 
-    fn call(ptr: *anyopaque, call_info: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-        _ = ptr;
-        _ = call_info;
+    fn call(c: *zjs.native.Call) zjs.JSValue {
+        _ = c;
         return zjs.JSValue.undefinedValue();
     }
 
@@ -193,7 +190,7 @@ test "production embedding can install external host functions" {
     defer ctx.destroy();
 
     var state = HostFunctionState{ .value = 42 };
-    try ctx.defineGlobalFunction("hostValue", 0, &state, HostFunctionState.call, null);
+    _ = try ctx.defineFunction("hostValue", zjs.native.managed(HostFunctionState.call), .{ .state = @ptrCast(&state) });
 
     const result = try ctx.eval("hostValue()", .{});
     try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
@@ -207,7 +204,7 @@ test "production embedding can create external host function values" {
     defer ctx.destroy();
 
     var state = HostFunctionState{ .value = 7 };
-    const function = try ctx.createExternalFunction("HostCtor", 0, &state, HostFunctionState.call, null, .{ .with_prototype = true });
+    const function = try ctx.createFunction("HostCtor", zjs.native.managed(HostFunctionState.call), .{ .state = @ptrCast(&state), .with_prototype = true });
     try std.testing.expect(function.isObject());
     try std.testing.expect(ctx.isCallable(function));
     try std.testing.expect(ctx.isConstructor(function));
@@ -719,13 +716,10 @@ test "production embedding public API allocation failures keep host ownership in
     try std.testing.expectEqual(local_before, rt.localRootCountForTest());
 
     var finalizer_state = HostFinalizerState{};
-    if (ctx.createExternalFunction(
+    if (ctx.createFunction(
         "AllocationBlockedHostFn",
-        0,
-        &finalizer_state,
-        HostFinalizerState.call,
-        HostFinalizerState.finalize,
-        .{},
+        zjs.native.managed(HostFinalizerState.call),
+        .{ .state = @ptrCast(&finalizer_state), .finalize = HostFinalizerState.finalize },
     )) |_| {
         return error.TestExpectedError;
     } else |err| {
@@ -933,7 +927,8 @@ test "production embedding can eval script source in explicit function realms" {
     try std.testing.expectEqual(@as(?i32, 43), value_result.asInt32());
 
     var state = HostFunctionState{ .value = 1 };
-    const function = try ctx.createExternalFunction("RealmTaggedHost", 0, &state, HostFunctionState.call, null, .{
+    const function = try ctx.createFunction("RealmTaggedHost", zjs.native.managed(HostFunctionState.call), .{
+        .state = @ptrCast(&state),
         .realm_global = realm_global_object,
     });
     const function_global = (try ctx.functionRealmGlobal(function)) orelse return error.TestExpectedEqual;

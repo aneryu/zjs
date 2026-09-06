@@ -15,7 +15,10 @@ pub const GCStats = core.GCStats;
 /// Collection-pause percentiles, from `JSRuntime.gcPauseDistribution()`.
 pub const GCPauseDistribution = core.GCPauseDistribution;
 pub const context_mod = @import("context.zig");
+pub const native = @import("native.zig");
 pub const JSContext = context_mod.JSContext;
+/// Resolved-once native -> JS call target (see `context_mod.CallSite`).
+pub const CallSite = context_mod.CallSite;
 pub const JSValue = core.JSValue;
 pub const Object = core.Object;
 
@@ -33,21 +36,16 @@ pub const EvalTiming = core.EvalTiming;
 pub const DataPropertyOptions = core.DataPropertyOptions;
 pub const PropertyAccessOptions = core.PropertyAccessOptions;
 pub const PropertyDescriptor = core.PropertyDescriptor;
-pub const ExternalFunctionOptions = core.ExternalFunctionOptions;
 pub const FunctionCallOptions = core.FunctionCallOptions;
 pub const ErrorOptions = core.ErrorOptions;
 pub const ScriptEvalOptions = core.ScriptEvalOptions;
 pub const SharedArrayBufferRef = core.SharedArrayBufferRef;
-pub const ExternalHostCall = core.ExternalHostCall;
-pub const ExternalHostCallFn = core.ExternalHostCallFn;
-pub const ExternalHostFinalizer = core.ExternalHostFinalizer;
 pub const OpcodeProfile = core.OpcodeProfile;
 pub const default_stack_size = core.runtime.default_stack_size;
 pub const default_gc_threshold = core.runtime.default_gc_threshold;
 
 pub const prop_name = @import("prop_name.zig");
 pub const binding = @import("binding.zig");
-pub const ffi = @import("ffi.zig");
 
 pub const PropNameID = prop_name.PropNameID;
 pub const JSString = core.JSValue.String;
@@ -72,7 +70,6 @@ test {
     _ = JSBytes;
     _ = Object;
     _ = binding;
-    _ = ffi;
     _ = RuntimeOptions;
     _ = RuntimeMemoryUsage;
     _ = ContextOptions;
@@ -82,14 +79,10 @@ test {
     _ = DataPropertyOptions;
     _ = PropertyAccessOptions;
     _ = PropertyDescriptor;
-    _ = ExternalFunctionOptions;
     _ = FunctionCallOptions;
     _ = ErrorOptions;
     _ = ScriptEvalOptions;
     _ = SharedArrayBufferRef;
-    _ = ExternalHostCall;
-    _ = ExternalHostCallFn;
-    _ = ExternalHostFinalizer;
     _ = OpcodeProfile;
 }
 
@@ -112,7 +105,6 @@ test "JSValue lifetime names are aliases, not wrappers" {
     try std.testing.expect(!@hasDecl(JSValue, "TypedArray"));
     try std.testing.expect(!@hasDecl(JSBytes.Store, "borrowed"));
     try std.testing.expect(!@hasDecl(JSBytes.Store, "fromBorrowed"));
-    try std.testing.expect(!@hasDecl(ffi, "asyncBinding"));
 }
 
 test "binding JSString is the core JSValue string view" {

@@ -15,11 +15,11 @@ embedder  →  src/root.zig  →  src/binding/  →  src/core/
 CLI/tests →  src/internal_root.zig
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode.zig
 execute   →  src/exec/  (VM, builtins, modules, promises)
-host      →  src/runtime/  (event loop, plugins)
+host      →  src/runtime/  (event loop)
 ```
 
-`src/core/` must not depend on CLI policy, test262 glue, plugins, or the event
-loop. `tools/architecture/check_deps.js` enforces that boundary. Checkpoint
+`src/core/` must not depend on CLI policy, test262 glue, plugin loaders, or
+the event loop. `tools/architecture/check_deps.js` enforces that boundary. Checkpoint
 and the production gate both run it.
 
 Three `src/` companions sit beside those layers:
@@ -34,16 +34,19 @@ Three `src/` companions sit beside those layers:
 ## Public entry — `src/root.zig`
 
 Embedders import `zjs`. The stable surface is `JSRuntime`, `JSContext`,
-`JSValue`, `zjs.value` handles, `zjs.host`, `zjs.runtime`, and `zjs.ffi`.
+`JSValue`, `zjs.value` handles, `zjs.native` (host functions), `zjs.CallSite`
+(native -> JS calls), `zjs.host` (native objects, property names),
+and `zjs.runtime`.
 Contract: [public-api-contract.md](public-api-contract.md). Examples:
 [embedding-cookbook.md](embedding-cookbook.md).
 
 `src/internal_root.zig` aggregates CLI, test262, and in-repo tests. It is not
 the public embedding contract.
 
-`src/binding/` adapts core types into that public surface: context helpers,
-strings, bytes, property names, host callbacks, native objects, and FFI
-descriptors.
+`src/binding/` adapts core types into that public surface: context helpers
+and `CallSite` (`context.zig`), strings, bytes, property names, native
+functions (`native.zig`: the comptime thunk generators over `NativeEntry`),
+and native objects (`binding.zig`).
 
 ## Core — `src/core/`
 
@@ -184,14 +187,15 @@ nine `perf-*-profile` steps with exact opcode pins, and
 Only host policy that must stay out of core:
 
 - `event_loop.zig`: timers, fd/signal handlers, job draining
-- `plugin.zig`: dynamic native plugins (deprecated 2026-08-25 — frozen,
-  correctness fixes only; removed at FNABI M3, see
-  `docs/runtime-plugin-abi.md`)
 
 Atomics waiter cleanup is in exec and re-exported from `runtime/root.zig`.
-There is no `cleanup.zig`, `modules.zig`, or `buffer.zig` in this directory.
-Host functions register through `ExternalHostCall` on the public API
-(`zjs.host.*`).
+There is no `cleanup.zig`, `modules.zig`, `buffer.zig`, or `plugin.zig` in
+this directory (the dynamic plugin loader and its `zjs.ffi` ABI were deleted
+2026-09-06; the FNABI loader lives in `fun`). Host functions register
+through `zjs.native` (`JSContext.defineFunction` / `createFunction`): each
+registration is one immutable `NativeEntry` (`src/core/native_entry.zig`)
+that the VM dispatches exactly like a builtin (`src/exec/vm_native.zig`);
+native -> JS goes through `zjs.CallSite` (`src/exec/call_site.zig`).
 
 ## Libraries, CLI, tests
 
@@ -206,7 +210,7 @@ Host functions register through `ExternalHostCall` on the public API
   `$262.agent` coordinator. `run_test262_reporter.zig` owns synchronized
   stderr, failure buckets, directory summaries, and report files
 - `src/tests/`: Zig unit and integration entrypoints
-- `tests/fixtures/`: plugin fixtures and test262 overrides. CLI smoke
+- `tests/fixtures/`: test262 harness and override fixtures. CLI smoke
   coverage lives in `src/tests/smoke_test.zig` (inline scripts, `zig build
   smoke`), not in a fixture tree.
 

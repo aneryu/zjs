@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Public API: the host function surface is replaced by `zjs.native`**
+  (2026-09-06, native-boundary redesign phase A3, owner rulings D4/D8, hard
+  cut without adapters). Removed: `JSContext.defineGlobalFunction` /
+  `createExternalFunction`, `zjs.host.Call` / `Function` / `Finalizer` /
+  `FunctionOptions`, the `zjs.ffi` plugin ABI, `zjs.runtime.Plugin` /
+  `PluginInstallOptions`, the `src/runtime/plugin.zig` loader and
+  `docs/runtime-plugin-abi.md`. Added: `zjs.native.managed` / `leaf` /
+  `leafWithState` (comptime thunks over a plain Zig function, dispatched
+  like builtins through one immutable `NativeEntry`), `zjs.native.Call` /
+  `Spec` / `Options` (`length`, `state`, `finalize`, `with_prototype`,
+  `realm_global`), `JSContext.defineFunction` / `createFunction`, and
+  `zjs.CallSite` (resolved-once native -> JS calls; `JSContext.callFunction`
+  is the one-shot form). See `docs/public-api-contract.md` and
+  `docs/embedding-cookbook.md`.
+
 - **GC: the `-Dzjs_gc` selector and its six always-true comptime gates are
   removed** (TGC S5-a). `-Dzjs_gc=rc` / `=shadow` had been rejected with a
   migration message since 2026-08-29; the option itself, `build_options.zjs_gc`,
@@ -100,8 +115,9 @@ refactor-policy gates.
   `src/binding/ffi.zig` ABI) is frozen — correctness fixes only — and is
   superseded by the Fun Native Plugin design (FNABI v0.3,
   `docs/fun-native-plugin-design.md`); the loader moves to the `fun`
-  repository at FNABI milestone M3. See `docs/runtime-plugin-abi.md` for the
-  freeze terms.
+  repository at FNABI milestone M3. (The freeze terms lived in
+  `docs/runtime-plugin-abi.md`, deleted with the surface on 2026-09-06; see
+  the entry above.)
 
 - **bench-v8 now vendors Octane 2.0 (V8 suite version 9)** instead of the
   8-benchmark version-7 suite (17 named results, 16 running, zlib

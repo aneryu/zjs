@@ -15,6 +15,8 @@ const call = @import("call.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const call_runtime = @import("call_runtime.zig");
+const call_site_mod = @import("call_site.zig");
+const CallSite = call_site_mod.CallSite;
 const array_ops = @import("array_ops.zig");
 const string_ops = @import("string_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
@@ -169,10 +171,10 @@ fn prototypeExecDirectEntry(
     comptime name: []const u8,
     comptime length: u8,
     comptime method: PrototypeMethod,
-    comptime direct: builtin_dispatch.ExecDirectCallFn,
+    comptime direct: core.native_entry.ManagedFn,
 ) core.host_function.InternalEntry {
     var entry = prototypeEntry(name, length, method);
-    entry.exec_direct = builtin_dispatch.execDirectFunction(direct);
+    entry.managed = direct;
     return entry;
 }
 
@@ -675,26 +677,30 @@ pub fn objectHasOwnCall(
 /// else is the unchanged `objectPrototypeOwnPropertyCall`.
 fn objectHasOwnPropertyDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
     if (objectFromValue(this_value)) |object| {
         if (args.len >= 1) {
             if (property_ops.propertyKeyAtomIfReady(args[0])) |atom_id| {
                 // Same exotic handling as the generic arm (typed-array
                 // canonical index, Proxy trap): one predicate, not two.
                 const present = object_ops.proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame) catch |err|
-                    return builtin_dispatch.nativeFromHostError(ctx, global, err);
-                return builtin_dispatch.nativeToBits(core.JSValue.boolean(present));
+                    return builtin_dispatch.hostErrorToValue(ctx, global, err);
+                return (core.JSValue.boolean(present));
             }
         }
     }
-    return builtin_dispatch.nativeFromHostResult(ctx, global, objectHasOwnPropertyHost(
+    return builtin_dispatch.hostResultToValue(ctx, objectHasOwnPropertyHost(
         ctx,
         output,
         global,
@@ -732,9 +738,8 @@ test "Object.prototype.hasOwnProperty uses exec_direct on the shared object hand
         if (entry.id != @intFromEnum(PrototypeMethod.has_own_property)) continue;
         found = true;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &objectCall);
-        try std.testing.expect(entry.exec_direct != null);
-        try std.testing.expect(entry.exec_direct.? ==
-            builtin_dispatch.execDirectFunction(&objectHasOwnPropertyDirect));
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &objectHasOwnPropertyDirect);
     }
     try std.testing.expect(found);
 }
@@ -903,7 +908,7 @@ pub fn objectGroupByCall(
     const out_value = out.value();
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    var callback_call = call_runtime.SyncInternalCallSite.init(
+    var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,

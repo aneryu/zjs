@@ -23,6 +23,7 @@
 //! - `(ctx, global, output)` are re-targeted per call at depth 0; the
 //!   Machine only ever holds chunk storage between calls.
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
@@ -47,6 +48,14 @@ pub const HostInvocation = struct {
     backtrace_frame: core.ActiveBacktraceFrame,
     invocation: inline_calls.ActiveInvocation,
     published: bool = false,
+    /// Lean frame (`inline_calls.LeanFrame`) of the last one-shot callee,
+    /// keyed by the callee value, its FunctionBytecode and its capture base
+    /// (a collected closure whose address is reused cannot alias all three
+    /// with a different frame shape). Only read while a call is live, when
+    /// the embedder holds the callee.
+    lean: inline_calls.LeanFrame = undefined,
+    lean_callee: core.JSValue = core.JSValue.undefinedValue(),
+    lean_valid: bool = false,
 
     pub fn create(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
         const self = try rt.memory.create(HostInvocation);
@@ -92,19 +101,43 @@ pub const HostInvocation = struct {
     }
 
     /// Runtime-owned singleton, created on first use.
-    pub fn acquire(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
+    pub inline fn acquire(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
         if (rt.host_invocation) |ptr| {
             const self: *HostInvocation = @ptrCast(@alignCast(ptr));
             std.debug.assert(!self.published and self.machine.depth == 0);
-            self.machine.ctx = ctx;
-            self.machine.global = global;
-            self.machine.output = output;
+            self.machine.retarget(ctx, output, global);
             return self;
         }
+        return acquireSlow(rt, ctx, output, global);
+    }
+
+    noinline fn acquireSlow(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
         const self = try create(rt, ctx, output, global);
         rt.host_invocation = self;
         rt.host_invocation_retire = retire;
         return self;
+    }
+
+    /// The cached lean frame for `target`, (re)initialized on a callee change;
+    /// null when the callee's shape is not lean-eligible.
+    pub inline fn leanFrameFor(self: *HostInvocation, rt: *core.JSRuntime, target: *const inline_calls.InlineTarget) ?*inline_calls.LeanFrame {
+        if (self.lean_valid and self.lean.isIntact() and
+            self.lean_callee.repr.payload == target.callable.repr.payload and
+            self.lean_callee.repr.tag == target.callable.repr.tag and
+            self.lean.entry.frame.function == target.fb and
+            self.lean.entry.frame.var_refs.ptr == target.var_refs)
+        {
+            return &self.lean;
+        }
+        return self.leanFrameInit(rt, target);
+    }
+
+    noinline fn leanFrameInit(self: *HostInvocation, rt: *core.JSRuntime, target: *const inline_calls.InlineTarget) ?*inline_calls.LeanFrame {
+        self.lean_valid = false;
+        if (!self.lean.initInPlace(rt, target)) return null;
+        self.lean_callee = target.callable;
+        self.lean_valid = true;
+        return &self.lean;
     }
 
     fn retire(rt: *core.JSRuntime, ptr: *anyopaque) void {
@@ -114,22 +147,28 @@ pub const HostInvocation = struct {
 
     /// Publish for one call: becomes the active invocation and the head of
     /// the backtrace chain. Requires no active invocation.
-    pub fn publish(self: *HostInvocation, ctx: *core.JSContext) void {
+    pub inline fn publish(self: *HostInvocation, ctx: *core.JSContext) void {
         std.debug.assert(!self.published);
         std.debug.assert(ctx.runtime.active_invocation == null);
         std.debug.assert(self.machine.depth == 0);
-        ctx.pushActiveBacktraceFrame(&self.backtrace_frame);
-        self.root_view.live = true;
-        self.invocation.current_backtrace_view = &self.root_view;
+        // `root_view.live` and `invocation.current_backtrace_view` are
+        // invariants of the idle machine (set at creation; an idle-mode
+        // boundary scope never installs a nested view), so a publish is the
+        // backtrace link plus the invocation pointer.
+        std.debug.assert(self.root_view.live and self.invocation.current_backtrace_view == &self.root_view);
+        const hot = &ctx.runtime.hot;
+        self.backtrace_frame.previous = hot.current_backtrace_frame;
+        hot.current_backtrace_frame = &self.backtrace_frame;
         ctx.runtime.active_invocation = &self.invocation;
-        self.published = true;
+        if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) self.published = true;
     }
 
-    pub fn unpublish(self: *HostInvocation, ctx: *core.JSContext) void {
+    pub inline fn unpublish(self: *HostInvocation, ctx: *core.JSContext) void {
         std.debug.assert(self.published);
         std.debug.assert(self.machine.depth == 0);
+        std.debug.assert(ctx.runtime.hot.current_backtrace_frame == &self.backtrace_frame);
         ctx.runtime.active_invocation = null;
-        ctx.popActiveBacktraceFrame(&self.backtrace_frame);
-        self.published = false;
+        ctx.runtime.hot.current_backtrace_frame = self.backtrace_frame.previous;
+        if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) self.published = false;
     }
 };

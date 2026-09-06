@@ -237,6 +237,11 @@ pub const Definition = struct {
     call: ?Call = null,
     has_exotic: bool = false,
     exotic_methods: ?*const anyopaque = null,
+    /// NB2 §8.1: set iff this class is a `NativeObject` family member; the
+    /// pointer is the runtime-owned `native_object.NativeType` (opaque here so
+    /// class metadata stays below the object layer). Instances keep `self` in
+    /// the payload arm word and `nativeSelf` reads it after one class check.
+    native_type: ?*const anyopaque = null,
 };
 
 pub const Record = struct {
@@ -254,6 +259,7 @@ pub const Record = struct {
     call: ?Call = null,
     has_exotic: bool = false,
     exotic_methods: ?*const anyopaque = null,
+    native_type: ?*const anyopaque = null,
 
     pub fn isRegistered(self: Record) bool {
         return self.id != invalid_class_id;
@@ -736,6 +742,7 @@ pub const Table = struct {
             .call = def.call,
             .has_exotic = def.has_exotic or def.exotic_methods != null,
             .exotic_methods = def.exotic_methods,
+            .native_type = def.native_type,
         };
         if (id < ids.init_count) {
             self.standard_plans[id] = definitionPlan(&self.records[id], id, state.generation);

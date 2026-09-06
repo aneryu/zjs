@@ -382,7 +382,9 @@ inline fn getFieldFastSlotWithExoticOrder(
             // reduces exactly to the exotic-methods bit (neither class appears
             // in any of its slow arms), so an authoritative link costs one
             // compare plus one bit test instead of the whole class switch.
-            if (object.class_id == core.class.ids.object or object.isGlobal()) {
+            // A NativeObject (NB2 §8.1, embedder class instance) is exactly as
+            // ordinary as a plain object: no class exotics, only the shape.
+            if (object.class_id == core.class.ids.object or object.isGlobal() or object.flags.is_native_object) {
                 if (object.hasExoticMethods()) return null;
                 object = object.getPrototype() orelse {
                     absent.* = true;
@@ -478,6 +480,27 @@ pub inline fn getFieldFastSlotOrAbsent(
 /// classification from being speculated into the dominant own-hit handler;
 /// the property search and its ordering are otherwise the same as
 /// `getFieldFastSlotOrAbsent`.
+/// After the inline data walk stopped on a non-data slot: walk the ordinary
+/// links (plain object / global / NativeObject, no exotics) from
+/// `probed_object` and return the getter of the FIRST hit when that hit is an
+/// accessor (undefined getter included). Null when the first hit is not an
+/// accessor or the chain reaches a link the ordinary rules do not cover, so
+/// the caller keeps its resolver path. Same admission set as
+/// `property_direct.ordinaryDataPropertyLookup`; the receiver's own probe has
+/// already been done by the caller.
+pub fn ordinaryAccessorGetterAfterOwnMiss(probed_object: *core.Object, atom_id: core.Atom) ?core.JSValue {
+    var object = probed_object;
+    while (true) {
+        if (object.hasExoticMethods()) return null;
+        if (!(object.class_id == core.class.ids.object or object.isGlobal() or object.flags.is_native_object)) return null;
+        if (object.findOwnPropertySlotTrusted(atom_id)) |lookup| {
+            if (lookup.flags.deleted or lookup.flags.kind != .accessor) return null;
+            return lookup.entry.slot.accessor.getterValue();
+        }
+        object = object.getPrototype() orelse return null;
+    }
+}
+
 pub inline fn getFieldFastSlotOrAbsentAfterOwnMiss(
     rt: *core.JSRuntime,
     probed_object: *core.Object,
@@ -816,7 +839,7 @@ pub inline fn atomPropertyValueForFastPath(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     if (objectFromValue(receiver)) |object| {
-        if (object.class_id == core.class.ids.object or object.isArray() or object.isGlobal()) {
+        if (object.class_id == core.class.ids.object or object.isArray() or object.isGlobal() or object.flags.is_native_object) {
             return switch (property_direct.ordinaryDataPropertyLookup(rt, receiver, atom_id)) {
                 .value => |value| .{ .borrowed = value },
                 .getter => |getter| .{ .getter = getter },

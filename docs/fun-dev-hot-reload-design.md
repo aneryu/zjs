@@ -1727,7 +1727,7 @@ docs/fun-native-plugin-design.md
 （FNABI v0.3，2026-08-25，评审修订版；完成 M0 后冻结 FNABI v1）
 ```
 
-本章只定义 hot reload 系统与 FNABI 的对接方式，不重复定义 plugin ABI。旧 `runtime-plugin-abi.md` 已退役，不作为本设计的依据。
+本章只定义 hot reload 系统与 FNABI 的对接方式，不重复定义 plugin ABI。旧 `runtime-plugin-abi.md` 已退役并于 2026-09-06 删除（NB2 A3），不作为本设计的依据；宿主函数的现行公开面是 `zjs.native`。
 
 ## 26.1 与 FNABI 的概念映射
 

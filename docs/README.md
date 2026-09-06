@@ -20,9 +20,15 @@ when needed.
   the embedding test target.
 - [Public API Contract](public-api-contract.md): the supported Zig API surface
   and ownership rules.
-- [Runtime Plugin ABI](runtime-plugin-abi.md): dynamic native plugins
-  (**deprecated 2026-08-25** — superseded by the
-  [Fun Native Plugin design](fun-native-plugin-design.md)).
+- Native functions and native -> JS calls (`zjs.native`, `zjs.CallSite`):
+  the cookbook's Native Functions / Typed Leaf / Calling JavaScript From The
+  Host / Rooting Rules sections and the contract's Native Functions chapter;
+  the mechanism is the
+  [native boundary design](perf/native-boundary-design.md) (§3, §7, §9).
+  The former in-tree Runtime Plugin ABI (`runtime-plugin-abi.md`) was
+  deleted 2026-09-06; dynamic plugins are the
+  [Fun Native Plugin design](fun-native-plugin-design.md) (FNABI, built on
+  `zjs.native`, loader in the `fun` repository).
 - [Fun Dev Hot Reload design](fun-dev-hot-reload-design.md): the fun/zjs
   hot-reload and dev-update system — HostCore/Session split, Sequential
   Session Reload, ESM HMR, and the zjs capability list (v1.5,

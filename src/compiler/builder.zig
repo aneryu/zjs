@@ -266,7 +266,6 @@ pub const Builder = struct {
     /// Item-wise release of the owned atom prefix, then every backing freed
     /// by full capacity. Idempotent.
     pub fn deinit(self: *Builder) void {
-
         if (self.code_capacity != 0) self.memory.free(u8, self.code);
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
         if (self.label_capacity != 0) self.memory.free(labels.LabelSlot, self.label_slots);
@@ -510,6 +509,21 @@ pub const Builder = struct {
         std.mem.writeInt(u16, self.code[opcode_index + 1 ..][0..2], val, .little);
         self.last_opcode_pos = @intCast(opcode_offset);
         self.code_len += 3;
+    }
+
+    /// Emit a variable-arity call (`argc:u16` + `cache_idx:u8`). The index
+    /// byte is a placeholder in the phase-1 stream; `resolve_labels` assigns
+    /// the real one when it writes the final form.
+    pub fn emitCallOp(self: *Builder, op_id: u8, argc: u16) Error!void {
+        try self.reserveCode(4);
+
+        const opcode_offset = self.code_len;
+        const opcode_index: usize = @intCast(opcode_offset);
+        self.code[opcode_index] = op_id;
+        std.mem.writeInt(u16, self.code[opcode_index + 1 ..][0..2], argc, .little);
+        self.code[opcode_index + 3] = 0;
+        self.last_opcode_pos = @intCast(opcode_offset);
+        self.code_len += 4;
     }
 
     /// Emit an opcode with a u32 immediate operand (compact temp encoding).
@@ -1641,7 +1655,6 @@ test "compiler.builder: s2g4 take atom and truncate speculative tail" {
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
-
 }
 
 test "compiler.builder: lvalue atom take and opcode rewind are one transaction" {
@@ -1674,7 +1687,6 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(op_start, b.source_slots[0].temp_offset);
-
 }
 
 test "compiler.builder: marked opcode rewind preserves older same-offset source" {

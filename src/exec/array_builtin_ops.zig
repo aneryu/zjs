@@ -199,7 +199,7 @@ fn arrayPushEntry(comptime name: []const u8, comptime length: u8, comptime id: u
     // exec_direct: js_call_c_function (quickjs.c:17563) has no env
     // side-channel. The NMFD assume terminal then blr's this ABI and
     // skips TLS / typed-cproto / arrayPushCall (charCodeAt/apply shape).
-    entry.exec_direct = builtin_dispatch.execDirectFunction(&arrayPushDirect);
+    entry.managed = &arrayPushDirect;
     return entry;
 }
 
@@ -209,7 +209,7 @@ fn arrayPopEntry(comptime name: []const u8, comptime length: u8, comptime id: u3
 
 fn arraySpliceEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     var entry = arrayEntryWithHandler(name, length, id, &arraySpliceCall);
-    entry.exec_direct = builtin_dispatch.execDirectFunction(&arraySpliceDirect);
+    entry.managed = &arraySpliceDirect;
     return entry;
 }
 
@@ -235,9 +235,8 @@ test "Array.push has a dedicated native record handler" {
         if (entry.id != @intFromEnum(PrototypeMethod.push)) continue;
         found = true;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &arrayPushCall);
-        try std.testing.expect(entry.exec_direct != null);
-        try std.testing.expect(entry.exec_direct.? ==
-            builtin_dispatch.execDirectFunction(&arrayPushDirect));
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &arrayPushDirect);
         try std.testing.expect(!entry.forwards_call);
     }
     try std.testing.expect(found);
@@ -249,9 +248,8 @@ test "Array.splice has a dedicated native record handler" {
         if (entry.id != @intFromEnum(PrototypeMethod.splice)) continue;
         found = true;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &arraySpliceCall);
-        try std.testing.expect(entry.exec_direct != null);
-        try std.testing.expect(entry.exec_direct.? ==
-            builtin_dispatch.execDirectFunction(&arraySpliceDirect));
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &arraySpliceDirect);
         try std.testing.expect(!entry.forwards_call);
     }
     try std.testing.expect(found);
@@ -385,22 +383,26 @@ fn arrayPushCall(
 
 fn arrayPushDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
     // Hot arm returns NativeBits (x0+x1) like qjs JS_NewInt32. Miss/OOM
     // falls through to the existing impl (ToObject + generic Set).
     if (builtin_glue.tryFastArrayPush(ctx.runtime, this_value, args)) |maybe_len| {
-        if (maybe_len) |new_len| return builtin_dispatch.nativeToBits(core.JSValue.int32(new_len));
+        if (maybe_len) |new_len| return (core.JSValue.int32(new_len));
     } else |err| {
-        return builtin_dispatch.nativeFromHostError(ctx, global, err);
+        return builtin_dispatch.hostErrorToValue(ctx, global, err);
     }
-    return builtin_dispatch.nativeFromHostResult(ctx, global, arrayPushDirectHost(
+    return builtin_dispatch.hostResultToValue(ctx, arrayPushDirectHost(
         ctx,
         output,
         global,
@@ -451,17 +453,21 @@ fn arraySpliceCall(
 
 fn arraySpliceDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
     _ = caller_function;
     _ = caller_frame;
-    return builtin_dispatch.nativeFromHostResult(ctx, global, arraySpliceDirectHost(
+    return builtin_dispatch.hostResultToValue(ctx, arraySpliceDirectHost(
         ctx,
         output,
         global,

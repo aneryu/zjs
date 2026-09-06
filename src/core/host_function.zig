@@ -21,7 +21,6 @@ const ClassId = class.ClassId;
 
 pub const ids = struct {
     pub const output = 1;
-    pub const external_host = 119;
 };
 
 pub const InternalCallableTag = enum(u8) {
@@ -76,25 +75,6 @@ pub const ExternalCall = struct {
 pub const ExternalCallFn = *const fn (ptr: *anyopaque, call: ExternalCall) anyerror!JSValue;
 pub const ExternalFinalizer = *const fn (ptr: *anyopaque) void;
 
-pub const ExternalRecord = struct {
-    ptr: *anyopaque,
-    call: ExternalCallFn,
-    finalizer: ?ExternalFinalizer = null,
-};
-
-// --- Collection callback protocol -------------------------------------------
-//
-// The collection iteration helpers (Map/Set forEach, Array.prototype callback
-// methods, group-by) invoke a user callback through this small protocol struct.
-// It is pure: a function pointer plus the realm global slots, with zero VM
-// dependence, so it lives in core beside the other host-function protocol
-// types. `src/exec/collection_adapter.zig` supplies the concrete `call`
-// implementation that routes into the VM, and `exec/collection_ops.zig`
-// re-exports these names so its method bodies keep using them unchanged.
-
-/// Hard/control errors allowed to cross the collection callback boundary.
-/// Ordinary engine failures are materialized as a realm-correct pending JS
-/// exception by the exec adapter and cross this seam only as `JSException`.
 pub const CallbackError = error{
     JSException,
     OutOfMemory,
@@ -198,69 +178,14 @@ pub fn isConstructorCProto(cproto: NativeCProto) bool {
     };
 }
 
-/// One dispatchable builtin. Slots whose `native_function` is null are
-/// unoccupied gap ids; lookups treat them as missing.
-pub const InternalRecord = struct {
-    /// Spec `length` of the function (JSCFunctionListEntry.length analogue).
-    length: u8 = 0,
-    /// Selector forwarded to the typed handler so one implementation can serve several
-    /// ids (JSCFunctionListEntry.magic analogue).
-    magic: u16 = 0,
-    /// Function.prototype.call-style transparent forwarding. The VM may reuse
-    /// its current bytecode Machine for an eligible target while retaining this
-    /// record as a synthetic native frame in observable error stacks.
-    forwards_call: bool = false,
-    cproto: NativeCProto = .generic,
-    native_function: ?NativeFunctionPtr = null,
-    /// Cold observable-coercion path for numeric cprotos. It uses the same
-    /// typed generic+magic ABI as ordinary native records.
-    fallback_function: ?NativeGenericMagicFn = null,
-    /// Exec-owned direct-call ABI. QuickJS's `js_call_c_function`
-    /// (quickjs.c:17563) has no environment side-channel: everything the C
-    /// body needs arrives as parameters. When set, exec's record dispatch
-    /// passes the resolved realm pair, host output, and VM caller state by
-    /// parameter and skips the stack-local NativeCallEnvironment
-    /// materialization plus the `active_native_call` save/set/restore
-    /// entirely. Type-erased here because the caller-frame parameter types
-    /// live in exec; only `src/exec/builtin_dispatch.zig` casts it (to
-    /// `ExecDirectCallFn`), and only exec domain tables populate it.
-    exec_direct: ?*const anyopaque = null,
-
-    pub fn hasCallable(self: InternalRecord) bool {
-        return self.native_function != null;
-    }
-
-    pub fn isConstructor(self: InternalRecord) bool {
-        return isConstructorCProto(self.cproto);
-    }
-};
-
-/// A stable high method id that would otherwise force a domain's direct-index
-/// table to materialize hundreds of empty `InternalRecord` slots.
-pub const SparseInternalRecord = struct {
-    id: u32,
-    record: InternalRecord,
-};
-
-/// Per-domain builtin records. Common low ids retain the original direct
-/// bounds-check + indexed-load path; only ids beyond a size-selected split
-/// search the sparse tail. This preserves externally stable method ids without
-/// making every gap cost `@sizeOf(InternalRecord)` bytes.
-pub const InternalRecordTable = struct {
-    dense: []const InternalRecord = &.{},
-    sparse: []const SparseInternalRecord = &.{},
-
-    pub inline fn get(self: InternalRecordTable, id: u32) ?*const InternalRecord {
-        if (id < self.dense.len) {
-            const record = &self.dense[id];
-            return if (record.hasCallable()) record else null;
-        }
-        for (self.sparse) |*entry| {
-            if (entry.id == id) return &entry.record;
-        }
-        return null;
-    }
-};
+/// NB2 (docs/perf/native-boundary-design.md §3): the dispatch record is the
+/// unified `NativeEntry`. These names are kept as aliases for the phase-A2
+/// transition; declaration tables still speak `InternalEntry` (below) and
+/// exec's `native_legacy.entryFromInternal` turns each into an entry.
+const native_entry = @import("native_entry.zig");
+pub const InternalRecord = native_entry.NativeEntry;
+pub const SparseInternalRecord = native_entry.SparseEntry;
+pub const InternalRecordTable = native_entry.EntryTable;
 
 /// Declaration-side entry: what a standard-global function-list table exports
 /// per method. The comptime builder maps these into a direct low-id prefix plus
@@ -278,8 +203,21 @@ pub const InternalEntry = struct {
     native_function: ?NativeFunctionPtr = null,
     /// See `InternalRecord.fallback_function`.
     fallback_function: ?NativeGenericMagicFn = null,
-    /// See `InternalRecord.exec_direct`.
-    exec_direct: ?*const anyopaque = null,
+    /// NB2: a body already written to the K0 prototype (no legacy thunk, no
+    /// environment). Takes precedence over `cproto` / `native_function`.
+    managed: ?native_entry.ManagedFn = null,
+    /// NB2 lane K (design §4.3 `prim_self`): a typed leaf arm over a primitive
+    /// receiver. The entry becomes `Kind.method_leaf` with this target and
+    /// signature; the body declared through `managed` / `cproto` stays as the
+    /// tag-miss `fallback`, so ToString / ToInteger semantics are unchanged.
+    prim_leaf: ?PrimLeaf = null,
+
+    pub const PrimLeaf = struct {
+        /// FNABI schema signature name (`STRING_I32_TO_I32`, ...).
+        sig: []const u8,
+        /// Leaf C prototype selected by `sig` (`native_legacy.Leaf*`).
+        target: native_entry.CodePtr,
+    };
 };
 
 // --- Builtin method-id enums ------------------------------------------------

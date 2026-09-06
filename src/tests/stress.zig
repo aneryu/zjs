@@ -27,6 +27,7 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         op.call,
         0,
         0,
+        bytecode.CallSiteCache.no_cache_idx,
         op.@"return",
     };
     const method_code = [_]u8{
@@ -36,6 +37,7 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         op.tail_call_method,
         0,
         0,
+        bytecode.CallSiteCache.no_cache_idx,
     };
     const plain = try createTailOpcodeFixture(&js, "__w2RawTail", &plain_code, 1);
     const method = try createTailOpcodeFixture(&js, "__w2RawMethodTail", &method_code, 2);

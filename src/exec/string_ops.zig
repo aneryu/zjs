@@ -33,6 +33,7 @@ const QjsConcatPart = struct {
 };
 
 const call_runtime = @import("call_runtime.zig");
+const call_site_mod = @import("call_site.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const coercion_ops = @import("coercion_ops.zig");
@@ -56,7 +57,7 @@ const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
+const CallSite = call_site_mod.CallSite;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
 const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
@@ -446,8 +447,8 @@ noinline fn stringReplaceCore(
     const source_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     const search_value = try toStringForAnnexB(ctx, output, global, search_input, caller_function, caller_frame);
     const functional_replace = isCallableValue(replacement_input);
-    var replacement_call: ?SyncInternalCallSite = if (functional_replace)
-        SyncInternalCallSite.init(
+    var replacement_call: ?CallSite = if (functional_replace)
+        CallSite.initInternal(
             ctx,
             output,
             global,
@@ -1319,9 +1320,9 @@ pub fn regExpSymbolReplaceGeneric(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const functional_replace = isCallableValue(replace_value);
-    var replacer_call_storage: SyncInternalCallSite = undefined;
-    const replacer_call: ?*SyncInternalCallSite = if (functional_replace) blk: {
-        replacer_call_storage = SyncInternalCallSite.init(
+    var replacer_call_storage: CallSite = undefined;
+    const replacer_call: ?*CallSite = if (functional_replace) blk: {
+        replacer_call_storage = CallSite.initInternal(
             ctx,
             output,
             global,
@@ -1664,7 +1665,7 @@ pub fn callReplaceFunction(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    replacer_call: *SyncInternalCallSite,
+    replacer_call: *CallSite,
     match: ReplaceMatch,
     string_value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,

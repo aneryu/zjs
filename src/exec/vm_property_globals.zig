@@ -230,10 +230,11 @@ fn nextOpCanStartGlobalUriCall1(function: *const bytecode.FunctionBytecode, fram
     if (frame.pc >= function.byteCode().len) return false;
     const code = function.byteCode();
     return switch (code[frame.pc]) {
-        op.push_atom_value => frame.pc + 6 <= code.len and code[frame.pc + 5] == op.call1,
-        op.get_var_ref, op.get_var_ref_check => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
-        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => frame.pc + 1 <= code.len and code[frame.pc + 1] == op.call1,
-        op.get_var, op.get_var_undef => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
+        // `call1 idx` is two bytes; the bound covers its cache-index operand.
+        op.push_atom_value => frame.pc + 7 <= code.len and code[frame.pc + 5] == op.call1,
+        op.get_var_ref, op.get_var_ref_check => frame.pc + 5 <= code.len and code[frame.pc + 3] == op.call1,
+        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => frame.pc + 3 <= code.len and code[frame.pc + 1] == op.call1,
+        op.get_var, op.get_var_undef => frame.pc + 5 <= code.len and code[frame.pc + 3] == op.call1,
         else => false,
     };
 }

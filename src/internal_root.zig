@@ -10,6 +10,7 @@ comptime {
 const public_root = @import("root.zig");
 
 pub const public_api = public_root;
+pub const native = @import("binding/root.zig").native;
 pub const binding_root = @import("binding/root.zig");
 /// Monotonic/wall clocks. The CLI roots are their own modules and cannot
 /// reach `src/platform_clock.zig` directly, which is how `zjs.zig` ended up
@@ -20,6 +21,7 @@ pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;
 pub const JSRuntime = binding_root.JSRuntime;
 pub const JSContext = binding_root.JSContext;
+pub const CallSite = binding_root.CallSite;
 pub const JSValue = binding_root.JSValue;
 pub const Object = binding_root.Object;
 pub const Descriptor = core.Descriptor;
@@ -35,17 +37,12 @@ pub const PropNameID = binding_root.PropNameID;
 pub const JSString = binding_root.JSString;
 pub const JSBytes = binding_root.JSBytes;
 pub const binding = binding_root.binding;
-pub const ffi = binding_root.ffi;
 pub const GCPolicy = core.GCPolicy;
 pub const GCStats = core.GCStats;
 
 pub const EvalOptions = core.context.EvalOptions;
 pub const EvalTiming = core.context.EvalTiming;
 pub const DataPropertyOptions = binding_root.DataPropertyOptions;
-pub const ExternalFunctionOptions = binding_root.ExternalFunctionOptions;
-pub const ExternalHostCall = binding_root.ExternalHostCall;
-pub const ExternalHostCallFn = binding_root.ExternalHostCallFn;
-pub const ExternalHostFinalizer = binding_root.ExternalHostFinalizer;
 
 pub const core = @import("core/root.zig");
 pub const parser = @import("parser.zig");

@@ -488,6 +488,17 @@ tracer cannot run a reentrant plugin mark hook.
 
 ### 4.1 Named reentry-capable callbacks (must be listed)
 
+Census note (2026-09-06): the rows and later sections naming
+`src/runtime/plugin.zig`, `docs/runtime-plugin-abi.md`,
+`hostCallExternalHostFunction`, and `ExternalCall` describe the 2026-08-23
+tree. That loader, ABI document and external-host registry were deleted in
+NB2 phase A3; every host function is now one `NativeEntry`
+(`src/core/native_entry.zig`) created through `zjs.native` and dispatched by
+`src/exec/vm_native.zig` / `builtin_dispatch.callRecordFromVmInRealm`. The
+reentry facts are unchanged: managed native functions may call back into JS
+(and do so through `zjs.CallSite`); typed leaf functions may not (contract
+C5).
+
 | Symbol | File | When | Reentry allowed? | Risk |
 |---|---|---|---|---|
 | `InstalledBinding.call` | `src/runtime/plugin.zig` | plugin function trampoline | **yes** — ABI: "Callback reentry is allowed" (`docs/runtime-plugin-abi.md` Installed Lifetime). `plugin.beginExecution` / `active_calls` pin the DSO | HIGH for safepoint; this is ordinary mutator code, not a tracer |

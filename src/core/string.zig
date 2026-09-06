@@ -123,7 +123,7 @@ pub const StringRope = struct {
         return self.depth == 0;
     }
 
-    fn flatString(self: *const StringRope) ?*String {
+    pub fn flatString(self: *const StringRope) ?*String {
         if (!self.isLinearized()) return null;
         return self.left.asStringBodyRaw();
     }

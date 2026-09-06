@@ -200,17 +200,14 @@ pub const PendingDefinition = struct {
         self.synthetic_kind = .none;
         self.has_top_level_await = false;
 
-        for (imports) |_| {
-        }
+        for (imports) |_| {}
         for (exports) |*entry| {
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        for (indirect_exports) |_| {
-        }
-        for (import_attributes) |_| {
-        }
+        for (indirect_exports) |_| {}
+        for (import_attributes) |_| {}
 
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
@@ -476,17 +473,14 @@ pub const ModuleRecord = struct {
         self.resetLinkTransientNoFail();
         self.eval_exception = null;
 
-        for (imports) |_| {
-        }
+        for (imports) |_| {}
         for (exports) |*entry| {
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        for (indirect_exports) |_| {
-        }
-        for (import_attributes) |_| {
-        }
+        for (indirect_exports) |_| {}
+        for (import_attributes) |_| {}
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
         if (exports.len != 0) self.memory.free(ExportEntry, exports);

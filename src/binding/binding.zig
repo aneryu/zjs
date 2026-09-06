@@ -13,6 +13,14 @@ const JSBytes = core.JSValue.Bytes;
 const JSString = core.JSValue.String;
 const PropNameID = @import("prop_name.zig").PropNameID;
 const context_mod = @import("context.zig");
+const native = @import("native.zig");
+
+/// Per-call view handed to the typed method adapters (NB2 `Call` subset).
+const HostCall = struct {
+    realm: *core.JSContext,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+};
 const JSContext = context_mod.JSContext;
 
 pub const BindingError = error{
@@ -387,7 +395,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                 @compileError("zjs.binding.JSObject property entries must use zjs.binding.method(name, fn)");
             }
             const Stub = MethodStub(entry);
-            const function_value = try createMethodFunction(ctx, class_id, entry.name, callbackLength(entry.call), Stub.call);
+            const function_value = try createMethodFunction(ctx, class_id, entry.name, callbackLength(entry.call), Stub.method_spec);
 
             try key.defineDataProperty(ctx.runtimePtr(), prototype, core.Descriptor.data(function_value, true, false, true));
         }
@@ -445,7 +453,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             class_id: core.ClassId,
             name: []const u8,
             length: i32,
-            call: core.host_function.ExternalCallFn,
+            method_spec: native.Spec,
         ) !core.JSValue {
             const rt = ctx.runtimePtr();
             const runtime = try rt.memory.create(MethodRuntime);
@@ -455,19 +463,18 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                 .runtime = rt,
                 .class_id = class_id,
             };
+            // Ownership registration first: once registered, teardown frees it.
+            try rt.registerNativeEntryFinalizer(@ptrCast(runtime), MethodRuntime.deinit);
+            runtime_owned = false;
+            var template = method_spec.template;
+            template.state = @ptrCast(runtime);
+            template.arity = @intCast(@max(length, 0));
+            const entry = try rt.allocNativeEntry(template);
 
             const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
             const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, function_proto, name, length, 2);
             const function_object = try core.Object.expect(function_value);
-
-            const external_id = try rt.registerExternalHostFunction(.{
-                .ptr = @ptrCast(runtime),
-                .call = call,
-                .finalizer = MethodRuntime.deinit,
-            });
-            runtime_owned = false;
-
-            function_object.installExternalHostFunction(rt, external_id);
+            function_object.installNativeEntry(entry);
             return function_value;
         }
 
@@ -477,16 +484,18 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             comptime validateMethodSignature(info);
 
             return struct {
-                fn call(ptr: *anyopaque, host_call: core.host_function.ExternalCall) anyerror!core.JSValue {
-                    const runtime: *MethodRuntime = @ptrCast(@alignCast(ptr));
-                    const prototype = host_call.realm.classPrototypeObject(runtime.class_id) orelse return error.TypeError;
-                    const self_payload = payloadFromClassAndPrototype(runtime.class_id, prototype, host_call.this_value) orelse return error.TypeError;
-                    return invoke(entry.call, self_payload, host_call);
+                pub const method_spec = native.managed(call);
+
+                fn call(c: *native.Call) anyerror!core.JSValue {
+                    const runtime = c.state(MethodRuntime);
+                    const prototype = c.ctx.core.classPrototypeObject(runtime.class_id) orelse return error.TypeError;
+                    const self_payload = payloadFromClassAndPrototype(runtime.class_id, prototype, c.this) orelse return error.TypeError;
+                    return invoke(entry.call, self_payload, .{ .realm = c.ctx.core, .this_value = c.this, .args = c.args() });
                 }
             };
         }
 
-        fn invoke(comptime call: anytype, self_payload: *Payload, host_call: core.host_function.ExternalCall) anyerror!core.JSValue {
+        fn invoke(comptime call: anytype, self_payload: *Payload, host_call: HostCall) anyerror!core.JSValue {
             const Call = @TypeOf(call);
             const info = @typeInfo(Call).@"fn";
             if (comptime methodHasUtf8Param(info)) {
@@ -502,7 +511,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             comptime call: anytype,
             comptime info: std.builtin.Type.Fn,
             self_payload: *Payload,
-            host_call: core.host_function.ExternalCall,
+            host_call: HostCall,
             utf8_allocator: ?std.mem.Allocator,
         ) anyerror!core.JSValue {
             const Call = @TypeOf(call);
@@ -613,7 +622,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         fn callbackArg(
             comptime Param: type,
             self_payload: *Payload,
-            host_call: core.host_function.ExternalCall,
+            host_call: HostCall,
             js_index: *usize,
             utf8_allocator: ?std.mem.Allocator,
         ) anyerror!Param {
@@ -707,7 +716,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
         fn callbackParamKind(comptime Param: type) CallbackParamKind {
             if (Param == *core.JSContext) return .context;
-            if (Param == core.host_function.ExternalCall) return .raw_call;
+            if (Param == HostCall) return .raw_call;
             if (Param == core.JSValue) return .value;
             if (Param == bool) return .boolean;
             if (Param == JSString) return .string;
@@ -739,7 +748,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             return false;
         }
 
-        fn callContext(host_call: core.host_function.ExternalCall) *core.JSContext {
+        fn callContext(host_call: HostCall) *core.JSContext {
             return host_call.realm;
         }
     };

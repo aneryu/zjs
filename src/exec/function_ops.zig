@@ -20,6 +20,7 @@ const bytecode = @import("../bytecode.zig");
 
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
+const native_legacy = @import("native_legacy.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const exceptions = @import("exceptions.zig");
@@ -48,14 +49,12 @@ pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.host_
 /// qjs compares the C function pointer (`js_function_hasInstance`, 41379).
 /// Same identity as `isDefaultHasInstanceRecord` without the runtime table.
 pub inline fn recordIsDefaultHasInstance(record: *const core.host_function.InternalRecord) bool {
-    const nf = record.native_function orelse return false;
-    return switch (nf) {
-        .generic => |ptr| ptr == defaultHasInstanceNative,
-        else => false,
-    };
+    return record.target == default_has_instance_target;
 }
 
-const defaultHasInstanceNative: core.host_function.NativeGenericFn = &functionHasInstance;
+/// NB2: the comptime adapter is memoized per declaration, so the table's
+/// `[Symbol.hasInstance]` entry and this constant share one thunk pointer.
+const default_has_instance_target = native_legacy.entryFromInternal(functionHasInstanceEntry()).target;
 
 /// Declaration + dispatch table for the `.function` native-builtin domain
 /// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
@@ -84,7 +83,7 @@ fn functionHasInstanceEntry() core.host_function.InternalEntry {
         .magic = 0,
         .cproto = .generic,
         .native_function = .{ .generic = &functionHasInstance },
-        .exec_direct = builtin_dispatch.execDirectFunction(&functionHasInstanceDirect),
+        .managed = &functionHasInstanceDirect,
     };
 }
 
@@ -95,51 +94,60 @@ fn functionHasInstanceEntry() core.host_function.InternalEntry {
 /// set and the direct ABI requires the exact `HostError` surface.
 fn functionHasInstanceDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
-    return builtin_dispatch.nativeFromHostResult(
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
+    return builtin_dispatch.hostResultToValue(
         ctx,
-        global,
         call_runtime.functionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame),
     );
 }
 
 fn functionCallDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
-    return builtin_dispatch.nativeFromHostResult(
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
+    return builtin_dispatch.hostResultToValue(
         ctx,
-        global,
         call_runtime.functionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame),
     );
 }
 
 fn functionApplyDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
-    return builtin_dispatch.nativeFromHostResult(
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
+    return builtin_dispatch.hostResultToValue(
         ctx,
-        global,
         call_runtime.functionApplyCall(ctx, output, global, this_value, args, caller_function, caller_frame),
     );
 }
@@ -190,17 +198,17 @@ fn functionCallEntry() core.host_function.InternalEntry {
         // NB2-B: same shape as apply — the body consumes only the direct-ABI
         // parameter set, so the non-forwarding dispatch paths (e.g.
         // `fastNativeMethodCall`) skip the environment round-trip too.
-        .exec_direct = builtin_dispatch.execDirectFunction(&functionCallDirect),
+        .managed = &functionCallDirect,
     };
 }
 
 /// qjs:41392 `JS_CFUNC_MAGIC_DEF("apply", 2, js_function_apply, 0)`: apply is
 /// a dedicated C function in qjs, not a selector into a shared body. Mirror
 /// that with its own record handler so the hot apply path skips the
-/// `functionCall` magic switch. `forwards_call` stays false: apply
-/// materializes its own argument list, and `op_call_method`'s fused-frame
-/// forwarding arm (vm_call.zig `nativeMethodFastDispatch` miss gate) is built
-/// only for Function.prototype.call's argv+1 forwarding.
+/// `functionCall` magic switch. `forwards_call` routes it, like `call`, to
+/// `op_call_method`'s window-rewrite arms (design §5.4): the VM tells the two
+/// apart by `apply_entry_target`, spreads a dense argument list into the
+/// operand window itself, and leaves every other array-like to this body.
 fn functionApplyEntry() core.host_function.InternalEntry {
     const id = @intFromEnum(PrototypeMethod.apply);
     return .{
@@ -208,6 +216,7 @@ fn functionApplyEntry() core.host_function.InternalEntry {
         .length = 2,
         .id = id,
         .magic = @intCast(id),
+        .forwards_call = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&functionApplyRecord),
         // NB2-B (qjs:17563 `js_call_c_function` has no env side-channel):
@@ -215,7 +224,7 @@ fn functionApplyEntry() core.host_function.InternalEntry {
         // hot record dispatch skips the NativeCallEnvironment stores and the
         // `active_native_call` save/set/restore. `functionApplyRecord` stays
         // as the env-path shim for any dispatcher that still owns one.
-        .exec_direct = builtin_dispatch.execDirectFunction(&functionApplyDirect),
+        .managed = &functionApplyDirect,
     };
 }
 
@@ -241,7 +250,24 @@ test "Function.call has a dedicated native record handler" {
     return error.TestUnexpectedResult;
 }
 
-test "Function.apply has a dedicated non-forwarding native record handler" {
+/// NB2 §5.4: identity of the two forwarding entries for the VM's window-rewrite
+/// arms -- the target code pointer, exactly qjs's `js_function_call` /
+/// `js_function_apply` C-pointer identity (the `default_has_instance_target`
+/// precedent), never the name. The comptime adapter is memoized per
+/// declaration, so the realm's table entry and these constants share one
+/// pointer.
+pub const call_entry_target = native_legacy.entryFromInternal(functionCallEntry()).target;
+pub const apply_entry_target = native_legacy.entryFromInternal(functionApplyEntry()).target;
+
+test "call/apply entry identity is the target code pointer" {
+    try std.testing.expect(call_entry_target != apply_entry_target);
+    try std.testing.expect(call_entry_target != default_has_instance_target);
+    try std.testing.expect(apply_entry_target != default_has_instance_target);
+    try std.testing.expect(@intFromPtr(call_entry_target) == @intFromPtr(&functionCallDirect));
+    try std.testing.expect(@intFromPtr(apply_entry_target) == @intFromPtr(&functionApplyDirect));
+}
+
+test "Function.apply has a dedicated forwarding native record handler" {
     var apply_handler: ?core.host_function.NativeGenericMagicFn = null;
     for (internal_entries) |entry| {
         if (entry.id == @intFromEnum(PrototypeMethod.apply)) {
@@ -256,15 +282,14 @@ test "Function.apply has a dedicated non-forwarding native record handler" {
     try std.testing.expect(apply_handler.? == &functionApplyRecord);
     for (internal_entries) |entry| {
         if (entry.id == @intFromEnum(PrototypeMethod.apply)) {
-            // apply must NOT route into op_call_method's fused-frame
-            // forwarding arm, which only implements Function.prototype.call.
-            try std.testing.expect(!entry.forwards_call);
+            // apply takes op_call_method's forwarding branch (design §5.4);
+            // the VM's apply arm is selected by `apply_entry_target`.
+            try std.testing.expect(entry.forwards_call);
             // NB2-B: the hot record dispatch must take the exec-direct ABI
             // (no NativeCallEnvironment round-trip) straight into the flat
             // apply body.
-            try std.testing.expect(entry.exec_direct != null);
-            try std.testing.expect(entry.exec_direct.? ==
-                builtin_dispatch.execDirectFunction(&functionApplyDirect));
+            try std.testing.expect(entry.managed != null);
+            try std.testing.expect(entry.managed.? == &functionApplyDirect);
             return;
         }
     }

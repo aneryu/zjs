@@ -51,6 +51,8 @@ pub const opcode = struct {
         atom_label_u8,
         atom_label_u16,
         label_u16,
+        /// `argc:u16` + `cache_idx:u8` (call family; see opcode_logical.zig).
+        npop_u8,
     };
 
     /// Phase-1 scope operand flag: the LHS reference has already selected its
@@ -1917,12 +1919,27 @@ pub const opcode = struct {
                 @setEvalBranchQuota(200000);
                 var sel = ShortSelection{ .burned = .{ null, null, null, null }, .byte = null };
                 const fam = logical.familyOf(wide);
+                // Carrier residents have no layout row and no ladder.
+                const wlay = layout_table[@intFromEnum(wide)] orelse return sel;
                 for (@typeInfo(logical.LogicalOpcode).@"enum".fields) |f| {
                     const form: logical.LogicalOpcode = @enumFromInt(f.value);
                     if (form == wide or logical.familyOf(form) != fam) continue;
                     if (f.value >= 300) continue; // final forms only
                     const lay = layout_table[f.value] orelse continue;
-                    if (lay.len != 1) continue;
+                    // The short variant narrows or burns in the LEADING
+                    // operand only; any trailing operands (the call family's
+                    // `cache_idx` byte) must be carried unchanged, so a
+                    // candidate whose tail differs from the wide row is not
+                    // a rung of this ladder.
+                    if (lay.len != wlay.len or lay.len == 0) continue;
+                    var tail_matches = true;
+                    for (1..lay.len) |i| {
+                        const a = lay.slots[i];
+                        const b = wlay.slots[i];
+                        if (a.kind != b.kind or a.offset == null or b.offset == null or a.width != b.width)
+                            tail_matches = false;
+                    }
+                    if (!tail_matches) continue;
                     const slot = lay.slots[0];
                     if (slot.offset == null) {
                         // burned variant
@@ -2677,8 +2694,10 @@ pub const opcode = struct {
         try std.testing.expectEqual(@as(u8, 0), nPopOf(op.push_i32));
         try std.testing.expectEqual(@as(u8, 1), nPushOf(op.push_i32));
 
-        try std.testing.expectEqual(Format.npop, formatOf(op.call));
-        try std.testing.expectEqual(@as(u8, 3), sizeOf(op.call));
+        try std.testing.expectEqual(Format.npop_u8, formatOf(op.call));
+        try std.testing.expectEqual(@as(u8, 4), sizeOf(op.call));
+        try std.testing.expectEqual(Format.npopx, formatOf(op.call2));
+        try std.testing.expectEqual(@as(u8, 2), sizeOf(op.call2));
         try std.testing.expectEqual(@as(u8, 1), nPopOf(op.call));
         try std.testing.expectEqual(@as(u8, 1), nPushOf(op.call));
 
@@ -2774,8 +2793,11 @@ pub const format = struct {
             .u16 => .{ .operands = &.{.u16} },
             .i16 => .{ .operands = &.{.i16} },
             .label16 => .{ .operands = &.{.label} },
-            .npop, .npopx => .{ .operands = &.{.npop} },
+            .npop => .{ .operands = &.{.npop} },
+            // call0..3: the count is burned in; the one byte is the cache index.
+            .npopx => .{ .operands = &.{.u8} },
             .npop_u16 => .{ .operands = &.{ .npop, .u16 } },
+            .npop_u8 => .{ .operands = &.{ .npop, .u8 } },
             .loc => .{ .operands = &.{.local} },
             .arg => .{ .operands = &.{.argument} },
             .var_ref => .{ .operands = &.{.var_ref} },
@@ -2995,14 +3017,10 @@ pub const module = struct {
             self.import_attributes = &.{};
             self.has_top_level_await = false;
 
-            for (imports) |_| {
-            }
-            for (exports) |_| {
-            }
-            for (indirect_exports) |_| {
-            }
-            for (import_attributes) |_| {
-            }
+            for (imports) |_| {}
+            for (exports) |_| {}
+            for (indirect_exports) |_| {}
+            for (import_attributes) |_| {}
             if (requests.len != 0) self.memory.free(Request, requests);
             if (imports.len != 0) self.memory.free(Import, imports);
             if (exports.len != 0) self.memory.free(Export, exports);
@@ -3491,6 +3509,29 @@ pub const function_bytecode = struct {
         }
     };
 
+    /// Per-call-site feedback slot (native-boundary design 5.5 / 15 R10).
+    /// `entry` / `handler` are opaque here; the quickening lane retypes them.
+    /// Not a GC edge: nothing in a slot is a heap object, so no tracer visits
+    /// the array. Storage is the `call_sites` FAM tail of the owning
+    /// FunctionBytecode, zero-initialised with it and freed with it.
+    pub const CallSiteCache = extern struct {
+        entry: ?*const anyopaque = null,
+        handler: ?*const anyopaque = null,
+        misses: u8 = 0,
+        state: u8 = @intFromEnum(State.empty),
+        _pad: [6]u8 = .{0} ** 6,
+
+        pub const State = enum(u8) { empty, mono, mega };
+
+        /// The operand value that means "this site has no cache slot".
+        pub const no_cache_idx: u8 = 255;
+
+        comptime {
+            std.debug.assert(@sizeOf(@This()) == 24);
+            std.debug.assert(@alignOf(@This()) == 8);
+        }
+    };
+
     /// Hot zjs-only state placed immediately after the exact code bytes. Code
     /// has byte alignment, so canonical access must use `*align(1)`. The
     /// execution snapshot is two bytes; explicit padding preserves the
@@ -3507,7 +3548,16 @@ pub const function_bytecode = struct {
         /// Stable ScriptOrModule identity used as the dynamic-import referrer.
         script_or_module: atom.Atom,
         ctor_alloc: CtorAllocProfile = .{},
-        _ctor_alloc_pad: [48]u8 = @splat(0),
+        /// small_inline owns bytes 0..24 (CallerState pointer, borrowed
+        /// realm word, apply-forward memo byte).
+        _ctor_alloc_pad: [32]u8 = @splat(0),
+        /// Call-site cache slots: `call_site_count` entries at the aligned
+        /// `call_sites` FAM tail behind this extension (null when zero).
+        /// Written once by `FunctionLayout.seedHeader`; the layout re-reads
+        /// `call_site_count` to size the allocation on teardown.
+        call_sites: ?[*]function_bytecode.CallSiteCache = null,
+        call_site_count: u16 = 0,
+        _call_sites_pad: [6]u8 = @splat(0),
 
         comptime {
             std.debug.assert(@sizeOf(@This()) == 64);
@@ -3516,6 +3566,8 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "_call_facts_padding") == 0x02);
             std.debug.assert(@offsetOf(@This(), "script_or_module") == 0x04);
             std.debug.assert(@offsetOf(@This(), "ctor_alloc") == 0x08);
+            std.debug.assert(@offsetOf(@This(), "call_sites") == 0x30);
+            std.debug.assert(@offsetOf(@This(), "call_site_count") == 0x38);
         }
     };
 
@@ -4119,6 +4171,24 @@ pub const function_bytecode = struct {
             return self.filenameAtom();
         }
 
+        /// Number of call-site cache slots (0 for fixtures, legacy adapters
+        /// and functions without an extension tail).
+        pub inline fn callSiteCount(self: *const FunctionBytecodeImpl) u16 {
+            const hot = self.hotExtension() orelse return 0;
+            return hot.call_site_count;
+        }
+
+        /// The cache slot a call instruction's `cache_idx` operand names, or
+        /// null for the no-cache index (255) and for indices past the
+        /// function's slot count (fixture streams carry placeholder bytes).
+        pub inline fn callSiteCache(self: *const FunctionBytecodeImpl, idx: u8) ?*function_bytecode.CallSiteCache {
+            if (idx == function_bytecode.CallSiteCache.no_cache_idx) return null;
+            const hot = self.hotExtension() orelse return null;
+            if (idx >= hot.call_site_count) return null;
+            const sites = hot.call_sites orelse return null;
+            return &sites[idx];
+        }
+
         fn createRaw(
             account: *memory.MemoryAccount,
             layout_value: function_bytecode.FunctionLayout,
@@ -4165,6 +4235,9 @@ pub const function_bytecode = struct {
             has_extension: bool = true,
             filename: atom.Atom = atom.null_atom,
             script_or_module: atom.Atom = atom.null_atom,
+            /// Call-site cache slots to allocate (fixture streams carry
+            /// whatever `cache_idx` bytes the test wrote).
+            call_site_count: u16 = 0,
         };
 
         /// Fixture-only constructor. It uses the same packed FAM topology as
@@ -4181,6 +4254,7 @@ pub const function_bytecode = struct {
                 options.var_count,
                 options.closure_var_count,
                 options.byte_code.len,
+                options.call_site_count,
             );
             const fb = try createRaw(&rt.memory, layout_value);
             var raw_owned = true;
@@ -4443,12 +4517,18 @@ pub const function_bytecode = struct {
         var_count: usize,
         closure_var_count: usize,
         byte_code_len: usize,
+        /// Call-site cache slots (<= 255; requires `has_extension`).
+        call_site_count: usize,
         cpool_off: usize,
         vardefs_off: usize,
         closure_var_off: usize,
         byte_code_off: usize,
         byte_code_end: usize,
         hot_off: ?usize,
+        /// Aligned start of the `CallSiteCache` array, or null when there
+        /// are no slots. Sits behind the hot extension so every QuickJS core
+        /// offset and the extension's exact-code_end placement are untouched.
+        call_sites_off: ?usize,
         total_size: usize,
 
         pub fn init(
@@ -4459,10 +4539,13 @@ pub const function_bytecode = struct {
             var_count: usize,
             closure_var_count: usize,
             byte_code_len: usize,
+            call_site_count: usize,
         ) error{BytecodeOverflow}!@This() {
             if (arg_count > std.math.maxInt(u16) or var_count > std.math.maxInt(u16) or
                 cpool_count > std.math.maxInt(i32) or closure_var_count > std.math.maxInt(i32) or
-                byte_code_len > std.math.maxInt(i32))
+                byte_code_len > std.math.maxInt(i32) or
+                call_site_count > function_bytecode.CallSiteCache.no_cache_idx or
+                (call_site_count != 0 and !has_extension))
             {
                 return error.BytecodeOverflow;
             }
@@ -4477,10 +4560,18 @@ pub const function_bytecode = struct {
             const byte_code_off = std.math.add(usize, closure_var_off, closure_bytes) catch return error.BytecodeOverflow;
             const byte_code_end = std.math.add(usize, byte_code_off, byte_code_len) catch return error.BytecodeOverflow;
             const hot_off: ?usize = if (has_extension) byte_code_end else null;
-            const total_size = if (hot_off) |offset|
+            const hot_end = if (hot_off) |offset|
                 std.math.add(usize, offset, @sizeOf(FunctionBytecodeHotExtension)) catch return error.BytecodeOverflow
             else
                 byte_code_end;
+            const call_sites_off: ?usize = if (call_site_count != 0)
+                std.mem.alignForward(usize, hot_end, @alignOf(function_bytecode.CallSiteCache))
+            else
+                null;
+            const total_size = if (call_sites_off) |offset|
+                std.math.add(usize, offset, call_site_count * @sizeOf(function_bytecode.CallSiteCache)) catch return error.BytecodeOverflow
+            else
+                hot_end;
 
             // The pinned QuickJS order is naturally aligned for both supported
             // JSValue representations; padding there would be a layout bug.
@@ -4497,19 +4588,26 @@ pub const function_bytecode = struct {
                 .var_count = var_count,
                 .closure_var_count = closure_var_count,
                 .byte_code_len = byte_code_len,
+                .call_site_count = call_site_count,
                 .cpool_off = cpool_off,
                 .vardefs_off = vardefs_off,
                 .closure_var_off = closure_var_off,
                 .byte_code_off = byte_code_off,
                 .byte_code_end = byte_code_end,
                 .hot_off = hot_off,
+                .call_sites_off = call_sites_off,
                 .total_size = total_size,
             };
         }
 
         pub fn fromFunction(fb: *const FunctionBytecodeImpl) error{ InvalidBytecode, BytecodeOverflow }!@This() {
             if (fb.cpool_count < 0 or fb.closure_var_count < 0 or fb.byte_code_len < 0) return error.InvalidBytecode;
-            return init(
+            // The slot count lives in the extension, which sits at exact
+            // code_end -- locatable from the header fields alone, before
+            // the tail behind it is known. Read it through the slot-free
+            // layout rather than `hotExtension()`: the empty-code arm of
+            // that accessor comes back through `layout()`.
+            const base = try init(
                 fb.hasDebug(),
                 fb.hasExtension(),
                 @intCast(fb.cpool_count),
@@ -4517,6 +4615,21 @@ pub const function_bytecode = struct {
                 fb.var_count,
                 @intCast(fb.closure_var_count),
                 @intCast(fb.byte_code_len),
+                0,
+            );
+            const hot_off = base.hot_off orelse return base;
+            const bytes: [*]const u8 = @ptrCast(fb);
+            const hot: *align(1) const FunctionBytecodeHotExtension = @ptrCast(bytes + hot_off);
+            if (hot.call_site_count == 0) return base;
+            return init(
+                base.has_debug,
+                base.has_extension,
+                base.cpool_count,
+                base.arg_count,
+                base.var_count,
+                base.closure_var_count,
+                base.byte_code_len,
+                hot.call_site_count,
             );
         }
 
@@ -4544,6 +4657,11 @@ pub const function_bytecode = struct {
             return packedSlice(fb, u8, self.byte_code_off, self.byte_code_len, self.total_size);
         }
 
+        pub fn callSitesSliceMut(self: @This(), fb: *FunctionBytecodeImpl) []function_bytecode.CallSiteCache {
+            const offset = self.call_sites_off orelse return &.{};
+            return packedSlice(fb, function_bytecode.CallSiteCache, offset, self.call_site_count, self.total_size);
+        }
+
         fn hotExtensionPtrMut(self: @This(), fb: *FunctionBytecodeImpl) ?*align(1) FunctionBytecodeHotExtension {
             const offset = self.hot_off orelse return null;
             const bytes: [*]u8 = @ptrCast(fb);
@@ -4564,6 +4682,11 @@ pub const function_bytecode = struct {
             fb.vardefs = if (vardefs.len == 0) null else vardefs.ptr;
             fb.closure_var = if (closure_var.len == 0) null else closure_var.ptr;
             fb.byte_code = if (byte_code.len == 0) null else byte_code.ptr;
+            if (self.hotExtensionPtrMut(fb)) |hot| {
+                const sites = self.callSitesSliceMut(fb);
+                hot.call_site_count = @intCast(self.call_site_count);
+                hot.call_sites = if (sites.len == 0) null else sites.ptr;
+            }
         }
 
         fn restoreSizing(self: @This(), fb: *FunctionBytecodeImpl) void {
@@ -5602,8 +5725,7 @@ pub const function_def = struct {
         pub fn truncateAtomOperands(self: *FunctionDefImpl, target_len: usize) void {
             std.debug.assert(target_len <= self.atom_operands.len);
             var i: usize = target_len;
-            while (i < self.atom_operands.len) : (i += 1) {
-            }
+            while (i < self.atom_operands.len) : (i += 1) {}
             self.atom_operands = self.atom_operands.ptr[0..target_len];
         }
 
@@ -6933,7 +7055,7 @@ pub const binding_rules = struct {
             opcode.op.scope_get_private_field, opcode.op.scope_get_private_field2 => switch (res.var_kind) {
                 .private_field => accessor_size + 1 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field2)),
                 .private_method => accessor_size + 1 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field)),
-                .private_getter, .private_getter_setter => accessor_size + 4 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field2)),
+                .private_getter, .private_getter_setter => accessor_size + 5 + @as(usize, @intFromBool(op_id == opcode.op.scope_get_private_field2)),
                 .private_setter => throw_error_instr_size,
                 else => return error.ClosureVarNotFound,
             },
@@ -6942,7 +7064,7 @@ pub const binding_rules = struct {
                 .private_method, .private_getter => throw_error_instr_size,
                 .private_setter, .private_getter_setter => blk: {
                     const setter = resolvePrivateSetter(ctx, atom_id, scope_level) orelse return error.ClosureVarNotFound;
-                    break :blk privateAccessorSize(ctx, setter) + 9;
+                    break :blk privateAccessorSize(ctx, setter) + 10;
                 },
                 else => return error.ClosureVarNotFound,
             },
@@ -6961,9 +7083,16 @@ pub const binding_rules = struct {
     }
 
     fn writePrivateCallMethodZero(output: []u8, out_idx: *usize) void {
+        writePrivateCallMethod(output, out_idx, 0);
+    }
+
+    /// Phase-1 `call_method argc idx`: the cache index is a placeholder here;
+    /// `resolve_labels` assigns the real one when it writes the final form.
+    fn writePrivateCallMethod(output: []u8, out_idx: *usize, argc: u16) void {
         output[out_idx.*] = opcode.op.call_method;
-        std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], 0, .little);
-        out_idx.* += 3;
+        std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], argc, .little);
+        output[out_idx.* + 3] = 0;
+        out_idx.* += 4;
     }
 
     fn writeLoweredPrivateField(
@@ -7029,9 +7158,7 @@ pub const binding_rules = struct {
                     out_idx.* += 1;
                     output[out_idx.*] = opcode.op.rot3l;
                     out_idx.* += 1;
-                    output[out_idx.*] = opcode.op.call_method;
-                    std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], 1, .little);
-                    out_idx.* += 3;
+                    writePrivateCallMethod(output, out_idx, 1);
                     output[out_idx.*] = opcode.op.drop;
                     out_idx.* += 1;
                 },
@@ -9752,8 +9879,8 @@ pub const pipeline_stack_size = struct {
     test "stack_size: indexed method call QuickJS shape is strict-computable" {
         const op = opcode.op;
 
-        // get_var obj ; get_var key ; get_array_el2 ; get_var arg ; call_method 1 ; drop ; return_undef
-        var bc = [_]u8{0} ** 15;
+        // get_var obj ; get_var key ; get_array_el2 ; get_var arg ; call_method 1 idx ; drop ; return_undef
+        var bc = [_]u8{0} ** 16;
         bc[0] = op.get_var;
         std.mem.writeInt(u16, bc[1..3], 0, .little);
         bc[3] = op.get_var;
@@ -9763,8 +9890,9 @@ pub const pipeline_stack_size = struct {
         std.mem.writeInt(u16, bc[8..10], 2, .little);
         bc[10] = op.call_method;
         std.mem.writeInt(u16, bc[11..13], 1, .little);
-        bc[13] = op.drop;
-        bc[14] = op.return_undef;
+        bc[13] = 255;
+        bc[14] = op.drop;
+        bc[15] = op.return_undef;
 
         const result = try compute(&bc, .{});
         try std.testing.expectEqual(@as(u16, 3), result);
@@ -9828,7 +9956,7 @@ pub const pipeline_stack_size = struct {
         const op = opcode.op;
 
         // push_this ; special_object home ; get_super ; push_atom_value x ;
-        // get_array_el ; tail_call_method 0
+        // get_array_el ; tail_call_method 0 idx
         var bc = [_]u8{0} ** 16;
         bc[0] = op.push_this;
         bc[1] = op.special_object;
@@ -9838,8 +9966,9 @@ pub const pipeline_stack_size = struct {
         bc[9] = op.get_array_el;
         bc[10] = op.tail_call_method;
         std.mem.writeInt(u16, bc[11..13], 0, .little);
+        bc[13] = 255;
 
-        const result = try compute(bc[0..13], .{});
+        const result = try compute(bc[0..14], .{});
         try std.testing.expectEqual(@as(u16, 3), result);
     }
 
@@ -9895,10 +10024,10 @@ pub const pipeline_stack_size = struct {
         const op = opcode.op;
 
         // set_loc_uninitialized this ; init_ctor ; put_loc_check_init this ;
-        // get_var_ref_check <class_fields_init> ; dup ; if_false8 8 ;
-        // get_loc_check this ; swap ; call_method 0 ; drop ;
+        // get_var_ref_check <class_fields_init> ; dup ; if_false8 9 ;
+        // get_loc_check this ; swap ; call_method 0 idx ; drop ;
         // get_loc_checkthis this ; return
-        var bc = [_]u8{0} ** 25;
+        var bc = [_]u8{0} ** 26;
         bc[0] = op.set_loc_uninitialized;
         std.mem.writeInt(u16, bc[1..3], 0, .little);
         bc[3] = op.init_ctor;
@@ -9908,16 +10037,17 @@ pub const pipeline_stack_size = struct {
         std.mem.writeInt(u16, bc[8..10], 0, .little);
         bc[10] = op.dup;
         bc[11] = op.if_false8;
-        bc[12] = 8;
+        bc[12] = 9;
         bc[13] = op.get_loc_check;
         std.mem.writeInt(u16, bc[14..16], 0, .little);
         bc[16] = op.swap;
         bc[17] = op.call_method;
         std.mem.writeInt(u16, bc[18..20], 0, .little);
-        bc[20] = op.drop;
-        bc[21] = op.get_loc_checkthis;
-        std.mem.writeInt(u16, bc[22..24], 0, .little);
-        bc[24] = op.@"return";
+        bc[20] = 255;
+        bc[21] = op.drop;
+        bc[22] = op.get_loc_checkthis;
+        std.mem.writeInt(u16, bc[23..25], 0, .little);
+        bc[25] = op.@"return";
 
         const result = try compute(&bc, .{});
         try std.testing.expectEqual(@as(u16, 2), result);
@@ -10443,6 +10573,7 @@ pub const pipeline_finalize = struct {
             fd.vars.len,
             fd.closure_var.len,
             lowered.code.len,
+            lowered.call_site_count,
         );
 
         // Every fallible artifact allocation happens before owner commit.
@@ -10880,8 +11011,7 @@ pub const pipeline_finalize = struct {
             const value = JSValue.functionBytecode(&fb.header);
             const old_value = parent.cpool[idx];
             parent.cpool[idx] = value;
-            if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {
-            }
+            if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {}
         }
     }
 
@@ -11039,6 +11169,10 @@ const function_mod = struct {
         owns_pc2line_buf: bool = false,
         source_loc_slots: []pipeline_pc2line.SourceLocSlot = &.{},
         source_loc_capacity: usize = 0,
+        /// Call-site cache slots the final code addresses (resolve_labels
+        /// assigns `cache_idx` operands 0.. in emission order; sites past
+        /// 255 carry the no-cache index). Sizes the FunctionBytecode tail.
+        call_site_count: u16 = 0,
         flags: Flags = .{},
         entry_contract: EntryContract = .{},
         /// Precomputed bytecode-only half of simple inline-call eligibility.
@@ -11494,8 +11628,7 @@ const function_mod = struct {
         pub fn truncateAtomOperands(self: *BytecodeImpl, target_len: usize) void {
             std.debug.assert(target_len <= self.atom_operands.len);
             var i: usize = target_len;
-            while (i < self.atom_operands.len) : (i += 1) {
-            }
+            while (i < self.atom_operands.len) : (i += 1) {}
             self.atom_operands = self.atom_operands.ptr[0..target_len];
         }
 
@@ -11909,6 +12042,7 @@ const bytecode_dump = dump;
 pub const Bytecode = function_mod.Bytecode;
 pub const FunctionBytecode = function_bytecode.FunctionBytecode;
 pub const FunctionLayout = function_bytecode.FunctionLayout;
+pub const CallSiteCache = function_bytecode.CallSiteCache;
 pub const CallFacts = function_bytecode.CallFacts;
 pub const legacy_byte_code_len_sentinel = function_bytecode.legacy_byte_code_len_sentinel;
 pub const LegacyExecutionAdapter = function_mod.LegacyExecutionAdapter;

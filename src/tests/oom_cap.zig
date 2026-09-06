@@ -133,18 +133,16 @@ const ExhaustState = struct {
     snapshot: usize = 0,
     window_allocations: ?usize = null,
 
-    fn exhaust(ptr: *anyopaque, call: zjs.ExternalHostCall) anyerror!core.JSValue {
-        _ = call;
-        const self: *ExhaustState = @ptrCast(@alignCast(ptr));
+    fn exhaust(call: *zjs.native.Call) core.JSValue {
+        const self = call.state(ExhaustState);
         self.snapshot = self.counting.success_count;
         // Freeze the heap: every further accounted allocation fails.
         self.rt.memory.setLimit(self.rt.memory.allocated_bytes);
         return core.JSValue.undefinedValue();
     }
 
-    fn report(ptr: *anyopaque, call: zjs.ExternalHostCall) anyerror!core.JSValue {
-        _ = call;
-        const self: *ExhaustState = @ptrCast(@alignCast(ptr));
+    fn report(call: *zjs.native.Call) core.JSValue {
+        const self = call.state(ExhaustState);
         self.window_allocations = self.counting.success_count - self.snapshot;
         self.rt.memory.setLimit(null);
         return core.JSValue.undefinedValue();
@@ -160,8 +158,8 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     var wrapper = BindingContext.borrowCore(ctx);
 
     var state = ExhaustState{ .rt = rt, .counting = &counting };
-    try wrapper.defineGlobalFunction("__exhaust", 0, &state, ExhaustState.exhaust, null);
-    try wrapper.defineGlobalFunction("__report", 0, &state, ExhaustState.report, null);
+    _ = try wrapper.defineFunction("__exhaust", zjs.native.managed(ExhaustState.exhaust), .{ .state = @ptrCast(&state) });
+    _ = try wrapper.defineFunction("__report", zjs.native.managed(ExhaustState.report), .{ .state = @ptrCast(&state) });
 
     // Phase 1 (normal memory): compile the probe up front so phase 2 runs
     // without parsing.

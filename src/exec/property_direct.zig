@@ -177,7 +177,7 @@ pub fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom
         if (cursor.hasExoticMethods()) return .slow;
         if (cursor.isArray()) {
             if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
-        } else if (cursor.class_id != core.class.ids.object and !cursor.isGlobal()) return .slow;
+        } else if (cursor.class_id != core.class.ids.object and !cursor.isGlobal() and !cursor.flags.is_native_object) return .slow;
         if (cursor.findProperty(atom_id)) |index| {
             return switch (cursor.propKindAt(index)) {
                 .data => .{ .value = cursor.propertyEntry(index).*.slot.data },

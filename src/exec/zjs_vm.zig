@@ -99,6 +99,15 @@ pub fn runWithOutput(
 /// constructor (Object, Array, String, ..., 43 specs and ~362
 /// methods) plus generic host helpers such as `print` and `console`;
 /// keeping it cached avoids paying that cost on every eval call.
+/// Register-only fast arm of `contextGlobal` for the embedder call path: a
+/// live context's global needs no bootstrap check.
+pub inline fn contextGlobalFast(ctx: *core.JSContext) !*core.Object {
+    if (ctx.global) |existing| {
+        if (ctx.isLive()) return existing;
+    }
+    return contextGlobal(ctx);
+}
+
 pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     if (ctx.global) |existing| {
         if (!ctx.isLive()) try ctx.publishLive();
@@ -566,7 +575,7 @@ fn runWithArgsState(
     }
 
     while (true) {
-        return runTC(&machine) catch |err| {
+        runTC(&machine) catch |err| {
             // The error escaped the current frame without an in-frame
             // handler. Unwind suspended inline frames (mirroring how the
             // error would propagate through the recursive call chain) and
@@ -574,6 +583,7 @@ fn runWithArgsState(
             if (machine.depth > 0 and try machine.unwindForError(global, err)) continue;
             return err;
         };
+        return machine.vm.return_value;
     }
 }
 
@@ -683,35 +693,24 @@ noinline fn initFreshEntryFrame(
     try vm_call.initFrameVarRefs(ctx, global, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
 }
 
-/// Tail-call dispatcher entry: build the hot `Vm` caches from the Machine's
-/// single current-level seam and run the handler chain.
-fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
+/// Tail-call dispatcher entry: publish the Machine's current level into its
+/// resident `Vm` (native-boundary design section 6.2) and run the handler
+/// chain. Only the per-level fields are written here; `ctx/rt/global/output`
+/// and the resident handler tables were set when the Machine was created or
+/// re-targeted, and outcome/property payloads are published by their
+/// consumers before being read.
+fn runTC(m: *inline_calls.Machine) HostError!void {
     const level = m.currentLevel();
     const func = level.function();
-    const rt = m.ctx.runtime;
-    var vm = tailcall_dispatch.Vm{
-        .ctx = m.ctx,
-        .rt = rt,
-        .function = func,
-        .global = m.global,
-        .frame = level.frame,
-        .stack = level.stack,
-        .machine = m,
-        .output = m.output,
-        .code_base = func.byteCode().ptr,
-        .catch_target = level.catch_target,
-        // Every consumer publishes these outcome/property payloads before
-        // reading them. Avoid clearing cold scratch fields at each driver
-        // entry, which is especially visible for short native callbacks.
-        .property_atom = undefined,
-        .local_fast_blocked = undefined,
-        .return_value = undefined,
-        .return_action = undefined,
-        .return_payload = undefined,
-        .pending_error = undefined,
-        .tail_mode = undefined,
-    };
-    return tailcall_dispatch.runDispatchLoop(&vm);
+    const vm = &m.vm;
+    std.debug.assert(vm.ctx == m.ctx and vm.rt == m.ctx.runtime and vm.global == m.global);
+    vm.machine = m;
+    vm.function = func;
+    vm.frame = level.frame;
+    vm.stack = level.stack;
+    vm.code_base = func.byteCode().ptr;
+    vm.catch_target = level.catch_target;
+    return tailcall_dispatch.runDispatchLoop(vm);
 }
 
 /// Drive a callback Entry on an already-active Machine until its
@@ -722,14 +721,34 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
 pub fn runActiveInvocationUntilNativeBoundary(
     invocation: *inline_calls.ActiveInvocation,
     scope: *const inline_calls.NativeBoundaryScope,
-) HostError!core.JSValue {
+) HostError!void {
     const machine = invocation.machine;
     std.debug.assert(machine.depth > scope.fence_depth);
-    const result = runTC(machine) catch |err|
+    runTC(machine) catch |err|
         return runActiveInvocationAfterNativeBoundaryError(machine, scope, err);
     std.debug.assert(machine.depth == scope.fence_depth);
-    std.debug.assert(machine.top == scope.view.bottom_exclusive);
-    return result;
+    std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
+}
+
+/// `runActiveInvocationUntilNativeBoundary` for an Entry the caller just
+/// pushed: the per-level fields are published from the pusher's registers
+/// instead of being re-derived through the Machine.
+pub inline fn runPushedEntryUntilNativeBoundary(
+    invocation: *inline_calls.ActiveInvocation,
+    scope: *const inline_calls.NativeBoundaryScope,
+    entry: *inline_calls.Entry,
+    target: *const inline_calls.InlineTarget,
+) HostError!void {
+    const machine = invocation.machine;
+    std.debug.assert(machine.depth > scope.fence_depth);
+    const vm = &machine.vm;
+    std.debug.assert(vm.ctx == machine.ctx and vm.rt == machine.ctx.runtime and vm.global == machine.global);
+    vm.publishPushedEntry(machine, entry, target);
+    // A fresh frame starts at pc 0: the first opcode is at `code_base`.
+    tailcall_dispatch.runDispatchLoopPublished(vm, vm.code_base) catch |err|
+        return runActiveInvocationAfterNativeBoundaryError(machine, scope, err);
+    std.debug.assert(machine.depth == scope.fence_depth);
+    std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
 }
 
 /// Callback throws are uncommon but require the complete bounded-unwind loop.
@@ -739,7 +758,7 @@ noinline fn runActiveInvocationAfterNativeBoundaryError(
     machine: *inline_calls.Machine,
     scope: *const inline_calls.NativeBoundaryScope,
     initial_err: HostError,
-) HostError!core.JSValue {
+) HostError!void {
     var pending_err = initial_err;
     while (true) {
         if (machine.depth <= scope.fence_depth or
@@ -750,16 +769,16 @@ noinline fn runActiveInvocationAfterNativeBoundaryError(
             ))
         {
             std.debug.assert(machine.depth == scope.fence_depth);
-            std.debug.assert(machine.top == scope.view.bottom_exclusive);
+            std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
             return pending_err;
         }
-        const result = runTC(machine) catch |err| {
+        runTC(machine) catch |err| {
             pending_err = err;
             continue;
         };
         std.debug.assert(machine.depth == scope.fence_depth);
-        std.debug.assert(machine.top == scope.view.bottom_exclusive);
-        return result;
+        std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
+        return;
     }
 }
 

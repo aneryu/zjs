@@ -77,25 +77,50 @@ pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     // fresh global whose context has not adopted it yet, so no Realm-dependent
     // host placeholder may be published before this call.
     try rt.installStandardGlobals(global);
-    const output_external_id = try registerOutputExternalHostFunction(rt);
-    try definePredefinedExternalHostFunction(rt, global, "print", hostFunctionLength(.output), output_external_id);
+    try definePredefinedHostEntryFunction(rt, global, "print", 1, &output_host_entry);
     try defineGlobalThisProperty(rt, global);
     try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
     try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
     try global.defineOwnPropertyAssumingNew(rt, core.atom.ids.undefined_, core.Descriptor.data(core.JSValue.undefinedValue(), false, false, false));
 
-    try defineConsoleObject(rt, global, output_external_id);
+    try defineConsoleObject(rt, global, &output_host_entry);
 }
 
-fn defineConsoleObject(rt: *core.JSRuntime, global: *core.Object, output_external_id: u32) !void {
+fn defineConsoleObject(rt: *core.JSRuntime, global: *core.Object, entry: *const core.NativeEntry) !void {
     const key = predefinedStringAtom("console");
     try global.defineConsoleAutoInitProperty(
         rt,
         key,
         core.property.Flags.data(true, true, true),
-        core.host_function.ids.external_host,
-        output_external_id,
+        core.host_function.ids.output,
+        entry,
     );
+}
+
+/// NB2: `print` and `console.log/warn/error` share one static managed entry.
+/// The host output writer is the active invocation's (`vmCallerView`), so
+/// no registry, no per-runtime record, no environment.
+pub const output_host_entry: core.NativeEntry = .{
+    .target = core.NativeEntry.code(&outputHostThunk),
+    .kind = .managed,
+    .arity = 1,
+};
+
+fn outputHostThunk(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    argv: [*]const core.JSValue,
+    argc: u32,
+    entry: *const core.NativeEntry,
+    func_obj: ?*core.Object,
+) callconv(.c) core.JSValue {
+    _ = this_value;
+    _ = entry;
+    _ = func_obj;
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const result = hostOutputValues(ctx, global, builtin_dispatch.vmCallerView(ctx).output, argv[0..argc]) catch |err|
+        return builtin_dispatch.hostErrorToValue(ctx, global, err);
+    return result;
 }
 
 pub fn callValue(
@@ -267,13 +292,11 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
 }
 
 // Engine-internal host callables dispatched by id. Host/embedder native
-// functions never extend this enum: they go through the `external_host`
-// id + per-runtime `ExternalRecord` registry (see docs/api-boundary.md).
+// functions never extend this enum: they are `NativeEntry`s (zjs.native).
 // The id values are frozen; gaps left by the deleted legacy qjs:std/qjs:os
 // cluster stay unused.
 pub const HostFunction = enum(i32) {
     output = core.host_function.ids.output,
-    external_host = core.host_function.ids.external_host,
 };
 
 const HostCallFlags = struct {
@@ -296,15 +319,11 @@ const HostFunctionRecord = struct {
     call: HostNativeFn,
 };
 
-const max_host_function_id = @max(
-    @intFromEnum(HostFunction.output),
-    @intFromEnum(HostFunction.external_host),
-);
+const max_host_function_id = @intFromEnum(HostFunction.output);
 
 const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = records: {
     var records = [_]?HostFunctionRecord{null} ** (max_host_function_id + 1);
     records[@intFromEnum(HostFunction.output)] = .{ .length = 1, .call = hostCallOutput };
-    records[@intFromEnum(HostFunction.external_host)] = .{ .length = 0, .call = hostCallExternalHostFunction };
     break :records records;
 };
 
@@ -357,10 +376,6 @@ fn callHostFunction(
     };
 }
 
-fn hostCallExternalHostFunction(call: HostCall) HostError!core.JSValue {
-    return builtin_dispatch.callExternalHostRecord(call.realm.realm, call.output, call.realm.global, call.func_obj, call.this_value, call.args);
-}
-
 pub fn callHostFunctionObjectForVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -377,31 +392,26 @@ pub fn callHostFunctionObjectForVm(
 }
 
 fn hostFunctionCanDispatchFromVmWithoutGlobals(kind: i32) bool {
-    return switch (kind) {
-        @intFromEnum(HostFunction.output),
-        @intFromEnum(HostFunction.external_host),
-        => true,
-        else => false,
-    };
+    return kind == @intFromEnum(HostFunction.output);
 }
 
-fn definePredefinedExternalHostFunction(
+fn definePredefinedHostEntryFunction(
     rt: *core.JSRuntime,
     target: *core.Object,
     comptime name: []const u8,
     length: i32,
-    external_id: u32,
+    entry: *const core.NativeEntry,
 ) !void {
-    try target.defineHostAutoInitPropertyWithExternalId(
+    try target.defineHostAutoInitPropertyWithEntry(
         rt,
         predefinedStringAtom(name),
         name,
         length,
         core.property.Flags.data(true, true, true),
-        core.host_function.ids.external_host,
+        core.host_function.ids.output,
         false,
         null,
-        external_id,
+        entry,
     );
 }
 
@@ -2220,25 +2230,6 @@ fn hostOutputValues(
             return exception_ops.throwHostError(ctx, global, err);
     }
     return core.JSValue.undefinedValue();
-}
-
-var output_external_host_context: u8 = 0;
-
-fn registerOutputExternalHostFunction(rt: *core.JSRuntime) !u32 {
-    for (rt.external_host_functions, 0..) |record, index| {
-        if (record.ptr == @as(*anyopaque, @ptrCast(&output_external_host_context)) and record.call == externalHostOutput) {
-            return @intCast(index + 1);
-        }
-    }
-    return rt.registerExternalHostFunction(.{
-        .ptr = @ptrCast(&output_external_host_context),
-        .call = externalHostOutput,
-    });
-}
-
-fn externalHostOutput(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
-    const global = call.realm.global orelse return error.InvalidBuiltinRegistry;
-    return hostOutputValues(call.realm, global, call.output, call.args);
 }
 
 fn hostCallOutput(call: HostCall) HostError!core.JSValue {

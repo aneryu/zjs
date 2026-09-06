@@ -33,6 +33,7 @@ from measure_fields import single_cpu  # noqa: E402
 
 CASES = ["empty", "ctrl",
          "N1_abs_hoisted", "N1m_abs_method", "N2_max3_variadic", "N3_charcodeat",
+         "N3b_charat", "N3c_at", "N3d_codepointat",
          "N4_hasown_string", "N5_push_pop", "N6_fcall", "N7_fapply",
          "C1_foreach8", "C2_reduce8", "C3_map8", "C4_sort8", "C5_replace_fn"]
 # crossings per loop iteration (JS->native call or native->JS callback)

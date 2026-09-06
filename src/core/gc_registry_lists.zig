@@ -202,7 +202,6 @@ pub fn verifyCircularHeaderList(
     return count;
 }
 
-
 /// The Registry's list cursors.
 pub const Lists = struct {
     // qjs `rt->gc_obj_list`. Call `init` after the Registry reaches its

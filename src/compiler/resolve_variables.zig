@@ -68,7 +68,6 @@ pub const ResolvedProduct = struct {
     /// Idempotent, and `deinitUncommitted` remains correct whether or not this
     /// ran.
     pub fn releaseConsumedStreams(self: *ResolvedProduct) void {
-
         if (self.code_capacity != 0) self.memory.free(u8, self.code);
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
         if (self.source_capacity != 0) self.memory.free(builder.SourceSlot, self.source_slots);
@@ -87,7 +86,6 @@ pub const ResolvedProduct = struct {
     /// Item-wise release of the owned atom prefix, then free each backing by
     /// full capacity. Idempotent. Mirrors Builder.deinit discipline.
     pub fn deinitUncommitted(self: *ResolvedProduct) void {
-
         if (self.code_capacity != 0) self.memory.free(u8, self.code);
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
         if (self.label_capacity != 0) self.memory.free(labels.LabelSlot, self.label_slots);

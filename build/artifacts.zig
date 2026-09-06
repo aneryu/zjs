@@ -3,10 +3,6 @@ const config = @import("config.zig");
 
 pub const Artifacts = struct {
     engine_mod: *std.Build.Module,
-    runtime_plugin_fixture: *std.Build.Step.Compile,
-    install_runtime_plugin_fixture: *std.Build.Step.InstallArtifact,
-    runtime_empty_plugin_fixture: *std.Build.Step.Compile,
-    install_runtime_empty_plugin_fixture: *std.Build.Step.InstallArtifact,
     internal_fast_mod: *std.Build.Module,
     zjs_exe: *std.Build.Step.Compile,
     install_zjs: *std.Build.Step.InstallArtifact,
@@ -39,54 +35,6 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
-
-    // Separate options object (not a reuse of engine_options) so the same
-    // generated file is not registered under two module names; follows
-    // -Doptimize like the fixture modules themselves.
-    const plugin_fixture_options = addEngineOptions(b, engine_option_inputs);
-    const plugin_fixture_zjs_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    plugin_fixture_zjs_mod.addOptions("build_options", plugin_fixture_options);
-    const runtime_plugin_fixture_mod = b.createModule(.{
-        .root_source_file = b.path("tests/fixtures/runtime_plugin_fixture.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zjs", .module = plugin_fixture_zjs_mod },
-        },
-    });
-    const runtime_plugin_fixture = b.addLibrary(.{
-        .name = "zjs-runtime-plugin-fixture",
-        .linkage = .dynamic,
-        .root_module = runtime_plugin_fixture_mod,
-    });
-    forceLlvmBackendOnDebug(runtime_plugin_fixture);
-    const install_runtime_plugin_fixture = b.addInstallArtifact(runtime_plugin_fixture, .{
-        .dest_dir = .{ .override = .lib },
-    });
-    const runtime_empty_plugin_fixture_mod = b.createModule(.{
-        .root_source_file = b.path("tests/fixtures/runtime_empty_plugin_fixture.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zjs", .module = plugin_fixture_zjs_mod },
-        },
-    });
-    const runtime_empty_plugin_fixture = b.addLibrary(.{
-        .name = "zjs-runtime-empty-plugin-fixture",
-        .linkage = .dynamic,
-        .root_module = runtime_empty_plugin_fixture_mod,
-    });
-    forceLlvmBackendOnDebug(runtime_empty_plugin_fixture);
-    const install_runtime_empty_plugin_fixture = b.addInstallArtifact(runtime_empty_plugin_fixture, .{
-        .dest_dir = .{ .override = .lib },
-    });
 
     const internal_fast_mod = b.createModule(.{
         .root_source_file = b.path("src/internal_root.zig"),
@@ -252,10 +200,6 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
 
     return .{
         .engine_mod = engine_mod,
-        .runtime_plugin_fixture = runtime_plugin_fixture,
-        .install_runtime_plugin_fixture = install_runtime_plugin_fixture,
-        .runtime_empty_plugin_fixture = runtime_empty_plugin_fixture,
-        .install_runtime_empty_plugin_fixture = install_runtime_empty_plugin_fixture,
         .internal_fast_mod = internal_fast_mod,
         .zjs_exe = zjs_exe,
         .install_zjs = install_zjs,

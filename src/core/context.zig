@@ -191,11 +191,6 @@ pub const ContextEvalOptions = struct {
 
 pub const EvalOptions = ContextEvalOptions;
 
-pub const ExternalFunctionOptions = struct {
-    with_prototype: bool = false,
-    realm_global: ?*Object = null,
-};
-
 pub const DataPropertyOptions = struct {
     writable: bool = true,
     enumerable: bool = true,

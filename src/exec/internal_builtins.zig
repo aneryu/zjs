@@ -33,10 +33,11 @@ const regexp = @import("regexp_ops.zig");
 const string = @import("string_builtin_ops.zig");
 const uri = @import("uri_ops.zig");
 
+const native_legacy = @import("native_legacy.zig");
 const InternalEntry = core.host_function.InternalEntry;
-const InternalRecord = core.host_function.InternalRecord;
-const InternalRecordTable = core.host_function.InternalRecordTable;
-const SparseInternalRecord = core.host_function.SparseInternalRecord;
+const InternalRecord = core.NativeEntry;
+const InternalRecordTable = core.native_entry.EntryTable;
+const SparseInternalRecord = core.native_entry.SparseEntry;
 const NativeBuiltinDomain = core.function.NativeBuiltinDomain;
 
 const domain_count = count: {
@@ -47,28 +48,10 @@ const domain_count = count: {
     break :count max_value + 1;
 };
 
+/// NB2 A2: every declaration becomes a `NativeEntry` through the one
+/// comptime adapter (validation lives there).
 fn checkedRecord(comptime entry: InternalEntry) InternalRecord {
-    const native_function = entry.native_function orelse @compileError("native cproto entry missing function: " ++ entry.name);
-    if (std.meta.activeTag(native_function) != entry.cproto) {
-        @compileError("native function tag does not match cproto: " ++ entry.name);
-    }
-    if (entry.fallback_function != null and entry.cproto != .f_f and entry.cproto != .f_f_f) {
-        @compileError("only numeric cproto entries may set a coercion fallback: " ++ entry.name);
-    }
-    // The exec-direct ABI carries no is_constructor/new_target channel;
-    // construct-capable records must keep the environment path.
-    if (entry.exec_direct != null and core.host_function.isConstructorCProto(entry.cproto)) {
-        @compileError("construct-capable entries may not set exec_direct: " ++ entry.name);
-    }
-    return .{
-        .length = entry.length,
-        .magic = entry.magic,
-        .forwards_call = entry.forwards_call,
-        .cproto = entry.cproto,
-        .native_function = entry.native_function,
-        .fallback_function = entry.fallback_function,
-        .exec_direct = entry.exec_direct,
-    };
+    return native_legacy.entryFromInternal(entry);
 }
 
 fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
@@ -76,7 +59,7 @@ fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
         // Validation plus one occupancy scan is linear in the static entry
         // count, but larger domains legitimately exceed Zig's tiny default
         // comptime quota while checking every tagged function record.
-        @setEvalBranchQuota(10_000);
+        @setEvalBranchQuota(400_000);
         if (entries.len == 0) return .{};
 
         var max_id: u32 = 0;
@@ -113,7 +96,7 @@ fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
             }
         }
 
-        var dense = [_]InternalRecord{.{}} ** dense_len;
+        var dense = [_]InternalRecord{core.native_entry.retired_entry} ** dense_len;
         var sparse: [sparse_count]SparseInternalRecord = undefined;
         var sparse_index: usize = 0;
         for (entries) |entry| {
@@ -121,7 +104,7 @@ fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
             if (entry.id < dense_len) {
                 dense[entry.id] = record;
             } else {
-                sparse[sparse_index] = .{ .id = entry.id, .record = record };
+                sparse[sparse_index] = .{ .id = entry.id, .entry = record };
                 sparse_index += 1;
             }
         }
@@ -250,9 +233,8 @@ test "Promise.resolve has an internal record handler" {
     const records = table[@intFromEnum(NativeBuiltinDomain.promise)];
     const resolve_id = @intFromEnum(core.host_function.builtin_method_ids.promise.LegacyStaticMethod.resolve);
     const record = records.get(resolve_id) orelse return error.TestUnexpectedResult;
-    try testing.expect(record.native_function != null);
-    try testing.expectEqual(core.host_function.NativeCProto.generic_magic, record.cproto);
-    try testing.expectEqual(record.cproto, std.meta.activeTag(record.native_function.?));
+    try testing.expectEqual(core.native_entry.Kind.managed, record.kind);
+    try testing.expect(record.flags.needs_env);
 }
 
 test "Object constructor has a constructor-or-function internal record handler" {
@@ -260,29 +242,23 @@ test "Object constructor has a constructor-or-function internal record handler" 
     const records = table[@intFromEnum(NativeBuiltinDomain.object)];
     const call_id = @intFromEnum(core.host_function.builtin_method_ids.object.ConstructorMethod.call);
     const record = records.get(call_id) orelse return error.TestUnexpectedResult;
-    try testing.expect(record.native_function != null);
     try testing.expect(record.isConstructor());
-    try testing.expectEqual(core.host_function.NativeCProto.constructor_or_func_magic, record.cproto);
-    try testing.expectEqual(record.cproto, std.meta.activeTag(record.native_function.?));
+    try testing.expectEqual(core.native_entry.Kind.constructor_or_func, record.kind);
 }
 
-test "every occupied standard native record has one matching typed payload" {
+test "every occupied standard native entry is a well-formed NativeEntry" {
     const testing = std.testing;
     for (table) |records| {
         for (records.dense) |record| {
-            const native = record.native_function orelse continue;
-            try testing.expectEqual(record.cproto, std.meta.activeTag(native));
-            if (record.fallback_function != null) {
-                try testing.expect(record.cproto == .f_f or record.cproto == .f_f_f);
-            }
+            if (record.kind == .retired) continue;
+            try testing.expect(record.fallback == null or record.kind == .leaf or record.kind == .method_leaf);
+            if (record.kind == .leaf or record.kind == .method_leaf) try testing.expect(record.sig != 0);
+            if (record.kind == .method_leaf) try testing.expect(record.fallback != null);
         }
         for (records.sparse) |entry| {
-            const record = entry.record;
-            const native = record.native_function orelse return error.TestUnexpectedResult;
-            try testing.expectEqual(record.cproto, std.meta.activeTag(native));
-            if (record.fallback_function != null) {
-                try testing.expect(record.cproto == .f_f or record.cproto == .f_f_f);
-            }
+            const record = entry.entry;
+            try testing.expect(record.kind != .retired);
+            try testing.expect(record.fallback == null or record.kind == .leaf or record.kind == .method_leaf);
         }
     }
 }

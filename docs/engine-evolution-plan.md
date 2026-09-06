@@ -50,7 +50,8 @@ baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 trac
   [fun-native-plugin-design.md](fun-native-plugin-design.md)
   (FNABI v0.6)——§9.1 的 NativeCallDescriptor 与
   FNABI 的 `NativeCallPlan` 统一为单一 schema;runtime-plugin-abi.md
-  已 deprecated。
+  已 deprecated(2026-08-25)并于 2026-09-06 随 NB2 A3 删除,现行公开面为
+  `zjs.native`(docs/public-api-contract.md)。
 
 ---
 
@@ -789,9 +790,11 @@ unwind。
 
 ### 9.1 NativeCallDescriptor(并行轨,可自 Phase 1 起)
 
-基于 `src/binding/ffi.zig` 既有描述符扩展。**对齐目标修订
-(2026-08-25)**:原对齐对象 runtime-plugin-abi.md 已 deprecated
-(2026-08-25),改对齐
+原基于 `src/binding/ffi.zig` 既有描述符扩展;该文件与
+runtime-plugin-abi.md 已于 2026-09-06(NB2 A3)删除,描述符的落地形态是
+`src/core/native_entry.zig` 的 `NativeEntry`(docs/perf/native-boundary-design.md
+§3.1)。**对齐目标修订(2026-08-25)**:原对齐对象 runtime-plugin-abi.md
+已 deprecated(2026-08-25),改对齐
 [fun-native-plugin-design.md](fun-native-plugin-design.md) §15.2;
 FNABI 裁决(2026-08-25)要求 `NativeCallPlan` 与本描述符统一为
 **单一 schema**;FNABI 里程碑已拆分(roadmap v1.7):M1A 不依赖

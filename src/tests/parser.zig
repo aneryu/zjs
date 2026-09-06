@@ -3294,7 +3294,7 @@ test "F4: optional length call consumer preserves get_field2 and its atom operan
         op.call_method,
     });
     try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
-    try std.testing.expectEqual(@as(usize, 18), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
     try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 11));
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 15));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
@@ -3463,13 +3463,94 @@ test "F4: tagged template on member access obj.tag`hello` rewrites to call_metho
     try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 29));
 }
 
+test "call-site cache: every final call instruction carries a cache_idx and the function owns one slot per site" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    // call0 / call1 / call (argc 5) / call_method / call2 + return: five
+    // sites, indices 0..4 in emission order.
+    var fn_bc = try parseExprWithTopLevelChildren(&env, "(function f(a, b) { g(); g(1); g(1, 2, 3, 4, 5); o.m(); return h(a, b); })");
+    defer fn_bc.deinit(env.rt);
+    const child = try expectFunctionConstant(fn_bc, 0);
+    try std.testing.expectEqual(@as(u16, 5), child.callSiteCount());
+
+    const code = child.byteCode();
+    var pc: usize = 0;
+    var seen: [5]bool = @splat(false);
+    var sites: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
+        const idx_at: ?usize = switch (code[pc]) {
+            op.call0, op.call1, op.call2, op.call3 => pc + 1,
+            op.call, op.tail_call, op.call_method, op.tail_call_method, op.call_method_apply_fwd => pc + 3,
+            else => null,
+        };
+        if (idx_at) |at| {
+            const idx = code[at];
+            try std.testing.expect(idx < 5);
+            try std.testing.expect(!seen[idx]);
+            seen[idx] = true;
+            sites += 1;
+            // The slot the operand names is the idx'th entry of the tail.
+            const slot = child.callSiteCache(idx) orelse return error.TestExpectedEqual;
+            try std.testing.expectEqual(@intFromPtr(child.callSiteCache(0).?) + @as(usize, idx) * @sizeOf(engine.bytecode.CallSiteCache), @intFromPtr(slot));
+            try std.testing.expect(slot.entry == null and slot.handler == null);
+            try std.testing.expectEqual(@as(u8, 0), slot.misses);
+            try std.testing.expectEqual(@intFromEnum(engine.bytecode.CallSiteCache.State.empty), slot.state);
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, 5), sites);
+    // Out of range and the no-cache index resolve to no slot.
+    try std.testing.expect(child.callSiteCache(5) == null);
+    try std.testing.expect(child.callSiteCache(engine.bytecode.CallSiteCache.no_cache_idx) == null);
+    // The root expression (`fclosure` + return) has no call of its own.
+    try std.testing.expectEqual(@as(u16, 0), fn_bc.call_site_count);
+}
+
+test "call-site cache: sites past the 255-slot budget carry the no-cache index" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "(function f() {");
+    var n: usize = 0;
+    while (n < 300) : (n += 1) try source.appendSlice(std.testing.allocator, " g();");
+    try source.appendSlice(std.testing.allocator, " })");
+    var fn_bc = try parseExprWithTopLevelChildren(&env, source.items);
+    defer fn_bc.deinit(env.rt);
+    const child = try expectFunctionConstant(fn_bc, 0);
+    try std.testing.expectEqual(@as(u16, 255), child.callSiteCount());
+
+    const code = child.byteCode();
+    var pc: usize = 0;
+    var next: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
+        if (code[pc] == op.call0) {
+            const expected: u8 = if (next < 255) @intCast(next) else engine.bytecode.CallSiteCache.no_cache_idx;
+            try std.testing.expectEqual(expected, code[pc + 1]);
+            if (next < 255) {
+                try std.testing.expect(child.callSiteCache(code[pc + 1]) != null);
+            } else {
+                try std.testing.expect(child.callSiteCache(code[pc + 1]) == null);
+            }
+            next += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, 300), next);
+}
+
 test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "tag`a${x}b${y}c`");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.call3, fn_bc.code[fn_bc.code.len - 1]);
+    // `call3 idx`: the opcode sits before its cache-index byte.
+    try std.testing.expectEqual(op.call3, fn_bc.code[fn_bc.code.len - 2]);
 }
 
 test "F4: optional call without chain receiver a?.()(b) — chain only on first call" {
@@ -13569,7 +13650,6 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
             .exact_leaf => try std.testing.expectEqual(@as(usize, 0), window.state.function_def.child_list.len),
             .nested_function_bytecode => try std.testing.expect(window.state.function_def.child_list.len > 0),
         }
-
 
         try phase_ownership.expectB1(b1);
 

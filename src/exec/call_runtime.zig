@@ -25,7 +25,6 @@ const exception_ops = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const inline_calls = @import("inline_calls.zig");
-const host_invocation_mod = @import("host_invocation.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const vm_call = @import("vm_call.zig");
@@ -205,47 +204,6 @@ pub fn tryCatchInFrame(
     return true;
 }
 
-/// Embedder -> JS through the resident host invocation (P4, native-boundary
-/// plan). Returns null when the call cannot take the resident route (the
-/// callee is not an eligible plain bytecode function of the caller's own
-/// Realm); the caller then takes the authoritative root path. Nothing is
-/// published for a callee that would take the root path anyway. The
-/// interrupt poll happens here.
-pub fn callFromHost(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    func: core.JSValue,
-    args: []const core.JSValue,
-) HostError!?core.JSValue {
-    if (inline_calls.activeInvocation(ctx.runtime) != null) {
-        // Nested host -> JS from inside a running invocation (a host
-        // function called by JS calling back): the builtin-callback route,
-        // which itself falls back to the root path when ineligible.
-        return try callValueOrBytecodeSyncInternal(ctx, output, global, this_value, func, args, null, null);
-    }
-    // The resident machine runs under the caller's context; the root path
-    // switches to the callee's Realm, so only same-Realm callees qualify
-    // (resolveInlineFunction also rejects a callee whose Realm global is not
-    // `global`).
-    const ctx_global = ctx.global orelse return null;
-    if (ctx_global != global) return null;
-    const resolved = inline_calls.resolveInlineFunction(global, func) orelse return null;
-    const host = try host_invocation_mod.HostInvocation.acquire(ctx.runtime, ctx, output, global);
-    host.publish(ctx);
-    defer host.unpublish(ctx);
-    var route: SyncInlineRoute = .{
-        .invocation = &host.invocation,
-        .target = resolved.bind(this_value, func),
-    };
-    try exception_ops.pollInterrupt(ctx, global);
-    if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
-        return try runSyncInlineRouteCopiedArgs(&route, global, args);
-    }
-    return try runSyncInlineRouteOwnedCopy(&route, ctx, global, this_value, func, args);
-}
-
 pub fn callValueOrBytecodeRoot(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -344,7 +302,7 @@ pub fn callNativeBuiltinRecordForVm(
     // func-object-free synthetic record reuse can retain supplied legacy data.
     if (ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id)) |record| {
         if (function_object.class_id == core.class.ids.c_function) {
-            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, record.length);
+            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, record.arity);
             const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
             return try builtin_dispatch.callInternalRecordDirectInRealm(view, output, function_object, this_value, record, args, caller_function, caller_frame);
         }
@@ -540,112 +498,143 @@ inline fn resolveSyncInlineRoute(
     );
 }
 
+/// The native-boundary run helpers below take the invocation and the
+/// resolved target separately: `call_site.CallSite` keeps one immutable
+/// target per site and selects the Machine per call.
+/// `idle_machine`: the fence is an idle Machine (the resident host
+/// invocation), so the scope skips the outer dispatch-state snapshot.
 noinline fn runSyncInlineRouteMoved(
-    route: *SyncInlineRoute,
+    comptime idle_machine: bool,
+    invocation: *inline_calls.ActiveInvocation,
+    target: *const inline_calls.InlineTarget,
     global: *core.Object,
     moved_values: []core.JSValue,
-) HostError!core.JSValue {
-    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    out: *core.JSValue,
+) HostError!void {
+    var boundary = if (idle_machine)
+        inline_calls.NativeBoundaryScope.initIdle(invocation)
+    else
+        inline_calls.NativeBoundaryScope.init(invocation);
     boundary.push();
     errdefer boundary.deinit();
 
-    _ = try route.invocation.machine.pushMovedCall(
+    _ = try invocation.machine.pushMovedCall(
         global,
-        &route.target,
+        target,
         moved_values,
         .method,
         .native_boundary,
         0,
     );
     inline_calls.recordSameMachineSyncCall();
-    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    try zjs_vm.runActiveInvocationUntilNativeBoundary(invocation, &boundary);
     boundary.finish();
-    return result;
+    invocation.machine.vm.takeNativeReturnInto(out);
 }
 
-inline fn runSyncInlineRouteCopiedArgs(
-    route: *SyncInlineRoute,
+/// `lean`: the site's pre-built lean frame (`inline_calls.LeanFrame`), tried
+/// first; a miss (reentrant site, budget, arena) takes the generic push.
+pub inline fn runSyncInlineRouteCopiedArgs(
+    comptime fixed_argc: ?usize,
+    comptime idle_machine: bool,
+    invocation: *inline_calls.ActiveInvocation,
+    target: *const inline_calls.InlineTarget,
     global: *core.Object,
+    this_value: *const core.JSValue,
     args: []const core.JSValue,
-) HostError!core.JSValue {
-    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
-    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    lean: ?*inline_calls.LeanFrame,
+    out: *core.JSValue,
+) HostError!void {
+    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(target));
+    var boundary = if (idle_machine)
+        inline_calls.NativeBoundaryScope.initIdle(invocation)
+    else
+        inline_calls.NativeBoundaryScope.init(invocation);
     boundary.push();
     errdefer boundary.deinit();
 
-    const machine = route.invocation.machine;
-    if (machine.tryPushNativeBoundaryCopiedArgsFast(
-        machine.ctx.runtime,
-        &route.target,
-        args,
-    ) == null) {
-        _ = (try machine.pushNativeBoundaryCopiedArgs(
-            global,
-            &route.target,
-            args,
-        )).?;
-    }
+    const machine = invocation.machine;
+    const rt = machine.ctx.runtime;
+    var lean_live: ?*inline_calls.LeanFrame = null;
+    defer if (lean_live) |frame| {
+        frame.in_use = false;
+    };
+    const entry = blk: {
+        if (lean) |frame| {
+            if (machine.pushLeanEntry(fixed_argc, rt, frame, this_value, args)) |entry| {
+                lean_live = frame;
+                break :blk entry;
+            }
+        }
+        break :blk machine.tryPushNativeBoundaryCopiedArgsFast(rt, target, args) orelse
+            (try machine.pushNativeBoundaryCopiedArgs(global, target, args)).?;
+    };
     inline_calls.recordSameMachineSyncCall();
-    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    try zjs_vm.runPushedEntryUntilNativeBoundary(invocation, &boundary, entry, target);
     boundary.finish();
-    return result;
+    machine.vm.takeNativeReturnInto(out);
 }
 
 noinline fn runSyncInlineRouteMovedArgs(
-    route: *SyncInlineRoute,
+    invocation: *inline_calls.ActiveInvocation,
+    target: *const inline_calls.InlineTarget,
     global: *core.Object,
     args: []core.JSValue,
-) HostError!core.JSValue {
-    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
-    var boundary = inline_calls.NativeBoundaryScope.init(route.invocation);
+    out: *core.JSValue,
+) HostError!void {
+    std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(target));
+    var boundary = inline_calls.NativeBoundaryScope.init(invocation);
     boundary.push();
     errdefer boundary.deinit();
 
-    const machine = route.invocation.machine;
-    if (machine.tryPushNativeBoundaryMovedArgsFast(
+    const machine = invocation.machine;
+    const entry = machine.tryPushNativeBoundaryMovedArgsFast(
         machine.ctx.runtime,
-        &route.target,
+        target,
         args,
-    ) == null) {
-        _ = (try machine.pushNativeBoundaryMovedArgs(
-            global,
-            &route.target,
-            args,
-        )).?;
-    }
+    ) orelse (try machine.pushNativeBoundaryMovedArgs(
+        global,
+        target,
+        args,
+    )).?;
     inline_calls.recordSameMachineSyncCall();
-    const result = try zjs_vm.runActiveInvocationUntilNativeBoundary(route.invocation, &boundary);
+    try zjs_vm.runPushedEntryUntilNativeBoundary(invocation, &boundary, entry, target);
     boundary.finish();
-    return result;
+    machine.vm.takeNativeReturnInto(out);
 }
 
-noinline fn runSyncInlineRouteOwnedCopy(
-    route: *SyncInlineRoute,
+pub noinline fn runSyncInlineRouteOwnedCopy(
+    comptime idle_machine: bool,
+    invocation: *inline_calls.ActiveInvocation,
+    target: *const inline_calls.InlineTarget,
     ctx: *core.JSContext,
     global: *core.Object,
     this_value: core.JSValue,
     func: core.JSValue,
     args: []const core.JSValue,
-) HostError!core.JSValue {
+    out: *core.JSValue,
+) HostError!void {
     var owned_args = OwnedArgList{};
     try owned_args.init(ctx.runtime, this_value, func, args);
     defer owned_args.deinit();
-    return runSyncInlineRouteMoved(route, global, owned_args.values);
+    return runSyncInlineRouteMoved(idle_machine, invocation, target, global, owned_args.values, out);
 }
 
 noinline fn runSyncInlineRouteOwnedArgsGeneral(
-    route: *SyncInlineRoute,
+    invocation: *inline_calls.ActiveInvocation,
+    target: *const inline_calls.InlineTarget,
     ctx: *core.JSContext,
     global: *core.Object,
     this_value: core.JSValue,
     func: core.JSValue,
     args: []core.JSValue,
-) HostError!core.JSValue {
-    std.debug.assert(!inline_calls.Machine.nativeBoundarySimpleEligible(&route.target));
+    out: *core.JSValue,
+) HostError!void {
+    std.debug.assert(!inline_calls.Machine.nativeBoundarySimpleEligible(target));
     var owned_args = OwnedArgList{};
     try owned_args.initTakeArgs(ctx.runtime, this_value, func, args);
     defer owned_args.deinit();
-    return runSyncInlineRouteMoved(route, global, owned_args.values);
+    return runSyncInlineRouteMoved(false, invocation, target, global, owned_args.values, out);
 }
 
 /// Explicit synchronous internal call boundary for native algorithms that
@@ -684,17 +673,23 @@ pub inline fn callValueOrBytecodeSyncInternal(
             true,
         );
 
+    var out: core.JSValue = undefined;
     if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
-        return runSyncInlineRouteCopiedArgs(&route, global, args);
+        try runSyncInlineRouteCopiedArgs(null, false, route.invocation, &route.target, global, &route.target.this_value, args, null, &out);
+        return out;
     }
-    return runSyncInlineRouteOwnedCopy(
-        &route,
+    try runSyncInlineRouteOwnedCopy(
+        false,
+        route.invocation,
+        &route.target,
         ctx,
         global,
         this_value,
         func,
         args,
+        &out,
     );
+    return out;
 }
 
 /// Loop-callback adapter for the same explicit synchronous contract. Keeping
@@ -724,131 +719,6 @@ pub noinline fn callValueOrBytecodeSyncInternalOutlined(
         caller_frame,
     );
 }
-
-/// A stack-local adapter for native algorithms that invoke one immutable
-/// callback repeatedly. QuickJS resolves the JSFunction record once from the
-/// callback value held by the native algorithm; mirror that lifetime here
-/// instead of rebuilding the wider InlineTarget on every iteration.
-///
-/// Call entry remains fully observable: every `call` polls interrupts and
-/// verifies that the invocation which prepared the route is still active.
-/// A site prepared outside bytecode execution, or used after an execution-root
-/// change, takes the authoritative root-call fallback unconditionally.
-pub const SyncInternalCallSite = struct {
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    func: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-    route: ?SyncInlineRoute,
-
-    pub inline fn init(
-        ctx: *core.JSContext,
-        output: ?*std.Io.Writer,
-        global: *core.Object,
-        this_value: core.JSValue,
-        func: core.JSValue,
-        caller_function: ?*const bytecode.FunctionBytecode,
-        caller_frame: ?*frame_mod.Frame,
-    ) SyncInternalCallSite {
-        var route: SyncInlineRoute = undefined;
-        return .{
-            .ctx = ctx,
-            .output = output,
-            .global = global,
-            .this_value = this_value,
-            .func = func,
-            .caller_function = caller_function,
-            .caller_frame = caller_frame,
-            .route = if (resolveSyncInlineRoute(
-                &route,
-                ctx,
-                output,
-                global,
-                this_value,
-                func,
-            )) route else null,
-        };
-    }
-
-    pub noinline fn call(
-        self: *SyncInternalCallSite,
-        args: []const core.JSValue,
-    ) HostError!core.JSValue {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
-
-        if (self.route) |*route| {
-            if (inline_calls.activeInvocation(self.ctx.runtime) == route.invocation) {
-                if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
-                    return runSyncInlineRouteCopiedArgs(route, self.global, args);
-                }
-                return runSyncInlineRouteOwnedCopy(
-                    route,
-                    self.ctx,
-                    self.global,
-                    self.this_value,
-                    self.func,
-                    args,
-                );
-            }
-        }
-        return callValueOrBytecodeDispatchAfterInterruptPoll(
-            self.ctx,
-            self.output,
-            self.global,
-            self.this_value,
-            self.func,
-            args,
-            self.caller_function,
-            self.caller_frame,
-            true,
-        );
-    }
-
-    /// Reuse the prepared callable route while supplying the receiver for this
-    /// invocation. Recursive native algorithms such as JSON reviver/replacer
-    /// walks keep one callback but change the holder used as `this` at every
-    /// step. The copied route is stack-local so nested/reentrant calls cannot
-    /// mutate the site's immutable template.
-    pub noinline fn callWithThis(
-        self: *SyncInternalCallSite,
-        this_value: core.JSValue,
-        args: []const core.JSValue,
-    ) HostError!core.JSValue {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
-
-        if (self.route) |template| {
-            if (inline_calls.activeInvocation(self.ctx.runtime) == template.invocation) {
-                var route = template;
-                route.target.this_value = this_value;
-                if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
-                    return runSyncInlineRouteCopiedArgs(&route, self.global, args);
-                }
-                return runSyncInlineRouteOwnedCopy(
-                    &route,
-                    self.ctx,
-                    self.global,
-                    this_value,
-                    self.func,
-                    args,
-                );
-            }
-        }
-        return callValueOrBytecodeDispatchAfterInterruptPoll(
-            self.ctx,
-            self.output,
-            self.global,
-            this_value,
-            self.func,
-            args,
-            self.caller_function,
-            self.caller_frame,
-            true,
-        );
-    }
-};
 
 /// Same synchronous routing contract as `callValueOrBytecodeSyncInternal`,
 /// but the caller supplies a rooted, owned argument list. Simple eligible
@@ -881,17 +751,22 @@ pub inline fn callOwnedArgsValueOrBytecodeSyncInternal(
             caller_frame,
             true,
         );
+    var out: core.JSValue = undefined;
     if (inline_calls.Machine.nativeBoundarySimpleEligible(&route.target)) {
-        return runSyncInlineRouteMovedArgs(&route, global, args);
+        try runSyncInlineRouteMovedArgs(route.invocation, &route.target, global, args, &out);
+        return out;
     }
-    return runSyncInlineRouteOwnedArgsGeneral(
-        &route,
+    try runSyncInlineRouteOwnedArgsGeneral(
+        route.invocation,
+        &route.target,
         ctx,
         global,
         this_value,
         func,
         args,
+        &out,
     );
+    return out;
 }
 
 /// Slow-path collection prototype methods reached by name without a baked
@@ -1070,7 +945,7 @@ noinline fn callNativeCallableObject(
     switch (vmNativeCallableDispatch(function_object)) {
         .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
         .resolved_record => |target| {
-            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, target.record.length);
+            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, target.record.arity);
             const view = try builtin_dispatch.CallRealmView.caller(target.realm);
             const native_result = builtin_dispatch.callInternalRecordDirectInRealm(
                 view,
@@ -1133,7 +1008,7 @@ fn callValueOrBytecodeDispatch(
     return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame, copy_argv);
 }
 
-fn callValueOrBytecodeDispatchAfterInterruptPoll(
+pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2494,7 +2369,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             defer prototype.deinit(ctx.runtime);
             return try object_ops.errorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
         }
-        if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
+        if (function_object.isHostEntryFunction()) {
             return constructExternalHostFunction(ctx, output, global, function_object, args, caller_function, caller_frame, new_target);
         }
         if (function_object.class_id == core.class.ids.c_function and !isBuiltinConstructorName(name)) return error.TypeError;
@@ -2551,7 +2426,8 @@ fn constructExternalHostFunction(
     if (!function_object.hasOwnProperty(core.atom.ids.prototype)) return error.TypeError;
     const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
 
-    const result = (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, instance, args)) orelse return error.TypeError;
+    const entry = function_object.nativeRecord() orelse return error.TypeError;
+    const result = try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, instance, entry, args, caller_function, caller_frame);
     if (result.isObject()) {
         return result;
     }
@@ -4682,7 +4558,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
         }
         if (function_object.class_id == core.class.ids.c_function_data) return false;
         if (function_object.flags.is_html_dda) return false;
-        if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
+        if (function_object.isHostEntryFunction()) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
         }
         if (function_object.class_id == core.class.ids.c_closure) return true;
@@ -4964,6 +4840,11 @@ pub fn callAccessorSetter(
     if (try object_ops.findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
         if (desc.kind != .accessor) return false;
         if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
+        // K3 native setter: direct native terminal (design §8.2).
+        if (builtin_dispatch.tryNativeAccessorCall(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame, .setter)) |native_result| {
+            _ = try native_result;
+            return true;
+        }
         _ = try callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
         return true;
     }

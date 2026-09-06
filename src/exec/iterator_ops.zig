@@ -18,6 +18,7 @@ const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
+const call_site_mod = @import("call_site.zig");
 const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
@@ -31,7 +32,7 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const IteratorZipError = exceptions.HostError;
-const SyncInternalCallSite = call_runtime.SyncInternalCallSite;
+const CallSite = call_site_mod.CallSite;
 pub const for_in_iterator_kind: u8 = 251;
 pub const Step = enum { done, continue_loop };
 
@@ -2231,7 +2232,7 @@ fn iteratorToArrayCall(
     const next_key = core.atom.ids.next;
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    var next_call = SyncInternalCallSite.init(
+    var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2271,7 +2272,7 @@ fn iteratorPredicateCall(
     const next_key = core.atom.ids.next;
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    var next_call = SyncInternalCallSite.init(
+    var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2280,7 +2281,7 @@ fn iteratorPredicateCall(
         caller_function,
         caller_frame,
     );
-    var callback_call = SyncInternalCallSite.init(
+    var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2339,7 +2340,7 @@ fn iteratorReduceCall(
     const next_key = core.atom.ids.next;
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    var next_call = SyncInternalCallSite.init(
+    var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2348,7 +2349,7 @@ fn iteratorReduceCall(
         caller_function,
         caller_frame,
     );
-    var callback_call = SyncInternalCallSite.init(
+    var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2398,7 +2399,7 @@ fn iteratorStepWithSyncCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    next_call: *SyncInternalCallSite,
+    next_call: *CallSite,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
@@ -2419,7 +2420,7 @@ fn iteratorStepWithSyncValues(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
-    var next_call = SyncInternalCallSite.init(
+    var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2825,7 +2826,7 @@ pub fn iteratorHelperNext(
         },
         .take => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
-            var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
             if ((helper.iteratorIndexSlot().*) == 0) {
                 try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
                 return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
@@ -2840,7 +2841,7 @@ pub fn iteratorHelperNext(
         },
         .drop => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
-            var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
             while ((helper.iteratorIndexSlot().*) > 0) : (helper.iteratorIndexSlot().* -= 1) {
                 const skipped = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 if (skipped.done) {
@@ -2858,8 +2859,8 @@ pub fn iteratorHelperNext(
         .map, .filter, .flatMap => {
             const next_method = helper.iteratorNext() orelse return error.TypeError;
             const callback = helper.iteratorCallback() orelse return error.TypeError;
-            var next_call = SyncInternalCallSite.init(ctx, output, global, iterator, next_method, caller_function, caller_frame);
-            var callback_call = SyncInternalCallSite.init(
+            var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            var callback_call = CallSite.initInternal(
                 ctx,
                 output,
                 global,

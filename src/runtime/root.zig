@@ -1,4 +1,4 @@
-//! Runtime integration for the event loop, native plugins, and host wakeups.
+//! Runtime integration for the event loop and host wakeups.
 const std = @import("std");
 const atomics_ops = @import("../exec/atomics_ops.zig");
 const core = @import("../core/root.zig");
@@ -6,14 +6,11 @@ const exec = @import("../exec/root.zig");
 const zjs = @import("../binding/root.zig");
 
 pub const event_loop = @import("event_loop.zig");
-pub const plugin = @import("plugin.zig");
 
 pub const EventLoop = event_loop.EventLoop;
 pub const EventLoopOptions = event_loop.Options;
 pub const EventLoopRunResult = event_loop.RunResult;
 pub const runUntilIdle = event_loop.runUntilIdle;
-pub const Plugin = plugin.Plugin;
-pub const PluginInstallOptions = plugin.InstallOptions;
 
 pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void {
     exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx.core);
@@ -72,7 +69,6 @@ pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []con
 
 test {
     _ = event_loop;
-    _ = plugin;
     _ = cleanupAtomicsWaitersForContext;
     _ = wakeAtomicsWaitersForRuntimes;
     _ = detachArrayBuffer;

@@ -5,10 +5,8 @@ const zjs = @import("zjs");
 const HostState = struct {
     value: i32,
 
-    fn call(ptr: *anyopaque, call_info: zjs.host.Call) anyerror!zjs.JSValue {
-        _ = call_info;
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        return zjs.JSValue.int32(self.value);
+    fn call(c: *zjs.native.Call) zjs.JSValue {
+        return zjs.JSValue.int32(c.state(HostState).value);
     }
 };
 
@@ -110,31 +108,88 @@ test "embedding cookbook host function example compiles and runs" {
     defer ctx.destroy();
 
     var state = HostState{ .value = 42 };
-    try ctx.defineGlobalFunction("hostValue", 0, &state, HostState.call, null);
+    _ = try ctx.defineFunction("hostValue", zjs.native.managed(HostState.call), .{ .state = @ptrCast(&state) });
 
     const result = try ctx.eval("hostValue()", .{});
     try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
-// Contract pin for the high-performance host hookup path: native functions
-// register through `zjs.host.Function`/`zjs.host.Call` (ExternalHostCallFn /
-// ExternalHostCall) into the per-runtime external-record registry and dispatch
-// by id, with no string lookup on the call path. This is the only supported
-// route for host/runtime capability hookup; the legacy qjs:std/qjs:os host
-// cluster was deleted (git history has it).
+// Cookbook: typed leaf functions. The VM marshals the primitives (exact
+// int32 / f64 tag checks, no ToObject, no coercion of objects) and the target
+// never sees a JSValue, never allocates and cannot throw; a tag miss throws a
+// TypeError at the call site before the target runs.
+const LeafExample = struct {
+    fn add(a: i32, b: i32) i32 {
+        return a +% b;
+    }
+
+    fn half(x: f64) f64 {
+        return x / 2;
+    }
+};
+
+const TickState = struct {
+    ticks: i64 = 0,
+    step: i32 = 1,
+
+    fn tick(self: *TickState, i: i32) i32 {
+        self.ticks += 1;
+        return i +% self.step;
+    }
+};
+
+test "embedding cookbook typed leaf example compiles and runs" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    _ = try ctx.defineFunction("add", zjs.native.leaf(LeafExample.add), .{});
+    _ = try ctx.defineFunction("half", zjs.native.leaf(LeafExample.half), .{});
+    var counter = TickState{ .step = 10 };
+    _ = try ctx.defineFunction("tick", zjs.native.leafWithState(TickState.tick), .{ .state = @ptrCast(&counter) });
+
+    const sum = try ctx.eval("add(40, 2)", .{});
+    try std.testing.expectEqual(@as(?i32, 42), sum.asInt32());
+    const arity = try ctx.eval("add.length", .{});
+    try std.testing.expectEqual(@as(?i32, 2), arity.asInt32());
+    const halved = try ctx.eval("half(5)", .{});
+    try std.testing.expectEqual(@as(?f64, 2.5), halved.asNumber());
+    const ticked = try ctx.eval("tick(1) + tick(2)", .{});
+    try std.testing.expectEqual(@as(?i32, 23), ticked.asInt32());
+    try std.testing.expectEqual(@as(i64, 2), counter.ticks);
+
+    // A non-int32 argument to an int32 leaf is a TypeError at the call site.
+    const miss = try ctx.eval(
+        \\var name = "none";
+        \\try { add("1", 2); } catch (e) { name = e.name; }
+        \\name;
+    , .{});
+    const miss_text = try ctx.toOwnedUtf8(miss, allocator);
+    defer allocator.free(miss_text);
+    try std.testing.expectEqualStrings("TypeError", miss_text);
+}
+
+// Contract pin for the high-performance host hookup path (NB2, design §9):
+// a native function is a `zjs.native.managed` thunk bound to one immutable
+// `NativeEntry`; the VM dispatches it exactly like a builtin, with no
+// registry, no string lookup and no per-call environment on the call path.
+// This is the only supported route for host/runtime capability hookup.
 const ContractHost = struct {
     factor: i32,
     calls: usize = 0,
     saw_object_this: bool = false,
     finalized: *bool,
 
-    fn call(ptr: *anyopaque, call_info: zjs.host.Call) anyerror!zjs.JSValue {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
+    fn call(c: *zjs.native.Call) anyerror!zjs.JSValue {
+        const self = c.state(ContractHost);
         self.calls += 1;
-        if (call_info.this_value.isObject()) self.saw_object_this = true;
-        if (call_info.args.len < 2) return error.TypeError;
-        const a = call_info.args[0].asInt32() orelse return error.TypeError;
-        const b = call_info.args[1].asInt32() orelse return error.TypeError;
+        if (c.this.isObject()) self.saw_object_this = true;
+        if (c.argc < 2) return error.TypeError;
+        const a = c.arg(0).asInt32() orelse return error.TypeError;
+        const b = c.arg(1).asInt32() orelse return error.TypeError;
         if (a < 0) return error.RangeError;
         return zjs.JSValue.int32(self.factor * (a + b));
     }
@@ -144,6 +199,74 @@ const ContractHost = struct {
         self.finalized.* = true;
     }
 };
+
+// Cookbook: a host that calls one JS function many times keeps a CallSite.
+// The target is resolved (and pinned) once; each call pays only the interrupt
+// poll, the frame push and the dispatch loop. Nested use from inside a host
+// function that JS called, a receiver override, a thrown exception and a
+// non-bytecode callee (bound function) all go through the same object.
+const CallSiteHost = struct {
+    site: *zjs.CallSite,
+    sum: i32 = 0,
+
+    fn call(c: *zjs.native.Call) anyerror!zjs.JSValue {
+        const self = c.state(CallSiteHost);
+        const result = try self.site.call1(c.arg(0));
+        self.sum += result.asInt32() orelse return error.TypeError;
+        return result;
+    }
+};
+
+test "embedding cookbook CallSite example resolves once and calls repeatedly" {
+    const allocator = std.testing.allocator;
+    const rt = try zjs.JSRuntime.create(allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const add_one = try ctx.eval("(function (x) { return x + 1; })", .{});
+    var site = try zjs.CallSite.init(ctx, add_one, .{});
+    defer site.deinit();
+
+    var total: i32 = 0;
+    var i: i32 = 0;
+    while (i < 1000) : (i += 1) {
+        const result = try site.call1(zjs.JSValue.int32(i));
+        total += result.asInt32() orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(i32, 500500), total);
+    const zero = try site.call0();
+    try std.testing.expect(std.math.isNan(zero.asNumber() orelse return error.TestUnexpectedResult));
+
+    // Nested: JS -> host function -> the same site -> JS.
+    var host = CallSiteHost{ .site = &site };
+    _ = try ctx.defineFunction("viaSite", zjs.native.managed(CallSiteHost.call), .{ .length = 1, .state = @ptrCast(&host) });
+    const nested = try ctx.eval("var s = 0; for (var k = 0; k < 10; k++) s += viaSite(k); s", .{});
+    try std.testing.expectEqual(@as(?i32, 55), nested.asInt32());
+    try std.testing.expectEqual(@as(i32, 55), host.sum);
+
+    // Receiver override and a JS exception surfacing as error.JSException.
+    const get_v = try ctx.eval("(function () { return this.v; })", .{});
+    var method_site = try zjs.CallSite.init(ctx, get_v, .{});
+    defer method_site.deinit();
+    const holder = try ctx.eval("({ v: 7 })", .{});
+    const seven = try method_site.callWithThis(holder, &.{});
+    try std.testing.expectEqual(@as(?i32, 7), seven.asInt32());
+    const thrower = try ctx.eval("(function () { throw new RangeError('boom'); })", .{});
+    var throw_site = try zjs.CallSite.init(ctx, thrower, .{});
+    defer throw_site.deinit();
+    try std.testing.expectError(error.JSException, throw_site.call0());
+    try std.testing.expect(try ctx.pendingExceptionMatchesErrorName("RangeError"));
+    _ = ctx.takePendingException();
+
+    // A non-bytecode callee takes the root path through the same API.
+    const bound = try ctx.eval("(function (a, b) { return a * b; }).bind(null, 6)", .{});
+    var bound_site = try zjs.CallSite.init(ctx, bound, .{});
+    defer bound_site.deinit();
+    const product = try bound_site.call1(zjs.JSValue.int32(7));
+    try std.testing.expectEqual(@as(?i32, 42), product.asInt32());
+}
 
 test "embedding external host function contract covers args, this, errors, and finalizer" {
     const allocator = std.testing.allocator;
@@ -157,7 +280,7 @@ test "embedding external host function contract covers args, this, errors, and f
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
-    try ctx.defineGlobalFunction("hostCombine", 2, &state, ContractHost.call, ContractHost.finalize);
+    _ = try ctx.defineFunction("hostCombine", zjs.native.managed(ContractHost.call), .{ .length = 2, .state = @ptrCast(&state), .finalize = ContractHost.finalize });
 
     // Scoped so every eval result is released before the teardown choreography
     // below asserts on runtime/context destruction order.
@@ -338,38 +461,13 @@ test "embedding public NativeBinding failed realm install leaves binding absent"
     try std.testing.expect(binding_a.payload(value_b) == null);
 }
 
-test "embedding public runtime Plugin failed install preserves target properties" {
-    const allocator = std.testing.allocator;
-    const fixture_path = try testFixturePath(allocator, build_options.runtime_plugin_fixture_path);
-    defer allocator.free(fixture_path);
-
-    var plugin = try zjs.runtime.Plugin.load(allocator, fixture_path);
-    defer plugin.deinit();
-
-    const rt = try zjs.JSRuntime.create(allocator);
-    defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const target = try ctx.createObject();
-    try ctx.defineDataProperty(target, "add", zjs.JSValue.int32(1), .{});
-
-    try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(ctx.core, target, .{}));
-    try std.testing.expect(plugin.consumed);
-    try std.testing.expect(plugin.loaded != null);
-    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx.core, target, .{ .overwrite = true }));
-
-    const add = try ctx.getProperty(target, "add");
-    try std.testing.expectEqual(@as(?i32, 1), add.asInt32());
-}
-
 test "embedding public API core signatures stay source-compatible" {
     const create_runtime: fn (std.mem.Allocator) anyerror!*zjs.JSRuntime = zjs.JSRuntime.create;
     const create_runtime_with_options: fn (std.mem.Allocator, zjs.RuntimeOptions) anyerror!*zjs.JSRuntime = zjs.JSRuntime.createWithOptions;
     const create_context: fn (*zjs.JSRuntime) anyerror!*zjs.JSContext = zjs.JSContext.create;
     const create_context_with_options: fn (*zjs.JSRuntime, zjs.context.Options) anyerror!*zjs.JSContext = zjs.JSContext.createWithOptions;
-    const define_global_function: fn (*zjs.JSContext, []const u8, i32, *anyopaque, zjs.host.Function, ?zjs.host.Finalizer) anyerror!void = zjs.JSContext.defineGlobalFunction;
-    const create_external_function: fn (*zjs.JSContext, []const u8, i32, *anyopaque, zjs.host.Function, ?zjs.host.Finalizer, zjs.host.FunctionOptions) anyerror!zjs.JSValue = zjs.JSContext.createExternalFunction;
+    const define_function: fn (*zjs.JSContext, []const u8, zjs.native.Spec, zjs.native.Options) anyerror!zjs.JSValue = zjs.JSContext.defineFunction;
+    const create_function: fn (*zjs.JSContext, []const u8, zjs.native.Spec, zjs.native.Options) anyerror!zjs.JSValue = zjs.JSContext.createFunction;
     const eval_script: fn (*zjs.JSContext, []const u8, zjs.context.EvalOptions) anyerror!zjs.JSValue = zjs.JSContext.eval;
     const array_buffer: fn (*zjs.JSContext, *zjs.value.Bytes.Store) anyerror!zjs.JSValue = zjs.JSContext.arrayBuffer;
     const to_owned_utf8: fn (*zjs.JSContext, zjs.JSValue, std.mem.Allocator) anyerror![]u8 = zjs.JSContext.toOwnedUtf8;
@@ -378,13 +476,12 @@ test "embedding public API core signatures stay source-compatible" {
     _ = create_runtime_with_options;
     _ = create_context;
     _ = create_context_with_options;
-    _ = define_global_function;
-    _ = create_external_function;
+    _ = define_function;
+    _ = create_function;
     _ = eval_script;
     _ = array_buffer;
     _ = to_owned_utf8;
 
-    try std.testing.expect(zjs.host.Call == @typeInfo(@typeInfo(zjs.host.Function).pointer.child).@"fn".params[1].type.?);
     try std.testing.expect(zjs.value.Bytes.Store == zjs.JSValue.Bytes.Store);
     try std.testing.expect(@typeInfo(zjs.object.Object) == .@"opaque");
     // Public-module absences. Unified `zjs` is all_tests (which lifts these
@@ -485,6 +582,197 @@ test "embedding createRealm leftover is collected without JSContext.destroy on t
     rt.destroy();
 }
 
+// Cookbook: a native class (design §9.2). `WorldState` is the host struct;
+// typed members (`step`, `time`, `gravity`) never see a JSValue, managed
+// members (`query`, `create`) get a `Call`. JS-created instances (`new
+// World(stride)`) and host-created ones (`world.create`) share one class id,
+// one prototype per realm and one finalizer.
+const WorldState = struct {
+    steps: i32 = 0,
+    stride: i32 = 1,
+    time_ms: f64 = 1.5,
+    gravity: f64 = 9.8,
+
+    var finalized: usize = 0;
+
+    fn create(call: *zjs.native.Call) error{ OutOfMemory, TypeError }!*WorldState {
+        const state = try std.testing.allocator.create(WorldState);
+        state.* = .{};
+        if (call.argc > 0) state.stride = call.arg(0).asInt32() orelse {
+            std.testing.allocator.destroy(state);
+            return error.TypeError;
+        };
+        return state;
+    }
+
+    fn destroy(self: *WorldState) void {
+        finalized += 1;
+        std.testing.allocator.destroy(self);
+    }
+
+    fn step(self: *WorldState, dt: i32) i32 {
+        self.steps += 1;
+        return dt + self.stride;
+    }
+
+    fn query(self: *WorldState, call: *zjs.native.Call) error{TypeError}!zjs.JSValue {
+        if (call.argc == 0) return error.TypeError;
+        self.steps += 1;
+        return call.arg(0);
+    }
+
+    fn time(self: *WorldState) f64 {
+        return self.time_ms;
+    }
+
+    fn getGravity(self: *WorldState) f64 {
+        return self.gravity;
+    }
+
+    fn setGravity(self: *WorldState, g: f64) void {
+        self.gravity = g;
+    }
+
+    fn label(self: *WorldState, call: *zjs.native.Call) !zjs.JSValue {
+        _ = self;
+        return try call.ctx.createString("world");
+    }
+};
+
+const World = zjs.native.Class(.{
+    .name = "World",
+    .Self = WorldState,
+    .constructor = WorldState.create,
+    .constructor_length = 1,
+    .finalize = WorldState.destroy,
+    .methods = .{ .step = WorldState.step, .query = WorldState.query },
+    .getters = .{ .time = WorldState.time, .gravity = WorldState.getGravity, .label = WorldState.label },
+    .setters = .{ .gravity = WorldState.setGravity },
+});
+
+fn evalBool(ctx: *zjs.JSContext, source: []const u8) !bool {
+    const result = try ctx.eval(source, .{});
+    if (result.isException()) return error.JSException;
+    return result.asBool() orelse error.NotABoolean;
+}
+
+test "embedding cookbook native class covers create, unwrap, methods, accessors, constructor, dispose and finalizer" {
+    const allocator = std.testing.allocator;
+    WorldState.finalized = 0;
+    const rt = try zjs.JSRuntime.create(allocator);
+    var rt_alive = true;
+    defer if (rt_alive) rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const world = try ctx.defineClass(World, .{ .global_name = "World" });
+    // Idempotent per runtime / realm: the same handle comes back.
+    const again = try ctx.defineClass(World, .{});
+    try std.testing.expectEqual(world.classId(), again.classId());
+
+    // Host-created instance around a host-owned pointer.
+    const state = try allocator.create(WorldState);
+    state.* = .{ .stride = 10 };
+    const obj = try world.create(ctx, state);
+    const global = try ctx.globalObject();
+    try ctx.defineDataProperty(global.value(), "w", obj, .{});
+    try std.testing.expect(World.unwrap(obj) == state);
+    try std.testing.expect(world.unwrap(obj) == state);
+    try std.testing.expect(World.unwrap(try ctx.createObject()) == null);
+    try std.testing.expect(World.unwrap(zjs.JSValue.int32(1)) == null);
+
+    // K2 typed method: int in / int out through the leaf arm; state touched.
+    try std.testing.expect(try evalBool(ctx, "w.step(32) === 42"));
+    try std.testing.expectEqual(@as(i32, 1), state.steps);
+    // Canonical marshal: a double-represented int32 is fine, a fraction is not.
+    try std.testing.expect(try evalBool(ctx, "w.step(2.0) === 12"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { w.step(1.5); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    // K2 managed method: the Call view, a mapped Zig error.
+    try std.testing.expect(try evalBool(ctx, "w.query('q') === 'q'"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { w.query(); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    // K3 typed getter / setter and a managed getter.
+    try std.testing.expect(try evalBool(ctx, "w.time === 1.5"));
+    try std.testing.expect(try evalBool(ctx, "w.gravity === 9.8"));
+    try std.testing.expect(try evalBool(ctx, "(w.gravity = 2.5, w.gravity === 2.5)"));
+    try std.testing.expectEqual(@as(f64, 2.5), state.gravity);
+    try std.testing.expect(try evalBool(ctx, "w.label === 'world'"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { w.gravity = 'x'; return false; } catch (e) { return e instanceof TypeError; } })()"));
+    // Members are ordinary prototype properties.
+    try std.testing.expect(try evalBool(ctx, "w instanceof World && Object.getPrototypeOf(w) === World.prototype && World.prototype.constructor === World"));
+    try std.testing.expect(try evalBool(ctx, "typeof World.prototype.step === 'function' && World.prototype.step.length === 1 && World.prototype.step.name === 'step'"));
+    try std.testing.expect(try evalBool(ctx, "!World.prototype.propertyIsEnumerable('step') && Object.keys(World.prototype).length === 0"));
+    try std.testing.expect(try evalBool(ctx, "World.length === 1 && World.name === 'World'"));
+    // Receiver class check: a foreign receiver throws, for methods and accessors.
+    try std.testing.expect(try evalBool(ctx, "(function () { try { World.prototype.step.call({}, 1); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { World.prototype.query.call(1, 1); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { Object.getOwnPropertyDescriptor(World.prototype, 'time').get.call({}); return false; } catch (e) { return e instanceof TypeError && /World object expected/.test(e.message); } })()"));
+
+    // JS-created instances: the constructor allocates the host state; a
+    // call without `new` throws.
+    try std.testing.expect(try evalBool(ctx, "var w2 = new World(3); w2.step(1) === 4 && w2 instanceof World"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { World(); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { new World('x'); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    // Subclassing keeps new.target's prototype and the native payload.
+    try std.testing.expect(try evalBool(ctx, "class Sub extends World { twice(x) { return this.step(x) * 2; } } var s = new Sub(5); s.twice(1) === 12 && s instanceof Sub && s instanceof World"));
+    // An unreachable instance is finalized by the collector, not only at teardown.
+    try std.testing.expect(try evalBool(ctx, "(function () { new World(); return true; })()"));
+    try std.testing.expect(WorldState.finalized <= 1);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), WorldState.finalized);
+
+    // Dispose: detach the host pointer; later calls throw, the finalizer
+    // never sees it, and the host frees it.
+    try std.testing.expect(world.dispose(obj) == state);
+    try std.testing.expect(World.unwrap(obj) == null);
+    try std.testing.expect(try evalBool(ctx, "(function () { try { w.step(1); return false; } catch (e) { return e instanceof TypeError; } })()"));
+    try std.testing.expect(try evalBool(ctx, "(function () { try { return w.time; } catch (e) { return e instanceof TypeError; } })()"));
+    allocator.destroy(state);
+
+    // Teardown finalizes the remaining JS-created instances (w2, s): the
+    // class, its type record and the finalizer belong to the runtime.
+    ctx.destroy();
+    ctx_alive = false;
+    rt.destroy();
+    rt_alive = false;
+    try std.testing.expectEqual(@as(usize, 3), WorldState.finalized);
+}
+
+test "embedding native class accessor descriptors keep identity across reads" {
+    const allocator = std.testing.allocator;
+    WorldState.finalized = 0;
+    const rt = try zjs.JSRuntime.create(allocator);
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+    _ = try ctx.defineClass(World, .{ .global_name = "World" });
+
+    // The prototype accessor is a real K3 function object pair: the same
+    // objects come back from every descriptor read, with accessor names and
+    // attributes as qjs JS_CGETSET_DEF publishes them.
+    try std.testing.expect(try evalBool(ctx,
+        \\var d1 = Object.getOwnPropertyDescriptor(World.prototype, 'gravity');
+        \\var d2 = Object.getOwnPropertyDescriptor(World.prototype, 'gravity');
+        \\typeof d1.get === 'function' && typeof d1.set === 'function' &&
+        \\d1.get === d2.get && d1.set === d2.set && d1.get !== d1.set &&
+        \\d1.get.name === 'get gravity' && d1.set.name === 'set gravity' &&
+        \\d1.get.length === 0 && d1.set.length === 1 &&
+        \\d1.configurable === true && d1.enumerable === false
+    ));
+    try std.testing.expect(try evalBool(ctx,
+        \\var t = Object.getOwnPropertyDescriptor(World.prototype, 'time');
+        \\t.set === undefined && t.get === Object.getOwnPropertyDescriptor(World.prototype, 'time').get
+    ));
+    // Reflect / class-field style consumers see the same function object.
+    try std.testing.expect(try evalBool(ctx,
+        \\var g = Object.getOwnPropertyDescriptor(World.prototype, 'time').get;
+        \\Reflect.getOwnPropertyDescriptor(World.prototype, 'time').get === g &&
+        \\Object.getOwnPropertyDescriptors(World.prototype).time.get === g
+    ));
+    // The materialized getter behaves as the property read does.
+    try std.testing.expect(try evalBool(ctx, "var w = new World(); g.call(w) === 1.5 && w.time === 1.5"));
+}
+
 fn NamespaceType(comptime namespace: anytype) type {
     return switch (@typeInfo(@TypeOf(namespace))) {
         .type => namespace,
@@ -533,7 +821,7 @@ const public_root_decls = [_][]const u8{
     "runtime",
     "JSRuntime",
     "JSContext",
-    "ffi",
+    "CallSite",
     "JSValue",
     "RuntimeOptions",
     "RuntimeMemoryUsage",
@@ -545,6 +833,7 @@ const public_root_decls = [_][]const u8{
     "opcode_profile_build_enabled",
     "activateOpcodeProfile",
     "value",
+    "native",
     "host",
     "object",
     "context",
@@ -576,10 +865,6 @@ const public_value_decls = [_][]const u8{
     "isTruthy",
 };
 const public_host_decls = [_][]const u8{
-    "Call",
-    "Function",
-    "Finalizer",
-    "FunctionOptions",
     "NativeBinding",
     "NativeObject",
     "PropName",
@@ -665,76 +950,6 @@ const public_runtime_decls = [_][]const u8{
     "detachArrayBuffer",
     "evalFileModuleGraphWithOutput",
     "resolveModuleSpecifier",
-    "Plugin",
-    "PluginInstallOptions",
-};
-const public_ffi_decls = [_][]const u8{
-    "PropNameID",
-    "abi_version",
-    "magic",
-    "supported_features",
-    "Feature",
-    "featureBit",
-    "Endian",
-    "Target",
-    "DescriptorHeader",
-    "ValidationError",
-    "validateHeader",
-    "BorrowedBytes",
-    "MutableBytes",
-    "JSValueSlice",
-    "StringPolicy",
-    "StringLifetime",
-    "StringDescriptor",
-    "stringUtf8",
-    "cString",
-    "BytesPolicy",
-    "BytesDeinitFn",
-    "OwnedBytesOptions",
-    "BytesLifetime",
-    "Bytes",
-    "BytesDescriptor",
-    "bytes",
-    "HostTypeId",
-    "OpaqueHostObject",
-    "HostTraceVisitor",
-    "HostObjectFinalizer",
-    "HostObjectTracer",
-    "HostObjectOwner",
-    "HostObjectOptions",
-    "HostObjectDescriptor",
-    "hostObject",
-    "PropNameDescriptor",
-    "propName",
-    "ResolvedPropNames",
-    "resolvePropNames",
-    "Status",
-    "CreateOpaqueObjectFn",
-    "UnwrapOpaqueObjectFn",
-    "GetPropNameFn",
-    "OpaqueObjectServices",
-    "PropNameServices",
-    "HostServices",
-    "CallFrame",
-    "Trampoline",
-    "DescriptorExport",
-    "descriptor_symbol",
-    "ZigCall",
-    "trampoline",
-    "BindingOptions",
-    "binding",
-    "bindingWithOptions",
-    "BindingDescriptor",
-    "PluginDescriptor",
-    "Plugin",
-    "validatePlugin",
-    "validateHostObject",
-    "validatePropName",
-    "LoadError",
-    "LoadedPlugin",
-    "descriptorFromExport",
-    "statusFromError",
-    "js_value_layout_hash",
 };
 
 test "public API surface snapshot matches the checked-in name lists" {
@@ -763,9 +978,6 @@ test "public API surface snapshot matches the checked-in name lists" {
         failed = true;
     };
     expectPublicDeclSnapshot("zjs.runtime", zjs.runtime, &public_runtime_decls) catch {
-        failed = true;
-    };
-    expectPublicDeclSnapshot("zjs.ffi", zjs.ffi, &public_ffi_decls) catch {
         failed = true;
     };
     if (failed) return error.TestExpectedEqual;

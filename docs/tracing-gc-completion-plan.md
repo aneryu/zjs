@@ -234,4 +234,4 @@ S2 依赖 S1（bigint 先走一遍「入 tracer」的全套改点，作为 strin
 - **R1 量级不确定**（12-20 lw 是上界估算，R3 后收窄）；若 owner 不接受，退路是 R3 + 永久保守（JSC 路线），本计划其余部分不受影响。
 - **S2 的 rope 原地 flatten 与并行标记**：并行标记默认关，S2 期间保持关，S5 前补「flatten 只在 mutator 期」断言。
 - **S4 的 Generator open VarRef**：若不 close 会指向已死栈；需在规格里决定「sweep 前统一 close」或「VarRef 仅 close 时持值」。
-- **FNABI**：插件持有的 JSValue 若含 string，S2 后其活性由 handle 表承担；对照 `docs/runtime-plugin-abi.md` 的 persistent handle 条款，S2 规格内确认无裸 string 借用跨调用。
+- **FNABI**：插件持有的 JSValue 若含 string，S2 后其活性由 handle 表承担；对照 NB2 边界契约 C2（`docs/perf/native-boundary-design.md` §7：跨调用保留只经 `Persistent`；`docs/runtime-plugin-abi.md` 已于 2026-09-06 删除），S2 规格内确认无裸 string 借用跨调用。

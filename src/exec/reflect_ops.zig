@@ -219,7 +219,7 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (object.proxyTarget()) |target| return isConstructorValue(rt, target);
     return switch (object.class_id) {
         core.class.ids.c_function => {
-            if (object.hostFunctionKind() == core.host_function.ids.external_host) {
+            if (object.isHostEntryFunction()) {
                 return object.hasOwnProperty(core.atom.ids.prototype);
             }
             // A construct-capable builtin native id (Date/RegExp/String) marks a

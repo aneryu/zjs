@@ -1225,6 +1225,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         fixture_options.var_count,
         fixture_options.closure_var_count,
         fixture_options.byte_code.len,
+        0,
     );
     // Above the slab ceiling, so the exact
     // MemoryAccount charge is the one main allocation plus its GC prefix

@@ -286,12 +286,14 @@ pub const MarkFootprint = struct {
         // reporting one `string` population -- the two shapes are one family
         // to every consumer of this panel, and folding here keeps
         // `gc_stats_snapshot.py`'s existing line intact.
-        self.by_kind[@intFromEnum(switch (kind) {
-            // TGC S2-i folds the tail buffer in as well: it is string bytes
-            // that used to sit inside the flat bodies this row already counted.
-            .rope, .string_buffer => gc.GcKind.string,
-            else => kind,
-        })] +|= 1;
+        self.by_kind[
+            @intFromEnum(switch (kind) {
+                // TGC S2-i folds the tail buffer in as well: it is string bytes
+                // that used to sit inside the flat bodies this row already counted.
+                .rope, .string_buffer => gc.GcKind.string,
+                else => kind,
+            })
+        ] +|= 1;
         if (gc.Registry.isBlockCellHeader(header)) self.block_headers +|= 1;
     }
 

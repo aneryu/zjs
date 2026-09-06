@@ -1072,9 +1072,12 @@ pub const RootsDiagCensus = struct {
             "gc: ===== R1-b verdict: located {d} (residue {d} = {d}%, spill {d} = {d}%, candidate {d} = {d}%), unlocated {d} =====\n",
             .{
                 located,
-                overall[@intFromEnum(Verdict.likely_residue)],  percent(overall[@intFromEnum(Verdict.likely_residue)], located),
-                overall[@intFromEnum(Verdict.likely_spill)],    percent(overall[@intFromEnum(Verdict.likely_spill)], located),
-                overall[@intFromEnum(Verdict.candidate_root)],  percent(overall[@intFromEnum(Verdict.candidate_root)], located),
+                overall[@intFromEnum(Verdict.likely_residue)],
+                percent(overall[@intFromEnum(Verdict.likely_residue)], located),
+                overall[@intFromEnum(Verdict.likely_spill)],
+                percent(overall[@intFromEnum(Verdict.likely_spill)], located),
+                overall[@intFromEnum(Verdict.candidate_root)],
+                percent(overall[@intFromEnum(Verdict.candidate_root)], located),
                 self.unlocated,
             },
         );
@@ -1225,13 +1228,13 @@ pub const RootsDiagCensus = struct {
             try writer.print(
                 "gc: conservative-only #{d} {d} fn={s} kind={s} class={d} src={s} ptr={s} off={s} slot={s} stable={d}% young={d} native={d} pc=0x{x} caller=0x{x}\n",
                 .{
-                    rank,                              slot.count,
-                    self.nameAt(key.name_index),       @tagName(kind),
-                    key.class_id,                      @tagName(source),
-                    @tagName(ptr_kind),                offsetBucketName(key.offset_bucket, &offset_buf),
+                    rank,                                 slot.count,
+                    self.nameAt(key.name_index),          @tagName(kind),
+                    key.class_id,                         @tagName(source),
+                    @tagName(ptr_kind),                   offsetBucketName(key.offset_bucket, &offset_buf),
                     slotName(key.slot_bucket, &slot_buf), percent(slot.stable_count, slot.count),
-                    key.young,                         key.native,
-                    owner_pc,                          caller_pc,
+                    key.young,                            key.native,
+                    owner_pc,                             caller_pc,
                 },
             );
             if (owner_pc != 0) try writeOwnerPc(writer, owner_pc);

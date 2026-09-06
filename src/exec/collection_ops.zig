@@ -19,6 +19,8 @@ const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
+const call_site_mod = @import("call_site.zig");
+const CallSite = call_site_mod.CallSite;
 const collection_adapter = @import("collection_adapter.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
@@ -1741,7 +1743,7 @@ fn collectionForEachRecord(
     if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    var callback_call = call_runtime.SyncInternalCallSite.init(
+    var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,
@@ -2242,7 +2244,7 @@ pub fn mapGroupByRecord(
     const map_value = try constructWithPrototype(ctx.runtime, 1, prototype);
 
     const iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    var callback_call = call_runtime.SyncInternalCallSite.init(
+    var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,

@@ -2424,15 +2424,13 @@ pub const parser_core = struct {
 
         fn truncateClassPrivateElements(self: *State, len: usize) void {
             var i = len;
-            while (i < self.class_private_elements.items.len) : (i += 1) {
-            }
+            while (i < self.class_private_elements.items.len) : (i += 1) {}
             self.class_private_elements.shrinkRetainingCapacity(len);
         }
 
         fn truncateClassPrivateBoundNames(self: *State, len: usize) void {
             var i = len;
-            while (i < self.class_private_bound_names.items.len) : (i += 1) {
-            }
+            while (i < self.class_private_bound_names.items.len) : (i += 1) {}
             self.class_private_bound_names.shrinkRetainingCapacity(len);
         }
 
@@ -5936,8 +5934,8 @@ pub const parser_core = struct {
         try emitterAddSourceMarker(s, line_num, col_num);
         switch (shape) {
             .direct => |argc| switch (prepared.kind) {
-                .plain => try emitterOpU16NoSource(s, opcode.op.call, argc),
-                .method => try emitterOpU16NoSource(s, opcode.op.call_method, argc),
+                .plain => try emitterCallOp(s, opcode.op.call, argc),
+                .method => try emitterCallOp(s, opcode.op.call_method, argc),
                 .direct_eval => {
                     const eval_scope: u16 = @intCast(s.scope_level);
                     try emitterOpU32NoSource(s, opcode.op.eval, @as(u32, argc) | (@as(u32, eval_scope) << 16));
@@ -6120,7 +6118,7 @@ pub const parser_core = struct {
         try Emitter.jump(s, opcode.op.if_false, &skip_call);
         try s.emitScopeGetVar(atom_this);
         try Emitter.op(s, opcode.op.swap);
-        try Emitter.opU16(s, opcode.op.call_method, 0);
+        try Emitter.callOp(s, opcode.op.call_method, 0);
         try Emitter.bind(s, &skip_call);
         try Emitter.op(s, opcode.op.drop);
     }
@@ -6862,7 +6860,7 @@ pub const parser_core = struct {
             }
 
             if (part == .tail) {
-                try Emitter.opU16(s, opcode.op.call_method, depth - 1);
+                try Emitter.callOp(s, opcode.op.call_method, depth - 1);
                 try s.advance(); // consume the tail TOK_TEMPLATE
                 return;
             }
@@ -7812,6 +7810,10 @@ pub const parser_core = struct {
         inline fn opU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
             return emitterOpU16NoSource(s, op_id, val);
         }
+        /// `call` / `call_method` family: `argc:u16` plus the cache-index byte.
+        inline fn callOp(s: *State, op_id: u8, argc: u16) Error!void {
+            return emitterCallOp(s, op_id, argc);
+        }
         inline fn opU16At(s: *State, op_id: u8, val: u16, line_num: u32, col_num: u32) Error!void {
             return emitterOpU16At(s, op_id, val, line_num, col_num);
         }
@@ -7953,6 +7955,14 @@ pub const parser_core = struct {
     /// v2 mirror of `State.emitOpU16` (marker'd).
     fn emitterOpU16(s: *State, op_id: u8, val: u16) Error!void {
         s.builderEmitOpU16(op_id, val) catch |err| return mapBuilderError(err);
+    }
+
+    /// Variable-arity call emission (`argc:u16 cache_idx:u8`), source-less
+    /// like `emitterOpU16NoSource`: qjs call emission pins its one source
+    /// event on the callee, never on the call opcode itself.
+    fn emitterCallOp(s: *State, op_id: u8, argc: u16) Error!void {
+        s.activeBuilder().emitCallOp(op_id, argc) catch |err| return mapBuilderError(err);
+        s.builderRecordU16Control(op_id) catch |err| return mapBuilderError(err);
     }
 
     /// v2 mirror of `State.emitOpU32` (marker'd).
@@ -13416,7 +13426,7 @@ pub const parser_core = struct {
                     var no_return: Label = .{};
                     try Emitter.newLabel(s, &no_return);
                     try Emitter.jump(s, opcode.op.if_true, &no_return);
-                    try Emitter.opU16(s, opcode.op.call_method, 0);
+                    try Emitter.callOp(s, opcode.op.call_method, 0);
                     try Emitter.op(s, opcode.op.iterator_check_object);
                     try Emitter.op(s, opcode.op.await);
                     var closed: Label = .{};
@@ -13537,8 +13547,7 @@ pub const parser_core = struct {
             } else {
                 property_info = (try parseObjectPropertyName(s)) orelse return s.failExpectedDescription("property name");
             }
-            defer if (property_info) |_| {
-            };
+            defer if (property_info) |_| {};
 
             const explicit_target = s.peekKind() == @as(tok.TokenKind, @intCast(':'));
             if (explicit_target) try s.advance();
@@ -15112,7 +15121,7 @@ pub const parser_core = struct {
         try Emitter.op(s, opcode.op.swap);
         // qjs js_parse_class (quickjs.c:25394): the static block takes no
         // explicit arguments.
-        try Emitter.opU16(s, opcode.op.call_method, 0);
+        try Emitter.callOp(s, opcode.op.call_method, 0);
         // qjs js_parse_class (quickjs.c:25394): discard the static block's
         // completion value.
         try Emitter.op(s, opcode.op.drop);
@@ -15241,7 +15250,7 @@ pub const parser_core = struct {
         try emitterOp(s, opcode.op.dup);
         try s.emitFClosure(@intCast(cpool_idx));
         try emitterOp(s, opcode.op.set_home_object);
-        try emitterOpU16(s, opcode.op.call_method, 0);
+        try emitterCallOp(s, opcode.op.call_method, 0);
         try emitterOp(s, opcode.op.drop);
     }
 
@@ -15593,25 +15602,26 @@ pub const parser_core = struct {
             v2b.emitJump(opcode.op.if_false, skip) catch |err| return mapBuilderError(err);
             v2b.emitOpU16(this_read_op, this_idx) catch |err| return mapBuilderError(err);
             v2b.emitOp(opcode.op.swap) catch |err| return mapBuilderError(err);
-            v2b.emitOpU16(opcode.op.call_method, 0) catch |err| return mapBuilderError(err);
+            v2b.emitCallOp(opcode.op.call_method, 0) catch |err| return mapBuilderError(err);
             v2b.bindLabel(skip) catch |err| return mapBuilderError(err);
             v2b.invalidateLastOpcode();
             v2b.emitOp(opcode.op.drop) catch |err| return mapBuilderError(err);
         } else {
             const base: u32 = @intCast(fd.byte_code.len);
-            var code: [21]u8 = undefined;
+            var code: [22]u8 = undefined;
             code[0] = opcode.op.scope_get_var;
             std.mem.writeInt(u32, code[1..5], atom_class_fields_init, .little);
             std.mem.writeInt(u16, code[5..7], @intCast(fd.scope_level), .little);
             code[7] = opcode.op.dup;
             code[8] = opcode.op.if_false;
-            std.mem.writeInt(u32, code[9..13], base + 20, .little); // target: the drop
+            std.mem.writeInt(u32, code[9..13], base + 21, .little); // target: the drop
             code[13] = this_read_op;
             std.mem.writeInt(u16, code[14..16], this_idx, .little);
             code[16] = opcode.op.swap;
             code[17] = opcode.op.call_method;
             std.mem.writeInt(u16, code[18..20], 0, .little);
-            code[20] = opcode.op.drop;
+            code[20] = 0; // cache_idx placeholder
+            code[21] = opcode.op.drop;
             try fd.appendAtomOperand(atom_class_fields_init);
             fd.flow_tail.valid = false;
             try fd.appendByteCode(&code);
@@ -15974,14 +15984,12 @@ pub const parser_core = struct {
     }
 
     fn freeModuleImportSpecs(s: *State, imports: *std.ArrayList(ModuleImportSpec)) void {
-        for (imports.items) |_| {
-        }
+        for (imports.items) |_| {}
         imports.deinit(s.function.memory.allocator);
     }
 
     fn freeModuleExportSpecs(s: *State, exports: *std.ArrayList(ModuleExportSpec)) void {
-        for (exports.items) |_| {
-        }
+        for (exports.items) |_| {}
         exports.deinit(s.function.memory.allocator);
     }
 

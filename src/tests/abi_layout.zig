@@ -83,7 +83,7 @@ test "C header constants match the schema tables" {
     try std.testing.expectEqual(@as(u64, abi.call_kind.async_entry), c.FUN_CALL_ASYNC);
     try std.testing.expectEqual(@as(u64, abi.marshal_policy.canonical), c.FUN_MARSHAL_CANONICAL);
     try std.testing.expectEqual(@as(u64, abi.signatures[0].id), c.FUN_SIG_VOID_TO_VOID);
-    try std.testing.expectEqual(@as(u64, abi.signatures[abi.signatures.len - 1].id), c.FUN_SIG_ASYNC_VALUE4);
+    try std.testing.expectEqual(@as(u64, abi.signatures[abi.signatures.len - 1].id), c.FUN_SIG_SELF_TO_VOID);
 }
 
 test "signature ids are dense, unique, and start at 1 (0 reserved)" {

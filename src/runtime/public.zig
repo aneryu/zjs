@@ -1,4 +1,4 @@
-//! Public runtime facade for event-loop, plugin, module, and ArrayBuffer APIs.
+//! Public runtime facade for event-loop, module, and ArrayBuffer APIs.
 const runtime = @import("root.zig");
 pub const EventLoop = runtime.EventLoop;
 pub const EventLoopOptions = runtime.EventLoopOptions;
@@ -9,8 +9,6 @@ pub const wakeAtomicsWaitersForRuntimes = runtime.wakeAtomicsWaitersForRuntimes;
 pub const detachArrayBuffer = runtime.detachArrayBuffer;
 pub const evalFileModuleGraphWithOutput = runtime.evalFileModuleGraphWithOutput;
 pub const resolveModuleSpecifier = runtime.resolveModuleSpecifier;
-pub const Plugin = runtime.Plugin;
-pub const PluginInstallOptions = runtime.PluginInstallOptions;
 
 test {
     _ = EventLoop;
@@ -22,8 +20,6 @@ test {
     _ = detachArrayBuffer;
     _ = evalFileModuleGraphWithOutput;
     _ = resolveModuleSpecifier;
-    _ = Plugin;
-    _ = PluginInstallOptions;
 }
 
 test "public runtime namespace does not expose internals or kernel primitives" {

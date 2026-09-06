@@ -120,7 +120,7 @@ pub const ids = struct {
     // Property-key constants for the S3 predefined migration. Every name below is
     // a `.string` predefined atom, so `isConst` short-circuits dup/free: holding one
     // costs nothing and needs no release.
-    pub const return_: Atom = 6;  // "return"
+    pub const return_: Atom = 6; // "return"
     pub const delete: Atom = 9;
     pub const throw: Atom = 23;
     pub const with: Atom = 29;
@@ -195,7 +195,7 @@ pub const ids = struct {
     pub const padding: Atom = 660;
     pub const mode: Atom = 661;
     pub const prepareStackTrace: Atom = 662;
-    pub const type_: Atom = 663;  // "type"
+    pub const type_: Atom = 663; // "type"
     pub const userAgent: Atom = 664;
     pub const E: Atom = 665;
     pub const LN10: Atom = 666;
@@ -219,7 +219,7 @@ pub const ids = struct {
     pub const lineNumber: Atom = 684;
     pub const columnNumber: Atom = 685;
     pub const code: Atom = 686;
-    pub const error_: Atom = 687;  // "error"
+    pub const error_: Atom = 687; // "error"
     pub const suppressed: Atom = 688;
     pub const url: Atom = 689;
     pub const main: Atom = 690;

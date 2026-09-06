@@ -52,6 +52,11 @@ pub const Format = enum(u8) {
     atom_label_u8,
     atom_label_u16,
     label_u16,
+    /// Call-site quickening (native-boundary design 5.5): `argc:u16` followed
+    /// by a `cache_idx:u8` into `FunctionBytecode.call_sites` (255 = no
+    /// cache). Carried by the variable-arity call family; `call_constructor`,
+    /// `array_from` and `apply` keep the bare `npop` / `u16` rows.
+    npop_u8,
 };
 
 pub const LogicalOpcode = enum(u16) {
@@ -1007,7 +1012,10 @@ pub fn operandTemplate(fmt: Format) ?[]const Operand {
         .none_loc => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
         .none_arg => &.{.{ .kind = .arg_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
         .none_var_ref => &.{.{ .kind = .var_ref_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
-        .npopx => &.{.{ .kind = .count, .source = .{ .fixed = 0 } }},
+        .npopx => &.{
+            .{ .kind = .count, .source = .{ .fixed = 0 } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u8 } } },
+        },
 
         // Payload operands. Width and kind are orthogonal: `loc8` is a local
         // in one byte, `loc` is a local in two.
@@ -1028,6 +1036,10 @@ pub fn operandTemplate(fmt: Format) ?[]const Operand {
         .npop_u16 => &.{
             .{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } },
             .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
+        },
+        .npop_u8 => &.{
+            .{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u8 } } },
         },
         .atom_u8 => &.{
             .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
@@ -1374,10 +1386,10 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .get_var_ref0_get_loc8, .fmt = .none, .pop = 0, .push = 1 },
     .{ .form = .get_loc8_push_2, .fmt = .loc8, .pop = 0, .push = 1 },
     .{ .form = .call_constructor, .fmt = .npop, .pop = 2, .push = 1 },
-    .{ .form = .call, .fmt = .npop, .pop = 1, .push = 1 },
-    .{ .form = .tail_call, .fmt = .npop, .pop = 1, .push = 0 },
-    .{ .form = .call_method, .fmt = .npop, .pop = 2, .push = 1 },
-    .{ .form = .tail_call_method, .fmt = .npop, .pop = 2, .push = 0 },
+    .{ .form = .call, .fmt = .npop_u8, .pop = 1, .push = 1 },
+    .{ .form = .tail_call, .fmt = .npop_u8, .pop = 1, .push = 0 },
+    .{ .form = .call_method, .fmt = .npop_u8, .pop = 2, .push = 1 },
+    .{ .form = .tail_call_method, .fmt = .npop_u8, .pop = 2, .push = 0 },
     .{ .form = .array_from, .fmt = .npop, .pop = 0, .push = 1 },
     .{ .form = .apply, .fmt = .u16, .pop = 3, .push = 1 },
     .{ .form = .@"return", .fmt = .none, .pop = 1, .push = 0 },
@@ -1579,7 +1591,7 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .get_field2_call_method, .fmt = .atom, .pop = 1, .push = 2 },
     .{ .form = .get_loc2_field, .fmt = .none_loc, .pop = 0, .push = 1 },
     .{ .form = .eq_if_false8, .fmt = .none, .pop = 2, .push = 1 },
-    .{ .form = .call_method_apply_fwd, .fmt = .npop, .pop = 2, .push = 1 },
+    .{ .form = .call_method_apply_fwd, .fmt = .npop_u8, .pop = 2, .push = 1 },
     .{ .form = .get_loc0_field, .fmt = .none_loc, .pop = 0, .push = 1 },
     .{ .form = .cmp_if_false8, .fmt = .none, .pop = 2, .push = 1 },
     .{ .form = .put_loc8_get_loc8, .fmt = .loc8, .pop = 1, .push = 0 },

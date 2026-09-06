@@ -14,6 +14,7 @@ const number_format = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
+const native_legacy = @import("native_legacy.zig");
 // The `.string` builtin record table uses direct leaf handlers for the qjs-like
 // index reads and case conversion entries; its residual `stringCall` handler
 // dispatches the shared prototype-method ids into `stringPrototypeMethod`
@@ -80,7 +81,7 @@ pub const internal_entries = stringEntries: {
         // decodes). The remaining String.prototype methods (toString, valueOf,
         // the AnnexB html helpers, …) are installed as plain name-dispatched
         // native functions and never reach record dispatch.
-        stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at)),
+        stringPrimLeafEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), &stringCall, null, "STRING_I32_TO_STRING", &stringCharAtLeaf),
         stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring)),
         stringDirectEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), &stringCaseCall),
         stringDirectEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), &stringCaseCall),
@@ -94,9 +95,9 @@ pub const internal_entries = stringEntries: {
         stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end)),
         stringEntry("split", 2, @intFromEnum(PrototypeMethod.split)),
         stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of)),
-        stringExecDirectEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall, &stringCharCodeAtDirect),
-        stringDirectEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall),
-        stringDirectEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall),
+        stringPrimLeafEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall, &stringCharCodeAtDirect, "STRING_I32_TO_I32", &stringCharCodeAtLeaf),
+        stringPrimLeafEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall, null, "STRING_I32_TO_STRING", &stringAtLeaf),
+        stringPrimLeafEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall, null, "STRING_I32_TO_I32", &stringCodePointAtLeaf),
         stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
         stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat)),
         stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start)),
@@ -136,10 +137,29 @@ fn stringExecDirectEntry(
     comptime length: u8,
     comptime id: u32,
     comptime handler: anytype,
-    comptime direct: builtin_dispatch.ExecDirectCallFn,
+    comptime direct: core.native_entry.ManagedFn,
 ) core.host_function.InternalEntry {
     var entry = stringEntryWithHandler(name, length, id, handler);
-    entry.exec_direct = builtin_dispatch.execDirectFunction(direct);
+    entry.managed = direct;
+    return entry;
+}
+
+/// Lane K (design §4.3 `prim_self`): a `method_leaf` entry whose hot arm is
+/// the typed `leaf` target over a flat string receiver and an int32 index;
+/// the declared handler (plus optional exec_direct body) is the tag-miss
+/// fallback, so coercing receivers / indices keep the legacy semantics.
+fn stringPrimLeafEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+    comptime direct: ?core.native_entry.ManagedFn,
+    comptime sig: []const u8,
+    comptime leaf: native_legacy.LeafStringI32ToI32,
+) core.host_function.InternalEntry {
+    var entry = stringEntryWithHandler(name, length, id, handler);
+    entry.managed = direct;
+    entry.prim_leaf = .{ .sig = sig, .target = core.NativeEntry.code(leaf) };
     return entry;
 }
 
@@ -165,12 +185,52 @@ test "String.charCodeAt uses exec_direct and a dedicated handler" {
         if (entry.id != @intFromEnum(PrototypeMethod.char_code_at)) continue;
         found = true;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &stringCharCodeAtCall);
-        try std.testing.expect(entry.exec_direct != null);
-        try std.testing.expect(entry.exec_direct.? ==
-            builtin_dispatch.execDirectFunction(&stringCharCodeAtDirect));
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &stringCharCodeAtDirect);
         try std.testing.expect(!entry.forwards_call);
     }
     try std.testing.expect(found);
+}
+
+fn testStringDeclById(comptime id: u32) core.host_function.InternalEntry {
+    for (internal_entries) |decl| {
+        if (decl.id == id) return decl;
+    }
+    @compileError("no String entry with that id");
+}
+
+test "String index reads are prim_self method_leaf entries with their legacy bodies as fallback" {
+    const Expect = struct { id: u32, sig: u16, leaf: native_legacy.LeafStringI32ToI32 };
+    const expected = [_]Expect{
+        .{ .id = @intFromEnum(PrototypeMethod.char_code_at), .sig = native_legacy.sig_string_i32_to_i32, .leaf = &stringCharCodeAtLeaf },
+        .{ .id = @intFromEnum(PrototypeMethod.char_at), .sig = native_legacy.sig_string_i32_to_string, .leaf = &stringCharAtLeaf },
+        .{ .id = @intFromEnum(PrototypeMethod.at), .sig = native_legacy.sig_string_i32_to_string, .leaf = &stringAtLeaf },
+        .{ .id = @intFromEnum(PrototypeMethod.code_point_at), .sig = native_legacy.sig_string_i32_to_i32, .leaf = &stringCodePointAtLeaf },
+    };
+    inline for (expected) |want| {
+        const decl = comptime testStringDeclById(want.id);
+        const entry = comptime native_legacy.entryFromInternal(decl);
+        try std.testing.expectEqual(core.native_entry.Kind.method_leaf, entry.kind);
+        try std.testing.expectEqual(want.sig, entry.sig);
+        try std.testing.expect(entry.target == core.NativeEntry.code(want.leaf));
+        try std.testing.expect(entry.fallback != null);
+        try std.testing.expect(!entry.effect.may_throw);
+        // The exec_direct body reads the caller through vmCallerView; the
+        // generic_magic thunks still need the environment.
+        try std.testing.expectEqual(decl.managed == null, entry.flags.needs_env);
+    }
+    // The leaf targets own the index rule: negative = fallback.
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const str = try core.string.String.createLatin1(rt, "abc");
+    try std.testing.expectEqual(@as(i32, 'b'), stringCharCodeAtLeaf(str, 1));
+    try std.testing.expectEqual(@as(i32, -1), stringCharCodeAtLeaf(str, 3));
+    try std.testing.expectEqual(@as(i32, -1), stringCharCodeAtLeaf(str, -1));
+    try std.testing.expectEqual(@as(i32, 'c'), stringAtLeaf(str, -1));
+    try std.testing.expectEqual(@as(i32, -1), stringAtLeaf(str, -4));
+    const pair = try core.string.String.createUtf16(rt, &.{ 'a', 0xD83D, 0xDE00 });
+    try std.testing.expectEqual(@as(i32, 0x1F600), stringCodePointAtLeaf(pair, 1));
+    try std.testing.expectEqual(@as(i32, 0xDE00), stringCodePointAtLeaf(pair, 2));
 }
 
 test "String.fromCharCode uses exec_direct and a dedicated handler" {
@@ -179,9 +239,8 @@ test "String.fromCharCode uses exec_direct and a dedicated handler" {
         if (entry.id != @intFromEnum(StaticMethod.from_char_code)) continue;
         found = true;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &stringFromCharCodeCall);
-        try std.testing.expect(entry.exec_direct != null);
-        try std.testing.expect(entry.exec_direct.? ==
-            builtin_dispatch.execDirectFunction(&stringFromCharCodeDirect));
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &stringFromCharCodeDirect);
         try std.testing.expect(!entry.forwards_call);
     }
     try std.testing.expect(found);
@@ -357,21 +416,25 @@ fn stringConcatCall(
 
 fn stringFromCharCodeDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
     _ = this_value;
     _ = caller_function;
     _ = caller_frame;
     const result = string_ops.stringFromCharCode(ctx, output, global, args) catch |err| {
-        return builtin_dispatch.nativeFromHostError(ctx, global, @as(HostError, @errorCast(err)));
+        return builtin_dispatch.hostErrorToValue(ctx, global, @as(HostError, @errorCast(err)));
     };
-    return builtin_dispatch.nativeToBits(result);
+    return (result);
 }
 
 fn stringFromCharCodeCall(
@@ -389,17 +452,59 @@ fn stringFromCharCodeCall(
     return string_ops.stringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
 }
 
+// --- Lane K prim_self leaf targets (`native_legacy.LeafStringI32ToI32`) ---
+//
+// The arm (`builtin_dispatch.invokeMethodLeafFast`) has already established
+// a flat string receiver and an int32 index; these bodies own only the
+// per-method index rule and the code-unit read (`String.codeUnitAt`, the
+// same single access `stringValueCodeUnitAtUnchecked` ends in). A negative
+// return sends the arm to the fallback, which recomputes the observable
+// out-of-range result (NaN / undefined / "").
+
+fn stringCharCodeAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    if (index < 0 or @as(usize, @intCast(index)) >= str.len()) return -1;
+    return str.codeUnitAt(@intCast(index));
+}
+
+fn stringCharAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    if (index < 0 or @as(usize, @intCast(index)) >= str.len()) return -1;
+    return str.codeUnitAt(@intCast(index));
+}
+
+fn stringAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    const len: i64 = @intCast(str.len());
+    const relative: i64 = if (index < 0) len + index else index;
+    if (relative < 0 or relative >= len) return -1;
+    return str.codeUnitAt(@intCast(relative));
+}
+
+fn stringCodePointAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    const len = str.len();
+    if (index < 0 or @as(usize, @intCast(index)) >= len) return -1;
+    const position: usize = @intCast(index);
+    const unit = str.codeUnitAt(position);
+    if (isHighSurrogateUnit(unit) and position + 1 < len) {
+        const next = str.codeUnitAt(position + 1);
+        if (isLowSurrogateUnit(next)) return @intCast(unicode.codePointFromSurrogatePair(unit, next));
+    }
+    return unit;
+}
+
 fn stringCharCodeAtDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    _: ?*core.Object,
     this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) builtin_dispatch.NativeBits {
-    return builtin_dispatch.nativeFromHostResult(ctx, global, stringCharCodeAtDirectHost(
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
+    return builtin_dispatch.hostResultToValue(ctx, stringCharCodeAtDirectHost(
         ctx,
         output,
         global,

@@ -2095,18 +2095,18 @@ test "compiler.s2g4: minimal class expression and default constructor" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         // emitClassFieldInitCall binds its skip target at the shared drop.
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 26), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 27), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 24);
+    try expectLabel(ctor, 0, 1, 25);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[22..24], .little));
-    try std.testing.expectEqual(@as(i64, 25), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 26), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2163,16 +2163,16 @@ test "compiler.s2g4: class declaration stores local binding" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 26), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 27), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 24);
+    try expectLabel(ctor, 0, 1, 25);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 25), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 26), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2246,16 +2246,16 @@ test "compiler.s2g4: named class method splices runtime definition" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 26), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 27), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 24);
+    try expectLabel(ctor, 0, 1, 25);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 25), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 26), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2305,19 +2305,19 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_var, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         // emitClassFieldInitCall binds the skip target at this drop.
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 21), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 22), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 17);
+    try expectLabel(ctor, 0, 1, 18);
     try std.testing.expectEqual(@as(u32, 0), ctor.atom_len);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[15..17], .little));
-    try std.testing.expectEqual(@as(i64, 20), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 21), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2369,18 +2369,18 @@ test "compiler.s2g4: derived default constructor returns checked this" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc_check, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.get_loc_checkthis, .size = 3 },
         .{ .op = qop.@"return", .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 32), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 33), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 27);
+    try expectLabel(ctor, 0, 1, 28);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 31), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 32), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2567,19 +2567,19 @@ test "compiler.s2g4: static block nests closure in static initializer" {
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.fclosure8, .size = 2 },
         .{ .op = qop.set_home_object, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 34), b.code_len);
+    try std.testing.expectEqual(@as(u32, 35), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 33), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 34), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2595,17 +2595,17 @@ test "compiler.s2g4: static block nests closure in static initializer" {
         .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.get_var, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 16), static_init.code_len);
+    try std.testing.expectEqual(@as(u32, 17), static_init.code_len);
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
     try std.testing.expectEqual(@as(u32, 1), static_init.atom_len);
     try std.testing.expectEqual(core.atom.null_atom, static_init.atom_operands[0]);
     try std.testing.expectEqual(@as(u8, 0), static_init.code[1]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[12..14], .little));
-    try std.testing.expectEqual(@as(i64, 15), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 16), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 
@@ -2650,19 +2650,19 @@ test "compiler.s2g4: static field emits through static initializer" {
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.fclosure8, .size = 2 },
         .{ .op = qop.set_home_object, .size = 1 },
-        .{ .op = qop.call_method, .size = 3 },
+        .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 34), b.code_len);
+    try std.testing.expectEqual(@as(u32, 35), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[22]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 33), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 34), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2974,7 +2974,7 @@ test "compiler.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.goto8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.get_loc8));
-    try std.testing.expectEqual(@as(u8, 3), opcode.sizeOf(qop.call_method_apply_fwd));
+    try std.testing.expectEqual(@as(u8, 4), opcode.sizeOf(qop.call_method_apply_fwd));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));

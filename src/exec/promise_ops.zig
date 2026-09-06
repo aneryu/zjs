@@ -15,6 +15,7 @@ const function_ops = @import("function_ops.zig");
 const atomics_ops = @import("atomics_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const jobs_mod = core.jobs;
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
@@ -1003,10 +1004,19 @@ const PromiseJobOomProbe = struct {
     calls: usize = 0,
     fail: bool,
 
-    fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
-        const self: *PromiseJobOomProbe = @ptrCast(@alignCast(ptr));
+    fn thunk(ctx: *core.JSContext, this_value: core.JSValue, argv: [*]const core.JSValue, argc: u32, entry: *const core.NativeEntry, func_obj: ?*core.Object) callconv(.c) core.JSValue {
+        _ = this_value;
+        _ = argv;
+        _ = argc;
+        _ = func_obj;
+        const self: *PromiseJobOomProbe = @ptrCast(@alignCast(entry.state.?));
+        const result = self.call(ctx) catch |err| return builtin_dispatch.hostErrorToValue(ctx, ctx.global, err);
+        return result;
+    }
+
+    fn call(self: *PromiseJobOomProbe, ctx: *core.JSContext) anyerror!core.JSValue {
         self.calls += 1;
-        const rt = invocation.realm.runtime;
+        const rt = ctx.runtime;
         // TGC S4-b: sweep (with the conservative net, the caller's frames are
         // live) so the limit below is the LIVE size -- storage cells are
         // collected carriers now, so `checkAllocation`'s retry collection
@@ -1023,23 +1033,28 @@ fn promiseJobOomProbeFunction(
     probe: *PromiseJobOomProbe,
     name: []const u8,
 ) !core.JSValue {
-    const external_id = try ctx.runtime.registerExternalHostFunction(.{
-        .ptr = probe,
-        .call = PromiseJobOomProbe.call,
+    const entry = try ctx.runtime.allocNativeEntry(.{
+        .target = core.NativeEntry.code(&PromiseJobOomProbe.thunk),
+        .kind = .managed,
+        .state = @ptrCast(probe),
     });
     const function = try core.function.nativeFunction(ctx, name, 0);
     const object = objectFromValue(function) orelse return error.TypeError;
-    object.installExternalHostFunction(ctx.runtime, external_id);
+    object.installNativeEntry(entry);
     return function;
 }
 
 const PromiseBareCapabilityErrorProbe = struct {
     calls: usize = 0,
 
-    fn call(ptr: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
-        const self: *PromiseBareCapabilityErrorProbe = @ptrCast(@alignCast(ptr));
+    fn thunk(ctx: *core.JSContext, this_value: core.JSValue, argv: [*]const core.JSValue, argc: u32, entry: *const core.NativeEntry, func_obj: ?*core.Object) callconv(.c) core.JSValue {
+        _ = this_value;
+        _ = argv;
+        _ = argc;
+        _ = func_obj;
+        const self: *PromiseBareCapabilityErrorProbe = @ptrCast(@alignCast(entry.state.?));
         self.calls += 1;
-        return error.TypeError;
+        return builtin_dispatch.hostErrorToValue(ctx, ctx.global, error.TypeError);
     }
 };
 
@@ -1047,13 +1062,14 @@ fn promiseBareCapabilityErrorFunction(
     ctx: *core.JSContext,
     probe: *PromiseBareCapabilityErrorProbe,
 ) !core.JSValue {
-    const external_id = try ctx.runtime.registerExternalHostFunction(.{
-        .ptr = probe,
-        .call = PromiseBareCapabilityErrorProbe.call,
+    const entry = try ctx.runtime.allocNativeEntry(.{
+        .target = core.NativeEntry.code(&PromiseBareCapabilityErrorProbe.thunk),
+        .kind = .managed,
+        .state = @ptrCast(probe),
     });
     const function = try core.function.nativeFunction(ctx, "bareCapabilityError", 0);
     const object = objectFromValue(function) orelse return error.TypeError;
-    object.installExternalHostFunction(ctx.runtime, external_id);
+    object.installNativeEntry(entry);
     return function;
 }
 

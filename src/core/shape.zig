@@ -991,8 +991,7 @@ pub const Registry = struct {
 
         // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
         const old_prop_count = old.prop_count;
-        for (old.props()[0..old_prop_count]) |_| {
-        }
+        for (old.props()[0..old_prop_count]) |_| {}
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
 
         shape_ptr.* = new_shape;
@@ -1081,8 +1080,7 @@ pub const Registry = struct {
         // the single block freed last (qjs js_free_shape0 releases atoms +
         // proto, then the one allocation).
         const prop_count = shape.prop_count;
-        for (shape.props()[0..prop_count]) |_| {
-        }
+        for (shape.props()[0..prop_count]) |_| {}
         self.memory.destroyWithFam(Shape, shape, fam_bytes);
     }
 
@@ -1167,8 +1165,7 @@ pub const Registry = struct {
     }
 
     fn freePropertyAtoms(_: *Registry, props: []const Property) void {
-        for (props) |_| {
-        }
+        for (props) |_| {}
     }
 
     fn rebuildPropertyHash(self: *Registry, shape_ptr: **Shape, bucket_count: usize) !void {

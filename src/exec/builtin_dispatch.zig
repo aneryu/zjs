@@ -13,6 +13,8 @@ const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const exception_ops = @import("exception_ops.zig");
 const value_ops = @import("value_ops.zig");
+const native_legacy = @import("native_legacy.zig");
+const inline_calls = @import("inline_calls.zig");
 
 const HostError = exceptions.HostError;
 
@@ -108,10 +110,90 @@ inline fn nativeAsHostResult(ctx: *core.JSContext, v: NativeValue) HostError!cor
     return v;
 }
 
+/// Rooted-path receive: sentinel -> `HostError`. Unlike `nativeAsHostResult`
+/// it does not assert sentinel <=> pending, because a host caller may enter
+/// with an exception already pending (qjs `JS_Call` allows it) and a body
+/// that returns a value then leaves it pending, unrelated to this call.
+inline fn sentinelToHost(ctx: *core.JSContext, v: NativeValue) HostError!core.JSValue {
+    if (v.isException()) return nativeHostError(ctx);
+    return v;
+}
+
+/// NB2 thunk seam: legacy `HostError!JSValue` -> sentinel-carrying JSValue.
+pub inline fn hostResultToValue(ctx: *core.JSContext, result: HostError!core.JSValue) core.JSValue {
+    // `ctx` is the callee realm at every thunk site, so its global is the
+    // error-constructor authority (`realm_global` of the VM terminal).
+    const value = result catch |err| return nativeFromBits(nativeFromHostError(ctx, ctx.global, err));
+    return value;
+}
+
+pub inline fn hostErrorToValue(ctx: *core.JSContext, global: ?*core.Object, err: anyerror) core.JSValue {
+    return nativeFromBits(nativeFromHostError(ctx, global, err));
+}
+
+/// Embedder seam (`zjs.native.managed` thunks): a Zig error returned by a
+/// host function becomes the pending JS exception. Engine control errors
+/// (OutOfMemory / ProcessExit / Interrupted / Timeout / StackOverflow /
+/// UnhandledPromiseRejection) keep their engine materialization; an already
+/// pending exception is left as is; the six standard error names map to
+/// their constructors with an empty message (`InvalidUtf8` to URIError);
+/// every other name becomes `Error: <name>`.
+pub noinline fn embedderErrorToValue(ctx: *core.JSContext, err: anyerror) core.JSValue {
+    switch (err) {
+        error.OutOfMemory, error.ProcessExit, error.Interrupted, error.Timeout, error.StackOverflow, error.UnhandledPromiseRejection => {
+            return nativeFromBits(nativeFromHostError(ctx, ctx.global, err));
+        },
+        else => {},
+    }
+    if (ctx.hasException()) return nativeExc();
+    const global = ctx.global orelse return nativeFromBits(nativeFromHostError(ctx, null, err));
+    const info = embedderErrorInfo(err);
+    const error_value = exception_ops.createNamedError(ctx, global, info.name, info.message) catch |create_err| {
+        return nativeFromBits(nativeFromHostError(ctx, global, create_err));
+    };
+    _ = ctx.throwValue(error_value);
+    return nativeExc();
+}
+
+fn embedderErrorInfo(err: anyerror) struct { name: []const u8, message: []const u8 } {
+    return switch (err) {
+        error.TypeError => .{ .name = "TypeError", .message = "" },
+        error.RangeError => .{ .name = "RangeError", .message = "" },
+        error.SyntaxError => .{ .name = "SyntaxError", .message = "" },
+        error.ReferenceError => .{ .name = "ReferenceError", .message = "" },
+        error.EvalError => .{ .name = "EvalError", .message = "" },
+        error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "" },
+        else => .{ .name = "Error", .message = @errorName(err) },
+    };
+}
+
+/// What a native body needs from its VM caller without a per-call
+/// environment (NB2 §5.2 / §15 R5): the host output writer and the caller
+/// bytecode frame, read from the active invocation's top level (the frame
+/// that issued the call; natives push no level of their own). Outside any
+/// invocation (rooted host call) the environment, if published, is the
+/// source; otherwise there is no caller.
+pub const VmCallerView = struct {
+    output: ?*std.Io.Writer,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+};
+
+pub inline fn vmCallerView(ctx: *core.JSContext) VmCallerView {
+    if (inline_calls.activeInvocation(ctx.runtime)) |invocation| {
+        const level = invocation.machine.currentLevel();
+        return .{ .output = invocation.machine.output, .caller_function = level.function(), .caller_frame = level.frame };
+    }
+    if (activeNativeEnvironment(ctx)) |env| {
+        return .{ .output = env.output, .caller_function = env.caller_function, .caller_frame = env.caller_frame };
+    }
+    return .{ .output = null, .caller_function = null, .caller_frame = null };
+}
+
 pub const Bytecode = bytecode.FunctionBytecode;
 pub const Frame = frame_mod.Frame;
 
-const NativeCallEnvironment = struct {
+pub const NativeCallEnvironment = struct {
     callable_realm: ?CallRealmView,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
@@ -217,23 +299,6 @@ pub const NativeCall = struct {
     caller_frame: ?*Frame,
 };
 
-/// Direct-call ABI for records whose body consumes only the resolved realm
-/// pair, host output, and the VM caller pair — the `js_call_c_function`
-/// shape (qjs:17563): everything arrives as parameters, so the handler never
-/// consults `active_native_call` and the dispatch never materializes a
-/// NativeCallEnvironment. `ctx`/`global` are the FINAL callable realm view
-/// (post `finalCallEnvironment`), kept as one authority pair.
-pub const ExecDirectCallFn = *const fn (
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    func_obj: ?*core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) NativeBits;
-
 /// Leaf-boundary adapter: HostError!JSValue → NativeBits (x0+x1).
 pub inline fn nativeFromHostResult(
     ctx: *core.JSContext,
@@ -244,106 +309,7 @@ pub inline fn nativeFromHostResult(
     return nativeToBits(value);
 }
 
-/// Registration-side eraser for `InternalEntry.exec_direct`: taking the
-/// pointer through this helper is the only sanctioned way to populate the
-/// type-erased slot, so every stored pointer is proven to carry the
-/// `ExecDirectCallFn` ABI that `callExecDirectRecord` casts back to.
-pub fn execDirectFunction(comptime implementation: ExecDirectCallFn) *const anyopaque {
-    return @ptrCast(implementation);
-}
-
-/// The one dispatch record every external host function (embedder
-/// `createExternalFunction`, plugin bindings, host-installed callbacks)
-/// carries in its `call_cache`. It makes those functions indistinguishable
-/// from builtins on the VM's record arms (`op_call_method` native arm,
-/// `vmNativeCallableDispatch .resolved_record`): the hot path resolves the
-/// registry entry from the function object's external id and calls it, with
-/// no name lookup and no per-kind branch. `length` stays 0 (the registry
-/// protocol never padded arguments).
-pub const external_host_record: core.host_function.InternalRecord = .{
-    .length = 0,
-    .cproto = .generic,
-    .native_function = .{ .generic = externalHostGenericFallback },
-    .exec_direct = execDirectFunction(&externalHostDirect),
-};
-
-fn externalHostDirect(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    func_obj: ?*core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) NativeBits {
-    _ = caller_function;
-    _ = caller_frame;
-    const function_object = func_obj orelse return nativeFromHostError(ctx, global, error.TypeError);
-    return nativeFromHostResult(ctx, global, callExternalHostRecord(ctx, output, global, function_object, this_value, args));
-}
-
-/// Generic-ABI twin for the paths that dispatch the record through the
-/// typed cproto switch (they carry the function object in the environment).
-fn externalHostGenericFallback(ctx: *core.JSContext, this_value: core.JSValue, args: []const core.JSValue) HostError!core.JSValue {
-    const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
-    const function_object = env.func_obj orelse return error.TypeError;
-    const global = env.global orelse ctx.global orelse return error.TypeError;
-    return callExternalHostRecord(ctx, env.output, global, function_object, this_value, args);
-}
-
-/// Call an external host function's registry record. `ctx` is the callable's
-/// own realm (the registry protocol's `ExternalCall.realm`).
-pub fn callExternalHostRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    func_obj: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    const record = ctx.runtime.externalHostFunction(func_obj.externalHostFunctionId()) orelse return error.TypeError;
-    return record.call(record.ptr, .{
-        .realm = ctx,
-        .output = output,
-        .func_obj = func_obj,
-        .this_value = this_value,
-        .args = args,
-    }) catch |err| return throwExternalHostError(ctx, global, err);
-}
-
-/// Translate a Zig error escaping an external host function into the JS
-/// exception the caller observes (named error from the Zig error name; the
-/// hard/control errors pass through untouched).
-pub fn throwExternalHostError(ctx: *core.JSContext, global: *core.Object, err: anyerror) HostError!core.JSValue {
-    if (err == error.OutOfMemory) return error.OutOfMemory;
-    if (err == error.ProcessExit) return error.ProcessExit;
-    if (err == error.Interrupted) return error.Interrupted;
-    if (err == error.Timeout) return error.Timeout;
-    if (err == error.StackOverflow) return error.StackOverflow;
-    if (err == error.UnhandledPromiseRejection) return error.UnhandledPromiseRejection;
-    if (ctx.hasException()) return error.JSException;
-
-    const error_info = externalHostErrorInfo(err);
-    const error_value = exception_ops.createNamedError(ctx, global, error_info.name, error_info.message) catch |create_err|
-        return @errorCast(create_err);
-    if (ctx.hasException()) ctx.clearException();
-    _ = ctx.throwValue(error_value);
-    return error.JSException;
-}
-
-fn externalHostErrorInfo(err: anyerror) struct { name: []const u8, message: []const u8 } {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "TypeError")) return .{ .name = "TypeError", .message = "" };
-    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "" };
-    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "" };
-    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "" };
-    if (std.mem.eql(u8, name, "EvalError")) return .{ .name = "EvalError", .message = "" };
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "" };
-    return .{ .name = "Error", .message = name };
-}
-
-inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
+pub inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
     const opaque_ptr = ctx.runtime.active_native_call orelse return null;
     return @ptrCast(@alignCast(opaque_ptr));
 }
@@ -490,7 +456,7 @@ pub inline fn preflightInternalRecordCFunction(
         @intCast(@intFromEnum(native_ref.domain)),
         native_ref.id,
     ) orelse return;
-    return preflightCFunctionCall(caller_ctx, caller_global, func_obj, record.length);
+    return preflightCFunctionCall(caller_ctx, caller_global, func_obj, record.arity);
 }
 
 noinline fn throwCFunctionStackOverflow(
@@ -583,7 +549,7 @@ pub inline fn callInternalRecordDirect(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
-    try preflightCFunctionCall(ctx, global, func_obj, record.length);
+    try preflightCFunctionCall(ctx, global, func_obj, record.arity);
     const view = try finalCallEnvironment(ctx, global, globals, func_obj);
     return callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame);
 }
@@ -621,18 +587,6 @@ inline fn callInternalRecordDirectWithEnvironment(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
-    // Exec-direct terminal (qjs js_call_c_function, qjs:17563, has no env
-    // side-channel): pass the call state by parameter and skip both the
-    // NativeCallEnvironment stores and the `active_native_call`
-    // save/set/restore. Reentrant native dispatch below the handler always
-    // establishes its own environment first, so the skipped restore cannot
-    // leak a stale view.
-    if (record.exec_direct) |direct_ptr| {
-        return nativeAsHostResult(
-            view.ctx,
-            callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame),
-        );
-    }
     // QuickJS links a JSStackFrame around every C function call. Use the same
     // active-frame chain as bytecode invocations so an error created inside a
     // builtin captures the native callee before its bytecode caller. The data
@@ -657,7 +611,7 @@ inline fn callInternalRecordDirectWithEnvironment(
     view.ctx.runtime.active_native_call = &native_env;
     defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(view.ctx, this_value, record, args) catch |err| {
+    return invokeResolvedInternalRecord(view.ctx, this_value, record, args, func_obj) catch |err| {
         try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };
@@ -685,7 +639,7 @@ pub inline fn callRecordFromVmInRealm(
     // Native stack preflight (qjs js_call_c_function's js_check_stack_overflow
     // with the arg_buf reservation): `length` is a u8, so the byte count
     // cannot overflow -- no checked multiply.
-    const planned_stack_bytes: usize = @as(usize, record.length) * @sizeOf(core.JSValue);
+    const planned_stack_bytes: usize = @as(usize, record.arity) * @sizeOf(core.JSValue);
     if (ctx.runtime.checkNativeStackOverflow(planned_stack_bytes)) {
         throwCFunctionStackOverflow(ctx, global) catch |err| return nativeFromHostError(ctx, global, err);
         return nativeFromHostError(ctx, global, error.StackOverflow);
@@ -693,15 +647,42 @@ pub inline fn callRecordFromVmInRealm(
     const realm_global = realm.global orelse
         return nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry);
     // Native backtrace frame, pushed directly (no scope object, no active
-    // flag): the qjs `sf` link of js_call_c_function.
-    var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
+    // flag): the qjs `sf` link of js_call_c_function. The function value is
+    // written as an integer pair: a q-register store here would stall the
+    // 64-bit reads of the backtrace walker (store-forwarding width rule).
+    var bt_data: NativeBacktraceData = undefined;
+    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
     var bt_frame: core.ActiveBacktraceFrame = .{ .data = &bt_data, .resolver = resolveNativeBacktrace };
     realm.pushActiveBacktraceFrame(&bt_frame);
     defer realm.popActiveBacktraceFrame(&bt_frame);
-    if (record.exec_direct) |direct_ptr| {
-        const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
-        return direct(realm, output, realm_global, func_obj, this_value, args, caller_function, caller_frame);
+    // K2 prim-self leaf (lane K): receiver-taking typed arm; a miss (or a
+    // K1 leaf whose tags missed in the handler) takes the fallback below.
+    if (record.kind == .method_leaf) {
+        if (invokeMethodLeafFast(ctx, record, this_value, args)) |value| return nativeToBits(value);
     }
+    // NB2 bodies (and the former exec-direct bodies, which read the caller
+    // through `vmCallerView`) take no environment: one `bl` from here. The
+    // legacy `needs_env` leg is outlined so this frame stays small.
+    if (!record.flags.needs_env) {
+        const direct_result = invokeEntry(realm, this_value, record, args, func_obj) catch |err| {
+            return nativeFromHostError(realm, realm_global, err);
+        };
+        return nativeToBits(direct_result);
+    }
+    return callRecordWithEnvironment(output, realm_global, func_obj, record, realm, this_value, args, caller_function, caller_frame);
+}
+
+noinline fn callRecordWithEnvironment(
+    output: ?*std.Io.Writer,
+    realm_global: *core.Object,
+    func_obj: *core.Object,
+    record: *const core.host_function.InternalRecord,
+    realm: *core.RealmContext,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) NativeBits {
     const native_env: NativeCallEnvironment = .{
         .callable_realm = .{ .realm = realm, .global = realm_global },
         .output = output,
@@ -716,106 +697,36 @@ pub inline fn callRecordFromVmInRealm(
     const previous_native_call = realm.runtime.active_native_call;
     realm.runtime.active_native_call = &native_env;
     defer realm.runtime.active_native_call = previous_native_call;
-    const result = dispatchTypedRecord(realm, this_value, record, args) catch |err| {
+    const result = invokeEntry(realm, this_value, record, args, func_obj) catch |err| {
         return nativeFromHostError(realm, realm_global, err);
     };
     return nativeToBits(result);
 }
 
-pub fn callResolvedExecDirect(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    func_obj: *core.Object,
-    this_value: core.JSValue,
-    direct_ptr: *const anyopaque,
-    args: []const core.JSValue,
-    formal_length: usize,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) HostError!core.JSValue {
-    try preflightCFunctionCall(ctx, global, func_obj, formal_length);
-    const view = try finalCallEnvironment(ctx, global, empty_realm_globals[0..], func_obj);
-    return nativeAsHostResult(
-        view.ctx,
-        callExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame),
-    );
-}
-
-/// Direct-ABI record terminal: same native backtrace frame and error
-/// materialization boundary as the environment path, minus the environment
-/// itself. The handler receives the final realm authority pair by parameter.
-inline fn callExecDirectRecord(
-    view: FinalCallEnvironment,
-    output: ?*std.Io.Writer,
-    func_obj: ?*core.Object,
-    this_value: core.JSValue,
-    direct_ptr: *const anyopaque,
-    args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) NativeValue {
-    var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
-    native_scope.push();
-    defer native_scope.deinit();
-
-    return invokeExecDirectRecord(view, output, func_obj, this_value, direct_ptr, args, caller_function, caller_frame);
-}
-
-inline fn invokeExecDirectRecord(
-    view: FinalCallEnvironment,
-    output: ?*std.Io.Writer,
-    func_obj: ?*core.Object,
-    this_value: core.JSValue,
-    direct_ptr: *const anyopaque,
-    args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) NativeValue {
-    // Same authority gate as `callableRealm`: a synthetic invocation without
-    // a callable carrier reports the identical registry error the env-path
-    // handler would raise after its `nativeCall` recovery.
-    // Leaves return NativeBits (x0+x1). Registry miss still adapts here.
-    const realm_view = view.callable_realm orelse
-        return nativeFromBits(nativeFromHostError(view.ctx, view.global, error.InvalidBuiltinRegistry));
-    const direct: ExecDirectCallFn = @ptrCast(@alignCast(direct_ptr));
-    return nativeFromBits(direct(realm_view.realm, output, realm_view.global, func_obj, this_value, args, caller_function, caller_frame));
-}
-
 inline fn invokeResolvedInternalRecord(
     ctx: *core.JSContext,
     this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     args: []const core.JSValue,
+    func_obj: ?*core.Object,
 ) HostError!core.JSValue {
-    return callTypedInternalRecordDirect(ctx, this_value, record, args);
+    return callTypedInternalRecordDirect(ctx, this_value, record, args, func_obj);
 }
 
-/// Outlined so the ABI-selection switch does not inflate hot call sites.
+/// Outlined so the kind switch does not inflate hot call sites.
 noinline fn callTypedInternalRecordDirect(
     ctx: *core.JSContext,
     this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     args: []const core.JSValue,
+    func_obj: ?*core.Object,
 ) HostError!core.JSValue {
-    // Every builtin call passes through here, so this is where the receiver
-    // and arguments become exact roots for the duration of the call.
-    //
-    // Under refcounting they are already alive -- the caller holds counts --
-    // and this is dead weight, which is why it is comptime-gated. Under
-    // tracing they are not roots at all: a collection during a builtin can
-    // reclaim the very object the builtin is walking. `Set.prototype.add`
-    // losing its collection mid-insert is the case that made this concrete.
-    // TGC R1-c re-confirmed this frame needs nothing further. The R1-b
-    // census names its `.generic` / `.generic_magic` / getter call sites
-    // among the regexp-workload candidate frames, but every GC value the
-    // shell itself holds is already in this window: `receiver` is the named
-    // root and `args` is the borrowed operand window. `record` is a static
-    // engine-owned table entry and `ctx` is the realm, rooted by the
-    // runtime. The residual hits are deep slots the compiler reuses (one
-    // resolves to a fresh young string every scan with no local of that
-    // type in scope) plus this frame's prologue saves of ITS caller's
-    // registers; neither is answerable with a root here.
+    // Every rooted-path builtin call passes through here, so this is where
+    // the receiver and arguments become exact roots for the duration of the
+    // call (`Set.prototype.add` losing its collection mid-insert is the case
+    // that made this concrete; TGC R1-c re-confirmed nothing further is
+    // needed). The VM-window terminal does not need it: the operand window
+    // is already a `traceStack` root.
     var receiver = this_value;
     var call_roots = core.runtime.ValueRootFrame{
         .values = &[_]core.runtime.ValueRootValue{.{ .value = &receiver }},
@@ -824,84 +735,457 @@ noinline fn callTypedInternalRecordDirect(
     call_roots.activate(ctx.runtime);
     defer call_roots.deactivate(ctx.runtime);
 
-    return dispatchTypedRecord(ctx, this_value, record, args);
+    return invokeEntry(ctx, this_value, record, args, func_obj);
 }
 
-/// The cproto switch shared by the rooted terminal above and the VM-window
+/// The NB2 kind switch shared by the rooted terminal above and the VM-window
 /// terminal (`callRecordFromVmInRealm`). `ctx` is the callable's own realm.
-inline fn dispatchTypedRecord(
+/// Constructor kinds carry the managed prototype in phase A2 (see
+/// `native_entry.ManagedFn`); the construct path publishes `is_constructor`
+/// / `new_target` through the environment exactly as before.
+inline fn invokeEntry(
     ctx: *core.JSContext,
     this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
+    entry: *const core.NativeEntry,
     args: []const core.JSValue,
+    func_obj: ?*core.Object,
 ) HostError!core.JSValue {
-    const native = record.native_function orelse return error.TypeError;
-    // `InternalRecord` is engine-owned and its table builder guarantees that
-    // the function union tag equals `cproto`. QuickJS likewise stores an
-    // untagged `JSCFunctionType` and interprets it solely through `cproto`;
-    // retain the invariant check in safe builds without redispatching on the
-    // duplicate union tag in every hot ABI arm.
-    std.debug.assert(std.meta.activeTag(native) == record.cproto);
-    switch (record.cproto) {
-        .generic => {
-            const native_fn = native.generic;
-            return native_fn(ctx, this_value, args);
+    switch (entry.kind) {
+        .managed, .constructor_or_func => {
+            return sentinelToHost(ctx, entry.managed()(ctx, this_value, args.ptr, @intCast(args.len), entry, func_obj));
         },
         .constructor => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
-            const native_fn = native.constructor;
-            return native_fn(ctx, this_value, args);
-        },
-        .constructor_or_func => {
-            const native_fn = native.constructor_or_func;
-            return native_fn(ctx, this_value, args);
-        },
-        .generic_magic => {
-            const native_fn = native.generic_magic;
-            return native_fn(ctx, this_value, args, record.magic);
-        },
-        .constructor_magic => {
-            const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
-            if (!env.is_constructor) return error.TypeError;
-            const native_fn = native.constructor_magic;
-            return native_fn(ctx, this_value, args, record.magic);
-        },
-        .constructor_or_func_magic => {
-            const native_fn = native.constructor_or_func_magic;
-            return native_fn(ctx, this_value, args, record.magic);
+            return sentinelToHost(ctx, entry.managed()(ctx, this_value, args.ptr, @intCast(args.len), entry, func_obj));
         },
         .getter => {
-            const native_fn = native.getter;
-            return native_fn(ctx, this_value);
+            if (entry.sig != 0) return invokeTypedGetter(ctx, this_value, entry);
+            return sentinelToHost(ctx, entry.getter()(ctx, this_value, entry));
         },
         .setter => {
-            const native_fn = native.setter;
-            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0]);
+            const new_value = if (args.len == 0) core.JSValue.undefinedValue() else args[0];
+            if (entry.sig != 0) return invokeTypedSetter(ctx, this_value, entry, new_value);
+            return sentinelToHost(ctx, entry.setter()(ctx, this_value, new_value, entry));
         },
-        .getter_magic => {
-            const native_fn = native.getter_magic;
-            return native_fn(ctx, this_value, record.magic);
+        .leaf => {
+            if (invokeLeafFast(entry, args)) |value| return value;
+            return invokeLeafFallback(ctx, this_value, entry, args, func_obj);
         },
-        .setter_magic => {
-            const native_fn = native.setter_magic;
-            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0], record.magic);
+        // K2 (design §4.3): receiver class check + `self` unwrap, then the
+        // typed leaf arm or the managed prototype with `self` first.
+        .method_leaf => {
+            if (invokeMethodLeafFast(ctx, entry, this_value, args)) |value| return value;
+            if (entry.class_id != 0) return invokeMethodLeafMiss(ctx, this_value, entry, args, func_obj);
+            return invokeLeafFallback(ctx, this_value, entry, args, func_obj);
         },
-        .f_f => {
-            const native_fn = native.f_f;
-            const value = primitiveF64Arg(args, 0) orelse
-                return callInternalRecordFallback(ctx, this_value, record, args);
-            return value_ops.numberToValue(native_fn(value));
+        .method_managed => {
+            const self_ptr = nativeReceiverSelf(this_value, entry) orelse return throwNativeReceiverTypeError(ctx, entry);
+            return sentinelToHost(ctx, entry.methodManaged()(ctx, self_ptr, this_value, args.ptr, @intCast(args.len), entry));
         },
-        .f_f_f => {
-            const native_fn = native.f_f_f;
-            const lhs = primitiveF64Arg(args, 0) orelse
-                return callInternalRecordFallback(ctx, this_value, record, args);
-            const rhs = primitiveF64Arg(args, 1) orelse
-                return callInternalRecordFallback(ctx, this_value, record, args);
-            return value_ops.numberToValue(native_fn(lhs, rhs));
-        },
+        .forward_call, .forward_apply, .retired => return error.TypeError,
     }
+}
+
+/// K2 receiver unwrap (design §4.3 steps 1-2): `this` must be an object of
+/// exactly the entry's NativeType class with a live `self`. Null for a
+/// foreign receiver or a disposed instance; the caller throws.
+pub inline fn nativeReceiverSelf(this_value: core.JSValue, entry: *const core.NativeEntry) ?*anyopaque {
+    const obj = core.value_semantics.objectFromValue(this_value) orelse return null;
+    if (obj.class_id != entry.class_id) return null;
+    return obj.nativeSelfAssumeClass();
+}
+
+/// Install the K2/K3 receiver TypeError (qjs `JS_GetOpaque2`:
+/// "<Class> object expected"; a disposed instance reads the same) and return
+/// the host error for the rooted arms.
+pub noinline fn throwNativeReceiverTypeError(ctx: *core.JSContext, entry: *const core.NativeEntry) HostError!core.JSValue {
+    const global = ctx.global orelse return error.TypeError;
+    var buffer: [128]u8 = undefined;
+    const name: []const u8 = if (core.native_object.NativeType.fromRecord(ctx.runtime, entry.class_id)) |t| t.name else "native";
+    const message = std.fmt.bufPrint(&buffer, "{s} object expected", .{name}) catch "native object expected";
+    _ = exception_ops.throwTypeErrorMessage(ctx, global, message) catch |err| return @errorCast(err);
+    return error.TypeError;
+}
+
+/// Thunk-side variant (accessor / constructor thunks built by
+/// `zjs.native.Class`): unwrap or leave the TypeError pending and return null
+/// so the thunk answers with the exception sentinel.
+pub fn nativeReceiverSelfOrThrow(ctx: *core.JSContext, this_value: core.JSValue, entry: *const core.NativeEntry) ?*anyopaque {
+    if (nativeReceiverSelf(this_value, entry)) |self_ptr| return self_ptr;
+    _ = throwNativeReceiverTypeError(ctx, entry) catch {};
+    return null;
+}
+
+/// Canonical marshal helpers for thunks built outside this file (typed
+/// accessor thunks of `zjs.native.Class`): FNABI §15.3, no coercion.
+pub inline fn marshalI32(val: core.JSValue) ?i32 {
+    const one = [_]core.JSValue{val};
+    return leafI32Arg(&one, 0);
+}
+
+pub inline fn marshalF64(val: core.JSValue) ?f64 {
+    const one = [_]core.JSValue{val};
+    return leafF64Arg(&one, 0);
+}
+
+/// Thunk-side TypeError with a message: installs the exception and returns
+/// the sentinel.
+pub fn throwTypeErrorSentinel(ctx: *core.JSContext, message: []const u8) NativeValue {
+    const global = ctx.global orelse return nativeFromBits(nativeFromHostError(ctx, null, error.TypeError));
+    _ = exception_ops.throwTypeErrorMessage(ctx, global, message) catch {};
+    if (ctx.hasException()) return nativeExc();
+    return nativeFromBits(nativeFromHostError(ctx, global, error.TypeError));
+}
+
+/// K2 typed leaf arm: class check + `self` load + the K1 marshal checks +
+/// direct C call + boxing. Null on a receiver miss or an argument tag miss.
+inline fn invokeNativeMethodLeafFast(entry: *const core.NativeEntry, this_value: core.JSValue, args: []const core.JSValue) ?core.JSValue {
+    const self_ptr = nativeReceiverSelf(this_value, entry) orelse return null;
+    switch (entry.sig) {
+        native_legacy.sig_self_i32_to_i32 => {
+            const f: native_legacy.LeafSelfI32ToI32 = @ptrCast(entry.target);
+            const x = leafI32Arg(args, 0) orelse return null;
+            return core.JSValue.int32(f(self_ptr, x));
+        },
+        native_legacy.sig_self_to_i32 => {
+            const f: native_legacy.LeafSelfToI32 = @ptrCast(entry.target);
+            return core.JSValue.int32(f(self_ptr));
+        },
+        native_legacy.sig_self_i32_to_void => {
+            const f: native_legacy.LeafSelfI32ToVoid = @ptrCast(entry.target);
+            const x = leafI32Arg(args, 0) orelse return null;
+            f(self_ptr, x);
+            return core.JSValue.undefinedValue();
+        },
+        native_legacy.sig_self_to_void => {
+            const f: native_legacy.LeafSelfToVoid = @ptrCast(entry.target);
+            f(self_ptr);
+            return core.JSValue.undefinedValue();
+        },
+        native_legacy.sig_self_to_f64 => {
+            const f: native_legacy.LeafSelfToF64 = @ptrCast(entry.target);
+            return value_ops.numberToValue(f(self_ptr));
+        },
+        native_legacy.sig_self_f64_to_void => {
+            const f: native_legacy.LeafSelfF64ToVoid = @ptrCast(entry.target);
+            const x = leafF64Arg(args, 0) orelse return null;
+            f(self_ptr, x);
+            return core.JSValue.undefinedValue();
+        },
+        native_legacy.sig_self_f64_f64_to_void => {
+            const f: native_legacy.LeafSelfF64F64ToVoid = @ptrCast(entry.target);
+            const x = leafF64Arg(args, 0) orelse return null;
+            const y = leafF64Arg(args, 1) orelse return null;
+            f(self_ptr, x, y);
+            return core.JSValue.undefinedValue();
+        },
+        else => return null,
+    }
+}
+
+/// Cold K2 miss: a bad receiver throws the class TypeError; an argument tag
+/// miss takes the entry's fallback (or TypeError under the canonical policy).
+noinline fn invokeMethodLeafMiss(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    entry: *const core.NativeEntry,
+    args: []const core.JSValue,
+    func_obj: ?*core.Object,
+) HostError!core.JSValue {
+    if (nativeReceiverSelf(this_value, entry) == null) return throwNativeReceiverTypeError(ctx, entry);
+    return invokeLeafFallback(ctx, this_value, entry, args, func_obj);
+}
+
+/// K3 typed getter arm (design §4.4 typed variant): class check + `self` +
+/// direct C call + boxing. Null on a receiver miss.
+pub inline fn invokeTypedGetterFast(entry: *const core.NativeEntry, this_value: core.JSValue) ?core.JSValue {
+    const self_ptr = nativeReceiverSelf(this_value, entry) orelse return null;
+    switch (entry.sig) {
+        native_legacy.sig_self_to_f64 => {
+            const f: native_legacy.LeafSelfToF64 = @ptrCast(entry.target);
+            return value_ops.numberToValue(f(self_ptr));
+        },
+        native_legacy.sig_self_to_i32 => {
+            const f: native_legacy.LeafSelfToI32 = @ptrCast(entry.target);
+            return core.JSValue.int32(f(self_ptr));
+        },
+        else => unreachable,
+    }
+}
+
+/// Outcome of the typed setter arm: the value stored, a receiver miss, or a
+/// marshal miss (canonical policy: no coercion).
+pub const TypedSetterOutcome = enum { stored, receiver_miss, value_miss };
+
+pub inline fn invokeTypedSetterFast(entry: *const core.NativeEntry, this_value: core.JSValue, new_value: core.JSValue) TypedSetterOutcome {
+    const self_ptr = nativeReceiverSelf(this_value, entry) orelse return .receiver_miss;
+    switch (entry.sig) {
+        native_legacy.sig_self_f64_to_void => {
+            const f: native_legacy.LeafSelfF64ToVoid = @ptrCast(entry.target);
+            const x = marshalF64(new_value) orelse return .value_miss;
+            f(self_ptr, x);
+        },
+        native_legacy.sig_self_i32_to_void => {
+            const f: native_legacy.LeafSelfI32ToVoid = @ptrCast(entry.target);
+            const x = marshalI32(new_value) orelse return .value_miss;
+            f(self_ptr, x);
+        },
+        else => unreachable,
+    }
+    return .stored;
+}
+
+fn invokeTypedGetter(ctx: *core.JSContext, this_value: core.JSValue, entry: *const core.NativeEntry) HostError!core.JSValue {
+    if (invokeTypedGetterFast(entry, this_value)) |value| return value;
+    return throwNativeReceiverTypeError(ctx, entry);
+}
+
+fn invokeTypedSetter(ctx: *core.JSContext, this_value: core.JSValue, entry: *const core.NativeEntry, new_value: core.JSValue) HostError!core.JSValue {
+    return switch (invokeTypedSetterFast(entry, this_value, new_value)) {
+        .stored => core.JSValue.undefinedValue(),
+        .receiver_miss => throwNativeReceiverTypeError(ctx, entry),
+        .value_miss => throwTypedSetterValueTypeError(ctx, entry),
+    };
+}
+
+pub noinline fn throwTypedSetterValueTypeError(ctx: *core.JSContext, entry: *const core.NativeEntry) HostError!core.JSValue {
+    const global = ctx.global orelse return error.TypeError;
+    const message: []const u8 = if (entry.sig == native_legacy.sig_self_i32_to_void) "int32 expected" else "number expected";
+    _ = exception_ops.throwTypeErrorMessage(ctx, global, message) catch |err| return @errorCast(err);
+    return error.TypeError;
+}
+
+/// K3 direct call (design §8.2 slow path): when `accessor` is a native
+/// function whose entry is a `.getter` / `.setter`, invoke it through the VM
+/// native terminal (preflight + backtrace marker + realm from the payload)
+/// instead of the generic call machinery. Null when `accessor` is anything
+/// else (bytecode getter, bound function, ...), so the caller keeps its path.
+pub fn tryNativeAccessorCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    accessor: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+    comptime expected_kind: core.native_entry.Kind,
+) ?HostError!core.JSValue {
+    const target = nativeAccessorTarget(accessor, expected_kind) orelse return null;
+    return callNativeAccessorTarget(ctx, output, global, target, receiver, args, caller_function, caller_frame, expected_kind);
+}
+
+/// A native accessor function object with its entry + realm, resolved from
+/// the accessor slot value (the pure test half of `tryNativeAccessorCall`,
+/// so a handler can decide before publishing its pc / stack top).
+pub const NativeAccessorTarget = struct {
+    func_obj: *core.Object,
+    record: *const core.NativeEntry,
+    realm: *core.RealmContext,
+};
+
+pub inline fn nativeAccessorTarget(accessor: core.JSValue, comptime expected_kind: core.native_entry.Kind) ?NativeAccessorTarget {
+    comptime std.debug.assert(expected_kind == .getter or expected_kind == .setter);
+    // The accessor value is a property slot read (an expression value), so
+    // the tag test alone identifies the object (qjs JS_VALUE_GET_OBJ).
+    const func_obj = core.value_semantics.objectFromValueTrustedExpression(accessor) orelse return null;
+    if (func_obj.class_id != core.class.ids.c_function) return null;
+    const target = func_obj.nativeCallTarget() orelse return null;
+    if (target.record.kind != expected_kind) return null;
+    return .{ .func_obj = func_obj, .record = target.record, .realm = target.realm };
+}
+
+pub fn callNativeAccessorTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target: NativeAccessorTarget,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+    comptime expected_kind: core.native_entry.Kind,
+) HostError!core.JSValue {
+    // Typed accessor: leaf contract (§4.7 K1/K2 row) -- no preflight, no
+    // backtrace marker; the VM throws on a receiver / marshal miss.
+    if (target.record.sig != 0) {
+        if (expected_kind == .getter) {
+            return invokeTypedGetter(target.realm, receiver, target.record);
+        } else {
+            const new_value = if (args.len == 0) core.JSValue.undefinedValue() else args[0];
+            return invokeTypedSetter(target.realm, receiver, target.record, new_value);
+        }
+    }
+    const bits = callRecordFromVmInRealm(ctx, output, global, target.func_obj, target.record, target.realm, receiver, args, caller_function, caller_frame);
+    const result = nativeFromBits(bits);
+    if (nativeIsExc(ctx, result)) return nativeHostError(ctx);
+    return result;
+}
+
+/// VM-side entry for the leaf arm (vm_native.dispatch).
+pub inline fn invokeLeafFastEntry(entry: *const core.NativeEntry, args: []const core.JSValue) ?core.JSValue {
+    return invokeLeafFast(entry, args);
+}
+
+/// VM-side entry for the K2 `prim_self` arm (`op_call_method` inline arm):
+/// `this` is the operand-window receiver. Outlined on purpose: the string
+/// tag checks plus the boxing would otherwise sit inside the op_call_method
+/// handler body (whose size is load-bearing for the island tails).
+pub noinline fn invokeMethodLeafFastEntry(ctx: *core.JSContext, entry: *const core.NativeEntry, this_value: core.JSValue, args: []const core.JSValue) ?core.JSValue {
+    return invokeMethodLeafFast(ctx, entry, this_value, args);
+}
+
+/// K2 `prim_self` arm (design §4.3): receiver tag check in place of the
+/// class-id check, `self` = the flat string body, canonical i32 index, one
+/// direct C call, boxing. Null on any miss (non-string / unlinearized rope /
+/// Symbol receiver, non-int32 index, negative target result): the caller
+/// takes the entry's fallback, i.e. the legacy body with its full ToString /
+/// ToIntegerOrInfinity semantics.
+inline fn invokeMethodLeafFast(ctx: *core.JSContext, entry: *const core.NativeEntry, this_value: core.JSValue, args: []const core.JSValue) ?core.JSValue {
+    switch (entry.sig) {
+        native_legacy.sig_string_i32_to_i32 => {
+            const f: native_legacy.LeafStringI32ToI32 = @ptrCast(entry.target);
+            const str = leafStringReceiver(this_value) orelse return null;
+            const index = leafI32Arg(args, 0) orelse return null;
+            const code = f(str, index);
+            if (code < 0) return null;
+            return core.JSValue.int32(code);
+        },
+        native_legacy.sig_string_i32_to_string => {
+            const f: native_legacy.LeafStringI32ToI32 = @ptrCast(entry.target);
+            const str = leafStringReceiver(this_value) orelse return null;
+            const index = leafI32Arg(args, 0) orelse return null;
+            const code = f(str, index);
+            if (code < 0) return null;
+            return leafCodeUnitString(ctx.runtime, @intCast(code));
+        },
+        // Native-object receivers (lane D): SELF_* signatures.
+        else => return invokeNativeMethodLeafFast(entry, this_value, args),
+    }
+}
+
+/// `prim_self` receiver unwrap: a flat string, or a rope already linearized
+/// by an earlier read (the flat body cached in the node). Symbols share the
+/// body layout but must miss (ToString throws on them); ropes not yet
+/// linearized miss so the fallback linearizes once, as qjs
+/// js_linearize_string_rope does.
+inline fn leafStringReceiver(this_value: core.JSValue) ?*const core.string.String {
+    const tag = this_value.tagOf();
+    if (tag == core.value.Tag.string) return this_value.asStringBodyRaw().?;
+    if (tag == core.value.Tag.string_rope) return this_value.ropeBody().?.flatString();
+    return null;
+}
+
+/// One-code-unit result string (charAt / at). Allocation failure is a miss:
+/// the fallback repeats the allocation and reports it through the
+/// legacy error path.
+inline fn leafCodeUnitString(rt: *core.JSRuntime, unit: u16) ?core.JSValue {
+    if (unit < 0x100) {
+        const byte: [1]u8 = .{@intCast(unit)};
+        const str = core.string.String.createLatin1(rt, &byte) catch return null;
+        return str.value();
+    }
+    const units: [1]u16 = .{unit};
+    const str = core.string.String.createUtf16(rt, &units) catch return null;
+    return str.value();
+}
+
+/// K1 leaf arm: tag checks + direct C call + boxing, no environment. Returns
+/// null on a tag miss (the caller takes the fallback with the environment,
+/// or throws TypeError when the entry has none -- the canonical marshal
+/// policy of FNABI §15.3 / §15.6: a missing argument is `undefined` and
+/// therefore a miss).
+inline fn invokeLeafFast(entry: *const core.NativeEntry, args: []const core.JSValue) ?core.JSValue {
+    switch (entry.sig) {
+        native_legacy.sig_f64_to_f64 => {
+            const f: native_legacy.LeafF64ToF64 = @ptrCast(entry.target);
+            const x = primitiveF64Arg(args, 0) orelse return null;
+            return value_ops.numberToValue(f(x));
+        },
+        native_legacy.sig_f64_f64_to_f64 => {
+            const f: native_legacy.LeafF64F64ToF64 = @ptrCast(entry.target);
+            const x = primitiveF64Arg(args, 0) orelse return null;
+            const y = primitiveF64Arg(args, 1) orelse return null;
+            return value_ops.numberToValue(f(x, y));
+        },
+        native_legacy.sig_void_to_void => {
+            const f: native_legacy.LeafVoidToVoid = @ptrCast(entry.target);
+            f();
+            return core.JSValue.undefinedValue();
+        },
+        native_legacy.sig_i32_to_i32 => {
+            const f: native_legacy.LeafI32ToI32 = @ptrCast(entry.target);
+            const x = leafI32Arg(args, 0) orelse return null;
+            return core.JSValue.int32(f(x));
+        },
+        native_legacy.sig_i32_i32_to_i32 => {
+            const f: native_legacy.LeafI32I32ToI32 = @ptrCast(entry.target);
+            const x = leafI32Arg(args, 0) orelse return null;
+            const y = leafI32Arg(args, 1) orelse return null;
+            return core.JSValue.int32(f(x, y));
+        },
+        native_legacy.sig_f64_to_void => {
+            const f: native_legacy.LeafF64ToVoid = @ptrCast(entry.target);
+            const x = leafF64Arg(args, 0) orelse return null;
+            f(x);
+            return core.JSValue.undefinedValue();
+        },
+        native_legacy.sig_bool_to_bool => {
+            const f: native_legacy.LeafBoolToBool = @ptrCast(entry.target);
+            if (args.len == 0) return null;
+            const x = args[0].asBool() orelse return null;
+            return core.JSValue.boolean(f(x));
+        },
+        native_legacy.sig_state_f64_to_void => {
+            const f: native_legacy.LeafStateF64ToVoid = @ptrCast(entry.target);
+            const x = leafF64Arg(args, 0) orelse return null;
+            f(entry.state.?, x);
+            return core.JSValue.undefinedValue();
+        },
+        native_legacy.sig_state_i32_to_i32 => {
+            const f: native_legacy.LeafStateI32ToI32 = @ptrCast(entry.target);
+            const x = leafI32Arg(args, 0) orelse return null;
+            return core.JSValue.int32(f(entry.state.?, x));
+        },
+        else => return null,
+    }
+}
+
+/// Canonical `i32` marshal (FNABI §15.3): a JS Number whose mathematical
+/// value is an int32, whether it is int-tagged or double-represented. Any
+/// other value (including a missing argument) is a miss.
+inline fn leafI32Arg(args: []const core.JSValue, index: usize) ?i32 {
+    if (index >= args.len) return null;
+    const value = args[index];
+    if (value.isInt()) return value.asInt32().?;
+    if (value.asFloat64()) |f| {
+        if (f != @trunc(f)) return null;
+        if (f < -2147483648.0 or f > 2147483647.0) return null;
+        // -0.0 is not an int32 value.
+        if (f == 0 and std.math.signbit(f)) return null;
+        return @intFromFloat(f);
+    }
+    return null;
+}
+
+/// Canonical `f64` marshal (FNABI §15.3): any JS Number, nothing else.
+inline fn leafF64Arg(args: []const core.JSValue, index: usize) ?f64 {
+    if (index >= args.len) return null;
+    const value = args[index];
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    return value.asFloat64();
+}
+
+noinline fn invokeLeafFallback(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    entry: *const core.NativeEntry,
+    args: []const core.JSValue,
+    func_obj: ?*core.Object,
+) HostError!core.JSValue {
+    const fallback = entry.fallback orelse return error.TypeError;
+    return sentinelToHost(ctx, fallback(ctx, this_value, args.ptr, @intCast(args.len), entry, func_obj));
 }
 
 /// Numeric C-proto calls mirror QuickJS's primitive JS_ToFloat64 fast path.
@@ -916,16 +1200,6 @@ inline fn primitiveF64Arg(args: []const core.JSValue, index: usize) ?f64 {
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);
     return null;
-}
-
-noinline fn callInternalRecordFallback(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    const fallback = record.fallback_function orelse return error.TypeError;
-    return fallback(ctx, this_value, args, record.magic);
 }
 
 /// Probe the internal-builtin table for `native_ref` and invoke the record on
@@ -995,7 +1269,7 @@ fn callConstructRecordImpl(
     // report a miss and let the caller fall through to its construct cascade.
     if (!record.isConstructor()) return null;
     if (push_native_frame) {
-        try preflightCFunctionCall(ctx, global, func_obj, record.length);
+        try preflightCFunctionCall(ctx, global, func_obj, record.arity);
     }
     const view = try finalCallEnvironment(ctx, global, globals, func_obj);
     var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
@@ -1017,7 +1291,7 @@ fn callConstructRecordImpl(
     view.ctx.runtime.active_native_call = &native_env;
     defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(view.ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
+    return invokeResolvedInternalRecord(view.ctx, core.JSValue.undefinedValue(), record, args, func_obj) catch |err| {
         try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };

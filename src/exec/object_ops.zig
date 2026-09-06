@@ -3542,6 +3542,8 @@ inline fn getPropertyValueFromObjectChain(
                 .accessor => {
                     const getter = lookup.entry.slot.accessor.getterValue();
                     if (getter.isUndefined()) return core.JSValue.undefinedValue();
+                    // K3 native getter: direct native terminal (design §8.2).
+                    if (builtin_dispatch.tryNativeAccessorCall(ctx, output, global, receiver, getter, &.{}, caller_function, caller_frame, .getter)) |native_result| return try native_result;
                     return try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, getter, &.{}, caller_function, caller_frame);
                 },
                 // Auto-init materialization and var-ref/TDZ handling remain

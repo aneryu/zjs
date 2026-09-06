@@ -69,11 +69,7 @@ const NativeRecordStackProbe = struct {
     var calls: usize = 0;
     var recurse: bool = true;
 
-    const record: core.host_function.InternalRecord = .{
-        .length = 0,
-        .cproto = .generic,
-        .native_function = .{ .generic = call },
-    };
+    const record: core.host_function.InternalRecord = engine.exec.native_legacy.genericEntry(&call, 0);
 
     fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
         calls += 1;
@@ -693,7 +689,10 @@ test "Function and Reflect apply opt into the active Machine explicitly" {
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
-    try std.testing.expectEqual(@as(usize, 5), metrics.same_machine_sync_calls);
+    // Only Reflect.apply enters through the native sync-call seam;
+    // Function.prototype.apply on a bytecode target with a dense list is an
+    // in-window method push (native-boundary design §5.4), not a sync call.
+    try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
     try std.testing.expect(js.runtime.active_invocation == null);
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
@@ -736,7 +735,9 @@ test "synchronous apply fallbacks restore the outer active invocation" {
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
-    try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
+    // The same-Realm apply is a §5.4 window push, not a sync call; only the
+    // foreign-Realm apply leaves the Machine (and starts the second one).
+    try std.testing.expectEqual(@as(usize, 0), metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
 }
@@ -1306,7 +1307,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
     js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
-    js.context.interrupt_counter = 4;
+    js.context.interrupt_counter = 3; // NB2 D7: native calls no longer tick the interrupt counter (qjs parity)
     try std.testing.expectError(
         error.Interrupted,
         engine.exec.call_runtime.callValueOrBytecodeRoot(
@@ -1846,7 +1847,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     const interrupt_function = try global.getProperty(interrupt_key);
     var interrupt_state = InterruptTestState{ .stop = true };
     js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt_state);
-    js.context.interrupt_counter = 4;
+    js.context.interrupt_counter = 3; // NB2 D7: native calls no longer tick the interrupt counter (qjs parity)
     try std.testing.expectError(
         error.Interrupted,
         engine.exec.call_runtime.callValueOrBytecodeRoot(
@@ -2480,8 +2481,10 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     try std.testing.expectEqual(@as(usize, 3), state.hits);
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
 
-    // The same-Machine Function.prototype.call fast path fuses an outer native
-    // call and an inner target call, but both entries still consume the budget.
+    // Function.prototype.call on a bytecode target is a window rewrite
+    // (native-boundary design §5.4): no native frame is entered, so only the
+    // target's own bytecode entry consumes the budget (D7: native dispatch
+    // does not tick). The wrapper entry and the forwarded entry leave one.
     js.context.interrupt_counter = 3;
     const forwarded_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
@@ -2494,8 +2497,8 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
     );
     try std.testing.expectEqual(@as(?i32, 13), forwarded_result.asInt32());
-    try std.testing.expectEqual(@as(usize, 4), state.hits);
-    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
+    try std.testing.expectEqual(@as(usize, 3), state.hits);
+    try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
 
     // Initial async invocation pays the outer JS_CallInternal entry, one
     // async_func_resume entry, and the resolving-function call used to settle
@@ -2512,7 +2515,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(usize, 4), state.hits);
+    try std.testing.expectEqual(@as(usize, 3), state.hits);
     try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
 
     // Generator.next has one native call entry and one bytecode-resume entry.
@@ -2528,7 +2531,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(usize, 4), state.hits);
+    try std.testing.expectEqual(@as(usize, 3), state.hits);
     try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
 
     _ = try engine.exec.call_runtime.callValueOrBytecodeRoot(
@@ -2541,7 +2544,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(usize, 5), state.hits);
+    try std.testing.expectEqual(@as(usize, 4), state.hits);
     // The resumed body reaches its next yield through one additional jump poll.
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset - 2, js.context.interrupt_counter);
 }
@@ -5379,8 +5382,8 @@ test "call subsystem installs and invokes host globals" {
     const print_object = core.Object.fromHeader(print.refHeader().?);
     const host_function_key = try rt.internAtom("__host_function");
     try std.testing.expect((try print_object.getOwnProperty(rt, host_function_key)) == null);
-    try std.testing.expectEqual(core.host_function.ids.external_host, print_object.hostFunctionKindSlot().*);
-    try std.testing.expect(print_object.externalHostFunctionId() != 0);
+    try std.testing.expectEqual(core.host_function.ids.output, print_object.hostFunctionKindSlot().*);
+    try std.testing.expect(print_object.nativeRecord() == &engine.exec.call.output_host_entry);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -5396,8 +5399,8 @@ test "call subsystem installs and invokes host globals" {
     const console_object = core.Object.fromHeader(console_value.refHeader().?);
     const log = try console_object.getProperty(log_key);
     const log_object = core.Object.fromHeader(log.refHeader().?);
-    try std.testing.expectEqual(core.host_function.ids.external_host, log_object.hostFunctionKindSlot().*);
-    try std.testing.expectEqual(print_object.externalHostFunctionId(), log_object.externalHostFunctionId());
+    try std.testing.expectEqual(core.host_function.ids.output, log_object.hostFunctionKindSlot().*);
+    try std.testing.expect(log_object.nativeRecord() == print_object.nativeRecord());
 
     const log_args = [_]core.JSValue{ core.JSValue.int32(2), core.JSValue.boolean(false) };
     const log_result = try engine.exec.call.callValue(ctx, &stream, log, &log_args);
@@ -5435,7 +5438,11 @@ test "call subsystem installs and invokes host globals" {
     const set_args = [_]core.JSValue{ stored_key, stored_value };
     const set_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_set, &set_args);
     try std.testing.expect(set_result.same(map_value));
-    try std.testing.expectError(error.TypeError, engine.exec.call.callValue(ctx, null, map_set, &set_args));
+    // NB2 (design §7 C3): the Zig error identity across the native seam is
+    // `JSException`; the class lives on the pending exception.
+    try std.testing.expectError(error.JSException, engine.exec.call.callValue(ctx, null, map_set, &set_args));
+    try std.testing.expect(ctx.hasException());
+    ctx.clearException();
     const get_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_get, &.{stored_key});
     var get_text = std.ArrayList(u8).empty;
     defer get_text.deinit(rt.memory.allocator);
@@ -5460,15 +5467,15 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     const abs_object = core.Object.fromHeader(abs_value.refHeader().?);
     try std.testing.expect(abs_object.nativeFunctionIdSlot().* != 0);
     const abs_record = abs_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
-    try std.testing.expectEqual(core.host_function.NativeCProto.f_f, abs_record.cproto);
-    try std.testing.expect(abs_record.native_function != null);
+    try std.testing.expectEqual(core.native_entry.Kind.leaf, abs_record.kind);
+    try std.testing.expectEqual(engine.exec.native_legacy.sig_f64_to_f64, abs_record.sig);
 
     const atan2_key = try rt.internAtom("atan2");
     const atan2_value = try math_object.getProperty(atan2_key);
     const atan2_object = core.Object.fromHeader(atan2_value.refHeader().?);
     const atan2_record = atan2_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
-    try std.testing.expectEqual(core.host_function.NativeCProto.f_f_f, atan2_record.cproto);
-    try std.testing.expect(atan2_record.native_function != null);
+    try std.testing.expectEqual(core.native_entry.Kind.leaf, atan2_record.kind);
+    try std.testing.expectEqual(engine.exec.native_legacy.sig_f64_f64_to_f64, atan2_record.sig);
 
     const fake = try engine.core.function.nativeFunction(ctx, "notMathAbs", 1);
     const fake_object = core.Object.fromHeader(fake.refHeader().?);
@@ -9423,13 +9430,9 @@ test "external C function preflight uses caller realm and callback errors use ca
     const callee_global = try engine.exec.zjs_vm.contextGlobal(callee);
 
     var probe: CrossRealmNativeProbe = .{};
-    const external_id = try js.runtime.registerExternalHostFunction(.{
-        .ptr = &probe,
-        .call = crossRealmNativeProbe,
-    });
     const native_value = try core.function.nativeFunction(callee, "realmProbe", 0);
     const native_object = try core.Object.expect(native_value);
-    native_object.installExternalHostFunction(js.runtime, external_id);
+    try helpers.TestEngine.installLegacyProbeEntry(js.runtime, native_object, &probe, crossRealmNativeProbe);
 
     js.runtime.setNativeStackSize(1);
     defer js.runtime.setNativeStackSize(0);
@@ -10056,6 +10059,7 @@ test "vm call handler accepts allocator-backed argument lists" {
     try bytes.append(rt.memory.allocator, op.call);
     const argc: u16 = 40;
     try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&argc));
+    try bytes.append(rt.memory.allocator, bytecode.CallSiteCache.no_cache_idx);
     try bytes.append(rt.memory.allocator, op.@"return");
     try helpers.setCodeAndStackSize(&function, bytes.items);
 
@@ -15645,6 +15649,47 @@ test "Engine eval preserves local string substring host output semantics" {
     , "bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n");
 }
 
+test "String prim_self leaf arms (lane K) agree with the legacy bodies on every miss shape" {
+    // Hot shape (flat string, int32 index) runs the method_leaf arm; each
+    // other shape must take the fallback and print exactly what the legacy
+    // body prints: out-of-range, negative `at`, double-represented and
+    // fractional indices, missing index, rope receivers (first read
+    // linearizes, later reads hit the arm), String wrappers, surrogates.
+    try helpers.expectPrints(
+        \\const s = "abcdefgh";
+        \\print(s.charCodeAt(2), s.charAt(2), s.at(2), s.codePointAt(2));
+        \\print(s.charCodeAt(8), JSON.stringify(s.charAt(8)), s.at(8), s.codePointAt(8));
+        \\print(s.at(-1), s.at(-8), s.at(-9), s.charCodeAt(-1), s.charAt(-1) === "");
+        \\print(s.charCodeAt(3.0), s.charCodeAt(3.7), s.charCodeAt("4"), s.charCodeAt(), s.charAt(), s.at(), s.codePointAt());
+        \\print(s.charCodeAt(NaN), s.charCodeAt(-0), s.charCodeAt(1e10), s.charCodeAt(true), s.charCodeAt(null));
+        \\let rope = "";
+        \\for (let i = 0; i < 40; i++) rope += "xy" + i;
+        \\print(rope.charCodeAt(0), rope.charAt(1), rope.at(-1), rope.codePointAt(2), rope.charCodeAt(0));
+        \\const wrapped = new String("wrap");
+        \\print(wrapped.charCodeAt(1), wrapped.charAt(1), wrapped.at(-1), wrapped.codePointAt(0));
+        \\const emoji = "a😀b";
+        \\print(emoji.codePointAt(1), emoji.codePointAt(2), emoji.charCodeAt(1), emoji.charAt(1).length, emoji.at(-2).length);
+        \\print("é".charAt(0) === "\u00e9", "\u4e2d".charAt(0) === "\u4e2d", "\u4e2d".at(0).length);
+        \\print(String.prototype.charCodeAt.call(123, 0), String.prototype.charAt.call(true, 1));
+        \\try { String.prototype.charCodeAt.call(Symbol(), 0); } catch (e) { print(e.name); }
+        \\try { String.prototype.at.call(undefined, 0); } catch (e) { print(e.name); }
+    ,
+        \\99 c c 99
+        \\NaN "" undefined undefined
+        \\h a undefined NaN true
+        \\100 100 101 97 a a 97
+        \\97 97 NaN 98 97
+        \\120 y 9 48 120
+        \\114 r p 119
+        \\128512 56832 55357 1 1
+        \\true true 1
+        \\49 r
+        \\TypeError
+        \\TypeError
+        \\
+    );
+}
+
 test "String index-read native records preserve primitive fast paths and observable coercion" {
     try helpers.expectPrints(
         \\let log = "";
@@ -16860,13 +16905,9 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     try std.testing.expect(registry_realm != callback_realm);
 
     var probe: CrossRealmNativeProbe = .{};
-    const external_id = try rt.registerExternalHostFunction(.{
-        .ptr = &probe,
-        .call = crossRealmNativeProbe,
-    });
     const callback = try core.function.nativeFunction(callback_realm, "finalizationRealmProbe", 1);
     const callback_object = try core.Object.expect(callback);
-    callback_object.installExternalHostFunction(rt, external_id);
+    try helpers.TestEngine.installLegacyProbeEntry(rt, callback_object, &probe, crossRealmNativeProbe);
 
     const registry_value = try object_ops.constructFinalizationRegistryWithPrototype(
         registry_realm,
@@ -16947,13 +16988,9 @@ test "event-loop caller reaches external C function with one callee realm view" 
     try std.testing.expect(caller_realm != js.context);
 
     var probe: CrossRealmNativeProbe = .{};
-    const external_id = try js.runtime.registerExternalHostFunction(.{
-        .ptr = &probe,
-        .call = crossRealmNativeProbe,
-    });
     const native_value = try core.function.nativeFunction(callee_realm, "realmProbe", 0);
     const native_object = try core.Object.expect(native_value);
-    native_object.installExternalHostFunction(js.runtime, external_id);
+    try helpers.TestEngine.installLegacyProbeEntry(js.runtime, native_object, &probe, crossRealmNativeProbe);
 
     const escaped_key = try js.runtime.internAtom("__escapedNative");
     try caller_global.defineOwnProperty(
@@ -18414,13 +18451,18 @@ test "module TLA continuation OOM retains FIFO node for retry" {
     const registry = engine.exec.standard_globals;
     registry.configureRuntime(js.runtime);
 
-    const dir = ".zig-cache/module-tla-continuation-oom-retry-test";
-    const main_path = dir ++ "/main.js";
+    // Per-process scratch dir: the Debug and gc-stress shards of the merge
+    // gate run this test concurrently and must not share one directory.
+    const dir = helpers.scratchDirForProcess(".zig-cache/module-tla-continuation-oom-retry-test");
+    var scratch_buf1: [192]u8 = undefined;
+    var scratch_buf2: [192]u8 = undefined;
+    var scratch_buf3: [192]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&scratch_buf1, "{s}/main.js", .{dir});
     std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
-        .sub_path = dir ++ "/a.mjs",
+        .sub_path = try std.fmt.bufPrint(&scratch_buf2, "{s}/a.mjs", .{dir}),
         .data =
         \\globalThis.__aRetry = (globalThis.__aRetry || 0) + 1;
         \\await 1;
@@ -18431,7 +18473,7 @@ test "module TLA continuation OOM retains FIFO node for retry" {
         ,
     });
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
-        .sub_path = dir ++ "/b.mjs",
+        .sub_path = try std.fmt.bufPrint(&scratch_buf3, "{s}/b.mjs", .{dir}),
         .data =
         \\globalThis.__bRetry = (globalThis.__bRetry || 0) + 1;
         \\await 1;
@@ -18506,24 +18548,30 @@ test "async module dependency does not preempt an independent sibling" {
     const registry = engine.exec.standard_globals;
     registry.configureRuntime(js.runtime);
 
-    const dir = ".zig-cache/module-async-sibling-order-test";
-    const main_path = dir ++ "/main.mjs";
+    // Per-process scratch dir: the Debug and gc-stress shards of the merge
+    // gate run this test concurrently and must not share one directory.
+    const dir = helpers.scratchDirForProcess(".zig-cache/module-async-sibling-order-test");
+    var scratch_buf1: [192]u8 = undefined;
+    var scratch_buf2: [192]u8 = undefined;
+    var scratch_buf3: [192]u8 = undefined;
+    var scratch_buf4: [192]u8 = undefined;
+    const main_path = try std.fmt.bufPrint(&scratch_buf1, "{s}/main.mjs", .{dir});
     std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
-        .sub_path = dir ++ "/b.mjs",
+        .sub_path = try std.fmt.bufPrint(&scratch_buf2, "{s}/b.mjs", .{dir}),
         .data = "globalThis.__moduleOrder = globalThis.__moduleOrder || [];\n" ++
             "globalThis.__moduleOrder.push('b-start');\n" ++
             "await 0;\n" ++
             "globalThis.__moduleOrder.push('b-end');\n",
     });
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
-        .sub_path = dir ++ "/a.mjs",
+        .sub_path = try std.fmt.bufPrint(&scratch_buf3, "{s}/a.mjs", .{dir}),
         .data = "import './b.mjs';\nglobalThis.__moduleOrder.push('a');\n",
     });
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
-        .sub_path = dir ++ "/c.mjs",
+        .sub_path = try std.fmt.bufPrint(&scratch_buf4, "{s}/c.mjs", .{dir}),
         .data = "globalThis.__moduleOrder = globalThis.__moduleOrder || [];\n" ++
             "globalThis.__moduleOrder.push('c');\n",
     });
@@ -18554,9 +18602,13 @@ test "import bytes module creates immutable ArrayBuffer backing store" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    const dir = ".zig-cache/module-import-bytes-immutable-test";
-    const bytes_path = dir ++ "/payload.bin";
-    const main_path = dir ++ "/main.mjs";
+    // Per-process scratch dir: the Debug and gc-stress shards of the merge
+    // gate run this test concurrently and must not share one directory.
+    const dir = helpers.scratchDirForProcess(".zig-cache/module-import-bytes-immutable-test");
+    var scratch_buf1: [192]u8 = undefined;
+    var scratch_buf2: [192]u8 = undefined;
+    const bytes_path = try std.fmt.bufPrint(&scratch_buf1, "{s}/payload.bin", .{dir});
+    const main_path = try std.fmt.bufPrint(&scratch_buf2, "{s}/main.mjs", .{dir});
     std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
     try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
@@ -20970,13 +21022,14 @@ test "TGC S3-d: an inline call's argument region stays rooted while the callee f
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
     _ = try function.addConstant(callee);
-    var code: [12]u8 = undefined;
+    var code: [13]u8 = undefined;
     code[0] = op.push_const;
     std.mem.writeInt(u32, code[1..5], 0, .little);
     code[5] = op.push_atom_value;
     std.mem.writeInt(u32, code[6..10], victim_atom, .little);
     code[10] = op.call1;
-    code[11] = op.@"return";
+    code[11] = bytecode.CallSiteCache.no_cache_idx;
+    code[12] = op.@"return";
     try helpers.setCodeAndStackSize(&function, code[0..]);
 
     // A legacy `Bytecode` fixture carries no tracer edge for its inline atom

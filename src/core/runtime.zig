@@ -18,6 +18,7 @@ const atom = @import("atom.zig");
 const class = @import("class.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
+const native_entry = @import("native_entry.zig");
 const job_mod = @import("jobs.zig");
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
@@ -1212,6 +1213,11 @@ const RuntimeCompactState = packed struct(u8) {
     _padding: u5 = 0,
 };
 
+pub const NativeEntryFinalizer = struct {
+    ptr: *anyopaque,
+    finalize: *const fn (*anyopaque) void,
+};
+
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
@@ -1475,13 +1481,20 @@ pub const JSRuntime = struct {
     /// Populated by the exec layer at context-global bootstrap.
     performance_time_origin_ms: f64 = 0,
     opcode_profile: ?*profile.OpcodeProfile = null,
-    external_host_functions: []host_function.ExternalRecord = &.{},
-    external_host_functions_capacity: usize = 0,
+    /// NB2 (design §3.1 / §5.5): host-registered `NativeEntry`s. Each is an
+    /// individually allocated, address-stable, never-freed-before-teardown
+    /// record; the list only exists to free them at `deinit`.
+    native_entries: std.ArrayListUnmanaged(*native_entry.NativeEntry) = .empty,
+    /// Ownership registrations for entry `state` pointers (run on the
+    /// runtime thread at teardown, like external record finalizers).
+    native_entry_finalizers: std.ArrayListUnmanaged(NativeEntryFinalizer) = .empty,
+    /// Bumped whenever an entry is retired (§15 R6); JIT code and call-site
+    /// caches that embedded a target compare against it.
+    native_entry_epoch: u32 = 0,
     /// Shared dispatch record for external host functions (exec-owned
     /// trampoline, installed with the internal builtin tables). Null until
     /// exec registers it; a function published before that keeps the
     /// record-less host path.
-    external_host_record: ?*const host_function.InternalRecord = null,
     cached_iterator_next_entries: []CachedIteratorNextEntry = &.{},
     cached_iterator_next_entries_capacity: usize = 0,
     /// Static internal-builtin record table, indexed
@@ -1641,12 +1654,12 @@ pub const JSRuntime = struct {
         rt.small_int_strings = @splat(null);
         rt.performance_time_origin_ms = 0;
         rt.opcode_profile = null;
-        rt.external_host_functions = &.{};
-        rt.external_host_functions_capacity = 0;
+        rt.native_entries = .empty;
+        rt.native_entry_finalizers = .empty;
+        rt.native_entry_epoch = 0;
         rt.cached_iterator_next_entries = &.{};
         rt.cached_iterator_next_entries_capacity = 0;
         rt.internal_builtins = &.{};
-        rt.external_host_record = null;
         rt.host_invocation = null;
         rt.host_invocation_retire = null;
         rt.memory.profile_alloc_count = null;
@@ -1777,7 +1790,6 @@ pub const JSRuntime = struct {
         const local_root_slots: []*RootSlot = if (self.local_root_slots_capacity != 0) self.local_root_slots.ptr[0..self.local_root_slots_capacity] else self.local_root_slots[0..0];
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
         const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
-        const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
         const cached_iterator_next_entries: []CachedIteratorNextEntry = if (self.cached_iterator_next_entries_capacity != 0) self.cached_iterator_next_entries.ptr[0..self.cached_iterator_next_entries_capacity] else self.cached_iterator_next_entries[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
         const deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = if (self.deferred_class_payload_finalizers_capacity != 0) self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity] else self.deferred_class_payload_finalizers[0..0];
@@ -1792,8 +1804,6 @@ pub const JSRuntime = struct {
         self.persistent_root_slots_capacity = 0;
         self.weak_root_slots = &.{};
         self.weak_root_slots_capacity = 0;
-        self.external_host_functions = &.{};
-        self.external_host_functions_capacity = 0;
         self.cached_iterator_next_entries = &.{};
         self.cached_iterator_next_entries_capacity = 0;
         self.deferred_native_cleanups = &.{};
@@ -1809,7 +1819,6 @@ pub const JSRuntime = struct {
         if (local_root_slots.len != 0) self.memory.free(*RootSlot, local_root_slots);
         if (persistent_root_slots.len != 0) self.memory.free(*RootSlot, persistent_root_slots);
         if (weak_root_slots.len != 0) self.memory.free(*WeakRootSlot, weak_root_slots);
-        if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
         if (cached_iterator_next_entries.len != 0) self.memory.free(CachedIteratorNextEntry, cached_iterator_next_entries);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
@@ -2964,27 +2973,26 @@ pub const JSRuntime = struct {
         return WeakPersistentValue.init(self, value, callback, callback_context);
     }
 
-    pub fn registerExternalHostFunction(self: *JSRuntime, record: host_function.ExternalRecord) !u32 {
-        // A finalizer-free record is a pure dispatch tuple: sharing its id is
-        // unobservable and keeps repeated Realm/host installation idempotent.
-        // Finalized records are ownership registrations, so each one keeps a
-        // distinct id and cleanup obligation even when the tuple is identical.
-        if (record.finalizer == null) {
-            for (self.external_host_functions, 0..) |existing, index| {
-                if (existing.finalizer == null and existing.ptr == record.ptr and existing.call == record.call) {
-                    return @intCast(index + 1);
-                }
-            }
-        }
-        try appendRuntimeExternalHostFunction(&self.memory, &self.external_host_functions, &self.external_host_functions_capacity, record);
-        return @intCast(self.external_host_functions.len);
+    /// NB2: allocate an immutable, address-stable host `NativeEntry` from a
+    /// template. Never freed before `deinit` (design §5.5 lifetime rule).
+    pub fn allocNativeEntry(self: *JSRuntime, template: native_entry.NativeEntry) !*const native_entry.NativeEntry {
+        const entry = try self.memory.create(native_entry.NativeEntry);
+        errdefer self.memory.destroy(native_entry.NativeEntry, entry);
+        entry.* = template;
+        try self.native_entries.append(self.memory.allocator, entry);
+        return entry;
     }
 
-    pub fn externalHostFunction(self: *JSRuntime, id: u32) ?host_function.ExternalRecord {
-        if (id == 0) return null;
-        const index: usize = @intCast(id - 1);
-        if (index >= self.external_host_functions.len) return null;
-        return self.external_host_functions[index];
+    pub fn registerNativeEntryFinalizer(self: *JSRuntime, ptr: *anyopaque, finalize: *const fn (*anyopaque) void) !void {
+        try self.native_entry_finalizers.append(self.memory.allocator, .{ .ptr = ptr, .finalize = finalize });
+    }
+
+    /// Retire a host entry in place (tombstone): callers that still hold
+    /// the function object get a TypeError; nothing is freed.
+    pub fn retireNativeEntry(self: *JSRuntime, entry: *const native_entry.NativeEntry) void {
+        const mutable: *native_entry.NativeEntry = @constCast(entry);
+        mutable.kind = .retired;
+        self.native_entry_epoch +%= 1;
     }
 
     /// Internal-builtin record lookup: `domain_index` is the
@@ -2997,29 +3005,22 @@ pub const JSRuntime = struct {
         return self.internal_builtins[domain_index].get(id);
     }
 
-    pub fn replaceExternalHostFunction(self: *JSRuntime, id: u32, record: host_function.ExternalRecord) ?host_function.ExternalRecord {
-        if (id == 0) return null;
-        const index: usize = @intCast(id - 1);
-        if (index >= self.external_host_functions.len) return null;
-        const old = self.external_host_functions[index];
-        self.external_host_functions[index] = record;
-        return old;
-    }
-
     pub fn clearExternalHostFunctions(self: *JSRuntime) void {
-        const records = self.external_host_functions;
-        const capacity = self.external_host_functions_capacity;
-        self.external_host_functions = &.{};
-        self.external_host_functions_capacity = 0;
-
-        for (records) |record| {
-            if (record.finalizer) |finalizer| {
-                self.enqueueDeferredNativeCleanup(finalizer, record.ptr) catch {
-                    finalizer(record.ptr);
-                };
-            }
+        // NB2 entry state finalizers and the entries themselves.
+        const entry_finalizers = self.native_entry_finalizers;
+        self.native_entry_finalizers = .empty;
+        for (entry_finalizers.items) |item| {
+            self.enqueueDeferredNativeCleanup(item.finalize, item.ptr) catch {
+                item.finalize(item.ptr);
+            };
         }
-        if (capacity != 0) self.memory.free(host_function.ExternalRecord, records.ptr[0..capacity]);
+        var finalizers_storage = entry_finalizers;
+        finalizers_storage.deinit(self.memory.allocator);
+        const entries = self.native_entries;
+        self.native_entries = .empty;
+        for (entries.items) |entry| self.memory.destroy(native_entry.NativeEntry, entry);
+        var entries_storage = entries;
+        entries_storage.deinit(self.memory.allocator);
     }
 
     pub fn runObjectCycleRemoval(self: *JSRuntime) usize {
@@ -4732,28 +4733,6 @@ fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capaci
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
         if (old_capacity != 0) account.free(*Object, old);
-    }
-    const len = slice.*.len;
-    slice.* = slice.*.ptr[0 .. len + 1];
-    slice.*[len] = item;
-}
-
-fn appendRuntimeExternalHostFunction(
-    account: *memory.MemoryAccount,
-    slice: *[]host_function.ExternalRecord,
-    capacity: *usize,
-    item: host_function.ExternalRecord,
-) !void {
-    if (slice.*.len == capacity.*) {
-        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(host_function.ExternalRecord, next_capacity);
-        errdefer account.free(host_function.ExternalRecord, next);
-        @memcpy(next[0..slice.*.len], slice.*);
-        const old_capacity = capacity.*;
-        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
-        slice.* = next[0..slice.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(host_function.ExternalRecord, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];

@@ -1132,6 +1132,7 @@ test "FunctionBytecode RealmRef edge participates in realm-global cycle collecti
         1,
         1,
         code.len,
+        0,
     );
     try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
     try std.testing.expect(fb.famBytes() > @sizeOf(engine.bytecode.function_bytecode.DebugInfo));
@@ -6696,6 +6697,7 @@ test "function bytecode registration is old-space accounted" {
         5,
         4,
         1,
+        0,
     );
     // Keep this above the 512-byte small-object ceiling even in the alternate
     // 8-byte JSValue representation. The main FAM must therefore use one
@@ -6907,61 +6909,6 @@ test "runtime runs deferred native cleanup jobs with a budget" {
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredNativeCleanupCountForTest());
     try std.testing.expectEqual(@as(usize, 0), stats.deferred_native_cleanup_count);
     try std.testing.expectEqual(@as(usize, 2), stats.deferred_native_cleanup_run_count);
-}
-
-test "external host finalizers are deferred through native cleanup queue" {
-    var rt: core.JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var calls: usize = 0;
-    _ = try rt.registerExternalHostFunction(.{
-        .ptr = @ptrCast(&calls),
-        .call = dummyExternalHostCall,
-        .finalizer = countNativeCleanup,
-    });
-
-    rt.clearExternalHostFunctions();
-    try std.testing.expectEqual(@as(usize, 0), calls);
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredNativeCleanupCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().deferred_native_cleanup_count);
-
-    try std.testing.expectEqual(@as(usize, 1), rt.runDeferredNativeCleanupBudgeted(1));
-    try std.testing.expectEqual(@as(usize, 1), calls);
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredNativeCleanupCountForTest());
-}
-
-test "external host registry reuses identical non-owning records" {
-    var rt: core.JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{});
-    defer rt.deinit();
-
-    var context: usize = 0;
-    const record: core.host_function.ExternalRecord = .{
-        .ptr = @ptrCast(&context),
-        .call = dummyExternalHostCall,
-    };
-    const before = rt.external_host_functions.len;
-    const first = try rt.registerExternalHostFunction(record);
-    const second = try rt.registerExternalHostFunction(record);
-
-    try std.testing.expectEqual(first, second);
-    try std.testing.expectEqual(before + 1, rt.external_host_functions.len);
-
-    const owning_record: core.host_function.ExternalRecord = .{
-        .ptr = @ptrCast(&context),
-        .call = dummyExternalHostCall,
-        .finalizer = countNativeCleanup,
-    };
-    const first_owning = try rt.registerExternalHostFunction(owning_record);
-    const second_owning = try rt.registerExternalHostFunction(owning_record);
-    try std.testing.expect(first_owning != second_owning);
-    try std.testing.expectEqual(before + 3, rt.external_host_functions.len);
-
-    rt.clearExternalHostFunctions();
-    try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredNativeCleanupCountForTest());
-    rt.drainDeferredNativeCleanups();
-    try std.testing.expectEqual(@as(usize, 2), context);
 }
 
 test "std file object destruction defers native close cleanup" {
@@ -11324,8 +11271,8 @@ test "auto-init descriptor interning reuses value-identical metadata" {
     const first_info: core.property.AutoInit = .{
         .name = first_name,
         .length = 2,
-        .host_function_kind = core.host_function.ids.external_host,
-        .external_host_function_id = 7,
+        .host_function_kind = core.host_function.ids.output,
+        .native_entry = &engine.exec.call.output_host_entry,
         .host_function_prototype = true,
     };
     var second_info = first_info;

@@ -399,6 +399,22 @@ pub const TestEngine = struct {
         try wrapper.runJobs(null);
     }
 
+    pub fn installLegacyProbeEntry(rt: *core.JSRuntime, function_object: *core.Object, ptr: *anyopaque, call: core.host_function.ExternalCallFn) !void {
+        const state = try rt.memory.create(LegacyProbeState);
+        errdefer rt.memory.destroy(LegacyProbeState, state);
+        state.* = .{ .runtime = rt, .ptr = ptr, .call = call, .finalizer = null };
+        try rt.registerNativeEntryFinalizer(@ptrCast(state), LegacyProbeState.finalize);
+        const entry = try rt.allocNativeEntry(.{
+            .target = core.NativeEntry.code(&LegacyProbeState.thunk),
+            .kind = .managed,
+            .state = @ptrCast(state),
+        });
+        function_object.installNativeEntry(entry);
+    }
+
+    /// Test-probe adapter: the legacy `(ptr, ExternalCall)` probe shape is
+    /// kept for the existing tests, but the function is an ordinary NB2
+    /// `NativeEntry` (managed thunk + heap state), not a registry record.
     pub fn createExternalHostFunctionValue(
         self: *TestEngine,
         name: []const u8,
@@ -407,15 +423,19 @@ pub const TestEngine = struct {
         call: core.host_function.ExternalCallFn,
         finalizer: ?core.host_function.ExternalFinalizer,
     ) !core.JSValue {
-        const id = try self.runtime.registerExternalHostFunction(.{
-            .ptr = ptr,
-            .call = call,
-            .finalizer = finalizer,
+        const state = try self.runtime.memory.create(LegacyProbeState);
+        errdefer self.runtime.memory.destroy(LegacyProbeState, state);
+        state.* = .{ .runtime = self.runtime, .ptr = ptr, .call = call, .finalizer = finalizer };
+        try self.runtime.registerNativeEntryFinalizer(@ptrCast(state), LegacyProbeState.finalize);
+        const entry = try self.runtime.allocNativeEntry(.{
+            .target = core.NativeEntry.code(&LegacyProbeState.thunk),
+            .kind = .managed,
+            .state = @ptrCast(state),
+            .arity = @intCast(@max(length, 0)),
         });
         const function_value = try engine.core.function.nativeFunction(self.context, name, length);
-
         const function_object = try engine.exec.property_ops.expectObject(function_value);
-        function_object.installExternalHostFunction(self.runtime, id);
+        function_object.installNativeEntry(entry);
         return function_value;
     }
 
@@ -853,4 +873,49 @@ pub fn createTailOpcodeFixture(
         core.JSValue.functionBytecode(&fb.header),
         .root_global,
     );
+}
+
+/// Heap state behind `createExternalHostFunctionValue`: runs the legacy probe
+/// and maps its error exactly as the old external-host seam did.
+pub const LegacyProbeState = struct {
+    runtime: *core.JSRuntime,
+    ptr: *anyopaque,
+    call: core.host_function.ExternalCallFn,
+    finalizer: ?core.host_function.ExternalFinalizer,
+
+    pub fn finalize(raw: *anyopaque) void {
+        const self: *LegacyProbeState = @ptrCast(@alignCast(raw));
+        if (self.finalizer) |f| f(self.ptr);
+        self.runtime.memory.destroy(LegacyProbeState, self);
+    }
+
+    pub fn thunk(
+        ctx: *core.JSContext,
+        this_value: core.JSValue,
+        argv: [*]const core.JSValue,
+        argc: u32,
+        entry: *const core.NativeEntry,
+        func_obj: ?*core.Object,
+    ) callconv(.c) core.JSValue {
+        const self: *LegacyProbeState = @ptrCast(@alignCast(entry.state.?));
+        const function_object = func_obj orelse return engine.exec.builtin_dispatch.hostErrorToValue(ctx, ctx.global, error.TypeError);
+        const result = self.call(self.ptr, .{
+            .realm = ctx,
+            .output = engine.exec.builtin_dispatch.vmCallerView(ctx).output,
+            .func_obj = function_object,
+            .this_value = this_value,
+            .args = argv[0..argc],
+        }) catch |err| return engine.exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+        return result;
+    }
+};
+
+/// A scratch directory name unique to this test process: the merge gate
+/// runs the Debug and gc-stress shards concurrently, and two processes
+/// deleting/creating one fixed directory race each other.
+pub fn scratchDirForProcess(comptime base: []const u8) []const u8 {
+    const S = struct {
+        var buf: [256]u8 = undefined;
+    };
+    return std.fmt.bufPrint(&S.buf, "{s}-{d}", .{ base, std.os.linux.getpid() }) catch base;
 }

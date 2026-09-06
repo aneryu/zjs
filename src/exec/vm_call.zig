@@ -461,7 +461,7 @@ pub fn call(
     const argc = switch (opc) {
         op.call => blk: {
             const value = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-            frame.pc += 2;
+            frame.pc += 3; // argc + cache_idx
             break :blk value;
         },
         op.call0 => 0,
@@ -476,11 +476,6 @@ pub fn call(
         .inline_call => .inline_call,
     };
 }
-
-/// Result of `nativeMethodFastDispatch` — the outlined native c_function arm
-/// of `op_call_method` (Phase 2a). `hit`/`caught` re-dispatch via `coldNext`;
-/// `miss` falls through to the forwarding arm / `callMethod`.
-pub const NativeFastDispatchResult = enum { hit, caught, miss };
 
 /// Record + callable realm from one walk of the function payload
 /// (`nativeCallTarget`); a builtin whose record is not memoized yet takes the
@@ -549,204 +544,6 @@ pub inline fn callResolvedNativeMethod(
     );
 }
 
-/// Exec_direct hit twin of `callResolvedNativeMethod`. Stays off the
-/// NativeCallEnvironment / typed-cproto tail so the internal-method seam
-/// does not inherit the 0x1c0→0x1d0 frame tax.
-pub inline fn callResolvedExecDirect(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    method_obj: *core.Object,
-    receiver: core.JSValue,
-    direct_ptr: *const anyopaque,
-    args: []const core.JSValue,
-    formal_length: usize,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    return builtin_dispatch.callResolvedExecDirect(
-        ctx,
-        output,
-        global,
-        method_obj,
-        receiver,
-        direct_ptr,
-        args,
-        formal_length,
-        caller_function,
-        caller_frame,
-    );
-}
-
-/// In-hole tombstone (PDFJS-K rework). NMFD live body shrank when the
-/// assume terminal was outlined; the hole slid w35 off-island helpers.
-/// Never-taken `cbnz` + `.space 0x294` keeps the bytes *inside this
-/// symbol* (aarch64-linux-musl RF span 0x7cc, next symbol adjacent).
-/// Extracting the pad as a following `export fn` does not work:
-/// Zig/LLVM emit order is not declaration order (pad landed 2MB away).
-export var zjs_nmfd_tombstone_keep: u8 = 0;
-
-/// Outlined native c_function fast dispatch for `op_call_method`.
-/// K1/K2: the caller already proved `class_id == c_function` and filtered
-/// `forwards_call` so Function.prototype.call never enters here (the
-/// fused-frame arm stays on the miss/fallthrough path). Rec is re-resolved
-/// here with the assume helper — not passed in — so `op_call_method` does
-/// not keep it live across this bl (0x3f0→0x400 slide). No class/payload
-/// re-admit and no `forwards_call` tbnz.
-pub noinline fn nativeMethodFastDispatch(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    method_obj: *core.Object,
-    argc: u16,
-) align(32) !NativeFastDispatchResult {
-    if (zjs_nmfd_tombstone_keep != 0) {
-        // In-symbol hole. Do not extract: a following export is not
-        // the next `.text` symbol.
-        asm volatile (".space 0x294");
-        unreachable;
-    }
-    const total: usize = @as(usize, argc) + 2;
-    if (stack.len() < total) return error.StackUnderflow;
-    const region_base = stack.len() - total;
-    const receiver = stack.values[region_base];
-    const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
-    // Resolve before poll/pc so a miss is a no-op (same contract as 5707718c).
-    // Caller already dropped forwards_call; this is the assume path only.
-    // One payload walk yields record + realm (P3, native-boundary plan).
-    const target = resolvedNativeCallTargetAssumeCFunction(ctx, method_obj) orelse return .miss;
-    // Committed to native dispatch: advance pc and poll interrupts before
-    // entering user-observable code (mirrors callMethod's poll-then-call).
-    frame.pc += 2; // consume argc operand
-    if (ctx.pollInterruptTick()) {
-        exception_ops.pollInterruptSlowLeg(ctx, global) catch |err|
-            return nativeDispatchFailure(ctx, output, stack, frame, catch_target, global, region_base, err);
-    }
-    const result = builtin_dispatch.nativeFromBits(callResolvedNativeMethodAssumeCFunction(
-        ctx,
-        output,
-        global,
-        method_obj,
-        target.record,
-        target.realm,
-        receiver,
-        args,
-        function,
-        frame,
-    ));
-    if (builtin_dispatch.nativeIsExc(ctx, result)) {
-        return nativeDispatchFailure(ctx, output, stack, frame, catch_target, global, region_base, builtin_dispatch.nativeHostError(ctx));
-    }
-    stack.setLen(region_base);
-    if (dropUnusedCallResult(ctx, function, frame, result)) return .hit;
-    stack.pushOwnedAssumeCapacity(result);
-    return .hit;
-}
-
-/// Plain-call twin of `nativeMethodFastDispatch` for `f(...)` on a native
-/// callee (`op_call*` layout: func at the region base, no receiver slot,
-/// `this` = undefined). The handler has already consumed its operand and
-/// verified the region is live, so the pc and the stack length are not
-/// re-checked here. Misses (no record, or a forwarding record such as
-/// Function.prototype.call) fall back to `execCall` unchanged. Every cold
-/// leg is outlined so this body stays a small leaf around one `bl`.
-pub noinline fn nativePlainFastDispatch(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    func_obj: *core.Object,
-    argc: u16,
-) align(32) !NativeFastDispatchResult {
-    const total: usize = @as(usize, argc) + 1;
-    const region_base = stack.len() - total;
-    const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
-    const target = resolvedNativeCallTargetAssumeCFunction(ctx, func_obj) orelse return .miss;
-    if (target.record.forwards_call) return .miss;
-    if (ctx.pollInterruptTick()) {
-        exception_ops.pollInterruptSlowLeg(ctx, global) catch |err|
-            return nativeDispatchFailure(ctx, output, stack, frame, catch_target, global, region_base, err);
-    }
-    const result = builtin_dispatch.nativeFromBits(builtin_dispatch.callRecordFromVmInRealm(
-        ctx,
-        output,
-        global,
-        func_obj,
-        target.record,
-        target.realm,
-        core.JSValue.undefinedValue(),
-        args,
-        function,
-        frame,
-    ));
-    if (builtin_dispatch.nativeIsExc(ctx, result)) {
-        return nativeDispatchFailure(ctx, output, stack, frame, catch_target, global, region_base, builtin_dispatch.nativeHostError(ctx));
-    }
-    stack.setLen(region_base);
-    if (dropUnusedCallResult(ctx, function, frame, result)) return .hit;
-    stack.pushOwnedAssumeCapacity(result);
-    return .hit;
-}
-
-/// Cold leg shared by the native dispatchers: drop the call region and route
-/// the pending error to the frame's handler (`.caught`) or the caller.
-noinline fn nativeDispatchFailure(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-    region_base: usize,
-    err: core.errors.HostError,
-) core.errors.HostError!NativeFastDispatchResult {
-    call_runtime.popOwnedStackRegion(stack, region_base);
-    const caught = call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err) catch |handler_err|
-        return @errorCast(handler_err);
-    if (caught) return .caught;
-    return err;
-}
-
-const nmfd_term_section = if (builtin.target.ofmt == .elf)
-    ".text.zjs.nmfd_term"
-else if (builtin.target.ofmt == .macho)
-    "__TEXT,__text"
-else
-    ".text";
-
-noinline fn callResolvedNativeMethodAssumeCFunction(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    method_obj: *core.Object,
-    record: *const core.host_function.InternalRecord,
-    realm: *core.RealmContext,
-    receiver: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) linksection(nmfd_term_section) builtin_dispatch.NativeBits {
-    return builtin_dispatch.callRecordFromVmInRealm(
-        ctx,
-        output,
-        global,
-        method_obj,
-        record,
-        realm,
-        receiver,
-        args,
-        caller_function,
-        caller_frame,
-    );
-}
-
 pub noinline fn callMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -759,7 +556,7 @@ pub noinline fn callMethod(
     req_out: *call_runtime.InlineCallRequest,
 ) !CallStep {
     const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
+    frame.pc += 3; // argc + cache_idx
     // Inline frame fast path: a method call whose callable is a plain bytecode
     // function runs as an inline frame (like op.call), so method-position
     // recursion gets the logical call-depth limit instead of the shallow
@@ -829,7 +626,7 @@ pub noinline fn callMethod(
     return .done;
 }
 
-fn dropUnusedCallResult(
+pub fn dropUnusedCallResult(
     _: *core.JSContext,
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,

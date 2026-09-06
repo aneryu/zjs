@@ -1107,7 +1107,6 @@ pub const FunctionPayload = struct {
         call_cache: ?*const host_function.InternalRecord = null,
         host_function_kind: i32 = 0,
         native_function_id: i32 = 0,
-        external_host_function_id: u32 = 0,
         native_dispatch_name: atom.Atom = atom.null_atom,
         typed_array_element_size: u32 = 0,
         typed_array_kind: u8 = 0,

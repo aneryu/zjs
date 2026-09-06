@@ -81,7 +81,7 @@ fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
 /// (quickjs.c:46952) over int32 / float64 arguments only.
 fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32, comptime is_max: bool) core.host_function.InternalEntry {
     var entry = mathOpEntry(name, 2, id);
-    entry.exec_direct = builtin_dispatch.execDirectFunction(mathMinMaxDirect(is_max));
+    entry.managed = mathMinMaxDirect(is_max);
     return entry;
 }
 
@@ -89,23 +89,21 @@ fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32, comptime is_max:
 /// comptime (qjs passes it as `magic`); the miss leg (any argument that is
 /// not an int32 / float64) is the unchanged realm path `preparedOpCall`, so
 /// ToPrimitive / ToNumber ordering and exceptions stay with the generic code.
-fn mathMinMaxDirect(comptime is_max: bool) builtin_dispatch.ExecDirectCallFn {
+fn mathMinMaxDirect(comptime is_max: bool) core.native_entry.ManagedFn {
     return &struct {
         fn direct(
             ctx: *core.JSContext,
-            output: ?*std.Io.Writer,
-            global: *core.Object,
-            _: ?*core.Object,
             this_value: core.JSValue,
-            args: []const core.JSValue,
-            caller_function: ?*const builtin_dispatch.Bytecode,
-            caller_frame: ?*builtin_dispatch.Frame,
-        ) builtin_dispatch.NativeBits {
+            argv: [*]const core.JSValue,
+            argc: u32,
+            _: *const core.NativeEntry,
+            _: ?*core.Object,
+        ) callconv(.c) core.JSValue {
             _ = this_value;
-            _ = caller_function;
-            _ = caller_frame;
-            if (mathMinMaxNumberFast(args, is_max)) |value| return builtin_dispatch.nativeToBits(value);
-            return builtin_dispatch.nativeFromHostResult(ctx, global, preparedOpCall(ctx, output, global, if (is_max) 8 else 7, args));
+            const args = argv[0..argc];
+            if (mathMinMaxNumberFast(args, is_max)) |value| return value;
+            const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+            return builtin_dispatch.hostResultToValue(ctx, preparedOpCall(ctx, builtin_dispatch.vmCallerView(ctx).output, global, if (is_max) 8 else 7, args));
         }
     }.direct;
 }
@@ -728,12 +726,12 @@ test "Math.min/max entries carry the exec_direct arm on the shared handler" {
         if (entry.id != 7 and entry.id != 8) continue;
         seen += 1;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &mathOpCall);
-        try std.testing.expect(entry.exec_direct != null);
+        try std.testing.expect(entry.managed != null);
         const expected = if (entry.id == 8)
-            builtin_dispatch.execDirectFunction(mathMinMaxDirect(true))
+            mathMinMaxDirect(true)
         else
-            builtin_dispatch.execDirectFunction(mathMinMaxDirect(false));
-        try std.testing.expect(entry.exec_direct.? == expected);
+            mathMinMaxDirect(false);
+        try std.testing.expect(entry.managed.? == expected);
     }
     try std.testing.expectEqual(@as(u8, 2), seen);
 }
