@@ -309,6 +309,12 @@ pub const LogicalOpcode = enum(u16) {
     /// (obj64 S1) while this line was in flight; declared here during the
     /// rebase so the join assertions stay closed.
     object_slots2 = 254,
+    /// PERF-T-SPIKE (branch spike/perf-t-main, never main): guarded
+    /// direct-slot property READ. Operands: atom u32 (capture / generic
+    /// fallback) + site registry index u8. Emitted only by the ZJS_TSPIKE=1
+    /// rewrite in resolve_labels.zig. Takes reclaimed id 253 (R11: the
+    /// 2026-08-26 spike's 254 is now object_slots2).
+    tspike_get_slot = 253,
     // Cold-plane residents (400+). Without these the sixteen opcodes
     // demoted into the `using` carrier would sit outside the single
     // declaration source -- which is exactly how an identity-matching
@@ -503,6 +509,7 @@ pub const SemanticFamily = enum {
     null,
     object,
     object_slots2,
+    tspike_get_slot,
     @"or",
     perm3,
     perm4,
@@ -626,6 +633,7 @@ pub fn familyOf(form: LogicalOpcode) SemanticFamily {
         .push_true => .push_true,
         .object => .object,
         .object_slots2 => .object_slots2,
+        .tspike_get_slot => .tspike_get_slot,
         .special_object => .special_object,
         .rest => .rest,
         .drop => .drop,
@@ -1585,6 +1593,7 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .put_loc8_get_loc8, .fmt = .loc8, .pop = 1, .push = 0 },
     .{ .form = .push_this_put_loc0, .fmt = .none, .pop = 0, .push = 1 },
     .{ .form = .object_slots2, .fmt = .none, .pop = 0, .push = 1 },
+    .{ .form = .tspike_get_slot, .fmt = .atom_u8, .pop = 1, .push = 1 },
     .{ .form = .enter_scope, .fmt = .u16, .pop = 0, .push = 0 },
     .{ .form = .leave_scope, .fmt = .u16, .pop = 0, .push = 0 },
     .{ .form = .label, .fmt = .label, .pop = 0, .push = 0 },

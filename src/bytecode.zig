@@ -469,6 +469,11 @@ pub const opcode = struct {
         /// when all keys are static and the final unique named-property count
         /// is one or two, allowing a Shape-sized two-entry trailing allocation.
         pub const object_slots2: u8 = 254;
+        /// PERF-T-SPIKE (branch spike/perf-t-main, never main): guarded
+        /// direct-slot property READ. Operands: atom u32 (capture / generic
+        /// fallback) + site registry index u8 (size 6). Emitted only by the
+        /// ZJS_TSPIKE=1 rewrite in resolve_labels.zig. Reclaimed id 253.
+        pub const tspike_get_slot: u8 = 253;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -2537,7 +2542,7 @@ pub const opcode = struct {
         // 2026-08-30 rebase found these pins at the test tier, one full
         // 2.5-minute test cycle later than necessary.
         comptime {
-            if (counts.final != 243) @compileError(std.fmt.comptimePrint("final form count drifted: expected 243, found {d}", .{counts.final}));
+            if (counts.final != 244) @compileError(std.fmt.comptimePrint("final form count drifted (spike/perf-t-main: +tspike_get_slot): expected 244, found {d}", .{counts.final}));
             if (counts.temp != 19) @compileError(std.fmt.comptimePrint("temp form count drifted: expected 19, found {d}", .{counts.temp}));
         }
         // The `using` carrier's residents: three of its own operations plus
@@ -2550,7 +2555,7 @@ pub const opcode = struct {
         try std.testing.expect(logical.planeOf(.using_set_proto) == .sub);
         try std.testing.expect(logical.planeOf(.get_loc0) == .main);
         comptime {
-            if (physical.ledger.claimed != 243) @compileError(std.fmt.comptimePrint("ledger.claimed drifted: expected 243, found {d}", .{physical.ledger.claimed}));
+            if (physical.ledger.claimed != 244) @compileError(std.fmt.comptimePrint("ledger.claimed drifted (spike/perf-t-main): expected 244, found {d}", .{physical.ledger.claimed}));
         }
 
         // Family is a rollup, never an identity: the width variants of one
@@ -2610,7 +2615,8 @@ pub const opcode = struct {
         // 10.7 pin: reassigning the quarantined id, moving a resident or
         // changing any slot state must consciously update this number in
         // the same commit that earns it.
-        try std.testing.expectEqual(@as(u64, 0x166cb5a2882d5cd6), decode.fingerprint);
+        // spike/perf-t-main: tspike_get_slot claims id 253 (main pin 0x166cb5a2882d5cd6).
+        try std.testing.expectEqual(@as(u64, 0x5c462805bfeb1d4f), decode.fingerprint);
     }
 
     test "physical ledger is derived, not asserted by hand" {
@@ -2620,10 +2626,10 @@ pub const opcode = struct {
         // Comptime for the same reason as the count pins above: `zig build
         // check` is the cheapest tier that can see a ledger drift.
         comptime {
-            if (physical.ledger.claimed != 243) @compileError(std.fmt.comptimePrint("ledger.claimed drifted: expected 243, found {d}", .{physical.ledger.claimed}));
-            if (physical.ledger.reclaimed != 12) @compileError(std.fmt.comptimePrint("ledger.reclaimed drifted: expected 12, found {d}", .{physical.ledger.reclaimed}));
+            if (physical.ledger.claimed != 244) @compileError(std.fmt.comptimePrint("ledger.claimed drifted (spike/perf-t-main): expected 244, found {d}", .{physical.ledger.claimed}));
+            if (physical.ledger.reclaimed != 11) @compileError(std.fmt.comptimePrint("ledger.reclaimed drifted (spike/perf-t-main): expected 11, found {d}", .{physical.ledger.reclaimed}));
             if (physical.ledger.no_row != 1) @compileError(std.fmt.comptimePrint("ledger.no_row drifted: expected 1, found {d}", .{physical.ledger.no_row}));
-            if (physical.ledger.free() != 13) @compileError(std.fmt.comptimePrint("ledger.free drifted: expected 13, found {d}", .{physical.ledger.free()}));
+            if (physical.ledger.free() != 12) @compileError(std.fmt.comptimePrint("ledger.free drifted (spike/perf-t-main): expected 12, found {d}", .{physical.ledger.free()}));
             if (physical.ledger.total() != 256) @compileError(std.fmt.comptimePrint("ledger.total drifted: expected 256, found {d}", .{physical.ledger.total()}));
         }
 
@@ -2995,14 +3001,10 @@ pub const module = struct {
             self.import_attributes = &.{};
             self.has_top_level_await = false;
 
-            for (imports) |_| {
-            }
-            for (exports) |_| {
-            }
-            for (indirect_exports) |_| {
-            }
-            for (import_attributes) |_| {
-            }
+            for (imports) |_| {}
+            for (exports) |_| {}
+            for (indirect_exports) |_| {}
+            for (import_attributes) |_| {}
             if (requests.len != 0) self.memory.free(Request, requests);
             if (imports.len != 0) self.memory.free(Import, imports);
             if (exports.len != 0) self.memory.free(Export, exports);
@@ -5602,8 +5604,7 @@ pub const function_def = struct {
         pub fn truncateAtomOperands(self: *FunctionDefImpl, target_len: usize) void {
             std.debug.assert(target_len <= self.atom_operands.len);
             var i: usize = target_len;
-            while (i < self.atom_operands.len) : (i += 1) {
-            }
+            while (i < self.atom_operands.len) : (i += 1) {}
             self.atom_operands = self.atom_operands.ptr[0..target_len];
         }
 
@@ -10880,8 +10881,7 @@ pub const pipeline_finalize = struct {
             const value = JSValue.functionBytecode(&fb.header);
             const old_value = parent.cpool[idx];
             parent.cpool[idx] = value;
-            if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {
-            }
+            if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {}
         }
     }
 
@@ -11494,8 +11494,7 @@ const function_mod = struct {
         pub fn truncateAtomOperands(self: *BytecodeImpl, target_len: usize) void {
             std.debug.assert(target_len <= self.atom_operands.len);
             var i: usize = target_len;
-            while (i < self.atom_operands.len) : (i += 1) {
-            }
+            while (i < self.atom_operands.len) : (i += 1) {}
             self.atom_operands = self.atom_operands.ptr[0..target_len];
         }
 

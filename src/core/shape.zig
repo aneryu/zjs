@@ -150,7 +150,9 @@ pub const Shape = extern struct {
         // `property_storage: []u8` slice — the storage is no longer a second
         // heap allocation. `extern` pins the field order so the FAM begins at
         // exactly `@sizeOf(Shape)`.
-        std.debug.assert(@sizeOf(@This()) == 56);
+        // PERF-T-SPIKE branch: +8 bytes for tspike_identity (56 -> 64). The
+        // footprint column of the A/B carries this (typed plan §十一 R6).
+        std.debug.assert(@sizeOf(@This()) == 64);
         std.debug.assert(@alignOf(@This()) == 8);
         const header_bytes = @sizeOf(gc.GCObjectHeader);
         const list_previous_bytes = @sizeOf(?*gc.Header);
@@ -188,6 +190,14 @@ pub const Shape = extern struct {
     cold_state: ShapeColdState = .{},
     registry_hash_next: ?*Shape = null, // gc-slot: weak
     proto: ?*Object = null,
+    /// PERF-T-SPIKE (branch spike/perf-t-main): monotonic shape identity per
+    /// the PERF-SHAPE-ID contract shape -- a NEW value at creation and
+    /// before every in-place mutation (unshared append / delete / flag
+    /// update / proto swap); PRESERVED across grow-relocation (same logical
+    /// layout, new address => ABA-immune); never reused. Process-wide
+    /// counter: the spike measures one Runtime; per-Runtime scoping is the
+    /// production design, not prototyped here.
+    tspike_identity: u64 = 0,
     // Inline flexible array member follows at `@sizeOf(Shape)`:
     //   [props: Property × prop_size] [hash buckets: u32 × bucketCount()]
     // Props first: every hot property access (lookup walks, transition
@@ -609,6 +619,8 @@ pub const Registry = struct {
         try self.reservePropertyAppend(shape_ptr, property_capacity);
         try self.appendProperty(shape_ptr, atom_id, flags);
         const shape = shape_ptr.*;
+        // PERF-T-SPIKE: unshared in-place append = new logical layout.
+        shape.tspike_identity = tspikeFreshIdentity();
         if (shape.isHashed()) {
             shape.hash = transitionHash(old_hash, atom_id, flags);
             self.rehashShape(shape, old_hash);
@@ -653,9 +665,14 @@ pub const Registry = struct {
             current.setHashed(false);
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
+            // PERF-T-SPIKE: an in-place mutation follows.
+            current.tspike_identity = tspikeFreshIdentity();
             return;
         }
-        if (!current.isShared()) return;
+        if (!current.isShared()) {
+            current.tspike_identity = tspikeFreshIdentity();
+            return;
+        }
         const clone = try self.cloneForMutation(current);
         shape_ptr.* = clone;
     }
@@ -665,6 +682,9 @@ pub const Registry = struct {
         if (shape.proto == proto) return null;
         const old_proto = shape.proto;
         shape.proto = proto;
+        // PERF-T-SPIKE: the receiver shape pins WHICH object is the
+        // prototype for proto-slot sites; a swap is a new identity.
+        shape.tspike_identity = tspikeFreshIdentity();
         // The Shape owns the prototype edge, so the Shape is the barrier's
         // owner. Every other write to `proto` is on a freshly created or
         // relocated Shape, where the owner is young and the barrier is a
@@ -719,6 +739,10 @@ pub const Registry = struct {
             .cold_state = initialColdState(old.deletedPropCount()),
             .registry_hash_next = null, // re-established by insertShapeHash below
             .proto = old.proto, // proto ref MOVES to the new shape (old freed w/o proto cleanup)
+            // PERF-T-SPIKE: grow-relocation keeps the SAME logical layout;
+            // identity is preserved (ABA-immunity comes from never reusing
+            // values, not from the address).
+            .tspike_identity = old.tspike_identity,
         };
 
         // Copy the prop descriptors (atom ownership moves with them).
@@ -747,6 +771,9 @@ pub const Registry = struct {
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_accounted_size);
         // Registration only links/accountes the already initialized header.
         // Same-value passthrough: new_fam_bytes sized the block above.
+        // PERF-T-SPIKE: relocateShape preserved the identity in its literal;
+        // compactProperties / restorePropertyLayout build a NEW layout.
+        if (new_shape.tspike_identity == 0) new_shape.tspike_identity = tspikeFreshIdentity();
         self.gc_registry.addInitializedShape(&new_shape.header, new_shape.accountedAllocationSize());
         if (new_shape.isHashed()) self.insertShapeHash(new_shape);
 
@@ -804,6 +831,8 @@ pub const Registry = struct {
         prop.flags = flags;
         prop.atom_id = atom.null_atom;
         shape.incrementDeletedPropCount();
+        // PERF-T-SPIKE: a captured slot must not be read once deleted.
+        shape.tspike_identity = tspikeFreshIdentity();
     }
 
     /// Remove deleted shape/property slots while preserving the relative order
@@ -899,6 +928,9 @@ pub const Registry = struct {
         const old_fam_bytes = old.famByteSize();
         const old_accounted_size = old.accountedAllocationSize();
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_accounted_size);
+        // PERF-T-SPIKE: relocateShape preserved the identity in its literal;
+        // compactProperties / restorePropertyLayout build a NEW layout.
+        if (new_shape.tspike_identity == 0) new_shape.tspike_identity = tspikeFreshIdentity();
         self.gc_registry.addInitializedShape(&new_shape.header, new_shape.accountedAllocationSize());
         object.shape_ref = new_shape;
         object.refreshTraceShapeSummary();
@@ -925,6 +957,8 @@ pub const Registry = struct {
         std.debug.assert(index < shape.prop_count);
         if (shape.props()[index].flags == flags) return;
         shape.props()[index].flags = flags;
+        // PERF-T-SPIKE: flags are part of the guarded layout.
+        shape.tspike_identity = tspikeFreshIdentity();
     }
 
     pub fn restorePropertyLayout(self: *Registry, shape_ptr: **Shape, baseline_props: []const Property, baseline_hash: u32, baseline_deleted_count: usize) !void {
@@ -986,13 +1020,15 @@ pub const Registry = struct {
         const old_accounted_size = old.accountedAllocationSize();
         if (old.isHashed()) self.removeShapeHash(old);
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_accounted_size);
+        // PERF-T-SPIKE: relocateShape preserved the identity in its literal;
+        // compactProperties / restorePropertyLayout build a NEW layout.
+        if (new_shape.tspike_identity == 0) new_shape.tspike_identity = tspikeFreshIdentity();
         self.gc_registry.addInitializedShape(&new_shape.header, new_shape.accountedAllocationSize());
         if (new_shape.isHashed()) self.insertShapeHash(new_shape);
 
         // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
         const old_prop_count = old.prop_count;
-        for (old.props()[0..old_prop_count]) |_| {
-        }
+        for (old.props()[0..old_prop_count]) |_| {}
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
 
         shape_ptr.* = new_shape;
@@ -1081,8 +1117,7 @@ pub const Registry = struct {
         // the single block freed last (qjs js_free_shape0 releases atoms +
         // proto, then the one allocation).
         const prop_count = shape.prop_count;
-        for (shape.props()[0..prop_count]) |_| {
-        }
+        for (shape.props()[0..prop_count]) |_| {}
         self.memory.destroyWithFam(Shape, shape, fam_bytes);
     }
 
@@ -1167,8 +1202,7 @@ pub const Registry = struct {
     }
 
     fn freePropertyAtoms(_: *Registry, props: []const Property) void {
-        for (props) |_| {
-        }
+        for (props) |_| {}
     }
 
     fn rebuildPropertyHash(self: *Registry, shape_ptr: **Shape, bucket_count: usize) !void {
@@ -1189,7 +1223,18 @@ pub const Registry = struct {
         shape.hashBuckets()[bucket] = @intCast(index);
     }
 
+    /// PERF-T-SPIKE identity counter (see Shape.tspike_identity).
+    var tspike_next_identity: u64 = 1;
+    pub fn tspikeFreshIdentity() u64 {
+        const id = tspike_next_identity;
+        tspike_next_identity += 1;
+        return id;
+    }
+
     inline fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
+        // PERF-T-SPIKE: every construction that links (createShape*,
+        // cloneShape) is a new logical layout.
+        shape.tspike_identity = tspikeFreshIdentity();
         // Shapes are tracked solely through the GC object list (added by the
         // caller via `gc_registry.addInitializedWithSize`), exactly like qjs `add_gc_object`.
         // The only per-shape bookkeeping here is hash-table insertion.

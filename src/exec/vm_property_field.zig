@@ -9,6 +9,7 @@ const frame_mod = @import("frame.zig");
 const property_direct = @import("property_direct.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
+const tspike = @import("tspike.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
@@ -154,8 +155,24 @@ pub noinline fn field(
 ) align(16) !Step {
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
+    // PERF-T-SPIKE op carries one extra operand byte (registry index). The
+    // site is captured HERE, on its first cold visit, so the resident
+    // handler stays leaf (tspike.zig fairness rule 1): this visit still
+    // answers generically, and the next execution takes the guarded path.
+    if (opc == op.tspike_get_slot) {
+        const site_index = function.byteCode()[frame.pc];
+        frame.pc += 1;
+        const entry = &tspike.registry[site_index];
+        if (entry.state == tspike.state_empty and stack.len() >= 1) {
+            if (object_ops.objectFromValueTrustedExpression(stack.values[stack.len() - 1])) |obj| {
+                _ = tspike.capture(obj, atom_id, entry);
+            } else {
+                entry.state = tspike.state_poisoned;
+            }
+        }
+    }
     switch (opc) {
-        op.get_field, op.get_field_field2 => {
+        op.get_field, op.get_field_field2, op.tspike_get_slot => {
             if (stack.len() == 0) return error.StackUnderflow;
             const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];

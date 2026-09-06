@@ -42,7 +42,7 @@ function_bytecode size=88 align=8 header=0 js_mode=8 byte_code=16 byte_code_len=
 var_ref size=40 align=8 header=0 value=8 pvalue=24 is_const=32 is_open=36
 realm_context size=2176 align=16 header=0 runtime=1472 publication_state=2160 modules=1424 global=288 trace_rc=2164 list_prev=2168
 module size=272 align=16 header=0 registry_prev=136 registry=32 memory=40 module_name=244 requests=104 func_obj=192 module_ns=208
-shape size=56 align=8 header=0 list_prev=8 ownership=16 hash=20 prop_hash_mask=24 prop_size=28 prop_count=32 registry_hash_next=40 proto=48 fam=56
+shape size=64 align=8 header=0 list_prev=8 ownership=16 hash=20 prop_hash_mask=24 prop_size=28 prop_count=32 registry_hash_next=40 proto=48 fam=64
 string_flat size=12 align=4 metadata_prefix=8 len_meta=0 hash_meta=4 atom_id=8 fam=12
 string_rope size=56 align=8 metadata_prefix=8 left=0 right=16 rt=32 len=48 depth=52 wide=53
 string_rope_tail extensible=54 buffer=40

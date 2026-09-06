@@ -425,7 +425,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.dyn_env_probe] = h_dyn_env_probe;
 
     // --- fields / private / array_el / super ---
-    inline for ([_]u8{ op.get_field, op.get_field2, op.put_field }) |o| t[o] = h_field;
+    inline for ([_]u8{ op.get_field, op.get_field2, op.put_field, op.tspike_get_slot }) |o| t[o] = h_field;
     t[op.get_private_field] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try vm_property_private.getPrivateFieldVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
@@ -952,6 +952,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.push_this_put_loc0] = dispatch.op_push_this_put_loc0;
     t[op.dec_loc] = dispatch.op_update_loc;
     t[op.get_field] = dispatch.op_get_field; // inline-cache fast path; IC miss → cold h_field
+    // PERF-T-SPIKE (branch spike/perf-t-main): guarded direct-slot read; every
+    // miss re-tails to cold h_field, whose field() arms cover this op.
+    t[op.tspike_get_slot] = dispatch.op_tspike_get_slot;
     t[op.get_loc0_field] = dispatch.op_get_loc0_field;
     t[op.get_loc2_field] = dispatch.op_get_loc2_field;
     t[op.get_loc2_field2] = dispatch.op_get_loc2_field2;

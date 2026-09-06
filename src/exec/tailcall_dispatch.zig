@@ -27,6 +27,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vm_profile = @import("vm_profile.zig");
+const tspike = @import("tspike.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -3474,6 +3475,45 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     }
     vm.property_holder = object;
     return @call(.always_tail, propertyTailHandler(vm, .get_field_after_own_miss), .{ pc, sp, var_buf, vm });
+}
+
+// ---- PERF-T-SPIKE handler (branch spike/perf-t-main, never main; policy
+// policies/spikes/perf-t-spike-v1.json; registry/capture in tspike.zig).
+// Size-6 instruction: atom u32 at pc+1 (capture + generic fallback),
+// registry index at pc+5.
+//
+// The resident handler must stay LEAF, like op_get_field: capture and every
+// miss leg live in the cold `h_field` shell (cold_table), because inlining
+// capture here costs a callee-saved prologue on every HIT and would
+// under-price the mechanism this spike exists to price (tspike.zig fairness
+// rule 1). A miss re-tails to cold_table[pc[0]] directly (NOT the get_field
+// property tail, whose continuation advances pc by 5).
+//
+// R7 (typed plan §十一): the slot is reached by loading `prop_values`
+// (Object+16) and indexing -- never folded to `obj + const` -- because the
+// slots2 inline tail holds only two slots and the third property spills to
+// a cell; the load is the lowering contract for every typed slot access.
+pub fn op_tspike_get_slot(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    if (!receiver.isObject())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const obj = object_ops.objectFromValueTrustedExpression(receiver) orelse unreachable;
+    const e = &tspike.registry[pc[5]];
+    const shape_ptr = obj.shape_ref;
+    if (tspike.shapeKey(shape_ptr) != e.guard_key)
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    var holder = obj;
+    if (e.proto_key != 0) {
+        const proto_obj = shape_ptr.proto orelse
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        if (tspike.shapeKey(proto_obj.shape_ref) != e.proto_key)
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        holder = proto_obj;
+    }
+    const slot = &holder.prop_values[e.slot_index].slot.data;
+    const value = loadValueAsIntPair(slot);
+    storeValueAsIntPair(&(sp - 1)[0], value);
+    return cont(pc + 6, sp, var_buf, vm);
 }
 
 // Primitive get_field2 keeps the raw receiver on the stack and pushes the resolved

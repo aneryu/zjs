@@ -758,6 +758,47 @@ const Resolver = struct {
         return (v4Mask() & bit) != 0;
     }
 
+    // PERF-T-SPIKE (branch spike/perf-t-main, never main): ZJS_TSPIKE=1
+    // rewrites get_field sites into the guarded direct-slot op, one registry
+    // index per site (process-wide counter; sites past the registry capacity
+    // stay generic), and suppresses the fusions whose A or B side is
+    // get_field so the sites survive to the rewrite. Diagnostic only, like
+    // ZJS_FUSE_V4. Modes: "1" = suppress the get_field fusions AND rewrite
+    // the sites. "fuseoff" = suppress the same fusions but do NOT rewrite --
+    // the fusion-loss-only control arm, so the A/B can price the direct-slot
+    // mechanism fusion-neutrally instead of charging it for the fusions the
+    // rewrite has to give up. Anything else = off.
+    var tspike_ready: bool = false;
+    var tspike_rewrite: bool = false;
+    var tspike_fuse_off: bool = false;
+    var tspike_next_site: u16 = 0;
+
+    fn tspikeLoad() void {
+        if (tspike_ready) return;
+        tspike_ready = true;
+        const raw = std.c.getenv("ZJS_TSPIKE") orelse return;
+        const s = std.mem.span(raw);
+        if (std.mem.eql(u8, s, "1")) {
+            tspike_rewrite = true;
+            tspike_fuse_off = true;
+        } else if (std.mem.eql(u8, s, "fuseoff")) {
+            tspike_fuse_off = true;
+        }
+    }
+
+    /// Site rewriting (get_field -> guarded direct-slot op).
+    fn tspikeOn() bool {
+        tspikeLoad();
+        return tspike_rewrite;
+    }
+
+    /// Fusion suppression: on in BOTH non-off modes, so the control arm sees
+    /// exactly the instruction stream the rewrite arm starts from.
+    fn tspikeFuseOff() bool {
+        tspikeLoad();
+        return tspike_fuse_off;
+    }
+
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
         self.fuse_b3 = 0;
@@ -767,7 +808,7 @@ const Resolver = struct {
         switch (opc) {
             op.get_loc0 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_field;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field;
                 self.fuse_op = op.get_loc0_field;
                 self.fuse_b2 = 0;
             },
@@ -797,7 +838,7 @@ const Resolver = struct {
             },
             op.get_loc2 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_field;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field;
                 self.fuse_op = op.get_loc2_field;
                 self.fuse_b2 = op.get_field2;
                 self.fuse_op2 = op.get_loc2_field2;
@@ -810,13 +851,13 @@ const Resolver = struct {
             },
             op.get_field => {
                 self.last_sz = 5;
-                self.fuse_b = op.get_field2;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field2;
                 self.fuse_op = op.get_field_field2;
                 self.fuse_b2 = 0;
             },
             op.get_var => {
                 self.last_sz = 3;
-                self.fuse_b = op.get_field;
+                self.fuse_b = if (tspikeFuseOff()) 0 else op.get_field;
                 self.fuse_op = op.get_var_field;
                 self.fuse_b2 = 0;
             },
@@ -2680,6 +2721,16 @@ const Resolver = struct {
                         try self.attachSource();
                         try self.appendByte(op.get_length);
                         try self.consumeAtomsRange(position, position_next, null);
+                    } else if (tspikeOn() and tspike_next_site < 256) {
+                        // PERF-T-SPIKE: same atom operand (ownership moves
+                        // with the ledger append), plus the site's registry
+                        // index. Capture happens on first execution.
+                        try self.attachSource();
+                        try self.appendByte(op.tspike_get_slot);
+                        try self.appendU32(try readU32At(self.code, position, operand_off.atom));
+                        try self.appendByte(@intCast(tspike_next_site));
+                        tspike_next_site += 1;
+                        try self.consumeInstructionAtom(position, instruction, true);
                     } else {
                         try self.copyDefault(layout, position, instruction);
                     }
