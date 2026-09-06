@@ -86,7 +86,10 @@ fn dynEnvProbeAccess(
     else
         true;
     if (flags.kind == .read and !still_has_binding and (function.isStrictMode() or function.runtimeStrictMode())) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
         return error.ReferenceError;
     }
     switch (flags.kind) {
@@ -243,7 +246,13 @@ pub fn getRefValue(
     if (stack.len() < 2) return error.StackUnderflow;
     const obj = stack.values[stack.len() - 2];
     const key = stack.values[stack.len() - 1];
-    if (obj.isUndefined()) return error.ReferenceError;
+    if (obj.isUndefined()) {
+        // qjs OP_get_ref_value (quickjs.c:19499): the atom is resolved first,
+        // then the undefined base reports the identifier.
+        const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+        _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return err;
+        return error.ReferenceError;
+    }
     if (varRefCellFromValue(obj) != null) {
         const value = slot_ops.adapterValueBorrow(obj);
         if (value.isUninitialized()) return error.ReferenceError;
@@ -255,7 +264,7 @@ pub fn getRefValue(
     const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
     if (!still_exists) {
         if (function.isStrictMode() or function.runtimeStrictMode()) {
-            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "binding is not defined") catch |err| return err;
+            _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return err;
             return error.ReferenceError;
         }
         try stack.push(core.JSValue.undefinedValue());
@@ -295,7 +304,12 @@ pub fn putRefValue(
 
     const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
     if (obj.isUndefined()) {
-        if (runtime_strict) return error.ReferenceError;
+        if (runtime_strict) {
+            // qjs OP_put_ref_value (quickjs.c:19606).
+            const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+            _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return err;
+            return error.ReferenceError;
+        }
         const global_value = global.value();
         obj = global_value;
     }
@@ -318,7 +332,10 @@ pub fn putRefValue(
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     const object = try property_ops.expectObject(obj);
     const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
-    if (!still_exists and runtime_strict) return error.ReferenceError;
+    if (!still_exists and runtime_strict) {
+        _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return err;
+        return error.ReferenceError;
+    }
     _ = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
 }
 
@@ -373,7 +390,10 @@ fn dynEnvProbeStore(
         return err;
     };
     if (!still_exists and (function.isStrictMode() or function.runtimeStrictMode())) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
         return error.ReferenceError;
     }
     const value = try stack.pop();

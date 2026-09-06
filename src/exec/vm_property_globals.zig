@@ -79,7 +79,10 @@ fn getVarFromGlobalObject(
                 return err;
             };
             if (!has_global_binding) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
                 return error.ReferenceError;
             }
         }
@@ -183,7 +186,10 @@ pub noinline fn getVar(
                 return err;
             };
             if (!has_global_binding) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
                 return error.ReferenceError;
             }
         }
@@ -318,7 +324,10 @@ pub noinline fn putVar(
             return err;
         };
         if (!has_global_binding and (runtime_strict or strict_unresolved_get_var)) {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
             return error.ReferenceError;
         }
     }

@@ -21104,3 +21104,26 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     helpers.finishGcCycles(rt);
     _ = rt.runObjectCycleRemoval();
 }
+
+test "an unresolved binding names its identifier in the ReferenceError message (qjs JS_ThrowReferenceErrorNotDefined)" {
+    try helpers.expectPrints(
+        \\try { zjsUndeclaredRead; } catch (e) { print(e.name + ": " + e.message + " " + (e instanceof ReferenceError)); }
+        \\try { zjsUndeclaredCall(); } catch (e) { print(e.message); }
+        \\try { zjsUndeclaredMember.x; } catch (e) { print(e.message); }
+        \\try { (function () { "use strict"; zjsUndeclaredAssign = 1; })(); } catch (e) { print(e.message); }
+        \\try { (function () { "use strict"; zjsUndeclaredUpdate++; })(); } catch (e) { print(e.message); }
+        \\try { (function () { zjsUndeclaredInner; })(); } catch (e) { print(e.message); }
+        \\print(typeof zjsUndeclaredTypeof, delete zjsUndeclaredDelete);
+        \\zjsSloppyAssign = 1; print(zjsSloppyAssign);
+    ,
+        \\ReferenceError: 'zjsUndeclaredRead' is not defined true
+        \\'zjsUndeclaredCall' is not defined
+        \\'zjsUndeclaredMember' is not defined
+        \\'zjsUndeclaredAssign' is not defined
+        \\'zjsUndeclaredUpdate' is not defined
+        \\'zjsUndeclaredInner' is not defined
+        \\undefined true
+        \\1
+        \\
+    );
+}

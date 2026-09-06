@@ -398,6 +398,24 @@ pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, me
     return error.ReferenceError;
 }
 
+/// qjs JS_ThrowReferenceErrorNotDefined (quickjs.c:7820): `'name' is not
+/// defined`. Every unresolved-binding exit (get_var, strict put_var, the
+/// with-scope and ref-value legs) goes through here so the identifier reaches
+/// the message; the bare `error.ReferenceError` sentinel (runtimeErrorInfo:
+/// "not defined") is what a JS `catch` would otherwise see. Cold: called only
+/// after the lookup has already failed.
+pub fn throwReferenceErrorNotDefined(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue {
+    const allocator = ctx.runtime.memory.allocator;
+    var index_buf: [16]u8 = undefined;
+    const name: []const u8 = if (core.atom.isTaggedInt(atom_id))
+        std.fmt.bufPrint(&index_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable
+    else
+        ctx.runtime.atoms.name(atom_id) orelse "";
+    const message = try std.fmt.allocPrint(allocator, "'{s}' is not defined", .{name});
+    defer allocator.free(message);
+    return throwReferenceErrorMessage(ctx, global, message);
+}
+
 pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
     const error_value = try createNamedError(ctx, global, "SyntaxError", message);
     _ = ctx.throwValue(error_value);
