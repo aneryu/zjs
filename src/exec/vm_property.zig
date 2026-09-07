@@ -26,6 +26,11 @@ comptime {
         if (bytecode.opcode.decode.sizeOfForm(f) != 1)
             @compileError("sequence matcher step is no longer one byte: " ++ @tagName(f));
     }
+    // get_field / get_field2 / put_field stay 5-byte atom-sized.
+    for ([_]Form{ .get_field, .get_field2, .put_field }) |f| {
+        if (bytecode.opcode.decode.sizeOfForm(f) != 5)
+            @compileError("get_field family is no longer atom-sized: " ++ @tagName(f));
+    }
 }
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -37,27 +42,6 @@ const slot_ops = @import("slot_ops.zig");
 const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyValueForFastPath;
 
 pub const Step = enum { done, continue_loop };
-
-const FieldAtom = struct {
-    atom: core.Atom,
-    next_pc: usize,
-};
-
-pub fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?FieldAtom {
-    comptime {
-        // Callers pass get_field-family ops; the hard-coded stride is only
-        // sound while the whole family is atom-sized.
-        for ([_]Form{ .get_field, .get_field2, .put_field }) |f| {
-            if (bytecode.opcode.decode.sizeOfForm(f) != 5)
-                @compileError("decodeFieldAtom stride is stale for " ++ @tagName(f));
-        }
-    }
-    if (pc + 5 > code.len or code[pc] != expected_op) return null;
-    return .{
-        .atom = readInt(u32, code[pc + 1 ..][0..4]),
-        .next_pc = pc + 5,
-    };
-}
 
 pub fn globalVarAtom(function: *const bytecode.FunctionBytecode, idx: u16) ?core.Atom {
     if (idx < function.closureVar().len) return function.closureVar()[idx].var_name;
@@ -247,7 +231,3 @@ pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: 
 }
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
-
-fn readInt(comptime T: type, bytes: []const u8) T {
-    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
-}

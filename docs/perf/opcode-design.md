@@ -2875,8 +2875,8 @@ slot 0）从前没有字节可读，现在从声明打出。冷路径无性能�
 （`sizeOfForm`/`burnedOperandOf`）。数字全都是对的，但从前没有任何东西
 把它们连到定义它们的声明上——重编码一个 form 会把每个 matcher 变成
 静默错解码器；现在变成编译错误。两个注释级假设升格为构建断言
-（序列匹配的 pc+1 步进依赖六个 form 恒 1 字节；`decodeFieldAtom` 步长
-依赖 get_field 族恒 atom 尺寸）。
+（序列匹配的 pc+1 步进依赖六个 form 恒 1 字节；get_field 族恒 atom 尺寸
+由 `vm_property.zig` 顶部 comptime `sizeOfForm` 断言守住）。
 
 P1-1 证据（裁决要求生成代码核对，合同文本不算）：
 **`.text.zjs.op_handlers` 逐字节相同（164448 == 164448）**、定工作量
