@@ -1557,24 +1557,25 @@ test "registered symbol index ignores unique symbols and private names" {
     keep_roots.activate(rt);
     defer keep_roots.deactivate(rt);
 
-    var registered = try rt.atoms.internSymbol(registry_name);
-    const registered_again = try rt.atoms.internSymbol(registry_name);
+    var registered = try rt.atoms.internGlobalSymbol(registry_name);
+    const registered_again = try rt.atoms.internGlobalSymbol(registry_name);
     try std.testing.expect(unique != registered);
     try std.testing.expect(private != registered);
     try std.testing.expectEqual(registered, registered_again);
-    try std.testing.expect(!rt.atoms.isRegisteredSymbol(unique));
-    try std.testing.expect(!rt.atoms.isRegisteredSymbol(private));
-    try std.testing.expect(rt.atoms.isRegisteredSymbol(registered));
+    try std.testing.expect(rt.atoms.kind(unique) != .global_symbol);
+    try std.testing.expect(rt.atoms.kind(private) != .global_symbol);
+    try std.testing.expect(rt.atoms.kind(registered) == .global_symbol);
 
     {
         var registry_roots = core.runtime.rootAtoms(.{&registered});
         registry_roots.activate(rt);
         defer registry_roots.deactivate(rt);
         _ = rt.runObjectCycleRemoval();
-        try std.testing.expect(rt.atoms.isRegisteredSymbol(registered_again));
+        try std.testing.expect(rt.atoms.kind(registered_again) == .global_symbol);
+        try std.testing.expect(rt.atoms.name(registered_again) != null);
     }
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(!rt.atoms.isRegisteredSymbol(registered_again));
+    try std.testing.expect(rt.atoms.kind(registered_again) == null);
     try std.testing.expect(rt.atoms.name(unique) != null);
     try std.testing.expect(rt.atoms.name(private) != null);
 }
@@ -1588,7 +1589,7 @@ test "registered value symbols keep a single registry ref" {
     const registered_again = try rt.atoms.internRegisteredValueSymbol(registry_name);
     try std.testing.expectEqual(registered, registered_again);
 
-    const manual = try rt.atoms.internSymbol(registry_name);
+    const manual = try rt.atoms.internGlobalSymbol(registry_name);
     try std.testing.expectEqual(registered, manual);
 }
 
@@ -1997,7 +1998,7 @@ test "GC keeps object-held and registered symbol atoms" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(object_symbol) == null);
 
-    var registered = try rt.atoms.internSymbol("Symbol.for:gc-registered-symbol");
+    var registered = try rt.atoms.internGlobalSymbol("Symbol.for:gc-registered-symbol");
     var registry_roots = core.runtime.rootAtoms(.{&registered});
     registry_roots.activate(rt);
     defer registry_roots.deactivate(rt);
@@ -17155,10 +17156,11 @@ test "TGC S3-b: a compile scope on a runtime-less table records without register
     try scope.activate();
     try std.testing.expect(scope.rt == null);
 
-    const id = try scope.intern("zjsS3FixtureIdent");
-    // Ambient and explicit recording agree, and the direct-mapped filter keeps
-    // a repeat from growing the list.
-    try std.testing.expectEqual(id, scope.noteExisting(id));
+    const id = try table.internString("zjsS3FixtureIdent");
+    scope.note(id);
+    // Repeat recording must not grow the list: internString already notes
+    // into the active scope, and the direct-mapped filter drops a second note.
+    scope.note(id);
     try std.testing.expectEqual(@as(usize, 1), scope.ids.items.len);
     try std.testing.expectEqual(id, scope.ids.items[0]);
 }

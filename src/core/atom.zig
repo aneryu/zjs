@@ -1571,10 +1571,6 @@ pub const AtomTable = struct {
         return self.internDynamic("", .symbol, false, true, 0);
     }
 
-    pub fn internSymbol(self: *AtomTable, description: []const u8) !Atom {
-        return self.internGlobalSymbol(description);
-    }
-
     pub fn internGlobalSymbol(self: *AtomTable, description: []const u8) !Atom {
         const id = try self.internGlobalSymbolInner(description);
         self.noteCompileScope(id);
@@ -1613,14 +1609,6 @@ pub const AtomTable = struct {
         const entry = self.findDynamic(id).?;
         entry.registry_managed_symbol = true;
         return id;
-    }
-
-    pub fn isRegisteredSymbol(self: *const AtomTable, atom_id: Atom) bool {
-        const idx = dynamicEntryIndex(atom_id) orelse return false;
-        if (idx >= self.entries.len) return false;
-        const entry = self.entries[idx];
-        if (!entry.occupied or entry.kind != .global_symbol) return false;
-        return self.findAtom(entry.bytes, .global_symbol, entry.hash) == atom_id;
     }
 
     // ---- TGC S3: tracing-owned atom liveness (docs/tracing-gc-s3-spec.md) ----
@@ -2537,23 +2525,6 @@ pub const CompileAtomScope = struct {
             return;
         };
         self.recent[slot] = id;
-    }
-
-    /// Explicit form of the ambient recording, for a call site that wants the
-    /// scope spelled out. The symbol family (`newSymbol`/`internSymbol`, the
-    /// parser's private names) needs no wrapper: those entry points note into
-    /// the ambient scope like every other one.
-    pub fn intern(self: *CompileAtomScope, bytes: []const u8) !Atom {
-        const id = try self.table.internString(bytes);
-        self.note(id);
-        return id;
-    }
-
-    /// Explicit form for an id the scope did not intern itself (the caller
-    /// obtained it before the scope opened).
-    pub fn noteExisting(self: *CompileAtomScope, id: Atom) Atom {
-        self.note(id);
-        return id;
     }
 };
 
