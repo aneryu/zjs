@@ -395,7 +395,7 @@ const OwnedArgList = struct {
     /// inline slots plus seven empty slices whose pointer is `@alignOf`.
     /// Zero in place and store `&.{}` so that template can leave.
     fn initEmpty(self: *OwnedArgList) void {
-        self.* = std.mem.zeroes(OwnedArgList);
+        @memset(std.mem.asBytes(self), 0);
         const empty_values: []core.JSValue = &.{};
         self.values = empty_values;
         self.rooted_prefix = empty_values;
