@@ -841,9 +841,8 @@ fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
         .{ ", other ", census.other_superblocks },
         .{ ", uninitialized slots ", census.uninitialized_blocks },
     }, "\n");
-    try writer.print(
+    try writer.writeAll(
         "gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free\n",
-        .{},
     );
     var total: engine.core.gc_block_heap.BlockCensusRow = .{};
     for (census.rows) |row| {
@@ -924,11 +923,13 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         .{ ", remembered drops ", st.remembered_drops },
         .{ ", suspensions ", st.minor_suspensions },
     }, "\n");
-    try writer.print("gc: major retirement commits {d}, abandons {d}, current state {s}\n", .{
-        st.retirement_commits,
-        st.retirement_abandons,
-        @tagName(registry.generation.major_retirement),
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: major retirement commits ", st.retirement_commits },
+        .{ ", abandons ", st.retirement_abandons },
+    }, "");
+    try writer.writeAll(", current state ");
+    try writer.writeAll(@tagName(registry.generation.major_retirement));
+    try writer.writeAll("\n");
     try writeCounterLine(writer, &.{
         .{ "gc: generational barrier calls ", st.barrier_calls },
         .{ ", exit young-owner ", st.barrier_young_owner },
@@ -976,7 +977,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
             .{ " over ", st.minor_collections },
         }, " verified minors\n");
     } else {
-        try writer.print("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n", .{});
+        try writer.writeAll("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n");
     }
     const cs = registry.incremental.stats;
     try writeCounterLine(writer, &.{
@@ -1137,9 +1138,8 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
     // An all-zero panel reads like "nothing was marked", which is a wrong
     // answer rather than a missing one. Say which it is.
     if (!engine.core.gc_trace_stw.mark_footprint_census) {
-        try writer.print(
+        try writer.writeAll(
             "gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n",
-            .{},
         );
         return;
     }
@@ -1268,20 +1268,31 @@ fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
 }
 
 fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
-    const state = engine.core.gc_trace_stw.doomedStateSnapshot(rt);
-    try writer.print(
-        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, deferred_finalizers {d}, active_finalizer {s}\n",
-        .{
-            layer,
-            if (state.pending) "true" else "false",
-            state.nonempty_buckets,
-            state.bucket_headers,
-            if (state.cursor_present) "true" else "false",
-            state.doomed_blocks,
-            state.deferred_finalizers,
-            if (state.active_finalizer) "true" else "false",
-        },
-    );
+    try writeDoomedStateLine(writer, layer, engine.core.gc_trace_stw.doomedStateSnapshot(rt));
+}
+
+fn writeDoomedStateLine(
+    writer: *std.Io.Writer,
+    layer: []const u8,
+    state: engine.core.gc_trace_stw.DoomedStateSnapshot,
+) !void {
+    try writer.writeAll("gc: ");
+    try writer.writeAll(layer);
+    try writer.writeAll(" doomed_pending ");
+    try writer.writeAll(if (state.pending) "true" else "false");
+    try writeCounterLine(writer, &.{
+        .{ ", doomed_buckets ", state.nonempty_buckets },
+        .{ ", doomed_headers ", state.bucket_headers },
+    }, "");
+    try writer.writeAll(", doomed_cursor ");
+    try writer.writeAll(if (state.cursor_present) "true" else "false");
+    try writeCounterLine(writer, &.{
+        .{ ", doomed_blocks ", state.doomed_blocks },
+        .{ ", deferred_finalizers ", state.deferred_finalizers },
+    }, "");
+    try writer.writeAll(", active_finalizer ");
+    try writer.writeAll(if (state.active_finalizer) "true" else "false");
+    try writer.writeAll("\n");
 }
 
 /// Pause percentiles, or an explicit "no pauses" line. Never print zeros for
@@ -1294,7 +1305,7 @@ fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.J
 /// design target is written against.
 fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) !void {
     const d = distribution orelse {
-        try writer.print("gc: major pauses none\n", .{});
+        try writer.writeAll("gc: major pauses none\n");
         return;
     };
     const retained = @min(d.samples, engine.core.gc.pause_sample_capacity);
@@ -1806,6 +1817,48 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
         \\
     ;
     try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "zjs doomed state line preserves mixed bools and counters" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeDoomedStateLine(&writer, "endpoint", .{
+        .pending = true,
+        .nonempty_buckets = 2,
+        .bucket_headers = 7,
+        .cursor_present = false,
+        .doomed_blocks = 11,
+        .deferred_finalizers = 13,
+        .active_finalizer = true,
+    });
+    try std.testing.expectEqualStrings(
+        "gc: endpoint doomed_pending true, doomed_buckets 2, doomed_headers 7, doomed_cursor false, doomed_blocks 11, deferred_finalizers 13, active_finalizer true\n",
+        writer.buffered(),
+    );
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeDoomedStateLine(&writer, "settled", .{
+        .pending = false,
+        .nonempty_buckets = 0,
+        .bucket_headers = 0,
+        .cursor_present = true,
+        .doomed_blocks = 0,
+        .deferred_finalizers = 0,
+        .active_finalizer = false,
+    });
+    try std.testing.expectEqualStrings(
+        "gc: settled doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor true, doomed_blocks 0, deferred_finalizers 0, active_finalizer false\n",
+        writer.buffered(),
+    );
+    writer = std.Io.Writer.fixed(buffer[0..8]);
+    try std.testing.expectError(error.WriteFailed, writeDoomedStateLine(&writer, "endpoint", .{
+        .pending = true,
+        .nonempty_buckets = 1,
+        .bucket_headers = 1,
+        .cursor_present = true,
+        .doomed_blocks = 1,
+        .deferred_finalizers = 1,
+        .active_finalizer = true,
+    }));
 }
 
 test "zjs counter line handles full unsigned range and writer errors" {
