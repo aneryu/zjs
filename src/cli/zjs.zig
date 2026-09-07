@@ -1656,8 +1656,11 @@ test "zjs perf json opcode profile includes counters and rows" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"get_var\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"push_i16\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"opcode\": ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\": 17") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\": 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\": 1") != null);
+    if (comptime !zjs.opcode_profile_build_enabled) {
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"nanos\": 17") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"nanos\": 5") != null);
+    }
 
     if (comptime zjs.opcode_profile_build_enabled) {
         var ic_buffer: [1024]u8 = undefined;
