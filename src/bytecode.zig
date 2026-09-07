@@ -5051,32 +5051,46 @@ pub const function_def = struct {
             return slice.ptr[used..new_used];
         }
 
-        return growSliceBySlow(T, mem, slice, capacity, used, new_used);
+        const elem_size = @sizeOf(T);
+        const old_ptr: [*]u8 = if (capacity.* == 0) undefined else @ptrCast(slice.ptr);
+        const new_ptr = try growSliceBySlowBytes(
+            mem,
+            old_ptr,
+            capacity,
+            used,
+            new_used,
+            elem_size,
+            comptime std.mem.Alignment.of(T),
+        );
+        slice.* = @as([*]T, @ptrCast(@alignCast(new_ptr)))[0..new_used];
+        return slice.*[used..new_used];
     }
 
     /// QuickJS keeps `js_resize_array` inline and enters its no-inline
     /// `js_realloc_array` only when the requested length exceeds capacity.
-    /// Preserve that call shape without changing this backing's growth policy
-    /// or its used-length/owned-capacity contract.
-    noinline fn growSliceBySlow(
-        comptime T: type,
+    /// One type-erased walk: alloc via `allocElements` / `allocSlowErased`,
+    /// not `allocAlignedBytes(trigger=true)` (knife 20 STOP).
+    noinline fn growSliceBySlowBytes(
         mem: *memory.MemoryAccount,
-        slice: *[]T,
+        old_ptr: [*]u8,
         capacity: *usize,
         used: usize,
         new_used: usize,
-    ) ![]T {
+        elem_size: usize,
+        alignment: std.mem.Alignment,
+    ) ![*]u8 {
         std.debug.assert(new_used > capacity.*);
         var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
         if (new_cap < new_used) new_cap = new_used;
-        const new_buf = try mem.alloc(T, new_cap);
-        @memcpy(new_buf[0..used], slice.*);
-        var old_buf: []T = &.{};
-        if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
-        slice.* = new_buf[0..new_used];
+        const new_buf = try mem.allocElements(new_cap, elem_size, alignment);
+        const used_bytes = std.math.mul(usize, used, elem_size) catch return error.OutOfMemory;
+        if (used_bytes != 0) @memcpy(new_buf[0..used_bytes], old_ptr[0..used_bytes]);
+        if (capacity.* != 0) {
+            const old_bytes = std.math.mul(usize, capacity.*, elem_size) catch return error.OutOfMemory;
+            mem.freeAlignedBytes(old_ptr[0..old_bytes], alignment);
+        }
         capacity.* = new_cap;
-        if (old_buf.len != 0) mem.free(T, old_buf);
-        return slice.ptr[used..new_used];
+        return new_buf.ptr;
     }
 
     /// Free the full backing buffer of a growable slice and reset both the
