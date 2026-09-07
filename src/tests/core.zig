@@ -19154,6 +19154,12 @@ test "gc_audit_print hexPad matches zero-padded hex widths" {
         .{ 0xa, 2, "{x:0>2}" },
         .{ 0xff, 2, "{x:0>2}" },
         .{ 0x100, 2, "{x:0>2}" },
+        .{ 0, 4, "{x:0>4}" },
+        .{ 0x1, 4, "{x:0>4}" },
+        .{ 0x1f, 4, "{x:0>4}" },
+        .{ 0x7f, 4, "{x:0>4}" },
+        .{ 0xffff, 4, "{x:0>4}" },
+        .{ 0x10000, 4, "{x:0>4}" },
         .{ 0, 8, "{x:0>8}" },
         .{ 0x11, 8, "{x:0>8}" },
         .{ 0xffffffff, 8, "{x:0>8}" },
@@ -19166,6 +19172,15 @@ test "gc_audit_print hexPad matches zero-padded hex widths" {
         const actual = gc_audit_print.hexPad(case[0], case[1], &actual_buf);
         try std.testing.expectEqualStrings(expected, actual);
     }
+}
+
+test "json leftover unicode escapes match hexPad min-width" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(rt.memory.allocator);
+    try core.json.appendEscapedJsonString(rt, &buffer, &[_]u8{ 0x01, 0x1f, 'A' });
+    try std.testing.expectEqualStrings("\"\\u0001\\u001fA\"", buffer.items);
 }
 
 test "gc_audit_print handles full unsigned range and writer errors" {

@@ -11,6 +11,7 @@
 const std = @import("std");
 
 const core = @import("root.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const unicode = @import("../libs/unicode.zig");
 
 /// Wrap finished serializer bytes in a JSValue string, choosing the ASCII
@@ -142,9 +143,10 @@ fn appendEscapedJsonByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: 
 }
 
 fn appendEscapedJsonUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: anytype) !void {
-    var escaped: [6]u8 = undefined;
-    const text = std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{unit}) catch unreachable;
-    try buffer.appendSlice(rt.memory.allocator, text);
+    var hex_buf: [16]u8 = undefined;
+    const digits = gc_audit_print.hexPad(@as(u64, unit), 4, &hex_buf);
+    try buffer.appendSlice(rt.memory.allocator, "\\u");
+    try buffer.appendSlice(rt.memory.allocator, digits);
 }
 
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {

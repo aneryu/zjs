@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
+const gc_audit_print = @import("../core/gc_audit_print.zig");
 const value_ops = @import("value_ops.zig");
 const date_ops = @import("date_ops.zig");
 const regexp_adapter = @import("regexp_adapter.zig");
@@ -47,6 +48,12 @@ const State = struct {
 
     fn printf(self: *State, comptime fmt: []const u8, args: anytype) Error!void {
         try self.writer.print(fmt, args);
+    }
+
+    fn putUnicodeEscape(self: *State, value: u64) Error!void {
+        var hex_buf: [16]u8 = undefined;
+        try self.puts("\\u");
+        try self.puts(gc_audit_print.hexPad(value, 4, &hex_buf));
     }
 };
 
@@ -131,23 +138,23 @@ fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void {
             continue;
         }
         if (c < 32 or (c >= 0x7f and c <= 0x9f)) {
-            try s.printf("\\u{x:0>4}", .{c});
+            try s.putUnicodeEscape(c);
             continue;
         }
         if (std.unicode.utf16IsHighSurrogate(@intCast(c))) {
             if (i + 1 >= len) {
-                try s.printf("\\u{x:0>4}", .{c});
+                try s.putUnicodeEscape(c);
                 continue;
             }
             const c1: u32 = units.at(i + 1);
             if (!std.unicode.utf16IsLowSurrogate(@intCast(c1))) {
-                try s.printf("\\u{x:0>4}", .{c});
+                try s.putUnicodeEscape(c);
                 continue;
             }
             i += 1;
             c = 0x10000 + (((c & 0x3ff) << 10) | (c1 & 0x3ff));
         } else if (std.unicode.utf16IsLowSurrogate(@intCast(c))) {
-            try s.printf("\\u{x:0>4}", .{c});
+            try s.putUnicodeEscape(c);
             continue;
         }
         var utf8: [4]u8 = undefined;
