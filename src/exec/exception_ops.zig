@@ -323,9 +323,9 @@ pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytyp
 pub fn rejectedPromiseForRuntimeError(
     ctx: *core.JSContext,
     global: *core.Object,
-    err: anytype,
+    err: exceptions.HostError,
     prototype: ?*core.Object,
-) !core.JSValue {
+) exceptions.HostError!core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
         const thrown_value = ctx.runtime.current_exception;
         const promise = try core.promise.rejectedWithPrototype(ctx, thrown_value, prototype);
