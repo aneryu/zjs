@@ -11,7 +11,6 @@
 const std = @import("std");
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
-const builtin = @import("builtin");
 
 comptime {
     @setEvalBranchQuota(5000);
@@ -649,31 +648,6 @@ pub const Table = struct {
         const rec = &self.records[id];
         if (!rec.isRegistered()) return null;
         return rec;
-    }
-
-    pub fn runFinalizer(self: *Table, id: ClassId) bool {
-        self.assertOwnerThread();
-        const generation = self.pinCallback(id) orelse return false;
-        defer self.releaseCallback(id, generation);
-        const finalizer = (self.recordPtr(id) orelse return false).finalizer orelse return false;
-        finalizer();
-        return true;
-    }
-
-    pub fn runPayloadFinalizerForTest(
-        self: *Table,
-        id: ClassId,
-        runtime: *anyopaque,
-        object: *anyopaque,
-        payload: *Payload,
-    ) bool {
-        self.assertOwnerThread();
-        if (!builtin.is_test) @compileError("runPayloadFinalizerForTest is only available in tests");
-        const generation = self.pinCallback(id) orelse return false;
-        defer self.releaseCallback(id, generation);
-        const finalizer = (self.recordPtr(id) orelse return false).payload_finalizer orelse return false;
-        finalizer(runtime, object, payload);
-        return true;
     }
 
     pub fn runPayloadFinalizer(

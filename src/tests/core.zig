@@ -3619,16 +3619,16 @@ test "class finalizers and context prototype slots are wired" {
     try std.testing.expect(ctx.classPrototypeObject(dynamic_id) == null);
 
     finalizer_calls = 0;
-    try std.testing.expect(rt.classes.runFinalizer(dynamic_id));
+    rt.classes.recordPtr(dynamic_id).?.finalizer.?();
     try std.testing.expectEqual(@as(usize, 1), finalizer_calls);
-    try std.testing.expect(!rt.classes.runFinalizer(core.class.ids.object));
+    try std.testing.expect(rt.classes.recordPtr(core.class.ids.object).?.finalizer == null);
 
     payload_finalizer_calls = 0;
     var payload: core.class.Payload = null;
-    try std.testing.expect(rt.classes.runPayloadFinalizerForTest(dynamic_id, @ptrCast(rt), @ptrCast(ctx), &payload));
+    rt.classes.recordPtr(dynamic_id).?.payload_finalizer.?(@ptrCast(rt), @ptrCast(ctx), &payload);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(null, payload);
-    try std.testing.expect(!rt.classes.runPayloadFinalizerForTest(core.class.ids.object, @ptrCast(rt), @ptrCast(ctx), &payload));
+    try std.testing.expect(rt.classes.recordPtr(core.class.ids.object).?.payload_finalizer == null);
 
     payload_mark_calls = 0;
     var visited_values: usize = 0;
