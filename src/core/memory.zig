@@ -1031,10 +1031,10 @@ pub const MemoryAccount = struct {
         return ptr[0..count];
     }
 
-    /// The one cold allocation body behind `allocInternalSlow` and
-    /// `createInternalSlow`. `is_create` only selects the diagnostics
-    /// counter and the extent-tracking arm (`create` publishes an extent for
-    /// a GC kind; `alloc` never did).
+    /// The one cold allocation body behind `allocInternalSlow`,
+    /// `createInternalSlow`, and `createWithFamInternalSlow`. `is_create`
+    /// only selects the diagnostics counter and the extent-tracking arm
+    /// (`create` publishes an extent for a GC kind; `alloc` never did).
     noinline fn allocSlowErased(self: *MemoryAccount, l: SlowLayout, comptime is_create: bool) ![*]u8 {
         const slab_index = if (self.small_slab_enabled) SmallObjectSlab.classIndex(l.payload_bytes, l.alignment) else null;
         const prefix = if (l.is_gc) (if (slab_index != null) 0 else l.standalone_prefix) else 0;
@@ -1760,40 +1760,23 @@ pub const MemoryAccount = struct {
         return self.createWithFamInternalSlow(T, fam_bytes, trigger_gc);
     }
 
-    /// Cold continuation of `createWithFamInternal`: arena refill and the
-    /// slab-disabled/standalone-prefix routes. Re-running the limit check
-    /// (and, on refill, the GC trigger request) here is idempotent.
-    noinline fn createWithFamInternalSlow(self: *MemoryAccount, comptime T: type, fam_bytes: usize, comptime trigger_gc: bool) !*T {
+    /// Cold continuation of `createWithFamInternal`. Same walk as
+    /// `createInternalSlow`: one `allocSlowErased` body, runtime FAM size.
+    /// Does not instantiate `allocAlignedBytesSlow(true)`.
+    inline fn createWithFamInternalSlow(self: *MemoryAccount, comptime T: type, fam_bytes: usize, comptime trigger_gc: bool) !*T {
+        comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
         const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
-        const alignment = comptime gcAlignment(T);
-        const slab_index = self.gcSlabClassIndex(payload_bytes, alignment);
-        const prefix = if (slab_index != null) 0 else comptime gcPrefixSize(T);
-        const bytes = std.math.add(usize, prefix, payload_bytes) catch return error.OutOfMemory;
-        try self.checkAllocation(bytes);
-        if (comptime trigger_gc) {
-            self.triggerGCBeforeAllocation(bytes);
-        }
-        const carrier_reservation = if (comptime extent_tracking_enabled)
-            try self.reserveGcExtent()
-        else {};
-        const raw = try self.rawAllocForGc(bytes, alignment, slab_index);
-        const obj_addr = @intFromPtr(raw) + prefix;
-        initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
-        const ptr: *T = @ptrFromInt(obj_addr);
-        self.creditAlloc(if (slab_index != null) payload_bytes else bytes, slab_index);
-        if (comptime extent_tracking_enabled) {
-            self.commitGcExtent(
-                carrier_reservation,
-                obj_addr,
-                @intFromPtr(raw),
-                payload_bytes,
-                bytes,
-                payload_bytes,
-                T.gc_kind_tag,
-            );
-        }
-        self.noteAllocDiagnostics(true, 1, bytes, @intFromPtr(ptr));
-        return ptr;
+        const raw = try self.allocSlowErased(.{
+            .is_gc = true,
+            .payload_bytes = payload_bytes,
+            .element_size = payload_bytes,
+            .count = 1,
+            .alignment = comptime gcAlignment(T),
+            .standalone_prefix = comptime gcPrefixSize(T),
+            .kind_tag = T.gc_kind_tag,
+            .trigger_gc = trigger_gc,
+        }, true);
+        return @ptrCast(@alignCast(raw));
     }
 
     /// Accounted payload of a slab-backed GC FAM, or null when the object
@@ -2193,6 +2176,39 @@ pub const MemoryAccount = struct {
         };
     }
 };
+
+test "createWithFamInternalSlow shares allocSlowErased ledger for FAM payloads" {
+    const TestHeader = extern struct {
+        prev: ?*@This() = null,
+        next_non_object: ?*@This() = null,
+    };
+    const TestGc = extern struct {
+        pub const gc_kind_tag: u8 = 3;
+
+        header: TestHeader = .{},
+        payload: [48]u8 = @splat(0),
+    };
+
+    comptime std.debug.assert(@sizeOf(TestGc) == 64);
+
+    // Slab disabled forces createWithFamInternalSlow (no hot slab pop).
+    var account = MemoryAccount.init(std.testing.allocator);
+    defer account.small_slab.deinit(std.testing.allocator);
+    account.small_slab_enabled = false;
+
+    const extras = [_]usize{ 0, 8, 64, 256 };
+    for (extras) |extra| {
+        const before = account.allocated_bytes;
+        const ptr = try account.createWithFam(TestGc, extra);
+        ptr.* = .{};
+        const meta: [*]const u8 = @ptrFromInt(@intFromPtr(ptr) - MemoryAccount.gc_prefix_size);
+        try std.testing.expectEqual(TestGc.gc_kind_tag, meta[3] & 0x7);
+        const prefix = MemoryAccount.gcPrefixSize(TestGc);
+        try std.testing.expectEqual(before + prefix + @sizeOf(TestGc) + extra, account.allocated_bytes);
+        account.destroyWithFam(TestGc, ptr, extra);
+        try std.testing.expectEqual(before, account.allocated_bytes);
+    }
+}
 
 test "allocElements matches alloc(T) ledger for non-GC elements" {
     for ([_]bool{ false, true }) |slab_enabled| {
