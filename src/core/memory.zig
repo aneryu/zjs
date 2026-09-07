@@ -898,6 +898,26 @@ pub const MemoryAccount = struct {
         return raw[0..payload_bytes];
     }
 
+    /// Replace an exact-fit `old_count` element allocation with `new_count`
+    /// elements. Used by module-metadata `append` (+1 realloc). Reuses
+    /// `allocElements` / `allocSlowErased`; does not instantiate
+    /// `allocAlignedBytesSlow(true)`. `old_count == 0` means no old buffer.
+    pub noinline fn reallocElements(
+        self: *MemoryAccount,
+        old_ptr: [*]u8,
+        old_count: usize,
+        new_count: usize,
+        elem_size: usize,
+        alignment: std.mem.Alignment,
+    ) ![]u8 {
+        std.debug.assert(new_count > old_count);
+        const new_buf = try self.allocElements(new_count, elem_size, alignment);
+        const used_bytes = std.math.mul(usize, old_count, elem_size) catch return error.OutOfMemory;
+        if (used_bytes != 0) @memcpy(new_buf[0..used_bytes], old_ptr[0..used_bytes]);
+        if (old_count != 0) self.freeAlignedBytes(old_ptr[0..used_bytes], alignment);
+        return new_buf;
+    }
+
     /// Runtime hot path variant. The owning runtime performs a direct GC
     /// threshold check before entering, avoiding the nullable trigger callback.
     pub inline fn allocNoTrigger(self: *MemoryAccount, comptime T: type, count: usize) ![]T {
@@ -2207,6 +2227,51 @@ test "createWithFamInternalSlow shares allocSlowErased ledger for FAM payloads" 
         try std.testing.expectEqual(before + prefix + @sizeOf(TestGc) + extra, account.allocated_bytes);
         account.destroyWithFam(TestGc, ptr, extra);
         try std.testing.expectEqual(before, account.allocated_bytes);
+    }
+}
+
+test "reallocElements matches alloc(T, n+1) ledger for exact-fit append" {
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var typed = MemoryAccount.init(std.testing.allocator);
+        defer typed.small_slab.deinit(std.testing.allocator);
+        typed.small_slab_enabled = slab_enabled;
+        var erased = MemoryAccount.init(std.testing.allocator);
+        defer erased.small_slab.deinit(std.testing.allocator);
+        erased.small_slab_enabled = slab_enabled;
+
+        var typed_items: []u32 = &.{};
+        var erased_items: []u32 = &.{};
+        defer if (typed_items.len != 0) typed.free(u32, typed_items);
+        defer if (erased_items.len != 0) erased.freeAlignedBytes(
+            @as([*]u8, @ptrCast(erased_items.ptr))[0 .. erased_items.len * @sizeOf(u32)],
+            std.mem.Alignment.of(u32),
+        );
+
+        var n: usize = 0;
+        while (n < 8) : (n += 1) {
+            const before_typed = typed.allocated_bytes;
+            const before_erased = erased.allocated_bytes;
+            const next_typed = try typed.alloc(u32, n + 1);
+            @memcpy(next_typed[0..n], typed_items);
+            next_typed[n] = @intCast(n);
+            if (typed_items.len != 0) typed.free(u32, typed_items);
+            typed_items = next_typed;
+
+            const old_ptr: [*]u8 = if (erased_items.len == 0) undefined else @ptrCast(erased_items.ptr);
+            const next_erased = try erased.reallocElements(
+                old_ptr,
+                erased_items.len,
+                erased_items.len + 1,
+                @sizeOf(u32),
+                std.mem.Alignment.of(u32),
+            );
+            erased_items = @as([*]u32, @ptrCast(@alignCast(next_erased.ptr)))[0 .. n + 1];
+            erased_items[n] = @intCast(n);
+
+            try std.testing.expectEqual(typed.allocated_bytes - before_typed, erased.allocated_bytes - before_erased);
+            try std.testing.expectEqual(typed_items.len, erased_items.len);
+            try std.testing.expectEqualSlices(u32, typed_items, erased_items);
+        }
     }
 }
 
