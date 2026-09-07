@@ -242,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
         .file => |file| source: {
             const read_start = platform_clock.monotonicNanos();
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, file.path, allocator, .limited(max_source_size)) catch |err| {
-                try cli_process.printError(io, "zjs: unable to read {s}: {s}\n", .{ file.path, @errorName(err) });
+                try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", file.path, ": ", @errorName(err), "\n" });
                 std.process.exit(1);
             };
             read_source_ns = platform_clock.elapsedNanosSince(read_start);
@@ -267,12 +267,12 @@ pub fn main(init: std.process.Init) !void {
         .gc_threshold = zjs.default_gc_threshold,
         .stack_size = commandRuntimeOptions(command).stack_size orelse zjs.default_stack_size,
     }) catch |err| {
-        try cli_process.printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "zjs: engine init failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     errdefer rt.destroy();
     const ctx = zjs.JSContext.create(rt) catch |err| {
-        try cli_process.printError(io, "zjs: context init failed: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     errdefer ctx.destroy();
@@ -291,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
     const runtime_options = commandRuntimeOptions(command);
     if (runtime_options.profile_opcodes) {
         if (!zjs.opcode_profile_build_enabled) {
-            try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n", .{});
+            try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n");
             std.process.exit(2);
         }
         runtime.runtime.setOpcodeProfile(&opcode_profile);
@@ -299,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
         _ = zjs.activateOpcodeProfile(&opcode_profile);
     }
     zjs.host.defineScriptArgs(runtime.context, commandScriptArgs(command)) catch |err| {
-        try cli_process.printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "zjs: scriptArgs setup failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     runtime.context.setPreserveUncaughtException(true);
@@ -381,7 +381,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.interface.flush();
 
     if (value.isException()) {
-        try cli_process.printError(io, "zjs: uncaught exception\n", .{});
+        try cli_process.printError(io, "zjs: uncaught exception\n");
         std.process.exit(1);
     }
 
@@ -479,7 +479,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n");
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -1520,7 +1520,7 @@ fn printTypeErrorNotFunction(io: std.Io, command: Command) !void {
         .file => |file| file.path,
         .eval => "<eval>",
     };
-    try cli_process.printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
+    try cli_process.printErrorJoin(io, &.{ "TypeError: not a function\n    at <anonymous> (", path, ":7:20)\n\n" });
 }
 
 test "zjs args accept eval source" {

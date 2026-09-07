@@ -15,10 +15,15 @@ pub fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []
 
 /// Print to stderr and flush, so a message written just before
 /// `std.process.exit` is not lost with the buffer.
-pub fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+pub fn printError(io: std.Io, message: []const u8) !void {
+    return printErrorJoin(io, &.{message});
+}
+
+/// Same flush contract as `printError`, with the pieces already rendered.
+pub fn printErrorJoin(io: std.Io, parts: []const []const u8) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
-    try stderr.print(fmt, args);
+    for (parts) |part| try stderr.writeAll(part);
     try stderr.flush();
 }

@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try cli_process.argsToSlice(arena, init.minimal.args);
 
     var config = parseArgs(args[1..]) catch |err| {
-        try cli_process.printError(io, "run-test262: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "run-test262: ", @errorName(err), "\n" });
         try printUsage(io);
         std.process.exit(2);
     };
@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var summary = runSelectedTests(init.gpa, io, config, "zig-out/bin/zjs") catch |err| {
-        try cli_process.printError(io, "run-test262: unable to run tests: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "run-test262: unable to run tests: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     defer summary.deinit(init.gpa);
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, runner_options.usage, .{});
+    try cli_process.printError(io, runner_options.usage);
 }
 
 fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
@@ -403,7 +403,13 @@ fn runWorkerLoop(
             if (shared.reporter) |reporter| {
                 reporter.lockedPrint(shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, shared.tests.len, index * 100 / shared.tests.len }) catch {};
             } else {
-                cli_process.printError(shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, shared.tests.len, index * 100 / shared.tests.len }) catch {};
+                var progress_buf: [96]u8 = undefined;
+                const progress = std.fmt.bufPrint(
+                    &progress_buf,
+                    "Progress: {d}/{d} tests ({d}%)\n",
+                    .{ index, shared.tests.len, index * 100 / shared.tests.len },
+                ) catch "Progress\n";
+                cli_process.printError(shared.io, progress) catch {};
             }
         }
         const test_path = shared.tests[index];
@@ -552,11 +558,11 @@ fn requireTest262Roots(io: std.Io, tests: NameList) !void {
     for (tests.items) |test_path| {
         if (!std.fs.path.isAbsolute(test_path)) continue;
         _ = runner_source.requireTest262RelativePath(test_path) catch |err| {
-            try cli_process.printError(
-                io,
-                "run-test262: {s} is not inside a test262 checkout; exclude rules and the override manifest cannot be applied\n",
-                .{test_path},
-            );
+            try cli_process.printErrorJoin(io, &.{
+                "run-test262: ",
+                test_path,
+                " is not inside a test262 checkout; exclude rules and the override manifest cannot be applied\n",
+            });
             return err;
         };
     }
