@@ -2135,15 +2135,23 @@ pub const parser_core = struct {
             return self.failExpectedDescription(expected_name);
         }
 
+        fn formatExpectedGot(buffer: []u8, expected: []const u8, actual: []const u8) []const u8 {
+            const prefix = "expected ";
+            const mid = ", got ";
+            const needed = prefix.len + expected.len + mid.len + actual.len;
+            if (needed > buffer.len) return "UnexpectedToken";
+            @memcpy(buffer[0..prefix.len], prefix);
+            @memcpy(buffer[prefix.len..][0..expected.len], expected);
+            @memcpy(buffer[prefix.len + expected.len ..][0..mid.len], mid);
+            @memcpy(buffer[prefix.len + expected.len + mid.len ..][0..actual.len], actual);
+            return buffer[0..needed];
+        }
+
         fn failExpectedDescription(self: *State, expected: []const u8) Error {
             var actual_buffer: [16]u8 = undefined;
             const actual_name = self.currentTokenKindLabel(&actual_buffer);
             var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
-            const message = std.fmt.bufPrint(
-                &message_buffer,
-                "expected {s}, got {s}",
-                .{ expected, actual_name },
-            ) catch "UnexpectedToken";
+            const message = State.formatExpectedGot(&message_buffer, expected, actual_name);
             self.setPendingDiagnostic(error.UnexpectedToken, self.currentDiagnosticPosition(), message);
             return error.UnexpectedToken;
         }
@@ -2157,11 +2165,7 @@ pub const parser_core = struct {
             var actual_buffer: [16]u8 = undefined;
             const actual_name = self.tokenKindLabel(actual, &actual_buffer);
             var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
-            const message = std.fmt.bufPrint(
-                &message_buffer,
-                "expected {s}, got {s}",
-                .{ expected, actual_name },
-            ) catch "UnexpectedToken";
+            const message = State.formatExpectedGot(&message_buffer, expected, actual_name);
             return self.failWithMessage(position, message);
         }
 
