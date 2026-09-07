@@ -83,6 +83,16 @@ const CaptureSlotBuffer = struct {
     heap_slots: []usize = &.{},
     slots: []usize = &.{},
 
+    /// `CaptureSlotBuffer{}` memcpy's a 544-byte `.rodata` template: 64 zero
+    /// slots plus two empty `[]usize` whose pointer is `@alignOf(usize)`.
+    /// Zero in place and store `&.{}` so that template can leave.
+    fn initDefault(self: *CaptureSlotBuffer) void {
+        self.* = std.mem.zeroes(CaptureSlotBuffer);
+        const empty: []usize = &.{};
+        self.heap_slots = empty;
+        self.slots = empty;
+    }
+
     fn init(self: *CaptureSlotBuffer, allocator: std.mem.Allocator, count: usize) !void {
         if (count <= self.inline_slots.len) {
             self.slots = self.inline_slots[0..count];
@@ -94,7 +104,7 @@ const CaptureSlotBuffer = struct {
 
     fn deinit(self: *CaptureSlotBuffer, allocator: std.mem.Allocator) void {
         if (self.heap_slots.len != 0) allocator.free(self.heap_slots);
-        self.* = .{};
+        self.initDefault();
     }
 };
 
@@ -461,7 +471,8 @@ pub fn execIntoMatchWithOptions(
     out_match: *Match,
 ) !ExecResult {
     const header = try parseHeader(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
+    var capture_buf: CaptureSlotBuffer = undefined;
+    capture_buf.initDefault();
     try capture_buf.init(allocator, try checkedAllocCount(header));
     defer capture_buf.deinit(allocator);
 
@@ -483,7 +494,8 @@ pub fn execIntoMatchTrustedWithOptions(
     out_match: *Match,
 ) !ExecResult {
     const header = parseHeaderTrusted(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
+    var capture_buf: CaptureSlotBuffer = undefined;
+    capture_buf.initDefault();
     try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
     defer capture_buf.deinit(allocator);
 
@@ -578,7 +590,8 @@ fn execCaptureSlotsParsed(
 /// See `execIntoMatchTrustedWithOptions` for the safety contract.
 pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
     const header = parseHeaderTrusted(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
+    var capture_buf: CaptureSlotBuffer = undefined;
+    capture_buf.initDefault();
     try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
     defer capture_buf.deinit(allocator);
     return (try execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
