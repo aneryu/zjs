@@ -391,6 +391,25 @@ const OwnedArgList = struct {
     root: array_ops.ValueSliceRoot = .{},
     heap_backed: bool = false,
 
+    /// `OwnedArgList{}` memcpy's a 328-byte `.rodata` template: zeroed
+    /// inline slots plus seven empty slices whose pointer is `@alignOf`.
+    /// Zero in place and store `&.{}` so that template can leave.
+    fn initEmpty(self: *OwnedArgList) void {
+        self.* = std.mem.zeroes(OwnedArgList);
+        const empty_values: []core.JSValue = &.{};
+        self.values = empty_values;
+        self.rooted_prefix = empty_values;
+        self.root.frame.slices = &.{};
+        self.root.frame.values = &.{};
+        self.root.frame.objects = &.{};
+        if (comptime @TypeOf(self.root.frame.headers) != void) {
+            self.root.frame.headers = &.{};
+        }
+        if (comptime @TypeOf(self.root.frame.atoms) != void) {
+            self.root.frame.atoms = &.{};
+        }
+    }
+
     fn init(
         self: *OwnedArgList,
         rt: *core.JSRuntime,
@@ -465,6 +484,29 @@ const OwnedArgList = struct {
         self.heap_backed = false;
     }
 };
+
+test "OwnedArgList initEmpty matches OwnedArgList{}" {
+    const expected = OwnedArgList{};
+    var actual: OwnedArgList = undefined;
+    actual.initEmpty();
+    try std.testing.expectEqual(expected.rt, actual.rt);
+    try std.testing.expectEqual(expected.heap_backed, actual.heap_backed);
+    try std.testing.expectEqual(expected.values.ptr, actual.values.ptr);
+    try std.testing.expectEqual(expected.values.len, actual.values.len);
+    try std.testing.expectEqual(expected.rooted_prefix.ptr, actual.rooted_prefix.ptr);
+    try std.testing.expectEqual(expected.rooted_prefix.len, actual.rooted_prefix.len);
+    try std.testing.expectEqual(expected.root.rt, actual.root.rt);
+    try std.testing.expectEqual(expected.root.frame.slices.ptr, actual.root.frame.slices.ptr);
+    try std.testing.expectEqual(expected.root.frame.slices.len, actual.root.frame.slices.len);
+    try std.testing.expectEqual(expected.root.frame.values.ptr, actual.root.frame.values.ptr);
+    try std.testing.expectEqual(expected.root.frame.values.len, actual.root.frame.values.len);
+    try std.testing.expectEqual(expected.root.frame.objects.ptr, actual.root.frame.objects.ptr);
+    try std.testing.expectEqual(expected.root.frame.objects.len, actual.root.frame.objects.len);
+    try std.testing.expectEqual(expected.root.frame.headers.ptr, actual.root.frame.headers.ptr);
+    try std.testing.expectEqual(expected.root.frame.headers.len, actual.root.frame.headers.len);
+    try std.testing.expectEqual(expected.root.frame.atoms.ptr, actual.root.frame.atoms.ptr);
+    try std.testing.expectEqual(expected.root.frame.atoms.len, actual.root.frame.atoms.len);
+}
 
 const SyncInlineRoute = struct {
     invocation: *inline_calls.ActiveInvocation,
@@ -615,7 +657,8 @@ pub noinline fn runSyncInlineRouteOwnedCopy(
     args: []const core.JSValue,
     out: *core.JSValue,
 ) HostError!void {
-    var owned_args = OwnedArgList{};
+    var owned_args: OwnedArgList = undefined;
+    owned_args.initEmpty();
     try owned_args.init(ctx.runtime, this_value, func, args);
     defer owned_args.deinit();
     // One outlined copy owns the arg list. The idle vs active fence stays
@@ -638,7 +681,8 @@ noinline fn runSyncInlineRouteOwnedArgsGeneral(
     out: *core.JSValue,
 ) HostError!void {
     std.debug.assert(!inline_calls.Machine.nativeBoundarySimpleEligible(target));
-    var owned_args = OwnedArgList{};
+    var owned_args: OwnedArgList = undefined;
+    owned_args.initEmpty();
     try owned_args.initTakeArgs(ctx.runtime, this_value, func, args);
     defer owned_args.deinit();
     return runSyncInlineRouteMoved(false, invocation, target, global, owned_args.values, out);
