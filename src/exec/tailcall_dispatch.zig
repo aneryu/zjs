@@ -3629,27 +3629,24 @@ pub fn op_push_const8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: 
 /// The constructor may allocate/collect, so pc and the live pre-result stack
 /// remain authoritative roots, but success continues from the register-resident
 /// pc/sp instead of paying coldStd -> vm_call.closure -> Stack.push -> coldNext.
-pub fn opFclosure(comptime wide_index: bool) Handler {
-    return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            const advance: usize = if (wide_index) 5 else 2;
-            const index: usize = if (wide_index) readInt(u32, pc + 1) else pc[1];
-            vm.syncPc(pc, advance);
-            vm.syncSp(sp);
-            const bytecode_value = vm.function.constantAt(index) orelse return vm.fail(error.InvalidBytecode);
-            const closure_value = object_ops.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
-                return vm.fail(err);
-            // qjs's `*sp++` is safe because JS_CallInternal's operand stack is
-            // alloca'd inside the activation and never moves. zjs's Stack can
-            // relocate (`Stack.reserveAdditional` rewrites `self.values`), and
-            // the constructor above allocates, so the published top is the
-            // authority for the result slot — the same re-derivation every
-            // other allocating resident handler performs.
-            const result_sp = vm.stack.topPtr();
-            result_sp[0] = closure_value;
-            return cont(pc + advance, result_sp + 1, var_buf, vm);
-        }
-    }.h;
+pub fn opFclosure(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const wide_index = pc[0] == op.fclosure;
+    const advance: usize = if (wide_index) 5 else 2;
+    const index: usize = if (wide_index) readInt(u32, pc + 1) else pc[1];
+    vm.syncPc(pc, advance);
+    vm.syncSp(sp);
+    const bytecode_value = vm.function.constantAt(index) orelse return vm.fail(error.InvalidBytecode);
+    const closure_value = object_ops.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
+        return vm.fail(err);
+    // qjs's `*sp++` is safe because JS_CallInternal's operand stack is
+    // alloca'd inside the activation and never moves. zjs's Stack can
+    // relocate (`Stack.reserveAdditional` rewrites `self.values`), and
+    // the constructor above allocates, so the published top is the
+    // authority for the result slot — the same re-derivation every
+    // other allocating resident handler performs.
+    const result_sp = vm.stack.topPtr();
+    result_sp[0] = closure_value;
+    return cont(pc + advance, result_sp + 1, var_buf, vm);
 }
 
 /// qjs OP_push_atom_value: decode the atom and push its retained string/symbol

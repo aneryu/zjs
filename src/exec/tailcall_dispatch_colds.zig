@@ -863,8 +863,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // The resident zjs twins preserve the allocating constructor/rooting path
     // while continuing with their register pc/sp; the all-cold table above
     // remains the stop-boundary implementation.
-    t[op.fclosure] = dispatch.opFclosure(true);
-    t[op.fclosure8] = dispatch.opFclosure(false);
+    t[op.fclosure] = dispatch.opFclosure;
+    t[op.fclosure8] = dispatch.opFclosure;
     t[op.get_arg] = dispatch.op_get_arg;
     t[op.get_arg0] = dispatch.op_get_arg0_fast;
     t[op.get_arg1] = dispatch.op_get_arg1_fast;
