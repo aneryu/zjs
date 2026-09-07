@@ -2802,6 +2802,18 @@ test "class Record default fill matches Record{} without a template" {
     try std.testing.expectEqual(@as(u16, 1), rt.classes.records[core.class.ids.proxy].inline_payload_align);
 }
 
+test "class prototype inline slots start as JSValue.nullValue" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(usize, 69 * 16), @sizeOf(@TypeOf(ctx.class_prototypes_inline)));
+    try std.testing.expectEqual(ctx.class_prototypes_inline[0..].ptr, ctx.class_prototypes.ptr);
+    try std.testing.expectEqualDeep(core.JSValue.nullValue(), ctx.class_prototypes[core.class.invalid_class_id]);
+    try std.testing.expectEqualDeep(core.JSValue.nullValue(), ctx.class_prototypes[core.class.ids.proxy]);
+    try std.testing.expect(ctx.class_prototypes[core.class.ids.proxy].isNull());
+}
+
 var finalizer_calls: usize = 0;
 var payload_finalizer_calls: usize = 0;
 var payload_mark_calls: usize = 0;
