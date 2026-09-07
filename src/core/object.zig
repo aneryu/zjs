@@ -1850,11 +1850,7 @@ pub const Object = extern struct {
             gc.metadata_prefix_size + @sizeOf(T),
         );
         const typed: *T = @ptrCast(@alignCast(body));
-        if (comptime T == OrdinaryPayload) {
-            typed.fillDefault();
-        } else {
-            typed.* = .{};
-        }
+        typed.* = .{};
         return typed;
     }
 

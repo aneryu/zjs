@@ -312,15 +312,6 @@ pub const OrdinaryPayload = struct {
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
 
-    /// `OrdinaryPayload{}` memcpy's a 360-byte `.rodata` template: zeros plus
-    /// `callsite_line = 1` / `callsite_column = 1`. Zero in place and store
-    /// those defaults so the template can leave.
-    pub fn fillDefault(self: *OrdinaryPayload) void {
-        self.* = std.mem.zeroes(OrdinaryPayload);
-        self.callsite_line = 1;
-        self.callsite_column = 1;
-    }
-
     pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.callsite_file);
         destroyOptionalValue(rt, &self.callsite_function);
@@ -335,7 +326,7 @@ pub const OrdinaryPayload = struct {
         destroyOptionalValue(rt, &self.promise_combinator_keys);
         destroyOptionalValue(rt, &self.error_stack);
         destroyOptionalValue(rt, &self.error_stack_sites);
-        self.fillDefault();
+        self.* = .{};
     }
 
     pub fn traceChildEdges(self: *OrdinaryPayload, visitor: anytype) !void {
