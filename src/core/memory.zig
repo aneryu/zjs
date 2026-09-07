@@ -1890,10 +1890,9 @@ pub const MemoryAccount = struct {
     /// bytes 0..2 preserved, `kind_tag`, zero lifetime word); the caller
     /// still publishes through `addInitializedWithSizeNoFail`.
     ///
-    /// `kind_tag` is the string-family kind this carrier holds:
-    /// `string_kind_tag` for a flat body, `rope_kind_tag` for a rope node
-    /// (TGC S4-a). It is comptime so each caller keeps the single-store
-    /// prefix write it had when the tag was hard-coded.
+    /// `kind_tag` is a runtime byte (string-family or storage). The prefix
+    /// write is still one store: `string_kind_tag` / `rope_kind_tag` or a
+    /// storage tag from `createStorageCell`.
     pub fn createStringCell(self: *MemoryAccount, kind_tag: u8, total_bytes: usize) !?[*]u8 {
         std.debug.assert(kind_tag <= gc_representation.kind_mask);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());

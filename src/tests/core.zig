@@ -18058,19 +18058,33 @@ test "storage-cell mint writes runtime kind tags on block and extent paths" {
         .{ core.gc.representation.array_storage_kind_tag, .array_storage },
         .{ core.gc.representation.string_buffer_kind_tag, .string_buffer },
     };
+    // Prefix + 16-byte body. For `.string_buffer` that body is the 8-byte
+    // StringBuffer header plus 8 latin1 units — teardown sizes the cell
+    // from `capacity`, so the header must match the request.
     const small = core.gc.metadata_prefix_size + 16;
     const large = core.gc_space.large_min_bytes;
     for (cases) |case| {
         const small_body = try rt.gc.createStorageCellPublished(case[0], small);
+        installMintedStringBufferBody(case[1], small_body, small);
         const small_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(small_body));
         try std.testing.expectEqual(case[1], small_header.metaConst().flags.kind);
         try std.testing.expect(core.gc.Registry.isBlockCellHeader(small_header));
 
         const large_body = try rt.gc.createStorageCellPublished(case[0], large);
+        installMintedStringBufferBody(case[1], large_body, large);
         const large_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(large_body));
         try std.testing.expectEqual(case[1], large_header.metaConst().flags.kind);
         try std.testing.expect(!core.gc.Registry.isBlockCellHeader(large_header));
     }
+}
+
+fn installMintedStringBufferBody(kind: core.gc.GcKind, body: [*]u8, total_bytes: usize) void {
+    if (kind != .string_buffer) return;
+    const buf: *core.string.StringBuffer = @ptrCast(@alignCast(body));
+    buf.* = .{
+        .capacity = @intCast(total_bytes - core.gc.metadata_prefix_size - core.string.StringBuffer.units_offset),
+        .is_wide = false,
+    };
 }
 
 test "TGC S4-b: an external property buffer survives with its owner and dies one major later" {
