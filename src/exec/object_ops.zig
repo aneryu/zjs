@@ -1824,6 +1824,7 @@ test "objectRestOwnKeys roots direct symbol values while creating rest object" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
     const global = try zjs_vm.contextGlobal(ctx);
 
     var source_value = (try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global))).value();
