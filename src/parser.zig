@@ -1027,7 +1027,11 @@ pub const parser_core = struct {
                 self.function.memory.destroy(function_def_mod.FunctionDef, fd);
             }
             if (cur_func_stack_capacity != 0) {
-                self.function.memory.free(*function_def_mod.FunctionDef, cur_func_stack.ptr[0..cur_func_stack_capacity]);
+                const elem_size = @sizeOf(*function_def_mod.FunctionDef);
+                const alignment = comptime std.mem.Alignment.of(*function_def_mod.FunctionDef);
+                const bytes = elem_size * cur_func_stack_capacity;
+                const ptr: [*]u8 = @ptrCast(cur_func_stack.ptr);
+                self.function.memory.freeAlignedBytes(ptr[0..bytes], alignment);
             }
             var discarded_func = self.discarded_func_head;
             self.discarded_func_head = null;
@@ -1378,15 +1382,26 @@ pub const parser_core = struct {
                     std.math.mul(usize, old_capacity, 2) catch return error.OutOfMemory;
                 if (new_capacity < new_len) new_capacity = new_len;
 
-                const next = try self.function.memory.alloc(*function_def_mod.FunctionDef, new_capacity);
-                errdefer self.function.memory.free(*function_def_mod.FunctionDef, next);
-                @memcpy(next[0..old_len], self.cur_func_stack);
-                const old_stack: []*function_def_mod.FunctionDef = if (old_capacity != 0) self.cur_func_stack.ptr[0..old_capacity] else self.cur_func_stack[0..0];
+                const elem_size = @sizeOf(*function_def_mod.FunctionDef);
+                const alignment = comptime std.mem.Alignment.of(*function_def_mod.FunctionDef);
+                const next_bytes = try self.function.memory.allocElements(new_capacity, elem_size, alignment);
+                errdefer self.function.memory.freeAlignedBytes(next_bytes, alignment);
+                const used_bytes = std.math.mul(usize, old_len, elem_size) catch return error.OutOfMemory;
+                if (used_bytes != 0) {
+                    const old_ptr: [*]const u8 = @ptrCast(self.cur_func_stack.ptr);
+                    @memcpy(next_bytes[0..used_bytes], old_ptr[0..used_bytes]);
+                }
+                const next: []*function_def_mod.FunctionDef = @as(
+                    [*]*function_def_mod.FunctionDef,
+                    @ptrCast(@alignCast(next_bytes.ptr)),
+                )[0..new_capacity];
+                if (old_capacity != 0) {
+                    const old_bytes = std.math.mul(usize, old_capacity, elem_size) catch return error.OutOfMemory;
+                    const old_ptr: [*]u8 = @ptrCast(self.cur_func_stack.ptr);
+                    self.function.memory.freeAlignedBytes(old_ptr[0..old_bytes], alignment);
+                }
                 self.cur_func_stack = next[0..old_len];
                 self.cur_func_stack_capacity = new_capacity;
-                if (old_capacity != 0) {
-                    self.function.memory.free(*function_def_mod.FunctionDef, old_stack);
-                }
             }
 
             self.cur_func_stack = self.cur_func_stack.ptr[0..new_len];
