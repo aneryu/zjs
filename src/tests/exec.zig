@@ -18818,8 +18818,8 @@ test "reflect construct roots argument list while resolving prototype" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    // `reflectConstruct` routes builtin construction (Array, like Date/RegExp/
-    // String) through the internal record table, so the realm globals must be
+    // `reflectConstructCall` routes builtin construction (Array, like Date/RegExp/
+    // String) through the VM construct dispatcher, so the realm globals must be
     // installed to wire `rt.internal_builtins` before the construct record is
     // reachable.
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
@@ -18862,9 +18862,8 @@ test "reflect construct roots argument list while resolving prototype" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    var globals = [_]engine.exec.globals.Slot{};
     const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
-    _ = try engine.exec.reflect_ops.reflectConstruct(ctx, &reflect_args, globals[0..]);
+    _ = try engine.exec.reflect_ops.reflectConstructCall(ctx, null, realm_global, &reflect_args, null, null);
     var result_alive = true;
 
     try std.testing.expect(!probe.trace_failed);

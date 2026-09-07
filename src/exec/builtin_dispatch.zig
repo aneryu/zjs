@@ -1357,8 +1357,8 @@ fn callConstructRecordImpl(
 
 /// True when `native_ref` resolves to a construct-capable record (the
 /// `JS_CFUNC_constructor` cproto analogue: Date/RegExp/String today). The
-/// constructor-validity predicates (`isConstructorLike`/`isConstructorValue`)
-/// use this to recognize a builtin constructor by its native id instead of its
+/// constructor-validity predicate (`isConstructorLike`)
+/// uses this to recognize a builtin constructor by its native id instead of its
 /// resolved dispatch name, so a function carrying a builtin construct id but a
 /// custom `name` still validates as a constructor. Misses report false.
 pub fn isConstructRecordRef(rt: *const core.JSRuntime, native_ref: core.function.NativeBuiltinRef) bool {
