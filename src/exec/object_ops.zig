@@ -1819,67 +1819,46 @@ pub fn objectGetPrototypeOfValue(
     return result;
 }
 
-pub fn destructuringObjectRest(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    var source_value = if (args[0].isObject())
-        args[0]
-    else
-        try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    const source = try property_ops.expectObject(source_value);
-
-    var out_value = core.JSValue.undefinedValue();
-    var value = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
-    out_value = out.value();
-    const keys = try objectRestOwnKeys(ctx, output, global, source);
-    defer core.Object.freeKeys(ctx.runtime, keys);
-
-    for (keys) |key| {
-        if (source.class_id == core.class.ids.string and key == core.atom.ids.length) continue;
-        if (try objectRestKeyExcluded(ctx, args[1..], key)) continue;
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
-        if (desc.enumerable != true) continue;
-        value = getValueProperty(ctx, output, global, args[0], key, null, null) catch |err| return err;
-        try out.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(value, true, true, true));
-        value = core.JSValue.undefinedValue();
-    }
-    return out_value;
-}
-
-test "destructuringObjectRest roots direct symbol values while creating rest object" {
+test "objectRestOwnKeys roots direct symbol values while creating rest object" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
-    const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
+    var source_value = (try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global))).value();
+    const source = try property_ops.expectObject(source_value);
     const key = try rt.internAtom("kept");
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-object-rest-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
 
-    const args = [_]core.JSValue{source.value()};
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const rest_value = try destructuringObjectRest(ctx, null, global, &args);
-    const rest = try property_ops.expectObject(rest_value);
+    var out_value = core.JSValue.undefinedValue();
+    var value = core.JSValue.undefinedValue();
+    var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const out = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
+    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
+    out_value = out.value();
+    const keys = try objectRestOwnKeys(ctx, null, global, source);
+    defer core.Object.freeKeys(rt, keys);
+    for (keys) |rest_key| {
+        const desc = try objectRestOwnPropertyDescriptor(ctx, null, global, source, rest_key) orelse continue;
+        if (desc.enumerable != true) continue;
+        value = try getValueProperty(ctx, null, global, source_value, rest_key, null, null);
+        try out.defineOwnProperty(rt, rest_key, core.Descriptor.data(value, true, true, true));
+        value = core.JSValue.undefinedValue();
+    }
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try rest.getProperty(key);
+        const stored = try out.getProperty(key);
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
@@ -1948,14 +1927,6 @@ pub fn objectRestOwnPropertyDescriptor(
     key: core.Atom,
 ) !?core.Descriptor {
     return try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, null, null);
-}
-
-pub fn objectRestKeyExcluded(ctx: *core.JSContext, excluded: []const core.JSValue, key: core.Atom) !bool {
-    for (excluded) |value| {
-        const excluded_key = try property_ops.propertyKeyAtom(ctx.runtime, value);
-        if (excluded_key == key) return true;
-    }
-    return false;
 }
 
 pub fn atomicsBufferObject(object: *core.Object) !*core.Object {
