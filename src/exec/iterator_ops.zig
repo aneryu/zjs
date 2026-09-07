@@ -2100,7 +2100,7 @@ pub fn iteratorZipCloseAllAndPropagate(
     global: *core.Object,
     iters: *core.Object,
     count: usize,
-    err: anytype,
+    err: IteratorZipError,
     extra_iterator: ?core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
