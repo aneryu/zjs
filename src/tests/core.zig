@@ -6748,6 +6748,16 @@ test "memory account treats zero-length allocations as inert" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
+test "VM stack arena default fill matches VmStackArena{}" {
+    var arena: core.VmStackArena = undefined;
+    arena.initDefault();
+    try std.testing.expectEqualDeep(core.VmStackArena{}, arena);
+    try std.testing.expectEqual(@as(usize, 1552), @sizeOf(core.VmStackArena));
+    const empty: []core.JSValue = &.{};
+    try std.testing.expectEqual(empty.ptr, arena.chunks[0].ptr);
+    try std.testing.expectEqual(@as(usize, 0), arena.chunks[0].len);
+}
+
 test "VM stack arena allocates and reuses a compact first chunk" {
     try std.testing.expectEqual(
         core.VmStackArena.first_chunk_bytes / @sizeOf(core.JSValue),

@@ -210,6 +210,18 @@ pub const VmStackArena = struct {
     used: [max_chunks]usize = @splat(0),
     chunks: [max_chunks][]JSValue = @splat(&.{}),
 
+    /// `VmStackArena{}` is zeros plus 64 empty slices whose pointer is
+    /// `@alignOf(JSValue)` (Zig `&.{}`), not null. Copying that typed default
+    /// materializes a 1552-byte `.rodata` template. Zero the struct, then store
+    /// the empty slices so every field still equals `VmStackArena{}`.
+    pub fn initDefault(self: *VmStackArena) void {
+        self.* = std.mem.zeroes(VmStackArena);
+        const empty: []JSValue = &.{};
+        for (&self.chunks) |*chunk| {
+            chunk.* = empty;
+        }
+    }
+
     pub fn mark(self: *const VmStackArena) Mark {
         return .{ .chunk = self.active, .used = if (self.chunk_count == 0) 0 else self.used[self.active] };
     }
@@ -1655,7 +1667,7 @@ pub const JSRuntime = struct {
         // than construction (conformance worker runtimes).
         rt.hot.native_stack_top = @frameAddress();
         rt.hot.native_stack_limit = if (initial_native_stack_size == 0) 0 else rt.hot.native_stack_top -| initial_native_stack_size;
-        rt.vm_stack = .{};
+        rt.vm_stack.initDefault();
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
