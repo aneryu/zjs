@@ -33,8 +33,8 @@ pub const sum_precise_method_id: u32 = 37;
 /// magic pattern for its js_math_op entries). Entry order is the namespace
 /// property definition order (kept from the former centralized install table).
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    mathMinMaxEntry("min", 7, false),
-    mathMinMaxEntry("max", 8, true),
+    mathMinMaxEntry("min", 7),
+    mathMinMaxEntry("max", 8),
     mathUnaryEntry("abs", 1),
     mathUnaryEntry("floor", 2),
     mathUnaryEntry("ceil", 3),
@@ -79,33 +79,31 @@ fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
 /// `Math.min` / `Math.max`: the shared `mathOpCall` record plus an exec_direct
 /// arm (`js_call_c_function` shape) whose hot leg is qjs `js_math_min_max`
 /// (quickjs.c:46952) over int32 / float64 arguments only.
-fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32, comptime is_max: bool) core.host_function.InternalEntry {
+fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
     var entry = mathOpEntry(name, 2, id);
-    entry.managed = mathMinMaxDirect(is_max);
+    entry.managed = &mathMinMaxDirect;
     return entry;
 }
 
-/// Exec-direct twin of the `mathOpCall` min/max arm. `is_max` is baked at
-/// comptime (qjs passes it as `magic`); the miss leg (any argument that is
-/// not an int32 / float64) is the unchanged realm path `preparedOpCall`, so
-/// ToPrimitive / ToNumber ordering and exceptions stay with the generic code.
-fn mathMinMaxDirect(comptime is_max: bool) core.native_entry.ManagedFn {
-    return &struct {
-        fn direct(
-            ctx: *core.JSContext,
-            this_value: core.JSValue,
-            argv: [*]const core.JSValue,
-            argc: u32,
-            _: *const core.NativeEntry,
-            _: ?*core.Object,
-        ) callconv(.c) core.JSValue {
-            _ = this_value;
-            const args = argv[0..argc];
-            if (mathMinMaxNumberFast(args, is_max)) |value| return value;
-            const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-            return builtin_dispatch.hostResultToValue(ctx, preparedOpCall(ctx, builtin_dispatch.vmCallerView(ctx).output, global, if (is_max) 8 else 7, args));
-        }
-    }.direct;
+/// Exec-direct twin of the `mathOpCall` min/max arm. `is_max` comes from
+/// `entry.magic` (qjs passes it as `magic`: 8 = max, 7 = min). The miss
+/// leg (any argument that is not an int32 / float64) is the unchanged
+/// realm path `preparedOpCall`, so ToPrimitive / ToNumber ordering and
+/// exceptions stay with the generic code.
+noinline fn mathMinMaxDirect(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    argv: [*]const core.JSValue,
+    argc: u32,
+    entry: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    _ = this_value;
+    const is_max = entry.magic == 8;
+    const args = argv[0..argc];
+    if (mathMinMaxNumberFast(args, is_max)) |value| return value;
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    return builtin_dispatch.hostResultToValue(ctx, preparedOpCall(ctx, builtin_dispatch.vmCallerView(ctx).output, global, if (is_max) 8 else 7, args));
 }
 
 /// qjs `js_math_min_max` (quickjs.c:46952-47003) restricted to arguments that
@@ -115,7 +113,7 @@ fn mathMinMaxDirect(comptime is_max: bool) core.native_entry.ManagedFn {
 /// `js_fmin` signed-zero rules, returning through `JS_NewFloat64` (int-valued
 /// doubles collapse back to int32, as `numberToValue` does). Any other
 /// argument type returns null so the caller takes the ToNumber path.
-pub fn mathMinMaxNumberFast(args: []const core.JSValue, comptime is_max: bool) ?core.JSValue {
+pub fn mathMinMaxNumberFast(args: []const core.JSValue, is_max: bool) ?core.JSValue {
     if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
     var index: usize = 1;
     var result: f64 = undefined;
@@ -727,11 +725,7 @@ test "Math.min/max entries carry the exec_direct arm on the shared handler" {
         seen += 1;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &mathOpCall);
         try std.testing.expect(entry.managed != null);
-        const expected = if (entry.id == 8)
-            mathMinMaxDirect(true)
-        else
-            mathMinMaxDirect(false);
-        try std.testing.expect(entry.managed.? == expected);
+        try std.testing.expect(entry.managed.? == &mathMinMaxDirect);
     }
     try std.testing.expectEqual(@as(u8, 2), seen);
 }
