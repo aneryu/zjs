@@ -363,53 +363,25 @@ fn functionCallRecord(
     );
 }
 
-/// Create a native function object carrying source text for
-/// `Function.prototype.toString`-style inspection.
-pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []const u8) !core.JSValue {
-    const rt = realm.runtimePtr();
-    const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
-    var function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, 0, 2);
-    const function_object = try core.Object.expect(function_value);
-    var source_value = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &function_value, &source_value });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    errdefer {
-        function_value = core.JSValue.undefinedValue();
-    }
-
-    const source_string = try core.string.String.createUtf8(rt, source);
-    source_value = source_string.value();
-    try function_object.setOptionalValueSlot(rt, try function_object.functionSourceSlot(rt), source_value);
-    source_value = core.JSValue.undefinedValue();
-
-    return function_value;
-}
-
-test "sourceFunction roots function and source while attaching source text" {
+test "constructFunctionFromSource roots function and source while compiling source text" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
-    ctx.cached_function_proto = function_proto;
+    const global = try zjs_vm.contextGlobal(ctx);
+    const constructor = try global.getProperty(core.atom.ids.Function);
+    const body = try core.string.String.createUtf8(rt, "return 1");
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const function_value = try sourceFunction(ctx, "namedSource", "function namedSource() { return 1; }");
-    const function_object = objectFromFunctionValue(function_value) orelse return error.TypeError;
-    const source_value = function_object.functionSource() orelse return error.TypeError;
-    const source_string = source_value.asStringBody() orelse return error.TypeError;
-    try std.testing.expect(source_string.eqlBytes("function namedSource() { return 1; }"));
-}
-
-fn objectFromFunctionValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return core.Object.fromHeader(header);
+    const function_value = try constructFunctionFromSource(ctx, null, global, constructor, &.{body.value()}, null, null);
+    const function_object = object_ops.functionObjectFromValue(function_value) orelse return error.TypeError;
+    const stored = function_object.functionBytecode() orelse return error.TypeError;
+    const function = call_runtime.functionBytecodeFromValue(stored) orelse return error.TypeError;
+    const source = function.sourceText() orelse return error.TypeError;
+    try std.testing.expect(std.mem.indexOf(u8, source, "return 1") != null);
 }
 
 pub fn constructFunctionFromSource(
