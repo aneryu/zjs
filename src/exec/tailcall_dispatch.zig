@@ -3558,35 +3558,29 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
 /// copy. Publishing the copy before releasing the displaced value also makes a
 /// refcounted `captured = captured` safe. Generator/eval stop boundaries
 /// retain the cold adapter; bounds are a compile-time contract (M2-刀4).
-pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
-    return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            const idx: u16 = switch (idx_src) {
-                .c0 => 0,
-                .c1 => 1,
-                .c2 => 2,
-                .c3 => 3,
-                .half => readInt(u16, pc + 1),
-            };
-            const advance: usize = switch (idx_src) {
-                .c0, .c1, .c2, .c3 => 1,
-                .half => 3,
-            };
-            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
-            // are finalize-validated, frames carry exactly closure_var_count
-            // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
-            std.debug.assert(idx < vm.frame.var_refs.len);
-            // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
-            std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
-            const cell = vm.var_refs_base[idx];
-            cell.pvalue.* = (sp - 1)[0];
-            // The cell is the owner of this slot, and it long outlives the
-            // frame doing the store; `VarRef.setVarRefValue` takes the same
-            // barrier, but these handlers write `cell.pvalue` directly.
-            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
-            return cont(pc + advance, sp, var_buf, vm);
-        }
-    }.h;
+pub fn opSetVarRef(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const wide = pc[0] == op.set_var_ref;
+    const idx: u16 = if (wide) readInt(u16, pc + 1) else switch (pc[0]) {
+        op.set_var_ref0 => 0,
+        op.set_var_ref1 => 1,
+        op.set_var_ref2 => 2,
+        op.set_var_ref3 => 3,
+        else => unreachable,
+    };
+    const advance: usize = if (wide) 3 else 1;
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+    // are finalize-validated, frames carry exactly closure_var_count
+    // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
+    std.debug.assert(idx < vm.frame.var_refs.len);
+    // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+    std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+    const cell = vm.var_refs_base[idx];
+    cell.pvalue.* = (sp - 1)[0];
+    // The cell is the owner of this slot, and it long outlives the
+    // frame doing the store; `VarRef.setVarRefValue` takes the same
+    // barrier, but these handlers write `cell.pvalue` directly.
+    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
+    return cont(pc + advance, sp, var_buf, vm);
 }
 
 // I-cache pin (see op_return): keeps this hot handler's entry alignment

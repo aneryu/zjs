@@ -1000,11 +1000,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
         // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
         .{ .o = op.put_var_ref_check, .h = dispatch.op_put_var_ref_check },
-        .{ .o = op.set_var_ref0, .h = dispatch.opSetVarRef(.c0) },
-        .{ .o = op.set_var_ref1, .h = dispatch.opSetVarRef(.c1) },
-        .{ .o = op.set_var_ref2, .h = dispatch.opSetVarRef(.c2) },
-        .{ .o = op.set_var_ref3, .h = dispatch.opSetVarRef(.c3) },
-        .{ .o = op.set_var_ref, .h = dispatch.opSetVarRef(.half) },
+        .{ .o = op.set_var_ref0, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref1, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref2, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref3, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref, .h = dispatch.opSetVarRef },
     }) |e| t[e.o] = e.h;
     return .{ .table = t, .keep = keep };
 }
