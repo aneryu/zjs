@@ -6857,15 +6857,16 @@ pub const Object = extern struct {
     /// `--gc-stats` parser contract.
     pub fn recordTraceStorageFootprint(self: *const Object, rt: *const JSRuntime, recorder: anytype) void {
         const Helper = struct {
-            fn allocation(rec: anytype, component: anytype, ptr: anytype, allocated: usize, touched: usize) void {
+            /// Address is already erased: leftover copies were one per payload
+            /// pointer type, each inlining the same `noteAllocation` body.
+            noinline fn allocation(rec: anytype, component: anytype, address: usize, allocated: usize, touched: usize) void {
                 if (allocated == 0 or touched == 0) return;
-                const address = @intFromPtr(ptr);
                 rec.noteAllocation(component, allocated, address, touched);
             }
 
-            fn backing(rec: anytype, ptr: anytype, capacity: usize, live: usize, comptime T: type) void {
+            fn backing(rec: anytype, address: usize, capacity: usize, live: usize, elem_size: usize) void {
                 if (capacity == 0 or live == 0) return;
-                allocation(rec, .payload_backing, ptr, capacity * @sizeOf(T), live * @sizeOf(T));
+                allocation(rec, .payload_backing, address, capacity * elem_size, live * elem_size);
             }
         };
 
@@ -6887,7 +6888,7 @@ pub const Object = extern struct {
             Helper.allocation(
                 recorder,
                 .payload_backing,
-                rt.cached_iterator_next_entries.ptr,
+                @intFromPtr(rt.cached_iterator_next_entries.ptr),
                 rt.cached_iterator_next_entries_capacity * @sizeOf(runtime_mod.CachedIteratorNextEntry),
                 rt.cached_iterator_next_entries.len * @sizeOf(runtime_mod.CachedIteratorNextEntry),
             );
@@ -6937,7 +6938,7 @@ pub const Object = extern struct {
                 Helper.allocation(
                     recorder,
                     .dense_elements,
-                    self.arrayArm().*.values,
+                    @intFromPtr(self.arrayArm().*.values),
                     capacity * @sizeOf(JSValue),
                     live * @sizeOf(JSValue),
                 );
@@ -6948,9 +6949,9 @@ pub const Object = extern struct {
         // and optional cold aux are separate allocations.
         if (class.isBytecodeFunctionClass(self.class_id)) {
             const captures = self.bytecodeArm().*.captureSlots();
-            Helper.backing(recorder, captures.ptr, captures.len, captures.len, ?*var_ref_mod.VarRef);
+            Helper.backing(recorder, @intFromPtr(captures.ptr), captures.len, captures.len, @sizeOf(?*var_ref_mod.VarRef));
             if (self.bytecodeFunctionAuxConst()) |aux| {
-                Helper.allocation(recorder, .trace_payload, aux, @sizeOf(BytecodeFunctionAux), @sizeOf(BytecodeFunctionAux));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(aux), @sizeOf(BytecodeFunctionAux), @sizeOf(BytecodeFunctionAux));
             }
             return;
         }
@@ -6958,88 +6959,88 @@ pub const Object = extern struct {
         switch (self.flags.class_payload_kind) {
             .none => {},
             .promise_reaction_record => if (self.promiseReactionRecordPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(PromiseReactionRecordPayload), @sizeOf(PromiseReactionRecordPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(PromiseReactionRecordPayload), @sizeOf(PromiseReactionRecordPayload));
             },
             .ordinary => if (self.ordinaryPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(OrdinaryPayload), @sizeOf(OrdinaryPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(OrdinaryPayload), @sizeOf(OrdinaryPayload));
             },
             .iterator => if (self.iteratorPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(IteratorPayload), @sizeOf(IteratorPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(IteratorPayload), @sizeOf(IteratorPayload));
             },
             .collection => if (self.collectionPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(CollectionPayload), @sizeOf(CollectionPayload));
-                Helper.backing(recorder, payload.entries.ptr, payload.entries_capacity, payload.entries.len, CollectionEntry);
-                Helper.backing(recorder, payload.weak_entries.ptr, payload.weak_entries_capacity, payload.weak_entries.len, WeakCollectionEntry);
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(CollectionPayload), @sizeOf(CollectionPayload));
+                Helper.backing(recorder, @intFromPtr(payload.entries.ptr), payload.entries_capacity, payload.entries.len, @sizeOf(CollectionEntry));
+                Helper.backing(recorder, @intFromPtr(payload.weak_entries.ptr), payload.weak_entries_capacity, payload.weak_entries.len, @sizeOf(WeakCollectionEntry));
             },
             .buffer, .regexp, .weak_ref, .std_file => {}, // trace methods have no strong-edge loads
             .typed_array => if (self.typedArrayPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(TypedArrayPayload), @sizeOf(TypedArrayPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(TypedArrayPayload), @sizeOf(TypedArrayPayload));
             },
             .bound_function => if (self.boundFunctionPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(BoundFunctionPayload), @sizeOf(BoundFunctionPayload));
-                Helper.backing(recorder, payload.args.ptr, payload.args.len, payload.args.len, JSValue);
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(BoundFunctionPayload), @sizeOf(BoundFunctionPayload));
+                Helper.backing(recorder, @intFromPtr(payload.args.ptr), payload.args.len, payload.args.len, @sizeOf(JSValue));
             },
             .proxy => if (self.proxyPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(ProxyPayload), @sizeOf(ProxyPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(ProxyPayload), @sizeOf(ProxyPayload));
             },
             .arguments => if (self.argumentsPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(ArgumentsPayload), @sizeOf(ArgumentsPayload));
-                Helper.backing(recorder, payload.var_refs.ptr, payload.var_refs.len, payload.var_refs.len, JSValue);
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(ArgumentsPayload), @sizeOf(ArgumentsPayload));
+                Helper.backing(recorder, @intFromPtr(payload.var_refs.ptr), payload.var_refs.len, payload.var_refs.len, @sizeOf(JSValue));
             },
             .object_data => if (self.objectDataPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(ObjectDataPayload), @sizeOf(ObjectDataPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(ObjectDataPayload), @sizeOf(ObjectDataPayload));
             },
             .var_ref => if (self.varRefPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(VarRefPayload), @sizeOf(VarRefPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(VarRefPayload), @sizeOf(VarRefPayload));
             },
             .finalization_registry => if (self.finalizationRegistryPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(FinalizationRegistryPayload), @sizeOf(FinalizationRegistryPayload));
-                Helper.backing(recorder, payload.cells.ptr, payload.cells_capacity, payload.cells.len, FinalizationRegistryCell);
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(FinalizationRegistryPayload), @sizeOf(FinalizationRegistryPayload));
+                Helper.backing(recorder, @intFromPtr(payload.cells.ptr), payload.cells_capacity, payload.cells.len, @sizeOf(FinalizationRegistryCell));
             },
             .disposable_stack => if (self.disposableStackPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(DisposableStackPayload), @sizeOf(DisposableStackPayload));
-                Helper.backing(recorder, payload.resources.ptr, payload.resource_capacity, payload.resources.len, DisposableResource);
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(DisposableStackPayload), @sizeOf(DisposableStackPayload));
+                Helper.backing(recorder, @intFromPtr(payload.resources.ptr), payload.resource_capacity, payload.resources.len, @sizeOf(DisposableResource));
             },
             .global => if (self.globalPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(GlobalPayload), @sizeOf(GlobalPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(GlobalPayload), @sizeOf(GlobalPayload));
             },
             .realm_record => {
                 const ptr = self.payloadArm().* orelse return;
                 const payload: *const RealmRecordPayload = @ptrCast(@alignCast(ptr));
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(RealmRecordPayload), @sizeOf(RealmRecordPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(RealmRecordPayload), @sizeOf(RealmRecordPayload));
             },
             .promise => if (self.promisePayloadConst()) |payload| {
                 // Built-in state is already included in the Object body.
                 if (self.class_id != class.ids.promise)
-                    Helper.allocation(recorder, .trace_payload, payload, @sizeOf(PromisePayload), @sizeOf(PromisePayload));
-                Helper.backing(recorder, payload.reactions.ptr, payload.reactions_capacity, payload.reactions.len, JSValue);
+                    Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(PromisePayload), @sizeOf(PromisePayload));
+                Helper.backing(recorder, @intFromPtr(payload.reactions.ptr), payload.reactions_capacity, payload.reactions.len, @sizeOf(JSValue));
             },
             .generator => if (self.generatorPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(GeneratorPayload), @sizeOf(GeneratorPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(GeneratorPayload), @sizeOf(GeneratorPayload));
                 if (payload.execution) |execution| {
                     const execution_bytes = execution.allocationSize();
-                    Helper.allocation(recorder, .payload_backing, execution, execution_bytes, execution_bytes);
+                    Helper.allocation(recorder, .payload_backing, @intFromPtr(execution), execution_bytes, execution_bytes);
                     if (!execution.suspended.running_aliases) {
                         const storage = &execution.suspended.storage;
                         if (!execution.stackUsesCombinedStorage()) {
-                            Helper.backing(recorder, storage.stack.values.ptr, storage.stack.capacity, storage.stack.values.len, JSValue);
+                            Helper.backing(recorder, @intFromPtr(storage.stack.values.ptr), storage.stack.capacity, storage.stack.values.len, @sizeOf(JSValue));
                         }
                         if (!execution.frameUsesCombinedStorage()) {
                             if (storage.frame.storage.len != 0) {
-                                Helper.backing(recorder, storage.frame.storage.ptr, storage.frame.storage.len, storage.frame.storage.len, JSValue);
+                                Helper.backing(recorder, @intFromPtr(storage.frame.storage.ptr), storage.frame.storage.len, storage.frame.storage.len, @sizeOf(JSValue));
                             } else {
-                                Helper.backing(recorder, storage.frame.locals.ptr, storage.frame.locals.len, storage.frame.locals.len, JSValue);
-                                Helper.backing(recorder, storage.frame.args.ptr, storage.frame.args.len, storage.frame.args.len, JSValue);
+                                Helper.backing(recorder, @intFromPtr(storage.frame.locals.ptr), storage.frame.locals.len, storage.frame.locals.len, @sizeOf(JSValue));
+                                Helper.backing(recorder, @intFromPtr(storage.frame.args.ptr), storage.frame.args.len, storage.frame.args.len, @sizeOf(JSValue));
                             }
                         }
                     }
                 }
-                Helper.backing(recorder, payload.async_queue.ptr, payload.async_queue_capacity, payload.async_queue.len, AsyncGeneratorRequest);
+                Helper.backing(recorder, @intFromPtr(payload.async_queue.ptr), payload.async_queue_capacity, payload.async_queue.len, @sizeOf(AsyncGeneratorRequest));
             },
             .function => if (self.functionPayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(FunctionPayload), @sizeOf(FunctionPayload));
+                Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(FunctionPayload), @sizeOf(FunctionPayload));
                 if (payload.rare) |rare| {
-                    Helper.allocation(recorder, .payload_backing, rare, @sizeOf(FunctionRarePayload), @sizeOf(FunctionRarePayload));
+                    Helper.allocation(recorder, .payload_backing, @intFromPtr(rare), @sizeOf(FunctionRarePayload), @sizeOf(FunctionRarePayload));
                 }
             },
         }
