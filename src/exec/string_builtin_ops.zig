@@ -718,11 +718,6 @@ fn thisObject(value: core.JSValue) ?*core.Object {
     return core.Object.fromHeader(header);
 }
 
-pub fn charAt(bytes: []const u8, index: usize) []const u8 {
-    if (index >= bytes.len) return "";
-    return bytes[index .. index + 1];
-}
-
 pub fn toUpperAscii(buf: []u8, bytes: []const u8) []u8 {
     const n = @min(buf.len, bytes.len);
     for (bytes[0..n], 0..) |byte, i| buf[i] = unicode.toUpperAscii(byte);
@@ -829,60 +824,6 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: 
     const units: [1]u16 = .{first};
     const out = try core.string.String.createUtf16(rt, &units);
     return iteratorResult(rt, global, out.value(), false);
-}
-
-/// Legacy primitive-only String.fromCharCode helper used by transitional bytecode.
-/// JS-visible native calls use the VM shared helper so object coercion and
-/// abrupt completion propagation match QuickJS.
-pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len == 2) {
-        const first_code = args[0].asInt32() orelse return error.TypeError;
-        const second_code = args[1].asInt32() orelse return error.TypeError;
-        const first: u16 = @intCast(@as(u32, @bitCast(first_code)) & 0xffff);
-        const second: u16 = @intCast(@as(u32, @bitCast(second_code)) & 0xffff);
-        const cached = try rt.recentTwoUnitString(first, second);
-        return cached.value();
-    }
-    if (args.len == 1) {
-        const code = args[0].asInt32() orelse return error.TypeError;
-        const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-        if (unit <= 0xff) return (try rt.singleByteString(@intCast(unit))).value();
-    }
-
-    // Most call sites pass 1-2 code points (notably the `String.fromCharCode(H, L)`
-    // surrogate-pair pattern that drives URI sweeps), so keep the
-    // working buffer on the stack.
-    var stack_buf: [16]u16 = undefined;
-    var heap_buf: []u16 = &.{};
-    defer if (heap_buf.len != 0) rt.memory.free(u16, heap_buf);
-    const units: []u16 = if (args.len <= stack_buf.len)
-        stack_buf[0..args.len]
-    else blk: {
-        heap_buf = try rt.memory.alloc(u16, args.len);
-        break :blk heap_buf;
-    };
-    for (args, 0..) |value, i| {
-        const code = value.asInt32() orelse return error.TypeError;
-        units[i] = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-    }
-    const string = try core.string.String.createUtf16(rt, units);
-    return string.value();
-}
-
-pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
-    for (args) |value| {
-        if (value.isSymbol()) return error.TypeError;
-        const number = try toIntegerOrInfinity(rt, value);
-        if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
-            return error.RangeError;
-        }
-        const code_point: u32 = @intFromFloat(number);
-        try unicode.appendUtf16CodePoint(rt.memory.allocator, &units, @intCast(code_point));
-    }
-    const string = try core.string.String.createUtf16(rt, units.items);
-    return string.value();
 }
 
 /// QuickJS source map: narrow charAt helper used by transitional
