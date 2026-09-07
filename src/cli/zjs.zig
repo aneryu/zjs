@@ -631,18 +631,19 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     const stderr = &stderr_writer.interface;
     const memory = runtime.runtime.memoryUsage();
 
-    try stderr.print("{{\n  \"file\": ", .{});
+    try stderr.writeAll("{\n  \"file\": ");
     try writeJsonString(stderr, commandPerfFile(command));
-    try stderr.print(",\n", .{});
+    try stderr.writeAll(",\n");
     try dumpPerfJsonMetrics(stderr, memory, timings);
-    try stderr.print(",\n  \"opcode_profile_enabled\": {}", .{perf_profile != null});
+    try stderr.writeAll(",\n  \"opcode_profile_enabled\": ");
+    try stderr.writeAll(if (perf_profile != null) "true" else "false");
     if (perf_profile) |profile| {
-        try stderr.print(",\n", .{});
+        try stderr.writeAll(",\n");
         try dumpPerfJsonOpcodeProfile(stderr, profile);
-        try stderr.print(",\n", .{});
+        try stderr.writeAll(",\n");
         try dumpPerfJsonIc(stderr, profile);
     }
-    try stderr.print("\n}}\n", .{});
+    try stderr.writeAll("\n}\n");
     try stderr.flush();
 }
 
@@ -685,31 +686,37 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
     }
     sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
-    try output.print("  \"opcode_profile\": {{\n", .{});
-    try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
+    try output.writeAll("  \"opcode_profile\": {\n");
+    try writeCounterLine(output, &.{
+        .{ "    \"opcodes_executed\": ", profile.totalOpcodeCount() },
+    }, ",\n");
     if (comptime zjs.opcode_profile_build_enabled) {
         try output.writeAll("    \"measured_ns\": \"not instrumented\",\n");
     } else {
-        try output.print("    \"measured_ns\": {d},\n", .{profile.totalOpcodeNanos()});
+        try writeCounterLine(output, &.{.{ "    \"measured_ns\": ", profile.totalOpcodeNanos() }}, ",\n");
     }
     if (comptime zjs.opcode_profile_build_enabled) {
         try output.writeAll("    \"value_dups\": \"not instrumented\",\n");
     } else {
-        try output.print("    \"value_dups\": {d},\n", .{profile.value_dup_count});
+        try writeCounterLine(output, &.{.{ "    \"value_dups\": ", profile.value_dup_count }}, ",\n");
     }
-    try output.print("    \"value_frees\": {d},\n", .{profile.value_free_count});
-    try output.print("    \"prop_lookups\": {d},\n", .{profile.prop_lookup_count});
+    try writeCounterLine(output, &.{
+        .{ "    \"value_frees\": ", profile.value_free_count },
+        .{ ",\n    \"prop_lookups\": ", profile.prop_lookup_count },
+    }, ",\n");
     if (comptime zjs.opcode_profile_build_enabled) {
         try output.writeAll("    \"global_lookups\": \"not instrumented\",\n");
     } else {
-        try output.print("    \"global_lookups\": {d},\n", .{profile.global_lookup_count});
+        try writeCounterLine(output, &.{.{ "    \"global_lookups\": ", profile.global_lookup_count }}, ",\n");
     }
     if (comptime zjs.opcode_profile_build_enabled) {
         try output.writeAll("    \"allocations\": \"not instrumented\",\n");
         try output.writeAll("    \"call_frames\": \"not instrumented\",\n");
     } else {
-        try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
-        try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
+        try writeCounterLine(output, &.{
+            .{ "    \"allocations\": ", profile.alloc_count },
+            .{ ",\n    \"call_frames\": ", profile.call_frame_count },
+        }, ",\n");
     }
     try output.writeAll("    \"opcodes\": [");
     for (rows[0..row_count], 0..) |row, index| {
@@ -717,12 +724,17 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
         const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
-        try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
+        try writeCounterLine(output, &.{.{ "\n      {\"opcode\": ", row.opcode }}, ", \"name\": ");
         try writeJsonString(output, display_name);
         if (comptime zjs.opcode_profile_build_enabled) {
-            try output.print(", \"count\": {d}, \"nanos\": \"not instrumented\", \"avg_ns\": \"not instrumented\", \"slow\": \"not instrumented\"}}", .{row.count});
+            try writeCounterLine(output, &.{.{ ", \"count\": ", row.count }}, ", \"nanos\": \"not instrumented\", \"avg_ns\": \"not instrumented\", \"slow\": \"not instrumented\"}");
         } else {
-            try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
+            try writeCounterLine(output, &.{
+                .{ ", \"count\": ", row.count },
+                .{ ", \"nanos\": ", row.nanos },
+                .{ ", \"avg_ns\": ", avg },
+                .{ ", \"slow\": ", profile.slow_count[row.opcode] },
+            }, "}");
         }
     }
     if (row_count != 0) try output.writeByte('\n');
@@ -731,13 +743,13 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
 
 fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
     if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  \"ic\": {{\n", .{});
+        try output.writeAll("  \"ic\": {\n");
         try output.writeAll("    \"hit\": \"not instrumented\",\n");
         try output.writeAll("    \"miss\": \"not instrumented\",\n");
         try output.writeAll("    \"invalidate\": \"not instrumented\",\n");
         try output.writeAll("    \"promote_poly\": \"not instrumented\",\n");
         try output.writeAll("    \"promote_mega\": \"not instrumented\"\n");
-        try output.print("  }},\n", .{});
+        try output.writeAll("  },\n");
         try output.writeAll("  \"ic_hit\": \"not instrumented\",\n");
         try output.writeAll("  \"ic_miss\": \"not instrumented\",\n");
         try output.writeAll("  \"ic_invalidate\": \"not instrumented\",\n");
@@ -745,13 +757,15 @@ fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !vo
         try output.writeAll("  \"ic_promote_mega\": \"not instrumented\"");
         return;
     }
-    try output.print("  \"ic\": {{\n", .{});
-    try output.print("    \"hit\": {d},\n", .{profile.totalIcHit()});
-    try output.print("    \"miss\": {d},\n", .{profile.totalIcMiss()});
-    try output.print("    \"invalidate\": {d},\n", .{profile.totalIcInvalidate()});
-    try output.print("    \"promote_poly\": {d},\n", .{profile.totalIcPromotePoly()});
-    try output.print("    \"promote_mega\": {d}\n", .{profile.totalIcPromoteMega()});
-    try output.print("  }},\n", .{});
+    try output.writeAll("  \"ic\": {\n");
+    try writeCounterLine(output, &.{
+        .{ "    \"hit\": ", profile.totalIcHit() },
+        .{ ",\n    \"miss\": ", profile.totalIcMiss() },
+        .{ ",\n    \"invalidate\": ", profile.totalIcInvalidate() },
+        .{ ",\n    \"promote_poly\": ", profile.totalIcPromotePoly() },
+        .{ ",\n    \"promote_mega\": ", profile.totalIcPromoteMega() },
+    }, "\n");
+    try output.writeAll("  },\n");
     try output.writeAll("  \"ic_hit\": ");
     try writeJsonU64Array(output, &profile.ic_hit);
     try output.writeAll(",\n  \"ic_miss\": ");
@@ -768,7 +782,7 @@ fn writeJsonU64Array(output: *std.Io.Writer, values: *const [zjs.OpcodeProfile.o
     try output.writeByte('[');
     for (values.*, 0..) |value, index| {
         if (index != 0) try output.writeByte(',');
-        try output.print("{d}", .{value});
+        try writeCounterLine(output, &.{.{ "", value }}, "");
     }
     try output.writeByte(']');
 }
@@ -1641,6 +1655,9 @@ test "zjs perf json opcode profile includes counters and rows" {
     }
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"get_var\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"push_i16\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"opcode\": ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\": 17") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\": 5") != null);
 
     if (comptime zjs.opcode_profile_build_enabled) {
         var ic_buffer: [1024]u8 = undefined;
@@ -1649,7 +1666,42 @@ test "zjs perf json opcode profile includes counters and rows" {
         const ic_json = ic_writer.buffered();
         try std.testing.expect(std.mem.indexOf(u8, ic_json, "\"hit\": \"not instrumented\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, ic_json, "\"ic_hit\": \"not instrumented\"") != null);
+    } else {
+        profile.ic_hit[0] = 3;
+        profile.ic_miss[1] = 5;
+        profile.ic_invalidate[2] = 7;
+        profile.ic_promote_poly[3] = 11;
+        profile.ic_promote_mega[4] = 13;
+        var ic_buffer: [8192]u8 = undefined;
+        var ic_writer = std.Io.Writer.fixed(&ic_buffer);
+        try dumpPerfJsonIc(&ic_writer, &profile);
+        const ic_json = ic_writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, ic_json, "    \"hit\": 3,\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ic_json, "    \"miss\": 5,\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ic_json, "    \"invalidate\": 7,\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ic_json, "    \"promote_poly\": 11,\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ic_json, "    \"promote_mega\": 13\n") != null);
+        try std.testing.expect(std.mem.startsWith(u8, ic_json, "  \"ic\": {\n"));
+        try std.testing.expect(std.mem.indexOf(u8, ic_json, "  },\n  \"ic_hit\": [3,") != null);
     }
+}
+
+test "zjs JSON u64 array matches decimal fmt across the unsigned range" {
+    var values: [zjs.OpcodeProfile.opcode_count]u64 = @splat(0);
+    values[0] = 0;
+    values[1] = 42;
+    values[2] = std.math.maxInt(u64);
+    var got: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&got);
+    try writeJsonU64Array(&writer, &values);
+    // Compare the first three cells against std.fmt so empty-prefix
+    // writeCounterLine cannot silently change digit spelling.
+    var expect_buf: [80]u8 = undefined;
+    const expect = try std.fmt.bufPrint(&expect_buf, "[{d},{d},{d}", .{ values[0], values[1], values[2] });
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), expect));
+    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "]"));
+    writer = std.Io.Writer.fixed(got[0..1]);
+    try std.testing.expectError(error.WriteFailed, writeJsonU64Array(&writer, &values));
 }
 
 test "zjs args accept module file" {
