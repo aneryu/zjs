@@ -237,52 +237,21 @@ pub fn namespace(comptime token: type) type {
                 return self.lexPunctuator(out);
             }
 
-            /// Resume lexing a template after the parser closed a `${ ... }`
-            /// substitution. Mirrors the second call into
-            /// `js_parse_template_part` (`quickjs.c:21794`).
-            ///
-            /// **LexerImpl position contract**: must be called with `pos` AT the
-            /// closing `}` byte. The `nextTemplatePartAfterBrace` variant is
-            /// for the parser case where the `}` has already been advanced past
-            /// (i.e. the parser observed `}` as the lookahead token after the
-            /// substitution's expression, so `lex.pos` is one byte past `}`).
-            pub fn nextTemplatePart(self: *LexerImpl) Error!t.Token {
-                var result: t.Token = undefined;
-                try self.nextTemplatePartInto(&result);
-                return result;
-            }
-
+            /// Resume template lexing after `${...}` (`js_parse_template_part`,
+            /// `quickjs.c:21794`). `pos` must be AT the closing `}`.
             pub fn nextTemplatePartInto(self: *LexerImpl, out: *t.Token) Error!void {
                 self.mark();
                 return self.lexTemplate(out, .middle_or_tail);
             }
 
-            /// Like `nextTemplatePart`, but assumes the closing `}` has already
-            /// been lexed and consumed by the parser's lookahead. Used by the
-            /// expression parser, which discovers `}` only via its standard
-            /// post-expression lookahead.
-            pub fn nextTemplatePartAfterBrace(self: *LexerImpl) Error!t.Token {
-                var result: t.Token = undefined;
-                try self.nextTemplatePartAfterBraceInto(&result);
-                return result;
-            }
-
+            /// Resume a template after lookahead already consumed `}`.
             pub fn nextTemplatePartAfterBraceInto(self: *LexerImpl, out: *t.Token) Error!void {
                 self.mark();
                 return self.lexTemplateBody(out, .middle_or_tail, false);
             }
 
-            /// Re-lex the most recently emitted `/`/`/=` punctuator as a regex
-            /// literal. Mirrors the QuickJS pattern of letting the parser ask
-            /// for a regexp once it knows it's in a regexp-allowed context
-            /// (`js_parse_regexp`, `quickjs.c:22005`). The caller passes the
-            /// `mark_pos` recorded before the slash so we restart from there.
-            pub fn rescanRegexp(self: *LexerImpl, slash_offset: usize) Error!t.Token {
-                var result: t.Token = undefined;
-                try self.rescanRegexpInto(&result, slash_offset);
-                return result;
-            }
-
+            /// Re-lex `/` or `/=` as a regexp from `slash_offset`
+            /// (`js_parse_regexp`, `quickjs.c:22005`).
             pub fn rescanRegexpInto(self: *LexerImpl, out: *t.Token, slash_offset: usize) Error!void {
                 // Reset position back to the slash. The caller is responsible
                 // for having recorded `mark_line`/`mark_col` before the slash.

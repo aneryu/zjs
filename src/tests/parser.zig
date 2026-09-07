@@ -383,7 +383,8 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
     try std.testing.expectEqual(t.TOK_NUMBER, num1.val);
 
     // After the parser sees the closing `}`, it asks for the next part.
-    var middle = try lx.nextTemplatePart();
+    var middle: t.Token = undefined;
+    try lx.nextTemplatePartInto(&middle);
     defer freeAndDrain(&lx, &middle);
     try std.testing.expectEqual(t.TemplatePart.middle, middle.payload.str.template.?);
     try std.testing.expectEqualStrings("b", middle.payload.str.bytes);
@@ -392,7 +393,8 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
     defer freeAndDrain(&lx, &num2);
     try std.testing.expectEqual(t.TOK_NUMBER, num2.val);
 
-    var tail = try lx.nextTemplatePart();
+    var tail: t.Token = undefined;
+    try lx.nextTemplatePartInto(&tail);
     defer freeAndDrain(&lx, &tail);
     try std.testing.expectEqual(t.TemplatePart.tail, tail.payload.str.template.?);
     try std.testing.expectEqualStrings("c", tail.payload.str.bytes);
@@ -437,10 +439,11 @@ test "F1.2: regex literal exposes pattern and flags" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
 
-    // Provide the slash directly to rescanRegexp; in real usage the
+    // Provide the slash directly to rescanRegexpInto; in real usage the
     // parser would call this once it knew the / starts a regex.
     var lx = env.lexer("/a[bc]\\/d/gi");
-    var tok = try lx.rescanRegexp(0);
+    var tok: t.Token = undefined;
+    try lx.rescanRegexpInto(&tok, 0);
     defer freeAndDrain(&lx, &tok);
     try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
     try std.testing.expectEqualStrings("a[bc]\\/d", tok.payload.regexp.pattern);
@@ -456,7 +459,8 @@ test "F1.2: regex literal may begin with equals after slash rescan" {
     defer freeAndDrain(&lx, &div_assign);
     try std.testing.expectEqual(t.TOK_DIV_ASSIGN, div_assign.val);
 
-    var tok = try lx.rescanRegexp(lx.mark_pos);
+    var tok: t.Token = undefined;
+    try lx.rescanRegexpInto(&tok, lx.mark_pos);
     defer freeAndDrain(&lx, &tok);
     try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
     try std.testing.expectEqualStrings("=", tok.payload.regexp.pattern);
