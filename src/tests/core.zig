@@ -2814,6 +2814,15 @@ test "class prototype inline slots start as JSValue.nullValue" {
     try std.testing.expect(ctx.class_prototypes[core.class.ids.proxy].isNull());
 }
 
+test "class standard_plans match standardPayloadKind before and after register" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    try std.testing.expectEqual(core.class.standardPayloadKind(core.class.ids.proxy), rt.classes.standard_plans[core.class.ids.proxy].payload_kind);
+    try std.testing.expectEqual(@as(u16, 1), rt.classes.standard_plans[core.class.ids.proxy].inline_payload_align);
+    try std.testing.expectEqual(core.class.standardPayloadKind(core.class.ids.object), rt.classes.standard_plans[core.class.ids.object].payload_kind);
+    try std.testing.expectEqual(rt.classes.record(core.class.ids.object).?.payload_kind, rt.classes.standard_plans[core.class.ids.object].payload_kind);
+}
+
 var finalizer_calls: usize = 0;
 var payload_finalizer_calls: usize = 0;
 var payload_mark_calls: usize = 0;

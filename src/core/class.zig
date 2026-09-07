@@ -380,7 +380,7 @@ pub const Table = struct {
     /// outside `standard_classes` never register; their entries stay on the
     /// same `standardPayloadKind` fallback `definitionPlan` used for a null
     /// record view.
-    standard_plans: [ids.init_count]DefinitionPlan = standard_plan_fallbacks,
+    standard_plans: [ids.init_count]DefinitionPlan = undefined,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
         var table = Table{
@@ -388,7 +388,9 @@ pub const Table = struct {
             .atoms = atoms,
             .owner_thread_id = std.Thread.getCurrentId(),
             .records_inline = undefined,
+            .standard_plans = undefined,
         };
+        fillStandardPlanFallbacks(&table.standard_plans);
         errdefer table.deinit();
         try table.ensureCapacity(ids.init_count);
         try table.registerStandardClasses();
@@ -401,7 +403,9 @@ pub const Table = struct {
             .atoms = atoms,
             .owner_thread_id = std.Thread.getCurrentId(),
             .records_inline = undefined,
+            .standard_plans = undefined,
         };
+        fillStandardPlanFallbacks(&self.standard_plans);
         self.records = self.records_inline[0..ids.init_count];
         self.registration_states = self.registration_states_inline[0..ids.init_count];
         fillDefaultRecords(self.records);
@@ -800,13 +804,11 @@ pub const Table = struct {
         }
     }
 
-    const standard_plan_fallbacks: [ids.init_count]DefinitionPlan = blk: {
-        var plans: [ids.init_count]DefinitionPlan = undefined;
-        for (&plans, 0..) |*plan, id| {
+    fn fillStandardPlanFallbacks(plans: *[ids.init_count]DefinitionPlan) void {
+        for (plans, 0..) |*plan, id| {
             plan.* = .{ .payload_kind = standardPayloadKind(@intCast(id)) };
         }
-        break :blk plans;
-    };
+    }
 
     fn definitionPlan(definition_view: ?*const Record, id: ClassId, generation: u64) DefinitionPlan {
         if (definition_view) |registered| {
