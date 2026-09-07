@@ -226,8 +226,12 @@ fn endsWith(bytes: []const u8, suffix: []const u8) bool {
 /// (one correctly-rounded int->double conversion); wider literals keep
 /// accumulating in f64, mirroring qjs js_atod's accumulate-into-double
 /// behaviour instead of failing to NaN.
-fn parseRadixPrefixedDigits(digits: []const u8, comptime radix: u8) f64 {
+/// One helper for 0x/0o/0b. Radix is a value so the three prefix sites
+/// share a single outlined walk instead of three comptime copies.
+noinline fn parseRadixPrefixedDigits(digits: []const u8, radix: u8) f64 {
     if (digits.len == 0) return std.math.nan(f64);
+    const radix_wide: u128 = radix;
+    const radix_f: f64 = @floatFromInt(radix);
     var wide: u128 = 0;
     var overflowed = false;
     var value: f64 = 0;
@@ -240,7 +244,7 @@ fn parseRadixPrefixedDigits(digits: []const u8, comptime radix: u8) f64 {
         };
         if (digit >= radix) return std.math.nan(f64);
         if (!overflowed) {
-            const mul = @mulWithOverflow(wide, radix);
+            const mul = @mulWithOverflow(wide, radix_wide);
             const add = @addWithOverflow(mul[0], digit);
             if (mul[1] == 0 and add[1] == 0) {
                 wide = add[0];
@@ -249,7 +253,7 @@ fn parseRadixPrefixedDigits(digits: []const u8, comptime radix: u8) f64 {
             overflowed = true;
             value = @floatFromInt(wide);
         }
-        value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
+        value = value * radix_f + @as(f64, @floatFromInt(digit));
     }
     if (!overflowed) return @floatFromInt(wide);
     return value;
@@ -263,4 +267,17 @@ fn hasSignedRadixPrefix(bytes: []const u8) bool {
 fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
     const index: usize = if (bytes.len > 0 and (bytes[0] == '+' or bytes[0] == '-')) 1 else 0;
     return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
+}
+
+test "parseJsNumber keeps 0x 0o 0b prefixes exact and rejects bad digits" {
+    try std.testing.expectEqual(@as(f64, 255), parseJsNumber("0xFF"));
+    try std.testing.expectEqual(@as(f64, 255), parseJsNumber("0Xff"));
+    try std.testing.expectEqual(@as(f64, 15), parseJsNumber("0o17"));
+    try std.testing.expectEqual(@as(f64, 10), parseJsNumber("0b1010"));
+    try std.testing.expect(std.math.isNan(parseJsNumber("0x")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("0o8")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("0b2")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("0xG")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("+0x1")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("0x1_0")));
 }
