@@ -1838,29 +1838,31 @@ test "objectRestOwnKeys roots direct symbol values while creating rest object" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    var out_value = core.JSValue.undefinedValue();
-    var value = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const out = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
-    out_value = out.value();
-    const keys = try objectRestOwnKeys(ctx, null, global, source);
-    defer core.Object.freeKeys(rt, keys);
-    for (keys) |rest_key| {
-        const desc = try objectRestOwnPropertyDescriptor(ctx, null, global, source, rest_key) orelse continue;
-        if (desc.enumerable != true) continue;
-        value = try getValueProperty(ctx, null, global, source_value, rest_key, null, null);
-        try out.defineOwnProperty(rt, rest_key, core.Descriptor.data(value, true, true, true));
-        value = core.JSValue.undefinedValue();
-    }
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try out.getProperty(key);
-        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
+        var out_value = core.JSValue.undefinedValue();
+        var value = core.JSValue.undefinedValue();
+        var root_frame = core.runtime.rootValues(.{ &source_value, &out_value, &value });
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
+
+        const out = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
+        errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
+        out_value = out.value();
+        const keys = try objectRestOwnKeys(ctx, null, global, source);
+        defer core.Object.freeKeys(rt, keys);
+        for (keys) |rest_key| {
+            const desc = try objectRestOwnPropertyDescriptor(ctx, null, global, source, rest_key) orelse continue;
+            if (desc.enumerable != true) continue;
+            value = try getValueProperty(ctx, null, global, source_value, rest_key, null, null);
+            try out.defineOwnProperty(rt, rest_key, core.Descriptor.data(value, true, true, true));
+            value = core.JSValue.undefinedValue();
+        }
+
+        try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+        {
+            const stored = try out.getProperty(key);
+            try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
+        }
     }
 
     _ = rt.runObjectCycleRemoval();
