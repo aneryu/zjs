@@ -610,7 +610,15 @@ fn dumpMemorySnapshot(output: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage) !v
         .{ "modules", memory.module_count, memory.module_bytes },
         .{ "classes", memory.registered_class_count, memory.class_bytes },
     }) |row| {
-        try output.print("{s:<22} {d:>5} {d:>8}\n", row);
+        var name_buf: [32]u8 = undefined;
+        var count_buf: [32]u8 = undefined;
+        var size_buf: [32]u8 = undefined;
+        try output.writeAll(spacePad(row[0], 22, false, &name_buf));
+        try output.writeAll(" ");
+        try output.writeAll(decPad(@as(u64, row[1]), 5, &count_buf));
+        try output.writeAll(" ");
+        try output.writeAll(decPad(@as(u64, row[2]), 8, &size_buf));
+        try output.writeAll("\n");
     }
 }
 
@@ -898,6 +906,40 @@ fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
 noinline fn writeCounterLine(writer: *std.Io.Writer, parts: []const struct { []const u8, u64 }, suffix: []const u8) !void {
     for (parts) |part| try writer.print("{s}{d}", .{ part[0], part[1] });
     try writer.writeAll(suffix);
+}
+
+/// Zig `{s:<width}` / `{s:>width}`: width is a floor. Longer text is unchanged.
+noinline fn spacePad(text: []const u8, width: u8, right_align: bool, buf: *[32]u8) []const u8 {
+    std.debug.assert(width >= 1 and width <= buf.len);
+    if (text.len >= width) return text;
+    const pad = @as(usize, width) - text.len;
+    if (right_align) {
+        @memset(buf[0..pad], ' ');
+        @memcpy(buf[pad..][0..text.len], text);
+    } else {
+        @memcpy(buf[0..text.len], text);
+        @memset(buf[text.len..][0..pad], ' ');
+    }
+    return buf[0..@as(usize, width)];
+}
+
+/// Zig `{d:>width}`: decimal digits, then right-align. Width is a floor.
+noinline fn decPad(value: u64, width: u8, buf: *[32]u8) []const u8 {
+    std.debug.assert(width >= 1 and width <= buf.len);
+    var rest = value;
+    var i: usize = buf.len;
+    while (true) {
+        i -= 1;
+        buf[i] = '0' + @as(u8, @intCast(rest % 10));
+        rest /= 10;
+        if (rest == 0) break;
+    }
+    const raw_len = buf.len - i;
+    if (raw_len >= width) return buf[i..];
+    const pad = @as(usize, width) - raw_len;
+    const start = i - pad;
+    @memset(buf[start..i], ' ');
+    return buf[start..];
 }
 
 /// Generational counters. `remembered without young` is the one to watch: it
@@ -1388,9 +1430,37 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         const display_name = if (name.len == 0) "<invalid>" else name;
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
         if (comptime zjs.opcode_profile_build_enabled) {
-            try output.print("{s:<20} {d:>9} {s:>18} {s:>16} {s:>16}\n", .{ display_name, row.count, "not instrumented", "not instrumented", "not instrumented" });
+            var name_buf: [32]u8 = undefined;
+            var count_buf: [32]u8 = undefined;
+            var total_buf: [32]u8 = undefined;
+            var avg_buf: [32]u8 = undefined;
+            var slow_buf: [32]u8 = undefined;
+            try output.writeAll(spacePad(display_name, 20, false, &name_buf));
+            try output.writeAll(" ");
+            try output.writeAll(decPad(row.count, 9, &count_buf));
+            try output.writeAll(" ");
+            try output.writeAll(spacePad("not instrumented", 18, true, &total_buf));
+            try output.writeAll(" ");
+            try output.writeAll(spacePad("not instrumented", 16, true, &avg_buf));
+            try output.writeAll(" ");
+            try output.writeAll(spacePad("not instrumented", 16, true, &slow_buf));
+            try output.writeAll("\n");
         } else {
-            try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
+            var name_buf: [32]u8 = undefined;
+            var count_buf: [32]u8 = undefined;
+            var total_buf: [32]u8 = undefined;
+            var avg_buf: [32]u8 = undefined;
+            var slow_buf: [32]u8 = undefined;
+            try output.writeAll(spacePad(display_name, 20, false, &name_buf));
+            try output.writeAll(" ");
+            try output.writeAll(decPad(row.count, 9, &count_buf));
+            try output.writeAll(" ");
+            try output.writeAll(decPad(row.nanos, 13, &total_buf));
+            try output.writeAll(" ");
+            try output.writeAll(decPad(avg, 12, &avg_buf));
+            try output.writeAll(" ");
+            try output.writeAll(decPad(profile.slow_count[row.opcode], 10, &slow_buf));
+            try output.writeAll("\n");
         }
     }
 
@@ -1406,7 +1476,15 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
             if (c == 0) continue;
             const resident = engine.bytecode.opcode.logical.subForm(@intCast(sub));
             const name = if (resident) |form| @tagName(form) else "<range>";
-            try output.print("{s:<20} {d:>9}  (sub {d})\n", .{ name, c, sub });
+            var name_buf: [32]u8 = undefined;
+            var count_buf: [32]u8 = undefined;
+            var sub_buf: [32]u8 = undefined;
+            try output.writeAll(spacePad(name, 20, false, &name_buf));
+            try output.writeAll(" ");
+            try output.writeAll(decPad(c, 9, &count_buf));
+            try output.writeAll("  (sub ");
+            try output.writeAll(decPad(@as(u64, sub), 1, &sub_buf));
+            try output.writeAll(")\n");
         }
     }
 
@@ -1423,7 +1501,12 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
     var fam_it = family_counts.iterator();
     while (fam_it.next()) |entry| {
         if (entry.value.* == 0) continue;
-        try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
+        var name_buf: [32]u8 = undefined;
+        var count_buf: [32]u8 = undefined;
+        try output.writeAll(spacePad(@tagName(entry.key), 20, false, &name_buf));
+        try output.writeAll(" ");
+        try output.writeAll(decPad(entry.value.*, 9, &count_buf));
+        try output.writeAll("\n");
     }
 }
 
@@ -1859,6 +1942,101 @@ test "zjs doomed state line preserves mixed bools and counters" {
         .deferred_finalizers = 1,
         .active_finalizer = true,
     }));
+}
+
+test "zjs column pad matches std fmt min-width" {
+    const dec_cases = .{
+        .{ 0, 1, "{d:>1}" },
+        .{ 0, 5, "{d:>5}" },
+        .{ 3, 5, "{d:>5}" },
+        .{ 123456, 5, "{d:>5}" },
+        .{ 0, 8, "{d:>8}" },
+        .{ 999999999, 8, "{d:>8}" },
+        .{ 1, 9, "{d:>9}" },
+        .{ 12345678901, 9, "{d:>9}" },
+        .{ 0, 13, "{d:>13}" },
+        .{ 1, 12, "{d:>12}" },
+        .{ 1, 10, "{d:>10}" },
+        .{ std.math.maxInt(u64), 8, "{d:>8}" },
+    };
+    inline for (dec_cases) |case| {
+        var expected_buf: [32]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buf, case[2], .{@as(u64, case[0])});
+        var actual_buf: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(expected, decPad(case[0], case[1], &actual_buf));
+    }
+
+    const space_cases = .{
+        .{ "atoms", 22, false, "{s:<22}" },
+        .{ "memory allocated", 22, false, "{s:<22}" },
+        .{ "this-name-is-longer-than-22-chars", 22, false, "{s:<22}" },
+        .{ "get_var", 20, false, "{s:<20}" },
+        .{ "not instrumented", 18, true, "{s:>18}" },
+        .{ "not instrumented", 16, true, "{s:>16}" },
+        .{ "overflow-string-value", 16, true, "{s:>16}" },
+    };
+    inline for (space_cases) |case| {
+        var expected_buf: [64]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buf, case[3], .{case[0]});
+        var actual_buf: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(expected, spacePad(case[0], case[1], case[2], &actual_buf));
+    }
+}
+
+test "zjs opcode profile table preserves min-width columns" {
+    var profile: zjs.OpcodeProfile = undefined;
+    initOpcodeProfile(&profile);
+    const get_var = engine.bytecode.opcode.op.get_var;
+    const push_i16 = engine.bytecode.opcode.op.push_i16;
+    profile.recordOpcode(get_var, 17);
+    profile.recordOpcode(push_i16, 5);
+    profile.slow_count[get_var] = 12345678901;
+    profile.ext0_sub_count[3] = 7;
+
+    var buf: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try dumpOpcodeProfile(&writer, &profile);
+    const text = writer.buffered();
+
+    const get_var_name = zjs.OpcodeProfile.opcodeName(get_var);
+    const push_name = zjs.OpcodeProfile.opcodeName(push_i16);
+    var row_buf: [128]u8 = undefined;
+    if (comptime zjs.opcode_profile_build_enabled) {
+        const row = try std.fmt.bufPrint(&row_buf, "{s:<20} {d:>9} {s:>18} {s:>16} {s:>16}\n", .{
+            get_var_name,
+            @as(u64, 1),
+            "not instrumented",
+            "not instrumented",
+            "not instrumented",
+        });
+        try std.testing.expect(std.mem.indexOf(u8, text, row) != null);
+    } else {
+        const get_var_row = try std.fmt.bufPrint(&row_buf, "{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{
+            get_var_name,
+            @as(u64, 1),
+            @as(u64, 17),
+            @as(u64, 17),
+            profile.slow_count[get_var],
+        });
+        try std.testing.expect(std.mem.indexOf(u8, text, get_var_row) != null);
+        const push_row = try std.fmt.bufPrint(&row_buf, "{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{
+            push_name,
+            @as(u64, 1),
+            @as(u64, 5),
+            @as(u64, 5),
+            @as(u64, 0),
+        });
+        try std.testing.expect(std.mem.indexOf(u8, text, push_row) != null);
+    }
+
+    const resident = engine.bytecode.opcode.logical.subForm(3);
+    const sub_name = if (resident) |form| @tagName(form) else "<range>";
+    const sub_row = try std.fmt.bufPrint(&row_buf, "{s:<20} {d:>9}  (sub {d})\n", .{
+        sub_name,
+        @as(u64, 7),
+        @as(u64, 3),
+    });
+    try std.testing.expect(std.mem.indexOf(u8, text, sub_row) != null);
 }
 
 test "zjs counter line handles full unsigned range and writer errors" {
