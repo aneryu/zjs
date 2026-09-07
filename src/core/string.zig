@@ -894,7 +894,7 @@ pub const String = struct {
 
     const StorageTag = enum { latin1, utf16 };
 
-    fn createUninitialized(rt: *JSRuntime, tag: StorageTag, unit_count: usize) !*String {
+    fn createUninitialized(rt: *JSRuntime, comptime tag: StorageTag, unit_count: usize) !*String {
         // Central allocation cap (qjs js_alloc_string / string_buffer_realloc,
         // quickjs.c:4078): every flat creator funnels through here, so this one
         // compare bounds all string construction.
@@ -940,7 +940,10 @@ pub const String = struct {
 
     fn destroyFlat(rt: *JSRuntime, self: *String) void {
         const tag: StorageTag = if (self.len_meta.is_wide) .utf16 else .latin1;
-        const inline_layout = inlineAllocationLayout(tag, self.len_meta.len) orelse unreachable;
+        const inline_layout = switch (tag) {
+            .latin1 => inlineAllocationLayout(.latin1, self.len_meta.len) orelse unreachable,
+            .utf16 => inlineAllocationLayout(.utf16, self.len_meta.len) orelse unreachable,
+        };
         if (gc.Registry.isBlockCellHeader(@ptrCast(@alignCast(self)))) {
             rt.memory.destroyStringCell(self, inline_layout.total_size);
             return;
@@ -1880,8 +1883,8 @@ inline fn callVisitValue(vis: anytype, slot: *JSValue) !void {
     }
 }
 
-fn inlineAllocationLayout(tag: String.StorageTag, unit_count: usize) ?InlineAllocationLayout {
-    const unit_size: usize = switch (tag) {
+fn inlineAllocationLayout(comptime tag: String.StorageTag, unit_count: usize) ?InlineAllocationLayout {
+    const unit_size = switch (tag) {
         .latin1 => @sizeOf(u8),
         .utf16 => @sizeOf(u16),
     };

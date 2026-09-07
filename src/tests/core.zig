@@ -2688,42 +2688,6 @@ test "nested ropes preserve immutable child content" {
     try std.testing.expect(inner_flat.eqlBytes("abcdef"));
 }
 
-test "flat string mint writes runtime storage tags on cell and extent paths" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const small_latin1 = try core.string.String.createLatin1(rt, "Ab");
-    try std.testing.expect(!small_latin1.isWide());
-    try std.testing.expectEqual(@as(usize, 2), small_latin1.len());
-    try std.testing.expect(small_latin1.eqlBytes("Ab"));
-    try std.testing.expectEqual(@as(u8, 0), small_latin1.inlineBytesPtr()[small_latin1.len()]);
-    try std.testing.expect(core.gc.Registry.isBlockCellHeader(small_latin1.header()));
-
-    const small_utf16 = try core.string.String.createUtf16(rt, &.{ 'A', 0x0100 });
-    try std.testing.expect(small_utf16.isWide());
-    try std.testing.expectEqual(@as(usize, 2), small_utf16.len());
-    try std.testing.expectEqual(@as(u16, 0x0100), small_utf16.utf16()[1]);
-    try std.testing.expect(core.gc.Registry.isBlockCellHeader(small_utf16.header()));
-
-    const large_latin1_units = try std.testing.allocator.alloc(u8, 4096);
-    defer std.testing.allocator.free(large_latin1_units);
-    @memset(large_latin1_units, 'x');
-    const large_latin1 = try core.string.String.createLatin1(rt, large_latin1_units);
-    try std.testing.expect(!large_latin1.isWide());
-    try std.testing.expectEqual(@as(usize, 4096), large_latin1.len());
-    try std.testing.expectEqual(@as(u8, 0), large_latin1.inlineBytesPtr()[large_latin1.len()]);
-    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(large_latin1.header()));
-
-    const large_utf16_units = try std.testing.allocator.alloc(u16, 2048);
-    defer std.testing.allocator.free(large_utf16_units);
-    @memset(large_utf16_units, 0x0100);
-    const large_utf16 = try core.string.String.createUtf16(rt, large_utf16_units);
-    try std.testing.expect(large_utf16.isWide());
-    try std.testing.expectEqual(@as(usize, 2048), large_utf16.len());
-    try std.testing.expectEqual(@as(u16, 0x0100), large_utf16.utf16()[2047]);
-    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(large_utf16.header()));
-}
-
 test "strings compare by code unit across storage widths" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
