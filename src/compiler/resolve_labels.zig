@@ -1742,61 +1742,6 @@ const Resolver = struct {
         }
     }
 
-    // The hand-written ladder below is now the BASELINE for the decode
-    // layer's declaration-derived selection; this proves the two agree on
-    // every family and across every branch boundary of the idx domain
-    // before the writer switches to the derived one. The probe values
-    // cover both sides of each threshold the ladder tests.
-    comptime {
-        @setEvalBranchQuota(100000);
-        const wides = [_]Form{
-            .get_loc,     .put_loc,       .set_loc,
-            .get_arg,     .put_arg,       .set_arg,
-            .get_var_ref, .put_var_ref,   .set_var_ref,
-            .call,        .put_loc_check, .get_loc_check,
-            .get_field,   .push_i32,
-        };
-        const probes = [_]u16{ 0, 1, 2, 3, 4, 5, 255, 256, 257, 65535 };
-        for (wides) |wide| {
-            for (probes) |idx| {
-                const hand = shortSlotOp(opId(wide), idx);
-                const derived = opcode.decode.selectSlotShortForm(wide, idx);
-                const derived_id: ?u8 = if (derived) |form| opId(form) else null;
-                if (!std.meta.eql(hand, derived_id))
-                    @compileError("short selection diverges for " ++ @tagName(wide) ++
-                        " at idx " ++ std.fmt.comptimePrint("{d}", .{idx}));
-            }
-        }
-    }
-
-    fn shortSlotOp(op_id: u8, idx: u16) ?u8 {
-        if (idx < 4) {
-            const base: ?u8 = switch (op_id) {
-                op.get_loc => op.get_loc0,
-                op.put_loc => op.put_loc0,
-                op.set_loc => op.set_loc0,
-                op.get_arg => op.get_arg0,
-                op.put_arg => op.put_arg0,
-                op.set_arg => op.set_arg0,
-                op.get_var_ref => op.get_var_ref0,
-                op.put_var_ref => op.put_var_ref0,
-                op.set_var_ref => op.set_var_ref0,
-                op.call => op.call0,
-                else => null,
-            };
-            if (base) |short_base| return short_base + @as(u8, @intCast(idx));
-        }
-        if (idx < 256) {
-            return switch (op_id) {
-                op.get_loc => op.get_loc8,
-                op.put_loc => op.put_loc8,
-                op.set_loc => op.set_loc8,
-                else => null,
-            };
-        }
-        return null;
-    }
-
     fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32 {
         // Contract 3: capacity and emission consume the same selector, and
         // the selected form's size comes from its row -- there is no second
