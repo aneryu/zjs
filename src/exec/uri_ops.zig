@@ -14,7 +14,6 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("exception_ops.zig");
 const string_ops = @import("string_ops.zig");
-const array_list_erased = @import("../core/array_list_erased.zig");
 
 const HostError = exceptions.HostError;
 
@@ -178,7 +177,7 @@ fn decodeUriUnits(comptime T: type, ctx: *core.JSContext, global: ?*core.Object,
     const rt = ctx.runtime;
     var out = std.ArrayList(u16).empty;
     defer out.deinit(rt.memory.allocator);
-    try array_list_erased.ensureTotalCapacity(&out, rt.memory.allocator, units.len);
+    try out.ensureTotalCapacity(rt.memory.allocator, units.len);
     var k: usize = 0;
     while (k < units.len) {
         var c: u32 = units[k];

@@ -18762,42 +18762,6 @@ test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
     }
 }
 
-test "array_list_erased ensureTotalCapacity matches std ArrayList growth" {
-    const array_list_erased = @import("../core/array_list_erased.zig");
-    const types = .{ u16, u32 };
-
-    inline for (types) |T| {
-        var std_list: std.ArrayList(T) = .empty;
-        defer std_list.deinit(std.testing.allocator);
-        var erased: std.ArrayList(T) = .empty;
-        defer erased.deinit(std.testing.allocator);
-
-        try array_list_erased.ensureTotalCapacity(&erased, std.testing.allocator, 0);
-        try std_list.ensureTotalCapacity(std.testing.allocator, 0);
-        try std.testing.expectEqual(std_list.capacity, erased.capacity);
-
-        try array_list_erased.ensureTotalCapacity(&erased, std.testing.allocator, 1);
-        try std_list.ensureTotalCapacity(std.testing.allocator, 1);
-        try std.testing.expectEqual(std_list.capacity, erased.capacity);
-        try std.testing.expect(erased.capacity >= 1);
-
-        const held = erased.capacity;
-        try array_list_erased.ensureTotalCapacity(&erased, std.testing.allocator, held);
-        try std.testing.expectEqual(held, erased.capacity);
-
-        try array_list_erased.ensureTotalCapacity(&erased, std.testing.allocator, held + 1);
-        try std_list.ensureTotalCapacity(std.testing.allocator, held + 1);
-        try std.testing.expectEqual(std_list.capacity, erased.capacity);
-    }
-
-    var failing: std.ArrayList(u16) = .empty;
-    defer failing.deinit(std.testing.failing_allocator);
-    try std.testing.expectError(
-        error.OutOfMemory,
-        array_list_erased.ensureTotalCapacity(&failing, std.testing.failing_allocator, 8),
-    );
-}
-
 test "sort_erased heap matches std.sort.heap" {
     const sort_erased = @import("../core/sort_erased.zig");
     const Sample = struct { key: u32, order: u32 };

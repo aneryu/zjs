@@ -1116,7 +1116,7 @@ pub const CharRange = struct {
     ) std.mem.Allocator.Error!CharRange {
         var out = CharRange.init(allocator);
         errdefer out.deinit();
-        try array_list_erased.ensureTotalCapacity(&out.points, allocator, a.points.items.len + b.points.items.len);
+        try out.points.ensureTotalCapacity(allocator, a.points.items.len + b.points.items.len);
 
         var a_idx: usize = 0;
         var b_idx: usize = 0;
@@ -1318,7 +1318,7 @@ fn unicodeProp1(allocator: std.mem.Allocator, prop: data.Prop) UnicodeError!Rang
     const table = data.propTable(prop) orelse return error.InvalidProperty;
     var cr = RangeSet.init(allocator);
     errdefer cr.deinit();
-    try array_list_erased.ensureTotalCapacity(&cr.points, allocator, table.len);
+    try cr.points.ensureTotalCapacity(allocator, table.len);
 
     var p: usize = 0;
     var c: u32 = 0;
@@ -1352,7 +1352,7 @@ fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.
     var cr = RangeSet.init(allocator);
     errdefer cr.deinit();
     if (case_mask == 0) return cr;
-    try array_list_erased.ensureTotalCapacity(&cr.points, allocator, data.case_conv_table1.len * 2);
+    try cr.points.ensureTotalCapacity(allocator, data.case_conv_table1.len * 2);
 
     const tab_run_mask = [_]u32{
         (1 << RUN_TYPE_U) | (1 << RUN_TYPE_UF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_UF_D20) | (1 << RUN_TYPE_UF_D1_EXT) | (1 << RUN_TYPE_U_EXT) | (1 << RUN_TYPE_UF_EXT2) | (1 << RUN_TYPE_UF_EXT3),

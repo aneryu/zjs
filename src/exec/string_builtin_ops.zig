@@ -22,7 +22,6 @@ const native_legacy = @import("native_legacy.zig");
 // Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
 // exec-only in `exec/string_ops.zig`.
 const string_ops = @import("string_ops.zig");
-const array_list_erased = @import("../core/array_list_erased.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 
@@ -1077,7 +1076,7 @@ fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !c
     try string_value.ensureFlat(rt);
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
-    try array_list_erased.ensureTotalCapacity(&units, rt.memory.allocator, string_value.len());
+    try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
 
     var i: usize = 0;
     while (i < string_value.len()) {
@@ -1510,7 +1509,7 @@ fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower
             } else {
                 if (!is_wide) {
                     is_wide = true;
-                    try array_list_erased.ensureTotalCapacity(&wide, rt.memory.allocator, latin1.items.len + 1);
+                    try wide.ensureTotalCapacity(rt.memory.allocator, latin1.items.len + 1);
                     for (latin1.items) |byte| wide.appendAssumeCapacity(byte);
                     latin1.clearRetainingCapacity();
                 }
