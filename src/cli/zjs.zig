@@ -1964,9 +1964,12 @@ test "zjs memory table preserves widths and populated fields" {
     try std.testing.expectError(error.WriteFailed, dumpMemorySnapshot(&writer, memory));
 }
 
-// Keep the declared defaults, including the pending-dispatch sentinel.
+// Materialize the declared defaults without a 18 KiB .rodata copy of
+// `OpcodeProfile{}`. Every field is zero except `pending_op`, whose type
+// default is the pending-dispatch sentinel.
 fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void {
-    profile.* = .{};
+    profile.* = std.mem.zeroes(zjs.OpcodeProfile);
+    profile.pending_op = zjs.OpcodeProfile.no_pending_op;
 }
 
 test "opcode profile initialization preserves every default field" {
