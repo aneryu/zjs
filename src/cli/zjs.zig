@@ -24,6 +24,10 @@ comptime {
 const public_api = engine.public_api;
 const zjs = public_api;
 const runtime_layer = public_api.runtime;
+// File-scope so `if (comptime …)` elides dumper bodies in production `zjs`.
+// The CLI test TU keeps them for in-file --perf-json opcode/IC fixtures.
+const opcode_profile_build_enabled = zjs.opcode_profile_build_enabled;
+const opcode_profile_dumpers_compiled = opcode_profile_build_enabled or @import("builtin").is_test;
 
 const Runtime = struct {
     runtime: *zjs.JSRuntime,
@@ -412,10 +416,12 @@ pub fn main(init: std.process.Init) !void {
         try dumpMemoryUsage(&stdout_writer.interface, &runtime);
         try stdout_writer.interface.flush();
     }
-    if (zjs.opcode_profile_build_enabled and commandRuntimeOptions(command).profile_opcodes) {
-        opcode_profile.flushPendingDispatch();
-        try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
-        try stdout_writer.interface.flush();
+    if (comptime opcode_profile_build_enabled) {
+        if (commandRuntimeOptions(command).profile_opcodes) {
+            opcode_profile.flushPendingDispatch();
+            try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
+            try stdout_writer.interface.flush();
+        }
     }
     if (commandRuntimeOptions(command).gc_stats) {
         if (commandRuntimeOptions(command).gc_gate_settle) {
@@ -635,11 +641,13 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     try stderr.print(",\n", .{});
     try dumpPerfJsonMetrics(stderr, memory, timings);
     try stderr.print(",\n  \"opcode_profile_enabled\": {}", .{perf_profile != null});
-    if (perf_profile) |profile| {
-        try stderr.print(",\n", .{});
-        try dumpPerfJsonOpcodeProfile(stderr, profile);
-        try stderr.print(",\n", .{});
-        try dumpPerfJsonIc(stderr, profile);
+    if (comptime opcode_profile_build_enabled) {
+        if (perf_profile) |profile| {
+            try stderr.print(",\n", .{});
+            try dumpPerfJsonOpcodeProfile(stderr, profile);
+            try stderr.print(",\n", .{});
+            try dumpPerfJsonIc(stderr, profile);
+        }
     }
     try stderr.print("\n}}\n", .{});
     try stderr.flush();
@@ -669,107 +677,245 @@ fn dumpPerfJsonMetrics(stderr: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage, t
 }
 
 fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
-    ensureOpcodeProfileNames();
+    if (comptime opcode_profile_dumpers_compiled) {
+        ensureOpcodeProfileNames();
 
-    var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
-    var row_count: usize = 0;
-    for (profile.count, 0..) |count, opcode| {
-        if (count == 0) continue;
-        rows[row_count] = .{
-            .opcode = @intCast(opcode),
-            .count = count,
-            .nanos = profile.nanos[opcode],
-        };
-        row_count += 1;
-    }
-    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
-
-    try output.print("  \"opcode_profile\": {{\n", .{});
-    try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.writeAll("    \"measured_ns\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"measured_ns\": {d},\n", .{profile.totalOpcodeNanos()});
-    }
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.writeAll("    \"value_dups\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"value_dups\": {d},\n", .{profile.value_dup_count});
-    }
-    try output.print("    \"value_frees\": {d},\n", .{profile.value_free_count});
-    try output.print("    \"prop_lookups\": {d},\n", .{profile.prop_lookup_count});
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.writeAll("    \"global_lookups\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"global_lookups\": {d},\n", .{profile.global_lookup_count});
-    }
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.writeAll("    \"allocations\": \"not instrumented\",\n");
-        try output.writeAll("    \"call_frames\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
-        try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
-    }
-    try output.writeAll("    \"opcodes\": [");
-    for (rows[0..row_count], 0..) |row, index| {
-        if (index != 0) try output.writeByte(',');
-        const name = zjs.OpcodeProfile.opcodeName(row.opcode);
-        const display_name = if (name.len == 0) "<invalid>" else name;
-        const avg = if (row.count == 0) 0 else row.nanos / row.count;
-        try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
-        try writeJsonString(output, display_name);
-        if (comptime zjs.opcode_profile_build_enabled) {
-            try output.print(", \"count\": {d}, \"nanos\": \"not instrumented\", \"avg_ns\": \"not instrumented\", \"slow\": \"not instrumented\"}}", .{row.count});
-        } else {
-            try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
+        var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
+        var row_count: usize = 0;
+        for (profile.count, 0..) |count, opcode| {
+            if (count == 0) continue;
+            rows[row_count] = .{
+                .opcode = @intCast(opcode),
+                .count = count,
+                .nanos = profile.nanos[opcode],
+            };
+            row_count += 1;
         }
+        std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+
+        try output.print("  \"opcode_profile\": {{\n", .{});
+        try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.writeAll("    \"measured_ns\": \"not instrumented\",\n");
+        } else {
+            try output.print("    \"measured_ns\": {d},\n", .{profile.totalOpcodeNanos()});
+        }
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.writeAll("    \"value_dups\": \"not instrumented\",\n");
+        } else {
+            try output.print("    \"value_dups\": {d},\n", .{profile.value_dup_count});
+        }
+        try output.print("    \"value_frees\": {d},\n", .{profile.value_free_count});
+        try output.print("    \"prop_lookups\": {d},\n", .{profile.prop_lookup_count});
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.writeAll("    \"global_lookups\": \"not instrumented\",\n");
+        } else {
+            try output.print("    \"global_lookups\": {d},\n", .{profile.global_lookup_count});
+        }
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.writeAll("    \"allocations\": \"not instrumented\",\n");
+            try output.writeAll("    \"call_frames\": \"not instrumented\",\n");
+        } else {
+            try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
+            try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
+        }
+        try output.writeAll("    \"opcodes\": [");
+        for (rows[0..row_count], 0..) |row, index| {
+            if (index != 0) try output.writeByte(',');
+            const name = zjs.OpcodeProfile.opcodeName(row.opcode);
+            const display_name = if (name.len == 0) "<invalid>" else name;
+            const avg = if (row.count == 0) 0 else row.nanos / row.count;
+            try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
+            try writeJsonString(output, display_name);
+            if (comptime zjs.opcode_profile_build_enabled) {
+                try output.print(", \"count\": {d}, \"nanos\": \"not instrumented\", \"avg_ns\": \"not instrumented\", \"slow\": \"not instrumented\"}}", .{row.count});
+            } else {
+                try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
+            }
+        }
+        if (row_count != 0) try output.writeByte('\n');
+        try output.writeAll("    ]\n  }");
     }
-    if (row_count != 0) try output.writeByte('\n');
-    try output.writeAll("    ]\n  }");
 }
 
 fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime opcode_profile_dumpers_compiled) {
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.print("  \"ic\": {{\n", .{});
+            try output.writeAll("    \"hit\": \"not instrumented\",\n");
+            try output.writeAll("    \"miss\": \"not instrumented\",\n");
+            try output.writeAll("    \"invalidate\": \"not instrumented\",\n");
+            try output.writeAll("    \"promote_poly\": \"not instrumented\",\n");
+            try output.writeAll("    \"promote_mega\": \"not instrumented\"\n");
+            try output.print("  }},\n", .{});
+            try output.writeAll("  \"ic_hit\": \"not instrumented\",\n");
+            try output.writeAll("  \"ic_miss\": \"not instrumented\",\n");
+            try output.writeAll("  \"ic_invalidate\": \"not instrumented\",\n");
+            try output.writeAll("  \"ic_promote_poly\": \"not instrumented\",\n");
+            try output.writeAll("  \"ic_promote_mega\": \"not instrumented\"");
+            return;
+        }
         try output.print("  \"ic\": {{\n", .{});
-        try output.writeAll("    \"hit\": \"not instrumented\",\n");
-        try output.writeAll("    \"miss\": \"not instrumented\",\n");
-        try output.writeAll("    \"invalidate\": \"not instrumented\",\n");
-        try output.writeAll("    \"promote_poly\": \"not instrumented\",\n");
-        try output.writeAll("    \"promote_mega\": \"not instrumented\"\n");
+        try output.print("    \"hit\": {d},\n", .{profile.totalIcHit()});
+        try output.print("    \"miss\": {d},\n", .{profile.totalIcMiss()});
+        try output.print("    \"invalidate\": {d},\n", .{profile.totalIcInvalidate()});
+        try output.print("    \"promote_poly\": {d},\n", .{profile.totalIcPromotePoly()});
+        try output.print("    \"promote_mega\": {d}\n", .{profile.totalIcPromoteMega()});
         try output.print("  }},\n", .{});
-        try output.writeAll("  \"ic_hit\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_miss\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_invalidate\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_promote_poly\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_promote_mega\": \"not instrumented\"");
-        return;
+        try output.writeAll("  \"ic_hit\": ");
+        try writeJsonU64Array(output, &profile.ic_hit);
+        try output.writeAll(",\n  \"ic_miss\": ");
+        try writeJsonU64Array(output, &profile.ic_miss);
+        try output.writeAll(",\n  \"ic_invalidate\": ");
+        try writeJsonU64Array(output, &profile.ic_invalidate);
+        try output.writeAll(",\n  \"ic_promote_poly\": ");
+        try writeJsonU64Array(output, &profile.ic_promote_poly);
+        try output.writeAll(",\n  \"ic_promote_mega\": ");
+        try writeJsonU64Array(output, &profile.ic_promote_mega);
     }
-    try output.print("  \"ic\": {{\n", .{});
-    try output.print("    \"hit\": {d},\n", .{profile.totalIcHit()});
-    try output.print("    \"miss\": {d},\n", .{profile.totalIcMiss()});
-    try output.print("    \"invalidate\": {d},\n", .{profile.totalIcInvalidate()});
-    try output.print("    \"promote_poly\": {d},\n", .{profile.totalIcPromotePoly()});
-    try output.print("    \"promote_mega\": {d}\n", .{profile.totalIcPromoteMega()});
-    try output.print("  }},\n", .{});
-    try output.writeAll("  \"ic_hit\": ");
-    try writeJsonU64Array(output, &profile.ic_hit);
-    try output.writeAll(",\n  \"ic_miss\": ");
-    try writeJsonU64Array(output, &profile.ic_miss);
-    try output.writeAll(",\n  \"ic_invalidate\": ");
-    try writeJsonU64Array(output, &profile.ic_invalidate);
-    try output.writeAll(",\n  \"ic_promote_poly\": ");
-    try writeJsonU64Array(output, &profile.ic_promote_poly);
-    try output.writeAll(",\n  \"ic_promote_mega\": ");
-    try writeJsonU64Array(output, &profile.ic_promote_mega);
 }
 
 fn writeJsonU64Array(output: *std.Io.Writer, values: *const [zjs.OpcodeProfile.opcode_count]u64) !void {
-    try output.writeByte('[');
-    for (values.*, 0..) |value, index| {
-        if (index != 0) try output.writeByte(',');
-        try output.print("{d}", .{value});
+    if (comptime opcode_profile_dumpers_compiled) {
+        try output.writeByte('[');
+        for (values.*, 0..) |value, index| {
+            if (index != 0) try output.writeByte(',');
+            try output.print("{d}", .{value});
+        }
+        try output.writeByte(']');
     }
-    try output.writeByte(']');
+}
+
+const OpcodeProfileRow = struct {
+    opcode: u8,
+    count: u64,
+    nanos: u64,
+};
+
+fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
+    if (comptime opcode_profile_dumpers_compiled) {
+        ensureOpcodeProfileNames();
+
+        var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
+        var row_count: usize = 0;
+        for (profile.count, 0..) |count, opcode| {
+            if (count == 0) continue;
+            rows[row_count] = .{
+                .opcode = @intCast(opcode),
+                .count = count,
+                .nanos = profile.nanos[opcode],
+            };
+            row_count += 1;
+        }
+
+        std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+
+        try output.print("\nZJS opcode profile\n", .{});
+        try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.print("  measured ns:      not instrumented\n", .{});
+        } else {
+            try output.print("  measured ns:      {d}\n", .{profile.totalOpcodeNanos()});
+        }
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.print("  value dups:       not instrumented\n", .{});
+        } else {
+            try output.print("  value dups:       {d}\n", .{profile.value_dup_count});
+        }
+        try output.print("  value frees:      {d}\n", .{profile.value_free_count});
+        try output.print("  prop lookups:     {d}\n", .{profile.prop_lookup_count});
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.print("  global lookups:   not instrumented\n", .{});
+        } else {
+            try output.print("  global lookups:   {d}\n", .{profile.global_lookup_count});
+        }
+        if (comptime zjs.opcode_profile_build_enabled) {
+            try output.print("  allocations:      not instrumented\n", .{});
+            try output.print("  call frames:      not instrumented\n", .{});
+            try output.print("  ic hits:          not instrumented\n", .{});
+            try output.print("  ic misses:        not instrumented\n", .{});
+            try output.print("  ic invalidations: not instrumented\n", .{});
+            try output.print("  ic promote poly:  not instrumented\n", .{});
+            try output.print("  ic promote mega:  not instrumented\n", .{});
+            try output.print("\nOPCODE                 COUNT          TOTAL_NS           AVG_NS             SLOW\n", .{});
+        } else {
+            try output.print("  allocations:      {d}\n", .{profile.alloc_count});
+            try output.print("  call frames:      {d}\n", .{profile.call_frame_count});
+            try output.print("  ic hits:          {d}\n", .{profile.totalIcHit()});
+            try output.print("  ic misses:        {d}\n", .{profile.totalIcMiss()});
+            try output.print("  ic invalidations: {d}\n", .{profile.totalIcInvalidate()});
+            try output.print("  ic promote poly:  {d}\n", .{profile.totalIcPromotePoly()});
+            try output.print("  ic promote mega:  {d}\n", .{profile.totalIcPromoteMega()});
+            try output.print("\nOPCODE                 COUNT      TOTAL_NS       AVG_NS       SLOW\n", .{});
+        }
+
+        // The default 40-row cap keeps the profile readable. `ZJS_PROFILE_ALL=1`
+        // prints every executed opcode, which is what an opcode-space census
+        // needs: the cold tail is exactly the part the cap hides.
+        const print_all = if (std.c.getenv("ZJS_PROFILE_ALL")) |raw| blk: {
+            const v = std.mem.span(raw);
+            break :blk v.len != 0 and v[0] == '1';
+        } else false;
+        const limit = if (print_all) row_count else @min(row_count, 40);
+        for (rows[0..limit]) |row| {
+            const name = zjs.OpcodeProfile.opcodeName(row.opcode);
+            const display_name = if (name.len == 0) "<invalid>" else name;
+            const avg = if (row.count == 0) 0 else row.nanos / row.count;
+            if (comptime zjs.opcode_profile_build_enabled) {
+                try output.print("{s:<20} {d:>9} {s:>18} {s:>16} {s:>16}\n", .{ display_name, row.count, "not instrumented", "not instrumented", "not instrumented" });
+            } else {
+                try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
+            }
+        }
+
+        // D12: the carrier's residents, one row per sub, named from the
+        // declaration. Aggregating them into the one `using` row above is
+        // exactly what 11.5 clause 3 forbids -- the cold plane's population
+        // is the fact a reclaim decision needs.
+        var sub_total: u64 = 0;
+        for (profile.ext0_sub_count) |c| sub_total +|= c;
+        if (sub_total != 0) {
+            try output.print("\nUSING SUB               COUNT\n", .{});
+            for (profile.ext0_sub_count, 0..) |c, sub| {
+                if (c == 0) continue;
+                const resident = engine.bytecode.opcode.logical.subForm(@intCast(sub));
+                const name = if (resident) |form| @tagName(form) else "<range>";
+                try output.print("{s:<20} {d:>9}  (sub {d})\n", .{ name, c, sub });
+            }
+        }
+
+        // D12's family rollup: a GENERATED aggregation view over the form
+        // counts, never a substitute for per-form rows.
+        var family_counts = std.enums.EnumArray(engine.bytecode.opcode.logical.SemanticFamily, u64).initFill(0);
+        for (profile.count, 0..) |c, id| {
+            if (c == 0 or id >= engine.bytecode.opcode.op.op_count) continue;
+            if (engine.bytecode.opcode.physical.stateOf(@intCast(id)) != .claimed) continue;
+            const form: engine.bytecode.opcode.logical.LogicalOpcode = @enumFromInt(id);
+            family_counts.getPtr(engine.bytecode.opcode.logical.familyOf(form)).* +|= c;
+        }
+        try output.print("\nFAMILY (rollup)         COUNT\n", .{});
+        var fam_it = family_counts.iterator();
+        while (fam_it.next()) |entry| {
+            if (entry.value.* == 0) continue;
+            try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
+        }
+    }
+}
+
+fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {
+    if (comptime opcode_profile_dumpers_compiled) {
+        if (lhs.nanos != rhs.nanos) return lhs.nanos > rhs.nanos;
+        if (lhs.count != rhs.count) return lhs.count > rhs.count;
+        return lhs.opcode < rhs.opcode;
+    }
+    return false;
+}
+
+fn ensureOpcodeProfileNames() void {
+    if (comptime opcode_profile_dumpers_compiled) {
+        const previous = zjs.activateOpcodeProfile(null);
+        _ = zjs.activateOpcodeProfile(previous);
+    }
 }
 
 fn commandPerfFile(command: Command) []const u8 {
@@ -799,12 +945,6 @@ fn writeJsonString(output: *std.Io.Writer, bytes: []const u8) !void {
     }
     try output.writeByte('"');
 }
-
-const OpcodeProfileRow = struct {
-    opcode: u8,
-    count: u64,
-    nanos: u64,
-};
 
 /// Post-run GC counters. Every line here has a maintained write site in the
 /// collector; fields the engine does not instrument are simply absent rather
@@ -1307,114 +1447,6 @@ fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) 
     }, " pauses\n");
 }
 
-fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
-    ensureOpcodeProfileNames();
-
-    var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
-    var row_count: usize = 0;
-    for (profile.count, 0..) |count, opcode| {
-        if (count == 0) continue;
-        rows[row_count] = .{
-            .opcode = @intCast(opcode),
-            .count = count,
-            .nanos = profile.nanos[opcode],
-        };
-        row_count += 1;
-    }
-
-    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
-
-    try output.print("\nZJS opcode profile\n", .{});
-    try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  measured ns:      not instrumented\n", .{});
-    } else {
-        try output.print("  measured ns:      {d}\n", .{profile.totalOpcodeNanos()});
-    }
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  value dups:       not instrumented\n", .{});
-    } else {
-        try output.print("  value dups:       {d}\n", .{profile.value_dup_count});
-    }
-    try output.print("  value frees:      {d}\n", .{profile.value_free_count});
-    try output.print("  prop lookups:     {d}\n", .{profile.prop_lookup_count});
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  global lookups:   not instrumented\n", .{});
-    } else {
-        try output.print("  global lookups:   {d}\n", .{profile.global_lookup_count});
-    }
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  allocations:      not instrumented\n", .{});
-        try output.print("  call frames:      not instrumented\n", .{});
-        try output.print("  ic hits:          not instrumented\n", .{});
-        try output.print("  ic misses:        not instrumented\n", .{});
-        try output.print("  ic invalidations: not instrumented\n", .{});
-        try output.print("  ic promote poly:  not instrumented\n", .{});
-        try output.print("  ic promote mega:  not instrumented\n", .{});
-        try output.print("\nOPCODE                 COUNT          TOTAL_NS           AVG_NS             SLOW\n", .{});
-    } else {
-        try output.print("  allocations:      {d}\n", .{profile.alloc_count});
-        try output.print("  call frames:      {d}\n", .{profile.call_frame_count});
-        try output.print("  ic hits:          {d}\n", .{profile.totalIcHit()});
-        try output.print("  ic misses:        {d}\n", .{profile.totalIcMiss()});
-        try output.print("  ic invalidations: {d}\n", .{profile.totalIcInvalidate()});
-        try output.print("  ic promote poly:  {d}\n", .{profile.totalIcPromotePoly()});
-        try output.print("  ic promote mega:  {d}\n", .{profile.totalIcPromoteMega()});
-        try output.print("\nOPCODE                 COUNT      TOTAL_NS       AVG_NS       SLOW\n", .{});
-    }
-
-    // The default 40-row cap keeps the profile readable. `ZJS_PROFILE_ALL=1`
-    // prints every executed opcode, which is what an opcode-space census
-    // needs: the cold tail is exactly the part the cap hides.
-    const print_all = if (std.c.getenv("ZJS_PROFILE_ALL")) |raw| blk: {
-        const v = std.mem.span(raw);
-        break :blk v.len != 0 and v[0] == '1';
-    } else false;
-    const limit = if (print_all) row_count else @min(row_count, 40);
-    for (rows[0..limit]) |row| {
-        const name = zjs.OpcodeProfile.opcodeName(row.opcode);
-        const display_name = if (name.len == 0) "<invalid>" else name;
-        const avg = if (row.count == 0) 0 else row.nanos / row.count;
-        if (comptime zjs.opcode_profile_build_enabled) {
-            try output.print("{s:<20} {d:>9} {s:>18} {s:>16} {s:>16}\n", .{ display_name, row.count, "not instrumented", "not instrumented", "not instrumented" });
-        } else {
-            try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
-        }
-    }
-
-    // D12: the carrier's residents, one row per sub, named from the
-    // declaration. Aggregating them into the one `using` row above is
-    // exactly what 11.5 clause 3 forbids -- the cold plane's population
-    // is the fact a reclaim decision needs.
-    var sub_total: u64 = 0;
-    for (profile.ext0_sub_count) |c| sub_total +|= c;
-    if (sub_total != 0) {
-        try output.print("\nUSING SUB               COUNT\n", .{});
-        for (profile.ext0_sub_count, 0..) |c, sub| {
-            if (c == 0) continue;
-            const resident = engine.bytecode.opcode.logical.subForm(@intCast(sub));
-            const name = if (resident) |form| @tagName(form) else "<range>";
-            try output.print("{s:<20} {d:>9}  (sub {d})\n", .{ name, c, sub });
-        }
-    }
-
-    // D12's family rollup: a GENERATED aggregation view over the form
-    // counts, never a substitute for per-form rows.
-    var family_counts = std.enums.EnumArray(engine.bytecode.opcode.logical.SemanticFamily, u64).initFill(0);
-    for (profile.count, 0..) |c, id| {
-        if (c == 0 or id >= engine.bytecode.opcode.op.op_count) continue;
-        if (engine.bytecode.opcode.physical.stateOf(@intCast(id)) != .claimed) continue;
-        const form: engine.bytecode.opcode.logical.LogicalOpcode = @enumFromInt(id);
-        family_counts.getPtr(engine.bytecode.opcode.logical.familyOf(form)).* +|= c;
-    }
-    try output.print("\nFAMILY (rollup)         COUNT\n", .{});
-    var fam_it = family_counts.iterator();
-    while (fam_it.next()) |entry| {
-        if (entry.value.* == 0) continue;
-        try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
-    }
-}
-
 extern "c" fn atexit(callback: *const fn () callconv(.c) void) c_int;
 
 fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void {
@@ -1430,17 +1462,6 @@ fn writeV2OracleReportAtExit() callconv(.c) void {
     const text = engine.compiler.formatOracleReport(&buffer);
     if (text.len == 0) return;
     std.debug.print("{s}\n", .{text});
-}
-
-fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {
-    if (lhs.nanos != rhs.nanos) return lhs.nanos > rhs.nanos;
-    if (lhs.count != rhs.count) return lhs.count > rhs.count;
-    return lhs.opcode < rhs.opcode;
-}
-
-fn ensureOpcodeProfileNames() void {
-    const previous = zjs.activateOpcodeProfile(null);
-    _ = zjs.activateOpcodeProfile(previous);
 }
 
 fn takePendingRejectionOrException(runtime: *Runtime) zjs.JSValue {
