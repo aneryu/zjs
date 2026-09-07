@@ -39,7 +39,7 @@ pub noinline fn dispatch(
     catch_target: *?usize,
     func_obj: *core.Object,
     argc: u16,
-    comptime shape: Shape,
+    shape: Shape,
 ) align(32) core.errors.HostError!Outcome {
     const window_head: usize = if (shape == .method) 2 else 1;
     const total: usize = @as(usize, argc) + window_head;
