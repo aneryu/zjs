@@ -94,40 +94,60 @@ inline fn reserve(
     capacity: *usize,
     used: u32,
     need: usize,
-    comptime min_cap: usize,
+    min_cap: usize,
 ) Error!void {
     const required = std.math.add(usize, @as(usize, used), need) catch
         return error.OutOfMemory;
     if (required <= capacity.*) return;
 
-    return reserveSlow(T, mem, slice, capacity, used, required, min_cap);
+    const elem_size = @sizeOf(T);
+    var bytes: []u8 = if (capacity.* == 0)
+        &.{}
+    else
+        @as([*]u8, @ptrCast(slice.ptr))[0 .. std.math.mul(usize, capacity.*, elem_size) catch return error.OutOfMemory];
+    try reserveSlowBytes(
+        mem,
+        &bytes,
+        capacity,
+        used,
+        required,
+        min_cap,
+        elem_size,
+        comptime std.mem.Alignment.of(T),
+    );
+    slice.* = @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..capacity.*];
 }
 
 /// QuickJS keeps the DynBuf capacity check in its inline `dbuf_put*` helpers
 /// and enters an outlined allocator only when the backing must grow.  Keep the
 /// same call shape here: ordinary emission pays a compare, while the uncommon
-/// allocation/copy/free path remains shared and recoverable.
-noinline fn reserveSlow(
-    comptime T: type,
+/// allocation/copy/free path is one type-erased walk (alloc via the already-
+/// linked `allocSlowErased`, not `allocAlignedBytes(trigger=true)`).
+noinline fn reserveSlowBytes(
     mem: *core.memory.MemoryAccount,
-    slice: *[]T,
+    slice_bytes: *[]u8,
     capacity: *usize,
     used: u32,
     required: usize,
-    comptime min_cap: usize,
+    min_cap: usize,
+    elem_size: usize,
+    alignment: std.mem.Alignment,
 ) Error!void {
     std.debug.assert(required > capacity.*);
 
     const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
     const new_capacity = @max(@max(required, doubled), min_cap);
-    const new_backing = mem.alloc(T, new_capacity) catch return error.OutOfMemory;
-    @memcpy(new_backing[0..used], slice.*[0..used]);
+    const new_backing = mem.allocElements(new_capacity, elem_size, alignment) catch
+        return error.OutOfMemory;
+    const used_bytes = std.math.mul(usize, @as(usize, used), elem_size) catch
+        return error.OutOfMemory;
+    if (used_bytes != 0) @memcpy(new_backing[0..used_bytes], slice_bytes.*[0..used_bytes]);
 
-    const old_backing = slice.*;
+    const old_backing = slice_bytes.*;
     const old_capacity = capacity.*;
-    slice.* = new_backing;
+    slice_bytes.* = new_backing;
     capacity.* = new_capacity;
-    if (old_capacity != 0) mem.free(T, old_backing);
+    if (old_capacity != 0) mem.freeAlignedBytes(old_backing, alignment);
 }
 
 pub const Snapshot = struct {

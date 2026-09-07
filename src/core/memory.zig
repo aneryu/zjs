@@ -871,6 +871,33 @@ pub const MemoryAccount = struct {
         return self.allocInternal(T, count, true);
     }
 
+    /// Type-erased non-GC `alloc(T, count)`. Reuses the already-linked
+    /// `allocSlowErased` body (`trigger_gc` is a runtime SlowLayout field),
+    /// so leftover compiler grow copies can share one walk without
+    /// instantiating `allocAlignedBytesSlow(true)`. Free with
+    /// `freeAlignedBytes` using the same alignment.
+    pub fn allocElements(
+        self: *MemoryAccount,
+        count: usize,
+        elem_size: usize,
+        alignment: std.mem.Alignment,
+    ) ![]u8 {
+        if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
+        if (count == 0) return &.{};
+        const payload_bytes = std.math.mul(usize, elem_size, count) catch return error.OutOfMemory;
+        const raw = try self.allocSlowErased(.{
+            .is_gc = false,
+            .payload_bytes = payload_bytes,
+            .element_size = elem_size,
+            .count = count,
+            .alignment = alignment,
+            .standalone_prefix = 0,
+            .kind_tag = 0,
+            .trigger_gc = true,
+        }, false);
+        return raw[0..payload_bytes];
+    }
+
     /// Runtime hot path variant. The owning runtime performs a direct GC
     /// threshold check before entering, avoiding the nullable trigger callback.
     pub inline fn allocNoTrigger(self: *MemoryAccount, comptime T: type, count: usize) ![]T {
@@ -2166,6 +2193,31 @@ pub const MemoryAccount = struct {
         };
     }
 };
+
+test "allocElements matches alloc(T) ledger for non-GC elements" {
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var typed = MemoryAccount.init(std.testing.allocator);
+        defer typed.small_slab.deinit(std.testing.allocator);
+        typed.small_slab_enabled = slab_enabled;
+        var erased = MemoryAccount.init(std.testing.allocator);
+        defer erased.small_slab.deinit(std.testing.allocator);
+        erased.small_slab_enabled = slab_enabled;
+
+        const counts = [_]usize{ 1, 4, 8, 16 };
+        for (counts) |count| {
+            const before_typed = typed.allocated_bytes;
+            const before_erased = erased.allocated_bytes;
+            const typed_items = try typed.alloc(u32, count);
+            const erased_bytes = try erased.allocElements(count, @sizeOf(u32), std.mem.Alignment.of(u32));
+            try std.testing.expectEqual(typed.allocated_bytes - before_typed, erased.allocated_bytes - before_erased);
+            try std.testing.expectEqual(typed_items.len * @sizeOf(u32), erased_bytes.len);
+            typed.free(u32, typed_items);
+            erased.freeAlignedBytes(erased_bytes, std.mem.Alignment.of(u32));
+            try std.testing.expectEqual(before_typed, typed.allocated_bytes);
+            try std.testing.expectEqual(before_erased, erased.allocated_bytes);
+        }
+    }
+}
 
 test "aligned byte allocations charge their slab class" {
     // Pins `allocAlignedBytesInternal`'s slab routing to the account contract.
