@@ -46,6 +46,8 @@ pub const EvalTiming = core.context.EvalTiming;
 pub const DataPropertyOptions = binding_root.DataPropertyOptions;
 
 pub const core = @import("core/root.zig");
+/// Internal type-erased heap. Not part of the public embedder API.
+pub const sort_erased = @import("core/sort_erased.zig");
 pub const parser = @import("parser.zig");
 pub const simple_token = @import("simple_token.zig");
 pub const bytecode = @import("bytecode.zig");
