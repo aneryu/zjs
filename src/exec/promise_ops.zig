@@ -1192,7 +1192,7 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
         resolve,
         core.JSValue.undefinedValue(),
     );
-    try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(5), false);
+    try rt.job_queue.enqueue(jobs_mod.Job.initPromiseReaction(ctx, reaction, core.JSValue.int32(5), false));
 
     const TailJob = struct {
         fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
@@ -1235,7 +1235,7 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
         resolving.resolve,
         resolving.reject,
     );
-    try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(1), false);
+    try rt.job_queue.enqueue(jobs_mod.Job.initPromiseReaction(ctx, reaction, core.JSValue.int32(1), false));
 
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
@@ -1351,7 +1351,7 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
 
     var probe = PromiseJobOomProbe{ .fail = true };
     const then_function = try promiseJobOomProbeFunction(ctx, &probe, "thenableOomProbe");
-    try rt.job_queue.enqueuePromiseThenable(ctx, target.value(), thenable.value(), then_function);
+    try rt.job_queue.enqueue(jobs_mod.Job.initPromiseThenable(ctx, target.value(), thenable.value(), then_function));
 
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);

@@ -586,28 +586,6 @@ pub const Queue = struct {
         return Job.initPromiseReaction(context, reaction, value, rejected);
     }
 
-    pub fn enqueuePromiseReaction(
-        self: *Queue,
-        context: *core.JSContext,
-        reaction: core.JSValue,
-        value: core.JSValue,
-        rejected: bool,
-    ) !void {
-        try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(Job.initPromiseReaction(context, reaction, value, rejected));
-    }
-
-    pub fn enqueuePromiseThenable(
-        self: *Queue,
-        context: *core.JSContext,
-        target: core.JSValue,
-        thenable: core.JSValue,
-        then_function: core.JSValue,
-    ) !void {
-        try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(Job.initPromiseThenable(context, target, thenable, then_function));
-    }
-
     pub fn enqueueDynamicImport(
         self: *Queue,
         context: *core.JSContext,
