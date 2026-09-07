@@ -1087,48 +1087,46 @@ pub const MemoryAccount = struct {
         return @ptrFromInt(obj_addr);
     }
 
-    pub fn free(self: *MemoryAccount, comptime T: type, slice: []T) void {
+    /// Type-erased non-GC `free(T, slice)`. Reuses the already-linked
+    /// `freeAlignedBytes` body so leftover typed free copies share one walk.
+    /// GC kinds keep a specialized path (prefix / slab class / standalone).
+    pub inline fn free(self: *MemoryAccount, comptime T: type, slice: []T) void {
         if (slice.len == 0) return;
-        if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(slice.ptr));
         const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
-        // GC objects are allocated singly (`allocInternal` asserts count == 1),
-        // so their payload size is comptime-known here.
-        if (comptime is_gc) std.debug.assert(slice.len == 1);
+        if (comptime is_gc) {
+            self.freeGc(T, slice);
+            return;
+        }
         // The alloc side validated this product with a checked multiply; qjs
         // `__js_free` (quickjs.c:1595) recomputes nothing on free.
-        const payload_bytes = if (comptime is_gc) @sizeOf(T) else @sizeOf(T) *% slice.len;
-        const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
+        const payload_bytes = @sizeOf(T) *% slice.len;
         const bytes_ptr: [*]u8 = @ptrCast(slice.ptr);
-        if (comptime is_gc) {
-            const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), gcAlignment(T));
-            if (comptime slab_class != null) {
-                if (self.small_slab_enabled) {
-                    std.debug.assert(gcAllocInfoByte(bytes_ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
-                    self.debitAlloc(payload_bytes, comptime slab_class);
-                    self.noteFreeDiagnostics(false);
-                    return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
-                }
+        self.freeAlignedBytes(bytes_ptr[0..payload_bytes], std.mem.Alignment.of(T));
+    }
+
+    fn freeGc(self: *MemoryAccount, comptime T: type, slice: []T) void {
+        if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(slice.ptr));
+        // GC objects are allocated singly (`allocInternal` asserts count == 1),
+        // so their payload size is comptime-known here.
+        std.debug.assert(slice.len == 1);
+        const payload_bytes = @sizeOf(T);
+        const alignment = gcAlignment(T);
+        const bytes_ptr: [*]u8 = @ptrCast(slice.ptr);
+        const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), gcAlignment(T));
+        if (comptime slab_class != null) {
+            if (self.small_slab_enabled) {
+                std.debug.assert(gcAllocInfoByte(bytes_ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
+                self.debitAlloc(payload_bytes, comptime slab_class);
+                self.noteFreeDiagnostics(false);
+                return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
             }
-            const prefix = comptime gcPrefixSize(T);
-            const bytes = prefix + payload_bytes;
-            self.debitAlloc(bytes, null);
-            self.noteFreeDiagnostics(false);
-            const base: [*]u8 = @ptrFromInt(@intFromPtr(slice.ptr) - prefix);
-            return self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
         }
+        const prefix = comptime gcPrefixSize(T);
+        const bytes = prefix + payload_bytes;
+        self.debitAlloc(bytes, null);
         self.noteFreeDiagnostics(false);
-        if (self.small_slab_enabled and SmallObjectSlab.eligibleSize(payload_bytes, alignment)) {
-            // The runtime enables the slab before managed allocations begin;
-            // while enabled, every eligible allocation comes from it. Non-GC
-            // blocks keep the allocator's class byte, so read it back instead
-            // of re-deriving the class (qjs __js_free, quickjs.c:1614).
-            const slab_class = SmallObjectSlab.headerClassIndex(bytes_ptr);
-            std.debug.assert(slab_class == SmallObjectSlab.classIndex(payload_bytes, alignment).?);
-            self.debitAlloc(payload_bytes, slab_class);
-            return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, slab_class);
-        }
-        self.debitAlloc(payload_bytes, null);
-        self.backing_allocator.rawFree(bytes_ptr[0..payload_bytes], alignment, @returnAddress());
+        const base: [*]u8 = @ptrFromInt(@intFromPtr(slice.ptr) - prefix);
+        self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
     }
 
     /// Attempts to resize an existing allocation through the backing allocator's
@@ -1215,7 +1213,7 @@ pub const MemoryAccount = struct {
         return ptr[0..byte_count];
     }
 
-    pub fn freeAlignedBytes(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
+    pub noinline fn freeAlignedBytes(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
         if (bytes.len == 0) return;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(bytes.ptr));
         if (comptime diagnostic_accounting_enabled) {
@@ -2271,6 +2269,36 @@ test "reallocElements matches alloc(T, n+1) ledger for exact-fit append" {
             try std.testing.expectEqual(typed.allocated_bytes - before_typed, erased.allocated_bytes - before_erased);
             try std.testing.expectEqual(typed_items.len, erased_items.len);
             try std.testing.expectEqualSlices(u32, typed_items, erased_items);
+        }
+    }
+}
+
+test "free shares freeAlignedBytes ledger for non-GC elements" {
+    const Sample = extern struct { a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64 };
+    comptime std.debug.assert(@sizeOf(Sample) == 56);
+
+    const counts = [_]usize{ 1, 4, 8, 16 };
+    for ([_]bool{ false, true }) |slab_enabled| {
+        inline for (.{ u8, u32, Sample }) |T| {
+            for (counts) |count| {
+                var typed = MemoryAccount.init(std.testing.allocator);
+                defer typed.small_slab.deinit(std.testing.allocator);
+                typed.small_slab_enabled = slab_enabled;
+                var erased = MemoryAccount.init(std.testing.allocator);
+                defer erased.small_slab.deinit(std.testing.allocator);
+                erased.small_slab_enabled = slab_enabled;
+
+                const typed_items = try typed.alloc(T, count);
+                const erased_items = try erased.alloc(T, count);
+                const before_typed = typed.allocated_bytes;
+                const before_erased = erased.allocated_bytes;
+                typed.free(T, typed_items);
+                const erased_bytes = @as([*]u8, @ptrCast(erased_items.ptr))[0 .. erased_items.len * @sizeOf(T)];
+                erased.freeAlignedBytes(erased_bytes, std.mem.Alignment.of(T));
+                try std.testing.expectEqual(@as(usize, 0), typed.allocated_bytes);
+                try std.testing.expectEqual(@as(usize, 0), erased.allocated_bytes);
+                try std.testing.expectEqual(before_typed, before_erased);
+            }
         }
     }
 }

@@ -3143,7 +3143,6 @@ pub const module = struct {
     };
 
     inline fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
-        const std = @import("std");
         const old = slice.*;
         const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
         const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);
