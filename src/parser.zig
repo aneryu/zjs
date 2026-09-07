@@ -7584,10 +7584,13 @@ pub const parser_core = struct {
     }
 
     /// v2 mirror of `State.emitPushConst`: publish the placeholder instruction
-    /// first, then append the duplicated value and patch its cpool index. This
+    /// first, then append the value and patch its cpool index. This
     /// preserves QuickJS emit_push_const ordering (quickjs.c:23974-24004) and
     /// lets Builder rollback remove the instruction if the cpool grow fails.
-    fn emitterPushConst(s: *State, value: JSValue) Error!void {
+    /// leftover candidate37 still had emitterPushConst / Owned copies
+    /// (568 / 568, extra 568). The owned append is the same store today
+    /// (`appendCpool` / `Pool.append`); keep one outlined walk.
+    noinline fn emitterPushConst(s: *State, value: JSValue) Error!void {
         const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
@@ -7602,18 +7605,9 @@ pub const parser_core = struct {
 
     /// Owned-value variant of emitterPushConst. Ownership transfers only after
     /// the cpool append succeeds; every earlier failure rolls the Builder back
-    /// to its complete pre-emission snapshot.
-    fn emitterPushConstOwned(s: *State, value: JSValue) Error!void {
-        const v2b = s.activeBuilder();
-        const snapshot = v2b.snapshot();
-        errdefer v2b.rollback(snapshot);
-        try emitterOpU32(s, opcode.op.push_const, 0);
-        const opcode_pos: usize = @intCast(v2b.last_opcode_pos);
-        const idx = if (s.emit_to_function_def or s.top_level_functions_as_children)
-            try s.curFunc().appendCpoolOwned(value)
-        else
-            try s.function.constants.appendOwned(value);
-        std.mem.writeInt(u32, v2b.code[opcode_pos + 1 ..][0..4], idx, .little);
+    /// to its complete pre-emission snapshot. Same walk as `emitterPushConst`.
+    inline fn emitterPushConstOwned(s: *State, value: JSValue) Error!void {
+        return emitterPushConst(s, value);
     }
 
     /// v2 mirror of `State.emitOpU16NoSource`.

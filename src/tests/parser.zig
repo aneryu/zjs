@@ -6803,6 +6803,23 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
     );
 }
 
+test "emitterPushConst and Owned share the cpool patch walk" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var function = try parseRawExprWithRuntime(&env, "3.5");
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.push_const)) > 0);
+    }
+    {
+        var function = try parseRawExprWithRuntime(&env, "/a+/gi");
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.push_const)) >= 2);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.regexp)) > 0);
+    }
+}
+
 test "emitterOp NoSource and At share the plain opcode walk" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
