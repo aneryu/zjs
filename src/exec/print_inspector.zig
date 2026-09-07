@@ -50,10 +50,22 @@ const State = struct {
     }
 };
 
+fn makeState(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer) State {
+    return .{ .rt = ctx.runtime, .ctx = ctx, .global = global, .output = output, .writer = writer };
+}
+
 /// Entry point for one non-string `print` argument (`JS_PrintValue`,
 /// quickjs.c:14440, with the default options).
 pub fn printValue(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer, value: core.JSValue) Error!void {
-    var state = State{ .rt = ctx.runtime, .ctx = ctx, .global = global, .output = output, .writer = writer };
+    var state = makeState(ctx, global, output, writer);
+    try printValueRec(&state, value);
+}
+
+/// One `print` / `console.log` argument (`js_print`, quickjs-libc.c:4063):
+/// a top-level string is written raw; every other value is `JS_PrintValue`.
+pub fn printHostArgument(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer, value: core.JSValue) Error!void {
+    var state = makeState(ctx, global, output, writer);
+    if (value.isString()) return printRawString(&state, value);
     try printValueRec(&state, value);
 }
 

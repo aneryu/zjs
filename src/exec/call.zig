@@ -25,12 +25,10 @@ const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const print_inspector = @import("print_inspector.zig");
 const object_ops = @import("object_ops.zig");
-const dtoa = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const exceptions = @import("exceptions.zig");
 const HostError = exceptions.HostError;
-const PrintError = HostError || std.Io.Writer.Error;
 
 // Construct ref for the String wrapper boxing path (`primitiveWrapper`). The
 // String constructor record's construct branch forwards `args`/`new_target` to
@@ -234,64 +232,6 @@ pub fn callValueWithThisGlobalsAndGlobal(
         };
     }
     return callNativeBuiltin(ctx, output, global, globals, this_value, object, args);
-}
-
-pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSValue) PrintError!void {
-    if (value.isSymbol()) {
-        var buffer = std.ArrayList(u8).empty;
-        defer buffer.deinit(rt.memory.allocator);
-        try value_ops.appendValueString(rt, &buffer, value);
-        try writer.writeAll(buffer.items);
-    } else if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
-        try writer.writeAll(dtoa.formatInt32(&int_buf, int_value));
-    } else if (value_ops.numberValue(value)) |float_value| {
-        if (std.math.isNan(float_value)) {
-            try writer.writeAll("NaN");
-        } else if (std.math.isPositiveInf(float_value)) {
-            try writer.writeAll("Infinity");
-        } else if (std.math.isNegativeInf(float_value)) {
-            try writer.writeAll("-Infinity");
-        } else if (std.math.isNegativeZero(float_value)) {
-            try writer.writeAll("0");
-        } else {
-            var float_buf: [64]u8 = undefined;
-            try writer.writeAll(value_ops.formatFiniteNumberAssumeCapacity(&float_buf, float_value));
-        }
-    } else if (value.asShortBigInt()) |bigint_value| {
-        var bigint_buf: [32]u8 = undefined;
-        try writer.writeAll(dtoa.formatInt64(&bigint_buf, bigint_value));
-    } else if (value.isBigInt()) {
-        var big = try value_ops.cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const text = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(text);
-        try writer.writeAll(text);
-    } else if (value.asBool()) |bool_value| {
-        try writer.writeAll(if (bool_value) "true" else "false");
-    } else if (value.isUndefined()) {
-        try writer.writeAll("undefined");
-    } else if (value.isNull()) {
-        try writer.writeAll("null");
-    } else if (value.isString()) {
-        try printString(rt, writer, value);
-    } else if (value.isObject()) {
-        const header = value.refHeader() orelse return writer.writeAll("[object Object]");
-        const object_value = core.Object.fromHeader(header);
-        if (isFunctionClass(object_value.class_id)) {
-            try printNativeFunction(rt, writer, object_value);
-        } else if (object_value.class_id == core.class.ids.array_buffer) {
-            try writer.writeAll("[object ArrayBuffer]");
-        } else if (object_value.class_id == core.class.ids.promise) {
-            try writer.writeAll("[object Promise]");
-        } else if (object_value.isArray()) {
-            try printArray(rt, writer, object_value);
-        } else {
-            try writer.writeAll("[object Object]");
-        }
-    } else {
-        try writer.writeAll("[object Object]");
-    }
 }
 
 // Engine-internal host callables dispatched by id. Host/embedder native
@@ -2203,7 +2143,6 @@ fn hostOutputValues(
     output: ?*std.Io.Writer,
     values: []const core.JSValue,
 ) HostError!core.JSValue {
-    const rt = ctx.runtime;
     if (output) |writer| {
         var i: usize = 0;
         while (i < values.len) : (i += 1) {
@@ -2211,19 +2150,11 @@ fn hostOutputValues(
                 return exception_ops.throwHostError(ctx, global, err);
             // qjs js_print (quickjs-libc.c:4063): a string argument is
             // written raw; everything else is the JS_PrintValue inspector
-            // dump (`{ a: 1 }`, `[Function f]`, `Error: msg` + stack), see
-            // print_inspector.zig.
-            if (values[i].isString()) {
-                printValue(rt, writer, values[i]) catch |err| switch (err) {
-                    error.WriteFailed => return exception_ops.throwHostError(ctx, global, error.WriteFailed),
-                    else => |other| return other,
-                };
-            } else {
-                print_inspector.printValue(ctx, global, output, writer, values[i]) catch |err| switch (err) {
-                    error.WriteFailed => return exception_ops.throwHostError(ctx, global, error.WriteFailed),
-                    error.OutOfMemory => return error.OutOfMemory,
-                };
-            }
+            // dump (`{ a: 1 }`, `[Function f]`, `Error: msg` + stack).
+            print_inspector.printHostArgument(ctx, global, output, writer, values[i]) catch |err| switch (err) {
+                error.WriteFailed => return exception_ops.throwHostError(ctx, global, error.WriteFailed),
+                error.OutOfMemory => return error.OutOfMemory,
+            };
         }
         writer.writeByte('\n') catch |err|
             return exception_ops.throwHostError(ctx, global, err);
@@ -2492,47 +2423,6 @@ pub fn errorNameMatchesConstructor(err: anytype, constructor_name: []const u8) b
         (std.mem.eql(u8, err_name, "ReferenceError") and std.mem.eql(u8, constructor_name, "ReferenceError"));
 }
 
-fn printArray(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) PrintError!void {
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try writer.writeByte(',');
-        const value = try object.getProperty(core.atom.atomFromUInt32(index));
-        try printValue(rt, writer, value);
-    }
-}
-
-fn printString(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return writer.writeAll("[string]");
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        // latin1 is ISO-8859-1 (each byte is a U+0000..U+00FF code point), so a
-        // byte 0x80..0xFF must be UTF-8-encoded (2 bytes), not written raw —
-        // otherwise `console.log(String.fromCharCode(0xC9))` emits an invalid
-        // byte instead of `É`. ASCII runs are written in bulk.
-        .latin1 => |bytes| {
-            var start: usize = 0;
-            var i: usize = 0;
-            while (i < bytes.len) : (i += 1) {
-                const byte = bytes[i];
-                if (byte >= 0x80) {
-                    if (i > start) try writer.writeAll(bytes[start..i]);
-                    try writer.writeAll(&[_]u8{ 0xc0 | (byte >> 6), 0x80 | (byte & 0x3f) });
-                    start = i + 1;
-                }
-            }
-            if (bytes.len > start) try writer.writeAll(bytes[start..]);
-        },
-        .utf16 => |units| {
-            var it = std.unicode.Utf16LeIterator.init(units);
-            while (it.nextCodepoint() catch null) |codepoint| {
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch continue;
-                try writer.writeAll(utf8_buf[0..len]);
-            }
-        },
-    }
-}
-
 fn isFunctionClass(class_id: core.ClassId) bool {
     return class_id == core.class.ids.c_function or
         core.class.isBytecodeFunctionClass(class_id) or
@@ -2565,20 +2455,6 @@ test "four-class bytecode callable consumers accept every class" {
         const source = try functionToStringValue(rt, function_value);
         try std.testing.expect(source.isString());
     }
-}
-
-fn printNativeFunction(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) !void {
-    if (object.functionSource()) |source| {
-        try printString(rt, writer, source);
-        return;
-    }
-
-    const name_key = core.atom.ids.name;
-    const name_value = try object.getProperty(name_key);
-
-    try writer.print("function ", .{});
-    if (name_value.isString()) try printString(rt, writer, name_value);
-    try writer.print("() {{\n    [native code]\n}}", .{});
 }
 
 pub fn evalGlobalScriptSource(

@@ -22179,3 +22179,11 @@ test "fulfilled await does not replay a resumed body after allocation failure" {
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }
+
+test "print writes top-level strings raw including latin1 high bytes" {
+    try helpers.expectPrints(
+        \\print("ascii", String.fromCharCode(0xC9), { s: String.fromCharCode(0xC9) });
+    ,
+        "ascii É { s: \"É\" }\n",
+    );
+}
