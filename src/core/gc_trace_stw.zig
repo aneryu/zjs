@@ -22,6 +22,7 @@ const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
 const profile = @import("profile.zig");
 const BlockHeapMod = @import("gc_block_heap.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const runtime_mod = @import("runtime.zig");
 const property = @import("property.zig");
 const shape = @import("shape.zig");
@@ -647,7 +648,13 @@ inline fn censusEnd(started: u64) void {
 
 fn requireInvariant(result: anyerror!void, audit: []const u8, panic_message: []const u8) void {
     result catch |err| {
-        std.debug.print("gc: {s} AUDIT: {s}\n", .{ audit, @errorName(err) });
+        gc_audit_print.print(&.{
+            .{ .text = "gc: " },
+            .{ .text = audit },
+            .{ .text = " AUDIT: " },
+            .{ .text = @errorName(err) },
+            .{ .text = "\n" },
+        });
         @panic(panic_message);
     };
 }
@@ -660,10 +667,13 @@ fn verifyCollectorInvariants(
     const stale = rt.gc.address_registry.auditArenas();
     const missing = auditLiveObjectsResolve(rt);
     if (stale != 0 or missing != 0) {
-        std.debug.print(
-            "gc: ARENA AUDIT: {d} free blocks read live, {d} live objects unresolvable\n",
-            .{ stale, missing },
-        );
+        gc_audit_print.print(&.{
+            .{ .text = "gc: ARENA AUDIT: " },
+            .{ .dec = stale },
+            .{ .text = " free blocks read live, " },
+            .{ .dec = missing },
+            .{ .text = " live objects unresolvable\n" },
+        });
         @panic("arena invariant violated");
     }
     requireInvariant(rt.gc.address_registry.verifyIndex(verify_scan_cache), "ADDRESS INDEX", "address index invariant violated");
@@ -1603,10 +1613,15 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
         // whole-heap `AllocCountMismatch`.
         if (gc.invariantChecksEnabled()) {
             BlockHeapMod.Heap.verifyBlockAllocCount(block) catch |err| {
-                std.debug.print(
-                    "gc: DOOMED RECLAIM AUDIT: {s} block=0x{x} allocated_count={d}\n",
-                    .{ @errorName(err), @intFromPtr(block), block.allocated_count },
-                );
+                gc_audit_print.print(&.{
+                    .{ .text = "gc: DOOMED RECLAIM AUDIT: " },
+                    .{ .text = @errorName(err) },
+                    .{ .text = " block=0x" },
+                    .{ .hex = @intFromPtr(block) },
+                    .{ .text = " allocated_count=" },
+                    .{ .dec = block.allocated_count },
+                    .{ .text = "\n" },
+                });
                 @panic("the doomed reclaim left a block's alloc bitmap and count disagreeing");
             };
         }

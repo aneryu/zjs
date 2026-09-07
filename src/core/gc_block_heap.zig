@@ -16,6 +16,7 @@ const gc_representation = @import("gc_representation_constants.zig");
 const gc = @import("gc.zig");
 const carrier = @import("gc_carrier.zig");
 const space = @import("gc_space.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 
 const block_generation_enabled = carrier.block_generation_enabled;
 const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
@@ -2503,10 +2504,15 @@ pub const Heap = struct {
                 if (!hot_unprepared and !bitmap_canonical and
                     block.free_list >= block.cell_count and block.free_list != free_nil)
                 {
-                    std.debug.print(
-                        "gc: BLOCK HEAP AUDIT free head out of range block=0x{x} head={d} cells={d}\n",
-                        .{ @intFromPtr(block), block.free_list, block.cell_count },
-                    );
+                    gc_audit_print.print(&.{
+                        .{ .text = "gc: BLOCK HEAP AUDIT free head out of range block=0x" },
+                        .{ .hex = @intFromPtr(block) },
+                        .{ .text = " head=" },
+                        .{ .dec = block.free_list },
+                        .{ .text = " cells=" },
+                        .{ .dec = block.cell_count },
+                        .{ .text = "\n" },
+                    });
                     return error.FreeChainCorrupt;
                 }
                 if (hot_unprepared or bitmap_canonical) {
@@ -2573,20 +2579,38 @@ pub const Heap = struct {
                     while (link != free_nil) {
                         if (link >= block.cell_count) return error.FreeChainCorrupt;
                         if (testBitPlain(block.bitmaps().alloc, link)) {
-                            std.debug.print(
-                                "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x{x} link={d} walked={d}\n",
-                                .{ @intFromPtr(block), link, walked },
-                            );
+                            gc_audit_print.print(&.{
+                                .{ .text = "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x" },
+                                .{ .hex = @intFromPtr(block) },
+                                .{ .text = " link=" },
+                                .{ .dec = link },
+                                .{ .text = " walked=" },
+                                .{ .dec = walked },
+                                .{ .text = "\n" },
+                            });
                             return error.FreeChainCorrupt;
                         }
                         walked += 1;
                         if (walked > block.cell_count) return error.FreeChainCorrupt; // cycle
                         const raw = @as(*const u32, @ptrCast(@alignCast(block.cellPtr(link)))).*;
                         if (raw & ~free_link_mask != free_poison) {
-                            std.debug.print(
-                                "gc: BLOCK HEAP AUDIT free poison mismatch block=0x{x} link={d} raw=0x{x} walked={d} head={d} bump={d} allocated={d}\n",
-                                .{ @intFromPtr(block), link, raw, walked, block.free_list, block.bump, block.allocated_count },
-                            );
+                            gc_audit_print.print(&.{
+                                .{ .text = "gc: BLOCK HEAP AUDIT free poison mismatch block=0x" },
+                                .{ .hex = @intFromPtr(block) },
+                                .{ .text = " link=" },
+                                .{ .dec = link },
+                                .{ .text = " raw=0x" },
+                                .{ .hex = raw },
+                                .{ .text = " walked=" },
+                                .{ .dec = walked },
+                                .{ .text = " head=" },
+                                .{ .dec = block.free_list },
+                                .{ .text = " bump=" },
+                                .{ .dec = block.bump },
+                                .{ .text = " allocated=" },
+                                .{ .dec = block.allocated_count },
+                                .{ .text = "\n" },
+                            });
                             return error.FreeCellPoisonMismatch;
                         }
                         link = raw & free_link_mask;
@@ -2594,10 +2618,21 @@ pub const Heap = struct {
                     // Completeness, not just validity: every cell handed out
                     // by the bump pointer and since freed is reachable.
                     if (walked != block.bump - block.allocated_count) {
-                        std.debug.print(
-                            "gc: BLOCK HEAP AUDIT incomplete free chain block=0x{x} walked={d} expected={d} head={d} bump={d} allocated={d}\n",
-                            .{ @intFromPtr(block), walked, block.bump - block.allocated_count, block.free_list, block.bump, block.allocated_count },
-                        );
+                        gc_audit_print.print(&.{
+                            .{ .text = "gc: BLOCK HEAP AUDIT incomplete free chain block=0x" },
+                            .{ .hex = @intFromPtr(block) },
+                            .{ .text = " walked=" },
+                            .{ .dec = walked },
+                            .{ .text = " expected=" },
+                            .{ .dec = block.bump - block.allocated_count },
+                            .{ .text = " head=" },
+                            .{ .dec = block.free_list },
+                            .{ .text = " bump=" },
+                            .{ .dec = block.bump },
+                            .{ .text = " allocated=" },
+                            .{ .dec = block.allocated_count },
+                            .{ .text = "\n" },
+                        });
                         return error.FreeChainCorrupt;
                     }
                 }

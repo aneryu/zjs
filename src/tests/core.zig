@@ -18797,3 +18797,178 @@ test "sort_erased heap matches std.sort.heap" {
     sort_erased.heap(Sample, &erased_samples, {}, lessThan);
     try std.testing.expectEqualSlices(Sample, &std_samples, &erased_samples);
 }
+
+fn expectAuditPrintMatchesFmt(
+    comptime fmt: []const u8,
+    args: anytype,
+    parts: []const @import("../core/gc_audit_print.zig").Part,
+) !void {
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, fmt, args);
+    var actual_buf: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&actual_buf);
+    try @import("../core/gc_audit_print.zig").write(&writer, parts);
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "gc_audit_print leftover formats match debug.print digits" {
+    const gc_audit_print = @import("../core/gc_audit_print.zig");
+
+    try expectAuditPrintMatchesFmt(
+        "gc: {s} AUDIT: {s}\n",
+        .{ "ADDRESS INDEX", "OutOfMemory" },
+        &.{
+            .{ .text = "gc: " },
+            .{ .text = "ADDRESS INDEX" },
+            .{ .text = " AUDIT: " },
+            .{ .text = "OutOfMemory" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: ARENA AUDIT: {d} free blocks read live, {d} live objects unresolvable\n",
+        .{ @as(usize, 3), @as(usize, 11) },
+        &.{
+            .{ .text = "gc: ARENA AUDIT: " },
+            .{ .dec = 3 },
+            .{ .text = " free blocks read live, " },
+            .{ .dec = 11 },
+            .{ .text = " live objects unresolvable\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: DOOMED RECLAIM AUDIT: {s} block=0x{x} allocated_count={d}\n",
+        .{ "AllocCountMismatch", @as(usize, 0x7fabc0), @as(u32, 17) },
+        &.{
+            .{ .text = "gc: DOOMED RECLAIM AUDIT: " },
+            .{ .text = "AllocCountMismatch" },
+            .{ .text = " block=0x" },
+            .{ .hex = 0x7fabc0 },
+            .{ .text = " allocated_count=" },
+            .{ .dec = 17 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT free head out of range block=0x{x} head={d} cells={d}\n",
+        .{ @as(usize, 0x1000), @as(u32, 64), @as(u32, 32) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT free head out of range block=0x" },
+            .{ .hex = 0x1000 },
+            .{ .text = " head=" },
+            .{ .dec = 64 },
+            .{ .text = " cells=" },
+            .{ .dec = 32 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x{x} link={d} walked={d}\n",
+        .{ @as(usize, 0x20), @as(u32, 7), @as(u32, 4) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x" },
+            .{ .hex = 0x20 },
+            .{ .text = " link=" },
+            .{ .dec = 7 },
+            .{ .text = " walked=" },
+            .{ .dec = 4 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT free poison mismatch block=0x{x} link={d} raw=0x{x} walked={d} head={d} bump={d} allocated={d}\n",
+        .{ @as(usize, 0xabcdef), @as(u32, 9), @as(u32, 0xdead), @as(u32, 2), @as(u32, 1), @as(u32, 8), @as(u32, 3) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT free poison mismatch block=0x" },
+            .{ .hex = 0xabcdef },
+            .{ .text = " link=" },
+            .{ .dec = 9 },
+            .{ .text = " raw=0x" },
+            .{ .hex = 0xdead },
+            .{ .text = " walked=" },
+            .{ .dec = 2 },
+            .{ .text = " head=" },
+            .{ .dec = 1 },
+            .{ .text = " bump=" },
+            .{ .dec = 8 },
+            .{ .text = " allocated=" },
+            .{ .dec = 3 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT incomplete free chain block=0x{x} walked={d} expected={d} head={d} bump={d} allocated={d}\n",
+        .{ @as(usize, 0xf0), @as(u32, 5), @as(u32, 6), @as(u32, 0), @as(u32, 9), @as(u32, 3) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT incomplete free chain block=0x" },
+            .{ .hex = 0xf0 },
+            .{ .text = " walked=" },
+            .{ .dec = 5 },
+            .{ .text = " expected=" },
+            .{ .dec = 6 },
+            .{ .text = " head=" },
+            .{ .dec = 0 },
+            .{ .text = " bump=" },
+            .{ .dec = 9 },
+            .{ .text = " allocated=" },
+            .{ .dec = 3 },
+            .{ .text = "\n" },
+        },
+    );
+    _ = gc_audit_print;
+}
+
+test "gc_audit_print handles full unsigned range and writer errors" {
+    const gc_audit_print = @import("../core/gc_audit_print.zig");
+    const max_u64 = std.math.maxInt(u64);
+    try expectAuditPrintMatchesFmt(
+        "zero {d} hex {x} max {d} hexmax {x}\n",
+        .{ @as(u64, 0), @as(u64, 0), max_u64, max_u64 },
+        &.{
+            .{ .text = "zero " },
+            .{ .dec = 0 },
+            .{ .text = " hex " },
+            .{ .hex = 0 },
+            .{ .text = " max " },
+            .{ .dec = max_u64 },
+            .{ .text = " hexmax " },
+            .{ .hex = max_u64 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "{d} {d} {d} {x} {x} {x}",
+        .{ @as(u64, 1), @as(u64, 9), @as(u64, 10), @as(u64, 0xa), @as(u64, 0xff), @as(u64, 0x1000) },
+        &.{
+            .{ .dec = 1 },
+            .{ .text = " " },
+            .{ .dec = 9 },
+            .{ .text = " " },
+            .{ .dec = 10 },
+            .{ .text = " " },
+            .{ .hex = 0xa },
+            .{ .text = " " },
+            .{ .hex = 0xff },
+            .{ .text = " " },
+            .{ .hex = 0x1000 },
+        },
+    );
+
+    var buffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(buffer[0..1]);
+    try std.testing.expectError(error.WriteFailed, gc_audit_print.write(&writer, &.{
+        .{ .text = "gc: " },
+        .{ .dec = 12 },
+    }));
+    writer = std.Io.Writer.fixed(buffer[0..5]);
+    try std.testing.expectError(error.WriteFailed, gc_audit_print.write(&writer, &.{
+        .{ .text = "gc: " },
+        .{ .dec = 12 },
+        .{ .text = " more" },
+    }));
+    writer = std.Io.Writer.fixed(buffer[0..8]);
+    try std.testing.expectError(error.WriteFailed, gc_audit_print.write(&writer, &.{
+        .{ .text = "prefix " },
+        .{ .dec = max_u64 },
+    }));
+}
