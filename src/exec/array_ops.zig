@@ -1857,7 +1857,7 @@ pub fn arrayReduceRightSparseLarge(
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
         if (index >= length) continue;
-        try indexed.append(ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
+        try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
     std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
@@ -2182,7 +2182,7 @@ pub fn arrayLastIndexSparseLarge(
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
         if (index >= start_exclusive or index >= length) continue;
-        try indexed.append(ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
+        try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
     std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {

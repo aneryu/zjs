@@ -2069,7 +2069,7 @@ fn appendPendingModuleEvalPostorder(
     const path = runtime.atoms.name(module_name) orelse return error.InvalidAtom;
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
-    try postorder.append(allocator, owned_path);
+    try array_list_erased.append(postorder, allocator, owned_path);
 }
 
 fn rebuildPendingModuleEvalPostorder(
@@ -2183,7 +2183,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
     const owned_path = try allocator.dupe(u8, path);
     var seen_owns_path = false;
     errdefer if (!seen_owns_path) allocator.free(owned_path);
-    try seen.append(allocator, owned_path);
+    try array_list_erased.append(seen, allocator, owned_path);
     seen_owns_path = true;
 
     const module_name = try runtime.internAtom(path);
@@ -2334,7 +2334,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
 
     const order_path = try allocator.dupe(u8, path);
     errdefer allocator.free(order_path);
-    try postorder.append(allocator, order_path);
+    try array_list_erased.append(postorder, allocator, order_path);
 }
 
 fn wrapSourceByKind(

@@ -15,6 +15,7 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const core = @import("../core/root.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const exception_ops = @import("exception_ops.zig");
 const module_auto_init = @import("../core/module_auto_init.zig");
 const property_ops = @import("property_ops.zig");
@@ -1125,7 +1126,7 @@ pub fn throwCouldNotLoadModule(ctx: *core.JSContext, filename: []const u8) !void
 fn appendTrackedPath(allocator: std.mem.Allocator, paths: *std.ArrayList([]const u8), path: []const u8) !void {
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
-    try paths.append(allocator, owned_path);
+    try array_list_erased.append(paths, allocator, owned_path);
 }
 
 fn syntheticKindForRequestIndex(

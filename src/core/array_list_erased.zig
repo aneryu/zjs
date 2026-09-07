@@ -3,8 +3,8 @@
 //! Leftover outlined `array_list.Aligned(T)` copies share one `addOneErased`
 //! grow and one `toOwnedSliceErased` shrink-to-fit walk. Both use `remap` /
 //! `rawAlloc` / `rawFree` with the element's alignment — not `alloc(u8)` and
-//! not GC `TraceHeader` lists. `u8` / `[]const u8` / `u64` append sites and
-//! `u8` `toOwnedSlice` sites stay on std.
+//! not GC `TraceHeader` lists. `u8` / `u64` append sites and `u8`
+//! `toOwnedSlice` sites stay on std (`u64` includes GC pause samples).
 
 const std = @import("std");
 

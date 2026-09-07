@@ -705,7 +705,7 @@ fn JsonUnitParser(comptime T: type) type {
                 // later failure is covered by the `elements` errdefer.
                 if (child_slot) |slot| {
                     pending_frame.pending = slot;
-                    elements.append(self.rt.memory.allocator, slot.*) catch |err| {
+                    array_list_erased.append(&elements, self.rt.memory.allocator, slot.*) catch |err| {
                         pending_frame.pending = null;
                         slot.deinit(self.rt);
                         return err;
