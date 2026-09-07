@@ -2502,8 +2502,8 @@ var reentrant_mapped_arguments_key: core.atom.Atom = core.atom.null_atom;
 var reentrant_mapped_arguments_calls: usize = 0;
 var reentrant_cached_iterator_next_target: ?*core.Object = null;
 var reentrant_cached_iterator_next_calls: usize = 0;
-var reentrant_exception_slot_target: ?*core.exception.ExceptionSlot = null;
-var reentrant_exception_slot_calls: usize = 0;
+var reentrant_exception_ctx_target: ?*core.JSContext = null;
+var reentrant_exception_ctx_calls: usize = 0;
 var reentrant_array_iterator_target: ?*core.Object = null;
 var reentrant_array_iterator_calls: usize = 0;
 
@@ -2969,14 +2969,13 @@ fn reentrantCachedIteratorNextFinalizer(runtime: *anyopaque, _: *anyopaque, payl
     object.clearCachedIteratorNext(rt);
 }
 
-fn reentrantExceptionSlotFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
+fn reentrantExceptionClearFinalizer(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
     payload.* = null;
-    if (reentrant_exception_slot_calls != 0) return;
-    reentrant_exception_slot_calls += 1;
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
-    const slot = reentrant_exception_slot_target orelse return;
-    slot.clear(rt);
+    if (reentrant_exception_ctx_calls != 0) return;
+    reentrant_exception_ctx_calls += 1;
+    const ctx = reentrant_exception_ctx_target orelse return;
+    ctx.clearException();
 }
 
 fn reentrantArrayIteratorFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
@@ -4106,36 +4105,39 @@ test "cached iterator next clear publishes null before synchronous finalizer ree
     try std.testing.expect(object.cachedIteratorNext(rt) == null);
 }
 
-test "exception slot clear publishes empty state before synchronous finalizer reentry" {
+test "JSContext.clearException publishes empty state before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
-        .class_name = "ReentrantExceptionSlotClear",
-        .payload_finalizer = reentrantExceptionSlotFinalizer,
+        .class_name = "ReentrantExceptionClear",
+        .payload_finalizer = reentrantExceptionClearFinalizer,
     });
 
     const value = try core.Object.create(rt, reentrant_id, null);
-    var slot = core.exception.ExceptionSlot{ .value = value.value() };
+    _ = ctx.throwValue(value.value());
 
     payload_finalizer_calls = 0;
-    reentrant_exception_slot_target = &slot;
-    reentrant_exception_slot_calls = 0;
+    reentrant_exception_ctx_target = ctx;
+    reentrant_exception_ctx_calls = 0;
     defer {
-        reentrant_exception_slot_target = null;
-        reentrant_exception_slot_calls = 0;
+        reentrant_exception_ctx_target = null;
+        reentrant_exception_ctx_calls = 0;
     }
 
-    // The slot held the only reference; nothing the test reads afterwards is a
-    // heap object, so the collection needs no root frame here.
-    slot.clear(rt);
+    // current_exception held the only heap reference. After clearException the
+    // collection needs no extra root frame; the context itself stays alive.
+    ctx.clearException();
     helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 1), reentrant_exception_slot_calls);
+    try std.testing.expectEqual(@as(usize, 1), reentrant_exception_ctx_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expect(!slot.hasException());
+    try std.testing.expect(!ctx.hasException());
 }
 
 test "array iterator target clear publishes null before synchronous finalizer reentry" {

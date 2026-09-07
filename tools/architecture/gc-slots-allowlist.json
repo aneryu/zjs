@@ -202,14 +202,6 @@
       "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
     },
     {
-      "file": "src/core/exception.zig",
-      "struct": "ExceptionSlot",
-      "field": "value",
-      "type": "JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
       "file": "src/core/generator_state.zig",
       "struct": "AsyncGeneratorRequest",
       "field": "promise",

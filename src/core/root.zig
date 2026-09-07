@@ -48,7 +48,6 @@ pub const error_names = @import("error_names.zig");
 pub const errors = @import("errors.zig");
 pub const runtime = @import("runtime.zig");
 pub const context = @import("context.zig");
-pub const exception = @import("exception.zig");
 pub const memory = @import("memory.zig");
 pub const profile = @import("profile.zig");
 pub const gc_address_registry = @import("gc_address_registry.zig");
