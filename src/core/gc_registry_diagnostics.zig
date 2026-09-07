@@ -504,19 +504,28 @@ fn verifyPublishedHeaderRepresentation(
     const meta = header.metaConst();
     const kind = expected_kind orelse meta.flags.kind;
     verifyMetadataSemantics(meta, kind, .registry_published) catch |err| {
-        std.debug.print(
-            "gc: REPRESENTATION HEADER population={s} header=0x{x} kind={s} size_class={d} alloc_info=0x{x:0>2} flags=0x{x:0>2} lifetime=0x{x:0>8} error={s}\n",
-            .{
-                if (expected_kind == null) "live" else "doomed",
-                @intFromPtr(header),
-                @tagName(kind),
-                meta.size_class,
-                @as(u8, @bitCast(meta.alloc_info)),
-                @as(u8, @bitCast(meta.flags)),
-                @as(u32, @bitCast(meta.lifetime)),
-                @errorName(err),
-            },
-        );
+        var alloc_info_buf: [16]u8 = undefined;
+        var flags_buf: [16]u8 = undefined;
+        var lifetime_buf: [16]u8 = undefined;
+        gc_audit_print.print(&.{
+            .{ .text = "gc: REPRESENTATION HEADER population=" },
+            .{ .text = if (expected_kind == null) "live" else "doomed" },
+            .{ .text = " header=0x" },
+            .{ .hex = @intFromPtr(header) },
+            .{ .text = " kind=" },
+            .{ .text = @tagName(kind) },
+            .{ .text = " size_class=" },
+            .{ .dec = meta.size_class },
+            .{ .text = " alloc_info=0x" },
+            .{ .text = gc_audit_print.hexPad(@as(u8, @bitCast(meta.alloc_info)), 2, &alloc_info_buf) },
+            .{ .text = " flags=0x" },
+            .{ .text = gc_audit_print.hexPad(@as(u8, @bitCast(meta.flags)), 2, &flags_buf) },
+            .{ .text = " lifetime=0x" },
+            .{ .text = gc_audit_print.hexPad(@as(u32, @bitCast(meta.lifetime)), 8, &lifetime_buf) },
+            .{ .text = " error=" },
+            .{ .text = @errorName(err) },
+            .{ .text = "\n" },
+        });
         return err;
     };
 

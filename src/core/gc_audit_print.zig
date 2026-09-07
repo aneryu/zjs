@@ -18,6 +18,17 @@ pub inline fn boolText(value: bool) []const u8 {
     return if (value) "true" else "false";
 }
 
+/// Zig `{x:0>width}`: lowercase hex, no prefix, zero-padded to a minimum width.
+pub noinline fn hexPad(value: u64, width: u8, buf: *[16]u8) []const u8 {
+    std.debug.assert(width >= 1 and width <= 16);
+    const raw = formatHex(value, buf);
+    if (raw.len >= width) return raw;
+    const pad = @as(usize, width) - raw.len;
+    const start = buf.len - raw.len - pad;
+    @memset(buf[start .. buf.len - raw.len], '0');
+    return buf[start..];
+}
+
 /// Same stderr lock and ignore-errors contract as `std.debug.print`.
 pub fn print(parts: []const Part) void {
     var buffer: [64]u8 = undefined;

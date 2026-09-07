@@ -19119,6 +19119,53 @@ test "gc_audit_print leftover formats match debug.print digits" {
             .{ .text = "\n" },
         },
     );
+    var alloc_info_buf: [16]u8 = undefined;
+    var flags_buf: [16]u8 = undefined;
+    var lifetime_buf: [16]u8 = undefined;
+    try expectAuditPrintMatchesFmt(
+        "gc: REPRESENTATION HEADER population={s} header=0x{x} kind={s} size_class={d} alloc_info=0x{x:0>2} flags=0x{x:0>2} lifetime=0x{x:0>8} error={s}\n",
+        .{ "live", @as(usize, 0xabc), "object", @as(u8, 3), @as(u8, 0xa), @as(u8, 0), @as(u32, 0x11), "DoomedBitForFreeCell" },
+        &.{
+            .{ .text = "gc: REPRESENTATION HEADER population=" },
+            .{ .text = "live" },
+            .{ .text = " header=0x" },
+            .{ .hex = 0xabc },
+            .{ .text = " kind=" },
+            .{ .text = "object" },
+            .{ .text = " size_class=" },
+            .{ .dec = 3 },
+            .{ .text = " alloc_info=0x" },
+            .{ .text = gc_audit_print.hexPad(0xa, 2, &alloc_info_buf) },
+            .{ .text = " flags=0x" },
+            .{ .text = gc_audit_print.hexPad(0, 2, &flags_buf) },
+            .{ .text = " lifetime=0x" },
+            .{ .text = gc_audit_print.hexPad(0x11, 8, &lifetime_buf) },
+            .{ .text = " error=" },
+            .{ .text = "DoomedBitForFreeCell" },
+            .{ .text = "\n" },
+        },
+    );
+}
+
+test "gc_audit_print hexPad matches zero-padded hex widths" {
+    const gc_audit_print = @import("../core/gc_audit_print.zig");
+    const cases = .{
+        .{ 0, 2, "{x:0>2}" },
+        .{ 0xa, 2, "{x:0>2}" },
+        .{ 0xff, 2, "{x:0>2}" },
+        .{ 0x100, 2, "{x:0>2}" },
+        .{ 0, 8, "{x:0>8}" },
+        .{ 0x11, 8, "{x:0>8}" },
+        .{ 0xffffffff, 8, "{x:0>8}" },
+        .{ std.math.maxInt(u64), 8, "{x:0>8}" },
+    };
+    inline for (cases) |case| {
+        var expected_buf: [32]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buf, case[2], .{@as(u64, case[0])});
+        var actual_buf: [16]u8 = undefined;
+        const actual = gc_audit_print.hexPad(case[0], case[1], &actual_buf);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "gc_audit_print handles full unsigned range and writer errors" {
