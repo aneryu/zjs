@@ -292,7 +292,7 @@ pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors:
     return aggregate_error;
 }
 
-pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) exceptions.HostError!core.JSValue {
+pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: exceptions.HostError) exceptions.HostError!core.JSValue {
     // QuickJS's async boundary takes the already-thrown interrupt value and
     // rejects with it. Keep this transfer local to Promise conversion:
     // admitting Interrupted to the generic pending-error matcher would let

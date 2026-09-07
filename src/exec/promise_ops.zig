@@ -2088,7 +2088,7 @@ pub noinline fn promiseRejectCapabilityForError(
     output: ?*std.Io.Writer,
     global: *core.Object,
     reject_value: core.JSValue,
-    err: anyerror,
+    err: HostError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
@@ -2106,7 +2106,7 @@ noinline fn rejectCombinatorAndRelease(
     output: ?*std.Io.Writer,
     global: *core.Object,
     capability: *const PromiseCapabilityVm,
-    err: anyerror,
+    err: HostError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {

@@ -4293,7 +4293,7 @@ fn fromAsyncCloseWithError(
     output: ?*std.Io.Writer,
     global: *core.Object,
     state: *core.Object,
-    err: anyerror,
+    err: core.errors.HostError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
