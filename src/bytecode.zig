@@ -2172,26 +2172,6 @@ pub const opcode = struct {
             return size;
         }
 
-        /// The declared value of a burned-in operand (`get_loc0`'s slot is
-        /// 0, `push_2` is 2). Runtime matchers previously hard-coded these;
-        /// the numbers were correct, but nothing connected them to the
-        /// declaration that defines them.
-        pub inline fn burnedOperandOf(
-            comptime form: logical.LogicalOpcode,
-            comptime index: usize,
-        ) comptime_int {
-            comptime {
-                const lay = layout_table[@intFromEnum(form)] orelse
-                    @compileError("no layout for " ++ @tagName(form));
-                if (index >= lay.len)
-                    @compileError("operand index out of range for " ++ @tagName(form));
-                const slot = lay.slots[index];
-                if (slot.offset != null)
-                    @compileError("operand of " ++ @tagName(form) ++ " is in the payload, not burned in");
-                return slot.fixed;
-            }
-        }
-
         /// Byte offset of operand `index` within the instruction (i.e.
         /// relative to the opcode byte), resolved at comptime for call
         /// sites that just matched the form and therefore know it
@@ -9109,14 +9089,6 @@ pub const binding_rules = struct {
         };
     }
 
-    fn resolveScopeVarBindingTopology(
-        ctx: *JSContext,
-        atom_id: atom.Atom,
-        scope_level: i32,
-    ) Error!ScopeVarBinding {
-        return resolveScopeVarBindingTopologyImpl(false, ctx, atom_id, scope_level);
-    }
-
     const ScopeVarBindingKind = enum(u8) {
         local,
         arg,
@@ -9128,8 +9100,7 @@ pub const binding_rules = struct {
     /// opcode in one routine. Keep the production V2 scope-op path equally
     /// fused: its surface inlines this semantic walk into `lowerScopeVar`, so
     /// discovery, action selection, and writing share one outlined compiler
-    /// entry. The exact-index compatibility wrapper below remains outlined,
-    /// while reference/private consumers retain the standalone topology API.
+    /// entry. Reference/private consumers retain the standalone topology API.
     /// This is only a call-shape change; lookup order and data structures stay
     /// identical to the linked-scope QuickJS path above.
     /// Register-sized result of the QuickJS-shaped binding walk.  The former
@@ -9234,15 +9205,6 @@ pub const binding_rules = struct {
             .{ ctx, atom_id, op_id, binding },
         );
         return ResolvedScopeVarPlan.init(binding, action);
-    }
-
-    noinline fn resolveScopeVarPlan(
-        ctx: *JSContext,
-        atom_id: atom.Atom,
-        scope_level: i32,
-        op_id: u8,
-    ) Error!ResolvedScopeVarPlan {
-        return resolveScopeVarPlanImpl(false, ctx, atom_id, scope_level, op_id);
     }
 
     inline fn resolveScopeVarPlanV2(
