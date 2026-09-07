@@ -1122,14 +1122,6 @@ pub const MemoryAccount = struct {
         return new_ptr[0..new_count];
     }
 
-    /// Same as `alloc`, with the element type erased to bytes and alignment
-    /// taken as a runtime value. Callers must `freeAlignedBytes` with that
-    /// alignment. Production GC still triggers only when
-    /// `allocation_gc_trigger_enabled` is on (Debug / force-GC / tests).
-    pub fn allocAlignedBytes(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
-        return self.allocAlignedBytesInternal(byte_count, alignment, true);
-    }
-
     /// Runtime hot path variant. The owning runtime performs a direct GC
     /// threshold check before entering, avoiding the nullable trigger callback.
     pub fn allocAlignedBytesNoTrigger(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
