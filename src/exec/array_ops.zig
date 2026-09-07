@@ -5995,29 +5995,6 @@ pub const ValueSliceRoot = struct {
     }
 };
 
-/// `ValueSliceRoot` for a slot-typed var-ref cell slice under construction
-/// (`[]*VarRef`, VARREFS-SLOT-TYPING-BLUEPRINT phase D).
-pub const CellSliceRoot = struct {
-    rt: ?*core.JSRuntime = null,
-    slices: [1]core.runtime.ValueRootSlice = undefined,
-    frame: core.runtime.ValueRootFrame = .{},
-
-    pub fn init(self: *CellSliceRoot, rt: *core.JSRuntime, cells: *[]*core.VarRef) void {
-        self.rt = rt;
-        self.slices[0] = .{ .cells = cells };
-        self.frame = .{
-            .slices = &self.slices,
-        };
-        self.frame.activate(rt);
-    }
-
-    pub fn deinit(self: *CellSliceRoot) void {
-        const rt = self.rt orelse return;
-        self.frame.deactivate(rt);
-        self.rt = null;
-    }
-};
-
 pub const OwnedArrayLikeArgs = struct {
     const Storage = enum {
         empty,

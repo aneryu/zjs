@@ -311,7 +311,7 @@ then classify by the frame the activate closes over.
 |---|---:|---|---|
 | `rootValues` scalar | 127 | pointers at Zig `JSValue` locals | skip (conservative) |
 | manual scalar `.values` | 24 | same, spelled by hand | skip (conservative) |
-| container `.slices` | 26 | mutable/borrowed/cells windows, including `ValueSliceRoot` / `CellSliceRoot` / `ValueListRoot` / array literals | **link** |
+| container `.slices` | 26 | mutable/borrowed/cells windows, including `ValueSliceRoot` / `ValueListRoot` / array literals | **link** |
 | `RootedValueCopies` | 3 | heap copy of a `[]JSValue` (Array/Object builtins) | still `.values`; converting to `.slices` is a production codegen change (deferred) |
 
 `call.zig` / `eval_ops.zig` mixed frames (scalar locals plus an args window)
