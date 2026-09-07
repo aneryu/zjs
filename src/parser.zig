@@ -7475,23 +7475,25 @@ pub const parser_core = struct {
         s.activeBuilder().emitJump(op_id, label) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOp` (marker'd).
-    fn emitterOp(s: *State, op_id: u8) Error!void {
+    /// Shared plain-opcode emit: Builder `emitOp` + terminal control record.
+    /// leftover candidate36 still had emitterOp / emitterOpAt / emitterOpNoSource
+    /// copies (352 / 352 / 337, extra 689). Op and NoSource are the same walk;
+    /// At adds an explicit source marker then that walk.
+    noinline fn emitterOp(s: *State, op_id: u8) Error!void {
         s.builderEmitOp(op_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpNoSource`.
-    fn emitterOpNoSource(s: *State, op_id: u8) Error!void {
-        s.activeBuilder().emitOp(op_id) catch |err| return mapBuilderError(err);
-        s.builderRecordPlainControl(op_id) catch |err| return mapBuilderError(err);
+    /// v2 mirror of `State.emitOpNoSource`. Same walk as `emitterOp`:
+    /// `builderEmitOp` is already source-less (grammar sites own markers).
+    inline fn emitterOpNoSource(s: *State, op_id: u8) Error!void {
+        return emitterOp(s, op_id);
     }
 
     /// v2 mirror of the `emitSourcePosAndLoc` + `emitOpNoSource` pair: one opcode
     /// pinned to an explicit source event (assignment/update operators).
-    fn emitterOpAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
+    inline fn emitterOpAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
         s.builderAddSourceMarker(line_num, col_num) catch |err| return mapBuilderError(err);
-        s.activeBuilder().emitOp(op_id) catch |err| return mapBuilderError(err);
-        s.builderRecordPlainControl(op_id) catch |err| return mapBuilderError(err);
+        return emitterOp(s, op_id);
     }
 
     /// v2 mirror of `State.emitOpU16At`: one explicit source marker followed

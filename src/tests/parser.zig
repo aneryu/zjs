@@ -6803,6 +6803,22 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
     );
 }
 
+test "emitterOp NoSource and At share the plain opcode walk" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var function = try parseRawStatement(&env, "throw x;");
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.throw)) > 0);
+    }
+    {
+        var function = try parseRawStatement(&env, "x += 1;");
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.add)) > 0);
+    }
+}
+
 test "emitScope var wrappers keep phase-1 opcode pairs" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
