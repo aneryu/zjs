@@ -605,7 +605,7 @@ noinline fn runSyncInlineRouteMovedArgs(
 }
 
 pub noinline fn runSyncInlineRouteOwnedCopy(
-    comptime idle_machine: bool,
+    idle_machine: bool,
     invocation: *inline_calls.ActiveInvocation,
     target: *const inline_calls.InlineTarget,
     ctx: *core.JSContext,
@@ -618,7 +618,13 @@ pub noinline fn runSyncInlineRouteOwnedCopy(
     var owned_args = OwnedArgList{};
     try owned_args.init(ctx.runtime, this_value, func, args);
     defer owned_args.deinit();
-    return runSyncInlineRouteMoved(idle_machine, invocation, target, global, owned_args.values, out);
+    // One outlined copy owns the arg list. The idle vs active fence stays
+    // specialized in `runSyncInlineRouteMoved`; a runtime branch here avoids
+    // instantiating this helper twice for a comptime bool.
+    if (idle_machine) {
+        return runSyncInlineRouteMoved(true, invocation, target, global, owned_args.values, out);
+    }
+    return runSyncInlineRouteMoved(false, invocation, target, global, owned_args.values, out);
 }
 
 noinline fn runSyncInlineRouteOwnedArgsGeneral(
