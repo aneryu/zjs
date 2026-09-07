@@ -39,7 +39,6 @@ const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
-const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
 const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
 const IteratorZipRecord = iterator_ops.IteratorZipRecord;
@@ -104,7 +103,6 @@ fn setValuePropertyOrThrow(
 ) !void {
     _ = try object_ops.setValuePropertyWithThrow(ctx, output, global, object_value, atom_id, value, caller_function, caller_frame, true);
 }
-const adapterValueBorrow = slot_ops.adapterValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;

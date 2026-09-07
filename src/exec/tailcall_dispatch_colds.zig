@@ -67,11 +67,6 @@ pub const h_binary = coldStd(struct {
         _ = try vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global);
     }
 }.b);
-pub const h_compare = coldStd(struct {
-    fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_arith.compareVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global);
-    }
-}.b);
 pub const h_unary = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
         _ = try vm_arith.unaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global);
@@ -302,7 +297,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // h_binary path for BigInt/string/object/symbol operands and at the generator stop.
     inline for ([_]u8{ op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = dispatch.opLogicCold(o);
     // Register-resident cold compare (no publish round-trip) — falls back to the
-    // publishing h_compare path internally at the generator parameter/body stop. Reached via
+    // publishing compareVm path internally at the generator parameter/body stop. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
     // (direct routing would perturb the int32 fast-path codegen).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = dispatch.opCompareCold(o);

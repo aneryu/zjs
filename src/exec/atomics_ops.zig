@@ -14,7 +14,6 @@ const core = @import("../core/root.zig");
 const jobs_mod = core.jobs;
 const atomics_wait = @import("atomics_wait.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");

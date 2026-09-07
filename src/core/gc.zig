@@ -213,7 +213,6 @@ pub const registry_diagnostics = @import("gc_registry_diagnostics.zig");
 /// barrier only reads them. Mutual import with `gc_trace_stw.zig` is fine --
 /// Zig resolves lazily.
 const gc_trace_stw_reports = @import("gc_trace_stw.zig");
-const conservative_mod = @import("gc_conservative.zig");
 pub const generation = @import("gc_generation.zig");
 const IncrementalState = incremental.State;
 
@@ -451,19 +450,10 @@ pub const RefKind = enum(u4) {
     /// TGC S2-i: the extensible tail buffer behind a rope's dependent views
     /// (`string.StringBuffer`). A bare byte carrier: no out-edges, no
     /// destructor, marked only by the `storageCell` edge of every rope node
-    /// that reads it. It is deliberately NOT part of `isStringFamily`: that
-    /// predicate answers "flat body or rope node", i.e. the two shapes a
-    /// string JSValue can name, and a buffer is named by no JSValue.
+    /// that reads it. Unlike a flat body or rope node, a buffer is not a
+    /// shape that a string JSValue can name; only rope nodes reference it.
     string_buffer = 12,
 };
-
-/// The string family: a flat body and a rope node share one JSValue tag, one
-/// allocation family (prefix + body, `gc.string_prefix_size`) and one size
-/// query. Every site that used to ask `kind == .string` about the FAMILY (as
-/// opposed to "flat body specifically") asks this instead.
-inline fn isStringFamily(kind: RefKind) bool {
-    return kind == .string or kind == .rope;
-}
 
 /// Kinds whose carrier may be a collector block cell. Mirrors the catalog's
 /// `.block_slab_or_standalone`, spelled as a predicate for the hot cell
@@ -480,8 +470,8 @@ pub inline fn kindIsBlockCellKind(kind: RefKind) bool {
 /// family, the S2-i tail buffer and the S4-b storage kinds. Publication may
 /// not link them onto `lists.objects`, the young suffix may not anchor on one,
 /// and their standalone form is a block-heap EXTENT rather than a slab
-/// allocation. Every site that used to spell that set as `isStringFamily`
-/// (which is a JSValue-shape question, not a carrier question) asks this.
+/// allocation. Carrier checks use this broader set rather than only the
+/// flat body and rope node shapes that a string JSValue can name.
 pub inline fn kindIsPrefixCarrier(kind: RefKind) bool {
     return switch (kind) {
         .string, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
@@ -1107,7 +1097,6 @@ pub const listDelAfter = registry_lists.listDelAfter;
 pub const listDelAfterTraversalOwned = registry_lists.listDelAfterTraversalOwned;
 pub const listFirst = registry_lists.listFirst;
 const headerLinked = registry_lists.headerLinked;
-const verifyCircularHeaderList = registry_lists.verifyCircularHeaderList;
 
 const large_heap_size_class = std.math.maxInt(u16);
 
@@ -2775,8 +2764,8 @@ pub const Registry = struct {
         // TGC S2 extent string (spec §5.7): no bitmap and no TraceHeader
         // epoch either -- the mark lives in the heap's extent table,
         // keyed by the allocation base (body - 8). Cold: only strings
-        // over the cell ceiling get here. `.string` and not
-        // `isStringFamily`: `allocRopeNode` asserts at comptime that a
+        // over the cell ceiling get here. The extent path excludes ropes:
+        // `allocRopeNode` asserts at comptime that a
         // rope node always fits a cell, so no rope is ever an extent.
         if (kindIsExtentCapable(h.metaConst().flags.kind) and h.metaConst().alloc_info.standalone) {
             @branchHint(.unlikely);

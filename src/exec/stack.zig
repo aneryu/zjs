@@ -9,7 +9,6 @@ const std = @import("std");
 const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
-const gc = @import("../core/gc.zig");
 
 /// Operand slots a call site has retreated `top_ptr` past but has not yet
 /// moved into the callee frame.

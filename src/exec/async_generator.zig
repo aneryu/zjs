@@ -29,7 +29,6 @@
 const std = @import("std");
 const iterator_ops = @import("iterator_ops.zig");
 
-const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");

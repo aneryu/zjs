@@ -14,7 +14,6 @@ const core_array = @import("../core/array.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
-const call_runtime = @import("call_runtime.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("exception_ops.zig");

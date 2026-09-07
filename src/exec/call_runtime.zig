@@ -58,7 +58,6 @@ const builtin_glue = @import("builtin_glue.zig");
 const slot_ops = @import("slot_ops.zig");
 
 // --- Direct eval execution moved to eval_ops.zig ---
-const eval_ops = @import("eval_ops.zig");
 
 pub const InlineCallRequest = struct {
     target: inline_calls.InlineTarget,

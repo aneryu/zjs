@@ -37,10 +37,6 @@ pub inline fn nativeFromBits(b: NativeBits) NativeValue {
     return @bitCast(b);
 }
 
-pub inline fn nativeOk(v: core.JSValue) NativeValue {
-    return v;
-}
-
 pub inline fn nativeExc() NativeValue {
     return core.JSValue.exception();
 }
@@ -105,13 +101,8 @@ pub inline fn nativeHostError(ctx: *core.JSContext) HostError {
     return error.JSException;
 }
 
-inline fn nativeAsHostResult(ctx: *core.JSContext, v: NativeValue) HostError!core.JSValue {
-    if (nativeIsExc(ctx, v)) return nativeHostError(ctx);
-    return v;
-}
-
-/// Rooted-path receive: sentinel -> `HostError`. Unlike `nativeAsHostResult`
-/// it does not assert sentinel <=> pending, because a host caller may enter
+/// Rooted-path receive: sentinel -> `HostError`. It does not assert sentinel
+/// <=> pending, because a host caller may enter
 /// with an exception already pending (qjs `JS_Call` allows it) and a body
 /// that returns a value then leaves it pending, unrelated to this call.
 inline fn sentinelToHost(ctx: *core.JSContext, v: NativeValue) HostError!core.JSValue {
@@ -298,16 +289,6 @@ pub const NativeCall = struct {
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 };
-
-/// Leaf-boundary adapter: HostError!JSValue → NativeBits (x0+x1).
-pub inline fn nativeFromHostResult(
-    ctx: *core.JSContext,
-    global: ?*core.Object,
-    result: HostError!core.JSValue,
-) NativeBits {
-    const value = result catch |err| return nativeFromHostError(ctx, global, err);
-    return nativeToBits(value);
-}
 
 pub inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
     const opaque_ptr = ctx.runtime.active_native_call orelse return null;

@@ -33,8 +33,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const install_zjs_dev = artifacts.install_zjs_dev;
 
     // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
-    // `-Dtest-filter=<substring>` narrows the unified run to matching test
-    // names (iteration aid: compile once, run the handful under repair).
+    // `-Dtest-filter` builds a separate, symbolised diagnostic selection.
+    // `test-fast -- <substring>` below reuses the full binary instead.
     const test_filter = b.option([]const u8, "test-filter", "Only run unified tests whose name contains this substring");
     // The unified binary compiles once and runs as N parallel shard processes
     // (`--shard i/N`, round-robin over the test index): the run is the
@@ -102,6 +102,15 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         if (b.args) |args| run_unified_tests.addArgs(args);
         test_step.dependOn(&run_unified_tests.step);
     }
+
+    // Runtime filtering deliberately leaves the compile root, optimization,
+    // DWARF setting and compile-time test filters unchanged. Changing the
+    // selected name only changes this Run step, not the engine artifact.
+    const run_fast_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
+    run_fast_tests.addArgs(&.{ "--require-tests", "--skip-prefix", "tests.stress.", "--filter" });
+    if (b.args) |args| run_fast_tests.addArgs(args);
+    const fast_test_step = b.step("test-fast", "Run a required test-name substring from the unified binary without recompiling the selection: test-fast -- <substring>");
+    fast_test_step.dependOn(&run_fast_tests.step);
 
     // TGC S0 safety net (docs/tracing-gc-s0-spec.md §L2): the same suite with
     // the collector at every safepoint (`ZJS_GC_STRESS=1`, cadence 64), every

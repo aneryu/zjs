@@ -2414,6 +2414,10 @@ pub const opcode = struct {
             break :blk t;
         };
 
+        fn dynamicShape(form: logical.LogicalOpcode) ?logical.DynamicStack.Shape {
+            return dynamic_by_form[@intFromEnum(form)];
+        }
+
         /// No domain parameter: the form already carries it, because the
         /// lowered-only opcodes live at 300+ and the row table is keyed by
         /// form. That the parameter became dead is a small confirmation
@@ -2421,7 +2425,7 @@ pub const opcode = struct {
         pub fn stackEffect(h: Header, code: []const u8) Error!StackEffect {
             const row = form_row[@intFromEnum(h.form)];
             if (!row.isDynamic()) return .{ .pop = row.pop, .push = row.push };
-            if (dynamic_by_form[@intFromEnum(h.form)]) |shape| {
+            if (dynamicShape(h.form)) |shape| {
                 switch (shape) {
                     .affine => |expr| switch (expr) {
                         .affine => |a| {
@@ -5785,26 +5789,6 @@ pub const function_def = struct {
             @memcpy(tail, bytes);
         }
 
-        /// Reserve parser-phase code capacity without publishing any bytes.
-        /// This is the recoverable-OOM counterpart of QuickJS `dbuf_claim`:
-        /// allocation happens before an emitter transaction detaches an
-        /// lvalue getter or transfers an atom owner.
-        pub fn reserveByteCode(self: *FunctionDefImpl, additional: usize) !void {
-            if (additional == 0) return;
-            const used = self.byte_code.len;
-            _ = try growSliceBy(u8, self.memory, &self.byte_code, &self.byte_code_capacity, additional);
-            self.byte_code = self.byte_code.ptr[0..used];
-        }
-
-        /// Append after `reserveByteCode`. No allocation or error is possible.
-        pub fn appendByteCodeAssumeCapacity(self: *FunctionDefImpl, bytes: []const u8) void {
-            if (bytes.len == 0) return;
-            const used = self.byte_code.len;
-            std.debug.assert(used + bytes.len <= self.byte_code_capacity);
-            self.byte_code = self.byte_code.ptr[0 .. used + bytes.len];
-            @memcpy(self.byte_code[used..], bytes);
-        }
-
         pub fn appendSourceLoc(self: *FunctionDefImpl, pc: u32, line_num: i32, col_num: i32) !void {
             if (line_num <= 0 or col_num <= 0) return;
             // The phase-2 streaming source remap (P2-R1T) requires
@@ -8741,13 +8725,6 @@ pub const binding_rules = struct {
         return false;
     }
 
-    fn findClosureName(fd: *const function_def_mod.FunctionDef, atom_id: atom.Atom) ?u16 {
-        for (fd.closure_var, 0..) |cv, idx| {
-            if (cv.var_name == atom_id) return @intCast(idx);
-        }
-        return null;
-    }
-
     fn isPseudoBindingAtom(atom_id: atom.Atom) bool {
         return atom_id == atom.ids.home_object or
             atom_id == atom.ids.this_active_func or
@@ -11676,22 +11653,6 @@ const function_mod = struct {
             @memcpy(tail, bytes);
         }
 
-        /// Root-bytecode counterpart of FunctionDef.reserveByteCode.
-        pub fn reserveCode(self: *BytecodeImpl, additional: usize) !void {
-            if (additional == 0) return;
-            const used = self.code.len;
-            _ = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, additional);
-            self.code = self.code.ptr[0..used];
-        }
-
-        pub fn appendCodeAssumeCapacity(self: *BytecodeImpl, bytes: []const u8) void {
-            if (bytes.len == 0) return;
-            const used = self.code.len;
-            std.debug.assert(used + bytes.len <= self.code_capacity);
-            self.code = self.code.ptr[0 .. used + bytes.len];
-            @memcpy(self.code[used..], bytes);
-        }
-
         pub fn appendSourceLoc(self: *BytecodeImpl, pc: u32, line_num: i32, col_num: i32) !void {
             if (line_num <= 0 or col_num <= 0) return;
             // See FunctionDefImpl.appendSourceLoc: P2-R1T streaming remap
@@ -12240,3 +12201,107 @@ pub const CallFacts = function_bytecode.CallFacts;
 pub const legacy_byte_code_len_sentinel = function_bytecode.legacy_byte_code_len_sentinel;
 pub const LegacyExecutionAdapter = function_mod.LegacyExecutionAdapter;
 pub const FunctionDef = function_def.FunctionDef;
+
+// Historical sparse representations are retained only for equivalence tests.
+// Production decoding uses the direct authoritative tables above.
+const SparseDecodeTestOracle = struct {
+    const std = @import("std");
+    const logical = opcode.logical;
+    const OperandLayout = opcode.decode.OperandLayout;
+    const layout_table = opcode.decode.layout_table;
+    const layout_table_len = opcode.decode.layout_table_len;
+
+    const no_layout = std.math.maxInt(u16);
+
+    fn layoutsEqual(a: OperandLayout, b: OperandLayout) bool {
+        if (a.len != b.len or a.atom_slot != b.atom_slot or a.var_ref_slot != b.var_ref_slot) return false;
+        // Unused slots are undefined; compare only the initialized prefix.
+        for (a.slots[0..a.len], 0..) |slot, i| {
+            if (!std.meta.eql(slot, b.slots[i])) return false;
+        }
+        return true;
+    }
+
+    // Keep the original table as the compile-time authority, but store
+    // each distinct runtime layout once. Layouts remain immutable.
+    const runtime_layouts = blk: {
+        @setEvalBranchQuota(2000000);
+        var rows: [layout_table_len]OperandLayout = undefined;
+        var count: usize = 0;
+        var indices = [_]u16{no_layout} ** layout_table_len;
+        for (layout_table, 0..) |optional, form| {
+            const layout = optional orelse continue;
+            var index: usize = 0;
+            while (index < count and !layoutsEqual(layout, rows[index])) : (index += 1) {}
+            if (index == count) {
+                if (count == no_layout) @compileError("too many operand layouts");
+                rows[count] = layout;
+                count += 1;
+            }
+            indices[form] = @intCast(index);
+        }
+        const Pool = struct { rows: [count]OperandLayout, indices: [layout_table_len]u16 };
+        break :blk Pool{ .rows = rows[0..count].*, .indices = indices };
+    };
+
+    fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout {
+        const index = runtime_layouts.indices[@intFromEnum(form)];
+        std.debug.assert(index != no_layout);
+        return &runtime_layouts.rows[index];
+    }
+
+    const no_dynamic_shape = std.math.maxInt(u8);
+    const dynamic_shape_indices = blk: {
+        if (logical.dynamic_stack.len >= no_dynamic_shape) @compileError("too many dynamic stack shapes");
+        var indices = [_]u8{no_dynamic_shape} ** 512;
+        for (logical.dynamic_stack, 0..) |d, i| indices[@intFromEnum(d.form)] = @intCast(i);
+        break :blk indices;
+    };
+
+    fn dynamicShape(form: logical.LogicalOpcode) ?logical.DynamicStack.Shape {
+        const index = dynamic_shape_indices[@intFromEnum(form)];
+        if (index == no_dynamic_shape) return null;
+        return logical.dynamic_stack[index].shape;
+    }
+};
+
+test "operand layout pool preserves every declared layout and absent row" {
+    const std = @import("std");
+    const D = opcode.decode;
+    for (D.layout_table, 0..) |optional, id| {
+        if (optional) |expected| {
+            for ([_]*const D.OperandLayout{
+                D.layoutOf(@enumFromInt(id)),
+                SparseDecodeTestOracle.layoutOf(@enumFromInt(id)),
+            }) |actual| {
+                try std.testing.expectEqual(expected.len, actual.len);
+                try std.testing.expectEqual(expected.atom_slot, actual.atom_slot);
+                try std.testing.expectEqual(expected.var_ref_slot, actual.var_ref_slot);
+                for (expected.slots[0..expected.len], 0..) |slot, i| {
+                    try std.testing.expectEqualDeep(slot, actual.slots[i]);
+                }
+            }
+        } else {
+            try std.testing.expectEqual(SparseDecodeTestOracle.no_layout, SparseDecodeTestOracle.runtime_layouts.indices[id]);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(D.Header));
+}
+
+test "dynamic shape index preserves all declared effects and absent forms" {
+    const std = @import("std");
+    const D = opcode.decode;
+    for (D.dynamic_by_form, 0..) |expected, id| {
+        const index = SparseDecodeTestOracle.dynamic_shape_indices[id];
+        if (expected) |shape| {
+            try std.testing.expect(index != SparseDecodeTestOracle.no_dynamic_shape);
+            try std.testing.expectEqualDeep(shape, opcode.logical.dynamic_stack[index].shape);
+        } else {
+            try std.testing.expectEqual(SparseDecodeTestOracle.no_dynamic_shape, index);
+        }
+    }
+    for (std.enums.values(opcode.logical.LogicalOpcode)) |form| {
+        try std.testing.expectEqualDeep(D.dynamic_by_form[@intFromEnum(form)], D.dynamicShape(form));
+        try std.testing.expectEqualDeep(D.dynamic_by_form[@intFromEnum(form)], SparseDecodeTestOracle.dynamicShape(form));
+    }
+}

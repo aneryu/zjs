@@ -9,7 +9,6 @@
 //! dispatch at quickjs.c:17746-17791.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -74,19 +73,6 @@ pub fn enterCallDepth(
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
-pub fn enterInlineCallDepthMode(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-    copy_argv: bool,
-) !void {
-    if (!canEnterInlineCallDepthMode(ctx, function, argc, copy_argv)) {
-        return inlineCallDepthOverflow(ctx, global);
-    }
-    commitInlineCallDepthMode(ctx, function, argc, copy_argv);
-}
-
 /// QuickJS JS_CallInternal's planned `alloca_size` for a normal bytecode
 /// target called without COPY_ARGV (quickjs.c:17828-17836). Tail opcodes use
 /// flags=0, so only missing arguments allocate the padded argv prefix.
@@ -147,15 +133,6 @@ inline fn admissionCeilingsReject(
     return (@frameAddress() -| accumulated) < hot.native_stack_limit;
 }
 
-pub inline fn canEnterInlineCallDepthMode(
-    ctx: *const core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-    copy_argv: bool,
-) bool {
-    return canEnterInlineCallDepthBytes(ctx, bytecodeFrameAllocaSize(function, argc, copy_argv));
-}
-
 /// Byte-priced variants: constructors that already hold the planned frame
 /// bytes (to persist them into the Entry for the O(1) teardown release) check
 /// and commit that exact figure instead of re-deriving it from the function
@@ -167,15 +144,6 @@ pub inline fn canEnterInlineCallDepthBytes(
     const rt = ctx.runtime;
     return rt.hot.call_depth < maxLogicalJsCallDepth(ctx) and
         !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
-}
-
-pub inline fn commitInlineCallDepthMode(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    argc: usize,
-    copy_argv: bool,
-) void {
-    commitInlineCallDepthBytes(ctx, bytecodeFrameAllocaSize(function, argc, copy_argv));
 }
 
 pub inline fn commitInlineCallDepthBytes(
@@ -227,8 +195,8 @@ pub noinline fn retreatInlineCallDepthBytesMiss(
     leaveInlineCallDepthBytesRt(rt, planned_stack_bytes);
 }
 
-/// Bytes-priced sibling of `enterInlineCallDepthMode` for callers that keep
-/// the planned figure alive across the push (Entry persistence + errdefer).
+/// Admit and charge callers that keep the planned stack byte count across
+/// the push (Entry persistence + errdefer).
 pub inline fn enterInlineCallDepthBytes(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -998,14 +966,6 @@ fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
 
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
     return ctx.stackLimit();
-}
-
-/// rt-threaded twin of `maxLogicalJsCallDepth` (`ctx.stackLimit()` is exactly
-/// `ctx.runtime.stackSize()` == `rt.hot.stack_size`); the fused K2 admission
-/// already holds `rt`, and the direct field read avoids the by-value
-/// `stackSize(self: JSRuntime)` receiver copy in unoptimized builds.
-inline fn maxLogicalJsCallDepthRt(rt: *const core.JSRuntime) usize {
-    return rt.hot.stack_size;
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

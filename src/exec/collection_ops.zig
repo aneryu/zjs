@@ -81,48 +81,11 @@ pub const PrototypeMethod = core.host_function.builtin_method_ids.collection.Pro
 // Pure name->id mapping + the class-keyed fast-path / legacy-closure id helpers
 // relocated to engine core (`core/host_function.zig`, next to
 // `builtin_method_ids.collection`) in Phase 6b-3c; re-exported here so the
-// dispatch/install side keeps the original names. `legacyPrototypeMethodId`
-// below (collection-internal, not VM-referenced) keeps its local definition and
-// consumes the re-exported `prototypeMethodId`.
+// dispatch/install side keeps the original names.
 const collection_id_lookup = core.host_function.builtin_method_id_lookup.collection;
 pub const prototypeMethodId = collection_id_lookup.prototypeMethodId;
 pub const legacyClosureMethodId = collection_id_lookup.legacyClosureMethodId;
 pub const fastPrototypeMethodIdForClass = collection_id_lookup.fastPrototypeMethodIdForClass;
-
-pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
-    const id = prototypeMethodId(name) orelse return null;
-    if (legacyBasePrototypeMethodId(id)) |method_id| return method_id;
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.difference),
-        @intFromEnum(PrototypeMethod.intersection),
-        @intFromEnum(PrototypeMethod.is_disjoint_from),
-        @intFromEnum(PrototypeMethod.is_subset_of),
-        @intFromEnum(PrototypeMethod.is_superset_of),
-        @intFromEnum(PrototypeMethod.symmetric_difference),
-        @intFromEnum(PrototypeMethod.union_),
-        => id,
-        else => null,
-    };
-}
-
-fn legacyBasePrototypeMethodId(id: u32) ?u32 {
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.set),
-        @intFromEnum(PrototypeMethod.get),
-        @intFromEnum(PrototypeMethod.has),
-        @intFromEnum(PrototypeMethod.delete),
-        @intFromEnum(PrototypeMethod.clear),
-        @intFromEnum(PrototypeMethod.add),
-        @intFromEnum(PrototypeMethod.keys),
-        @intFromEnum(PrototypeMethod.values),
-        @intFromEnum(PrototypeMethod.entries),
-        @intFromEnum(PrototypeMethod.for_each),
-        @intFromEnum(PrototypeMethod.get_or_insert),
-        @intFromEnum(PrototypeMethod.get_or_insert_computed),
-        => id,
-        else => null,
-    };
-}
 
 /// Declaration + dispatch table for the `.collection` native-builtin domain
 /// (QuickJS js_map_funcs / js_set_funcs analogue). One shared record handler
@@ -1595,40 +1558,6 @@ const ValueListRoot = struct {
     }
 };
 
-pub fn setMethodCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    name: []const u8,
-    args: []const core.JSValue,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*builtin_dispatch.Frame,
-) !?core.JSValue {
-    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
-    if (owner_class != core.class.ids.set) return null;
-    const mode = setMethodMode(name) orelse return null;
-    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
-    if (receiver.class_id != core.class.ids.set) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
-    const other_value = if (args.len >= 1) args[0] else return error.TypeError;
-    const other_record = try getSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
-    // The receiver's entry array is walked by index across the set-like
-    // `has`/`keys` user calls; park a cursor so the slots cannot shift (same
-    // contract as js_map_forEach's record lock, quickjs.c:52320).
-    receiver.retainCollectionCursor();
-    defer receiver.releaseCollectionCursor();
-    return switch (mode) {
-        .difference => try setDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .intersection => try setIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_disjoint_from => try setIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_subset_of => try setIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .is_superset_of => try setIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .symmetric_difference => try setSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-        .union_ => try setUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
-    };
-}
-
 pub fn collectionNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1782,7 +1711,7 @@ fn setMethodRecord(
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
     const other_record = try getSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     const mode = setMethodModeFromRecord(method) orelse return error.TypeError;
-    // Same entry-array lock as `setMethodCall`.
+    // Keep entry indices stable across the set-like has/keys user calls.
     receiver.retainCollectionCursor();
     defer receiver.releaseCollectionCursor();
     return switch (mode) {
@@ -1794,17 +1723,6 @@ fn setMethodRecord(
         .symmetric_difference => try setSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
         .union_ => try setUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
     };
-}
-
-fn setMethodMode(name: []const u8) ?SetMethodMode {
-    if (std.mem.eql(u8, name, "difference")) return .difference;
-    if (std.mem.eql(u8, name, "intersection")) return .intersection;
-    if (std.mem.eql(u8, name, "isDisjointFrom")) return .is_disjoint_from;
-    if (std.mem.eql(u8, name, "isSubsetOf")) return .is_subset_of;
-    if (std.mem.eql(u8, name, "isSupersetOf")) return .is_superset_of;
-    if (std.mem.eql(u8, name, "symmetricDifference")) return .symmetric_difference;
-    if (std.mem.eql(u8, name, "union")) return .union_;
-    return null;
 }
 
 fn setMethodModeFromRecord(method: PrototypeMethod) ?SetMethodMode {

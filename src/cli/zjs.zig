@@ -10,12 +10,15 @@ const platform_clock = engine.platform_clock;
 pub const panic = @import("panic_policy.zig").policy;
 
 // QCP-1: this root is shared by `zjs` (ReleaseFast), `zjs-profile`
-// (ReleaseFast) and `zjs-dev` (Debug), so it proves the effective
+// (ReleaseFast), `zjs-dev` (Debug), and `zjs-size` (-Doptimize), so it proves the effective
 // configuration of the shipped binary itself at compile time, each reporting
 // its own optimize mode (src/config_signature.zig). `--print-config-signature`
 // below is the runtime half of the same statement.
 comptime {
     engine.config_signature.attest("zjs CLI");
+    if (!std.mem.eql(u8, @tagName(@import("builtin").mode), engine.config_signature.optimize)) {
+        @compileError("zjs CLI optimize mode differs from its engine");
+    }
 }
 
 const public_api = engine.public_api;
@@ -250,7 +253,8 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    var opcode_profile = zjs.OpcodeProfile{};
+    var opcode_profile: zjs.OpcodeProfile = undefined;
+    initOpcodeProfile(&opcode_profile);
     var eval_timing = zjs.context.EvalTiming{};
     var include_ns: u64 = 0;
     var setup_ns: u64 = 0;
@@ -408,7 +412,7 @@ pub fn main(init: std.process.Init) !void {
         try dumpMemoryUsage(&stdout_writer.interface, &runtime);
         try stdout_writer.interface.flush();
     }
-    if (commandRuntimeOptions(command).profile_opcodes) {
+    if (zjs.opcode_profile_build_enabled and commandRuntimeOptions(command).profile_opcodes) {
         opcode_profile.flushPendingDispatch();
         try dumpOpcodeProfile(&stdout_writer.interface, runtime.runtime.opcode_profile.?);
         try stdout_writer.interface.flush();
@@ -442,7 +446,7 @@ pub fn main(init: std.process.Init) !void {
     if (commandRuntimeOptions(command).perf_json) {
         opcode_profile.flushPendingDispatch();
         const active_profile: ?*const zjs.OpcodeProfile =
-            if (commandRuntimeOptions(command).profile_opcodes) &opcode_profile else null;
+            if (zjs.opcode_profile_build_enabled and commandRuntimeOptions(command).profile_opcodes) &opcode_profile else null;
         try dumpPerfJson(io, command, &runtime, active_profile, .{
             .total_ns = platform_clock.elapsedNanosSince(total_start),
             .read_source_ns = read_source_ns,
@@ -585,8 +589,10 @@ fn skipShebang(source: []const u8, pos: *usize) void {
 }
 
 fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *Runtime) !void {
-    const memory = runtime.runtime.memoryUsage();
+    try dumpMemorySnapshot(output, runtime.runtime.memoryUsage());
+}
 
+fn dumpMemorySnapshot(output: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage) !void {
     try output.print("\nZJS memory usage\n", .{});
     try output.print("  memory limit: ", .{});
     if (memory.memory_limit) |limit| {
@@ -595,12 +601,16 @@ fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *Runtime) !void {
         try output.print("0\n", .{});
     }
     try output.print("\nNAME                    COUNT     SIZE\n", .{});
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "memory allocated", memory.allocation_count, memory.allocated_bytes });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "atoms", memory.atom_count, memory.atom_bytes });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "objects", memory.object_count, memory.object_bytes });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "shapes", memory.shape_count, memory.shape_bytes });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "modules", memory.module_count, memory.module_bytes });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "classes", memory.registered_class_count, memory.class_bytes });
+    for ([_]struct { []const u8, usize, usize }{
+        .{ "memory allocated", memory.allocation_count, memory.allocated_bytes },
+        .{ "atoms", memory.atom_count, memory.atom_bytes },
+        .{ "objects", memory.object_count, memory.object_bytes },
+        .{ "shapes", memory.shape_count, memory.shape_bytes },
+        .{ "modules", memory.module_count, memory.module_bytes },
+        .{ "classes", memory.registered_class_count, memory.class_bytes },
+    }) |row| {
+        try output.print("{s:<22} {d:>5} {d:>8}\n", row);
+    }
 }
 
 const PerfJsonTimings = struct {
@@ -623,28 +633,7 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     try stderr.print("{{\n  \"file\": ", .{});
     try writeJsonString(stderr, commandPerfFile(command));
     try stderr.print(",\n", .{});
-    try stderr.print("  \"total_ns\": {d},\n", .{timings.total_ns});
-    try stderr.print("  \"read_source_ns\": {d},\n", .{timings.read_source_ns});
-    try stderr.print("  \"runtime_create_ns\": {d},\n", .{timings.runtime_create_ns});
-    try stderr.print("  \"setup_ns\": {d},\n", .{timings.setup_ns});
-    try stderr.print("  \"include_ns\": {d},\n", .{timings.include_ns});
-    try stderr.print("  \"eval_ns\": {d},\n", .{timings.eval_ns});
-    try stderr.print("  \"parse_ns\": {d},\n", .{timings.zjs.parse_ns});
-    try stderr.print("  \"finalize_ns\": null,\n", .{});
-    try stderr.print("  \"parse_ns_includes_finalize\": true,\n", .{});
-    try stderr.print("  \"vm_run_ns\": {d},\n", .{timings.zjs.vm_run_ns});
-    try stderr.print("  \"promise_jobs_ns\": {d},\n", .{timings.zjs.promise_jobs_ns});
-    try stderr.print("  \"jobs_ns\": {d},\n", .{timings.jobs_ns});
-    try stderr.print("  \"memory\": {{\n", .{});
-    try stderr.print("    \"allocated_bytes\": {d},\n", .{memory.allocated_bytes});
-    try stderr.print("    \"allocation_count\": {d},\n", .{memory.allocation_count});
-    try stderr.print("    \"allocated_bytes_peak\": {d},\n", .{memory.peak_allocated_bytes});
-    try stderr.print("    \"allocation_count_peak\": {d},\n", .{memory.peak_allocation_count});
-    try stderr.print("    \"alloc_calls\": {d},\n", .{memory.alloc_calls});
-    try stderr.print("    \"free_calls\": {d},\n", .{memory.free_calls});
-    try stderr.print("    \"create_calls\": {d},\n", .{memory.create_calls});
-    try stderr.print("    \"destroy_calls\": {d}\n", .{memory.destroy_calls});
-    try stderr.print("  }}", .{});
+    try dumpPerfJsonMetrics(stderr, memory, timings);
     try stderr.print(",\n  \"opcode_profile_enabled\": {}", .{perf_profile != null});
     if (perf_profile) |profile| {
         try stderr.print(",\n", .{});
@@ -654,6 +643,29 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     }
     try stderr.print("\n}}\n", .{});
     try stderr.flush();
+}
+
+fn dumpPerfJsonMetrics(stderr: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage, timings: PerfJsonTimings) !void {
+    try writeCounterLine(stderr, &.{
+        .{ "  \"total_ns\": ", timings.total_ns },
+        .{ ",\n  \"read_source_ns\": ", timings.read_source_ns },
+        .{ ",\n  \"runtime_create_ns\": ", timings.runtime_create_ns },
+        .{ ",\n  \"setup_ns\": ", timings.setup_ns },
+        .{ ",\n  \"include_ns\": ", timings.include_ns },
+        .{ ",\n  \"eval_ns\": ", timings.eval_ns },
+        .{ ",\n  \"parse_ns\": ", timings.zjs.parse_ns },
+        .{ ",\n  \"finalize_ns\": null,\n  \"parse_ns_includes_finalize\": true,\n  \"vm_run_ns\": ", timings.zjs.vm_run_ns },
+        .{ ",\n  \"promise_jobs_ns\": ", timings.zjs.promise_jobs_ns },
+        .{ ",\n  \"jobs_ns\": ", timings.jobs_ns },
+        .{ ",\n  \"memory\": {\n    \"allocated_bytes\": ", memory.allocated_bytes },
+        .{ ",\n    \"allocation_count\": ", memory.allocation_count },
+        .{ ",\n    \"allocated_bytes_peak\": ", memory.peak_allocated_bytes },
+        .{ ",\n    \"allocation_count_peak\": ", memory.peak_allocation_count },
+        .{ ",\n    \"alloc_calls\": ", memory.alloc_calls },
+        .{ ",\n    \"free_calls\": ", memory.free_calls },
+        .{ ",\n    \"create_calls\": ", memory.create_calls },
+        .{ ",\n    \"destroy_calls\": ", memory.destroy_calls },
+    }, "\n  }");
 }
 
 fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
@@ -803,20 +815,17 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
     const p50 = hist.percentilePayloadBelowLarge(50);
     const p95 = hist.percentilePayloadBelowLarge(95);
     const p99 = hist.percentilePayloadBelowLarge(99);
-    try writer.print(
-        "gc: allocation histogram publications {d}, payload bytes {d}, p50-below-large {d}, p95-below-large {d}, p99-below-large {d}, max-small {d}, covered-by-small {d}/{d} below-large, large {d}\n",
-        .{
-            hist.total,
-            hist.bytes_total,
-            p50,
-            p95,
-            p99,
-            space.max_small_payload,
-            hist.coveredByMaxSmall(),
-            hist.belowLarge(),
-            hist.large,
-        },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: allocation histogram publications ", hist.total },
+        .{ ", payload bytes ", hist.bytes_total },
+        .{ ", p50-below-large ", p50 },
+        .{ ", p95-below-large ", p95 },
+        .{ ", p99-below-large ", p99 },
+        .{ ", max-small ", space.max_small_payload },
+        .{ ", covered-by-small ", hist.coveredByMaxSmall() },
+        .{ "/", hist.belowLarge() },
+        .{ " below-large, large ", hist.large },
+    }, "\n");
 }
 
 /// TGC S4-f (2): per-size-class block occupancy. `blocks` is what
@@ -826,10 +835,11 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
 /// fragmentation, or blocks nothing has reclaimed.
 fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
     const census = registry.block_heap.censusBlocks();
-    try writer.print(
-        "gc: block census classed superblocks {d}, other {d}, uninitialized slots {d}\n",
-        .{ census.classed_superblocks, census.other_superblocks, census.uninitialized_blocks },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: block census classed superblocks ", census.classed_superblocks },
+        .{ ", other ", census.other_superblocks },
+        .{ ", uninitialized slots ", census.uninitialized_blocks },
+    }, "\n");
     try writer.print(
         "gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free\n",
         .{},
@@ -849,44 +859,45 @@ fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
         total.hot_listed += row.hot_listed;
         total.free_listed += row.free_listed;
         if (row.blocks == 0) continue;
-        try writer.print(
-            "gc: block census row {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n",
-            .{
-                row.cell_bytes,
-                row.blocks,
-                row.cells,
-                row.allocated,
-                if (row.cells == 0) @as(u64, 0) else row.allocated * 1000 / row.cells,
-                row.empty,
-                row.lt10,
-                row.lt50,
-                row.ge50,
-                row.young,
-                row.decommitted,
-                row.active,
-                row.hot_listed,
-                row.free_listed,
-            },
-        );
+        try writeCounterLine(writer, &.{
+            .{ "gc: block census row ", row.cell_bytes },
+            .{ " ", row.blocks },
+            .{ " ", row.cells },
+            .{ " ", row.allocated },
+            .{ " ", if (row.cells == 0) @as(u64, 0) else row.allocated * 1000 / row.cells },
+            .{ " ", row.empty },
+            .{ " ", row.lt10 },
+            .{ " ", row.lt50 },
+            .{ " ", row.ge50 },
+            .{ " ", row.young },
+            .{ " ", row.decommitted },
+            .{ " ", row.active },
+            .{ " ", row.hot_listed },
+            .{ " ", row.free_listed },
+        }, "\n");
     }
-    try writer.print(
-        "gc: block census total 0 {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n",
-        .{
-            total.blocks,
-            total.cells,
-            total.allocated,
-            if (total.cells == 0) @as(u64, 0) else total.allocated * 1000 / total.cells,
-            total.empty,
-            total.lt10,
-            total.lt50,
-            total.ge50,
-            total.young,
-            total.decommitted,
-            total.active,
-            total.hot_listed,
-            total.free_listed,
-        },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: block census total 0 ", total.blocks },
+        .{ " ", total.cells },
+        .{ " ", total.allocated },
+        .{ " ", if (total.cells == 0) @as(u64, 0) else total.allocated * 1000 / total.cells },
+        .{ " ", total.empty },
+        .{ " ", total.lt10 },
+        .{ " ", total.lt50 },
+        .{ " ", total.ge50 },
+        .{ " ", total.young },
+        .{ " ", total.decommitted },
+        .{ " ", total.active },
+        .{ " ", total.hot_listed },
+        .{ " ", total.free_listed },
+    }, "\n");
+}
+
+// Share integer formatting across cold diagnostic rows while keeping each
+// label, value, and suffix explicit at the call site.
+noinline fn writeCounterLine(writer: *std.Io.Writer, parts: []const struct { []const u8, u64 }, suffix: []const u8) !void {
+    for (parts) |part| try writer.print("{s}{d}", .{ part[0], part[1] });
+    try writer.writeAll(suffix);
 }
 
 /// Generational counters. `remembered without young` is the one to watch: it
@@ -896,193 +907,187 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
     const st = registry.generation.stats;
     // Row shape frozen: tools/perf/gc_stats_snapshot.py parses it. The S4-f
     // trigger census gets its own row below rather than a field here.
-    try writer.print("gc: generation current young {d}, remembered owners {d}\n", .{
-        st.young_count,
-        registry.generation.remembered.count(),
-    });
-    try writer.print("gc: generation current young-trigger {d} (excludes owner-decided storage cells)\n", .{
-        st.young_trigger_count,
-    });
-    try writer.print("gc: minor collections {d}, reclaimed {d}, promoted-by-minor {d}, promoted-all {d}, remembered without young {d}, remembered drops {d}, suspensions {d}\n", .{
-        st.minor_collections,
-        st.minor_reclaimed,
-        st.minor_promoted,
-        st.promoted,
-        st.remembered_without_young,
-        st.remembered_drops,
-        st.minor_suspensions,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: generation current young ", st.young_count },
+        .{ ", remembered owners ", registry.generation.remembered.count() },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: generation current young-trigger ", st.young_trigger_count },
+    }, " (excludes owner-decided storage cells)\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: minor collections ", st.minor_collections },
+        .{ ", reclaimed ", st.minor_reclaimed },
+        .{ ", promoted-by-minor ", st.minor_promoted },
+        .{ ", promoted-all ", st.promoted },
+        .{ ", remembered without young ", st.remembered_without_young },
+        .{ ", remembered drops ", st.remembered_drops },
+        .{ ", suspensions ", st.minor_suspensions },
+    }, "\n");
     try writer.print("gc: major retirement commits {d}, abandons {d}, current state {s}\n", .{
         st.retirement_commits,
         st.retirement_abandons,
         @tagName(registry.generation.major_retirement),
     });
-    try writer.print("gc: generational barrier calls {d}, exit young-owner {d}, exit old-target {d}, remembered-owner {d}\n", .{
-        st.barrier_calls,
-        st.barrier_young_owner,
-        st.barrier_old_target,
-        st.barrier_calls -| st.barrier_young_owner -| st.barrier_old_target,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: generational barrier calls ", st.barrier_calls },
+        .{ ", exit young-owner ", st.barrier_young_owner },
+        .{ ", exit old-target ", st.barrier_old_target },
+        .{ ", remembered-owner ", st.barrier_calls -| st.barrier_young_owner -| st.barrier_old_target },
+    }, "\n");
     const mean_pause = if (st.minor_collections == 0) 0 else st.pause_ns_total / st.minor_collections;
     const mean_young = if (st.minor_collections == 0) 0 else st.young_at_start_total / st.minor_collections;
-    try writer.print("gc: minor stw total {d} ns, mean {d} ns, max {d} ns\n", .{ st.pause_ns_total, mean_pause, st.pause_ns_max });
+    try writeCounterLine(writer, &.{
+        .{ "gc: minor stw total ", st.pause_ns_total },
+        .{ " ns, mean ", mean_pause },
+        .{ " ns, max ", st.pause_ns_max },
+    }, " ns\n");
     if (registry.generation.minorPauseDistribution()) |d| {
-        try writer.print("gc: minor pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns over {d} retained of {d} samples\n", .{
-            d.p50_ns,
-            d.p95_ns,
-            d.p99_ns,
-            d.max_ns,
-            d.samples_retained,
-            d.samples_total,
-        });
+        try writeCounterLine(writer, &.{
+            .{ "gc: minor pause p50 ", d.p50_ns },
+            .{ " ns, p95 ", d.p95_ns },
+            .{ " ns, p99 ", d.p99_ns },
+            .{ " ns, max ", d.max_ns },
+            .{ " ns over ", d.samples_retained },
+            .{ " retained of ", d.samples_total },
+        }, " samples\n");
     } else {
-        try writer.print("gc: minor pause distribution unavailable, sample drops {d}\n", .{registry.generation.minor_pause_sample_drops});
+        try writeCounterLine(writer, &.{
+            .{ "gc: minor pause distribution unavailable, sample drops ", registry.generation.minor_pause_sample_drops },
+        }, "\n");
     }
-    try writer.print(
-        "gc: minor phase totals clear {d}, roots {d}, conservative {d}, remembered {d}, trace {d}, sweep+destroy {d}, promote {d}, other {d} ns\n",
-        .{
-            st.minor_clear_ns_total,
-            st.minor_roots_ns_total,
-            st.minor_conservative_ns_total,
-            st.minor_remembered_ns_total,
-            st.minor_trace_ns_total,
-            st.minor_sweep_ns_total,
-            st.minor_promote_ns_total,
-            st.pause_ns_total -| st.minorPhaseNsTotal(),
-        },
-    );
-    try writer.print("gc: minor young-at-start mean {d}, max {d}\n", .{
-        mean_young,
-        st.young_at_start_max,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: minor phase totals clear ", st.minor_clear_ns_total },
+        .{ ", roots ", st.minor_roots_ns_total },
+        .{ ", conservative ", st.minor_conservative_ns_total },
+        .{ ", remembered ", st.minor_remembered_ns_total },
+        .{ ", trace ", st.minor_trace_ns_total },
+        .{ ", sweep+destroy ", st.minor_sweep_ns_total },
+        .{ ", promote ", st.minor_promote_ns_total },
+        .{ ", other ", st.pause_ns_total -| st.minorPhaseNsTotal() },
+    }, " ns\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: minor young-at-start mean ", mean_young },
+        .{ ", max ", st.young_at_start_max },
+    }, "\n");
     if (engine.core.gc.verify_minor) {
-        try writer.print("gc: conservative-only young {d} over {d} verified minors\n", .{
-            st.conservative_only_young,
-            st.minor_collections,
-        });
+        try writeCounterLine(writer, &.{
+            .{ "gc: conservative-only young ", st.conservative_only_young },
+            .{ " over ", st.minor_collections },
+        }, " verified minors\n");
     } else {
         try writer.print("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n", .{});
     }
     const cs = registry.incremental.stats;
-    try writer.print(
-        "gc: exact-target marking barrier calls {d}, exit marked-target {d}, exit unpublished-owner {d}, exit unpublished-target {d}, requeued-owner {d}, shaded-target {d}\n",
-        .{
-            cs.barrier_calls,
-            cs.barrier_marked_target,
-            cs.barrier_unpublished_owner,
-            cs.barrier_unpublished_target,
-            cs.barrier_requeued_owner,
-            cs.shaded,
-        },
-    );
-    try writer.print("gc: incremental doomed condemned headers {d}, destroyed counted objects {d}, parked entries drained {d}, parked-drain slices {d}\n", .{
-        cs.doomed_condemned_headers,
-        cs.doomed_destroyed_objects,
-        cs.doomed_parked_entries_drained,
-        cs.doomed_parked_drain_slices,
-    });
-    try writer.print(
-        "gc: incremental major cycles completed {d}, aborted {d}, forced {d}, mark steps {d}, cycle STW last {d} ns max {d} ns\n",
-        .{ cs.cycles_completed, cs.cycles_aborted, cs.forced_finishes, cs.increments, cs.last_cycle_stw_ns, cs.max_cycle_stw_ns },
-    );
-    try writer.print(
-        "gc: cycle envelope measured {d}, skipped {d}, max-P/T S {d}, T {d}, B {d}, P {d}, B/T-x1000000 {d}, P/T-x1000000 {d}, P/S-x1000000 {d}, forced {d}\n",
-        .{
-            cs.envelope_measured_cycles,
-            cs.envelope_skipped_cycles,
-            cs.envelope_max_start_bytes,
-            cs.envelope_max_threshold_bytes,
-            cs.envelope_max_begin_bytes,
-            cs.envelope_max_peak_bytes,
-            engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes),
-            engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes),
-            engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes),
-            cs.forced_finishes,
-        },
-    );
-    try writer.print(
-        "gc: incremental STW phase-segment max ns begin {d}, increment {d}, destroy {d}, finish {d}\n",
-        .{ cs.segment_max_ns[0], cs.segment_max_ns[1], cs.segment_max_ns[2], cs.segment_max_ns[3] },
-    );
-    try writer.print(
-        "gc: incremental STW phase totals begin {d} ns/{d} segments, increment {d} ns/{d} segments, destroy {d} ns/{d} segments, finish {d} ns/{d} segments\n",
-        .{
-            cs.total_stw_by_kind[0], cs.total_segments_by_kind[0],
-            cs.total_stw_by_kind[1], cs.total_segments_by_kind[1],
-            cs.total_stw_by_kind[2], cs.total_segments_by_kind[2],
-            cs.total_stw_by_kind[3], cs.total_segments_by_kind[3],
-        },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: exact-target marking barrier calls ", cs.barrier_calls },
+        .{ ", exit marked-target ", cs.barrier_marked_target },
+        .{ ", exit unpublished-owner ", cs.barrier_unpublished_owner },
+        .{ ", exit unpublished-target ", cs.barrier_unpublished_target },
+        .{ ", requeued-owner ", cs.barrier_requeued_owner },
+        .{ ", shaded-target ", cs.shaded },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental doomed condemned headers ", cs.doomed_condemned_headers },
+        .{ ", destroyed counted objects ", cs.doomed_destroyed_objects },
+        .{ ", parked entries drained ", cs.doomed_parked_entries_drained },
+        .{ ", parked-drain slices ", cs.doomed_parked_drain_slices },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental major cycles completed ", cs.cycles_completed },
+        .{ ", aborted ", cs.cycles_aborted },
+        .{ ", forced ", cs.forced_finishes },
+        .{ ", mark steps ", cs.increments },
+        .{ ", cycle STW last ", cs.last_cycle_stw_ns },
+        .{ " ns max ", cs.max_cycle_stw_ns },
+    }, " ns\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: cycle envelope measured ", cs.envelope_measured_cycles },
+        .{ ", skipped ", cs.envelope_skipped_cycles },
+        .{ ", max-P/T S ", cs.envelope_max_start_bytes },
+        .{ ", T ", cs.envelope_max_threshold_bytes },
+        .{ ", B ", cs.envelope_max_begin_bytes },
+        .{ ", P ", cs.envelope_max_peak_bytes },
+        .{ ", B/T-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes) },
+        .{ ", P/T-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes) },
+        .{ ", P/S-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes) },
+        .{ ", forced ", cs.forced_finishes },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental STW phase-segment max ns begin ", cs.segment_max_ns[0] },
+        .{ ", increment ", cs.segment_max_ns[1] },
+        .{ ", destroy ", cs.segment_max_ns[2] },
+        .{ ", finish ", cs.segment_max_ns[3] },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental STW phase totals begin ", cs.total_stw_by_kind[0] },
+        .{ " ns/", cs.total_segments_by_kind[0] },
+        .{ " segments, increment ", cs.total_stw_by_kind[1] },
+        .{ " ns/", cs.total_segments_by_kind[1] },
+        .{ " segments, destroy ", cs.total_stw_by_kind[2] },
+        .{ " ns/", cs.total_segments_by_kind[2] },
+        .{ " segments, finish ", cs.total_stw_by_kind[3] },
+        .{ " ns/", cs.total_segments_by_kind[3] },
+    }, " segments\n");
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
     const st = registry.block_heap.stats;
-    try writer.print(
-        "gc: block heap committed {d} live {d} committed/live-x1000 {d} superblocks {d} large maps {d}\n",
-        .{
-            st.committed_bytes,
-            registry.block_heap.liveBytes(),
-            registry.block_heap.committedLiveMilli(),
-            st.superblocks,
-            st.large_maps,
-        },
-    );
-    try writer.print(
-        "gc: block heap deferred block runs {d}, hot reuse published {d}, reopened {d}, bitmap reclaimed cells {d}\n",
-        .{ st.deferred_block_runs_completed, st.hot_blocks_published, st.hot_blocks_reopened, st.bitmap_reclaimed_cells },
-    );
-    try writer.print(
-        "gc: block heap hot publish rejects empty {d}, capacity {d}, active {d}, doomed {d}, young {d}, listed {d}, decommitted {d}, cached-k {d}, k-rejected reopens {d}\n",
-        .{
-            st.hot_publish_rejected_empty,
-            st.hot_publish_rejected_capacity,
-            st.hot_publish_rejected_active,
-            st.hot_publish_rejected_doomed,
-            st.hot_publish_rejected_young,
-            st.hot_publish_rejected_listed,
-            st.hot_publish_rejected_decommitted,
-            st.hot_publish_rejected_cached_k,
-            st.hot_blocks_k_rejected,
-        },
-    );
-    try writer.print(
-        "gc: major threshold resets growth {d}, small-heap-floor {d}\n",
-        .{ registry.stats.threshold_growth_hits, registry.stats.threshold_floor_hits },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: block heap committed ", st.committed_bytes },
+        .{ " live ", registry.block_heap.liveBytes() },
+        .{ " committed/live-x1000 ", registry.block_heap.committedLiveMilli() },
+        .{ " superblocks ", st.superblocks },
+        .{ " large maps ", st.large_maps },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: block heap deferred block runs ", st.deferred_block_runs_completed },
+        .{ ", hot reuse published ", st.hot_blocks_published },
+        .{ ", reopened ", st.hot_blocks_reopened },
+        .{ ", bitmap reclaimed cells ", st.bitmap_reclaimed_cells },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: block heap hot publish rejects empty ", st.hot_publish_rejected_empty },
+        .{ ", capacity ", st.hot_publish_rejected_capacity },
+        .{ ", active ", st.hot_publish_rejected_active },
+        .{ ", doomed ", st.hot_publish_rejected_doomed },
+        .{ ", young ", st.hot_publish_rejected_young },
+        .{ ", listed ", st.hot_publish_rejected_listed },
+        .{ ", decommitted ", st.hot_publish_rejected_decommitted },
+        .{ ", cached-k ", st.hot_publish_rejected_cached_k },
+        .{ ", k-rejected reopens ", st.hot_blocks_k_rejected },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: major threshold resets growth ", registry.stats.threshold_growth_hits },
+        .{ ", small-heap-floor ", registry.stats.threshold_floor_hits },
+    }, "\n");
     // TGC S4-d spec 2.4 deletion probe. The middle number is the one that
     // has to read 0 on every workload: a plain, payload-free, unstamped
     // object that still reached a destructor. The third is the sticky-bit
     // residue D-S4-4 permits (an object that stopped owing work keeps its
     // bit and so keeps paying one no-op visit).
-    try writer.print(
-        "gc: object destructor calls {d}, plain-object calls {d}, plain objects carrying the finalizer bit {d}\n",
-        .{
-            registry.stats.object_destructor_calls,
-            registry.stats.plain_object_destructor_calls,
-            registry.stats.plain_objects_with_finalizer_bit,
-        },
-    );
-    try writer.print(
-        "gc: block heap page returns cumulative decommitted {d}, recommitted {d}\n",
-        .{ st.decommitted_bytes, st.recommitted_bytes },
-    );
-    try writer.print(
-        "gc: block heap medium superblocks returned {d}, bytes {d}\n",
-        .{ st.medium_superblocks_released, st.medium_superblock_bytes_released },
-    );
-    try writer.print(
-        "gc: block heap decommit checks {d}, released blocks cumulative {d}, current bytes {d}, max batch bytes {d}\n",
-        .{
-            st.decommit_checks,
-            st.decommitted_bytes / @max(engine.core.gc_block_heap.decommit_bytes, 1),
-            st.currentDecommittedBytes(),
-            st.decommit_max_batch_bytes,
-        },
-    );
-    try writer.print(
-        "gc: process heap trim attempts {d}, successes {d}\n",
-        .{ st.malloc_trim_attempts, st.malloc_trim_successes },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: object destructor calls ", registry.stats.object_destructor_calls },
+        .{ ", plain-object calls ", registry.stats.plain_object_destructor_calls },
+        .{ ", plain objects carrying the finalizer bit ", registry.stats.plain_objects_with_finalizer_bit },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: block heap page returns cumulative decommitted ", st.decommitted_bytes },
+        .{ ", recommitted ", st.recommitted_bytes },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: block heap medium superblocks returned ", st.medium_superblocks_released },
+        .{ ", bytes ", st.medium_superblock_bytes_released },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: block heap decommit checks ", st.decommit_checks },
+        .{ ", released blocks cumulative ", st.decommitted_bytes / @max(engine.core.gc_block_heap.decommit_bytes, 1) },
+        .{ ", current bytes ", st.currentDecommittedBytes() },
+        .{ ", max batch bytes ", st.decommit_max_batch_bytes },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: process heap trim attempts ", st.malloc_trim_attempts },
+        .{ ", successes ", st.malloc_trim_successes },
+    }, "\n");
 }
 
 fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
@@ -1090,19 +1095,16 @@ fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
     // Row format is parsed by tools/perf/gc_stats_snapshot.py (Stage 0); the
     // two finish-side timers added by TGC S0 go on the reconciliation row
     // below so this row keeps its eight fields.
-    try writer.print(
-        "gc: incremental subphase ns totals begin-clear {d}, begin-precise-seed {d}, begin-conservative-seed {d}, begin-retire {d}, finish-remark-total {d}, finish-conservative-seed-subset {d}, finish-weak {d}, finish-condemn {d}\n",
-        .{
-            ph.phase_begin_clear_ns,
-            ph.phase_begin_precise_seed_ns,
-            ph.phase_begin_conservative_seed_ns,
-            ph.phase_begin_retire_ns,
-            ph.phase_finish_remark_ns,
-            ph.phase_finish_conservative_seed_ns,
-            ph.phase_finish_weak_ns,
-            ph.phase_finish_condemn_ns,
-        },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental subphase ns totals begin-clear ", ph.phase_begin_clear_ns },
+        .{ ", begin-precise-seed ", ph.phase_begin_precise_seed_ns },
+        .{ ", begin-conservative-seed ", ph.phase_begin_conservative_seed_ns },
+        .{ ", begin-retire ", ph.phase_begin_retire_ns },
+        .{ ", finish-remark-total ", ph.phase_finish_remark_ns },
+        .{ ", finish-conservative-seed-subset ", ph.phase_finish_conservative_seed_ns },
+        .{ ", finish-weak ", ph.phase_finish_weak_ns },
+        .{ ", finish-condemn ", ph.phase_finish_condemn_ns },
+    }, "\n");
     // Reconciliation against the STW rows above: both are cumulative over
     // the run, so the residuals are what the subphase timers do not cover
     // (the `nowNanos` reads around each pause, and for begin the frontier
@@ -1111,14 +1113,22 @@ fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
     const finish_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.finish)];
     const begin_sum = ph.phase_begin_clear_ns +| ph.phase_begin_precise_seed_ns +| ph.phase_begin_conservative_seed_ns +| ph.phase_begin_retire_ns;
     const finish_sum = ph.phase_finish_init_ns +| ph.phase_finish_remark_ns +| ph.phase_finish_weak_ns +| ph.phase_finish_condemn_ns +| ph.phase_finish_tail_ns;
-    try writer.print(
-        "gc: incremental subphase reconciliation finish-init {d}, finish-tail {d}; begin STW {d} - subphases {d} = other {d} ns; finish STW {d} - subphases {d} = other {d} ns\n",
-        .{ ph.phase_finish_init_ns, ph.phase_finish_tail_ns, begin_total, begin_sum, begin_total -| begin_sum, finish_total, finish_sum, finish_total -| finish_sum },
-    );
-    try writer.print(
-        "gc: incremental subphase work totals retired non-block headers {d}, retired young blocks {d}, retired remembered sets {d}, clearMarks non-block headers {d}\n",
-        .{ ph.phase_retired_nonblock_headers, ph.phase_retired_young_blocks, ph.phase_retired_remembered_sets, ph.phase_cleared_nonblock_headers },
-    );
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental subphase reconciliation finish-init ", ph.phase_finish_init_ns },
+        .{ ", finish-tail ", ph.phase_finish_tail_ns },
+        .{ "; begin STW ", begin_total },
+        .{ " - subphases ", begin_sum },
+        .{ " = other ", begin_total -| begin_sum },
+        .{ " ns; finish STW ", finish_total },
+        .{ " - subphases ", finish_sum },
+        .{ " = other ", finish_total -| finish_sum },
+    }, " ns\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: incremental subphase work totals retired non-block headers ", ph.phase_retired_nonblock_headers },
+        .{ ", retired young blocks ", ph.phase_retired_young_blocks },
+        .{ ", retired remembered sets ", ph.phase_retired_remembered_sets },
+        .{ ", clearMarks non-block headers ", ph.phase_cleared_nonblock_headers },
+    }, "\n");
 }
 
 fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
@@ -1132,107 +1142,115 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
         );
         return;
     }
-    try writer.print(
-        "gc: marked-set census majors {d}, headers {d}, block headers {d}\n",
-        .{ fp.major_censuses, fp.marked_headers, fp.block_headers },
-    );
-    try writer.print(
-        // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
-        // the two are one family to every consumer of this panel.
-        "gc: marked-set kinds object {d}, function-bytecode {d}, var-ref {d}, realm-context {d}, module {d}, shape {d}, big-int {d}, string {d}, storage {d}\n",
-        .{
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)],
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.property_storage)] +
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.array_storage)] +
-                fp.by_kind[@intFromEnum(engine.core.gc.GcKind.payload)],
-        },
-    );
-    try writer.print(
-        "gc: marked-set trace classes ordinary-object {d}, fast-array {d}, bytecode-function {d}, exotic-object {d}, non-object {d}\n",
-        .{
-            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.ordinary_object)],
-            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.fast_array)],
-            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.bytecode_function)],
-            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.exotic_object)],
-            fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.non_object)],
-        },
-    );
-    inline for (std.meta.tags(engine.core.gc_trace_stw.MarkStorageComponent)) |component| {
+    try writeCounterLine(writer, &.{
+        .{ "gc: marked-set census majors ", fp.major_censuses },
+        .{ ", headers ", fp.marked_headers },
+        .{ ", block headers ", fp.block_headers },
+    }, "\n");
+    // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
+    // the two are one family to every consumer of this panel.
+    try writeCounterLine(writer, &.{
+        .{ "gc: marked-set kinds object ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)] },
+        .{ ", function-bytecode ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)] },
+        .{ ", var-ref ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)] },
+        .{ ", realm-context ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)] },
+        .{ ", module ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)] },
+        .{ ", shape ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)] },
+        .{ ", big-int ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)] },
+        .{ ", string ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)] },
+        .{ ", storage ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.property_storage)] +
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.array_storage)] +
+            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.payload)] },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: marked-set trace classes ordinary-object ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.ordinary_object)] },
+        .{ ", fast-array ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.fast_array)] },
+        .{ ", bytecode-function ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.bytecode_function)] },
+        .{ ", exotic-object ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.exotic_object)] },
+        .{ ", non-object ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.non_object)] },
+    }, "\n");
+    for (std.meta.tags(engine.core.gc_trace_stw.MarkStorageComponent)) |component| {
         const aggregate = fp.storage[@intFromEnum(component)];
-        try writer.print(
-            "gc: mark storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
-            .{ @tagName(component), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
-        );
+        try writer.writeAll("gc: mark storage ");
+        try writer.writeAll(@tagName(component));
+        try writeCounterLine(writer, &.{
+            .{ " allocation-touches ", aggregate.allocation_touches },
+            .{ ", allocated-bytes ", aggregate.allocated_bytes },
+            .{ ", touched-cache-lines ", aggregate.touched_cache_lines },
+        }, "\n");
     }
-    inline for (std.meta.tags(engine.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
+    for (std.meta.tags(engine.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
         const aggregate = fp.storage_by_trace_class[@intFromEnum(trace_class)];
-        try writer.print(
-            "gc: mark trace class storage {s} allocation-touches {d}, allocated-bytes {d}, touched-cache-lines {d}\n",
-            .{ @tagName(trace_class), aggregate.allocation_touches, aggregate.allocated_bytes, aggregate.touched_cache_lines },
-        );
+        try writer.writeAll("gc: mark trace class storage ");
+        try writer.writeAll(@tagName(trace_class));
+        try writeCounterLine(writer, &.{
+            .{ " allocation-touches ", aggregate.allocation_touches },
+            .{ ", allocated-bytes ", aggregate.allocated_bytes },
+            .{ ", touched-cache-lines ", aggregate.touched_cache_lines },
+        }, "\n");
     }
-    inline for (engine.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
+    for (engine.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
         const plain_external = fp.inline_eligible_objects[index] -
             fp.inline_direct_objects[index] -
             fp.inline_tail_grown_external_objects[index];
-        try writer.print(
-            "gc: inline property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
-            .{ limit, fp.inline_eligible_objects[index], fp.inline_direct_objects[index], fp.inline_tail_grown_external_objects[index], plain_external, fp.inline_property_bytes[index], fp.inline_property_cache_lines[index] },
-        );
+        try writeCounterLine(writer, &.{
+            .{ "gc: inline property upper slots ", limit },
+            .{ ", eligible-objects ", fp.inline_eligible_objects[index] },
+            .{ ", direct-inline ", fp.inline_direct_objects[index] },
+            .{ ", tail-grown-external ", fp.inline_tail_grown_external_objects[index] },
+            .{ ", plain-external ", plain_external },
+            .{ ", external-allocated-bytes ", fp.inline_property_bytes[index] },
+            .{ ", external-touched-cache-lines ", fp.inline_property_cache_lines[index] },
+        }, "\n");
         const ordinary_plain_external = fp.inline_ordinary_eligible_objects[index] -
             fp.inline_ordinary_direct_objects[index] -
             fp.inline_ordinary_tail_grown_external_objects[index];
-        try writer.print(
-            "gc: inline ordinary property upper slots {d}, eligible-objects {d}, direct-inline {d}, tail-grown-external {d}, plain-external {d}, external-allocated-bytes {d}, external-touched-cache-lines {d}\n",
-            .{ limit, fp.inline_ordinary_eligible_objects[index], fp.inline_ordinary_direct_objects[index], fp.inline_ordinary_tail_grown_external_objects[index], ordinary_plain_external, fp.inline_ordinary_property_bytes[index], fp.inline_ordinary_property_cache_lines[index] },
-        );
+        try writeCounterLine(writer, &.{
+            .{ "gc: inline ordinary property upper slots ", limit },
+            .{ ", eligible-objects ", fp.inline_ordinary_eligible_objects[index] },
+            .{ ", direct-inline ", fp.inline_ordinary_direct_objects[index] },
+            .{ ", tail-grown-external ", fp.inline_ordinary_tail_grown_external_objects[index] },
+            .{ ", plain-external ", ordinary_plain_external },
+            .{ ", external-allocated-bytes ", fp.inline_ordinary_property_bytes[index] },
+            .{ ", external-touched-cache-lines ", fp.inline_ordinary_property_cache_lines[index] },
+        }, "\n");
     }
 }
 
 fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engine.core.gc.Registry) !void {
     const minors = registry.generation.stats.minor_collections;
-    try writer.print("gc: collection entries total {d}, major completed {d}, minor completed {d}, failed {d}\n", .{
-        stats.collections,
-        stats.major_gc_count,
-        minors,
-        stats.failed_collections,
-    });
-    try writer.print("gc: collector counted objects freed {d} (excludes bytecode)\n", .{
-        stats.freed_objects,
-    });
-    try writer.print("gc: heap live {d} bytes, account peak {d} bytes\n", .{
-        stats.heap_live_bytes,
-        stats.peak_allocated_bytes,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: collection entries total ", stats.collections },
+        .{ ", major completed ", stats.major_gc_count },
+        .{ ", minor completed ", minors },
+        .{ ", failed ", stats.failed_collections },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: collector counted objects freed ", stats.freed_objects },
+    }, " (excludes bytecode)\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: heap live ", stats.heap_live_bytes },
+        .{ " bytes, account peak ", stats.peak_allocated_bytes },
+    }, " bytes\n");
     // External is a separate reporting dimension, even where an ordinary
     // ArrayBuffer's engine-owned backing also overlaps the whole
     // MemoryAccount. The weighted debt is a pacing counter, not current live
     // bytes; printing both prevents either from being mistaken for the other.
-    try writer.print(
-        "gc: external bytes current {d}, peak {d}, token bytes {d} in {d} tokens, untracked bytes {d}, allocations {d}, frees {d}, invalid releases {d}, weighted debt {d}\n",
-        .{
-            stats.external_bytes,
-            stats.peak_external_bytes,
-            stats.external_token_bytes,
-            stats.external_token_count,
-            stats.external_untracked_bytes,
-            stats.external_alloc_count,
-            stats.external_free_count,
-            stats.external_invalid_release_count,
-            stats.allocation_debt,
-        },
-    );
-    try writer.print("gc: weak refs current {d}, finalizer queue current {d}\n", .{
-        stats.weak_ref_count,
-        stats.finalizer_queue_length,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: external bytes current ", stats.external_bytes },
+        .{ ", peak ", stats.peak_external_bytes },
+        .{ ", token bytes ", stats.external_token_bytes },
+        .{ " in ", stats.external_token_count },
+        .{ " tokens, untracked bytes ", stats.external_untracked_bytes },
+        .{ ", allocations ", stats.external_alloc_count },
+        .{ ", frees ", stats.external_free_count },
+        .{ ", invalid releases ", stats.external_invalid_release_count },
+        .{ ", weighted debt ", stats.allocation_debt },
+    }, "\n");
+    try writeCounterLine(writer, &.{
+        .{ "gc: weak refs current ", stats.weak_ref_count },
+        .{ ", finalizer queue current ", stats.finalizer_queue_length },
+    }, "\n");
 }
 
 /// TGC S3 §2.6 audit. `stale-edge` counts holder edges that named an entry the
@@ -1241,11 +1259,11 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engi
 /// `entries` is the dynamic atom table's slot count, so the two are readable
 /// as a rate.
 fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
-    try writer.print("gc: atom audit stale-edge {d}, shell-edge {d}, entries {d}\n", .{
-        rt.atoms.atom_audit_stale_edge,
-        rt.atoms.atom_audit_shell_edge,
-        rt.atoms.entries.len,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: atom audit stale-edge ", rt.atoms.atom_audit_stale_edge },
+        .{ ", shell-edge ", rt.atoms.atom_audit_shell_edge },
+        .{ ", entries ", rt.atoms.entries.len },
+    }, "\n");
 }
 
 fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
@@ -1279,14 +1297,14 @@ fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) 
         return;
     };
     const retained = @min(d.samples, engine.core.gc.pause_sample_capacity);
-    try writer.print("gc: major pause p50 {d} ns, p95 {d} ns, p99 {d} ns, max {d} ns, retained {d} of {d} pauses\n", .{
-        d.p50_ns,
-        d.p95_ns,
-        d.p99_ns,
-        d.max_ns,
-        retained,
-        d.samples,
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: major pause p50 ", d.p50_ns },
+        .{ " ns, p95 ", d.p95_ns },
+        .{ " ns, p99 ", d.p99_ns },
+        .{ " ns, max ", d.max_ns },
+        .{ " ns, retained ", retained },
+        .{ " of ", d.samples },
+    }, " pauses\n");
 }
 
 fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
@@ -1678,4 +1696,281 @@ test "zjs args reject missing source" {
     try std.testing.expectError(error.Usage, parseArgs(&.{"-e"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{"-m"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "-i", "extra" }));
+}
+
+test "zjs mark footprint serialization preserves populated rows and missing census" {
+    // Only the census field is read by this serializer; no collector is run.
+    var rt: engine.core.JSRuntime = undefined;
+    rt.gc_mark_footprint = .{ .major_censuses = 2, .marked_headers = 3, .block_headers = 4 };
+    const fp = &rt.gc_mark_footprint;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)] = 1;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)] = 2;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)] = 3;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)] = 4;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)] = 5;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)] = 6;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)] = 7;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)] = 8;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.property_storage)] = 9;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.array_storage)] = 10;
+    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.payload)] = 11;
+    for (&fp.storage, 0..) |*row, i| row.* = .{ .allocation_touches = i + 1, .allocated_bytes = i + 11, .touched_cache_lines = i + 21 };
+    for (&fp.storage_by_trace_class, 0..) |*row, i| row.* = .{ .allocation_touches = i + 31, .allocated_bytes = i + 41, .touched_cache_lines = i + 51 };
+    for (0..fp.inline_eligible_objects.len) |i| {
+        fp.inline_eligible_objects[i] = i + 10;
+        fp.inline_direct_objects[i] = 2;
+        fp.inline_tail_grown_external_objects[i] = 3;
+        fp.inline_property_bytes[i] = i + 100;
+        fp.inline_property_cache_lines[i] = i + 20;
+        fp.inline_ordinary_eligible_objects[i] = i + 8;
+        fp.inline_ordinary_direct_objects[i] = 1;
+        fp.inline_ordinary_tail_grown_external_objects[i] = 2;
+        fp.inline_ordinary_property_bytes[i] = i + 80;
+        fp.inline_ordinary_property_cache_lines[i] = i + 15;
+    }
+    const old_census = engine.core.gc_trace_stw.mark_footprint_census;
+    defer engine.core.gc_trace_stw.mark_footprint_census = old_census;
+    engine.core.gc_trace_stw.mark_footprint_census = true;
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try dumpGcMarkFootprint(&writer, &rt);
+    const expected =
+        \\gc: marked-set census majors 2, headers 3, block headers 4
+        \\gc: marked-set kinds object 1, function-bytecode 2, var-ref 3, realm-context 4, module 5, shape 6, big-int 7, string 8, storage 30
+        \\gc: marked-set trace classes ordinary-object 0, fast-array 0, bytecode-function 0, exotic-object 0, non-object 0
+        \\gc: mark storage base allocation-touches 1, allocated-bytes 11, touched-cache-lines 21
+        \\gc: mark storage shape allocation-touches 2, allocated-bytes 12, touched-cache-lines 22
+        \\gc: mark storage property_slots allocation-touches 3, allocated-bytes 13, touched-cache-lines 23
+        \\gc: mark storage dense_elements allocation-touches 4, allocated-bytes 14, touched-cache-lines 24
+        \\gc: mark storage trace_payload allocation-touches 5, allocated-bytes 15, touched-cache-lines 25
+        \\gc: mark storage payload_backing allocation-touches 6, allocated-bytes 16, touched-cache-lines 26
+        \\gc: mark trace class storage ordinary_object allocation-touches 31, allocated-bytes 41, touched-cache-lines 51
+        \\gc: mark trace class storage fast_array allocation-touches 32, allocated-bytes 42, touched-cache-lines 52
+        \\gc: mark trace class storage bytecode_function allocation-touches 33, allocated-bytes 43, touched-cache-lines 53
+        \\gc: mark trace class storage exotic_object allocation-touches 34, allocated-bytes 44, touched-cache-lines 54
+        \\gc: mark trace class storage non_object allocation-touches 35, allocated-bytes 45, touched-cache-lines 55
+        \\gc: inline property upper slots 1, eligible-objects 10, direct-inline 2, tail-grown-external 3, plain-external 5, external-allocated-bytes 100, external-touched-cache-lines 20
+        \\gc: inline ordinary property upper slots 1, eligible-objects 8, direct-inline 1, tail-grown-external 2, plain-external 5, external-allocated-bytes 80, external-touched-cache-lines 15
+        \\gc: inline property upper slots 2, eligible-objects 11, direct-inline 2, tail-grown-external 3, plain-external 6, external-allocated-bytes 101, external-touched-cache-lines 21
+        \\gc: inline ordinary property upper slots 2, eligible-objects 9, direct-inline 1, tail-grown-external 2, plain-external 6, external-allocated-bytes 81, external-touched-cache-lines 16
+        \\gc: inline property upper slots 4, eligible-objects 12, direct-inline 2, tail-grown-external 3, plain-external 7, external-allocated-bytes 102, external-touched-cache-lines 22
+        \\gc: inline ordinary property upper slots 4, eligible-objects 10, direct-inline 1, tail-grown-external 2, plain-external 7, external-allocated-bytes 82, external-touched-cache-lines 17
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    engine.core.gc_trace_stw.mark_footprint_census = false;
+    writer = std.Io.Writer.fixed(&buffer);
+    try dumpGcMarkFootprint(&writer, &rt);
+    try std.testing.expectEqualStrings("gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n", writer.buffered());
+    engine.core.gc_trace_stw.mark_footprint_census = true;
+    var small: [1]u8 = undefined;
+    writer = std.Io.Writer.fixed(&small);
+    try std.testing.expectError(error.WriteFailed, dumpGcMarkFootprint(&writer, &rt));
+}
+
+test "zjs generation diagnostic lines preserve populated snapshot" {
+    var memory = engine.core.memory.MemoryAccount.init(std.testing.allocator);
+    var registry: engine.core.gc.Registry = .{ .memory = &memory };
+    inline for (@typeInfo(@TypeOf(registry.generation.stats)).@"struct".fields, 0..) |field, i| {
+        if (@typeInfo(field.type) == .int) @field(registry.generation.stats, field.name) = @intCast(i + 11);
+    }
+    inline for (@typeInfo(@TypeOf(registry.incremental.stats)).@"struct".fields, 0..) |field, i| {
+        if (@typeInfo(field.type) == .int) @field(registry.incremental.stats, field.name) = @intCast(i + 101);
+    }
+    var samples = [_]u64{ 7, 2, 5 };
+    registry.generation.minor_pause_samples = .{ .items = &samples, .capacity = samples.len };
+    const old_verify = engine.core.gc.verify_minor;
+    defer engine.core.gc.verify_minor = old_verify;
+    engine.core.gc.verify_minor = false;
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try dumpGcGenerationStats(&writer, &registry);
+    const expected =
+        \\gc: generation current young 12, remembered owners 0
+        \\gc: generation current young-trigger 13 (excludes owner-decided storage cells)
+        \\gc: minor collections 16, reclaimed 17, promoted-by-minor 18, promoted-all 19, remembered without young 20, remembered drops 14, suspensions 15
+        \\gc: major retirement commits 36, abandons 37, current state clean
+        \\gc: generational barrier calls 21, exit young-owner 22, exit old-target 23, remembered-owner 0
+        \\gc: minor stw total 24 ns, mean 1 ns, max 25 ns
+        \\gc: minor pause p50 5 ns, p95 7 ns, p99 7 ns, max 7 ns over 3 retained of 3 samples
+        \\gc: minor phase totals clear 26, roots 27, conservative 28, remembered 29, trace 30, sweep+destroy 31, promote 32, other 0 ns
+        \\gc: minor young-at-start mean 2, max 34
+        \\gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)
+        \\gc: exact-target marking barrier calls 102, exit marked-target 103, exit unpublished-owner 104, exit unpublished-target 105, requeued-owner 106, shaded-target 101
+        \\gc: incremental doomed condemned headers 121, destroyed counted objects 122, parked entries drained 123, parked-drain slices 124
+        \\gc: incremental major cycles completed 107, aborted 108, forced 114, mark steps 109, cycle STW last 110 ns max 113 ns
+        \\gc: cycle envelope measured 115, skipped 116, max-P/T S 117, T 118, B 119, P 120, B/T-x1000000 1008475, P/T-x1000000 1016950, P/S-x1000000 1025642, forced 114
+        \\gc: incremental STW phase-segment max ns begin 0, increment 0, destroy 0, finish 0
+        \\gc: incremental STW phase totals begin 0 ns/0 segments, increment 0 ns/0 segments, destroy 0 ns/0 segments, finish 0 ns/0 segments
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "zjs counter line handles full unsigned range and writer errors" {
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeCounterLine(&writer, &.{ .{ "zero ", 0 }, .{ ", max ", std.math.maxInt(u64) } }, " bytes\n");
+    try std.testing.expectEqualStrings("zero 0, max 18446744073709551615 bytes\n", writer.buffered());
+    // Fail after the first field, then at the trailing suffix.
+    for ([_]usize{ 8, 32 }) |capacity| {
+        writer = std.Io.Writer.fixed(buffer[0..capacity]);
+        try std.testing.expectError(error.WriteFailed, writeCounterLine(&writer, &.{ .{ "zero ", 0 }, .{ ", max ", std.math.maxInt(u64) } }, " bytes\n"));
+    }
+}
+
+test "zjs registry diagnostic panels preserve populated snapshot" {
+    var memory = engine.core.memory.MemoryAccount.init(std.testing.allocator);
+    var registry: engine.core.gc.Registry = .{ .memory = &memory };
+    inline for (@typeInfo(@TypeOf(registry.stats)).@"struct".fields, 0..) |field, i| {
+        if (@typeInfo(field.type) == .int) @field(registry.stats, field.name) = @intCast(i + 11);
+    }
+    inline for (@typeInfo(@TypeOf(registry.block_heap.stats)).@"struct".fields, 0..) |field, i| {
+        if (@typeInfo(field.type) == .int) @field(registry.block_heap.stats, field.name) = @intCast(i + 101);
+    }
+    inline for (@typeInfo(@TypeOf(registry.incremental.stats)).@"struct".fields, 0..) |field, i| {
+        if (@typeInfo(field.type) == .int) @field(registry.incremental.stats, field.name) = @intCast(i + 201);
+    }
+    registry.incremental.stats.total_stw_by_kind = .{ 10000, 20000, 30000, 40000 };
+    registry.space_histogram.record(32);
+    registry.space_histogram.record(128);
+    registry.space_histogram.record(70000);
+    var buffer: [16384]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try dumpGcSpaceStats(&writer, &registry);
+    try dumpGcBlockCensus(&writer, &registry);
+    try dumpGcBlockHeapStats(&writer, &registry);
+    try dumpGcPhaseTotals(&writer, &registry);
+    var stats: zjs.GCStats = .{};
+    inline for (@typeInfo(zjs.GCStats).@"struct".fields, 0..) |field, i| {
+        if (@typeInfo(field.type) == .int) @field(stats, field.name) = @intCast(i + 301);
+    }
+    try dumpGcStats(&writer, stats, &registry);
+    try dumpGcPauses(&writer, null);
+    try dumpGcPauses(&writer, .{ .samples = 3, .p50_ns = 2, .p95_ns = 3, .p99_ns = 5, .max_ns = 7 });
+    const expected =
+        \\gc: allocation histogram publications 3, payload bytes 70160, p50-below-large 32, p95-below-large 128, p99-below-large 128, max-small 3760, covered-by-small 2/2 below-large, large 1
+        \\gc: block census classed superblocks 0, other 0, uninitialized slots 0
+        \\gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free
+        \\gc: block census total 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+        \\gc: block heap committed 101 live 0 committed/live-x1000 0 superblocks 103 large maps 104
+        \\gc: block heap deferred block runs 115, hot reuse published 116, reopened 117, bitmap reclaimed cells 127
+        \\gc: block heap hot publish rejects empty 118, capacity 119, active 120, doomed 121, young 122, listed 123, decommitted 124, cached-k 125, k-rejected reopens 126
+        \\gc: major threshold resets growth 29, small-heap-floor 30
+        \\gc: object destructor calls 32, plain-object calls 33, plain objects carrying the finalizer bit 34
+        \\gc: block heap page returns cumulative decommitted 109, recommitted 110
+        \\gc: block heap medium superblocks returned 128, bytes 129
+        \\gc: block heap decommit checks 111, released blocks cumulative 0, current bytes 0, max batch bytes 112
+        \\gc: process heap trim attempts 113, successes 114
+        \\gc: incremental subphase ns totals begin-clear 226, begin-precise-seed 227, begin-conservative-seed 228, begin-retire 229, finish-remark-total 230, finish-conservative-seed-subset 231, finish-weak 232, finish-condemn 233
+        \\gc: incremental subphase reconciliation finish-init 234, finish-tail 235; begin STW 10000 - subphases 910 = other 9090 ns; finish STW 40000 - subphases 1164 = other 38836 ns
+        \\gc: incremental subphase work totals retired non-block headers 236, retired young blocks 237, retired remembered sets 238, clearMarks non-block headers 239
+        \\gc: collection entries total 321, major completed 322, minor completed 0, failed 326
+        \\gc: collector counted objects freed 328 (excludes bytecode)
+        \\gc: heap live 303 bytes, account peak 302 bytes
+        \\gc: external bytes current 312, peak 314, token bytes 318 in 317 tokens, untracked bytes 313, allocations 315, frees 316, invalid releases 319, weighted debt 320
+        \\gc: weak refs current 330, finalizer queue current 331
+        \\gc: major pauses none
+        \\gc: major pause p50 2 ns, p95 3 ns, p99 5 ns, max 7 ns, retained 3 of 3 pauses
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "zjs perf JSON metrics preserve populated fields" {
+    const timings: PerfJsonTimings = .{
+        .total_ns = 1,
+        .read_source_ns = 2,
+        .runtime_create_ns = 3,
+        .setup_ns = 4,
+        .include_ns = 5,
+        .eval_ns = 6,
+        .jobs_ns = 10,
+        .zjs = .{ .parse_ns = 7, .vm_run_ns = 8, .promise_jobs_ns = 9 },
+    };
+    var memory = std.mem.zeroes(zjs.RuntimeMemoryUsage);
+    memory.allocated_bytes = 11;
+    memory.allocation_count = 12;
+    memory.peak_allocated_bytes = 13;
+    memory.peak_allocation_count = 14;
+    memory.alloc_calls = 15;
+    memory.free_calls = 16;
+    memory.create_calls = 17;
+    memory.destroy_calls = 18;
+    var buf: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try dumpPerfJsonMetrics(&writer, memory, timings);
+    const expected =
+        \\  "total_ns": 1,
+        \\  "read_source_ns": 2,
+        \\  "runtime_create_ns": 3,
+        \\  "setup_ns": 4,
+        \\  "include_ns": 5,
+        \\  "eval_ns": 6,
+        \\  "parse_ns": 7,
+        \\  "finalize_ns": null,
+        \\  "parse_ns_includes_finalize": true,
+        \\  "vm_run_ns": 8,
+        \\  "promise_jobs_ns": 9,
+        \\  "jobs_ns": 10,
+        \\  "memory": {
+        \\    "allocated_bytes": 11,
+        \\    "allocation_count": 12,
+        \\    "allocated_bytes_peak": 13,
+        \\    "allocation_count_peak": 14,
+        \\    "alloc_calls": 15,
+        \\    "free_calls": 16,
+        \\    "create_calls": 17,
+        \\    "destroy_calls": 18
+        \\  }
+    ;
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    writer = std.Io.Writer.fixed(buf[0..17]);
+    try std.testing.expectError(error.WriteFailed, dumpPerfJsonMetrics(&writer, memory, timings));
+}
+
+test "zjs memory table preserves widths and populated fields" {
+    var memory = std.mem.zeroes(zjs.RuntimeMemoryUsage);
+    memory.allocation_count = 123456;
+    memory.allocated_bytes = 999999999;
+    memory.atom_count = 3;
+    memory.atom_bytes = 4;
+    memory.object_count = 5;
+    memory.object_bytes = 6;
+    memory.shape_count = 7;
+    memory.shape_bytes = 8;
+    memory.module_count = 9;
+    memory.module_bytes = 10;
+    memory.registered_class_count = 11;
+    memory.class_bytes = 12;
+    const rows =
+        \\memory allocated       123456 999999999
+        \\atoms                      3        4
+        \\objects                    5        6
+        \\shapes                     7        8
+        \\modules                    9       10
+        \\classes                   11       12
+        \\
+    ;
+    var buf: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try dumpMemorySnapshot(&writer, memory);
+    try std.testing.expectEqualStrings("\nZJS memory usage\n  memory limit: 0\n\nNAME                    COUNT     SIZE\n" ++ rows, writer.buffered());
+    memory.memory_limit = 101;
+    writer = std.Io.Writer.fixed(&buf);
+    try dumpMemorySnapshot(&writer, memory);
+    try std.testing.expectEqualStrings("\nZJS memory usage\n  memory limit: 101\n\nNAME                    COUNT     SIZE\n" ++ rows, writer.buffered());
+    writer = std.Io.Writer.fixed(buf[0..1]);
+    try std.testing.expectError(error.WriteFailed, dumpMemorySnapshot(&writer, memory));
+}
+
+// Keep the declared defaults, including the pending-dispatch sentinel.
+fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void {
+    profile.* = .{};
+}
+
+test "opcode profile initialization preserves every default field" {
+    var profile: zjs.OpcodeProfile = undefined;
+    initOpcodeProfile(&profile);
+    try std.testing.expectEqualDeep(zjs.OpcodeProfile{}, profile);
 }

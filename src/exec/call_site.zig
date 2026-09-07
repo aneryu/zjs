@@ -344,21 +344,6 @@ pub inline fn callOnceInto(
     return callGeneric(ctx, output, global, this_value, callee, args, caller_function, caller_frame, out);
 }
 
-pub inline fn callOnce(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: JSValue,
-    callee: JSValue,
-    args: []const JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!JSValue {
-    var out: JSValue = undefined;
-    try callOnceInto(ctx, output, global, this_value, callee, args, caller_function, caller_frame, &out);
-    return pinnedLoad(&out);
-}
-
 /// The resident host Machine runs under the caller's context; the root path
 /// switches to the callee's Realm, so only the context's own Realm qualifies.
 inline fn hostEligible(ctx: *core.JSContext, global: *core.Object) bool {

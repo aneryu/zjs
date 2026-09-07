@@ -11,10 +11,17 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
 
 ## 每次改动(implementer 侧)必须做的
 
-1. 迭代验证用 `zig build check`(纯 sema,~7 s,2026-09-06)判编译错误;要跑测试的
-   编辑循环用常驻增量编译器 `mise run watch -- test`(`--watch -fincremental`;
-   实测每次改动后重建+跑分片 **~11 s**,冷 `zig build test` ~21 s。增量只省 sema,
-   LLVM 仍整模块重生成,所以 11 s 是 Debug 代码生成+链接的地板);
+默认编辑内循环使用 Debug：`check`、定向 `test-fast`，需要 CLI 时用
+`zjs-dev` 或 `mise run quick-watch`。ReleaseFast 后置到稳定候选的体积/性能
+筛选与批门，不随每次编辑构建。Debug 结果不能替代生产配置的最终验证。
+
+1. 迭代验证用 `zig build check` 判编译错误;定向测试用
+   `mise run test-fast -- '<测试名子串>'`，运行时过滤复用统一测试产物，空选择失败。
+   共享主机上的编辑循环用 `mise run watch -- test`：每轮有限构建持锁、空闲释放，
+   复用磁盘缓存。独占连续编辑可用 `mise run watch-exclusive -- test`
+   (`--watch -fincremental`，整个会话持锁，最多 300 秒，到期退出 124)。此前
+   ~11 s 的增量测试记录只适用于此独占模式；默认 watch 不保留驻留编译器。
+   需要符号化失败栈时再用 `-Dtest-filter` 或 `-Dtest-strip=false`;
 2. 为改动写针对性测试(新行为/新不变量);
 3. 收尾跑**一次** `zig build test`(pipefail)全绿;
 4. 注入验证:**仅**对守护新不变量的检查器;用「一次构建多注入点」模式
@@ -38,7 +45,36 @@ Status: **现行**(owner 裁决 2026-08-29:精简影响效率的门禁;验证摊
    精度制度;并发采到的 cycles 仍仅为归因诊断。不得把“有两个锁”解释成
    “数据已有 verdict 权威”。
 
-## 分级验证金字塔(2026-09-02 owner 令「效率」后增补;实现片与性能刀一律遵守)
+## 消融与迭代工具的快筛分级（2026-09-07）
+
+二进制与代码量消融先用 [`size-screen`](perf/size-screen.md) 冻结同配置基线、
+构建候选并比较 post-link stripped 字节与分类源码行数。候选开工前明确主指标与
+最小收益，未达到该收益时返回 STOP，不进入昂贵性能仪器；源码减少不等于机器码减少。
+`CONTINUE` 只表示值得继续验证，不表示语义、性能或合并通过。
+
+源码目标可先用 `mise run source-screen -- <baseline> --min-lines N` 做无编译
+预筛；STOP 不构建，CONTINUE 再冻结并比较同一源码身份，不能用预筛替代验证。
+批边界若还需生产/profiling smoke，使用 `mise run batch-gate-profile` 将
+`merge-gate smoke` 放进同一个构建图；它已含最终全量 test，不必先单独跑一次
+`test + smoke` 再串行跑批门。无 profiling 相关改动仍用普通 `batch-gate`。
+
+| 改动类别 | 每次改动的验证 | 性能/GC 快筛 |
+|---|---|---|
+| 构建、发布、测试/测量工具 | 对应真实入口和失败路径测试；收尾一次 `zig build test` | 不改变引擎机制时不运行 GC 六负载或 PMU |
+| 不改变运行路径的死源码消融 | 全树引用与公共 API/ABI 核对、size-screen、相关测试、收尾一次 `zig build test` | 不自动运行 GC 六负载；产物差分保留归因记录 |
+| 生产代码共享、实例化或代码生成实验 | size-screen、相关测试、收尾一次 `zig build test` | 活跃路径变化按上文第 5 条跑目标负载配对筛选；正式性能线与批门不变 |
+| 触及 GC、分配、根、屏障或回收策略 | 上述验证与生命周期不变量证据 | 下表 Stage 0 的 GC 六负载仍强制，不能用体积收益抵消回归 |
+
+此分级明确替代非 GC 消融和纯工具改动的全量 GC Stage 0 要求；不改变测试排除项、
+公共合同或性能通过线。保留公共 API/ABI、生成数据及 GC safety net，不以删除测试
+或生成表获得代码量收益。每合并批仍只跑一轮批门禁。冻结产物可通过 `--candidate`
+交给后续适用的 Stage 0，避免再次构建；基线在批内复用。
+
+生产 `zjs` 固定 ReleaseFast。代码生成实验使用
+`zig build zjs-size -Doptimize=ReleaseSmall`，其 CLI 与引擎同时遵循显式模式并独立
+校验配置。跨配置的体积比较必须显式声明，不能解释为同配置机制消融。
+
+## 分级验证金字塔(2026-09-02 owner 令「效率」后增补;GC 机制片适用)
 
 **原则:最贵的仪器只用来确认 GO,不用来发现问题。** 2026-09-02 M 切换片实录:
 正式 2×2 冷构建 ABBA + 两轮 batch-gate 约 5 小时后才看到 +12% 回归,而一次

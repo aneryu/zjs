@@ -71,9 +71,44 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         zjs_exe.setLinkerScript(b.path("src/exec/tail_hot_layout_aarch64.ld"));
     }
     const install_zjs = b.addInstallArtifact(zjs_exe, .{});
-    const zjs_step = b.step("zjs", "Build and install zjs");
+    // Publish the build graph's expectation for post-strip release checks.
+    // The executable independently attests this value during compilation.
+    const signature_files = b.addWriteFiles();
+    const signature_file = signature_files.add("zjs.config-signature", b.fmt("{s}\n", .{expect_config_fast}));
+    const install_signature = b.addInstallFileWithDir(signature_file, .bin, "zjs.config-signature");
+    install_zjs.step.dependOn(&install_signature.step);
+    const zjs_step = b.step("zjs", "Build and install production zjs (always ReleaseFast; use zjs-size for -Doptimize experiments)");
     zjs_step.dependOn(&install_zjs.step);
-    b.installArtifact(zjs_exe);
+    b.getInstallStep().dependOn(&install_zjs.step);
+
+    // Size/codegen experiments follow -Doptimize in BOTH modules and retain
+    // the caller's expected signature verbatim. Keep the production artifact
+    // and its cache identity independent of the experimental mode.
+    const internal_size_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .omit_frame_pointer = !engine_option_inputs.gc_roots_diag,
+    });
+    internal_size_mod.addOptions("build_options", engine_options);
+    const zjs_size_exe = b.addExecutable(.{
+        .name = "zjs-size",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/zjs.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zjs", .module = internal_size_mod }},
+        }),
+    });
+    forceLlvmBackendOnDebug(zjs_size_exe);
+    if (target.result.cpu.arch == .aarch64 and target.result.ofmt == .elf) {
+        zjs_size_exe.setLinkerScript(b.path("src/exec/tail_hot_layout_aarch64.ld"));
+    }
+    const install_zjs_size = b.addInstallArtifact(zjs_size_exe, .{});
+    const zjs_size_step = b.step("zjs-size", "Build experimental zjs-size following -Doptimize (e.g. -Doptimize=ReleaseSmall; default Debug)");
+    zjs_size_step.dependOn(&install_zjs_size.step);
 
     // Profiling CLI: the same ReleaseFast engine with per-opcode dispatch
     // scopes compiled in (the hot table is comptime-wrapped; see

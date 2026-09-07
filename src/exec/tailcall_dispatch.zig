@@ -105,7 +105,7 @@ pub const Vm = struct {
     output: ?*std.Io.Writer,
 
     /// `function.byteCode().ptr`, cached so pc<->frame.pc derivation (publish/syncPc/
-    /// reloadPc/coldNext) and jump-target arithmetic avoid re-loading the slice
+    /// coldNext) and jump-target arithmetic avoid re-loading the slice
     /// through `function`. Still hot: every cold op's publish and every jump
     /// reads it, so it stays an eagerly republished per-frame mirror.
     code_base: [*]const u8,
@@ -265,11 +265,6 @@ pub const Vm = struct {
     /// Re-derive sp after a cold helper mutated the Stack (push/pop/grow).
     pub inline fn reloadSp(self: *Vm) [*]JSValue {
         return self.stack.topPtr();
-    }
-
-    /// pc at the start of the next opcode (cold helper advanced frame.pc).
-    pub inline fn reloadPc(self: *Vm) [*]const u8 {
-        return self.code_base + self.frame.pc;
     }
 
     pub inline fn fail(self: *Vm, err: HostError) Outcome {
@@ -3013,19 +3008,6 @@ const h_await = coldGen(struct {
 const value_ops = @import("value_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
 
-const LocalOperand = struct { idx: u16, consume: usize };
-
-inline fn decodeLocalOperand(opc: u8, operand: [*]const u8) LocalOperand {
-    return switch (opc) {
-        op.get_loc, op.put_loc, op.set_loc => .{ .idx = readInt(u16, operand), .consume = 2 },
-        op.get_loc8, op.put_loc8, op.set_loc8 => .{ .idx = @intCast(operand[0]), .consume = 1 },
-        op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3 => .{ .idx = @intCast(opc - op.get_loc0), .consume = 0 },
-        op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => .{ .idx = @intCast(opc - op.put_loc0), .consume = 0 },
-        op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3 => .{ .idx = @intCast(opc - op.set_loc0), .consume = 0 },
-        else => unreachable,
-    };
-}
-
 /// Per-op binary-arithmetic handlers — qjs gives every binary op its own CASE
 /// label with its own JS_VALUE_IS_BOTH_INT fast leg (quickjs.c:19696 OP_add,
 /// 19792 OP_sub, 19830 OP_mul, 19879 OP_div, 19895 OP_mod, 20113 OP_shl, 20133
@@ -3219,7 +3201,7 @@ inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) 
 }
 
 /// Per-variant local-access handler (qjs has OP_get_loc0..3 etc. as distinct labels).
-/// `idx_src` resolves the local index at COMPILE time — no decodeLocalOperand csel
+/// `idx_src` resolves the local index at COMPILE time — no runtime operand-decoder csel
 /// chain — and the handler direct-dispatches via `cont`. Replaces the one-handler-
 /// for-18-variants op_loc whose runtime decode cost ~15 insn/op (measured).
 const LocKind = enum { get, put, set };

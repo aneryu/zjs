@@ -327,10 +327,6 @@ const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = rec
     break :records records;
 };
 
-fn hostFunctionRecord(kind: HostFunction) HostFunctionRecord {
-    return host_function_records[@intCast(@intFromEnum(kind))].?;
-}
-
 fn hostFunctionRecordFromId(value: i32) ?HostFunctionRecord {
     if (value < 0 or value > max_host_function_id) return null;
     return host_function_records[@intCast(value)];
@@ -438,10 +434,6 @@ fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Ob
         return;
     };
     try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value_ops.numberToValue(value), false, false, false));
-}
-
-fn hostFunctionLength(kind: HostFunction) i32 {
-    return hostFunctionRecord(kind).length;
 }
 
 fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {

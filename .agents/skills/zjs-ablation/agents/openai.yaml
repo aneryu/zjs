@@ -1,0 +1,4 @@
+interface:
+  display_name: "ZJS 消融与迭代"
+  short_description: "Evidence-based binary and source ablation for zjs"
+  default_prompt: "Use $zjs-ablation to continue a measured zjs ablation batch and improve the iteration loop."

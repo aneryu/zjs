@@ -218,6 +218,23 @@ test "zjs CLI behavior" {
         }
     }
 
+    // Production perf-json remains available without opcode profiling.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &.{ zjs_path, "--perf-json", "-e", "print(42);" },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings("42\n", result.stdout);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(false, parsed.value.object.get("opcode_profile_enabled").?.bool);
+        try std.testing.expect(parsed.value.object.contains("memory"));
+        try std.testing.expect(!parsed.value.object.contains("opcode_profile"));
+        try std.testing.expect(!parsed.value.object.contains("ic"));
+    }
+
     // 6. Prepared native Math calls must route sumPrecise through its iterable-aware implementation.
     {
         const result = try std.process.run(allocator, std.testing.io, .{
@@ -453,5 +470,63 @@ test "CLI top-level range fast paths collapse completion-store loops" {
         const opcodes = try perfOpcodeCount(result.stderr);
         try std.testing.expect(opcodes >= case.min_opcodes);
         try std.testing.expect(opcodes <= case.max_opcodes);
+    }
+}
+
+fn parseBlockCensusRow(text: []const u8) ![14]u64 {
+    var fields: [14]u64 = undefined;
+    var tokens = std.mem.tokenizeScalar(u8, text, ' ');
+    var index: usize = 0;
+    while (tokens.next()) |token| : (index += 1) {
+        try std.testing.expect(index < fields.len);
+        fields[index] = try std.fmt.parseInt(u64, token, 10);
+    }
+    try std.testing.expectEqual(fields.len, index);
+    return fields;
+}
+
+test "CLI nonempty block census rows reconcile with totals" {
+    var path_buffer: [1024]u8 = undefined;
+    const result = try std.process.run(std.testing.allocator, std.testing.io, .{
+        .argv = &.{
+            resolvedZjsPath(&path_buffer),                                       "--gc-stats", "--gc-block-census", "-e",
+            "const a=[]; for(let i=0;i<5000;i++) a.push({i}); print(a.length);",
+        },
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "5000\n"));
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    var sum: [14]u64 = @splat(0);
+    var total: ?[14]u64 = null;
+    var row_count: usize = 0;
+    var last_cell_bytes: u64 = 0;
+    while (lines.next()) |line| {
+        const row_prefix = "gc: block census row ";
+        const total_prefix = "gc: block census total ";
+        if (std.mem.startsWith(u8, line, row_prefix)) {
+            const row = try parseBlockCensusRow(line[row_prefix.len..]);
+            try std.testing.expect(row[0] > last_cell_bytes);
+            try std.testing.expect(row[1] > 0 and row[2] > 0);
+            try std.testing.expect(row[3] <= row[2]);
+            try std.testing.expectEqual(row[3] * 1000 / row[2], row[4]);
+            try std.testing.expectEqual(row[1], row[5] + row[6] + row[7] + row[8]);
+            for (row, 0..) |value, i| sum[i] += value;
+            last_cell_bytes = row[0];
+            row_count += 1;
+        } else if (std.mem.startsWith(u8, line, total_prefix)) {
+            try std.testing.expect(total == null);
+            total = try parseBlockCensusRow(line[total_prefix.len..]);
+        }
+    }
+    try std.testing.expect(row_count > 0 and total != null);
+    const totals = total.?;
+    try std.testing.expectEqual(@as(u64, 0), totals[0]);
+    try std.testing.expect(totals[3] > 0);
+    try std.testing.expectEqual(totals[3] * 1000 / totals[2], totals[4]);
+    for (totals, 0..) |value, i| {
+        if (i != 0 and i != 4) try std.testing.expectEqual(sum[i], value);
     }
 }

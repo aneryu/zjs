@@ -16,7 +16,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
-const op = bytecode.opcode.op;
 const core = @import("../core/root.zig");
 const exception_ops = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -3038,7 +3037,7 @@ pub const Machine = struct {
     /// Machine shares the zero-copy arg move (`initArgumentsMoved`), this-boxing
     /// and arena carve — NOT the dup-heavy
     /// `callFunctionBytecodeModeState` path.
-    /// The caller owns depth accounting (enterInlineCallDepthMode / enterCallDepth)
+    /// The caller owns depth accounting (enterInlineCallDepthBytes / enterCallDepth)
     /// and any push/pop bookkeeping; on error every partially-initialized
     /// resource is released via the errdefers below.
     pub noinline fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {

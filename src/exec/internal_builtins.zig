@@ -10,7 +10,6 @@
 //! ids in a sparse tail, so stable gaps consume no empty records.
 
 const std = @import("std");
-const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");
 const array = @import("array_builtin_ops.zig");
 const atomics = @import("atomics_ops.zig");

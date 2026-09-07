@@ -65,7 +65,7 @@ C-shaped structure. QuickJS remains the performance yardstick (bench-v8).
 Shipped default:
 
 ```
-zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off
 ```
 
 `compiler=v2` is the only compiler. `layout=short` is the release layout;
@@ -75,6 +75,9 @@ attests the configuration signature at compile time. See
 scope.
 
 ## Agent skills
+
+Binary/source ablation and iteration-loop work:
+[zjs-ablation](.agents/skills/zjs-ablation/SKILL.md).
 
 Issues and PRDs live under `.scratch/<feature>/`; conventions and triage
 labels: `docs/agents/project-experience.md` §11.

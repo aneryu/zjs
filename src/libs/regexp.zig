@@ -350,10 +350,6 @@ fn registerCountFromBytecode(bytecode: []const u8) usize {
     return bytecode[re_header_register_count];
 }
 
-pub fn registerCount(bytecode: []const u8) usize {
-    return registerCountFromBytecode(bytecode);
-}
-
 fn allocCountFromBytecode(bytecode: []const u8) usize {
     return captureCountFromBytecode(bytecode) * 2 + registerCountFromBytecode(bytecode);
 }
@@ -401,10 +397,6 @@ pub const Compiled = struct {
 
     pub fn captureCount(self: Compiled) usize {
         return captureCountFromBytecode(self.bytecode);
-    }
-
-    pub fn registerCount(self: Compiled) usize {
-        return registerCountFromBytecode(self.bytecode);
     }
 
     pub fn allocCount(self: Compiled) usize {

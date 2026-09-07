@@ -24,18 +24,40 @@ description = "Run the checkpoint gate"
 run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build checkpoint-gate "$ZJS_BUILD_JOBS" --summary all'
 
 [tasks.quick-watch]
-description = "Keep the Debug quick-gate compiler alive for faster incremental edit feedback"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'
+description = "Rebuild the Debug quick-gate on edits; release the host lock while idle"
+run = 'python3 tools/gates/watch.py -- taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build quick-gate "$ZJS_BUILD_JOBS" --summary new'
 
-# Resident incremental compiler for ANY build step. The engine-wide Debug
-# targets are the ones worth keeping resident: `mise run watch -- test`
-# rebuilds and re-runs the shards ~11 s after an edit against ~21 s for a
-# cold `zig build test` (2026-09-06; incremental skips sema, LLVM still
-# regenerates the whole module). One-shot -fincremental does not help
-# (state only persists in watch mode). Example: mise run watch -- test-exec
+# Shared-host edit loop: every finite build acquires the host lock, idle
+# sessions leave it free for other builds and measurement. This reuses disk
+# caches. Use the explicit, bounded exclusive session for resident compiler
+# state when the whole host is available for consecutive edits.
 [tasks.watch]
-description = "Keep a resident incremental compiler on a named build step (mise run watch -- test-exec)"
-run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'
+description = "Watch a build step with per-build locking (mise run watch -- test)"
+run = 'python3 tools/gates/watch.py -- taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build "$ZJS_BUILD_JOBS" --summary new'
+
+[tasks.watch-exclusive]
+description = "Resident incremental build; holds the host lock for at most 300 seconds (exit 124 on expiry)"
+run = 'timeout 300 flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build "$ZJS_BUILD_JOBS" --watch -fincremental --summary new'
+
+[tasks.test-fast]
+description = "Run a required test-name substring using the unified test binary (mise run test-fast -- name)"
+run = 'timeout 1200 flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build test-fast "$ZJS_BUILD_JOBS" --summary all --'
+
+[tasks.size-freeze]
+description = "Build and freeze a size/source baseline or candidate (pass --out .scratch/name)"
+run = 'python3 tools/maintainability/size_screen.py freeze'
+
+[tasks.size-screen]
+description = "Compare frozen size/source snapshots against an explicit minimum saving"
+run = 'python3 tools/maintainability/size_screen.py compare'
+
+[tasks.size-verify]
+description = "Verify a frozen artifact matches current source, mode and toolchain without rebuilding"
+run = 'python3 tools/maintainability/size_screen.py verify-current'
+
+[tasks.source-screen]
+description = "Precheck source savings without compiling (pass baseline --min-lines N)"
+run = 'python3 tools/maintainability/size_screen.py precheck-source'
 
 # Fixed-work instruction/cycle screen of zig-out/bin/zjs against pinned
 # QuickJS. This is the per-candidate screening instrument (~30s/benchmark at
@@ -109,6 +131,10 @@ ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 1000
 [tasks.batch-gate]
 description = "Per-merge-batch gate: zig build merge-gate (one parallel graph: suites, stress, gc-stress, smoke-dev, architecture, test262, fixed-work smoke)"
 run = 'flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build merge-gate "$ZJS_BUILD_JOBS" --summary all'
+
+[tasks.batch-gate-profile]
+description = "One batch graph including production/profiling smoke; use for profile-sensitive changes"
+run = 'timeout 1200 flock -x /tmp/zjs-host-heavy.lock taskset -c "${ZJS_BUILD_CPUS:-5-8,15-18}" zig build merge-gate smoke "$ZJS_BUILD_JOBS" --summary all'
 
 # Gantt of one gate: which step ran when, so the critical path is visible
 # (`zig build --time-report` needs the web UI and does not time Run steps).

@@ -448,17 +448,9 @@ inline fn namedAtomUsesOrdinaryWalkOnIndexExotic(class_id: core.class.ClassId, a
         class_id == core.class.ids.mapped_arguments;
 }
 
-/// Hot-handler variant: returns the BORROWED own/prototype data slot address
-/// so the resident get_field handlers can re-load it as two 64-bit integer
-/// words (see findOwnDataSlotFast). The pointer is only valid until the next
-/// potentially-shape-mutating operation; both callers consume it immediately.
-pub inline fn getFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
-    var absent = false;
-    // Named bytecode atom: never a tagged-int / mapped-args binding (F2).
-    return getFieldFastSlotWithExoticOrder(rt, receiver, atom_id, true, true, false, &absent);
-}
-
-/// Tri-state twin of `getFieldFastSlot` for op_get_field / op_get_field2.
+/// Borrowed own/prototype data slot for op_get_field / op_get_field2.
+/// The pointer is valid until the next potentially shape-mutating operation;
+/// callers consume it immediately (see findOwnDataSlotFast).
 /// A null return now carries a discriminator: `absent.*` is set only when the
 /// walk ran off the end of a chain whose every link was absence-authoritative
 /// (see the terminal comment above), i.e. the property is genuinely missing and
@@ -909,7 +901,7 @@ pub inline fn existingPropertyKeyAtomForFastPath(value: core.JSValue) ?core.Atom
 ///   window is own-hit-only and every miss already defers to the cold
 ///   resolver (put_field_slow_path -> JS_SetPropertyInternal), which walks
 ///   prototypes for setters/read-only holders and runs the exotic machinery.
-/// - zjs-only deviation, same as getFieldFastSlot: a mapped Arguments
+/// - zjs-only deviation, same as getFieldFastSlotOrAbsent: a mapped Arguments
 ///   receiver bails before probing — its numeric bindings live in
 ///   out-of-shape var-ref cells, so a shape data hit could be a stale mirror
 ///   and a direct slot write would desync the aliased parameter.

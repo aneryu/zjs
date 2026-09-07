@@ -5,7 +5,6 @@
 //! it in exec; callers only need the installer interface below.
 
 const core = @import("../core/root.zig");
-const atomics_ops = @import("atomics_ops.zig");
 const array_builtin = @import("array_builtin_ops.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const collection_builtin = @import("collection_ops.zig");
@@ -19,7 +18,6 @@ const atomics_builtin = @import("atomics_ops.zig");
 const reflect_builtin = @import("reflect_proxy_ops.zig");
 const typed_array_names = core.typed_array_names;
 const internal_builtins = @import("internal_builtins.zig");
-const builtin_dispatch = @import("builtin_dispatch.zig");
 const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
@@ -997,11 +995,6 @@ fn defineNativeMethodsAssumingNewWithRealm(rt: *core.JSRuntime, target: *core.Ob
         defer freeTemporaryStringAtom(rt, key);
         try target.defineAutoInitPropertyFromDescriptorWithResolvedRealm(rt, key, flags, realm, method);
     }
-}
-
-pub fn defineGlobalFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !void {
-    const value = try core.function.nativeFunctionForGlobal(rt, global, name, length);
-    try defineData(rt, global, name, value, global_flags);
 }
 
 fn defineGlobalLazyMethods(rt: *core.JSRuntime, global: *core.Object, methods: []const Method) !void {

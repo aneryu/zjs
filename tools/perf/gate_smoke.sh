@@ -32,7 +32,10 @@ MAX_COMMITTED_LIVE_MILLI="${ZJS_GATE_MAX_COMMITTED_LIVE_MILLI:-32000}"
 # merges old: the failure it reported had already been fixed on the branch it
 # was supposedly gating. A stale pass is the worse half of that -- it reads as
 # "the merge is clean" when nothing of the merge was run. Refuse either way.
-if [[ -f "$BIN" ]]; then
+# Explicit artifacts are owned by the caller: the build graph checks its input
+# dependencies, and frozen baselines may intentionally predate current sources.
+# A tests-only edit can leave a valid cached production artifact's mtime intact.
+if [[ -z "${1:-}" && -f "$BIN" ]]; then
     newest_src=$(find "$SCRIPT_DIR/../../src" "$SCRIPT_DIR/../../build.zig" \
         -newer "$BIN" -print -quit 2>/dev/null || true)
     if [[ -n "$newest_src" ]]; then

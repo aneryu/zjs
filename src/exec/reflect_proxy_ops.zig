@@ -8,7 +8,6 @@
 const core = @import("../core/root.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const call = @import("call.zig");
 const exceptions = @import("exceptions.zig");
 const reflect_ops = @import("reflect_ops.zig");
 

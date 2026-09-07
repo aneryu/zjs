@@ -57,7 +57,6 @@ const disposable_ops = @import("disposable_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const iterator_ops = @import("iterator_ops.zig");
-const ValueSliceRoot = array_ops.ValueSliceRoot;
 const cachedRealmObject = object_ops.cachedRealmObject;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 const closeIteratorForAbruptCompletion = forof_ops.closeIteratorForAbruptCompletion;

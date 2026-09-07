@@ -44,6 +44,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             require_tests = true;
         } else if (std.mem.eql(u8, arg, "--fail-fast")) {
             fail_fast = true;
+        } else if (std.mem.eql(u8, arg, "--filter")) {
+            if (filter != null) return error.InvalidArgs;
+            const pattern = args.next() orelse return error.InvalidArgs;
+            if (pattern.len == 0) return error.InvalidArgs;
+            filter = pattern;
         } else if (std.mem.eql(u8, arg, "--repeat")) {
             repeat_count = try std.fmt.parseUnsigned(usize, args.next() orelse return error.InvalidArgs, 10);
             if (repeat_count == 0) return error.InvalidArgs;
@@ -71,6 +76,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
+    // A required filtered run must execute tests; listing names cannot satisfy
+    // its nonempty-selection assertion. Unfiltered enumeration stays available.
+    if (list_only and require_tests and filter != null) return error.InvalidArgs;
     if (list_only) {
         for (test_fns, 0..) |test_fn, index| {
             std.debug.print("{}: {s}\n", .{ index, test_fn.name });

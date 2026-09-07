@@ -55,6 +55,10 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
   runs `strip` (plus `codesign -s -` on arm64 macOS, which `strip` invalidates)
   before the configuration-signature check, so the check runs against the exact
   bytes shipped and a broken strip fails the release rather than the user.
+  The expected signature comes from `zig-out/bin/zjs.config-signature`, installed
+  alongside `zjs` from the build graph's expectation; workflows do not repeat a
+  versioned literal. The CLI independently attests that expectation. The
+  sidecar is a verification input and is not included in the release archive.
 - Stripping is post-link on purpose: it leaves `.text` and the
   `.text.zjs.op_handlers` island byte-identical to the binary the gates
   measured. Building with `-fstrip` instead moves `.text` by 40 bytes, which

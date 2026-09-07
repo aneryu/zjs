@@ -16,11 +16,9 @@ const core = @import("../core/root.zig");
 const abi = @import("../abi/fun_native_abi.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 
-const HostError = core.errors.HostError;
 const JSValue = core.JSValue;
 const NativeEntry = core.NativeEntry;
 const InternalEntry = core.host_function.InternalEntry;
-const NativeCProto = core.host_function.NativeCProto;
 
 pub fn sigIdByName(comptime name: []const u8) u16 {
     return comptime blk: {

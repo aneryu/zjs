@@ -18,8 +18,8 @@ const bytecode = @import("../bytecode.zig");
 // error instead of a silent mis-decode.
 const Form = bytecode.opcode.logical.LogicalOpcode;
 comptime {
-    // The sequence matchers (`canFinishUndefinedCompletionTail` and
-    // friends) walk adjacent instructions with `pc + 1` steps. That is
+    // Completion-tail sequences walk adjacent instructions with
+    // `pc + 1` steps. That is
     // only sound while every form they step over is one byte; this turns
     // the assumption into a build error.
     for ([_]Form{ .put_loc0, .get_loc0, .undefined, .drop, .return_undef, .return_async }) |f| {
@@ -35,8 +35,6 @@ const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
 
 const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyValueForFastPath;
-
-const op = bytecode.opcode.op;
 
 pub const Step = enum { done, continue_loop };
 
@@ -79,27 +77,6 @@ pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSV
     return value;
 }
 
-fn canFinishUndefinedCompletionTail(function: *const bytecode.FunctionBytecode, pc: usize) bool {
-    if (function.isGenerator() or function.isAsync()) return false;
-    const code = function.byteCode();
-    if (pc + 4 == code.len and
-        code[pc] == op.put_loc0 and
-        code[pc + 1] == op.undefined and
-        code[pc + 2] == op.put_loc0 and
-        code[pc + 3] == op.get_loc0) return true;
-    if (pc + 3 == code.len and
-        code[pc] == op.undefined and
-        code[pc + 1] == op.put_loc0 and
-        code[pc + 2] == op.get_loc0) return true;
-    if (pc + 2 == code.len and
-        code[pc] == op.undefined and
-        code[pc + 1] == op.put_loc0) return true;
-    if (pc + 2 == code.len and
-        code[pc] == op.put_loc0 and
-        code[pc + 1] == op.get_loc0) return true;
-    return false;
-}
-
 pub fn fastInstalledGlobalDataValueForAtomAtPc(
     ctx: *core.JSContext,
     function: *const bytecode.FunctionBytecode,
@@ -116,9 +93,6 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
     return globalDataPropertyValueForFastPath(ctx.runtime, global, function, site_pc, atom_id);
 }
 
-// --- With-statement and reference opcode handlers moved to vm_property_ref.zig ---
-const vm_property_ref = @import("vm_property_ref.zig");
-
 pub fn hasObjectBinding(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -131,9 +105,6 @@ pub fn hasObjectBinding(
 ) !bool {
     return object_ops.hasValueProperty(ctx, output, global, receiver, object, atom_id, function, frame);
 }
-
-// --- Private-field opcode handlers moved to vm_property_private.zig ---
-const vm_property_private = @import("vm_property_private.zig");
 
 pub fn canUseFastGlobalVarLookup(
     function: *const bytecode.FunctionBytecode,
@@ -280,12 +251,3 @@ const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }
-
-// --- Global variable read/write/define opcode handlers moved to vm_property_globals.zig ---
-const vm_property_globals = @import("vm_property_globals.zig");
-
-// --- Local/arg/var-ref slot opcode handlers moved to vm_property_locals.zig ---
-const vm_property_locals = @import("vm_property_locals.zig");
-
-// --- Property field and array-element opcode handlers moved to vm_property_field.zig ---
-const vm_property_field = @import("vm_property_field.zig");

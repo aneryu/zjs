@@ -301,55 +301,57 @@ owning change, not in broad status ledgers.
 
 ### B.6 Validation Tiers
 
-Use the cheapest tier that proves the changed surface, then escalate before
-handoff or release. Do not weaken skips, excludes, or assertions to make any
-tier pass.
+Gate obligations and ablation routing are defined solely by
+[verification-policy](docs/verification-policy.md). The targets below are
+instruments for that policy. Do not weaken skips, excludes, or assertions.
 
-**Inner loop.** Start each focused edit with the narrowest changed-area target
-or direct reproducer. For example, replace `core` below with the matching
-subsystem:
+**Inner loop.** Use `zig build check` for compile errors, then the direct
+reproducer or a runtime-filtered selection from the unified test binary:
 
 ```bash
-zig build test-core --summary all
+mise run test-fast -- 'test-name substring'
 git diff --check
 ```
 
-Also run the focused Zig test filter, JS fixture, or `run-test262 -d` / `-f`
+`test-fast` runs one process, requires a nonempty matching substring, and
+does not change the compiled test selection or enable DWARF. Changing the
+substring reuses the same binary; source edits still require rebuilding it.
+Use `-Dtest-filter=<substring>` when a separate symbolised diagnostic build
+is needed. Also run the JS fixture or `run-test262 -d` / `-f`
 slice that directly reproduces the changed behavior. The explicit `test-core`,
 `test-parser`, `test-bytecode`, `test-compiler`, `test-exec`, `test-builtins`,
 `test-runtime`, and `test-runner` targets apply compile-time namespace filters
 and fail if the selection becomes empty.
 
-Run `mise run quick-gate` when the change touches the CLI, runtime glue, or
-another surface the focused targets do not exercise; for engine-internal
-edits the focused target plus the checkpoint gate at handoff covers it, and
-running quick-gate after every edit buys little for its ~35s Debug compile
-(2026-08-29 re-audit). For several consecutive edits that need CLI smoke
-feedback, `mise run quick-watch` keeps the compiler resident; the generic
-`mise run watch -- <step>` does the same for any focused target (worth it
-for engine-wide targets like `test-exec`, whose cold compile is ~60s). Stop
-the watcher before escalating to a broader gate. `quick-gate` intentionally
-does not compile the separate test262 runner.
+Run `mise run quick-gate` for CLI/runtime glue that targeted tests do not
+exercise. `mise run quick-watch` and `mise run watch -- <step>` debounce edits
+and lock each finite build; they release the host lock while idle and reuse
+disk caches. Default inputs are source/build/test/tool directories and build
+configuration; extra trees need `tools/gates/watch.py --path <tree> -- COMMAND`.
+For a private continuous editing window, `mise run watch-exclusive -- test`
+keeps the incremental compiler resident but holds the host lock for the whole
+session, limited to 300 seconds (exit 124 on expiry). Stop it before a gate or
+measurement. `quick-gate` does not compile the separate test262 runner.
 
-`zig build test` compiles the unified suite once and runs it as eight
+`zig build test` compiles the unified suite once and runs it as sixteen
 parallel shard processes (`tools/timing_test_runner.zig --shard i/N`,
 round-robin over the test index; `-Dtest-shards=N` changes the count, `1`
 restores the single process). Shard output is captured and replayed only for
 a shard that fails, so a green run prints just the step tree; a run with
 nothing changed is a cache hit and does not re-execute. `-Dtest-filter=<substring>`
-is always a single process with streamed output — use it to watch one test.
+is a separately compiled single-process diagnostic selection.
 The full run builds the test binary without debug info (`-Dtest-strip`
 defaults to true; a `-Dtest-filter` run keeps DWARF so a red can be
 diagnosed with a symbolised trace, and `-Dtest-strip=false` forces DWARF on
-the full run). Measured 2026-09-06 (build pool, cold cache): compile 36 s,
-shards 3–5 s each; 2026-09-05 with DWARF it was compile ~60 s, run ~15 s;
-before sharding ~225 s.
+the full run). Use `mise run gate-timeline -- <step>` to measure the current
+critical path; cache-hit, changed-source, and cold-cache timings differ.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
 stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`
 for an explicit randomized validation run.
 
-**Checkpoint.** Use this before handing off a non-trivial code-bearing change:
+**Checkpoint.** This aggregate is available when its additional surfaces are
+needed; per-change close-out remains one `zig build test` under the policy:
 
 ```bash
 mise run checkpoint-gate
@@ -398,9 +400,12 @@ is the cheap feedback — but a missed local run is now caught rather than lost.
 `zig build test -Dzjs_force_gc=true` is a diagnostic instrument, not a gate:
 reach for it when GC timing is the thing you are debugging.
 
-Hot-path performance changes are priced by [refactor-policy](docs/refactor-policy.md)
-rule 2 (a bench-v8 A/B) rather than by any step in this ladder. Performance is
-never measured in CI.
+For size/source ablations, freeze once with `mise run size-freeze -- --out
+.scratch/<batch>/baseline`, freeze a candidate, and compare with `mise run
+size-screen -- <baseline> <candidate> --objective binary --min-bytes <n>`.
+See [size-screen](docs/perf/size-screen.md) for source categories and explicit
+cross-configuration experiments. Performance validation follows the current
+verification policy and measurement contract; it is never measured in CI.
 
 ### B.7 Durable Lessons
 

@@ -22,7 +22,6 @@ const native_legacy = @import("native_legacy.zig");
 // Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
 // exec-only in `exec/string_ops.zig`.
 const string_ops = @import("string_ops.zig");
-const call_runtime = @import("call_runtime.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 

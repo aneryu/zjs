@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
-const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
@@ -28,7 +27,6 @@ const value_ops = @import("value_ops.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
-const op = bytecode.opcode.op;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("exception_ops.zig");
 const call_runtime = @import("call_runtime.zig");

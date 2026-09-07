@@ -13,7 +13,6 @@ const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const parser = @import("../parser.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");

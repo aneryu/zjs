@@ -79,6 +79,7 @@ must never import it.
 | `zjs` / `zjs-profile` / `zjs-dev` | `src/cli/zjs.zig` → `engine.config_signature.attest("zjs CLI")` | |
 | `run-test262` / `run-test262-dev` | `src/cli/run_test262.zig` attests `"run-test262 / test-runner"` | |
 | unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 16) parallel `--shard i/N` run processes with captured stderr, pinned to the run pool (`-Dgate-run-cpus`, default `0-8,10-18`) |
+| `test-fast -- <substring>` | same unified binary | One runtime-filtered process; missing, empty, unmatched, or list-only selection fails. Changing the substring does not change the compile artifact. |
 | scoped Class-B shells | `@import("zjs").config_signature.attest("test-X")` | Debug-pinned |
 | scoped Class-A shells | `@import("config_signature.zig").attest("test-X")` | Debug-pinned |
 | `test-runner` shell | attests the same string as `run_test262.zig` | Two attestations of one value are harmless |

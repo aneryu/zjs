@@ -320,8 +320,6 @@ pub const parser_core = struct {
     const atom_this_active_func: Atom = atom_module.ids.this_active_func;
     const atom_home_object: Atom = atom_module.ids.home_object;
     const atom_class_fields_init: Atom = atom_module.ids.class_fields_init;
-    const atom_var_object: Atom = atom_module.ids.var_object; // "<var>"
-    const atom_arg_var_object: Atom = atom_module.ids.arg_var_object; // "<arg_var>"
     const shared_iterator_close_marker: u8 = 255;
     const direct_iterator_close_marker: u8 = 254;
 
@@ -2057,7 +2055,7 @@ pub const parser_core = struct {
             };
         }
 
-        fn setPendingDiagnostic(self: *State, err: Error, position: diagnostics.Position, message: []const u8) void {
+        noinline fn setPendingDiagnostic(self: *State, err: Error, position: diagnostics.Position, message: []const u8) void {
             var pending = PendingDiagnostic{
                 .position = position,
                 .err = err,
@@ -2874,42 +2872,12 @@ pub const parser_core = struct {
             self.commitLastOpcode(opcode_pos);
         }
 
-        /// Prepare every growable buffer used by a source-less emitter
-        /// transaction without changing its visible state. QuickJS relies on
-        /// a poisoned DynBuf after OOM; zjs must remain usable, so lvalue
-        /// detach/owner transfer only begins after these claims succeed.
-        fn reserveEmission(self: *State, code_bytes: usize, atom_operands: usize) Error!void {
-            if (self.emit_to_function_def) {
-                try self.curFunc().reserveByteCode(code_bytes);
-                try self.curFunc().reserveAtomOperands(atom_operands);
-            } else {
-                try self.function.reserveCode(code_bytes);
-                try self.function.reserveAtomOperands(atom_operands);
-            }
-        }
-
-        fn appendBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
-            const pos = self.currentCodeLen();
-            if (self.emit_to_function_def) {
-                self.curFunc().appendByteCodeAssumeCapacity(bytes);
-            } else {
-                self.function.appendCodeAssumeCapacity(bytes);
-            }
-            if (bytes.len != 0) self.noteEmittedOp(bytes[0], pos, bytes.len);
-        }
-
         fn appendAtomOperandAssumeCapacity(self: *State, atom_id: Atom) void {
             if (self.emit_to_function_def) {
                 self.curFunc().appendAtomOperandAssumeCapacity(atom_id);
             } else {
                 self.function.retainAtomOperandAssumeCapacity(atom_id);
             }
-        }
-
-        fn emitOpcodeBytesNoSourceAssumeCapacity(self: *State, bytes: []const u8) void {
-            const opcode_pos = self.currentCodeLen();
-            self.appendBytesNoSourceAssumeCapacity(bytes);
-            self.commitLastOpcode(opcode_pos);
         }
 
         fn markDirectEvalCall(self: *State) Error!void {
@@ -2924,10 +2892,6 @@ pub const parser_core = struct {
             try self.emitOpcodeBytesNoSource(&[_]u8{op_id});
         }
 
-        fn emitOpNoSource(self: *State, op_id: u8) Error!void {
-            try self.emitOpcodeBytesNoSource(&[_]u8{op_id});
-        }
-
         fn emitOpU8(self: *State, op_id: u8, val: u8) Error!void {
             try self.emitOpcodeBytesNoSource(&[_]u8{ op_id, val });
         }
@@ -2937,20 +2901,6 @@ pub const parser_core = struct {
             bytes[0] = op_id;
             std.mem.writeInt(u16, bytes[1..3], val, .little);
             try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
-        fn emitOpU16NoSource(self: *State, op_id: u8, val: u16) Error!void {
-            var bytes: [3]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u16, bytes[1..3], val, .little);
-            try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
-        fn emitOpU16At(self: *State, op_id: u8, val: u16, line_num: u32, col_num: u32) Error!void {
-            var bytes: [3]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u16, bytes[1..3], val, .little);
-            try self.appendBytesAt(&bytes, line_num, col_num);
         }
 
         fn emitOpI32(self: *State, op_id: u8, val: i32) Error!void {
@@ -2965,92 +2915,6 @@ pub const parser_core = struct {
             bytes[0] = op_id;
             std.mem.writeInt(u32, bytes[1..5], val, .little);
             try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
-        fn emitOpU32NoSource(self: *State, op_id: u8, val: u32) Error!void {
-            var bytes: [5]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], val, .little);
-            try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
-        /// O(source) scan preserved as the exact fallback when the line-start
-        /// table cannot be built (OOM). Never wrong, just slow.
-        fn sourceOffsetForLineColScan(self: *const State, line_num: u32, col_num: u32) u32 {
-            if (line_num <= 1 and col_num <= 1) return 0;
-            var line: u32 = 1;
-            var col: u32 = 1;
-            for (self.lex.source, 0..) |byte, index| {
-                if (line == line_num and col == col_num) return @intCast(index);
-                if (byte == '\n') {
-                    line += 1;
-                    col = 1;
-                } else {
-                    col += 1;
-                }
-            }
-            return @intCast(self.lex.source.len);
-        }
-
-        /// Build the line-start offset table once for the current lexer source.
-        /// Guarded on source slice identity so direct-eval / sub-parses with a
-        /// different source rebuild it. Freed in `deinit`.
-        fn ensureSourceLineStarts(self: *State) Error!void {
-            const src = self.lex.source;
-            if (self.source_line_starts_src.ptr == src.ptr and
-                self.source_line_starts_src.len == src.len and
-                self.source_line_starts.len != 0)
-                return;
-            const allocator = self.function.memory.allocator;
-            if (self.source_line_starts.len != 0) allocator.free(self.source_line_starts);
-            self.source_line_starts = &.{};
-            self.source_line_starts_src = &.{};
-            var count: usize = 1;
-            for (src) |byte| {
-                if (byte == '\n') count += 1;
-            }
-            const table = try allocator.alloc(u32, count);
-            table[0] = 0;
-            var line: usize = 1;
-            for (src, 0..) |byte, index| {
-                if (byte == '\n') {
-                    table[line] = @intCast(index + 1);
-                    line += 1;
-                }
-            }
-            self.source_line_starts = table;
-            self.source_line_starts_src = src;
-        }
-
-        /// O(1) (line,col)->byte-offset via the cached line-start table. Exactly
-        /// reproduces `sourceOffsetForLineColScan` for every (line,col) the
-        /// lexer produces: `line_starts[line-1] + (col-1)`, clamped to source
-        /// length (the scan's fall-through result). Only real, in-bounds
-        /// positions reach here, so the col addition never crosses a newline.
-        fn sourceOffsetForLineCol(self: *State, line_num: u32, col_num: u32) u32 {
-            if (line_num <= 1 and col_num <= 1) return 0;
-            self.ensureSourceLineStarts() catch {
-                return self.sourceOffsetForLineColScan(line_num, col_num);
-            };
-            const li: usize = if (line_num >= 1) @as(usize, line_num) - 1 else 0;
-            if (li >= self.source_line_starts.len) return @intCast(self.lex.source.len);
-            const base: usize = self.source_line_starts[li];
-            const col: usize = if (col_num >= 1) @as(usize, col_num) - 1 else 0;
-            return @intCast(@min(base + col, self.lex.source.len));
-        }
-
-        fn emitSourcePos(self: *State, line_num: u32, col_num: u32) Error!bool {
-            if (!self.emit_phase1_temp) return true;
-            const source_offset = self.sourceOffsetForLineCol(line_num, col_num);
-            if (self.last_opcode_source_offset) |last| {
-                if (last == source_offset) return false;
-            }
-            var bytes: [5]u8 = undefined;
-            bytes[0] = opcode.op.line_num;
-            std.mem.writeInt(u32, bytes[1..5], source_offset, .little);
-            try self.appendBytesNoSource(&bytes);
-            self.last_opcode_source_offset = source_offset;
-            return true;
         }
 
         fn emitFClosure8(self: *State, idx: u8) Error!void {
@@ -3118,63 +2982,8 @@ pub const parser_core = struct {
             }
         }
 
-        fn emitOpAtom(self: *State, op_id: u8, atom_id: Atom) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperand(atom_id);
-            } else {
-                try self.function.retainAtomOperand(atom_id);
-            }
-            try self.emitOpU32(op_id, atom_id);
-        }
-
-        fn emitOpAtomNoSource(self: *State, op_id: u8, atom_id: Atom) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperand(atom_id);
-            } else {
-                try self.function.retainAtomOperand(atom_id);
-            }
-            var bytes: [5]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-            try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
         // ---- Temporary scope opcode helpers ----
         // These emit scope_* opcodes that will be lowered by resolve_variables.
-
-        fn emitOpAtomU16NoSource(self: *State, op_id: u8, atom_id: Atom, u16_val: u16) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperand(atom_id);
-            } else {
-                try self.function.retainAtomOperand(atom_id);
-            }
-            var bytes: [7]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-            std.mem.writeInt(u16, bytes[5..7], u16_val, .little);
-            try self.emitOpcodeBytesNoSource(&bytes);
-        }
-
-        fn emitOpAtomU8(self: *State, op_id: u8, atom_id: Atom, u8_val: u8) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            if (self.emit_to_function_def) {
-                try self.curFunc().appendAtomOperand(atom_id);
-            } else {
-                try self.function.retainAtomOperand(atom_id);
-            }
-            var bytes: [6]u8 = undefined;
-            bytes[0] = op_id;
-            std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-            bytes[5] = u8_val;
-            try self.emitOpcodeBytesNoSource(&bytes);
-        }
 
         fn emitScopeGetVar(self: *State, atom_id: Atom) Error!void {
             try self.ensureClosureVar(atom_id);
@@ -3673,18 +3482,6 @@ pub const parser_core = struct {
             return false;
         }
 
-        fn emitPushConst(self: *State, value: JSValue) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            try self.emitOpU32(opcode.op.push_const, 0);
-            const opcode_pos: usize = @intCast(self.curFunc().last_opcode_pos);
-            const idx = if (self.emit_to_function_def or self.top_level_functions_as_children)
-                try self.curFunc().appendCpool(value)
-            else
-                try self.function.addConstant(value);
-            std.mem.writeInt(u32, self.currentCode()[opcode_pos + 1 ..][0..4], idx, .little);
-        }
-
         fn emitBigIntLiteral(self: *State, text: []const u8, negate: bool) Error!void {
             if (parseBigIntI32(text, negate)) |small| {
                 try Emitter.opI32(self, opcode.op.push_bigint_i32, small);
@@ -3770,96 +3567,6 @@ pub const parser_core = struct {
             }
         }
 
-        /// The single mutation primitive for an already-emitted label
-        /// operand. Reads the old value so tagged/absolute bookkeeping stays
-        /// exact; a rewrite that could lower the current absolute watermark
-        /// falls back to lazy invalidation (the next query rebuilds).
-        fn publishParserLabelTarget(self: *State, operand_offset: usize, target: u32) Error!void {
-            // QCP-1 L3: mutating a legacy absolute-PC operand during a v2 parse
-            // is the same class of migration hole as emitting into the legacy
-            // stream — it is only reachable from a construct that also emitted
-            // there. Route it through the same gate (non-counting: this writes
-            // no new instruction) so an undeclared construct fails loudly with
-            // a symbolized trace and a declared one is accounted, instead of a
-            // bare assert that can only report the first offender.
-            var code = self.currentCode();
-            if (operand_offset + 4 > code.len) return Error.ParserInvariant;
-            const ft = self.flowTail();
-            if (ft.valid) {
-                const old = std.mem.readInt(u32, code[operand_offset..][0..4], .little);
-                if ((old & opcode.op.parser_label_tag) != 0) {
-                    std.debug.assert(ft.tagged_target_count > 0);
-                    ft.tagged_target_count -= 1;
-                } else if (old != 0 and old == ft.max_absolute_target and target < old) {
-                    ft.valid = false;
-                }
-            }
-            std.mem.writeInt(u32, code[operand_offset..][0..4], target, .little);
-            if (ft.valid) {
-                if ((target & opcode.op.parser_label_tag) != 0) {
-                    ft.tagged_target_count += 1;
-                } else if (target > ft.max_absolute_target) {
-                    ft.max_absolute_target = target;
-                }
-            }
-        }
-
-        /// Recompute the summary by scanning, using the same decode the
-        /// legacy query scans use. Also the Debug oracle's reference.
-        fn rebuildFlowTail(ft: *bytecode.FlowTailSummary, code: []const u8, atoms: []const Atom) void {
-            ft.* = .{ .valid = true };
-            var pc: usize = 0;
-            var atom_index: usize = 0;
-            while (pc < code.len) {
-                const op_id = code[pc];
-                const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
-                const size: usize = instr.size;
-                if (size == 0 or pc + size > code.len or pc + size > std.math.maxInt(u32)) {
-                    // Malformed suffix: poison to the conservative answers the
-                    // legacy scans produced (jump-to-end true, no last op).
-                    ft.* = .{ .valid = true, .tagged_target_count = 1 };
-                    return;
-                }
-                if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
-                    if (offset + 4 <= code.len) {
-                        const target = std.mem.readInt(u32, code[offset..][0..4], .little);
-                        if ((target & opcode.op.parser_label_tag) != 0) {
-                            ft.tagged_target_count += 1;
-                        } else if (target > ft.max_absolute_target) {
-                            ft.max_absolute_target = target;
-                        }
-                    }
-                }
-                if (op_id != opcode.op.line_num) {
-                    ft.last_non_line_op = op_id;
-                    if (op_id != opcode.op.leave_scope and op_id != opcode.op.close_loc) {
-                        ft.last_non_cleanup_op = op_id;
-                        ft.tail_start = @intCast(pc + size);
-                    }
-                }
-                if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-                pc += size;
-            }
-        }
-
-        /// Valid, oracle-checked summary for the current emission stream.
-        fn flowSummary(self: *State) *bytecode.FlowTailSummary {
-            const ft = self.flowTail();
-            if (!ft.valid) {
-                rebuildFlowTail(ft, self.currentCode(), self.currentAtomOperands());
-            }
-            if (comptime @import("builtin").mode == .Debug) {
-                var check: bytecode.FlowTailSummary = .{};
-                rebuildFlowTail(&check, self.currentCode(), self.currentAtomOperands());
-                std.debug.assert(check.last_non_line_op == ft.last_non_line_op);
-                std.debug.assert(check.last_non_cleanup_op == ft.last_non_cleanup_op);
-                std.debug.assert(check.tail_start == ft.tail_start);
-                std.debug.assert(check.max_absolute_target == ft.max_absolute_target);
-                std.debug.assert(check.tagged_target_count == ft.tagged_target_count);
-            }
-            return ft;
-        }
-
         fn appendBytesNoSource(self: *State, bytes: []const u8) Error!void {
             const pos = self.currentCodeLen();
             if (self.emit_to_function_def) {
@@ -3868,30 +3575,6 @@ pub const parser_core = struct {
                 try self.function.appendCode(bytes);
             }
             if (bytes.len != 0) self.noteEmittedOp(bytes[0], pos, bytes.len);
-        }
-
-        fn emitSourcePosAndLoc(self: *State, line_num: u32, col_num: u32) Error!usize {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            const inserted = try self.emitSourcePos(line_num, col_num);
-            if (self.emit_to_function_def) {
-                const pc: u32 = @intCast(self.curFunc().byte_code.len);
-                if (inserted) try self.curFunc().appendSourceLoc(pc, @intCast(line_num), @intCast(col_num));
-                return pc;
-            } else {
-                const pc: u32 = @intCast(self.function.code.len);
-                if (inserted) try self.function.appendSourceLoc(pc, @intCast(line_num), @intCast(col_num));
-                return pc;
-            }
-        }
-
-        fn appendBytesAt(self: *State, bytes: []const u8, line_num: u32, col_num: u32) Error!void {
-            const snapshot = self.takeEmissionSnapshot();
-            errdefer self.rollbackEmission(snapshot);
-            _ = try self.emitSourcePosAndLoc(line_num, col_num);
-            const opcode_pos = self.currentCodeLen();
-            try self.appendBytesNoSource(bytes);
-            self.commitLastOpcode(opcode_pos);
         }
 
         // ===== QCP-1 stage 2P: compiler-v2 emission veneer =====
@@ -4068,28 +3751,6 @@ pub const parser_core = struct {
         fn currentAtomOperands(self: *State) []Atom {
             if (self.emit_to_function_def) return self.curFunc().atom_operands;
             return self.function.atom_operands;
-        }
-
-        fn appendMovedCodeWithAtoms(self: *State, code: []u8, atoms: []const Atom, old_base: usize) Error!void {
-            const new_base = self.currentCodeLen();
-
-            // A moved-bytecode splice is a transaction over three pieces of
-            // state: the detached input, the destination code, and the
-            // destination atom stream.  Validate the complete input and claim
-            // both destination buffers before rebasing a single label.  Once
-            // rebasing begins, every remaining operation is allocation-free.
-            try validateMovedBytecodeLabels(code, atoms, old_base, new_base);
-            try self.reserveEmission(code.len, atoms.len);
-            rebaseMovedBytecodeLabelsAssumeValidated(code, atoms, old_base, new_base);
-            // Multi-instruction splice with rebased label operands: outside
-            // the single-op incremental contract, so rebuild lazily.
-            self.flowTail().valid = false;
-            self.appendBytesNoSourceAssumeCapacity(code);
-            for (atoms) |atom_id| self.appendAtomOperandAssumeCapacity(atom_id);
-            // A splice is a control-flow construction boundary.  QuickJS
-            // never lets get_lvalue reach through one to an opcode emitted in
-            // a detached buffer.
-            self.invalidateLastOpcode();
         }
 
         /// Drop bytes appended after `target_len`. Used by parseAssignExpr2 /
@@ -4618,74 +4279,6 @@ pub const parser_core = struct {
             fd = current.parent;
         }
         return false;
-    }
-
-    /// Emit the make-ref half of `get_lvalue` after aggregate reservation.
-    /// The operand receives a borrowed duplicate; the descriptor keeps the
-    /// retained atom removed from the original getter.
-    fn emitScopeMakeRefForLValueAssumeCapacity(s: *State, atom_id: Atom, scope: u16) usize {
-        std.debug.assert(s.emit_phase1_temp);
-        s.appendAtomOperandAssumeCapacity(atom_id);
-        var bytes: [11]u8 = undefined;
-        bytes[0] = opcode.op.scope_make_ref;
-        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-        std.mem.writeInt(u32, bytes[5..9], 0, .little);
-        std.mem.writeInt(u16, bytes[9..11], scope, .little);
-        const label_offset = s.currentCodeLen() + 5;
-        s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
-        return label_offset;
-    }
-
-    fn emitBorrowedAtomOpAssumeCapacity(s: *State, op_id: u8, atom_id: Atom) void {
-        s.appendAtomOperandAssumeCapacity(atom_id);
-        // W1: the `atom_cache_u8` family carries a placeholder `cache_idx`.
-        var bytes: [6]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-        if (opcode.carriesPropCacheIdxPhase1(op_id)) {
-            bytes[5] = bytecode.PropSiteCache.no_cache_idx;
-            s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
-            return;
-        }
-        s.emitOpcodeBytesNoSourceAssumeCapacity(bytes[0..5]);
-    }
-
-    fn emitBorrowedAtomU16OpAssumeCapacity(s: *State, op_id: u8, atom_id: Atom, scope: u16) void {
-        s.appendAtomOperandAssumeCapacity(atom_id);
-        var bytes: [7]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-        std.mem.writeInt(u16, bytes[5..7], scope, .little);
-        s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
-    }
-
-    fn emitOpNoSourceAssumeCapacity(s: *State, op_id: u8) void {
-        s.emitOpcodeBytesNoSourceAssumeCapacity(&[_]u8{op_id});
-    }
-
-    fn emitOpU8NoSourceAssumeCapacity(s: *State, op_id: u8, val: u8) void {
-        s.emitOpcodeBytesNoSourceAssumeCapacity(&[_]u8{ op_id, val });
-    }
-
-    fn reemitLValueGetterAssumeCapacity(s: *State, lvalue: *const LValue) void {
-        switch (lvalue.opcode) {
-            .scope_var => {
-                std.debug.assert(s.emit_phase1_temp);
-                emitBorrowedAtomU16OpAssumeCapacity(s, opcode.op.scope_get_var, lvalue.name, lvalue.scope);
-            },
-            .field => emitBorrowedAtomOpAssumeCapacity(s, opcode.op.get_field2, lvalue.name),
-            .private_field => {
-                std.debug.assert(s.emit_phase1_temp);
-                emitBorrowedAtomU16OpAssumeCapacity(s, opcode.op.scope_get_private_field2, lvalue.name, lvalue.scope);
-            },
-            .array_element => emitOpNoSourceAssumeCapacity(s, opcode.op.get_array_el3),
-            .super_value => {
-                emitOpNoSourceAssumeCapacity(s, opcode.op.to_propkey);
-                emitOpU8NoSourceAssumeCapacity(s, opcode.op.ext0, opcode.ext0_sub.dup3);
-                emitOpNoSourceAssumeCapacity(s, opcode.op.get_super_value);
-            },
-            .ref_value => emitOpNoSourceAssumeCapacity(s, opcode.op.get_ref_value),
-        }
     }
 
     /// QCP-1 S2-G4: v2 twin of `reemitLValueGetterAssumeCapacity` (all NoSource).
@@ -8114,15 +7707,6 @@ pub const parser_core = struct {
         builder: compiler.LabelId,
     };
 
-    fn emitParserLabelJump(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
-        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.ParserInvariant;
-        var bytes: [5]u8 = undefined;
-        bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
-        try s.emitOpcodeBytesNoSource(&bytes);
-        s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
-    }
-
     fn emitParserLabelJumpNoSource(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
         if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.ParserInvariant;
         var bytes: [5]u8 = undefined;
@@ -8130,22 +7714,6 @@ pub const parser_core = struct {
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         try s.emitOpcodeBytesNoSource(&bytes);
         s.noteEmittedLabelOperand(opcode.op.parser_label_tag | label.id);
-    }
-
-    /// Raw labels preserve the preceding real opcode as call/delete
-    /// provenance. Normal labels additionally invalidate it at the merge.
-    fn emitParserLabelRawNoSource(s: *State, label: ParserLabelRef) Error!void {
-        const snapshot = s.takeEmissionSnapshot();
-        errdefer s.rollbackEmission(snapshot);
-        var bytes: [5]u8 = undefined;
-        bytes[0] = opcode.op.label;
-        std.mem.writeInt(u32, bytes[1..5], label.id, .little);
-        try s.appendBytesNoSource(&bytes);
-    }
-
-    fn emitParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
-        try emitParserLabelRawNoSource(s, label);
-        s.invalidateLastOpcode();
     }
 
     /// Emit a jump opcode whose target is already known (for backward jumps,
@@ -8230,61 +7798,6 @@ pub const parser_core = struct {
             .label_u16 => pc + 1,
             else => null,
         };
-    }
-
-    fn validateMovedBytecodeLabels(code: []const u8, atoms: []const Atom, old_base: usize, new_base: usize) Error!void {
-        if (old_base > std.math.maxInt(usize) - code.len) return Error.ParserInvariant;
-        const old_end = old_base + code.len;
-        const delta = @as(i128, @intCast(new_base)) - @as(i128, @intCast(old_base));
-        var pc: usize = 0;
-        var atom_index: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
-            const size = instr.size;
-            if (size == 0 or pc + size > code.len) return Error.ParserInvariant;
-
-            const label_offset = parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp);
-            if (label_offset) |offset| {
-                if (offset > code.len or code.len - offset < 4) return Error.ParserInvariant;
-                const target = std.mem.readInt(u32, code[offset..][0..4], .little);
-                if (target >= old_base and target <= old_end) {
-                    const rebased = @as(i128, @intCast(target)) + delta;
-                    if (rebased < 0 or rebased > std.math.maxInt(u32)) return Error.ParserInvariant;
-                }
-            }
-
-            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) {
-                if (atom_index >= atoms.len) return Error.ParserInvariant;
-                atom_index += 1;
-            }
-            pc += size;
-        }
-        if (atom_index != atoms.len) return Error.ParserInvariant;
-    }
-
-    fn rebaseMovedBytecodeLabelsAssumeValidated(code: []u8, atoms: []const Atom, old_base: usize, new_base: usize) void {
-        if (old_base == new_base) return;
-        const old_end = old_base + code.len;
-        const delta = @as(i128, @intCast(new_base)) - @as(i128, @intCast(old_base));
-        var pc: usize = 0;
-        var atom_index: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
-            const label_offset = parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp);
-            if (label_offset) |offset| {
-                const target = std.mem.readInt(u32, code[offset..][0..4], .little);
-                if (target >= old_base and target <= old_end) {
-                    const rebased = @as(i128, @intCast(target)) + delta;
-                    std.debug.assert(rebased >= 0 and rebased <= std.math.maxInt(u32));
-                    std.mem.writeInt(u32, code[offset..][0..4], @intCast(rebased), .little);
-                }
-            }
-            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += instr.size;
-        }
-        std.debug.assert(atom_index == atoms.len);
     }
 
     fn pushBreakFrame(s: *State) Error!void {
@@ -8417,19 +7930,6 @@ pub const parser_core = struct {
 
     fn expressionStatementKeepsCompletion(s: *const State) bool {
         return s.eval_ret_idx >= 0 and !s.lex.is_module;
-    }
-
-    fn caseCanFallthrough(s: *State) bool {
-        const op_id = s.flowSummary().last_non_line_op orelse return true;
-        return switch (op_id) {
-            opcode.op.goto,
-            opcode.op.@"return",
-            opcode.op.return_undef,
-            opcode.op.return_async,
-            opcode.op.throw,
-            => false,
-            else => true,
-        };
     }
 
     /// QCP-1 S2-G2: v2 twin of the switch `break_fixups` growth check — an
@@ -11034,10 +10534,6 @@ pub const parser_core = struct {
             &catch_marker_depth,
         )) return;
         return Error.ParserInvariant;
-    }
-
-    fn patchJumpTarget(s: *State, operand_offset: usize, target: u32) Error!void {
-        try s.publishParserLabelTarget(operand_offset, target);
     }
 
     /// Mirror `js_parse_var` (`quickjs.c:27847`).
@@ -17111,3 +16607,57 @@ pub const EvalClosureSeed = compile_entry.EvalClosureSeed;
 pub const CompileContext = compile_entry.CompileContext;
 pub const CompilePolicy = compile_entry.CompilePolicy;
 pub const compile = compile_entry.compile;
+
+test "pending diagnostic preserves exact fields truncation replacement and OOM bypass" {
+    const std = @import("std");
+    // These operations own only pending_diagnostic. Deliberately leave the
+    // unrelated parser machinery unavailable so the allocation-failure arms
+    // cannot silently acquire a lexer/runtime dependency.
+    var state: parser_core.State = undefined;
+    state.pending_diagnostic = null;
+    state.recordFailureHere(error.OutOfMemory);
+    state.recordFailureHere(error.BytecodeOverflow);
+    try std.testing.expect(state.pending_diagnostic == null);
+
+    const position = diagnostics.Position{ .offset = 137, .line = 11, .column = 23 };
+    var message = [_]u8{ 'e', 'x', 'p', 'e', 'c', 't', 'e', 'd', ' ', '\'', ')', '\'' };
+    state.setPendingDiagnostic(error.UnexpectedToken, position, &message);
+    message[0] = 'X';
+    try std.testing.expectEqualDeep(position, state.pending_diagnostic.?.position);
+    try std.testing.expectEqual(error.UnexpectedToken, state.pending_diagnostic.?.err);
+    try std.testing.expectEqualStrings("expected ')'", state.pending_diagnostic.?.message());
+    state.recordFailureHere(error.OutOfMemory);
+    state.recordFailureHere(error.BytecodeOverflow);
+    try std.testing.expectEqualDeep(position, state.pending_diagnostic.?.position);
+    try std.testing.expectEqualStrings("expected ')'", state.pending_diagnostic.?.message());
+    try std.testing.expectEqual(error.UnexpectedToken, state.propagateFailureHere(error.UnexpectedToken));
+
+    var long_message: [parser_core.PendingDiagnostic.message_capacity + 17]u8 = undefined;
+    for (&long_message, 0..) |*byte, i| byte.* = @intCast('!' + i % 90);
+    const later = diagnostics.Position{ .offset = 271, .line = 31, .column = 47 };
+    state.setPendingDiagnostic(error.SyntaxError, later, &long_message);
+    try std.testing.expectEqualDeep(later, state.pending_diagnostic.?.position);
+    try std.testing.expectEqual(error.SyntaxError, state.pending_diagnostic.?.err);
+    try std.testing.expectEqualSlices(u8, long_message[0..parser_core.PendingDiagnostic.message_capacity], state.pending_diagnostic.?.message());
+    state.setPendingDiagnostic(error.UnexpectedToken, position, "");
+    try std.testing.expectEqualStrings("", state.pending_diagnostic.?.message());
+    try std.testing.expectEqualDeep(position, state.pending_diagnostic.?.position);
+}
+
+test "pending diagnostic syntax error allocation propagates OOM" {
+    const std = @import("std");
+    const core = @import("core/root.zig");
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+    try std.testing.expectError(error.OutOfMemory, diagnostics.SyntaxError.create(
+        &account,
+        &atoms,
+        core.atom.null_atom,
+        .{ .offset = 137, .line = 11, .column = 23 },
+        "expected ')', got '{'",
+    ));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}

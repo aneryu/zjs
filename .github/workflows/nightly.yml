@@ -65,8 +65,9 @@ jobs:
         run: |
           test "$(uname -m)" = "x86_64"
           strip zig-out/bin/zjs
-          expected="zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
-          test "$(zig-out/bin/zjs --print-config-signature)" = "$expected"
+          expected="$(cat zig-out/bin/zjs.config-signature)"
+          actual="$(zig-out/bin/zjs --print-config-signature)"
+          test "$actual" = "$expected"
       - name: Package Linux binary
         run: |
           mkdir -p release
@@ -98,8 +99,9 @@ jobs:
           test "$(uname -m)" = "arm64"
           strip -x zig-out/bin/zjs
           codesign -s - -f zig-out/bin/zjs
-          expected="zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
-          test "$(zig-out/bin/zjs --print-config-signature)" = "$expected"
+          expected="$(cat zig-out/bin/zjs.config-signature)"
+          actual="$(zig-out/bin/zjs --print-config-signature)"
+          test "$actual" = "$expected"
       - name: Package macOS binary
         run: |
           mkdir -p release
@@ -128,8 +130,11 @@ jobs:
           if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
             throw "Expected an x86_64 Windows runner, got $env:PROCESSOR_ARCHITECTURE"
           }
-          $expected = "zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off"
+          $expected = (Get-Content -Raw .\zig-out\bin\zjs.config-signature).Trim()
           $actual = (& .\zig-out\bin\zjs.exe --print-config-signature | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "zjs configuration check exited with code $LASTEXITCODE"
+          }
           if ($actual -ne $expected) {
             throw "Unexpected zjs configuration signature: $actual"
           }
