@@ -10,8 +10,6 @@ const memory = @import("memory.zig");
 const carrier = @import("gc_carrier.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
-const class = @import("class.zig");
-const property = @import("property.zig");
 const context_mod = @import("context.zig");
 const module_mod = @import("module.zig");
 const var_ref = @import("var_ref.zig");
@@ -31,7 +29,6 @@ const MB: usize = 1024 * KB;
 pub const roots_diag_enabled: bool = build_options.zjs_gc_roots_diag;
 
 const BlockHeapMod = @import("gc_block_heap.zig");
-const gc_space = @import("gc_space.zig");
 
 const AddressRegistryTable = @import("gc_address_registry.zig").Table;
 
