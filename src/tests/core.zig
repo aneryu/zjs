@@ -5342,6 +5342,15 @@ test "generator bound and proxy payloads carry no realm compensation" {
     try std.testing.expect(!@hasField(core.object.ProxyPayload, "realm_global_ptr"));
 }
 
+test "OrdinaryPayload default fill matches OrdinaryPayload{}" {
+    var payload: core.object.OrdinaryPayload = undefined;
+    payload.fillDefault();
+    try std.testing.expectEqualDeep(core.object.OrdinaryPayload{}, payload);
+    try std.testing.expectEqual(@as(usize, 360), @sizeOf(core.object.OrdinaryPayload));
+    try std.testing.expectEqual(@as(i32, 1), payload.callsite_line);
+    try std.testing.expectEqual(@as(i32, 1), payload.callsite_column);
+}
+
 test "leaf noncarrier payloads carry no borrowed realm compensation" {
     try std.testing.expect(!@hasField(core.object.OrdinaryPayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(core.object.ObjectDataPayload, "realm_global_ptr"));
