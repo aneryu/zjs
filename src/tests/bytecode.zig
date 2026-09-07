@@ -195,6 +195,33 @@ test "bytecode setCode owns exactly the visible code bytes" {
     try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
 }
 
+test "function_mod growSliceBy returns the grown tail and doubles capacity" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function_bc.deinit(rt);
+
+    try function_bc.appendCode(&.{1});
+    try std.testing.expectEqual(@as(usize, 1), function_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 8), function_bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &.{1}, function_bc.code);
+
+    try function_bc.appendCode(&.{ 2, 3, 4, 5, 6, 7, 8 });
+    try std.testing.expectEqual(@as(usize, 8), function_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 8), function_bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, function_bc.code);
+
+    try function_bc.appendCode(&.{9});
+    try std.testing.expectEqual(@as(usize, 9), function_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 16), function_bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, function_bc.code);
+
+    try function_bc.retainAtomOperand(core.atom.ids.empty_string);
+    try std.testing.expectEqual(@as(usize, 1), function_bc.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 8), function_bc.atom_operands_capacity);
+}
+
 test "bytecode appendCode preserves eval-looking atom operand bytes as data" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
