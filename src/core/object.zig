@@ -2481,14 +2481,6 @@ pub const Object = extern struct {
         return self.payloadArm().*;
     }
 
-    pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
-        // Keep this exclusion and its Debug proof paired with the mutable arm.
-        if (self.hasSlots2Layout() or self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
-        assertOnlyPayloadWordIsLive(self);
-        std.debug.assert(self.payloadArm().* == null or @intFromPtr(self.payloadArm().*.?) != @alignOf(JSValue));
-        return self.payloadArm().*;
-    }
-
     pub fn setCachedFunctionProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
         const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         ctx.cached_function_proto = prototype;
@@ -8485,17 +8477,6 @@ pub const Object = extern struct {
         try self.appendModuleAutoInitProperty(rt, atom_id, flags, realm, owner);
     }
 
-    pub fn defineAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        length: i32,
-        flags: property.Flags,
-    ) !void {
-        try self.defineAutoInitPropertyWithRealm(rt, atom_id, name, length, flags, null);
-    }
-
     pub fn defineAutoInitPropertyWithRealm(
         self: *Object,
         rt: *JSRuntime,
@@ -8832,20 +8813,6 @@ pub const Object = extern struct {
         self.setFastArrayCountAssumeCapacity(new_len);
         if (new_len > self.arrayArm().*.length) self.arrayArm().*.length = new_len;
         if (added != 0) self.markIndexedProperties(rt);
-    }
-
-    pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
-        std.debug.assert(self.isArray());
-        std.debug.assert(self.arrayArm().*.count == 0);
-        std.debug.assert(self.flags.length_writable);
-        std.debug.assert(self.flags.extensible);
-        std.debug.assert(self.arrayElements().len == 0);
-        std.debug.assert(self.arrayElementsCapacity() == 0);
-
-        const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = new_value;
-        if (self.arrayArm().*.length < 1) self.arrayArm().*.length = 1;
-        self.markIndexedProperties(rt);
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
