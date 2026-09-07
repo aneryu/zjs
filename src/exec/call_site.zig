@@ -221,21 +221,18 @@ pub const CallSite = struct {
         return self.callFixed(4, &args);
     }
 
-    /// Fixed-arity twin of `call` (`call0..call4`): the lean push unrolls its
-    /// argument copy for the comptime count. Outlined per arity.
+    /// Fixed-arity twin of `call` (`call0..call4`). The argument window is
+    /// still written with pinned stores; the outlined walk is the existing
+    /// `callInto` (one leftover copy). A comptime `argc` into `enterBytecode`
+    /// outlined one ~6 KiB copy per leftover arity.
     pub inline fn callFixed(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue) HostError!JSValue {
         var out: JSValue = undefined;
         try self.callFixedInto(argc, args, &out);
         return pinnedLoad(&out);
     }
 
-    pub noinline fn callFixedInto(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue, out: *JSValue) HostError!void {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
-        switch (self.route) {
-            .bytecode => |*route| return enterBytecode(argc, self.ctx, self.output, self.global, route, &route.target, &self.this_value, &self.callee, args, self.caller_function, self.caller_frame, self.leanFrame(route), out),
-            .generic => {},
-        }
-        return callGeneric(self.ctx, self.output, self.global, self.this_value, self.callee, args, self.caller_function, self.caller_frame, out);
+    pub inline fn callFixedInto(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue, out: *JSValue) HostError!void {
+        return self.callInto(args, out);
     }
 
     /// Reuse the prepared callable route while supplying the receiver for
