@@ -232,10 +232,7 @@ pub fn arrayPrototypeNativeRecord(
     const array_mod = method_ids.array;
     const function_object_nonnull = function_object orelse return error.TypeError;
     if (arrayIterationModeFromRecordId(id)) |mode| {
-        return if (arrayIterationModeIsFind(mode))
-            arrayIterationModeCall(true, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode)
-        else
-            arrayIterationModeCall(false, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
+        return arrayIterationModeCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
     }
     return switch (id) {
         @intFromEnum(array_mod.PrototypeMethod.to_string) => arrayToStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
@@ -1459,14 +1456,10 @@ pub fn arrayIterationCall(
             return null;
     };
 
-    return if (arrayIterationModeIsFind(mode))
-        arrayIterationModeCall(true, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode)
-    else
-        arrayIterationModeCall(false, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode);
+    return arrayIterationModeCall(ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode);
 }
 
-fn arrayIterationModeCall(
-    comptime find_family: bool,
+noinline fn arrayIterationModeCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1477,17 +1470,7 @@ fn arrayIterationModeCall(
     caller_frame: ?*frame_mod.Frame,
     mode: ArrayIterationMode,
 ) !?core.JSValue {
-    if (comptime find_family) {
-        switch (mode) {
-            .find, .find_index, .find_last, .find_last_index => {},
-            else => unreachable,
-        }
-    } else {
-        switch (mode) {
-            .for_each, .map, .filter, .some, .every => {},
-            else => unreachable,
-        }
-    }
+    const find_family = arrayIterationModeIsFind(mode);
     const receiver_object_value = if (objectFromValue(receiver)) |_|
         receiver
     else if (receiver.isNull() or receiver.isUndefined())
