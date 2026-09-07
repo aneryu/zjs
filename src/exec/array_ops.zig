@@ -15,6 +15,7 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
 const construct_mod = @import("construct.zig");
@@ -4895,7 +4896,7 @@ pub fn arraySortCall(
                 undefined_count += 1;
                 continue;
             }
-            try entries_list.append(rt.memory.allocator, .{ .value = value, .order = index });
+            try array_list_erased.append(&entries_list, rt.memory.allocator, .{ .value = value, .order = index });
         }
         entries = entries_list.items;
     }
@@ -5190,7 +5191,7 @@ pub fn arrayByCopyCall(
             if (item.isUndefined()) {
                 undefined_count += 1;
             } else {
-                try entries.append(ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
+                try array_list_erased.append(&entries, ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
             }
         }
         var sort_window: SortEntryRootWindow = .{};
@@ -5311,7 +5312,7 @@ pub fn typedArrayByCopyCall(
         var index: usize = 0;
         while (index < length) : (index += 1) {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-            try entries.append(ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
+            try array_list_erased.append(&entries, ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
         }
         try stableArraySortEntries(ctx, output, global, true, comparator, entries.items, caller_function, caller_frame);
 

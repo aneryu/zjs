@@ -12,6 +12,7 @@
 const std = @import("std");
 const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const jobs_mod = core.jobs;
 const parser = @import("../parser.zig");
 const exec = @import("root.zig");
@@ -1192,7 +1193,7 @@ fn appendModuleEvalStepRetainingOnError(
                     .keep_result = true,
                     .completed = true,
                 };
-                try continuations.append(allocator, continuation);
+                try array_list_erased.append(continuations, allocator, continuation);
             } else {}
         },
         .suspended => |suspended| {
@@ -1207,7 +1208,7 @@ fn appendModuleEvalStepRetainingOnError(
                 .awaited = suspended.awaited,
                 .keep_result = keep_result,
             };
-            try continuations.append(allocator, continuation);
+            try array_list_erased.append(continuations, allocator, continuation);
         },
     }
 }
@@ -1238,7 +1239,7 @@ fn enqueueDeferredModuleStart(
         .keep_result = keep_result,
         .deferred_start = true,
     };
-    try continuations.append(allocator, continuation);
+    try array_list_erased.append(continuations, allocator, continuation);
     module_record.status = .evaluating;
 }
 

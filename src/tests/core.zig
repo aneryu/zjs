@@ -18612,3 +18612,70 @@ test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent rou
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 }
+
+test "array_list_erased append matches std ArrayList growth" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const types = .{ u32, Sample, []const u8 };
+
+    inline for (types) |T| {
+        var std_list: std.ArrayList(T) = .empty;
+        defer std_list.deinit(std.testing.allocator);
+        var erased: std.ArrayList(T) = .empty;
+        defer erased.deinit(std.testing.allocator);
+
+        var i: u32 = 0;
+        while (i < 64) : (i += 1) {
+            const item: T = switch (T) {
+                u32 => i,
+                Sample => .{ .a = i, .b = i + 1, .c = i },
+                []const u8 => "item",
+                else => unreachable,
+            };
+            try std_list.append(std.testing.allocator, item);
+            try array_list_erased.append(&erased, std.testing.allocator, item);
+            try std.testing.expectEqual(std_list.items.len, erased.items.len);
+            try std.testing.expectEqual(std_list.capacity, erased.capacity);
+            try std.testing.expectEqual(std_list.items[i], erased.items[i]);
+        }
+    }
+
+    var failing: std.ArrayList(u32) = .empty;
+    defer failing.deinit(std.testing.failing_allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        array_list_erased.append(&failing, std.testing.failing_allocator, 1),
+    );
+}
+
+test "array_list_erased append matches MemoryAccount allocator ledger" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const account_mod = @import("../core/memory.zig");
+
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var typed = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer typed.small_slab.deinit(std.testing.allocator);
+        typed.small_slab_enabled = slab_enabled;
+        var erased_account = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer erased_account.small_slab.deinit(std.testing.allocator);
+        erased_account.small_slab_enabled = slab_enabled;
+
+        const typed_gpa = typed.accountedAllocator();
+        const erased_gpa = erased_account.accountedAllocator();
+        var std_list: std.ArrayList(Sample) = .empty;
+        defer std_list.deinit(typed_gpa);
+        var erased: std.ArrayList(Sample) = .empty;
+        defer erased.deinit(erased_gpa);
+
+        var i: u32 = 0;
+        while (i < 32) : (i += 1) {
+            const item = Sample{ .a = i, .b = i + 1, .c = i };
+            try std_list.append(typed_gpa, item);
+            try array_list_erased.append(&erased, erased_gpa, item);
+            try std.testing.expectEqual(typed.allocated_bytes, erased_account.allocated_bytes);
+            try std.testing.expectEqual(std_list.capacity, erased.capacity);
+            try std.testing.expectEqual(std_list.items.len, erased.items.len);
+        }
+    }
+}

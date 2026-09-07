@@ -302,6 +302,7 @@ pub const parser_core = struct {
     const simple_token = @import("simple_token.zig");
     const unicode = @import("libs/unicode.zig");
     const memory = @import("core/memory.zig");
+    const array_list_erased = @import("core/array_list_erased.zig");
     const JSValue = @import("core/value.zig").JSValue;
     const compiler = @import("compiler/root.zig");
 
@@ -7794,8 +7795,8 @@ pub const parser_core = struct {
         try s.continue_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
         try s.continue_frame_cleanup_drops.append(s.function.memory.allocator, 0);
         // qjs push_break_entry order: label_cont first, then label_break.
-        try s.continue_frame_labels.append(s.function.memory.allocator, try emitterNewLabel(s));
-        try s.break_frame_labels.append(s.function.memory.allocator, try emitterNewLabel(s));
+        try array_list_erased.append(&s.continue_frame_labels, s.function.memory.allocator, try emitterNewLabel(s));
+        try array_list_erased.append(&s.break_frame_labels, s.function.memory.allocator, try emitterNewLabel(s));
     }
 
     fn pushBreakOnlyFrame(s: *State) Error!void {
@@ -7803,7 +7804,7 @@ pub const parser_core = struct {
         try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
         try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
         try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
-        try s.break_frame_labels.append(s.function.memory.allocator, try emitterNewLabel(s));
+        try array_list_erased.append(&s.break_frame_labels, s.function.memory.allocator, try emitterNewLabel(s));
     }
 
     /// Put a real break/continue target in the same ordered environment chain
@@ -8510,7 +8511,7 @@ pub const parser_core = struct {
     pub fn parseProgramStatements(s: *State, decl_mask: DeclMask) Error!void {
         const frame_len = s.using_block_frames.items.len;
         const catch_marker_depth = s.active_catch_marker_depth;
-        try s.using_block_frames.append(s.function.memory.allocator, .{});
+        try array_list_erased.append(&s.using_block_frames, s.function.memory.allocator, .{});
         errdefer restoreUsingBlockFramesAfterError(s, frame_len, catch_marker_depth);
         while (s.peekKind() != tok.TOK_EOF) {
             parseStatementOrDecl(s, decl_mask) catch |err| return s.propagateFailureHere(err);
@@ -8535,7 +8536,7 @@ pub const parser_core = struct {
         }
         const frame_len = s.using_block_frames.items.len;
         const catch_marker_depth = s.active_catch_marker_depth;
-        try s.using_block_frames.append(s.function.memory.allocator, .{});
+        try array_list_erased.append(&s.using_block_frames, s.function.memory.allocator, .{});
         errdefer restoreUsingBlockFramesAfterError(s, frame_len, catch_marker_depth);
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
             try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -9395,7 +9396,7 @@ pub const parser_core = struct {
             if (directUsingDeclarationKind(s)) |using_kind| {
                 for_head_is_lexical = true;
                 for_has_initializer = true;
-                try s.using_block_frames.append(s.function.memory.allocator, .{});
+                try array_list_erased.append(&s.using_block_frames, s.function.memory.allocator, .{});
                 for_using_frame_active = true;
                 try parseUsingDeclaration(s, using_kind);
                 try s.expectToken(';');
@@ -11010,7 +11011,7 @@ pub const parser_core = struct {
             }
         }
         if (target_is_using_decl) {
-            try s.using_block_frames.append(s.function.memory.allocator, .{});
+            try array_list_erased.append(&s.using_block_frames, s.function.memory.allocator, .{});
             iteration_using_frame_active = true;
             const stack_loc = try armCurrentUsingBlockFrame(s);
 

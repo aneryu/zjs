@@ -30,6 +30,7 @@ const JSValue = @import("value.zig").JSValue;
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const memory_mod = @import("memory.zig");
+const array_list_erased = @import("array_list_erased.zig");
 const block_heap = @import("gc_block_heap.zig");
 const std = @import("std");
 const builtin = @import("builtin");
@@ -9798,7 +9799,7 @@ pub const Object = extern struct {
             if (self.class_id == class.ids.mapped_arguments) {
                 for (self.argumentsVarRefs(), 0..) |mapped, mapped_index| {
                     if (mapped == null) continue;
-                    try index_keys.append(rt.memory.allocator, .{
+                    try array_list_erased.append(&index_keys, rt.memory.allocator, .{
                         .index = @intCast(mapped_index),
                         .atom_id = atom.atomFromUInt32(@intCast(mapped_index)),
                     });
@@ -9806,7 +9807,7 @@ pub const Object = extern struct {
             }
             var dense_index: u32 = 0;
             while (dense_index < self.arrayElements().len) : (dense_index += 1) {
-                try index_keys.append(rt.memory.allocator, .{
+                try array_list_erased.append(&index_keys, rt.memory.allocator, .{
                     .index = dense_index,
                     .atom_id = atom.atomFromUInt32(dense_index),
                 });
@@ -9815,7 +9816,7 @@ pub const Object = extern struct {
                 if (property.Flags.fromBits(prop.flags).deleted) continue;
                 const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
                 if (self.hasDenseArrayElement(index)) continue;
-                try index_keys.append(rt.memory.allocator, .{
+                try array_list_erased.append(&index_keys, rt.memory.allocator, .{
                     .index = index,
                     .atom_id = prop.atom_id,
                 });

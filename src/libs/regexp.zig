@@ -1,6 +1,7 @@
 //! ECMAScript regular-expression compiler and QuickJS `libregexp.c`-style backtracking bytecode executor.
 //! Patterns and inputs are borrowed; `Compiled` owns bytecode, and scratch storage owns only inline-buffer overflow.
 const std = @import("std");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const unicode = @import("unicode.zig");
 const regexp_properties = @import("unicode/regexp_properties.zig");
 
@@ -1797,7 +1798,7 @@ const REStringList = struct {
             self.ranges.allocator.free(s);
             return;
         }
-        try self.strings.append(self.ranges.allocator, s);
+        try array_list_erased.append(&self.strings, self.ranges.allocator, s);
     }
 
     fn unionWith(self: *REStringList, other: *const REStringList) !void {
@@ -1806,7 +1807,7 @@ const REStringList = struct {
             if (self.containsString(s)) continue;
             const copy = try self.ranges.allocator.dupe(u21, s);
             errdefer self.ranges.allocator.free(copy);
-            try self.strings.append(self.ranges.allocator, copy);
+            try array_list_erased.append(&self.strings, self.ranges.allocator, copy);
         }
     }
 
@@ -3345,7 +3346,7 @@ const REParseState = struct {
             ctx.s.allocator.free(copy);
             return;
         }
-        try ctx.set.strings.append(ctx.s.allocator, copy);
+        try array_list_erased.append(&ctx.set.strings, ctx.s.allocator, copy);
     }
 
     fn parseUnicodePropertyEscapeWithOrdering(self: *REParseState, inverted: bool) CompileError!CharRange {

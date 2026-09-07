@@ -10286,6 +10286,7 @@ pub const pipeline_finalize = struct {
 
     const std = @import("std");
     const atom = @import("core/atom.zig");
+    const array_list_erased = @import("core/array_list_erased.zig");
     const bigint_mod = @import("core/bigint.zig");
     const runtime_mod = @import("core/runtime.zig");
     const fb_mod = function_bytecode;
@@ -11175,7 +11176,7 @@ pub const pipeline_finalize = struct {
         var frames: std.ArrayList(Frame) = .empty;
         defer frames.deinit(fd.memory.allocator);
         try prepareCurrentBeforeChildren(fd, root_module_record);
-        try frames.append(fd.memory.allocator, .{ .function_def = fd });
+        try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = fd });
 
         while (frames.items.len != 0) {
             const frame_index = frames.items.len - 1;
@@ -11189,7 +11190,7 @@ pub const pipeline_finalize = struct {
                     return error.InvalidBytecode;
                 }
                 try prepareCurrentBeforeChildren(child, null);
-                try frames.append(fd.memory.allocator, .{ .function_def = child });
+                try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = child });
                 continue;
             }
 

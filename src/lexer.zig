@@ -9,6 +9,7 @@ pub fn namespace(comptime token: type) type {
         //!
         const std = @import("std");
         const atom_module = @import("core/atom.zig");
+        const array_list_erased = @import("core/array_list_erased.zig");
         const simple_token = @import("simple_token.zig");
         const unicode = @import("libs/unicode.zig");
         const t = token;
@@ -3285,7 +3286,7 @@ pub fn namespace(comptime token: type) type {
 
         fn addRange(ranges: *std.ArrayList(Range), allocator: std.mem.Allocator, start: usize, end: usize) !void {
             if (end <= start) return;
-            try ranges.append(allocator, .{ .start = start, .end = end });
+            try array_list_erased.append(ranges, allocator, .{ .start = start, .end = end });
         }
 
         fn rangeLessThan(_: void, a: Range, b: Range) bool {

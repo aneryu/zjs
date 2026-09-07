@@ -3,6 +3,7 @@
 //! side by side, matching QuickJS's JSCFunctionListEntry pattern.
 
 const core = @import("../core/root.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -646,7 +647,7 @@ fn JsonUnitParser(comptime T: type) type {
                 // (json_parse_record_add, quickjs.c:49405).
                 if (child_slot) |slot| {
                     pending_frame.pending = slot;
-                    entries.append(self.rt.memory.allocator, .{ .atom = key_atom, .record = slot.* }) catch |err| {
+                    array_list_erased.append(&entries, self.rt.memory.allocator, .{ .atom = key_atom, .record = slot.* }) catch |err| {
                         pending_frame.pending = null;
                         slot.deinit(self.rt);
                         return err;
@@ -1005,7 +1006,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
 
 fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     if (objectInStack(stack.items, object)) return error.TypeError;
-    try stack.append(rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.memory.allocator, object);
     defer _ = stack.pop();
 
     try buffer.append(rt.memory.allocator, '[');
@@ -1032,7 +1033,7 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
 
 fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     if (objectInStack(stack.items, object)) return error.TypeError;
-    try stack.append(rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.memory.allocator, object);
     defer _ = stack.pop();
 
     try buffer.append(rt.memory.allocator, '{');
@@ -2065,7 +2066,7 @@ fn jsonAppendSimpleArray(
         if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return .fallback;
     }
 
-    try stack.append(rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.memory.allocator, object);
     defer _ = stack.pop();
     errdefer buffer.shrinkRetainingCapacity(start);
 
@@ -2098,7 +2099,7 @@ fn jsonAppendSimpleObject(
     if (object.hasExoticMethods() or object.isProxy() or object.class_id != core.class.ids.object) return .fallback;
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
 
-    try stack.append(rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.memory.allocator, object);
     defer _ = stack.pop();
     errdefer buffer.shrinkRetainingCapacity(start);
 
@@ -2458,7 +2459,7 @@ pub fn jsonAppendArray(
     defer root_frame.deactivate(ctx.runtime);
 
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
-    try stack.append(ctx.runtime.memory.allocator, object);
+    try array_list_erased.append(stack, ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
     const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
@@ -2500,7 +2501,7 @@ pub fn jsonAppendObject(
     defer root_frame.deactivate(ctx.runtime);
 
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
-    try stack.append(ctx.runtime.memory.allocator, object);
+    try array_list_erased.append(stack, ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
     try buffer.append(ctx.runtime.memory.allocator, '{');
     const owned_keys: []core.Atom = if (!options.has_property_list) try object_ops.objectRestOwnKeys(ctx, output, global, object) else &.{};
