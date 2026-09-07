@@ -12,7 +12,6 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
-const number_format = @import("../libs/number_format.zig");
 const string = @import("string.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -1965,8 +1964,8 @@ pub const AtomTable = struct {
 
     pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
         if (isTaggedInt(atom_id)) {
-            var buf: [16]u8 = undefined;
-            const text = number_format.formatInt32(&buf, @intCast(atomToUInt32(atom_id)));
+            var buf: [10]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)}) catch unreachable;
             if (text.len == 1 and text[0] <= 0x7f) {
                 const cached = try rt.singleByteString(text[0]);
                 return cached.value();

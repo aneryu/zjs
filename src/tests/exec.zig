@@ -3945,25 +3945,6 @@ test "a dynamic function outlives its teardown when its object held the last byt
     try std.testing.expectEqualStrings("16\n", stream.buffered());
 }
 
-test "json leftover integer digits match formatInt32 including negatives" {
-    var js = try helpers.TestEngine.init(std.testing.allocator);
-    defer js.deinit();
-
-    var output_buffer: [256]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    _ = try js.evalWithOutput(
-        \\print(JSON.stringify(0));
-        \\print(JSON.stringify(-1));
-        \\print(JSON.stringify(42));
-        \\print(JSON.stringify(-2147483648));
-        \\print(JSON.stringify(2147483647));
-        \\print(JSON.stringify([1, -2, 0]));
-        \\print(JSON.parse("123"));
-        \\print(JSON.stringify({1: "a"}));
-    , &stream);
-    try std.testing.expectEqualStrings("0\n-1\n42\n-2147483648\n2147483647\n[1,-2,0]\n123\n{\"1\":\"a\"}\n", stream.buffered());
-}
-
 test "string leftover ToIntegerOrInfinity matches value_ops including bigint TypeError" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

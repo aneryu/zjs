@@ -25,7 +25,6 @@ const object_mod = @import("object.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
 const unicode = @import("../libs/unicode.zig");
-const number_format = @import("../libs/number_format.zig");
 const var_ref_mod = @import("var_ref.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = object_mod.Object;
@@ -4154,7 +4153,7 @@ pub const JSRuntime = struct {
     pub fn smallIntString(self: *JSRuntime, value: u8) !*string.String {
         if (self.small_int_strings[value]) |s| return s;
         var buf: [4]u8 = undefined;
-        const text = number_format.formatInt32(&buf, value);
+        const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
         const s = try string.String.createLatin1(self, text);
         // The cache owns the string's initial reference and releases it in
         // JSRuntime.destroy; callers receive a borrowed pointer.
