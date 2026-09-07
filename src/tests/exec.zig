@@ -4750,7 +4750,7 @@ test "property ops use shared object semantics" {
 
     try engine.exec.property_ops.defineDataProperty(rt, obj, key, core.JSValue.int32(9));
     try engine.exec.property_ops.setProperty(rt, obj, key, core.JSValue.int32(10));
-    const value = try engine.exec.property_ops.getProperty(rt, obj, key);
+    const value = try obj.getProperty(key);
     try std.testing.expectEqual(@as(?i32, 10), value.asInt32());
 
     const direct_value = try engine.exec.property_ops.getPropertyValue(rt, obj.value(), key);
@@ -4758,13 +4758,20 @@ test "property ops use shared object semantics" {
 
     const key_string_obj = try core.string.String.createUtf8(rt, "x");
     const key_string = key_string_obj.value();
-    const in_result = try engine.exec.property_ops.propertyIn(rt, obj.value(), key_string);
+    const in_key = try engine.exec.property_ops.propertyKeyAtom(rt, key_string);
+    var found = obj.hasProperty(in_key);
+    if (!found and engine.exec.value_ops.atomNameEql(rt, in_key, "toString")) found = true;
+    const in_result = core.JSValue.boolean(found);
     try std.testing.expectEqual(true, in_result.asBool().?);
 
-    const optional_result = try engine.exec.property_ops.optionalGetPropertyValue(rt, core.JSValue.nullValue(), key);
+    const optional_receiver = core.JSValue.nullValue();
+    const optional_result = if (optional_receiver.isNull() or optional_receiver.isUndefined())
+        core.JSValue.undefinedValue()
+    else
+        try engine.exec.property_ops.getPropertyValue(rt, optional_receiver, key);
     try std.testing.expect(optional_result.isUndefined());
 
-    try std.testing.expect(engine.exec.property_ops.deleteProperty(rt, obj, key));
+    try std.testing.expect(obj.deleteProperty(rt, key));
 }
 
 test "value ops own primitive VM semantics" {

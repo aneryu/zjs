@@ -11,11 +11,6 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
-pub fn getProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !core.JSValue {
-    _ = rt;
-    return try object.getProperty(atom_id);
-}
-
 pub fn setProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
     try object.setProperty(rt, atom_id, value);
 }
@@ -24,29 +19,10 @@ pub fn defineDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: co
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
 }
 
-pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
-    return object.deleteProperty(rt, atom_id);
-}
-
 pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
     if (object_value.isGlobal() and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value();
     return try object_value.getProperty(atom_id);
-}
-
-pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
-    _ = rt;
-    if (value.isNull() or value.isUndefined()) return core.JSValue.undefinedValue();
-    const object_value = try expectObject(value);
-    return try object_value.getProperty(atom_id);
-}
-
-pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: core.JSValue) !core.JSValue {
-    const object = try expectObject(object_value);
-    const key = try propertyKeyAtom(rt, key_value);
-    var found = object.hasProperty(key);
-    if (!found and value_ops.atomNameEql(rt, key, "toString")) found = true;
-    return core.JSValue.boolean(found);
 }
 
 /// Allocation-free prefix of `propertyKeyAtom`: the atom when `value` is
