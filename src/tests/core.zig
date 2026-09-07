@@ -2141,7 +2141,7 @@ fn tailBufferText(rt: *core.JSRuntime, allocator: std.mem.Allocator, value: core
     var index: usize = 0;
     const len = core.string.stringValueLen(value);
     while (index < len) : (index += 1) {
-        const unit = core.string.stringValueCodeUnitAt(value, index).?;
+        const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
         try out.append(allocator, @intCast(unit & 0xff));
     }
     return out.toOwnedSlice(allocator);
@@ -2155,7 +2155,7 @@ test "S2-i tail buffer views read, compare and hash exactly like the flat string
     const right = try core.string.String.createLatin1(rt, "IJ");
     const view = try core.string.createTailBufferRope(rt, left, right);
     try std.testing.expect(view.buffer != null);
-    try std.testing.expect(view.isExtensibleView());
+    try std.testing.expect(view.extensible and view.buffer != null);
     try std.testing.expect(!view.isLinearized());
 
     const flat = try core.string.String.createLatin1(rt, "abcdefghIJ");
@@ -2174,7 +2174,7 @@ test "S2-i tail buffer views read, compare and hash exactly like the flat string
     const materialized = try view.flatten();
     try std.testing.expect(materialized.eqlBytes("abcdefghIJ"));
     try std.testing.expect(view.buffer == null);
-    try std.testing.expect(!view.isExtensibleView());
+    try std.testing.expect(!(view.extensible and view.buffer != null));
     try std.testing.expect(view.isLinearized());
     // A second read is idempotent and does not re-allocate.
     try std.testing.expectEqual(materialized, try view.flatten());
@@ -2193,8 +2193,8 @@ test "S2-i in-place append moves the extensible right and leaves the shorter vie
     const r1 = try core.string.appendTailBufferRope(rt, s, x);
     // In place: same buffer, right transferred.
     try std.testing.expectEqual(shared, r1.buffer.?);
-    try std.testing.expect(r1.isExtensibleView());
-    try std.testing.expect(!s.isExtensibleView());
+    try std.testing.expect(r1.extensible and r1.buffer != null);
+    try std.testing.expect(!(s.extensible and s.buffer != null));
     try std.testing.expectEqual(@as(usize, 12), s.len_());
 
     // Second fork off `s`: the right is spent, so this must COPY rather than
@@ -2241,9 +2241,11 @@ test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
     try std.testing.expect(widened.buffer.?.is_wide);
     try std.testing.expect(widened.wide);
     try std.testing.expectEqual(view.len_() + 1, widened.len_());
+    try std.testing.expect(widened.value().isString());
+    try std.testing.expect(widened.len_() > 0);
     try std.testing.expectEqual(
-        @as(?u16, 0x4e2d),
-        core.string.stringValueCodeUnitAt(widened.value(), widened.len_() - 1),
+        @as(u16, 0x4e2d),
+        core.string.stringValueCodeUnitAtUnchecked(widened.value(), widened.len_() - 1),
     );
     // The narrow predecessor still reads its own prefix.
     const narrow_text = try tailBufferText(rt, std.testing.allocator, view.value());
@@ -2322,13 +2324,15 @@ test "S2-i the concat operator seeds a tail buffer and keeps forks independent" 
 
     const fork_a = try engine.exec.value_ops.addStringsOwned(rt, accumulator, one);
     const fork_b = try engine.exec.value_ops.addStringsOwned(rt, accumulator, two);
+    try std.testing.expect(fork_a.isString() and core.string.stringValueLen(fork_a) > 0);
+    try std.testing.expect(fork_b.isString() and core.string.stringValueLen(fork_b) > 0);
     try std.testing.expectEqual(
-        @as(?u16, '1'),
-        core.string.stringValueCodeUnitAt(fork_a, core.string.stringValueLen(fork_a) - 1),
+        @as(u16, '1'),
+        core.string.stringValueCodeUnitAtUnchecked(fork_a, core.string.stringValueLen(fork_a) - 1),
     );
     try std.testing.expectEqual(
-        @as(?u16, '2'),
-        core.string.stringValueCodeUnitAt(fork_b, core.string.stringValueLen(fork_b) - 1),
+        @as(u16, '2'),
+        core.string.stringValueCodeUnitAtUnchecked(fork_b, core.string.stringValueLen(fork_b) - 1),
     );
     try std.testing.expectEqual(
         core.string.String.tail_buffer_seed_len + 1,
@@ -2350,10 +2354,12 @@ test "rope index compare and hash traverse nested leaves without flattening" {
 
     const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 0x0100, 'c', '!' });
 
-    try std.testing.expectEqual(@as(?u16, 'a'), core.string.stringValueCodeUnitAt(outer_value, 0));
-    try std.testing.expectEqual(@as(?u16, 0x0100), core.string.stringValueCodeUnitAt(outer_value, 2));
-    try std.testing.expectEqual(@as(?u16, '!'), core.string.stringValueCodeUnitAt(outer_value, 4));
-    try std.testing.expectEqual(@as(?u16, null), core.string.stringValueCodeUnitAt(outer_value, 5));
+    try std.testing.expect(outer_value.isString());
+    try std.testing.expect(4 < core.string.stringValueLen(outer_value));
+    try std.testing.expectEqual(@as(u16, 'a'), core.string.stringValueCodeUnitAtUnchecked(outer_value, 0));
+    try std.testing.expectEqual(@as(u16, 0x0100), core.string.stringValueCodeUnitAtUnchecked(outer_value, 2));
+    try std.testing.expectEqual(@as(u16, '!'), core.string.stringValueCodeUnitAtUnchecked(outer_value, 4));
+    try std.testing.expect(5 >= core.string.stringValueLen(outer_value));
 
     try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(outer_value, expected.value(), false));
     try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(outer_value, expected.value(), true));
@@ -2389,7 +2395,7 @@ test "strings compare by code unit across storage widths" {
 
     const latin1 = try core.string.String.createUtf8(rt, "é");
     const utf16_same = try core.string.String.createUtf16(rt, &.{0x00e9});
-    try std.testing.expect(latin1.eqlString(utf16_same));
+    try std.testing.expect(latin1.compare(utf16_same) == 0);
 
     const a = try core.string.String.createUtf8(rt, "abc");
     const b = try core.string.String.createUtf8(rt, "abd");
@@ -2411,9 +2417,14 @@ test "atom table retains its cached string until the atom dies" {
     var atom_roots = core.runtime.rootAtoms(.{&atom_id});
     atom_roots.activate(rt);
     defer atom_roots.deactivate(rt);
-    const atom_string = try core.string.String.createAtomBacked(rt, atom_id);
+    const atom_string = if (rt.atoms.cachedString(atom_id)) |cached| cached else blk: {
+        const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
+        const created = try core.string.String.createUtf8(rt, name);
+        rt.atoms.cacheString(rt, atom_id, created);
+        break :blk created;
+    };
     // The table caches the materialized string; repeat conversions reuse it.
-    const again = try core.string.String.createAtomBacked(rt, atom_id);
+    const again = rt.atoms.cachedString(atom_id) orelse return error.TestUnexpectedResult;
     try std.testing.expect(again == atom_string);
     // OP_push_atom_value's QJS-like direct entry path returns the same cached
     // body and performs no allocation after the first materialization.

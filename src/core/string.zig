@@ -137,13 +137,6 @@ pub const StringRope = struct {
         return buf.prefix(self.len);
     }
 
-    /// Can `self` still take an in-place append? Only the single node holding
-    /// the buffer's append right may, and only while the node is the buffer's
-    /// current end (`len` is the used prefix).
-    pub inline fn isExtensibleView(self: *const StringRope) bool {
-        return self.extensible and self.buffer != null;
-    }
-
     /// Materializes this rope into a flat `*String`, caching its owned value in
     /// `left` and releasing the former children and tail. Returns a BORROWED
     /// pointer to the cached flat string (the rope keeps ownership; callers
@@ -486,21 +479,6 @@ pub const String = struct {
         return self.len() == 0 and self.isWide();
     }
 
-    pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
-        // Atom-table cache hit: reuse the traced string already materialized
-        // for this atom, skipping the UTF-8 decode.
-        if (rt.atoms.cachedString(atom_id)) |cached| {
-            return cached;
-        }
-        const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
-        const self = try createUtf8(rt, name);
-        // `cacheString` only binds string-kind atoms: a symbol's
-        // description string must not convert back into the symbol atom
-        // when later used as a property key.
-        rt.atoms.cacheString(rt, atom_id, self);
-        return self;
-    }
-
     /// Interns this string's content as a property-key atom and returns an
     /// owned atom reference (caller releases it via `rt.atoms.free`).
     ///
@@ -831,10 +809,6 @@ pub const String = struct {
         };
     }
 
-    pub fn eqlString(self: *const String, other: *const String) bool {
-        return compare(self, other) == 0;
-    }
-
     pub fn compare(self: *const String, other: *const String) i32 {
         if (self.atom_id != no_atom_id and other.atom_id != no_atom_id) {
             if (self.atom_id == other.atom_id) return 0;
@@ -1099,12 +1073,6 @@ pub const StringValueIterator = struct {
 };
 
 const rope_iterator_stack_capacity: usize = String.rope_max_depth;
-
-/// QJS `string_rope_get`: return one UTF-16 code unit without flattening.
-pub fn stringValueCodeUnitAt(value: JSValue, index: usize) ?u16 {
-    if (!value.isString() or index >= stringValueLen(value)) return null;
-    return stringValueCodeUnitAtUnchecked(value, index);
-}
 
 /// QJS `string_rope_get` precondition: `value` is a string/rope and `index` is
 /// in range. Callers that already checked length avoid repeating optional/tag
