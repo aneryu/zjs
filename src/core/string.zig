@@ -1881,7 +1881,7 @@ inline fn callVisitValue(vis: anytype, slot: *JSValue) !void {
 }
 
 fn inlineAllocationLayout(tag: String.StorageTag, unit_count: usize) ?InlineAllocationLayout {
-    const unit_size = switch (tag) {
+    const unit_size: usize = switch (tag) {
         .latin1 => @sizeOf(u8),
         .utf16 => @sizeOf(u16),
     };
