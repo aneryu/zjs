@@ -368,6 +368,7 @@ test "constructFunctionFromSource roots function and source while compiling sour
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
     const global = try zjs_vm.contextGlobal(ctx);
     const constructor = try global.getProperty(core.atom.ids.Function);
     const body = try core.string.String.createUtf8(rt, "return 1");
