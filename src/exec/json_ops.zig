@@ -623,7 +623,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.skipWhitespace();
             if (self.peek() == @as(T, '}')) {
                 self.index += 1;
-                if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try entries.toOwnedSlice(self.rt.memory.allocator) } };
+                if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try array_list_erased.toOwnedSlice(&entries, self.rt.memory.allocator) } };
                 return object_value;
             }
             while (true) {
@@ -659,7 +659,7 @@ fn JsonUnitParser(comptime T: type) type {
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == '}') {
                     self.index += 1;
-                    if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try entries.toOwnedSlice(self.rt.memory.allocator) } };
+                    if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try array_list_erased.toOwnedSlice(&entries, self.rt.memory.allocator) } };
                     return object_value;
                 }
                 if (next != ',') return error.SyntaxError;
@@ -693,7 +693,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.skipWhitespace();
             if (self.peek() == @as(T, ']')) {
                 self.index += 1;
-                if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try elements.toOwnedSlice(self.rt.memory.allocator) } };
+                if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try array_list_erased.toOwnedSlice(&elements, self.rt.memory.allocator) } };
                 return object_value;
             }
             var index: u32 = 0;
@@ -723,7 +723,7 @@ fn JsonUnitParser(comptime T: type) type {
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == ']') {
                     self.index += 1;
-                    if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try elements.toOwnedSlice(self.rt.memory.allocator) } };
+                    if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try array_list_erased.toOwnedSlice(&elements, self.rt.memory.allocator) } };
                     return object_value;
                 }
                 if (next != ',') return error.SyntaxError;

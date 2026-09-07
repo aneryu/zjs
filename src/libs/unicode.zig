@@ -1,6 +1,7 @@
 //! Unicode classification, conversion, normalization, encoding, and QuickJS-format property-range construction.
 //! Scalar lookups borrow tables; allocating APIs return caller-owned buffers or explicitly deinitialized ranges.
 const std = @import("std");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const data = @import("unicode/data.zig");
 const names = @import("unicode/names.zig");
 const properties = @import("unicode/properties.zig");
@@ -356,7 +357,7 @@ pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: Norm
     sortCanonicalCombiningClass(out.items);
 
     if (out.items.len <= 1 or form == .nfd or form == .nfkd) {
-        return try out.toOwnedSlice(allocator);
+        return try array_list_erased.toOwnedSlice(&out, allocator);
     }
 
     var i: usize = 1;
@@ -389,7 +390,7 @@ pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: Norm
         i += 1;
     }
     out.shrinkRetainingCapacity(out_len);
-    return try out.toOwnedSlice(allocator);
+    return try array_list_erased.toOwnedSlice(&out, allocator);
 }
 
 pub fn propertyRangePoints(

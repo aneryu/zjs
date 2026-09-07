@@ -18679,3 +18679,85 @@ test "array_list_erased append matches MemoryAccount allocator ledger" {
         }
     }
 }
+
+test "array_list_erased toOwnedSlice matches std ArrayList shrink-to-fit" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const types = .{ u32, Sample, []const u8 };
+
+    inline for (types) |T| {
+        var empty: std.ArrayList(T) = .empty;
+        const empty_owned = try array_list_erased.toOwnedSlice(&empty, std.testing.allocator);
+        defer std.testing.allocator.free(empty_owned);
+        try std.testing.expectEqual(@as(usize, 0), empty_owned.len);
+        try std.testing.expectEqual(@as(usize, 0), empty.items.len);
+        try std.testing.expectEqual(@as(usize, 0), empty.capacity);
+
+        var std_list: std.ArrayList(T) = .empty;
+        defer std_list.deinit(std.testing.allocator);
+        var erased: std.ArrayList(T) = .empty;
+        defer erased.deinit(std.testing.allocator);
+
+        var i: u32 = 0;
+        while (i < 64) : (i += 1) {
+            const item: T = switch (T) {
+                u32 => i,
+                Sample => .{ .a = i, .b = i + 1, .c = i },
+                []const u8 => "item",
+                else => unreachable,
+            };
+            try std_list.append(std.testing.allocator, item);
+            try array_list_erased.append(&erased, std.testing.allocator, item);
+        }
+
+        const std_owned = try std_list.toOwnedSlice(std.testing.allocator);
+        defer std.testing.allocator.free(std_owned);
+        const erased_owned = try array_list_erased.toOwnedSlice(&erased, std.testing.allocator);
+        defer std.testing.allocator.free(erased_owned);
+        try std.testing.expectEqual(std_owned.len, erased_owned.len);
+        try std.testing.expectEqualSlices(T, std_owned, erased_owned);
+        try std.testing.expectEqual(@as(usize, 0), std_list.items.len);
+        try std.testing.expectEqual(@as(usize, 0), erased.items.len);
+        try std.testing.expectEqual(@as(usize, 0), std_list.capacity);
+        try std.testing.expectEqual(@as(usize, 0), erased.capacity);
+    }
+}
+
+test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const account_mod = @import("../core/memory.zig");
+
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var typed = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer typed.small_slab.deinit(std.testing.allocator);
+        typed.small_slab_enabled = slab_enabled;
+        var erased_account = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer erased_account.small_slab.deinit(std.testing.allocator);
+        erased_account.small_slab_enabled = slab_enabled;
+
+        const typed_gpa = typed.accountedAllocator();
+        const erased_gpa = erased_account.accountedAllocator();
+        var std_list: std.ArrayList(Sample) = .empty;
+        defer std_list.deinit(typed_gpa);
+        var erased: std.ArrayList(Sample) = .empty;
+        defer erased.deinit(erased_gpa);
+
+        var i: u32 = 0;
+        while (i < 32) : (i += 1) {
+            const item = Sample{ .a = i, .b = i + 1, .c = i };
+            try std_list.append(typed_gpa, item);
+            try array_list_erased.append(&erased, erased_gpa, item);
+        }
+
+        const std_owned = try std_list.toOwnedSlice(typed_gpa);
+        defer typed_gpa.free(std_owned);
+        const erased_owned = try array_list_erased.toOwnedSlice(&erased, erased_gpa);
+        defer erased_gpa.free(erased_owned);
+        try std.testing.expectEqual(typed.allocated_bytes, erased_account.allocated_bytes);
+        try std.testing.expectEqual(std_owned.len, erased_owned.len);
+        try std.testing.expectEqualSlices(Sample, std_owned, erased_owned);
+        try std.testing.expectEqual(@as(usize, 0), std_list.capacity);
+        try std.testing.expectEqual(@as(usize, 0), erased.capacity);
+    }
+}
