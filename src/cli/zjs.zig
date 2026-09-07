@@ -551,7 +551,7 @@ fn runIncludeFiles(runtime: *Runtime, options: RuntimeOptions, output: *std.Io.W
 
 fn parseLimitKBytes(text: []const u8) !usize {
     if (text.len == 0) return error.InvalidCharacter;
-    const kbytes = try std.fmt.parseInt(usize, text, 10);
+    const kbytes = try engine.core.value_format.parseAsciiInt(usize, text, 10);
     return std.math.mul(usize, kbytes, 1024) catch error.Overflow;
 }
 

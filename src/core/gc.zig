@@ -20,6 +20,7 @@ const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const shape = @import("shape.zig");
 const JSValue = @import("value.zig").JSValue;
+const value_format = @import("value_format.zig");
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -186,14 +187,14 @@ fn readStressFromEnv() void {
     }
     if (comptime builtin.is_test) {
         if (std.c.getenv("ZJS_GC_M_CUT_INJECT")) |raw| {
-            m_cut_inject = std.fmt.parseInt(u8, std.mem.span(raw), 10) catch 0;
+            m_cut_inject = value_format.parseAsciiInt(u8, std.mem.span(raw), 10) catch 0;
         }
     }
     const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
     const text = std.mem.span(raw);
     if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
     stress_collect = true;
-    const parsed = std.fmt.parseInt(i32, text, 10) catch return;
+    const parsed = value_format.parseAsciiInt(i32, text, 10) catch return;
     if (parsed > 1) stress_cadence = parsed;
 }
 

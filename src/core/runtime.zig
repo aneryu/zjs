@@ -32,6 +32,7 @@ const profile = @import("profile.zig");
 const property = @import("property.zig");
 const context_mod = @import("context.zig");
 const errors = @import("errors.zig");
+const value_format = @import("value_format.zig");
 
 extern "c" fn pclose(stream: *std.c.FILE) c_int;
 
@@ -3885,7 +3886,7 @@ pub const JSRuntime = struct {
 
     fn parseUnsignedToken(token: []const u8) ?usize {
         if (token.len == 0 or std.mem.eql(u8, token, "max")) return null;
-        return std.fmt.parseInt(usize, token, 10) catch null;
+        return value_format.parseAsciiInt(usize, token, 10) catch null;
     }
 
     inline fn prospectiveAllocationTotal(self: *const JSRuntime, size: usize) usize {

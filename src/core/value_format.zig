@@ -58,6 +58,19 @@ pub fn parseJsNumber(bytes: []const u8) f64 {
     return parseJsNumberTrimmed(trimJsWhitespace(bytes));
 }
 
+/// One `std.fmt.parseInt` body for every host integer width. Callers that
+/// used to instantiate `parseInt(T)` for `u8`/`i32`/`i64`/`usize` share
+/// this outlined `i128` walk and then range-check.
+pub fn parseAsciiInt(comptime T: type, buf: []const u8, base: u8) std.fmt.ParseIntError!T {
+    const wide = try parseAsciiIntI128(buf, base);
+    if (wide < @as(i128, std.math.minInt(T)) or wide > @as(i128, std.math.maxInt(T))) return error.Overflow;
+    return @intCast(wide);
+}
+
+noinline fn parseAsciiIntI128(buf: []const u8, base: u8) std.fmt.ParseIntError!i128 {
+    return std.fmt.parseInt(i128, buf, base);
+}
+
 /// ToNumber of a latin1-backed JS string. Each byte is one code point
 /// (0x00-0xFF); do not feed the raw sequence to a UTF-8 whitespace decoder.
 /// qjs classifies whitespace by CODE POINT after JS_ToCString (skip_spaces
@@ -267,6 +280,19 @@ fn hasSignedRadixPrefix(bytes: []const u8) bool {
 fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
     const index: usize = if (bytes.len > 0 and (bytes[0] == '+' or bytes[0] == '-')) 1 else 0;
     return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
+}
+
+test "parseAsciiInt shares one walk across host integer widths" {
+    try std.testing.expectEqual(@as(usize, 7), try parseAsciiInt(usize, "7", 10));
+    try std.testing.expectEqual(@as(i32, -3), try parseAsciiInt(i32, "-3", 10));
+    try std.testing.expectEqual(@as(i64, 255), try parseAsciiInt(i64, "0xFF", 0));
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), try parseAsciiInt(usize, "18446744073709551615", 10));
+    try std.testing.expectError(error.Overflow, parseAsciiInt(i32, "2147483648", 10));
+    try std.testing.expectError(error.Overflow, parseAsciiInt(usize, "18446744073709551616", 10));
+    try std.testing.expectError(error.Overflow, parseAsciiInt(usize, "-1", 10));
+    try std.testing.expectError(error.Overflow, parseAsciiInt(u8, "256", 10));
+    try std.testing.expectError(error.InvalidCharacter, parseAsciiInt(usize, "", 10));
+    try std.testing.expectError(error.InvalidCharacter, parseAsciiInt(i32, "1x", 10));
 }
 
 test "parseJsNumber keeps 0x 0o 0b prefixes exact and rejects bad digits" {

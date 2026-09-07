@@ -835,7 +835,7 @@ fn JsonUnitParser(comptime T: type) type {
             for (self.units[start..self.index]) |unit| ascii.appendAssumeCapacity(@intCast(unit));
             const text = ascii.items;
             if (!had_fraction) {
-                if (std.fmt.parseInt(i64, text, 10)) |int_value| {
+                if (core.value_format.parseAsciiInt(i64, text, 10)) |int_value| {
                     if (int_value >= std.math.minInt(i32) and int_value <= std.math.maxInt(i32)) {
                         if (!(int_value == 0 and text[0] == '-')) return core.JSValue.int32(@intCast(int_value));
                     }
@@ -940,7 +940,7 @@ pub fn isRawJSON(value: core.JSValue) bool {
 }
 
 pub fn parseInt(bytes: []const u8) !i32 {
-    return std.fmt.parseInt(i32, bytes, 10);
+    return core.value_format.parseAsciiInt(i32, bytes, 10);
 }
 
 fn createSimpleJsonAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
@@ -1221,7 +1221,7 @@ const SimpleJsonParser = struct {
             if (byte == '.' or byte == 'e' or byte == 'E') return error.UnsupportedSimpleJson;
         }
         if (std.mem.eql(u8, self.bytes[start..self.index], "-0")) return core.JSValue.float64(-0.0);
-        const parsed = std.fmt.parseInt(i32, self.bytes[start..self.index], 10) catch return error.UnsupportedSimpleJson;
+        const parsed = core.value_format.parseAsciiInt(i32, self.bytes[start..self.index], 10) catch return error.UnsupportedSimpleJson;
         return core.JSValue.int32(parsed);
     }
 

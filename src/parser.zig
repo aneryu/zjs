@@ -7338,7 +7338,7 @@ pub const parser_core = struct {
     }
 
     fn parseBigIntI32(text: []const u8, negate: bool) ?i32 {
-        const magnitude = std.fmt.parseInt(i64, text, 0) catch return null;
+        const magnitude = core.value_format.parseAsciiInt(i64, text, 0) catch return null;
         const signed = if (negate) -magnitude else magnitude;
         if (signed < std.math.minInt(i32) or signed > std.math.maxInt(i32)) return null;
         return @intCast(signed);
