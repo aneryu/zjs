@@ -26,10 +26,10 @@ comptime {
         if (bytecode.opcode.decode.sizeOfForm(f) != 1)
             @compileError("sequence matcher step is no longer one byte: " ++ @tagName(f));
     }
-    // get_field / get_field2 / put_field stay 5-byte atom-sized.
+    // get_field / get_field2 / put_field stay atom_cache_u8 (6 bytes).
     for ([_]Form{ .get_field, .get_field2, .put_field }) |f| {
-        if (bytecode.opcode.decode.sizeOfForm(f) != 5)
-            @compileError("get_field family is no longer atom-sized: " ++ @tagName(f));
+        if (bytecode.opcode.decode.sizeOfForm(f) != 6)
+            @compileError("get_field family is no longer atom_cache_u8-sized: " ++ @tagName(f));
     }
 }
 const core = @import("../core/root.zig");
