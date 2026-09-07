@@ -33,33 +33,8 @@ pub const default_layout: LayoutMode = std.meta.stringToEnum(
     @import("build_options").zjs_compiler_layout,
 ) orelse @compileError("invalid zjs_compiler_layout build option value");
 
-/// Kept private and duplicated from resolve_variables.zig deliberately: both
-/// compiler-v2 passes own independent growable outputs and neither frozen
-/// predecessor API should grow a shared allocation abstraction for Stage 4.
-fn reserve(
-    comptime T: type,
-    memory: *core.memory.MemoryAccount,
-    slice: *[]T,
-    capacity: *usize,
-    used: u32,
-    need: usize,
-    comptime min_capacity: usize,
-) Error!void {
-    const required = std.math.add(usize, @as(usize, used), need) catch
-        return error.OutOfMemory;
-    if (required <= capacity.*) return;
-
-    const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
-    const new_capacity = @max(@max(required, doubled), min_capacity);
-    const new_backing = memory.alloc(T, new_capacity) catch return error.OutOfMemory;
-    @memcpy(new_backing[0..used], slice.*[0..used]);
-
-    const old_backing = slice.*;
-    const old_capacity = capacity.*;
-    slice.* = new_backing;
-    capacity.* = new_capacity;
-    if (old_capacity != 0) memory.free(T, old_backing);
-}
+/// Stage 3/4 still own independent growable outputs. The geometric grow
+/// walk is the already-linked `builder.reserve` / `reserveSlowBytes` body.
 
 const FinalReloc = struct {
     next: u32,
@@ -630,7 +605,7 @@ const Resolver = struct {
             try self.functionPrologueSize(layout),
         ) catch return error.BytecodeOverflow;
         if (initial_output_capacity != 0) {
-            try reserve(
+            try builder.reserve(
                 u8,
                 self.memory,
                 &self.output,
@@ -649,7 +624,7 @@ const Resolver = struct {
         // Keep ensureOutputSources' cold growth path as a defensive contract
         // for future rewrites that may legitimately synthesize an event.
         if (self.input_sources.len != 0) {
-            try reserve(
+            try builder.reserve(
                 SourceLocSlot,
                 self.memory,
                 &self.output_sources,
@@ -665,7 +640,7 @@ const Resolver = struct {
         // bound once, then publish borrowed ids in the hot walk without a
         // retain and without geometric ledger growth.
         if (self.input_atoms.len != 0) {
-            try reserve(
+            try builder.reserve(
                 core.atom.Atom,
                 self.memory,
                 &self.output_atoms,
@@ -681,7 +656,7 @@ const Resolver = struct {
         if (need > std.math.maxInt(u32)) return error.BytecodeOverflow;
         _ = std.math.add(u32, self.output_len, @as(u32, @intCast(need))) catch
             return error.BytecodeOverflow;
-        try reserve(
+        try builder.reserve(
             u8,
             self.memory,
             &self.output,
@@ -703,7 +678,7 @@ const Resolver = struct {
         if (need > std.math.maxInt(u32)) return error.BytecodeOverflow;
         _ = std.math.add(u32, self.output_source_len, @as(u32, @intCast(need))) catch
             return error.BytecodeOverflow;
-        try reserve(
+        try builder.reserve(
             SourceLocSlot,
             self.memory,
             &self.output_sources,
@@ -1293,7 +1268,7 @@ const Resolver = struct {
     fn addReloc(self: *Resolver, label_index: u32, addr_value: u32, size: u8) Error!void {
         if (label_index >= self.product.label_len) return error.InvalidBytecode;
         if (self.reloc_len == labels.no_reloc) return error.BytecodeOverflow;
-        try reserve(
+        try builder.reserve(
             FinalReloc,
             self.memory,
             &self.relocs,

@@ -107,30 +107,8 @@ pub const ResolvedProduct = struct {
     }
 };
 
-fn reserve(
-    comptime T: type,
-    memory: *core.memory.MemoryAccount,
-    slice: *[]T,
-    capacity: *usize,
-    used: u32,
-    need: usize,
-    comptime min_capacity: usize,
-) Error!void {
-    const required = std.math.add(usize, @as(usize, used), need) catch
-        return error.OutOfMemory;
-    if (required <= capacity.*) return;
-
-    const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
-    const new_capacity = @max(@max(required, doubled), min_capacity);
-    const new_backing = memory.alloc(T, new_capacity) catch return error.OutOfMemory;
-    @memcpy(new_backing[0..used], slice.*[0..used]);
-
-    const old_backing = slice.*;
-    const old_capacity = capacity.*;
-    slice.* = new_backing;
-    capacity.* = new_capacity;
-    if (old_capacity != 0) memory.free(T, old_backing);
-}
+/// Geometric grow walk is the already-linked `builder.reserve` /
+/// `reserveSlowBytes` body. This pass still owns its output slices.
 
 const TempInstruction = cfg.TempInstruction;
 // Sequential walks have the exact atom-ledger cursor for their current pc and
@@ -276,7 +254,7 @@ const Resolver = struct {
         if (comptime !audit_oracles) return;
         if (self.opt_boundary_len == std.math.maxInt(u32))
             return error.BytecodeOverflow;
-        try reserve(
+        try builder.reserve(
             cfg.OptimizationBoundary,
             self.product.memory,
             &self.opt_boundaries,
@@ -344,7 +322,7 @@ const Resolver = struct {
             return error.BytecodeOverflow;
 
         if (code_need != 0) {
-            try reserve(
+            try builder.reserve(
                 u8,
                 self.product.memory,
                 &self.product.code,
@@ -355,7 +333,7 @@ const Resolver = struct {
             );
         }
         if (atom_need != 0) {
-            try reserve(
+            try builder.reserve(
                 core.atom.Atom,
                 self.product.memory,
                 &self.product.atom_operands,
@@ -366,7 +344,7 @@ const Resolver = struct {
             );
         }
         if (source_need != 0) {
-            try reserve(
+            try builder.reserve(
                 builder.SourceSlot,
                 self.product.memory,
                 &self.product.source_slots,
@@ -436,7 +414,7 @@ const Resolver = struct {
     fn newProductLabel(self: *Resolver) Error!u32 {
         if (self.product.label_len == std.math.maxInt(u32))
             return error.BytecodeOverflow;
-        try reserve(
+        try builder.reserve(
             labels.LabelSlot,
             self.product.memory,
             &self.product.label_slots,
@@ -950,7 +928,7 @@ const Resolver = struct {
         }
         if (self.pending_tail_len == std.math.maxInt(u32))
             return error.BytecodeOverflow;
-        try reserve(
+        try builder.reserve(
             PendingTailRewrite,
             self.product.memory,
             &self.pending_tail_rewrites,
@@ -2315,7 +2293,7 @@ fn validateInput(input: *const builder.Builder) Error!void {
 
 fn initializeLabels(product: *ResolvedProduct, input: *const builder.Builder) Error!void {
     if (input.label_len == 0) return;
-    try reserve(
+    try builder.reserve(
         labels.LabelSlot,
         product.memory,
         &product.label_slots,
@@ -2347,7 +2325,7 @@ fn preallocateProductStreams(
     input: *const builder.Builder,
 ) Error!void {
     if (input.code_len != 0) {
-        try reserve(
+        try builder.reserve(
             u8,
             product.memory,
             &product.code,
@@ -2358,7 +2336,7 @@ fn preallocateProductStreams(
         );
     }
     if (input.atom_len != 0) {
-        try reserve(
+        try builder.reserve(
             core.atom.Atom,
             product.memory,
             &product.atom_operands,
@@ -2369,7 +2347,7 @@ fn preallocateProductStreams(
         );
     }
     if (input.source_len != 0) {
-        try reserve(
+        try builder.reserve(
             builder.SourceSlot,
             product.memory,
             &product.source_slots,

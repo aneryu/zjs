@@ -87,7 +87,7 @@ pub const Error = error{
 /// Grow a backing without changing its initialized-prefix length. The visible
 /// slice always spans the full allocation; `used` alone identifies readable
 /// entries.
-inline fn reserve(
+pub inline fn reserve(
     comptime T: type,
     mem: *core.memory.MemoryAccount,
     slice: *[]T,
