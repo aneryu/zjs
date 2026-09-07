@@ -18915,6 +18915,77 @@ test "gc_audit_print leftover formats match debug.print digits" {
             .{ .text = "\n" },
         },
     );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MAJOR condemned-but-reachable source={s} kind={s}\n",
+        .{ "precise", "object" },
+        &.{
+            .{ .text = "VERIFY-MAJOR condemned-but-reachable source=" },
+            .{ .text = "precise" },
+            .{ .text = " kind=" },
+            .{ .text = "object" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MAJOR {d} precise, {d} conservative-only condemned-but-reachable\n",
+        .{ @as(usize, 2), @as(usize, 5) },
+        &.{
+            .{ .text = "VERIFY-MAJOR " },
+            .{ .dec = 2 },
+            .{ .text = " precise, " },
+            .{ .dec = 5 },
+            .{ .text = " conservative-only condemned-but-reachable\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MINOR setup failed: {s}\n",
+        .{"OutOfMemory"},
+        &.{
+            .{ .text = "VERIFY-MINOR setup failed: " },
+            .{ .text = "OutOfMemory" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n",
+        .{ "precise", @as(u16, 12), "array" },
+        &.{
+            .{ .text = "VERIFY-MINOR condemned-but-reachable source=" },
+            .{ .text = "precise" },
+            .{ .text = " kind=object class=" },
+            .{ .dec = 12 },
+            .{ .text = " payload=" },
+            .{ .text = "array" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n",
+        .{ @as(usize, 4), @as(usize, 9), @as(usize, 1), @as(usize, 3) },
+        &.{
+            .{ .text = "VERIFY-MINOR " },
+            .{ .dec = 4 },
+            .{ .text = " of " },
+            .{ .dec = 9 },
+            .{ .text = " condemned objects are reachable by a full trace (" },
+            .{ .dec = 1 },
+            .{ .text = " precise, " },
+            .{ .dec = 3 },
+            .{ .text = " conservative-only)\n" },
+        },
+    );
+    const Kind = enum { shape, object };
+    try expectAuditPrintMatchesFmt(
+        "gc: ARENA AUDIT live object at 0x{x} (kind {any}) does not resolve\n",
+        .{ @as(usize, 0xabc), Kind.shape },
+        &.{
+            .{ .text = "gc: ARENA AUDIT live object at 0x" },
+            .{ .hex = 0xabc },
+            .{ .text = " (kind ." },
+            .{ .text = @tagName(Kind.shape) },
+            .{ .text = ") does not resolve\n" },
+        },
+    );
     _ = gc_audit_print;
 }
 

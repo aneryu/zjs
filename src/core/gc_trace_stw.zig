@@ -548,16 +548,22 @@ fn verifyFullCondemnation(rt: *JSRuntime, reachable: *const FullReachable) Colle
         }
         if (reported < 8) {
             reported += 1;
-            std.debug.print("VERIFY-MAJOR condemned-but-reachable source={s} kind={s}\n", .{
-                @tagName(source),
-                @tagName(header.metaConst().flags.kind),
+            gc_audit_print.print(&.{
+                .{ .text = "VERIFY-MAJOR condemned-but-reachable source=" },
+                .{ .text = @tagName(source) },
+                .{ .text = " kind=" },
+                .{ .text = @tagName(header.metaConst().flags.kind) },
+                .{ .text = "\n" },
             });
         }
     }
     if (precise_violations + conservative_violations == 0) return;
-    std.debug.print("VERIFY-MAJOR {d} precise, {d} conservative-only condemned-but-reachable\n", .{
-        precise_violations,
-        conservative_violations,
+    gc_audit_print.print(&.{
+        .{ .text = "VERIFY-MAJOR " },
+        .{ .dec = precise_violations },
+        .{ .text = " precise, " },
+        .{ .dec = conservative_violations },
+        .{ .text = " conservative-only condemned-but-reachable\n" },
     });
     if (precise_violations == 0) return;
     return error.PayloadMarkFailed;
@@ -829,7 +835,11 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     defer if (full_reachable) |*reachable| reachable.deinit();
     if (gc.verify_minor) {
         full_reachable = computeFullReachable(rt, scan) catch |err| blk: {
-            std.debug.print("VERIFY-MINOR setup failed: {s}\n", .{@errorName(err)});
+            gc_audit_print.print(&.{
+                .{ .text = "VERIFY-MINOR setup failed: " },
+                .{ .text = @errorName(err) },
+                .{ .text = "\n" },
+            });
             break :blk null;
         };
     }
@@ -1826,10 +1836,13 @@ fn auditLiveObjectsResolve(rt: *JSRuntime) usize {
         missing += 1;
         if (reported < 8) {
             reported += 1;
-            std.debug.print(
-                "gc: ARENA AUDIT live object at 0x{x} (kind {any}) does not resolve\n",
-                .{ @intFromPtr(header), header.metaConst().flags.kind },
-            );
+            gc_audit_print.print(&.{
+                .{ .text = "gc: ARENA AUDIT live object at 0x" },
+                .{ .hex = @intFromPtr(header) },
+                .{ .text = " (kind ." },
+                .{ .text = @tagName(header.metaConst().flags.kind) },
+                .{ .text = ") does not resolve\n" },
+            });
         }
     }
     return missing;
@@ -2583,20 +2596,39 @@ const Collector = struct {
                 const kind = header.metaConst().flags.kind;
                 if (kind == .object) {
                     const o = Object.fromHeader(header);
-                    std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n", .{ @tagName(reachability), o.class_id, @tagName(o.flags.class_payload_kind) });
+                    gc_audit_print.print(&.{
+                        .{ .text = "VERIFY-MINOR condemned-but-reachable source=" },
+                        .{ .text = @tagName(reachability) },
+                        .{ .text = " kind=object class=" },
+                        .{ .dec = o.class_id },
+                        .{ .text = " payload=" },
+                        .{ .text = @tagName(o.flags.class_payload_kind) },
+                        .{ .text = "\n" },
+                    });
                 } else {
-                    std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind={s}\n", .{ @tagName(reachability), @tagName(kind) });
+                    gc_audit_print.print(&.{
+                        .{ .text = "VERIFY-MINOR condemned-but-reachable source=" },
+                        .{ .text = @tagName(reachability) },
+                        .{ .text = " kind=" },
+                        .{ .text = @tagName(kind) },
+                        .{ .text = "\n" },
+                    });
                 }
             }
             if (violations != 0) {
                 defer if (gc.verify_minor_fatal and precise_violations != 0)
                     @panic("VERIFY-MINOR: precisely reachable object condemned by a minor");
                 if (precise_violations != 0 or gc.verify_minor_verbose) {
-                    std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n", .{
-                        violations,
-                        doomed.items.len,
-                        precise_violations,
-                        violations - precise_violations,
+                    gc_audit_print.print(&.{
+                        .{ .text = "VERIFY-MINOR " },
+                        .{ .dec = violations },
+                        .{ .text = " of " },
+                        .{ .dec = doomed.items.len },
+                        .{ .text = " condemned objects are reachable by a full trace (" },
+                        .{ .dec = precise_violations },
+                        .{ .text = " precise, " },
+                        .{ .dec = violations - precise_violations },
+                        .{ .text = " conservative-only)\n" },
                     });
                 }
             }
