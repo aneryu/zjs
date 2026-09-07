@@ -2609,7 +2609,7 @@ fn iteratorZipCompleteAbrupt(
     iters: *core.Object,
     count: usize,
     current_index: ?usize,
-    err: anytype,
+    err: IteratorZipError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
