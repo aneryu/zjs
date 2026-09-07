@@ -991,11 +991,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         .{ .o = op.get_var_ref3, .h = dispatch.opGetVarRef(.c3) },
         .{ .o = op.get_var_ref, .h = dispatch.opGetVarRef(.half) },
         .{ .o = op.get_var_ref_check, .h = dispatch.opGetVarRef(.half) },
-        .{ .o = op.put_var_ref0, .h = dispatch.opPutVarRef(.c0) },
-        .{ .o = op.put_var_ref1, .h = dispatch.opPutVarRef(.c1) },
-        .{ .o = op.put_var_ref2, .h = dispatch.opPutVarRef(.c2) },
-        .{ .o = op.put_var_ref3, .h = dispatch.opPutVarRef(.c3) },
-        .{ .o = op.put_var_ref, .h = dispatch.opPutVarRef(.half) },
+        .{ .o = op.put_var_ref0, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref1, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref2, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref3, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref, .h = dispatch.opPutVarRef },
         // qjs OP_put_var_ref_check (quickjs.c:18670-18682): TDZ probe + set_value.
         // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
         // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
