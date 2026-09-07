@@ -4340,8 +4340,11 @@ pub const Machine = struct {
         return entry;
     }
 
+    /// One leftover walk for copied vs moved args. `move_args` is runtime so
+    /// the two specialized copies share this `noinline` body. Do not fold
+    /// `setupSimpleInlineEntry` (its `noinline` is load-bearing for fib).
     noinline fn setupNativeBoundarySimpleEntry(
-        comptime move_args: bool,
+        move_args: bool,
         ctx: *core.JSContext,
         entry: *Entry,
         target: *const InlineTarget,
