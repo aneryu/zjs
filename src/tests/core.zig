@@ -19212,6 +19212,18 @@ test "gc_audit_print hexPad matches zero-padded hex widths" {
     }
 }
 
+test "leftover integer {d} matches formatInt32" {
+    const number_format = @import("../libs/number_format.zig");
+    const cases = [_]i32{ 0, 1, 9, 10, -1, -10, 42, std.math.maxInt(i32), std.math.minInt(i32) };
+    for (cases) |value| {
+        var expected_buf: [32]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buf, "{d}", .{value});
+        var actual_buf: [32]u8 = undefined;
+        const actual = number_format.formatInt32(&actual_buf, value);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
 test "json leftover unicode escapes match hexPad min-width" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

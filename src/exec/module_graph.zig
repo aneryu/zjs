@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const atomics_ops = @import("atomics_ops.zig");
+const number_format = @import("../libs/number_format.zig");
 const core = @import("../core/root.zig");
 const array_list_erased = @import("../core/array_list_erased.zig");
 const jobs_mod = core.jobs;
@@ -2371,7 +2372,7 @@ fn wrapSourceByKind(
             for (source, 0..) |b, i| {
                 if (i > 0) try bytes_list.appendSlice(allocator, ",");
                 var buf: [16]u8 = undefined;
-                const slice = std.fmt.bufPrint(&buf, "{d}", .{b}) catch unreachable;
+                const slice = number_format.formatInt32(&buf, b);
                 try bytes_list.appendSlice(allocator, slice);
             }
             try bytes_list.appendSlice(allocator, "]);\nconst module = new WebAssembly.Module(bytes);\nconst instance = new WebAssembly.Instance(module);\nexport default instance.exports;\n");

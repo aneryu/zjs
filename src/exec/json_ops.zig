@@ -16,6 +16,7 @@ const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 const value_ops = @import("value_ops.zig");
+const number_format = @import("../libs/number_format.zig");
 
 const Bytecode = builtin_dispatch.Bytecode;
 const Frame = builtin_dispatch.Frame;
@@ -964,8 +965,8 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     } else if (rooted_value.isSymbol()) {
         try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
     } else if (rooted_value.asInt32()) |int_value| {
-        var int_buf: [64]u8 = undefined;
-        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{int_value}) catch unreachable;
+        var int_buf: [32]u8 = undefined;
+        const printed = number_format.formatInt32(&int_buf, int_value);
         try buffer.appendSlice(rt.memory.allocator, printed);
     } else if (rooted_value.asFloat64()) |float_value| {
         if (!std.math.isFinite(float_value)) {
@@ -1405,8 +1406,8 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
         return try string_object.internAtom(rt);
     }
     if (rooted_value.asInt32()) |int_value| {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "{d}", .{int_value}) catch unreachable;
+        var buf: [32]u8 = undefined;
+        const text = number_format.formatInt32(&buf, int_value);
         return try rt.internAtom(text);
     }
     if (rooted_value.asFloat64()) |float_value| {
@@ -1527,8 +1528,8 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     if (rooted_value.isUndefined()) return buffer.appendSlice(rt.memory.allocator, "undefined");
     if (rooted_value.asBool()) |bool_value| return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
     if (rooted_value.asInt32()) |int_value| {
-        var int_buf: [64]u8 = undefined;
-        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{int_value}) catch unreachable;
+        var int_buf: [32]u8 = undefined;
+        const printed = number_format.formatInt32(&int_buf, int_value);
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
     if (rooted_value.asFloat64()) |float_value| {
@@ -2009,8 +2010,8 @@ fn jsonAppendSimpleValue(
         return .appended;
     }
     if (value.asInt32()) |int_value| {
-        var int_buf: [64]u8 = undefined;
-        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{int_value}) catch unreachable;
+        var int_buf: [32]u8 = undefined;
+        const printed = number_format.formatInt32(&int_buf, int_value);
         try buffer.appendSlice(rt.memory.allocator, printed);
         return .appended;
     }

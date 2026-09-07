@@ -12,6 +12,7 @@ const std = @import("std");
 
 const core = @import("root.zig");
 const gc_audit_print = @import("gc_audit_print.zig");
+const number_format = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
 
 /// Wrap finished serializer bytes in a JSValue string, choosing the ASCII
@@ -53,8 +54,8 @@ pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), va
 /// rendering tagged-int atoms as their decimal index.
 pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void {
     if (core.atom.isTaggedInt(atom_id)) {
-        var int_buf: [10]u8 = undefined;
-        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
+        var int_buf: [16]u8 = undefined;
+        const printed = number_format.formatInt32(&int_buf, @intCast(core.atom.atomToUInt32(atom_id)));
         return appendEscapedJsonString(rt, buffer, printed);
     }
     const name = rt.atoms.name(atom_id) orelse "";
