@@ -8878,12 +8878,12 @@ pub const binding_rules = struct {
     /// local/argument path: those operations need fallible calls and a large
     /// spill frame, while QuickJS reaches them only after the same local miss.
     noinline fn resolveBindingTopologyAfterCurrentMiss(
-        comptime trust_final_scope_links: bool,
+        trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
     ) Error!ScopeVarBinding {
         const fd = ctx.function_def orelse return error.NoFunctionDef;
-        if (comptime trust_final_scope_links) {
+        if (trust_final_scope_links) {
             std.debug.assert(ctx.scope_link_proof != .none);
         }
         // Current-function fallbacks mirror resolve_scope_var exactly: normal
@@ -8909,7 +8909,7 @@ pub const binding_rules = struct {
         if (findResolvedClosureBinding(fd, atom_id)) |binding| return binding;
 
         if (fd.parent != null) {
-            if (comptime trust_final_scope_links) {
+            if (trust_final_scope_links) {
                 try ctx.proveParentScopeLinksForResolution();
             } else {
                 try validateFunctionDefParentChain(fd);
@@ -8919,13 +8919,12 @@ pub const binding_rules = struct {
         var maybe_parent = fd.parent;
         var visible_scope_level = fd.parent_scope_level;
         while (maybe_parent) |parent| {
-            const scoped_source = try discoverParentScopedSource(
-                trust_final_scope_links,
-                fd,
-                parent,
-                atom_id,
-                visible_scope_level,
-            );
+            // Keep `discoverParentScopedSource` specialized; this outlined
+            // miss walk is shared for both proof modes.
+            const scoped_source = if (trust_final_scope_links)
+                try discoverParentScopedSource(true, fd, parent, atom_id, visible_scope_level)
+            else
+                try discoverParentScopedSource(false, fd, parent, atom_id, visible_scope_level);
             const argument_environment_only = scoped_source.argument_environment_only;
             if (scoped_source.local) |local_idx| {
                 return .{ .closure = try threadParentLocalSource(fd, parent, local_idx) };
