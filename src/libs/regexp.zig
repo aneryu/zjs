@@ -471,30 +471,9 @@ pub fn execIntoMatchWithOptions(
     return .match;
 }
 
-/// Execution for bytecode produced by this compiler or by an equivalent
-/// validator. Like QuickJS's `lre_exec`, the release build trusts the compiled
-/// header and opcode operands; Debug assertions retain the internal contract.
-pub fn execIntoMatchTrustedWithOptions(
-    allocator: std.mem.Allocator,
-    bytecode: []const u8,
-    input: Input,
-    start_index: usize,
-    options: ExecOptions,
-    out_match: *Match,
-) !ExecResult {
-    const header = parseHeaderTrusted(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
-    try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
-    defer capture_buf.deinit(allocator);
-
-    const result = try execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture_buf.slots);
-    if (result != .match) return result;
-    writeMatch(bytecode, header.capture_count, capture_buf.slots.ptr, out_match);
-    return .match;
-}
-
 /// Trusted capture-slot execution for compiler-produced bytecode.
-/// See `execIntoMatchTrustedWithOptions` for the safety contract.
+/// Like QuickJS's `lre_exec`, the release build trusts the compiled header
+/// and opcode operands; Debug assertions retain the internal contract.
 pub fn execCaptureSlotsSliceTrustedWithOptions(
     allocator: std.mem.Allocator,
     bytecode: []const u8,
@@ -575,7 +554,7 @@ fn execCaptureSlotsParsed(
 }
 
 /// Trusted test-only execution for compiler-produced bytecode.
-/// See `execIntoMatchTrustedWithOptions` for the safety contract.
+/// See `execCaptureSlotsSliceTrustedWithOptions` for the safety contract.
 pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
     const header = parseHeaderTrusted(bytecode);
     var capture_buf = CaptureSlotBuffer{};
