@@ -592,7 +592,7 @@ inline fn callInternalRecordDirectWithEnvironment(
     view.ctx.runtime.active_native_call = &native_env;
     defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(view.ctx, this_value, record, args, func_obj) catch |err| {
+    return callTypedInternalRecordDirect(view.ctx, this_value, record, args, func_obj) catch |err| {
         try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };
@@ -758,16 +758,6 @@ noinline fn callRecordWithEnvironment(
         return nativeFromHostError(realm, realm_global, err);
     };
     return nativeToBits(result);
-}
-
-inline fn invokeResolvedInternalRecord(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    record: *const core.NativeEntry,
-    args: []const core.JSValue,
-    func_obj: ?*core.Object,
-) HostError!core.JSValue {
-    return callTypedInternalRecordDirect(ctx, this_value, record, args, func_obj);
 }
 
 /// Outlined so the kind switch does not inflate hot call sites.
@@ -1349,7 +1339,7 @@ fn callConstructRecordImpl(
     view.ctx.runtime.active_native_call = &native_env;
     defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(view.ctx, core.JSValue.undefinedValue(), record, args, func_obj) catch |err| {
+    return callTypedInternalRecordDirect(view.ctx, core.JSValue.undefinedValue(), record, args, func_obj) catch |err| {
         try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };
