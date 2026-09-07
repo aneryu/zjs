@@ -57,12 +57,6 @@ pub const arrayBufferAccessorMethodId = buffer_id_lookup.arrayBufferAccessorMeth
 pub const sharedArrayBufferAccessorMethodId = buffer_id_lookup.sharedArrayBufferAccessorMethodId;
 pub const dataViewAccessorMethodId = buffer_id_lookup.dataViewAccessorMethodId;
 pub const typedArrayAccessorMethodId = buffer_id_lookup.typedArrayAccessorMethodId;
-pub const dataViewGetKindFromRecordId = buffer_id_lookup.dataViewGetKindFromRecordId;
-pub const dataViewSetKindFromRecordId = buffer_id_lookup.dataViewSetKindFromRecordId;
-pub const arrayBufferAccessorNameFromRecordId = buffer_id_lookup.arrayBufferAccessorNameFromRecordId;
-pub const sharedArrayBufferAccessorNameFromRecordId = buffer_id_lookup.sharedArrayBufferAccessorNameFromRecordId;
-pub const dataViewAccessorNameFromRecordId = buffer_id_lookup.dataViewAccessorNameFromRecordId;
-pub const typedArrayAccessorNameFromRecordId = buffer_id_lookup.typedArrayAccessorNameFromRecordId;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "isView")) return @intFromEnum(StaticMethod.is_view);
@@ -272,14 +266,10 @@ fn uint8ArrayCodecCall(
     return result orelse error.TypeError;
 }
 
-// The engine-core TypedArray / ArrayBuffer / DataView element-access, coercion,
-// and storage-operation mechanism now lives in core/typed_array.zig (QuickJS
-// places these in the engine core, with builtins as clients). This file keeps
-// the JS-visible construction primitives that read constructor options / coerce
-// arguments (construct-path entangled) plus the record-dispatch table and the
-// name/id helpers above, and re-exports each moved primitive under its
-// original name so callers (and the construct-prim implementations below) keep
-// resolving them here.
+// Engine-core TypedArray / ArrayBuffer / DataView storage lives in
+// `core/typed_array.zig`. This file keeps the record-dispatch table, name/id
+// helpers, and the remaining compatibility aliases used by the public embedder
+// path and tests. Callers that need other primitives import core directly.
 const typed_array_core = core.typed_array;
 
 /// Legacy narrow ArrayBuffer storage struct. Retained as a public type; the
@@ -303,80 +293,21 @@ pub fn arrayBufferConstruct(rt: *core.JSRuntime, length_value: core.JSValue) !co
     return typed_array_core.arrayBufferConstruct(rt, length_value);
 }
 
-// ArrayBuffer / SharedArrayBuffer argument-coercing constructors read the
-// `maxByteLength` option off a user object, so the conservative Phase 6b-3c
-// placement put them in exec (`exec/typed_array_construct.zig`); re-exported
-// here under their original names for the install/test side.
+// ArrayBuffer argument-coercing constructor reads `maxByteLength` off a user
+// object (`exec/typed_array_construct.zig`); re-exported for tests.
 const typed_array_construct = @import("typed_array_construct.zig");
 pub const arrayBufferConstructArgs = typed_array_construct.arrayBufferConstructArgs;
-pub const sharedArrayBufferConstructArgs = typed_array_construct.sharedArrayBufferConstructArgs;
 
 pub const arrayBufferConstructLength = typed_array_core.arrayBufferConstructLength;
 pub const sharedArrayBufferConstructLength = typed_array_core.sharedArrayBufferConstructLength;
 pub const sharedArrayBufferFromStore = typed_array_core.sharedArrayBufferFromStore;
-
-// Pure view-construction primitives (no options `Get`, no user code) were
-// relocated to engine core (`core/typed_array.zig`) in Phase 6b-3c; re-exported
-// here so the install/test side keeps the original names. The VM construct path
-// consumes them through `core` directly.
-pub const typedArrayConstruct = typed_array_core.typedArrayConstruct;
 pub const typedArrayConstructWithOptions = typed_array_core.typedArrayConstructWithOptions;
-pub const typedArrayConstructFullBuffer = typed_array_core.typedArrayConstructFullBuffer;
 pub const typedArrayConstructFullBufferOwned = typed_array_core.typedArrayConstructFullBufferOwned;
-pub const dataViewConstruct = typed_array_core.dataViewConstruct;
-
-pub const dataViewValidateConstructorRange = typed_array_core.dataViewValidateConstructorRange;
-pub const dataViewRequireArrayBuffer = typed_array_core.dataViewRequireArrayBuffer;
-
-// --- Engine-core mechanism re-exports (moved to core/typed_array.zig) -------
-//
-// ArrayBuffer / SharedArrayBuffer storage operations.
-pub const arrayBufferSlice = typed_array_core.arrayBufferSlice;
-pub const arrayBufferSliceRange = typed_array_core.arrayBufferSliceRange;
-pub const arrayBufferSliceToImmutable = typed_array_core.arrayBufferSliceToImmutable;
-pub const arrayBufferSliceToImmutableRange = typed_array_core.arrayBufferSliceToImmutableRange;
-pub const arrayBufferTransfer = typed_array_core.arrayBufferTransfer;
-pub const arrayBufferTransferLength = typed_array_core.arrayBufferTransferLength;
-pub const arrayBufferTransferToImmutable = typed_array_core.arrayBufferTransferToImmutable;
-pub const arrayBufferTransferToImmutableLength = typed_array_core.arrayBufferTransferToImmutableLength;
-pub const sharedArrayBufferSlice = typed_array_core.sharedArrayBufferSlice;
-pub const sharedArrayBufferSliceRange = typed_array_core.sharedArrayBufferSliceRange;
-pub const sharedArrayBufferGrow = typed_array_core.sharedArrayBufferGrow;
 pub const sharedArrayBufferGrowLength = typed_array_core.sharedArrayBufferGrowLength;
-pub const arrayBufferResize = typed_array_core.arrayBufferResize;
 pub const arrayBufferResizeLength = typed_array_core.arrayBufferResizeLength;
 pub const detachArrayBuffer = typed_array_core.detachArrayBuffer;
-
-// TypedArray element read / write fabric.
 pub const typedArrayGetIndex = typed_array_core.typedArrayGetIndex;
-pub const typedArraySetIndex = typed_array_core.typedArraySetIndex;
-pub const typedArraySetElement = typed_array_core.typedArraySetElement;
-pub const typedArrayCoerceElementValue = typed_array_core.typedArrayCoerceElementValue;
-pub const typedArraySetInt32IndexFast = typed_array_core.typedArraySetInt32IndexFast;
-pub const typedArrayDefineOwnProperty = typed_array_core.typedArrayDefineOwnProperty;
 
-// DataView get/set primitives.
-pub const dataViewGet = typed_array_core.dataViewGet;
-pub const dataViewSet = typed_array_core.dataViewSet;
-pub const dataViewRejectImmutable = typed_array_core.dataViewRejectImmutable;
-pub const dataViewRequire = typed_array_core.dataViewRequire;
-pub const dataViewByteLength = typed_array_core.dataViewByteLength;
-pub const dataViewByteOffset = typed_array_core.dataViewByteOffset;
-
-// TypedArray element-mechanism predicates live in core/object.zig (the engine-
-// core storage layer); re-export under the original names so this file's
-// construction primitives and external callers keep resolving them locally.
 pub const isTypedArrayObject = core.object.isTypedArrayObject;
-pub const typedArrayOutOfBounds = core.object.typedArrayOutOfBounds;
-pub const typedArrayDetached = core.object.typedArrayDetached;
 pub const typedArrayLength = core.object.typedArrayLength;
 pub const typedArrayByteLength = core.object.typedArrayByteLength;
-pub const typedArrayByteOffset = core.object.typedArrayEffectiveByteOffset;
-pub const typedArrayIndexValid = core.object.typedArrayIndexValid;
-pub const TypedArrayCanonicalIndex = core.object.TypedArrayCanonicalIndex;
-pub const typedArrayCanonicalNumericIndex = core.object.typedArrayCanonicalNumericIndex;
-pub const typedArrayBackedByResizableBuffer = core.object.typedArrayBackedByResizableBuffer;
-pub const typedArrayRejectImmutableBuffer = core.object.typedArrayRejectImmutableBuffer;
-pub const typedArrayImmutableBuffer = core.object.typedArrayImmutableBuffer;
-pub const markArrayBufferImmutable = core.object.markArrayBufferImmutable;
-pub const arrayBufferIsImmutable = core.object.arrayBufferIsImmutable;
