@@ -7559,8 +7559,11 @@ pub const parser_core = struct {
         s.builderRecordPlainControl(op_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpU16` (marker'd).
-    fn emitterOpU16(s: *State, op_id: u8, val: u16) Error!void {
+    /// Shared u16-operand emit: Builder `emitOpU16` + u16 control record.
+    /// leftover candidate38 still had emitterOpU16 / emitterOpU16NoSource
+    /// copies (420 / 353, extra 353). They are the same walk; At stays
+    /// specialized (snapshot + explicit marker).
+    noinline fn emitterOpU16(s: *State, op_id: u8, val: u16) Error!void {
         s.builderEmitOpU16(op_id, val) catch |err| return mapBuilderError(err);
     }
 
@@ -7610,10 +7613,10 @@ pub const parser_core = struct {
         return emitterPushConst(s, value);
     }
 
-    /// v2 mirror of `State.emitOpU16NoSource`.
-    fn emitterOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
-        s.activeBuilder().emitOpU16(op_id, val) catch |err| return mapBuilderError(err);
-        s.builderRecordU16Control(op_id) catch |err| return mapBuilderError(err);
+    /// v2 mirror of `State.emitOpU16NoSource`. Same walk as `emitterOpU16`:
+    /// `builderEmitOpU16` is already source-less (grammar sites own markers).
+    inline fn emitterOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
+        return emitterOpU16(s, op_id, val);
     }
 
     /// v2 mirror of `State.emitOpU32NoSource`.

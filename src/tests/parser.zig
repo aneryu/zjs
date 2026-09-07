@@ -6803,6 +6803,22 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
     );
 }
 
+test "emitterOpU16 and NoSource share the u16 opcode walk" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var function = try parseRawStatement(&env, "{}");
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.enter_scope)) > 0);
+    }
+    {
+        var function = try parseRawExprWithRuntime(&env, "[]");
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, op.array_from)) > 0);
+    }
+}
+
 test "emitterPushConst and Owned share the cpool patch walk" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
