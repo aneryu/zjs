@@ -18049,6 +18049,30 @@ fn fillS4bDenseArray(rt: *core.JSRuntime, arr: *core.Object, count: u32) !void {
     }
 }
 
+test "storage-cell mint writes runtime kind tags on block and extent paths" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const cases = [_]struct { u8, core.gc.GcKind }{
+        .{ core.gc.representation.payload_kind_tag, .payload },
+        .{ core.gc.representation.property_storage_kind_tag, .property_storage },
+        .{ core.gc.representation.array_storage_kind_tag, .array_storage },
+        .{ core.gc.representation.string_buffer_kind_tag, .string_buffer },
+    };
+    const small = core.gc.metadata_prefix_size + 16;
+    const large = core.gc_space.large_min_bytes;
+    for (cases) |case| {
+        const small_body = try rt.gc.createStorageCellPublished(case[0], small);
+        const small_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(small_body));
+        try std.testing.expectEqual(case[1], small_header.metaConst().flags.kind);
+        try std.testing.expect(core.gc.Registry.isBlockCellHeader(small_header));
+
+        const large_body = try rt.gc.createStorageCellPublished(case[0], large);
+        const large_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(large_body));
+        try std.testing.expectEqual(case[1], large_header.metaConst().flags.kind);
+        try std.testing.expect(!core.gc.Registry.isBlockCellHeader(large_header));
+    }
+}
+
 test "TGC S4-b: an external property buffer survives with its owner and dies one major later" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -2179,7 +2179,7 @@ pub const Registry = struct {
     /// itself (S4 spec 5 (4)).
     pub fn createStorageCellPublished(
         self: *Registry,
-        comptime kind_tag: u8,
+        kind_tag: u8,
         total_bytes: usize,
     ) ![*]u8 {
         const cell = try self.memory.createStorageCell(kind_tag, total_bytes);

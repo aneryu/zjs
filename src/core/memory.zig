@@ -1894,8 +1894,8 @@ pub const MemoryAccount = struct {
     /// `string_kind_tag` for a flat body, `rope_kind_tag` for a rope node
     /// (TGC S4-a). It is comptime so each caller keeps the single-store
     /// prefix write it had when the tag was hard-coded.
-    pub fn createStringCell(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) !?[*]u8 {
-        comptime std.debug.assert(kind_tag <= gc_representation.kind_mask);
+    pub fn createStringCell(self: *MemoryAccount, kind_tag: u8, total_bytes: usize) !?[*]u8 {
+        std.debug.assert(kind_tag <= gc_representation.kind_mask);
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (!gc_block_heap.canAllocCellSize(total_bytes)) return null;
         const heap = self.gc_object_cell_heap orelse return null;
@@ -1944,10 +1944,9 @@ pub const MemoryAccount = struct {
     }
 
     /// TGC S2-i / S4-b (D-S4-3): the kind-parameterized extent route. Every
-    /// prefix carrier over the block-cell ceiling lands here; `kind_tag` is
-    /// comptime so each caller keeps the single-store prefix write the string
-    /// path had when the tag was hard-coded.
-    pub fn createExtent(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) ![]u8 {
+    /// prefix carrier over the block-cell ceiling lands here. `kind_tag` is
+    /// a runtime byte: the prefix write is still one store.
+    pub fn createExtent(self: *MemoryAccount, kind_tag: u8, total_bytes: usize) ![]u8 {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         std.debug.assert(!gc_block_heap.canAllocCellSize(total_bytes));
         const heap = self.gc_object_cell_heap orelse return error.OutOfMemory;
@@ -1958,7 +1957,7 @@ pub const MemoryAccount = struct {
         const slice = try heap.alloc(total_bytes);
         const base = slice.ptr;
         std.mem.writeInt(u16, base[0..2], 0, .little);
-        comptime std.debug.assert(kind_tag <= gc_representation.kind_mask);
+        std.debug.assert(kind_tag <= gc_representation.kind_mask);
         std.mem.writeInt(u16, base[2..4], @as(u16, alloc_info_standalone) | (@as(u16, kind_tag) << 8), .little);
         @as(*align(4) u32, @ptrCast(@alignCast(base + 4))).* = 0;
         self.creditAlloc(total_bytes, null);
@@ -2008,7 +2007,7 @@ pub const MemoryAccount = struct {
     /// Small requests take a block cell, everything else an extent of the
     /// same heap. The caller publishes the body (`base + 8`) through
     /// `addInitializedWithSizeNoFail(body, accounted_bytes)`.
-    pub fn createStorageCell(self: *MemoryAccount, comptime kind_tag: u8, total_bytes: usize) !StorageCell {
+    pub fn createStorageCell(self: *MemoryAccount, kind_tag: u8, total_bytes: usize) !StorageCell {
         if (try self.createStringCell(kind_tag, total_bytes)) |base| {
             return .{
                 .base = base,
