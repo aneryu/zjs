@@ -187,41 +187,52 @@ fn mathBinaryEntry(comptime name: []const u8, comptime id: u32) core.host_functi
 }
 
 fn mathUnaryNative(comptime id: u32) core.host_function.NativeF64Fn {
+    // Keep the illegal-id check at the table site so a new unary entry
+    // still fails at compile time. The outlined walk takes `id` at
+    // runtime so the leftover typed copies can share one body.
+    _ = switch (id) {
+        1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36 => {},
+        else => @compileError("unsupported unary Math cproto id"),
+    };
     return &struct {
         fn invoke(value: f64) f64 {
-            return switch (id) {
-                1 => @abs(value),
-                2 => @floor(value),
-                3 => @ceil(value),
-                4 => mathRound(value),
-                5 => @sqrt(value),
-                10 => exp(value),
-                11 => @sin(value),
-                12 => @cos(value),
-                13 => @tan(value),
-                14 => std.math.acos(value),
-                15 => std.math.asin(value),
-                16 => std.math.atan(value),
-                18 => std.math.acosh(value),
-                19 => std.math.asinh(value),
-                20 => std.math.atanh(value),
-                21 => @log(value),
-                22 => if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) value else if (value < 0) -@floor(@abs(value)) else @floor(value),
-                23 => std.math.cbrt(value),
-                25 => std.math.cosh(value),
-                26 => std.math.expm1(value),
-                27 => @as(f64, @floatCast(@as(f16, @floatCast(value)))),
-                28 => @as(f64, @floatCast(@as(f32, @floatCast(value)))),
-                31 => std.math.log1p(value),
-                32 => log2(value),
-                33 => @log10(value),
-                34 => mathSign(value),
-                35 => std.math.sinh(value),
-                36 => std.math.tanh(value),
-                else => @compileError("unsupported unary Math cproto id"),
-            };
+            return mathUnaryInvoke(id, value);
         }
     }.invoke;
+}
+
+noinline fn mathUnaryInvoke(id: u32, value: f64) f64 {
+    return switch (id) {
+        1 => @abs(value),
+        2 => @floor(value),
+        3 => @ceil(value),
+        4 => mathRound(value),
+        5 => @sqrt(value),
+        10 => exp(value),
+        11 => @sin(value),
+        12 => @cos(value),
+        13 => @tan(value),
+        14 => std.math.acos(value),
+        15 => std.math.asin(value),
+        16 => std.math.atan(value),
+        18 => std.math.acosh(value),
+        19 => std.math.asinh(value),
+        20 => std.math.atanh(value),
+        21 => @log(value),
+        22 => if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) value else if (value < 0) -@floor(@abs(value)) else @floor(value),
+        23 => std.math.cbrt(value),
+        25 => std.math.cosh(value),
+        26 => std.math.expm1(value),
+        27 => @as(f64, @floatCast(@as(f16, @floatCast(value)))),
+        28 => @as(f64, @floatCast(@as(f32, @floatCast(value)))),
+        31 => std.math.log1p(value),
+        32 => log2(value),
+        33 => @log10(value),
+        34 => mathSign(value),
+        35 => std.math.sinh(value),
+        36 => std.math.tanh(value),
+        else => unreachable,
+    };
 }
 
 fn mathBinaryNative(comptime id: u32) core.host_function.NativeF64F64Fn {
@@ -756,4 +767,21 @@ test "mathMinMaxNumberFast mirrors js_math_min_max over int32/float64 and misses
     try std.testing.expect(mathMinMaxNumberFast(&.{ int(1), core.JSValue.boolean(true) }, true) == null);
     try std.testing.expect(mathMinMaxNumberFast(&.{core.JSValue.undefinedValue()}, false) == null);
     try std.testing.expect(mathMinMaxNumberFast(&.{ flt(1.5), core.JSValue.nullValue() }, true) == null);
+}
+
+test "mathUnaryInvoke shares one walk across unary Math ids" {
+    const ids = [_]u32{ 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36 };
+    const samples = [_]f64{ 0.25, -2.5, 0, 1, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) };
+    inline for (ids) |id| {
+        const specialized = mathUnaryNative(id);
+        for (samples) |sample| {
+            const via_id = mathUnaryInvoke(id, sample);
+            const via_fn = specialized(sample);
+            if (std.math.isNan(via_fn)) {
+                try std.testing.expect(std.math.isNan(via_id));
+            } else {
+                try std.testing.expectEqual(via_fn, via_id);
+            }
+        }
+    }
 }
