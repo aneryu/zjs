@@ -2790,6 +2790,18 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.async_disposable_stack));
 }
 
+test "class Record default fill matches Record{} without a template" {
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(core.class.Record));
+    try std.testing.expectEqual(@as(usize, 90), @offsetOf(core.class.Record, "inline_payload_align"));
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    try std.testing.expect(!rt.classes.isRegistered(core.class.invalid_class_id));
+    try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
+    try std.testing.expectEqualDeep(core.class.Record{}, rt.classes.records[core.class.invalid_class_id]);
+    try std.testing.expectEqualDeep(core.class.Record{}, rt.classes.records[core.class.ids.proxy]);
+    try std.testing.expectEqual(@as(u16, 1), rt.classes.records[core.class.ids.proxy].inline_payload_align);
+}
+
 var finalizer_calls: usize = 0;
 var payload_finalizer_calls: usize = 0;
 var payload_mark_calls: usize = 0;
