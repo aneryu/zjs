@@ -3945,6 +3945,22 @@ test "a dynamic function outlives its teardown when its object held the last byt
     try std.testing.expectEqualStrings("16\n", stream.buffered());
 }
 
+test "string leftover ToIntegerOrInfinity matches value_ops including bigint TypeError" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    _ = try js.evalWithOutput(
+        \\print("ab".repeat(2));
+        \\print("hello".slice(1.9, 4));
+        \\print("hello".indexOf("l", true));
+        \\try { "ab".repeat(1n); print("no throw"); } catch (e) { print(e.name); }
+        \\try { String.fromCodePoint(1n); print("from-no"); } catch (e) { print(e.name); }
+    , &stream);
+    try std.testing.expectEqualStrings("abab\nell\n2\nTypeError\nTypeError\n", stream.buffered());
+}
+
 test "vm executes push constants arithmetic comparisons and return" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

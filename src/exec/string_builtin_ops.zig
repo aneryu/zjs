@@ -22,6 +22,7 @@ const native_legacy = @import("native_legacy.zig");
 // Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
 // exec-only in `exec/string_ops.zig`.
 const string_ops = @import("string_ops.zig");
+const value_ops = @import("value_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 
@@ -874,7 +875,7 @@ pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVa
     defer units.deinit(rt.memory.allocator);
     for (args) |value| {
         if (value.isSymbol()) return error.TypeError;
-        const number = try toIntegerOrInfinity(rt, value);
+        const number = try value_ops.toIntegerOrInfinity(rt, value);
         if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
             return error.RangeError;
         }
@@ -2187,7 +2188,7 @@ fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: cor
 }
 
 fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize {
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or number <= 0) return 0;
     if (std.math.isPositiveInf(number)) return length;
     const truncated = @trunc(number);
@@ -2196,7 +2197,7 @@ fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !u
 }
 
 fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.JSValue) !usize {
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return default_start;
     if (number <= 0) return 0;
     if (std.math.isPositiveInf(number)) return default_start;
@@ -2207,31 +2208,16 @@ fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.
 
 fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
     if (value.isBigInt() or value.isSymbol()) return error.TypeError;
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
     const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
     const modulo = @mod(integer, 4294967296.0);
     return @intFromFloat(modulo);
 }
 
-fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
-    if (numberValue(value)) |number| return number;
-    // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
-    // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
-    if (value.isBigInt()) return error.TypeError;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
-
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try appendValueString(rt, &buffer, value);
-    return parseJsNumber(buffer.items);
-}
-
 fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
     if (value.asInt32()) |int_value| return int_value;
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return 0;
     if (std.math.isPositiveInf(number)) return std.math.maxInt(i64);
     if (std.math.isNegativeInf(number)) return std.math.minInt(i64);
@@ -2239,15 +2225,6 @@ fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
     return @intFromFloat(integer);
 }
 
-fn parseJsNumber(bytes: []const u8) f64 {
-    return core.value_format.parseJsNumber(bytes);
-}
-
-fn numberValue(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    return null;
-}
 
 fn isTrimCodeUnit(unit: u16) bool {
     return unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);
