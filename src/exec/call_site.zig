@@ -120,18 +120,20 @@ pub const CallSite = struct {
         caller_function: ?*const bytecode.FunctionBytecode,
         caller_frame: ?*frame_mod.Frame,
     ) CallSite {
-        return .{
-            .ctx = ctx,
-            .output = output,
-            .global = global,
-            .this_value = this_value,
-            .callee = callee,
-            .caller_function = caller_function,
-            .caller_frame = caller_frame,
-            .route = resolveRoute(ctx, output, global, this_value, callee),
-            .lean = undefined,
-            .lean_state = .unknown,
-        };
+        // `return .{...}` memcpy's a 496-byte all-zero `.rodata` template.
+        // Zero in place, then store the live fields so that template can leave.
+        var site: CallSite = undefined;
+        @memset(std.mem.asBytes(&site), 0);
+        site.ctx = ctx;
+        site.output = output;
+        site.global = global;
+        site.this_value = this_value;
+        site.callee = callee;
+        site.caller_function = caller_function;
+        site.caller_frame = caller_frame;
+        site.route = resolveRoute(ctx, output, global, this_value, callee);
+        site.lean_state = .unknown;
+        return site;
     }
 
     inline fn leanFrame(self: *CallSite, route: *const BytecodeRoute) ?*inline_calls.LeanFrame {
