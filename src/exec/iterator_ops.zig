@@ -2146,7 +2146,7 @@ pub fn iteratorCloseWithCompletionAndPropagate(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    err: anytype,
+    err: IteratorZipError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
