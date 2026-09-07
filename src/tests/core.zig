@@ -10833,25 +10833,25 @@ test "collection iterator prototype follows explicit active realm, never receive
 
     const map = try core.Object.create(rt, core.class.ids.map, first_iterator_prototype);
 
-    const context_iterator_value = try engine.exec.collection_ops.methodCallWithContext(
+    const context_iterator_value = try engine.exec.collection_ops.methodCallWithContextAndHost(
         second_realm,
         map.value(),
         @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
         &.{},
-        &.{},
+        .{ .globals = &.{} },
     );
     const context_iterator = try core.Object.expect(context_iterator_value);
     try std.testing.expectEqual(second_iterator_prototype, context_iterator.getPrototype().?);
 
     // The explicit active global wins even when the caller passes a different
     // current context and the receiver belongs to that context's object graph.
-    const iterator_value = try engine.exec.collection_ops.methodCallWithGlobal(
+    const iterator_value = try engine.exec.collection_ops.methodCallWithGlobalAndHost(
         first_realm,
         second_global,
         map.value(),
         @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
         &.{},
-        &.{},
+        .{ .globals = &.{} },
     );
     const result_iterator = try core.Object.expect(iterator_value);
     try std.testing.expectEqual(second_iterator_prototype, result_iterator.getPrototype().?);

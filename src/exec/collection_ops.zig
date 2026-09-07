@@ -318,16 +318,6 @@ pub fn methodCallWithCallbackHost(
     return methodCallResolved(rt, null, globalObjectFromGlobals(rt, host.globals), object, method, args, host);
 }
 
-pub fn methodCallWithContext(
-    ctx: *core.JSContext,
-    object_value: core.JSValue,
-    method: u32,
-    args: []const core.JSValue,
-    globals: []globals_mod.Slot,
-) !core.JSValue {
-    return methodCallWithContextAndHost(ctx, object_value, method, args, .{ .globals = globals });
-}
-
 pub fn methodCallWithContextAndHost(
     ctx: *core.JSContext,
     object_value: core.JSValue,
@@ -337,17 +327,6 @@ pub fn methodCallWithContextAndHost(
 ) !core.JSValue {
     const object = try expectObject(object_value);
     return methodCallResolved(ctx.runtime, ctx, globalObjectFromGlobals(ctx.runtime, host.globals), object, method, args, host);
-}
-
-pub fn methodCallWithGlobal(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    object_value: core.JSValue,
-    method: u32,
-    args: []const core.JSValue,
-    globals: []globals_mod.Slot,
-) !core.JSValue {
-    return methodCallWithGlobalAndHost(ctx, global, object_value, method, args, .{ .globals = globals });
 }
 
 pub fn methodCallWithGlobalAndHost(
@@ -482,15 +461,6 @@ pub fn methodCallDroppedResult(rt: *core.JSRuntime, object: *core.Object, method
         },
         else => return false,
     }
-}
-
-pub fn groupBy(
-    ctx: *core.JSContext,
-    args: []const core.JSValue,
-    globals: []globals_mod.Slot,
-    prototype: ?*core.Object,
-) !core.JSValue {
-    return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(ctx, globals));
 }
 
 pub fn groupByWithCallbackHost(
