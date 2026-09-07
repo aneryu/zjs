@@ -2984,74 +2984,64 @@ pub const parser_core = struct {
 
         // ---- Temporary scope opcode helpers ----
         // These emit scope_* opcodes that will be lowered by resolve_variables.
+        // One outlined walk: leftover candidate35 still had five ~294 B
+        // emitScope* copies (extra 1176). Opcode pair and source flag stay
+        // runtime so LLVM cannot reconstruct the typed twins.
 
-        fn emitScopeGetVar(self: *State, atom_id: Atom) Error!void {
+        noinline fn emitScopeVar(
+            self: *State,
+            atom_id: Atom,
+            scope_op: u8,
+            global_op: u8,
+            attach_source: bool,
+        ) Error!void {
             try self.ensureClosureVar(atom_id);
             if (self.emit_phase1_temp) {
-                // qjs resolve_scope_var consumes the same atom+scope temp
-                // family (quickjs.c:33036-33052).
-                try Emitter.opAtomU16(self, opcode.op.scope_get_var, atom_id, @intCast(self.scope_level));
+                const scope_level: u16 = @intCast(self.scope_level);
+                if (attach_source) {
+                    // qjs resolve_scope_var consumes the same atom+scope temp
+                    // family (quickjs.c:33036-33052).
+                    try Emitter.opAtomU16(self, scope_op, atom_id, scope_level);
+                } else {
+                    try Emitter.opAtomU16NoSource(self, scope_op, atom_id, scope_level);
+                }
+            } else if (attach_source) {
+                try self.emitGlobalVarOp(global_op, atom_id);
             } else {
-                try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
+                try self.emitGlobalVarOpNoSource(global_op, atom_id);
             }
         }
 
-        fn emitScopeGetVarCheckThis(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16(self, opcode.op.scope_get_var_checkthis, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOp(opcode.op.get_var, atom_id);
-            }
+        inline fn emitScopeGetVar(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_get_var, opcode.op.get_var, true);
         }
 
-        fn emitScopePutVar(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16(self, opcode.op.scope_put_var, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOp(opcode.op.put_var, atom_id);
-            }
+        inline fn emitScopeGetVarCheckThis(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_get_var_checkthis, opcode.op.get_var, true);
         }
 
-        fn emitScopePutVarNoSource(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16NoSource(self, opcode.op.scope_put_var, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOpNoSource(opcode.op.put_var, atom_id);
-            }
+        inline fn emitScopePutVar(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_put_var, opcode.op.put_var, true);
         }
 
-        fn emitScopeGetVarUndef(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16(self, opcode.op.scope_get_var_undef, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOp(opcode.op.get_var_undef, atom_id);
-            }
+        inline fn emitScopePutVarNoSource(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_put_var, opcode.op.put_var, false);
+        }
+
+        inline fn emitScopeGetVarUndef(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_get_var_undef, opcode.op.get_var_undef, true);
         }
 
         /// Emit `scope_put_var_init` for `let` / `const` initialisers.
         /// Mirrors `quickjs.c:282` (scope init form). The pipeline
         /// lowers this to `put_loc` when the var resolves locally, or
         /// to `put_var_init` when it's a top-level lexical global.
-        fn emitScopePutVarInit(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16(self, opcode.op.scope_put_var_init, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOp(opcode.op.put_var_init, atom_id);
-            }
+        inline fn emitScopePutVarInit(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_put_var_init, opcode.op.put_var_init, true);
         }
 
-        fn emitScopePutVarInitNoSource(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                try Emitter.opAtomU16NoSource(self, opcode.op.scope_put_var_init, atom_id, @intCast(self.scope_level));
-            } else {
-                try self.emitGlobalVarOpNoSource(opcode.op.put_var_init, atom_id);
-            }
+        inline fn emitScopePutVarInitNoSource(self: *State, atom_id: Atom) Error!void {
+            return self.emitScopeVar(atom_id, opcode.op.scope_put_var_init, opcode.op.put_var_init, false);
         }
 
         fn emitThisValue(self: *State) Error!void {

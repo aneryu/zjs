@@ -6727,6 +6727,19 @@ fn findPhase1Opcode(code: []const u8, opcode_id: u8, start_pc: usize) !?usize {
     return null;
 }
 
+fn countPhase1Opcode(code: []const u8, opcode_id: u8) !usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const current = code[pc];
+        const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(current));
+        if (size == 0 or pc + size > code.len) return error.TestUnexpectedResult;
+        if (current == opcode_id) count += 1;
+        pc += size;
+    }
+    return count;
+}
+
 /// The compact phase-1 stream a FunctionDef's Builder holds while the parse
 /// is still live.
 fn fdPhase1Code(fd: *const engine.bytecode.FunctionDef) []const u8 {
@@ -6788,6 +6801,32 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
         src,
         .{ .source_kind = .typescript },
     );
+}
+
+test "emitScope var wrappers keep phase-1 opcode pairs" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const Case = struct { src: []const u8, opcode: u8 };
+    const cases = [_]Case{
+        .{ .src = "x;", .opcode = op.scope_get_var },
+        .{ .src = "x = 1;", .opcode = op.scope_put_var },
+        .{ .src = "let y;", .opcode = op.scope_put_var_init },
+        .{ .src = "let y = 1;", .opcode = op.scope_put_var_init },
+        .{ .src = "var z = 1;", .opcode = op.scope_put_var },
+        .{ .src = "typeof w;", .opcode = op.scope_get_var_undef },
+    };
+    for (cases) |c| {
+        var function = try parseRawStatement(&env, c.src);
+        defer function.deinit(env.rt);
+        try std.testing.expect((try countPhase1Opcode(function.code, c.opcode)) > 0);
+    }
+
+    var program = try parseRawTSProgram(&env, "enum E { A }");
+    defer program.deinit(env.rt);
+    const enum_code = program.phase1Code();
+    try std.testing.expect((try countPhase1Opcode(enum_code, op.scope_get_var_undef)) > 0);
+    try std.testing.expect((try countPhase1Opcode(enum_code, op.scope_put_var)) > 0);
 }
 
 test "M-SCOPE event producers: ordinary scopes match QuickJS phase-1 events" {
