@@ -317,42 +317,6 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     return core.JSValue.int32(out);
 }
 
-pub fn typeOf(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    const name: []const u8 = if (value.isBigInt())
-        "bigint"
-    else if (value.isNumber())
-        "number"
-    else if (value.isBool())
-        "boolean"
-    else if (value.isString())
-        "string"
-    else if (value.isUndefined())
-        "undefined"
-    else if (isHTMLDDA(value))
-        "undefined"
-    else if (value.isSymbol())
-        "symbol"
-    else if (value.isNull())
-        "object"
-    else if (value.isFunctionBytecode())
-        "function"
-    else if (isFunctionObject(value) or proxyTargetIsFunction(value))
-        "function"
-    else
-        "object";
-    return createStringValue(rt, name);
-}
-
-pub fn logical(op: u8, a: core.JSValue, b: core.JSValue) core.JSValue {
-    const out = switch (op) {
-        bytecode.opcode.op.@"and" => if (isTruthy(a)) b else a,
-        bytecode.opcode.op.@"or" => if (isTruthy(a)) a else b,
-        bytecode.opcode.op.is_undefined_or_null => if (a.isNull() or a.isUndefined()) b else a,
-        else => unreachable,
-    };
-    return out;
-}
-
 pub fn toStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (try primitiveToStringValueFast(rt, value)) |fast| return fast;
     var buffer = std.ArrayList(u8).empty;
