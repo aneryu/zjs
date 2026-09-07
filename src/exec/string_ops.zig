@@ -35,6 +35,7 @@ const QjsConcatPart = struct {
 const call_runtime = @import("call_runtime.zig");
 const call_site_mod = @import("call_site.zig");
 const array_ops = @import("array_ops.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
@@ -3568,7 +3569,7 @@ const StringBuffer = struct {
 
     fn widen(self: *StringBuffer) !void {
         self.is_wide = true;
-        try self.wide.ensureTotalCapacity(self.allocator, self.latin1.items.len);
+        try array_list_erased.ensureTotalCapacity(&self.wide, self.allocator, self.latin1.items.len);
         for (self.latin1.items) |byte| self.wide.appendAssumeCapacity(byte);
         self.latin1.clearRetainingCapacity();
     }

@@ -1,10 +1,12 @@
-//! Type-erased `std.ArrayList.append` / `toOwnedSlice` matching Zig 0.16.
+//! Type-erased `std.ArrayList.append` / `toOwnedSlice` / `ensureTotalCapacity`
+//! matching Zig 0.16.
 //!
 //! Leftover outlined `array_list.Aligned(T)` copies share one `addOneErased`
-//! grow and one `toOwnedSliceErased` shrink-to-fit walk. Both use `remap` /
-//! `rawAlloc` / `rawFree` with the element's alignment — not `alloc(u8)` and
-//! not GC `TraceHeader` lists. `u8` / `u64` append sites and `u8`
-//! `toOwnedSlice` sites stay on std (`u64` includes GC pause samples).
+//! grow, one `ensureTotalCapacityPrecise` reserve, and one
+//! `toOwnedSliceErased` shrink-to-fit walk. All use `remap` / `rawAlloc` /
+//! `rawFree` with the element's alignment — not `alloc(u8)` and not GC
+//! `TraceHeader` lists. `u8` / `u64` append sites, `u8` `toOwnedSlice` /
+//! `ensureTotalCapacity` sites, and `*TraceHeader` lists stay on std.
 
 const std = @import("std");
 
@@ -35,6 +37,30 @@ pub inline fn append(
         gpa,
     );
     @as(*T, @ptrCast(@alignCast(dest))).* = item;
+}
+
+/// Same contract as `std.ArrayList(T).ensureTotalCapacity`: grow
+/// super-linearly when `capacity < new_capacity`.
+pub inline fn ensureTotalCapacity(
+    list: anytype,
+    gpa: Allocator,
+    new_capacity: usize,
+) Allocator.Error!void {
+    const T = ListItem(@TypeOf(list));
+    comptime {
+        std.debug.assert(@typeInfo(@TypeOf(list)).pointer.size == .one);
+        std.debug.assert(@sizeOf(T) > 0);
+    }
+    if (list.capacity >= new_capacity) return;
+    try ensureTotalCapacityPrecise(
+        @ptrCast(&list.items.ptr),
+        list.items.len,
+        &list.capacity,
+        @sizeOf(T),
+        .fromByteUnits(@alignOf(T)),
+        gpa,
+        growCapacity(new_capacity, @sizeOf(T)),
+    );
 }
 
 /// Zig 0.16 `array_list.Aligned(T).growCapacity` with a runtime element size.
@@ -70,7 +96,7 @@ noinline fn addOneErased(
     return dest;
 }
 
-fn ensureTotalCapacityPrecise(
+noinline fn ensureTotalCapacityPrecise(
     ptr_slot: *[*]u8,
     used_len: usize,
     cap_slot: *usize,
