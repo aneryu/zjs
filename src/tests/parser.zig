@@ -6803,6 +6803,22 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
     );
 }
 
+test "escapedIdentifier reserved-word CurrentContext shares the Binding walk" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const rejected = [_][]const u8{
+        "\\u0069f;",
+        "var \\u0069f;",
+        "0, { l\\u0065t } = {};",
+    };
+    for (rejected) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "escaped-reserved.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
 test "emitterOpU16 and NoSource share the u16 opcode walk" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

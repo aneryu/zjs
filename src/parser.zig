@@ -6951,7 +6951,9 @@ pub const parser_core = struct {
         };
     }
 
-    fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
+    /// leftover candidate39 still had a 757 B CurrentContext copy whose extra
+    /// null/false/true/await/yield checks already live in this walk.
+    noinline fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
         if (!has_escape) return false;
         const name = s.function.atoms.name(atom_id) orelse return false;
         const strict = s.is_strict or s.curFunc().is_strict_mode;
@@ -7018,17 +7020,10 @@ pub const parser_core = struct {
             std.mem.eql(u8, name, "yield");
     }
 
-    fn escapedIdentifierIsReservedWordForCurrentContext(s: *State, atom_id: Atom, has_escape: bool) bool {
-        return has_escape and
-            (escapedIdentifierIsReservedWordForBinding(s, atom_id, has_escape) or
-                atomNameEquals(s, atom_id, "null") or
-                atomNameEquals(s, atom_id, "false") or
-                atomNameEquals(s, atom_id, "true") or
-                (s.in_async and atomNameEquals(s, atom_id, "await")) or
-                (s.lex.is_module and atomNameEquals(s, atom_id, "await")) or
-                (s.in_class_static_block and atomNameEquals(s, atom_id, "await")) or
-                (s.in_generator and atomNameEquals(s, atom_id, "yield")) or
-                ((s.is_strict or s.curFunc().is_strict_mode) and atomNameEquals(s, atom_id, "yield")));
+    /// Same reserved set as `ForBinding`. The previous extra keyword checks
+    /// were already covered by that walk.
+    inline fn escapedIdentifierIsReservedWordForCurrentContext(s: *State, atom_id: Atom, has_escape: bool) bool {
+        return escapedIdentifierIsReservedWordForBinding(s, atom_id, has_escape);
     }
 
     fn isInvalidStrictFunctionBindingName(s: *State, atom_id: Atom) bool {
