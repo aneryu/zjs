@@ -543,97 +543,10 @@ fn promiseCombinatorElementCall(
     return core.JSValue.undefinedValue();
 }
 
-const PromiseCapability = struct {
-    promise: core.JSValue,
-    resolve: core.JSValue,
-    reject: core.JSValue,
-};
-
 pub fn activeGlobalObject(_: *core.JSRuntime, global: ?*core.Object, globals: []globals_mod.Slot) !?*core.Object {
     if (global) |global_object| return global_object;
     const global_value = globals_mod.getByAtom(globals, core.atom.ids.globalThis);
     return thisObject(global_value);
-}
-
-fn createPromiseBuiltinFunction(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8, length: i32) !core.JSValue {
-    const global_object = global orelse return error.InvalidBuiltinRegistry;
-    const function_proto = object_ops.functionPrototypeFromGlobal(rt, global_object) orelse return error.InvalidBuiltinRegistry;
-    return core.function.nativeDataFunctionWithPrototype(rt, function_proto, name, length);
-}
-
-fn createPromiseCapability(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    constructor_value: core.JSValue,
-    constructor_object: *core.Object,
-) !PromiseCapability {
-    var promise_val = core.JSValue.undefinedValue();
-    var resolve_val = core.JSValue.undefinedValue();
-    var reject_val = core.JSValue.undefinedValue();
-    var capability_slot_val = core.JSValue.undefinedValue();
-    var executor_val = core.JSValue.undefinedValue();
-
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &promise_val },
-        .{ .value = &resolve_val },
-        .{ .value = &reject_val },
-        .{ .value = &capability_slot_val },
-        .{ .value = &executor_val },
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    if (try constructorNameEql(ctx.runtime, constructor_object, "Promise")) {
-        const active_global = try activeGlobalObject(ctx.runtime, global, globals);
-        promise_val = try core.promise.constructWithPrototype(ctx, constructorPrototype(ctx.runtime, constructor_object));
-        resolve_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
-        reject_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
-        const resolve_object = thisObject(resolve_val) orelse return error.TypeError;
-        const reject_object = thisObject(reject_val) orelse return error.TypeError;
-        try resolve_object.setInternalCallableTag(ctx.runtime, .promise_resolving);
-        try resolve_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val);
-        (try resolve_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = false;
-        try reject_object.setInternalCallableTag(ctx.runtime, .promise_resolving);
-        try reject_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val);
-        (try reject_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = true;
-        return .{
-            .promise = promise_val,
-            .resolve = resolve_val,
-            .reject = reject_val,
-        };
-    }
-
-    const active_global = try activeGlobalObject(ctx.runtime, global, globals);
-    const capability_slot = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    capability_slot_val = capability_slot.value();
-
-    executor_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 2);
-    const executor_object = thisObject(executor_val) orelse return error.TypeError;
-    try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
-    try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, capability_slot_val);
-
-    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, constructorPrototype(ctx.runtime, constructor_object));
-    promise_val = instance.value();
-
-    const call_result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, promise_val, constructor_value, &.{executor_val});
-    if (call_result.isObject()) {
-        const next_promise_val = call_result;
-        promise_val = next_promise_val;
-    }
-
-    resolve_val = if (capability_slot.promiseCapabilityResolve()) |stored| stored else core.JSValue.undefinedValue();
-    reject_val = if (capability_slot.promiseCapabilityReject()) |stored| stored else core.JSValue.undefinedValue();
-    if (!isCallableObjectValue(resolve_val) or !isCallableObjectValue(reject_val)) return error.TypeError;
-    return .{
-        .promise = promise_val,
-        .resolve = resolve_val,
-        .reject = reject_val,
-    };
 }
 
 fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
@@ -650,7 +563,7 @@ fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
     return global;
 }
 
-test "createPromiseCapability roots builtin promise capability under GC" {
+test "defaultPromiseCapability roots builtin promise capability under GC" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -658,14 +571,11 @@ test "createPromiseCapability roots builtin promise capability under GC" {
 
     const global = try installTestStandardRealm(ctx);
 
-    const constructor_value = try core.function.nativeFunction(ctx, "Promise", 1);
-    const constructor = thisObject(constructor_value) orelse return error.TypeError;
-
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const capability = try createPromiseCapability(ctx, null, global, &.{}, constructor_value, constructor);
+    const capability = try @import("promise_ops.zig").defaultPromiseCapability(ctx, null, global, null, null);
 
     const promise = promiseObjectFromValue(capability.promise) orelse return error.TypeError;
     const resolve_object = thisObject(capability.resolve) orelse return error.TypeError;
@@ -796,29 +706,7 @@ fn createPromiseAggregateError(rt: *core.JSRuntime, global: ?*core.Object, error
     return instance.value();
 }
 
-fn createPromiseCombinatorState(
-    rt: *core.JSRuntime,
-    resolve_value: core.JSValue,
-    reject_value: core.JSValue,
-    values: *core.Object,
-) !*core.Object {
-    var rooted_resolve = resolve_value;
-    var rooted_reject = reject_value;
-    var rooted_values = values.value();
-    var root_frame = core.runtime.rootValues(.{ &rooted_resolve, &rooted_reject, &rooted_values });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const state = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
-    try state.setPromiseCombinatorResolve(rt, rooted_resolve);
-    try state.setPromiseCombinatorReject(rt, rooted_reject);
-    try state.setPromiseCombinatorValues(rt, rooted_values);
-    (try state.promiseCombinatorRemainingSlot(rt)).* = 1;
-    return state;
-}
-
-test "createPromiseCombinatorState roots direct function bytecode resolve while creating state" {
+test "promiseCombinatorState roots direct function bytecode resolve while creating state" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -838,7 +726,7 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const state = try createPromiseCombinatorState(rt, resolve_value, core.JSValue.undefinedValue(), values);
+    const state = try @import("promise_ops.zig").promiseCombinatorState(rt, resolve_value, core.JSValue.undefinedValue(), values);
     var state_alive = true;
     defer if (state_alive) core.Object.destroyFromHeader(rt, state.gcHeader());
 
@@ -2182,8 +2070,6 @@ pub fn thisObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     return core.Object.fromHeader(header);
 }
-
-const constructorNameEql = call_runtime.constructorNameEqlLocal;
 
 pub fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object {
     _ = rt;
