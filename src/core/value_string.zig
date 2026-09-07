@@ -19,8 +19,8 @@
 //!
 //! The fourth axis is real and stays, as `Policy`: callers legitimately
 //! disagree about Symbols, primitive wrapper objects, and what a value with no
-//! `ToString` form becomes. It is comptime, so each site keeps exactly its old
-//! behavior and pays nothing for the arms it does not use.
+//! `ToString` form becomes. The primitive walk is identical for every policy,
+//! so the flag is a runtime value and one outlined helper serves every site.
 
 const std = @import("std");
 
@@ -56,13 +56,13 @@ pub const Policy = struct {
     unsupported: enum { object_tag, type_error } = .object_tag,
 };
 
-pub fn appendValueString(
+pub noinline fn appendValueString(
     rt: *JSRuntime,
     buffer: *std.ArrayList(u8),
     value: JSValue,
-    comptime policy: Policy,
+    policy: Policy,
 ) AppendStringError!void {
-    if (comptime policy.symbol == .describe) {
+    if (policy.symbol == .describe) {
         if (value.asSymbolAtom()) |atom_id| {
             const description = symbol.description(rt, atom_id) orelse "";
             try buffer.appendSlice(rt.memory.allocator, "Symbol(");
@@ -103,7 +103,7 @@ fn appendObjectString(
     rt: *JSRuntime,
     buffer: *std.ArrayList(u8),
     value: JSValue,
-    comptime policy: Policy,
+    policy: Policy,
 ) AppendStringError!void {
     const header = value.refHeader() orelse return;
     const object_value = Object.fromHeader(header);
@@ -111,7 +111,7 @@ fn appendObjectString(
         const data = object_value.objectData() orelse return error.TypeError;
         return appendValueString(rt, buffer, data, policy);
     }
-    if (comptime policy.unwrap_wrappers) {
+    if (policy.unwrap_wrappers) {
         if (object_value.class_id == class.ids.number or object_value.class_id == class.ids.boolean or
             object_value.class_id == class.ids.big_int or object_value.class_id == class.ids.symbol)
         {
@@ -129,8 +129,8 @@ fn appendObjectString(
     return buffer.appendSlice(rt.memory.allocator, "[object Object]");
 }
 
-fn unsupportedValue(rt: *JSRuntime, buffer: *std.ArrayList(u8), comptime policy: Policy) AppendStringError!void {
-    return switch (comptime policy.unsupported) {
+fn unsupportedValue(rt: *JSRuntime, buffer: *std.ArrayList(u8), policy: Policy) AppendStringError!void {
+    return switch (policy.unsupported) {
         .object_tag => buffer.appendSlice(rt.memory.allocator, "[object Object]"),
         // qjs `JS_ToString` throws for Symbols rather than tagging them; the
         // RegExp constructor legs (quickjs.c:47578,47627,47789) rely on it.
@@ -144,7 +144,7 @@ fn appendArrayString(
     rt: *JSRuntime,
     buffer: *std.ArrayList(u8),
     array: *Object,
-    comptime policy: Policy,
+    policy: Policy,
 ) AppendStringError!void {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
