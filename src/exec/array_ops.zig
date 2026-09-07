@@ -16,6 +16,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
 const array_list_erased = @import("../core/array_list_erased.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
 const construct_mod = @import("construct.zig");
@@ -1842,7 +1843,7 @@ pub fn arrayReduceRightSparseLarge(
         if (index >= length) continue;
         try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
-    std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
+    sort_erased.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
             return a.index > b.index;
         }
@@ -2167,7 +2168,7 @@ pub fn arrayLastIndexSparseLarge(
         if (index >= start_exclusive or index >= length) continue;
         try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
-    std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
+    sort_erased.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
             return a.index > b.index;
         }
@@ -3464,7 +3465,7 @@ pub fn arrayUnshiftSparseLarge(
             try candidates.append(ctx.runtime.memory.allocator, index - insert_count);
         }
     }
-    std.sort.heap(usize, candidates.items, {}, struct {
+    sort_erased.heap(usize, candidates.items, {}, struct {
         fn lessThan(_: void, a: usize, b: usize) bool {
             return a > b;
         }

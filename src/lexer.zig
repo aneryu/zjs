@@ -10,6 +10,7 @@ pub fn namespace(comptime token: type) type {
         const std = @import("std");
         const atom_module = @import("core/atom.zig");
         const array_list_erased = @import("core/array_list_erased.zig");
+        const sort_erased = @import("core/sort_erased.zig");
         const simple_token = @import("simple_token.zig");
         const unicode = @import("libs/unicode.zig");
         const t = token;
@@ -1862,7 +1863,7 @@ pub fn namespace(comptime token: type) type {
             try markTypeAssertions(self.allocator, self.source, tokens.items, &ranges);
             try markNonNullAssertions(self.allocator, self.source, tokens.items, &ranges);
 
-            std.sort.heap(Range, ranges.items, {}, rangeLessThan);
+            sort_erased.heap(Range, ranges.items, {}, rangeLessThan);
             self.skipped_intervals.clearRetainingCapacity();
             for (ranges.items) |range| {
                 if (self.skipped_intervals.items.len == 0 or range.start > self.skipped_intervals.items[self.skipped_intervals.items.len - 1].end) {

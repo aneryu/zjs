@@ -16,6 +16,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const core = @import("../core/root.zig");
 const array_list_erased = @import("../core/array_list_erased.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const exception_ops = @import("exception_ops.zig");
 const module_auto_init = @import("../core/module_auto_init.zig");
 const property_ops = @import("property_ops.zig");
@@ -830,7 +831,7 @@ fn initializeCanonicalModuleNamespace(
         &visited,
         &exports,
     );
-    std.sort.heap(core.Atom, exports.items, ctx.runtime, atomLessThan);
+    sort_erased.heap(core.Atom, exports.items, ctx.runtime, atomLessThan);
 
     for (exports.items) |export_name| {
         const resolution = try resolveExportChecked(ctx, record, export_name);

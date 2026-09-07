@@ -33,6 +33,7 @@ const memory_mod = @import("memory.zig");
 const array_list_erased = @import("array_list_erased.zig");
 const block_heap = @import("gc_block_heap.zig");
 const std = @import("std");
+const sort_erased = @import("sort_erased.zig");
 const builtin = @import("builtin");
 
 const ObjectVisitSet = std.AutoHashMap(usize, void);
@@ -9821,7 +9822,7 @@ pub const Object = extern struct {
                     .atom_id = prop.atom_id,
                 });
             }
-            std.sort.heap(IndexKey, index_keys.items, {}, indexKeyLessThan);
+            sort_erased.heap(IndexKey, index_keys.items, {}, indexKeyLessThan);
             var previous_index: ?u32 = null;
             for (index_keys.items) |index_key| {
                 if (previous_index) |previous| {

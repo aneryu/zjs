@@ -18761,3 +18761,39 @@ test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
         try std.testing.expectEqual(@as(usize, 0), erased.capacity);
     }
 }
+
+test "sort_erased heap matches std.sort.heap" {
+    const sort_erased = @import("../core/sort_erased.zig");
+    const Sample = struct { key: u32, order: u32 };
+
+    var empty: [0]u32 = .{};
+    sort_erased.heap(u32, &empty, {}, std.sort.asc(u32));
+
+    var std_nums = [_]u32{ 7, 1, 4, 1, 9, 0, 3 };
+    var erased_nums = std_nums;
+    std.sort.heap(u32, &std_nums, {}, std.sort.asc(u32));
+    sort_erased.heap(u32, &erased_nums, {}, std.sort.asc(u32));
+    try std.testing.expectEqualSlices(u32, &std_nums, &erased_nums);
+
+    var std_desc = [_]u32{ 3, 8, 2, 8, 1 };
+    var erased_desc = std_desc;
+    std.sort.heap(u32, &std_desc, {}, std.sort.desc(u32));
+    sort_erased.heap(u32, &erased_desc, {}, std.sort.desc(u32));
+    try std.testing.expectEqualSlices(u32, &std_desc, &erased_desc);
+
+    var std_samples = [_]Sample{
+        .{ .key = 2, .order = 0 },
+        .{ .key = 1, .order = 1 },
+        .{ .key = 2, .order = 2 },
+        .{ .key = 0, .order = 3 },
+    };
+    var erased_samples = std_samples;
+    const lessThan = struct {
+        fn lessThan(_: void, a: Sample, b: Sample) bool {
+            return a.key < b.key or (a.key == b.key and a.order < b.order);
+        }
+    }.lessThan;
+    std.sort.heap(Sample, &std_samples, {}, lessThan);
+    sort_erased.heap(Sample, &erased_samples, {}, lessThan);
+    try std.testing.expectEqualSlices(Sample, &std_samples, &erased_samples);
+}

@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("../core/root.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
 const cfg = @import("cfg.zig");
@@ -585,7 +586,7 @@ const Resolver = struct {
                 };
                 index += 1;
             }
-            std.sort.heap(BindEntry, self.binds, {}, bindLessThan);
+            sort_erased.heap(BindEntry, self.binds, {}, bindLessThan);
         }
         self.refreshBindFrontier();
 

@@ -2,6 +2,7 @@
 //! Patterns and inputs are borrowed; `Compiled` owns bytecode, and scratch storage owns only inline-buffer overflow.
 const std = @import("std");
 const array_list_erased = @import("../core/array_list_erased.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const unicode = @import("unicode.zig");
 const regexp_properties = @import("unicode/regexp_properties.zig");
 
@@ -2839,7 +2840,7 @@ const REParseState = struct {
         // uses its ordinary rqsort with only a length comparator
         // (libregexp.c:1308). Avoid a large stable block-sort instance here.
         const items = set.strings.items;
-        std.sort.heap([]u21, items, {}, struct {
+        sort_erased.heap([]u21, items, {}, struct {
             fn longerFirst(_: void, lhs: []u21, rhs: []u21) bool {
                 return lhs.len > rhs.len;
             }

@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
 const cfg = @import("cfg.zig");
@@ -2379,7 +2380,7 @@ fn buildBindIndex(
         };
         bind_index += 1;
     }
-    std.sort.heap(BindEntry, binds, {}, cfg.bindLessThan);
+    sort_erased.heap(BindEntry, binds, {}, cfg.bindLessThan);
     return binds;
 }
 

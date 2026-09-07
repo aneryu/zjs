@@ -1,6 +1,7 @@
 //! CLI boundary for script/module evaluation, host loading, job draining, and exception/rejection reporting.
 //! Source buffers live through evaluation; `--leak-check` selects explicit event-loop, context, and runtime teardown.
 const std = @import("std");
+const sort_erased = @import("../core/sort_erased.zig");
 const cli_process = @import("cli_process.zig");
 const engine = @import("zjs");
 const simple_token = engine.simple_token;
@@ -682,7 +683,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
         };
         row_count += 1;
     }
-    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
     try output.print("  \"opcode_profile\": {{\n", .{});
     try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
@@ -1322,7 +1323,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         row_count += 1;
     }
 
-    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
     try output.print("\nZJS opcode profile\n", .{});
     try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
