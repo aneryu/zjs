@@ -447,31 +447,6 @@ pub const ValueRootBuffer = struct {
     }
 };
 
-/// `ValueRootBuffer` for slot-typed var-ref cell slices (`[]*VarRef`,
-/// VARREFS-SLOT-TYPING-BLUEPRINT phase D): a rooted, refcount-holding copy of
-/// a cell slice, refcount behavior identical to the pre-typed initCopy of the
-/// same cells as JSValues.
-pub const CellRootBuffer = struct {
-    cells: []*var_ref_mod.VarRef = &.{},
-
-    pub fn initCopy(rt: *JSRuntime, source: []const *var_ref_mod.VarRef) !CellRootBuffer {
-        if (source.len == 0) return .{};
-        const cells = try rt.memory.alloc(*var_ref_mod.VarRef, source.len);
-        for (source, 0..) |cell, idx| cells[idx] = cell;
-        return .{ .cells = cells };
-    }
-
-    pub fn deinit(self: *CellRootBuffer, rt: *JSRuntime) void {
-        const cells = self.cells;
-        self.cells = &.{};
-        if (cells.len != 0) rt.memory.free(*var_ref_mod.VarRef, cells);
-    }
-
-    pub fn slice(self: *CellRootBuffer) ValueRootSlice {
-        return .{ .cells = &self.cells };
-    }
-};
-
 pub const ValueRootValue = struct {
     value: *JSValue,
 };
