@@ -280,7 +280,7 @@ fn finalCallEnvironment(
 
 /// Exec-side convenience view for native implementations that need more than
 /// their typed cproto arguments. It is reconstructed from the current
-/// stack-local environment and is not stored in `InternalRecord`.
+/// stack-local environment and is not stored in `NativeEntry`.
 pub const NativeCall = struct {
     ctx: *core.JSContext,
     /// Non-null only for an observable JS callable invocation. Synthetic
@@ -544,7 +544,7 @@ pub inline fn callInternalRecordDirect(
     globals: []core.global_slots.Slot,
     func_obj: ?*core.Object,
     this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -562,7 +562,7 @@ pub inline fn callInternalRecordDirectInRealm(
     output: ?*std.Io.Writer,
     func_obj: *core.Object,
     this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -582,7 +582,7 @@ inline fn callInternalRecordDirectWithEnvironment(
     output: ?*std.Io.Writer,
     func_obj: ?*core.Object,
     this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     args: []const core.JSValue,
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
@@ -629,7 +629,7 @@ pub inline fn callRecordFromVmInRealm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     func_obj: *core.Object,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     realm: *core.RealmContext,
     this_value: core.JSValue,
     args: []const core.JSValue,
@@ -672,11 +672,87 @@ pub inline fn callRecordFromVmInRealm(
     return callRecordWithEnvironment(output, realm_global, func_obj, record, realm, this_value, args, caller_function, caller_frame);
 }
 
+/// K0 inline arm (design §5.2): the call handler invokes a managed entry
+/// that declares no environment straight from the operand window. The
+/// handler owns the guards (`kind == .managed`, `!needs_env`, native stack
+/// preflight, stack top published); this pushes the qjs `sf` backtrace link
+/// on the handler's own stack, makes the one `bl`, and hands the raw
+/// sentinel-carrying value back in registers.
+pub inline fn callManagedFromWindow(
+    rt: *core.JSRuntime,
+    realm: *core.RealmContext,
+    entry: *const core.NativeEntry,
+    func_obj: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+) core.JSValue {
+    var bt_data: NativeBacktraceData = undefined;
+    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    var bt_frame: core.ActiveBacktraceFrame = .{
+        .previous = rt.hot.current_backtrace_frame,
+        .data = &bt_data,
+        .resolver = resolveNativeBacktrace,
+    };
+    rt.hot.current_backtrace_frame = &bt_frame;
+    const result = entry.managed()(realm, this_value, args.ptr, @intCast(args.len), entry, func_obj);
+    rt.hot.current_backtrace_frame = bt_frame.previous;
+    return result;
+}
+
+/// K3 untyped getter twin of `callManagedFromWindow` for the W1
+/// `.native_getter` arm: the handler has guarded the accessor slot and
+/// resolved the entry; this is the backtrace link around one `bl` into the
+/// managed getter prototype. The sentinel comes back raw.
+pub inline fn callGetterFromWindow(
+    rt: *core.JSRuntime,
+    realm: *core.RealmContext,
+    entry: *const core.NativeEntry,
+    func_obj: *core.Object,
+    receiver: core.JSValue,
+) core.JSValue {
+    var bt_data: NativeBacktraceData = undefined;
+    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    var bt_frame: core.ActiveBacktraceFrame = .{
+        .previous = rt.hot.current_backtrace_frame,
+        .data = &bt_data,
+        .resolver = resolveNativeBacktrace,
+    };
+    rt.hot.current_backtrace_frame = &bt_frame;
+    const result = entry.getter()(realm, receiver, entry);
+    rt.hot.current_backtrace_frame = bt_frame.previous;
+    return result;
+}
+
+/// K2 `method_managed` twin of `callManagedFromWindow` (design §4.3): the
+/// handler has already unwrapped the receiver (`nativeReceiverSelf`), so
+/// this is the same backtrace link around the managed-with-self prototype.
+pub inline fn callMethodManagedFromWindow(
+    rt: *core.JSRuntime,
+    realm: *core.RealmContext,
+    entry: *const core.NativeEntry,
+    func_obj: *core.Object,
+    self_ptr: *anyopaque,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+) core.JSValue {
+    var bt_data: NativeBacktraceData = undefined;
+    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    var bt_frame: core.ActiveBacktraceFrame = .{
+        .previous = rt.hot.current_backtrace_frame,
+        .data = &bt_data,
+        .resolver = resolveNativeBacktrace,
+    };
+    rt.hot.current_backtrace_frame = &bt_frame;
+    const result = entry.methodManaged()(realm, self_ptr, this_value, args.ptr, @intCast(args.len), entry);
+    rt.hot.current_backtrace_frame = bt_frame.previous;
+    return result;
+}
+
 noinline fn callRecordWithEnvironment(
     output: ?*std.Io.Writer,
     realm_global: *core.Object,
     func_obj: *core.Object,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     realm: *core.RealmContext,
     this_value: core.JSValue,
     args: []const core.JSValue,
@@ -783,7 +859,7 @@ inline fn invokeEntry(
             const self_ptr = nativeReceiverSelf(this_value, entry) orelse return throwNativeReceiverTypeError(ctx, entry);
             return sentinelToHost(ctx, entry.methodManaged()(ctx, self_ptr, this_value, args.ptr, @intCast(args.len), entry));
         },
-        .forward_call, .forward_apply, .retired => return error.TypeError,
+        .retired => return error.TypeError,
     }
 }
 
@@ -981,7 +1057,7 @@ pub fn tryNativeAccessorCall(
 /// so a handler can decide before publishing its pc / stack top).
 pub const NativeAccessorTarget = struct {
     func_obj: *core.Object,
-    record: *const core.NativeEntry,
+    entry: *const core.NativeEntry,
     realm: *core.RealmContext,
 };
 
@@ -992,8 +1068,8 @@ pub inline fn nativeAccessorTarget(accessor: core.JSValue, comptime expected_kin
     const func_obj = core.value_semantics.objectFromValueTrustedExpression(accessor) orelse return null;
     if (func_obj.class_id != core.class.ids.c_function) return null;
     const target = func_obj.nativeCallTarget() orelse return null;
-    if (target.record.kind != expected_kind) return null;
-    return .{ .func_obj = func_obj, .record = target.record, .realm = target.realm };
+    if (target.entry.kind != expected_kind) return null;
+    return .{ .func_obj = func_obj, .entry = target.entry, .realm = target.realm };
 }
 
 pub fn callNativeAccessorTarget(
@@ -1009,15 +1085,15 @@ pub fn callNativeAccessorTarget(
 ) HostError!core.JSValue {
     // Typed accessor: leaf contract (§4.7 K1/K2 row) -- no preflight, no
     // backtrace marker; the VM throws on a receiver / marshal miss.
-    if (target.record.sig != 0) {
+    if (target.entry.sig != 0) {
         if (expected_kind == .getter) {
-            return invokeTypedGetter(target.realm, receiver, target.record);
+            return invokeTypedGetter(target.realm, receiver, target.entry);
         } else {
             const new_value = if (args.len == 0) core.JSValue.undefinedValue() else args[0];
-            return invokeTypedSetter(target.realm, receiver, target.record, new_value);
+            return invokeTypedSetter(target.realm, receiver, target.entry, new_value);
         }
     }
-    const bits = callRecordFromVmInRealm(ctx, output, global, target.func_obj, target.record, target.realm, receiver, args, caller_function, caller_frame);
+    const bits = callRecordFromVmInRealm(ctx, output, global, target.func_obj, target.entry, target.realm, receiver, args, caller_function, caller_frame);
     const result = nativeFromBits(bits);
     if (nativeIsExc(ctx, result)) return nativeHostError(ctx);
     return result;
@@ -1077,13 +1153,14 @@ inline fn leafStringReceiver(this_value: core.JSValue) ?*const core.string.Strin
     return null;
 }
 
-/// One-code-unit result string (charAt / at). Allocation failure is a miss:
-/// the fallback repeats the allocation and reports it through the
-/// legacy error path.
+/// One-code-unit result string (charAt / at). A latin1 unit is a load from
+/// the runtime's single-code-unit string table (`singleByteString`), so the
+/// leaf arm allocates nothing at all after the first request for that unit.
+/// Allocation failure is a miss: the fallback repeats the allocation and
+/// reports it through the legacy error path.
 inline fn leafCodeUnitString(rt: *core.JSRuntime, unit: u16) ?core.JSValue {
     if (unit < 0x100) {
-        const byte: [1]u8 = .{@intCast(unit)};
-        const str = core.string.String.createLatin1(rt, &byte) catch return null;
+        const str = rt.singleByteString(@intCast(unit)) catch return null;
         return str.value();
     }
     const units: [1]u16 = .{unit};

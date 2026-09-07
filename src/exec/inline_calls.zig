@@ -428,6 +428,14 @@ pub const Entry = struct {
             self.return_action == .native_boundary;
     }
 
+    /// A site-owned lean native-boundary frame (`LeanFrame`), the shape the
+    /// dedicated return handler retires. The marker is only ever written
+    /// together with `.native_boundary`, so two loads decide it.
+    pub inline fn isLeanBoundaryReturn(self: *const Entry) bool {
+        return self.return_action == .native_boundary and
+            self.continuation_payload == LeanFrame.marker;
+    }
+
     pub inline fn completesConstructor(self: *const Entry) bool {
         return self.teardown.constructor_completion;
     }
@@ -680,8 +688,14 @@ pub const Entry = struct {
         std.debug.assert(self.teardown.has_native_caller);
         std.debug.assert(frame.cold == null);
         std.debug.assert(frame.ownership.storage == .borrowed);
-        std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
-        std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
+        // The exact-args forwarded shape borrows its argument window in place
+        // from the caller region (qjs `arg_buf = argv`, quickjs.c:17841), so
+        // there is nothing to release here either: those slots sit above the
+        // caller's retreated operand top and are dead once the frame unlinks.
+        std.debug.assert(frame.locals.len == 0);
+        std.debug.assert(frame.args.len == frame.function.arg_count);
+        std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
+        std.debug.assert(frame.open_var_refs.len == 0);
         std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
         rt.vm_stack.restore(self.arena_mark);
     }
@@ -1022,36 +1036,23 @@ pub const NativeBoundaryScope = struct {
     /// independent forwarding-eligible loads instead of the
     /// machine -> top -> frame -> function -> code dependent chain.
     vm_entry: tailcall_dispatch.Vm.EntryState,
-    /// `initIdle`: the fence is an idle Machine (the embedder's resident host
-    /// invocation at depth 0). Nothing is suspended in a native frame, so no
-    /// dispatch state has to survive the callback, and the invocation's own
-    /// live root view (bottom-less, published by `HostInvocation.publish`)
-    /// already enumerates exactly the callback segment, so no nested
-    /// backtrace node is installed either.
-    idle: bool,
     validation: NativeBoundaryValidation,
 
+    /// The idle-machine fence (the embedder's resident host invocation at
+    /// depth 0) has its own transaction type, `IdleBoundaryScope`: it needs
+    /// none of the state below.
     pub fn init(invocation: *ActiveInvocation) NativeBoundaryScope {
-        return initMode(invocation, false);
-    }
-
-    pub fn initIdle(invocation: *ActiveInvocation) NativeBoundaryScope {
-        std.debug.assert(invocation.machine.depth == 0);
-        std.debug.assert(invocation.current_backtrace_view.live and
-            invocation.current_backtrace_view.bottom_exclusive == null);
-        return initMode(invocation, true);
-    }
-
-    inline fn initMode(invocation: *ActiveInvocation, comptime idle: bool) NativeBoundaryScope {
         const machine = invocation.machine;
         return .{
             .invocation = invocation,
             .outer_view = invocation.current_backtrace_view,
-            .rt = machine.ctx.runtime,
-            .view = if (idle) undefined else MachineBacktraceView.segment(machine, machine.top),
+            // `machine.vm.rt` (resident, one load) rather than
+            // `machine.ctx.runtime` (machine -> ctx -> runtime, two dependent
+            // loads in front of every boundary scope).
+            .rt = machine.vm.rt,
+            .view = MachineBacktraceView.segment(machine, machine.top),
             .fence_depth = machine.depth,
-            .vm_entry = if (idle) undefined else machine.vm.saveEntryState(),
-            .idle = idle,
+            .vm_entry = machine.vm.saveEntryState(),
             .validation = if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) blk: {
                 const stack = machine.currentLevel().stack;
                 break :blk .{
@@ -1067,7 +1068,6 @@ pub const NativeBoundaryScope = struct {
     }
 
     pub fn push(self: *NativeBoundaryScope) void {
-        if (self.idle) return;
         self.outer_view.freeze(self.view.bottom_exclusive);
         self.frame = .{
             .data = &self.view,
@@ -1084,7 +1084,7 @@ pub const NativeBoundaryScope = struct {
             machine.discardToDepth(self.fence_depth);
         }
         std.debug.assert(machine.depth == self.fence_depth);
-        std.debug.assert(self.idle or machine.top == self.view.bottom_exclusive);
+        std.debug.assert(machine.top == self.view.bottom_exclusive);
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             const stack = machine.currentLevel().stack;
             std.debug.assert(stack.len() == self.validation.stack_len);
@@ -1097,7 +1097,6 @@ pub const NativeBoundaryScope = struct {
             std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
         }
 
-        if (self.idle) return;
         machine.vm.restoreEntryState(&self.vm_entry);
         self.popBacktrace();
     }
@@ -1108,7 +1107,7 @@ pub const NativeBoundaryScope = struct {
     pub fn finish(self: *NativeBoundaryScope) void {
         const machine = self.invocation.machine;
         std.debug.assert(machine.depth == self.fence_depth);
-        std.debug.assert(self.idle or machine.top == self.view.bottom_exclusive);
+        std.debug.assert(machine.top == self.view.bottom_exclusive);
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             const stack = machine.currentLevel().stack;
             std.debug.assert(stack.len() == self.validation.stack_len);
@@ -1120,9 +1119,19 @@ pub const NativeBoundaryScope = struct {
             std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.validation.native_call_depth);
             std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
         }
-        if (self.idle) return;
         machine.vm.restoreEntryState(&self.vm_entry);
         self.popBacktrace();
+    }
+
+    /// The two facts the bounded-unwind driver needs from a scope
+    /// (`zjs_vm.runActiveInvocationAfterNativeBoundaryError`), so the driver
+    /// takes two scalars instead of a pointer to the whole transaction.
+    pub inline fn fenceDepth(self: *const NativeBoundaryScope) usize {
+        return self.fence_depth;
+    }
+
+    pub inline fn expectedTop(self: *const NativeBoundaryScope) ?*Entry {
+        return self.view.bottom_exclusive;
     }
 
     inline fn popBacktrace(self: *NativeBoundaryScope) void {
@@ -1141,6 +1150,49 @@ pub const NativeBoundaryScope = struct {
             self.invocation.current_backtrace_view = self.outer_view;
             self.outer_view.thaw();
         }
+    }
+};
+
+/// Idle-machine twin of `NativeBoundaryScope`: the embedder's resident host
+/// invocation at depth 0 (`host_invocation.HostInvocation`). Nothing is
+/// suspended in a native frame, so there is no `Vm.EntryState` to snapshot;
+/// the invocation's own bottom-less root view already enumerates exactly the
+/// callback segment, so no nested backtrace node is installed either; and the
+/// fence depth is 0 by construction. `NativeBoundaryScope.initIdle` already
+/// skipped the work -- what it could not skip was BUILDING the 200-byte
+/// transaction on the stack (measured: 11 instructions of stores and one
+/// constant-true branch per embedder crossing) only for `finish` to read two
+/// words back out. This carries the one field the error leg needs.
+pub const IdleBoundaryScope = struct {
+    invocation: *ActiveInvocation,
+
+    pub inline fn init(invocation: *ActiveInvocation) IdleBoundaryScope {
+        std.debug.assert(invocation.machine.depth == 0);
+        std.debug.assert(invocation.current_backtrace_view.live and
+            invocation.current_backtrace_view.bottom_exclusive == null);
+        return .{ .invocation = invocation };
+    }
+
+    pub inline fn fenceDepth(_: *const IdleBoundaryScope) usize {
+        return 0;
+    }
+
+    pub inline fn expectedTop(_: *const IdleBoundaryScope) ?*Entry {
+        return null;
+    }
+
+    pub inline fn push(_: *IdleBoundaryScope) void {}
+
+    pub inline fn finish(self: *IdleBoundaryScope) void {
+        std.debug.assert(self.invocation.machine.depth == 0);
+    }
+
+    /// Error leg only: discard whatever the failed callback segment left
+    /// above the fence. Never inlined into the crossing.
+    pub noinline fn deinit(self: *IdleBoundaryScope) void {
+        const machine = self.invocation.machine;
+        if (machine.depth > 0) machine.discardToDepth(0);
+        std.debug.assert(machine.depth == 0);
     }
 };
 
@@ -1250,6 +1302,12 @@ pub const Machine = struct {
     /// for accounting (L0 boundary tests, backtrace length, slot reuse).
     /// Maintained in lockstep with `depth` by pushFrame/popFrame.
     top: ?*Entry = null,
+    /// The in-flight call's operand window, published by the call site's
+    /// `Stack.retreatToCallRegion*` and read back by
+    /// `active_invocation_trace.traceMachine` (see `stack.PendingCallRegion`).
+    /// Only the innermost call site of a Machine can be mid-retreat, so one
+    /// cell per Machine is enough.
+    pending_call_region: stack_mod.PendingCallRegion = .{},
     /// The resident dispatch-loop register bundle (native-boundary design
     /// section 6.2). `zjs_vm.runTC` used to build a fresh 24-field `Vm` on
     /// the C stack for every entry -- 84 instructions per builtin callback
@@ -1266,6 +1324,7 @@ pub const Machine = struct {
             .output = output,
             .global = global,
             .l0 = l0,
+            .pending_call_region = .{},
             .vm = undefined,
         };
         machine.vm.initResident(ctx, output, global);
@@ -1274,6 +1333,13 @@ pub const Machine = struct {
 
     /// Re-target an idle machine to another context of the same runtime
     /// (the resident host invocation is per runtime).
+    /// A `callFunction` / `CallSite` loop re-acquires the resident host
+    /// invocation for the SAME (ctx, global, output) on every call; the
+    /// re-target is then five dead stores, so it is guarded.
+    pub inline fn alreadyTargets(self: *const Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) bool {
+        return self.ctx == ctx and self.global == global and self.output == output;
+    }
+
     pub fn retarget(self: *Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) void {
         std.debug.assert(self.depth == 0);
         self.ctx = ctx;
@@ -2401,7 +2467,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishExactArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
+        return self.finishExactArgsLeafFrame(leaf_this, false, rt, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc(), core.JSValue.undefinedValue());
     }
 
     /// Capture-leaf authoritative constructor (O2) — the deep fallible twin
@@ -2588,6 +2654,14 @@ pub const Machine = struct {
     inline fn finishExactArgsLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        /// `Function.prototype.call` / `.apply` forwarding (design section
+        /// 5.4): the 16-byte slot this shape normally uses for the {resume
+        /// pc, resume sp} record carries the skipped native record instead,
+        /// so a backtrace keeps qjs's frame order
+        /// `target -> call (native) -> caller`. The return arm re-derives the
+        /// caller's resume through `prev`, exactly as the zero-arg forwarded
+        /// leaf already does.
+        comptime forwarded: bool,
         rt: *core.JSRuntime,
         entry: *Entry,
         global: *core.Object,
@@ -2599,7 +2673,9 @@ pub const Machine = struct {
         storage_on_heap: bool,
         planned_stack_bytes: usize,
         resume_pc: [*]const u8,
+        native_caller: core.JSValue,
     ) *Entry {
+        comptime std.debug.assert(!forwarded or leaf_this == .receiver);
         const method_receiver = comptime leaf_this == .receiver;
         std.debug.assert(rt == self.ctx.runtime);
         const callable_slot = &region_start[@intFromBool(method_receiver)];
@@ -2637,13 +2713,28 @@ pub const Machine = struct {
             },
         };
         entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
-        entry.teardown = .{
-            .simple = true,
-            .exact_args_leaf = !storage_on_heap,
-        };
-        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
-        // return path never reads the record.
-        entry.setEmptyLeafResume(resume_pc, region_start);
+        if (comptime forwarded) {
+            std.debug.assert(!storage_on_heap);
+            // NOT `exact_args_leaf`: that bit routes `popAndResume`'s hot arm
+            // straight to a resume record this shape does not have. The
+            // forwarded pair (`special_return` + `has_native_caller`) is the
+            // established O3 classification and reaches the `op_return_slow`
+            // arm that re-derives the caller's resume through `prev`.
+            entry.teardown = .{
+                .simple = true,
+                .special_return = true,
+                .has_native_caller = true,
+            };
+            entry.native_caller = native_caller;
+        } else {
+            entry.teardown = .{
+                .simple = true,
+                .exact_args_leaf = !storage_on_heap,
+            };
+            // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+            // return path never reads the record.
+            entry.setEmptyLeafResume(resume_pc, region_start);
+        }
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
@@ -2832,7 +2923,60 @@ pub const Machine = struct {
         entry.continuation_payload = 0;
         entry.catch_target = null;
         entry.arena_mark = carve.mark;
-        return self.finishExactArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
+        return self.finishExactArgsLeafFrame(leaf_this, false, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc, core.JSValue.undefinedValue());
+    }
+
+    /// Warm forwarded exact-args leaf (design sections 5.4 + O1):
+    /// `f.call(this, a)` / `f.apply(this, [a])` where `f` is a same-Realm
+    /// plain bytecode function whose published shape is the exact-args leaf
+    /// and the forwarded argc equals its `arg_count`. `op_call_method`'s
+    /// window rewrite has already produced the method layout
+    /// `[thisArg, f, args...]`, so this is
+    /// `tryPushExactArgsLeafCallFast(.receiver, ...)` with the skipped native
+    /// `call` / `apply` record in the slot the resume record would use.
+    ///
+    /// Before this arm the forwarded call built the general exact-simple
+    /// frame (`pushMethodCall` -> `pushExactSimpleFrame`) and retired through
+    /// `popOrdinaryFrame` + `reloadAfterPop`, while the identical `recv.m(x)`
+    /// shape took the leaf constructor and the flat republication.
+    pub inline fn tryPushForwardedExactArgsLeafFast(
+        self: *Machine,
+        rt: *core.JSRuntime,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        native_caller: core.JSValue,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertExactArgsLeafEligible(.receiver, function, call_facts);
+        std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
+        std.debug.assert(rt == self.ctx.runtime);
+        const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
+        const entry = self.entryAt(index);
+
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
+
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.arena_mark = carve.mark;
+        return self.finishExactArgsLeafFrame(.receiver, true, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, undefined, native_caller);
     }
 
     /// Warm, allocation-free capture-leaf construction (O2) — the parallel
@@ -4499,131 +4643,6 @@ pub const Machine = struct {
         return entry;
     }
 
-    /// Infallible publication tail for the forwarded empty leaf (O3) —
-    /// SEPARATE body from `finishEmptyLeafFrame` (sharing one parameterized
-    /// body measurably re-scheduled established arms; see
-    /// `pushExactArgsLeafFrame`). Region is `[target, call, thisArg?]` with
-    /// the caller top already retreated to `region_start`: the target
-    /// transfers into the frame callable exactly like the plain leaf, the
-    /// skipped native `call` function transfers into the entry's owned
-    /// `native_caller` (same slot `pushForwardedCall` publishes; the
-    /// backtrace resolver's `has_native_caller` arm reads it unchanged), and
-    /// the undefined `thisArg` slot needs no release. No resume record is
-    /// stored: its default-repr storage IS `native_caller`, so the return
-    /// arm re-derives the caller resume through `prev`. The sloppy `this`
-    /// arm borrows the realm global — identical to the plain sloppy leaf;
-    /// Function.prototype.call with an undefined thisArg reaches the same
-    /// deferred-coercion state as a plain call of the same target.
-    inline fn finishForwardedEmptyLeafFrame(
-        self: *Machine,
-        comptime leaf_this: LeafThis,
-        entry: *Entry,
-        global: *core.Object,
-        function: *const bytecode.FunctionBytecode,
-        region_start: [*]core.JSValue,
-        stack_window: []core.JSValue,
-    ) *Entry {
-        comptime std.debug.assert(leaf_this == .sloppy_global);
-        const rt = self.ctx.runtime;
-        // No failable operation follows the ownership transfers.
-        entry.frame = .{
-            .function = function,
-            .this_value = global.value(),
-            .current_function = takeSourceSlot(&region_start[0]),
-            // Forwarded leaves commit with copy_argv pricing, but the body is
-            // zero-arg, so the figure equals the leaf form either way.
-            .planned_stack_bytes = @intCast(vm_call.bytecodeLeafFrameAllocaSize(function)),
-            .storage_values = &.{},
-            .ownership = .{
-                .storage = .borrowed,
-            },
-        };
-        entry.native_caller = takeSourceSlot(&region_start[1]);
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
-        entry.teardown = .{
-            .simple = true,
-            .has_native_caller = true,
-            .special_return = true,
-            .copy_argv = true,
-        };
-        entry.prev = self.top;
-        self.top = entry;
-        self.depth += 1;
-        return entry;
-    }
-
-    /// Warm, allocation-free forwarded empty-leaf construction (O3) — the
-    /// Function.prototype.call twin of `tryPushEmptyLeafCallFast` (separate
-    /// body; see `pushExactArgsLeafFrame` for why the established zero-arg
-    /// source is not shared). A null result is the same pure miss contract:
-    /// call depth, arena watermark, source ownership (target, native `call`
-    /// function, and the optional undefined thisArg all still owned by their
-    /// region slots), and Machine links are unchanged, so the caller can
-    /// restore its operand top and take the authoritative generic forwarding
-    /// path (`pushForwardedCall`), which owns first-use Entry allocation,
-    /// chunk switching, heap fallback, OOM, and stack-overflow recovery.
-    pub inline fn tryPushForwardedEmptyLeafCallFast(
-        self: *Machine,
-        comptime leaf_this: LeafThis,
-        global: *core.Object,
-        caller_stack: *stack_mod.Stack,
-        function: *const bytecode.FunctionBytecode,
-        call_facts: bytecode.CallFacts,
-        region_start: [*]core.JSValue,
-    ) ?*Entry {
-        std.debug.assert(caller_stack.topPtr() == region_start);
-        assertLeafEligible(leaf_this, function, call_facts);
-        const ctx = self.ctx;
-        // K1 single pricing: one geometry derivation feeds admission, commit,
-        // and the persisted Entry charge (M1 dossier: the triple recompute was
-        // the top opCall residual).
-        const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
-        // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
-        // rare chunk/carve misses retreat the committed charge cold.
-        const rt = ctx.runtime;
-        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
-
-        const index = self.depth;
-        const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) {
-            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
-            return null;
-        }
-        const entry = self.entryAt(index);
-
-        const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
-            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
-            return null;
-        };
-
-        entry.return_action = .next;
-        entry.continuation_payload = 0;
-        entry.catch_target = null;
-        entry.arena_mark = carve.mark;
-        return self.finishForwardedEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window);
-    }
-
-    /// Push a bytecode target reached through Function.prototype.call. Takes
-    /// ownership of `native_caller` only on success; the caller retains and
-    /// frees it when frame setup fails.
-    pub fn pushForwardedCall(
-        self: *Machine,
-        global: *core.Object,
-        caller_stack: *stack_mod.Stack,
-        target: *const InlineTarget,
-        region_base: usize,
-        argc: u16,
-        layout: RegionLayout,
-        native_caller: core.JSValue,
-    ) HostError!*Entry {
-        caller_stack.setLen(region_base);
-        const entry = try self.pushFrame(.generic, false, true, global, target, ArgsSource.initStack(caller_stack.topPtr(), argc, layout == .method));
-        entry.native_caller = native_caller;
-        entry.teardown.has_native_caller = true;
-        return entry;
-    }
-
     /// Tail-call execution: transactionally replace the top inline frame with
     /// a fresh frame for `target` while retaining the retired caller's logical
     /// stack unit. QuickJS performs a nested JS_CallInternal for OP_tail_call
@@ -4985,10 +5004,10 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
-        // Forwarded leaves commit with copy_argv pricing, but the published
-        // body is zero-arg, so the padded-argv prefix is empty either way and
-        // the leaf figure releases the exact bytes charged.
-        std.debug.assert(dying.frame.function.arg_count == 0);
+        // Both forwarded shapes release the leaf figure: the zero-arg one
+        // commits with copy_argv pricing but its padded-argv prefix is empty,
+        // and the exact-args one commits `bytecodeLeafFrameAllocaSize`
+        // directly (argc == arg_count, so that prefix is empty too).
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(dying.frame.function));
         dying.deinitForwardedLeafInline(rt);

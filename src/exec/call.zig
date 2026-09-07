@@ -893,7 +893,7 @@ pub fn callNativeFunctionRecord(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    if (function_object.nativeRecord()) |record| {
+    if (function_object.nativeEntry()) |record| {
         return try builtin_dispatch.callInternalRecordDirect(
             ctx,
             output,

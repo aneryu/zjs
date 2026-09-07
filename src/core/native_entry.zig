@@ -42,10 +42,11 @@ pub const Kind = enum(u8) {
     method_leaf = 6,
     /// K2: `MethodManagedFn` with `self` unwrapped.
     method_managed = 7,
-    /// Function.prototype.call: window-forwarding arm, no native target.
-    forward_call = 8,
-    /// Function.prototype.apply: same.
-    forward_apply = 9,
+    // 8 / 9 were `forward_call` / `forward_apply`. Function.prototype.call /
+    // apply never became call kinds: §5.4 landed as an operand-window rewrite
+    // driven by `Flags.forwards_call` plus target identity
+    // (`function_ops.call_entry_target` / `apply_entry_target`), so the
+    // entries stay `managed`. Ids left unused rather than recycled.
     /// Tombstone: owner retired the entry; calling throws.
     retired = 255,
 
@@ -224,7 +225,7 @@ comptime {
     std.debug.assert(@offsetOf(NativeEntry, "owner") == 40);
 }
 
-/// Per-domain static table of builtin entries (replaces InternalRecordTable):
+/// Per-domain static table of builtin entries:
 /// a dense low-id prefix plus a sparse tail, both comptime rodata.
 pub const SparseEntry = struct {
     id: u32,

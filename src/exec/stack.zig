@@ -22,21 +22,37 @@ const gc = @import("../core/gc.zig");
 /// `f(a.map(g), new C([...]))` was reclaimed while sitting in it, and the
 /// surviving view then read a detached length.
 ///
-/// Thread-local rather than a `Stack` field because `Stack` is embedded in
-/// `inline_calls.Entry`, whose 256-byte layout is asserted; and one is enough
-/// because only the innermost call site can be mid-retreat on a thread.
-/// Erased outside generational builds.
-threadlocal var pending_call_region: []JSValue = &.{};
+/// One cell per `Machine` (`inline_calls.Machine.pending_call_region`), not a
+/// `Stack` field (`Stack` is embedded in `inline_calls.Entry`, whose 256-byte
+/// layout is asserted) and no longer a threadlocal: the threadlocal spelling
+/// tied the window's lifetime to a probe inside `setTopPtr`, which put a
+/// `mrs tpidr_el0` + two TLS loads + a compare (16 instructions) on EVERY
+/// operand-top publication, `op_return`'s included. The lifetime is now
+/// decided where it is read instead -- `active_invocation_trace.traceMachine`
+/// accepts the window only while its owning Stack is still one of the
+/// Machine's live levels AND that Stack's top is still exactly at the
+/// region's start, which is the same predicate the eager clear implemented
+/// (the retreat parks the top there; any later move of that top ends the
+/// window). Publication is three stores on the call leg; the return leg pays
+/// nothing.
+pub const PendingCallRegion = struct {
+    /// The Stack the window belongs to, compared by identity against the
+    /// Machine's live levels: a dead level's `Stack` is never dereferenced.
+    stack: ?*Stack = null,
+    values: [*]JSValue = undefined,
+    len: usize = 0,
 
-/// Publish the slots a call site has just retreated past. The top must already
-/// be at `region.ptr`; `setTopPtr` drops the window again on the next move.
-pub inline fn publishPendingCallRegion(region: []JSValue) void {
-    pending_call_region = region;
-}
-
-pub inline fn pendingCallRegion() []JSValue {
-    return pending_call_region;
-}
+    /// The live window, or an empty slice, for `owner`.
+    pub inline fn windowFor(self: *const PendingCallRegion, owner: *const Stack) []JSValue {
+        if (self.stack != owner or self.len == 0) return &.{};
+        if (owner.top_ptr != self.values) return &.{};
+        std.debug.assert(@intFromPtr(self.values) >= @intFromPtr(owner.values));
+        std.debug.assert(
+            (@intFromPtr(self.values) - @intFromPtr(owner.values)) / @sizeOf(JSValue) + self.len <= owner.capacity,
+        );
+        return self.values[0..self.len];
+    }
+};
 
 pub const Stack = struct {
     const Policy = runtime.VmStackWindowPolicy;
@@ -118,20 +134,25 @@ pub const Stack = struct {
     /// exactly the case the window exists for. Callers that already hold the
     /// register-resident top pass it; the `self.top_ptr` spelling below stays
     /// for the published call sites.
-    pub inline fn retreatToCallRegionFrom(self: *Stack, live_top: [*]JSValue, region_start: [*]JSValue) void {
+    pub inline fn retreatToCallRegionFrom(self: *Stack, pending: *PendingCallRegion, live_top: [*]JSValue, region_start: [*]JSValue) void {
         self.setTopPtr(region_start);
         // Not every call site reaches here with operands still above the
         // region: some arms retreat after an earlier arm already consumed
         // them, and land at or below `region_start`. There is nothing to
         // publish then, and publishing a span that is not the just-written
         // operands would hand the tracer whatever those slots hold.
-        if (@intFromPtr(live_top) <= @intFromPtr(region_start)) return;
+        if (@intFromPtr(live_top) <= @intFromPtr(region_start)) {
+            pending.len = 0;
+            return;
+        }
         const count = (@intFromPtr(live_top) - @intFromPtr(region_start)) / @sizeOf(JSValue);
-        publishPendingCallRegion(region_start[0..count]);
+        pending.stack = self;
+        pending.values = region_start;
+        pending.len = count;
     }
 
-    pub inline fn retreatToCallRegion(self: *Stack, region_start: [*]JSValue) void {
-        self.retreatToCallRegionFrom(self.top_ptr, region_start);
+    pub inline fn retreatToCallRegion(self: *Stack, pending: *PendingCallRegion, region_start: [*]JSValue) void {
+        self.retreatToCallRegionFrom(pending, self.top_ptr, region_start);
     }
 
     pub inline fn liveValues(self: *const Stack) []JSValue {
@@ -147,21 +168,15 @@ pub const Stack = struct {
         self.top_ptr = self.values + new_len;
     }
 
+    /// One store. The pending call region's lifetime used to be decided here
+    /// (see `PendingCallRegion`): the window is meaningful only while the top
+    /// sits exactly at its start, and the reader now tests that directly.
     pub inline fn setTopPtr(self: *Stack, new_top: [*]JSValue) void {
         const base_addr = @intFromPtr(self.values);
         const top_addr = @intFromPtr(new_top);
         std.debug.assert(top_addr >= base_addr);
         std.debug.assert(top_addr - base_addr <= self.capacity * @sizeOf(JSValue));
         std.debug.assert((top_addr - base_addr) % @sizeOf(JSValue) == 0);
-        // The pending region is meaningful only while the top sits exactly at
-        // its start: the retreat that opens the window sets the top there, and
-        // any other move either re-covers the slots (the callee frame is built
-        // over them, so `liveValues` reaches them again) or abandons them.
-        // Tying the lifetime to this one comparison keeps every exit path --
-        // including unwind -- from leaving a stale span behind.
-        if (pending_call_region.len != 0 and new_top != pending_call_region.ptr) {
-            pending_call_region = &.{};
-        }
         self.top_ptr = new_top;
     }
 

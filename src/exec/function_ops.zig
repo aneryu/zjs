@@ -38,7 +38,7 @@ pub const PrototypeMethod = enum(u32) {
 /// Identity of the realm-installed default `Function.prototype[@@hasInstance]`
 /// record (qjs:41395 `JS_CFUNC_DEF("[Symbol.hasInstance]", 1, js_function_hasInstance)`).
 /// Pointer compare against the densified table slot — not a name or shape cache.
-pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.host_function.InternalRecord) bool {
+pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.NativeEntry) bool {
     const expected = rt.internalBuiltinRecord(
         @intCast(@intFromEnum(core.function.NativeBuiltinDomain.function)),
         @intFromEnum(PrototypeMethod.has_instance),
@@ -48,7 +48,7 @@ pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.host_
 
 /// qjs compares the C function pointer (`js_function_hasInstance`, 41379).
 /// Same identity as `isDefaultHasInstanceRecord` without the runtime table.
-pub inline fn recordIsDefaultHasInstance(record: *const core.host_function.InternalRecord) bool {
+pub inline fn recordIsDefaultHasInstance(record: *const core.NativeEntry) bool {
     return record.target == default_has_instance_target;
 }
 

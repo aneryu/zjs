@@ -1239,18 +1239,24 @@ pub const JSRuntime = struct {
         /// QuickJS runtime execution state. These fields describe the
         /// currently executing stack, not a Realm, and are shared by every
         /// context belonging to this runtime.
+        /// Field ORDER is load-bearing on the bytecode-push admission
+        /// (`vm_call.tryCommitInlineCallDepthBytesRt`, one per crossing): the
+        /// two ceiling pairs it reads are laid out adjacently so each pair is
+        /// one `ldp` -- (call_depth, stack_size) for the logical depth ceiling
+        /// and (active_bytecode_stack_bytes, native_stack_limit) for the byte
+        /// ceiling. Keep a moved field paired with the value it is compared
+        /// against.
         call_depth: usize = 0,
-        native_call_depth: usize = 0,
+        /// Logical stack budget (`rt->stack_size` analogue); the data source
+        /// for both call-depth ceilings (`maxLogicalJsCallDepth` /
+        /// `maxNativeJsCallDepth`).
+        stack_size: usize = default_stack_size,
         /// Planned QuickJS bytecode-frame bytes for every active bytecode
         /// call, including tail-call callers whose physical zjs Entry storage
         /// has been reused. This Runtime owner survives nested Machines and
         /// Realm switches. It remains separate from Realm interrupt cadence
         /// and native call depth.
         active_bytecode_stack_bytes: usize = 0,
-        /// Logical stack budget (`rt->stack_size` analogue); the data source
-        /// for both call-depth ceilings (`maxLogicalJsCallDepth` /
-        /// `maxNativeJsCallDepth`).
-        stack_size: usize = default_stack_size,
         /// Native (machine C-stack) recursion guard, mirroring QuickJS
         /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860).
         /// Captured via `@frameAddress()` at the outermost eval entry
@@ -1260,8 +1266,9 @@ pub const JSRuntime = struct {
         /// yet". `native_stack_limit` is the lower address bound
         /// (`native_stack_top - native_stack_size`); a native frame pointer
         /// below it is an overflow. See `checkNativeStackOverflow`.
-        native_stack_top: usize = 0,
         native_stack_limit: usize = 0,
+        native_call_depth: usize = 0,
+        native_stack_top: usize = 0,
         native_stack_size: usize = default_native_stack_size,
         /// Head of the stack-local observable backtrace chain. Native calls
         /// and synchronous native fences both replace this pointer on entry
@@ -1444,17 +1451,25 @@ pub const JSRuntime = struct {
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
-    /// Lazy cache of single-byte (latin1) strings for ASCII code units.
-    /// Populated on first request via `singleByteString`. Each cached
-    /// String holds a permanent ref-count + 1 contributed by the cache;
-    /// borrowers `retain` and `free` normally, and the cache slot is
-    /// torn down on `JSRuntime.destroy`.
+    /// The single-code-unit string table: one shared latin1 body per code
+    /// unit `0..255`, created lazily on first request via `singleByteString`
+    /// and then never collected. The slot itself is the root
+    /// (`traceStringCacheRoots`), so a borrow of the body needs no retain
+    /// (ref-counting was deleted in TGC S1-S3) and the whole table is dropped
+    /// in `JSRuntime.destroy`.
+    ///
+    /// Every one-code-unit producer reads it: `charAt` / `at` /
+    /// `String.fromCharCode` with one argument / the string iterator /
+    /// `s[i]` indexing / a length-1 `slice`. Code units `>= 0x100` still
+    /// allocate. Sharing is unobservable because strings are compared by
+    /// value and are immutable; latin1 storage means the byte IS the code
+    /// unit, so `0x80..0xff` are as exact as the ASCII half.
     ///
     /// Hot paths like `getStringIndexValue` (`hex[i]`-style indexing in
     /// URI decode sweeps) call this thousands of times per
     /// inner iteration; reusing cached instances eliminates two heap
     /// allocations per call.
-    single_byte_strings: [128]?*string.String = @splat(null),
+    single_byte_strings: [256]?*string.String = @splat(null),
     /// Lazy cache for the immutable empty string. This shows up during
     /// standard global setup and in common `String`/JSON paths.
     empty_string: ?*string.String = null,
@@ -1505,7 +1520,7 @@ pub const JSRuntime = struct {
     /// `internalBuiltinRecord` with no compile-time knowledge of individual
     /// builtins. Empty until standard globals are installed, which is also
     /// the only path that creates native function objects carrying these ids.
-    internal_builtins: []const host_function.InternalRecordTable = &.{},
+    internal_builtins: []const native_entry.EntryTable = &.{},
     pub fn init(self: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
         const account = if (options.trace_writer) |writer|
             memory.MemoryAccount.initWithTrace(allocator, writer)
@@ -3000,7 +3015,7 @@ pub const JSRuntime = struct {
     /// Returns null for the separate host domain, invalid/gap ids, and runtimes
     /// whose standard globals were never installed. Two bounds-checked loads;
     /// no hashing or string compares.
-    pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const host_function.InternalRecord {
+    pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const native_entry.NativeEntry {
         if (domain_index >= self.internal_builtins.len) return null;
         return self.internal_builtins[domain_index].get(id);
     }
@@ -4056,21 +4071,27 @@ pub const JSRuntime = struct {
         self.gc.resetAllocationDebt();
     }
 
-    /// Return a cached single-byte (latin1) string for an ASCII byte
-    /// (0..127), creating it lazily on the first request. The cache slot is
-    /// itself a root, so the body outlives every borrow of it; there is no
-    /// per-caller retain to take (ref-counting was deleted in TGC S1-S3).
-    /// Returns `null` for non-ASCII bytes (the caller must allocate).
-    pub fn singleByteString(self: *JSRuntime, byte: u8) !?*string.String {
-        if (byte > 0x7f) return null;
+    /// Return the shared single-code-unit (latin1) string for `byte`,
+    /// creating it lazily on the first request. The cache slot is itself a
+    /// root, so the body outlives every borrow of it; there is no per-caller
+    /// retain to take (ref-counting was deleted in TGC S1-S3).
+    ///
+    /// Inline load + branch; the one-shot creation is outlined so a hit costs
+    /// nothing more than the table read.
+    pub inline fn singleByteString(self: *JSRuntime, byte: u8) !*string.String {
         if (self.single_byte_strings[byte]) |cached| return cached;
-        const created = try string.String.createAscii(self, &.{byte});
+        return self.createSingleByteString(byte);
+    }
+
+    /// Cold half of `singleByteString`: at most 256 executions per runtime.
+    noinline fn createSingleByteString(self: *JSRuntime, byte: u8) !*string.String {
+        const created = try string.String.createLatin1(self, &.{byte});
         self.single_byte_strings[byte] = created;
         return created;
     }
 
-    pub fn cachedSingleByteString(self: *JSRuntime, byte: u8) ?*string.String {
-        if (byte > 0x7f) return null;
+    /// Non-allocating probe: null when the slot has not been filled yet.
+    pub inline fn cachedSingleByteString(self: *JSRuntime, byte: u8) ?*string.String {
         return self.single_byte_strings[byte];
     }
 

@@ -58,8 +58,8 @@ fn moduleLayout() []const u8 {
 
 fn shapeLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "shape size={d} align={d} header={d} list_prev={d} ownership={d} hash={d} prop_hash_mask={d} prop_size={d} prop_count={d} registry_hash_next={d} proto={d} fam={d}\n",
-        .{ @sizeOf(core.Shape), @alignOf(core.Shape), @offsetOf(core.Shape, "header"), @offsetOf(core.Shape, "trace_list_previous"), @offsetOf(core.Shape, "ownership"), @offsetOf(core.Shape, "hash"), @offsetOf(core.Shape, "prop_hash_mask"), @offsetOf(core.Shape, "prop_size"), @offsetOf(core.Shape, "prop_count"), @offsetOf(core.Shape, "registry_hash_next"), @offsetOf(core.Shape, "proto"), @sizeOf(core.Shape) },
+        "shape size={d} align={d} header={d} list_prev={d} ownership={d} hash={d} prop_hash_mask={d} prop_size={d} prop_count={d} registry_hash_next={d} proto={d} identity={d} fam={d}\n",
+        .{ @sizeOf(core.Shape), @alignOf(core.Shape), @offsetOf(core.Shape, "header"), @offsetOf(core.Shape, "trace_list_previous"), @offsetOf(core.Shape, "ownership"), @offsetOf(core.Shape, "hash"), @offsetOf(core.Shape, "prop_hash_mask"), @offsetOf(core.Shape, "prop_size"), @offsetOf(core.Shape, "prop_count"), @offsetOf(core.Shape, "registry_hash_next"), @offsetOf(core.Shape, "proto"), @offsetOf(core.Shape, "identity"), @sizeOf(core.Shape) },
     );
 }
 

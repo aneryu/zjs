@@ -46,7 +46,7 @@ pub noinline fn dispatch(
     if (shape == .method and stack.len() < total) return error.StackUnderflow;
     const region_base = stack.len() - total;
     const target = vm_call.resolvedNativeCallTargetAssumeCFunction(ctx, func_obj) orelse return .miss;
-    const entry = target.record;
+    const entry = target.entry;
     const args: []const core.JSValue = stack.values[region_base + window_head ..][0..argc];
     var result: core.JSValue = undefined;
     var handled = false;
@@ -84,9 +84,30 @@ pub noinline fn dispatch(
     return .hit;
 }
 
+/// K0 inline-arm eligibility (design §5.2): a managed entry without an
+/// environment, with room on the native stack for the qjs `arg_buf`
+/// reservation. Everything else takes `dispatch`.
+pub inline fn managedInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
+    if (entry.kind != .managed or entry.flags.needs_env or entry.flags.forwards_call) return false;
+    return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
+}
+
+/// Same preflight for the W1 `.native_getter` arm: an untyped managed
+/// getter without an environment is one `bl` from the field tail.
+pub inline fn getterInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
+    if (entry.kind != .getter or entry.sig != 0 or entry.flags.needs_env) return false;
+    return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
+}
+
+/// Same preflight for the K2 `method_managed` arm of the method handler.
+pub inline fn methodManagedInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
+    if (entry.kind != .method_managed) return false;
+    return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
+}
+
 /// Cold leg: drop the call region and route the pending error to the
 /// frame's handler (`.caught`) or the caller.
-noinline fn failure(
+pub noinline fn failure(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,

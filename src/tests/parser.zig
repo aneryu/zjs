@@ -2888,7 +2888,8 @@ test "F4: method call obj.m(x) uses get_field2 + call_method" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 11));
+    // W1: `get_field2` grew one byte (cache_idx), so the trailing operands shift.
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 12));
 }
 
 test "F4: get_length final fold consumes the ordinary length atom operand" {
@@ -2909,7 +2910,7 @@ test "F4: length call consumer preserves get_field2 and its atom operand" {
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2_call_method, op.call_method });
     try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 4));
-    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 8));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 9));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
 
@@ -3294,9 +3295,9 @@ test "F4: optional length call consumer preserves get_field2 and its atom operan
         op.call_method,
     });
     try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
-    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 20), fn_bc.code.len);
     try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 11));
-    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 15));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 16));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
 
@@ -3347,7 +3348,7 @@ test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 18));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 19));
 }
 
 test "F4: parenthesized optional member call preserves receiver" {
@@ -3458,9 +3459,9 @@ test "F4: tagged template on member access obj.tag`hello` rewrites to call_metho
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.push_atom_value, op.array_from, op.push_atom_value, op.array_from, op.define_field, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 13));
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 21));
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 29));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 14));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 22));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 30));
 }
 
 test "call-site cache: every final call instruction carries a cache_idx and the function owns one slot per site" {
@@ -3543,6 +3544,88 @@ test "call-site cache: sites past the 255-slot budget carry the no-cache index" 
     try std.testing.expectEqual(@as(usize, 300), next);
 }
 
+test "prop-site cache: every final field instruction carries a cache_idx and the function owns one slot per site" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    // get_field (o.a), put_field (o.b = ...), get_field2 (o.m()), and the
+    // emit-time fusions get_loc0_field / get_field_field2 all carry one
+    // property site each, numbered in emission order.
+    var fn_bc = try parseExprWithTopLevelChildren(
+        &env,
+        "(function f(o) { o.b = o.a; o.m(); return o.c.d; })",
+    );
+    defer fn_bc.deinit(env.rt);
+    const child = try expectFunctionConstant(fn_bc, 0);
+    const count = child.propSiteCount();
+    try std.testing.expect(count >= 5);
+
+    const code = child.byteCode();
+    var pc: usize = 0;
+    var seen = [_]bool{false} ** 256;
+    var sites: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
+        if (engine.bytecode.opcode.carriesPropCacheIdx(code[pc])) {
+            const idx = code[pc + 5];
+            try std.testing.expect(idx < count);
+            try std.testing.expect(!seen[idx]);
+            seen[idx] = true;
+            sites += 1;
+            const slot = child.propSiteCache(idx) orelse return error.TestExpectedEqual;
+            try std.testing.expectEqual(
+                @intFromPtr(child.propSiteCache(0).?) + @as(usize, idx) * @sizeOf(engine.bytecode.PropSiteCache),
+                @intFromPtr(slot),
+            );
+            try std.testing.expectEqual(@as(u64, 0), slot.guard_key);
+            try std.testing.expectEqual(@as(u64, 0), slot.proto_key);
+            try std.testing.expectEqual(@as(u8, 0), slot.misses);
+            try std.testing.expectEqual(@intFromEnum(engine.bytecode.PropSiteCache.State.empty), slot.state);
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, count), sites);
+    try std.testing.expect(child.propSiteCache(@intCast(count)) == null);
+    try std.testing.expect(child.propSiteCache(engine.bytecode.PropSiteCache.no_cache_idx) == null);
+    // The root expression (`fclosure` + return) reads no property of its own.
+    try std.testing.expectEqual(@as(u16, 0), fn_bc.prop_site_count);
+}
+
+test "prop-site cache: sites past the 255-slot budget carry the no-cache index" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "(function f(o) { var s = 0;");
+    var n: usize = 0;
+    while (n < 300) : (n += 1) try source.appendSlice(std.testing.allocator, " s += o.a;");
+    try source.appendSlice(std.testing.allocator, " return s; })");
+    var fn_bc = try parseExprWithTopLevelChildren(&env, source.items);
+    defer fn_bc.deinit(env.rt);
+    const child = try expectFunctionConstant(fn_bc, 0);
+    try std.testing.expectEqual(@as(u16, 255), child.propSiteCount());
+
+    const code = child.byteCode();
+    var pc: usize = 0;
+    var next: usize = 0;
+    while (pc < code.len) {
+        const size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
+        if (engine.bytecode.opcode.carriesPropCacheIdx(code[pc])) {
+            const expected: u8 = if (next < 255) @intCast(next) else engine.bytecode.PropSiteCache.no_cache_idx;
+            try std.testing.expectEqual(expected, code[pc + 5]);
+            if (next < 255) {
+                try std.testing.expect(child.propSiteCache(code[pc + 5]) != null);
+            } else {
+                try std.testing.expect(child.propSiteCache(code[pc + 5]) == null);
+            }
+            next += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, 300), next);
+}
+
 test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3592,7 +3675,7 @@ test "F4: simple template with one substitution uses get_field2 concat + call_me
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.push_atom_value, op.get_field2, op.get_var, op.push_atom_value, op.call_method });
-    try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 18));
+    try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 19));
 }
 
 test "F4: returned interpolated template carries QuickJS tail-call source provenance" {
@@ -3627,7 +3710,7 @@ test "F4: empty-head template `${b}` skips middle/tail empty strings" {
     defer env.deinit();
     // `${b}` lowers to:
     //   push_empty_string    (1)
-    //   get_field2 concat    (5)
+    //   get_field2 concat    (6, W1 cache_idx)
     //   get_var b            (5)
     //   call_method 1        (3)
     // Middle/tail empty strings with depth>0 are skipped (mirrors
@@ -3636,7 +3719,7 @@ test "F4: empty-head template `${b}` skips middle/tail empty strings" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.push_empty_string, op.get_field2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 9));
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 10));
 }
 
 test "F4: template with two substitutions accumulates argc correctly" {
@@ -3644,7 +3727,7 @@ test "F4: template with two substitutions accumulates argc correctly" {
     defer env.deinit();
     // `a${b}c${d}e` →
     //   push_atom_value "a"   (5)
-    //   get_field2 concat     (5)
+    //   get_field2 concat     (6, W1 cache_idx)
     //   get_var b             (5)
     //   push_atom_value "c"   (5)
     //   get_var d             (5)
@@ -3654,7 +3737,7 @@ test "F4: template with two substitutions accumulates argc correctly" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.push_atom_value, op.get_field2, op.get_var, op.push_atom_value, op.get_var, op.push_atom_value, op.call_method });
-    try std.testing.expectEqual(@as(u16, 4), readU16AtOpcode(fn_bc.code, 26));
+    try std.testing.expectEqual(@as(u16, 4), readU16AtOpcode(fn_bc.code, 27));
 }
 
 // ---- F4 slice 6: spread in calls and arrays --------------------------
@@ -3756,7 +3839,7 @@ test "F4: template with empty middle still emits call_method with correct argc" 
     // `${b}${c}` — empty head emits push_empty_string + get_field2 concat;
     // empty middle is skipped; empty tail is skipped.
     //   push_empty_string   (1)
-    //   get_field2 concat   (5)
+    //   get_field2 concat   (6, W1 cache_idx)
     //   get_var b           (5)
     //   get_var c           (5)
     //   call_method 2       (3)
@@ -3764,7 +3847,7 @@ test "F4: template with empty middle still emits call_method with correct argc" 
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.push_empty_string, op.get_field2, op.get_var, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 12));
+    try std.testing.expectEqual(@as(u16, 2), readU16AtOpcode(fn_bc.code, 13));
 }
 
 // ---- F5: Statement parsing tests -------------------------------------
@@ -5762,6 +5845,7 @@ test "W1d: finalized private operations have no raw private atom operands" {
                 const atom_id: ?core.Atom = switch (format) {
                     .atom,
                     .atom_u8,
+                    .atom_cache_u8,
                     .atom_u16,
                     .atom_label_u8,
                     .atom_label_u16,
@@ -9803,7 +9887,7 @@ fn expectAtomOperandName(rt: *core.JSRuntime, function: anytype, expected: []con
         const size = engine.bytecode.opcode.sizeOf(op_id);
         if (size == 0 or pc + size > code.len) break;
         switch (engine.bytecode.opcode.formatOf(op_id)) {
-            .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
+            .atom, .atom_u8, .atom_cache_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
                 const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
                 if (rt.atoms.name(atom_id)) |name| {
                     if (std.mem.eql(u8, name, expected)) return;

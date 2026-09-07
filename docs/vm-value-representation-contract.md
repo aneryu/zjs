@@ -327,6 +327,37 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
 - 失效钩子(shape transition / free)与版本号的选择,须与 GC 线同桌
   评审一次成文。
 
+#### 5.2.1 W1 属性站点缓存的落地形态(2026-09-07,已实现)
+
+上面三条的具体兑现,`bytecode.PropSiteCache` + `Shape.identity`
+(PERF-SHAPE-ID,native-boundary-design §8.2 / §15 R8):
+
+- **版本号 = `Shape.identity: u64`**,per-Registry(即 per-Runtime)单调
+  计数器,**永不复用**。取新值的时机:创建(`link`)、以及**每次原地变异
+  之前**——属性追加(`appendProperty`,是 `addProperty` 与
+  `transitionPropertyUncached` 非共享臂共同的唯一收口)、删除
+  (`markPropertyDeleted`)、flags 更新(`updatePropertyFlags`)、原型替换
+  (`replacePrototypeAssumePrepared`)、以及变异总闸 `prepareUpdate` 的两条
+  腿。`relocateShape`(增长换址,同一逻辑布局)**保留**旧值;
+  `compactProperties` / `restorePropertyLayout`(重排布局)取新值。
+- **因此不需要显式失效钩子**:守卫比较的是 identity 不是指针,Shape 被
+  回收后地址复用无害(这正是本节 ABA 前科的正解);未共享的 Shape 会
+  在原地址上变异,所以**指针守卫不可用**(spike/perf-t-main
+  `tspike.zig` 头注 R12 已实测)。
+- **Shape 不锁定 class**:shape 会跨 class 复用(`createRegExpFromShape`、
+  realm 模板),而 exotic 自有属性行为(Array `length`、typed array /
+  string 下标、Proxy、module namespace)是 class 的性质。所以凡是越过
+  receiver 自身布局的臂(一级原型、原生访问器)条目里另存 `class_id`
+  并在命中时重比;own 臂不需要(identity 命中即证明该属性就在这个布局里)。
+- **缓存的原生访问器只存槽位,不存 `NativeEntry`**:`defineProperty` 可以
+  在不改动任何 shape flag 的情况下换掉 getter 函数对象,所以命中臂每次
+  从被守卫的槽里重读访问器再解析 entry。
+- 站点数组(`FunctionBytecode.prop_sites` FAM 尾)与 `call_sites` 一样
+  **登记为「非 GC 边」**:槽内没有任何堆指针。
+- 站点索引的**唯一性是命中臂的前提**(命中臂不重比 atom):一个
+  `cache_idx` 只能属于一个函数的一条指令。`small_inline` 的特化副本因此
+  在内联进来的 callee 体上把 `cache_idx` 全部清成 `no_cache_idx`。
+
 ### 5.3 Phase 2(baseline JIT)与 AOT 发射
 
 - **值移动经抽象层发射**,发射的是 §3 的屏障序:每条堆引用存储后发

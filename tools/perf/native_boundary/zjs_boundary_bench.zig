@@ -18,7 +18,9 @@
 //!   getter_typed   JS loop `world.time`: K3 typed getter (fn (*Self) i32)
 //!   n2j1 / n2j0  native -> JS one-shot: ctx.callFunction(cb, [i]) / (cb, []) N times
 //!   site1 / site0 native -> JS through zjs.CallSite (resolved once): site.call1(i) / site.call0()
-//!   prop_site   host loop: ctx.getProperty(obj, "field") N times, s += value
+//!   prop_site   host loop: zjs.PropertySite `site.get(obj)` N times, s += value
+//!   prop_str    host loop: ctx.getProperty(obj, "field") N times -- the same read
+//!               without a site (interns the name and walks the object each time)
 //!
 //! Every JS loop is `function main(n) { var s = 0; for (...) { s += <op>; } return s }`.
 //!
@@ -107,7 +109,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 /// Case names this harness implements; `--list` prints them so the sampler can skip the rest.
-const supported_cases = [_][]const u8{ "ctrl", "builtin", "host2", "host0", "hostm2", "leaf2", "leaf_state", "method_typed", "method_managed", "getter_native", "getter_typed", "n2j1", "n2j0", "site1", "site0", "prop_site" };
+const supported_cases = [_][]const u8{ "ctrl", "builtin", "host2", "host0", "hostm2", "leaf2", "leaf_state", "method_typed", "method_managed", "getter_native", "getter_typed", "n2j1", "n2j0", "site1", "site0", "prop_site", "prop_str" };
 
 fn isSupportedCase(name: []const u8) bool {
     for (supported_cases) |c| if (std.mem.eql(u8, c, name)) return true;
@@ -171,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
         try ctx.defineDataProperty(g.value(), "world", world_obj, .{});
     }
 
-    const host_loop = std.mem.startsWith(u8, case_name, "n2j") or std.mem.startsWith(u8, case_name, "site") or std.mem.eql(u8, case_name, "prop_site");
+    const host_loop = std.mem.startsWith(u8, case_name, "n2j") or std.mem.startsWith(u8, case_name, "site") or std.mem.startsWith(u8, case_name, "prop_");
     const source: []const u8 = if (std.mem.eql(u8, case_name, "ctrl"))
         jsLoop("i")
     else if (std.mem.eql(u8, case_name, "builtin"))
@@ -196,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
         "function cb(x) { return x + 1; }"
     else if (std.mem.eql(u8, case_name, "n2j0") or std.mem.eql(u8, case_name, "site0"))
         "function cb() {}"
-    else if (std.mem.eql(u8, case_name, "prop_site"))
+    else if (std.mem.eql(u8, case_name, "prop_site") or std.mem.eql(u8, case_name, "prop_str"))
         "var obj = { x: 1, y: 2, field: 3 };"
     else
         unreachable; // filtered by isSupportedCase above
@@ -241,6 +243,17 @@ pub fn main(init: std.process.Init) !void {
                 s += r.asInt32() orelse fatal("cb returned non-int", .{});
             }
         } else if (std.mem.eql(u8, case_name, "prop_site")) {
+            // PropertySite: the name is interned once and the receiver's
+            // shape identity guards a cached slot (qjs has no equivalent;
+            // its row is JS_GetPropertyStr, the `prop_str` shape).
+            const obj = try ctx.getProperty(global.value(), "obj");
+            var site = try zjs.PropertySite.init(ctx, "field");
+            defer site.deinit();
+            while (i < n) : (i += 1) {
+                const v = try site.get(obj);
+                s += v.asInt32() orelse fatal("field non-int", .{});
+            }
+        } else if (std.mem.eql(u8, case_name, "prop_str")) {
             const obj = try ctx.getProperty(global.value(), "obj");
             while (i < n) : (i += 1) {
                 const v = try ctx.getProperty(obj, "field");

@@ -852,10 +852,17 @@ const Resolver = struct {
     }
 
     fn emitAtomWide(self: *Resolver, op_id: u8, atom_id: core.atom.Atom) Error!void {
-        var bytes: [5]u8 = undefined;
+        // W1: the `atom_cache_u8` family carries a placeholder `cache_idx`
+        // byte through phase 2; `resolve_labels` writes the real index.
+        var bytes: [6]u8 = undefined;
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-        try self.emitInstruction(&bytes, atom_id);
+        if (opcode.carriesPropCacheIdx(op_id)) {
+            bytes[5] = bytecode.PropSiteCache.no_cache_idx;
+            try self.emitInstruction(&bytes, atom_id);
+            return;
+        }
+        try self.emitInstruction(bytes[0..5], atom_id);
     }
 
     fn emitProductJump(self: *Resolver, op_id: u8, label_index: u32) Error!void {
@@ -2091,9 +2098,12 @@ const Resolver = struct {
                 // qjs:34506-34512.
                 op.get_field_opt_chain => {
                     if (instruction.is_temp) {
-                        var rewritten: [5]u8 = undefined;
+                        // W1: `get_field` is `atom_cache_u8` -- the rewritten
+                        // instruction carries the placeholder index byte.
+                        var rewritten: [6]u8 = undefined;
                         rewritten[0] = op.get_field;
                         std.mem.writeInt(u32, rewritten[1..5], input_atom.?, .little);
+                        rewritten[5] = bytecode.PropSiteCache.no_cache_idx;
                         try self.emitInstruction(&rewritten, input_atom);
                     } else {
                         try self.copyInputInstruction(position, instruction, input_atom);
@@ -3026,7 +3036,10 @@ test "compiler.resolve_variables: erased temp ops and optional-chain rewrites" {
     try input.emitAtomOpOwned(op.get_field_opt_chain, field);
     try input.emitOp(op.get_array_el_opt_chain);
 
-    var expected = [_]u8{ op.get_field, 0, 0, 0, 0, op.get_array_el };
+    // W1: the erased `get_field_opt_chain` lowers to a `get_field` whose
+    // trailing `cache_idx` is the phase-2 placeholder (resolve_labels
+    // assigns the real index).
+    var expected = [_]u8{ op.get_field, 0, 0, 0, 0, bytecode.PropSiteCache.no_cache_idx, op.get_array_el };
     std.mem.writeInt(u32, expected[1..5], field, .little);
 
     var product = try harness.resolve();

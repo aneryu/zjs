@@ -1,6 +1,6 @@
 # Fun Native Plugin 技术设计
 
-版本：0.8（**FN-M0F:FNABI v1 已冻结**,2026-08-26 owner 批复;0.7:M0D 六项裁决闭合;0.6:side-by-side 移 post-v1、finalizer 方案 B）  
+版本：0.9（**NB2 修订**,2026-09-07:边界重设计取代 §14/§17/§18 的调用模型与 §28.1 的 plugin ABI,见 §0 0.9 条;0.8:FN-M0F FNABI v1 冻结,2026-08-26 owner 批复;0.7:M0D 六项裁决闭合;0.6:side-by-side 移 post-v1、finalizer 方案 B）<br>
 日期：2026-08-26  
 状态：**FNABI v1 FROZEN(2026-08-26)**。冻结面=`src/abi/fun_native_abi.zig`
 (单一事实源)及其生成 C 头、§12.1 结构、§15.2 签名 id 表、常量表;
@@ -21,6 +21,34 @@ process-model-design.md §20.2/§20.2a,本文 §0.1 逐条分类):class id
 ---
 
 ## 0. 版本变更
+
+**0.9（2026-09-07，NB2 修订；owner 09-06 裁决 D1/D8，实施记录见
+[perf/native-boundary-design.md](perf/native-boundary-design.md) §14/§16）**：
+
+- **调用模型改由 NB2 设计稿规范**（该稿 §3 `NativeEntry` 48 B 布局、§4
+  Fast Call ABI v2 `ManagedFn (ctx, this, argv, argc, entry, func_obj)
+  callconv(.c) JSValue` 单一 managed 原型、K0–K4 kind）。本文 §10 的
+  `NativeEntry` 模型、§14 的调用分类、§17 的 zjs 调用路径与 §18 的
+  handle/reentry 条款凡与之冲突处，以设计稿为准；偏离清单在设计稿 §11。
+  **D1**：§14.4 `fn0..fn4(ctx, a0..)` 固定元数形态降级为 SDK 层便利，
+  不再是 ABI 面。
+- **D8：runtime plugin ABI 硬切**——`src/runtime/plugin.zig`、
+  `src/binding/ffi.zig`、`docs/runtime-plugin-abi.md`、
+  `tests/fixtures/*plugin*` 与 `zjs.host.*` / `zjs.ffi` / `zjs.runtime.Plugin`
+  全部删除，无保留、无过渡；公开面只剩 `zjs.native`
+  （managed / leaf / leafWithState / Class）与 `JSContext.defineFunction`
+  / `createFunction` / `defineClass` / `CallSite`（§28.1 相应作废）。
+- **冻结面保留**：`src/abi/fun_native_abi.zig` 与生成头仍是叶签名
+  schema 的单一事实源，按 v1 冻结规则 append-only。§15.2 签名 id 表
+  追加 26..32（STATE_I32_TO_I32=26、STRING_I32_TO_I32=27、
+  STRING_I32_TO_STRING=28、SELF_I32_TO_I32=29、SELF_TO_I32=30、
+  SELF_I32_TO_VOID=31、SELF_TO_VOID=32；`abi_layout` 末 id 钉
+  FUN_SIG_SELF_TO_VOID）。**分配规则**：id 由 driver 统一发放（并行
+  lane 各自追加曾撞号），下一个空闲 id 为 **33**；追加后须
+  `zig build gen-abi-header` 重生成头文件。
+- fun 侧接入不在 zjs 范围（owner 09-07）；zjs 只提供接口与
+  [embedding-cookbook.md](embedding-cookbook.md) / [public-api-contract.md](public-api-contract.md)。
+
 
 **0.8（2026-08-26，FN-M0F:FNABI v1 冻结；owner 批复「可以冻结」）**：
 

@@ -1967,7 +1967,7 @@ pub const AtomTable = struct {
             var buf: [10]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)}) catch unreachable;
             if (text.len == 1 and text[0] <= 0x7f) {
-                const cached = (try rt.singleByteString(text[0])).?;
+                const cached = try rt.singleByteString(text[0]);
                 return cached.value();
             }
             const cached = try rt.recentAtomString(atom_id, text);
@@ -1983,7 +1983,7 @@ pub const AtomTable = struct {
             const predefined = predefinedById(atom_id) orelse return JSValue.undefinedValue();
             const text = predefined.name;
             if (text.len == 1 and text[0] <= 0x7f) {
-                const cached = (try rt.singleByteString(text[0])).?;
+                const cached = try rt.singleByteString(text[0]);
                 return cached.value();
             }
             if (predefined.kind != .string) {
@@ -2002,7 +2002,7 @@ pub const AtomTable = struct {
         if (!entry.isLive()) return JSValue.undefinedValue();
         const text = entry.bytes;
         if (text.len == 1 and text[0] <= 0x7f) {
-            const cached = (try rt.singleByteString(text[0])).?;
+            const cached = try rt.singleByteString(text[0]);
             // QJS `__JS_AtomToValue` (quickjs.c:3595) is a single
             // `atom_array[atom]` load + refcount bump because the atom entry
             // IS the string. Bind the shared single-byte body into the

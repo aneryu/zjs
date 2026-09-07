@@ -33,8 +33,9 @@ pub fn traceRoots(invocation_ptr: *anyopaque, visitor: *RootVisitor) RootTraceEr
 
 fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTraceError!void {
     const rt = machine.ctx.runtime;
+    const pending = &machine.pending_call_region;
     try traceFrame(rt, machine.l0.level.frame, visitor);
-    try traceStack(machine.l0.level.stack, visitor);
+    try traceStack(machine.l0.level.stack, pending, visitor);
     // A generator/module shell stays deliberately unpublished (off
     // `lists.objects`, not in the address registry) through parameter init
     // (`createGeneratorObject` -> `runGeneratorParameterInit` ->
@@ -53,7 +54,7 @@ fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTrace
     var entry = machine.top;
     while (entry) |current| {
         try traceFrame(rt, &current.frame, visitor);
-        try traceStack(&current.stack, visitor);
+        try traceStack(&current.stack, pending, visitor);
         try traceEntryExtras(current, visitor);
         entry = current.prev;
     }
@@ -93,12 +94,20 @@ fn traceFrame(rt: *core.JSRuntime, frame: *frame_mod.Frame, visitor: *RootVisito
     }
 }
 
-fn traceStack(stack: *stack_mod.Stack, visitor: *RootVisitor) RootTraceError!void {
+fn traceStack(
+    stack: *stack_mod.Stack,
+    pending: *const stack_mod.PendingCallRegion,
+    visitor: *RootVisitor,
+) RootTraceError!void {
     try visitor.values(stack.liveValues());
     // The in-flight call's operands, which sit above `top_ptr` between the
-    // region retreat and the frame push. See `Stack.pending_call_region`.
-    const pending = stack_mod.pendingCallRegion();
-    if (pending.len != 0) try visitor.values(pending);
+    // region retreat and the frame push. `windowFor` is the lifetime test the
+    // eager `setTopPtr` clear used to perform (this Stack still owns the
+    // window and its top is still parked at the window's start), applied here
+    // so the interpreter's return leg pays nothing for it. See
+    // `stack.PendingCallRegion`.
+    const window = pending.windowFor(stack);
+    if (window.len != 0) try visitor.values(window);
 }
 
 fn traceEntryExtras(entry: *inline_calls.Entry, visitor: *RootVisitor) RootTraceError!void {

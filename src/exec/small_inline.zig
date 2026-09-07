@@ -679,10 +679,29 @@ fn emitCallMethodApplyFwd(out: *Rewrite, argc: u16) bool {
     return emitSlice(out, &buf);
 }
 
+/// Overwrite every W1 property-site `cache_idx` operand in `code` with the
+/// no-cache index. Used on the inlined-callee region of a specialized copy;
+/// see the invariant note at the call site.
+fn clearPropSiteIndices(code: []u8) void {
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opc = code[pc];
+        const size: usize = bytecode.opcode.sizeOf(opc);
+        if (size == 0 or pc + size > code.len) return;
+        if (bytecode.opcode.carriesPropCacheIdx(opc))
+            code[pc + 5] = bytecode.PropSiteCache.no_cache_idx;
+        pc += size;
+    }
+}
+
 fn emitGetField2(out: *Rewrite, atom_id: u32) bool {
     if (!emitByte(out, op.get_field2)) return false;
-    var buf: [4]u8 = undefined;
-    std.mem.writeInt(u32, &buf, atom_id, .little);
+    var buf: [5]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], atom_id, .little);
+    // W1 `atom_cache_u8`: same reasoning as `emitCallMethodApplyFwd` -- a
+    // callee-body site index would alias one of the caller's own property
+    // sites, so the rewritten read carries no cache slot.
+    buf[4] = bytecode.PropSiteCache.no_cache_idx;
     return emitSlice(out, &buf);
 }
 
@@ -1070,6 +1089,14 @@ fn cloneAndExpand(
         const var_base: u16 = arg_base + extra_args;
         var rewritten = rewriteBody(callee, this_slot, arg_base, var_base, kind, site_argc) orelse return null;
         const after_body_rel: usize = rewritten.len;
+        // W1 invariant: a property-site `cache_idx` names one slot of ONE
+        // function, and the hit arm does not re-check the atom. The inlined
+        // callee body carries the CALLEE's indices, which would alias the
+        // caller's own sites in this specialized copy and let a guard-matching
+        // entry answer with a slot captured for a different property name.
+        // The copied body therefore runs uncached (the caller's own sites keep
+        // their indices; the callee's slots are its own FunctionBytecode's).
+        clearPropSiteIndices(rewritten.code[0..after_body_rel]);
         if (!emitGoto(&rewritten, 0)) return null;
         var rp: usize = 0;
         while (rp + 5 <= after_body_rel) {
@@ -1122,6 +1149,7 @@ fn cloneAndExpand(
         // The copy keeps the caller's `cache_idx` operands byte for byte, so
         // it needs the same slot count (its own fresh, empty slots).
         src_layout.call_site_count,
+        src_layout.prop_site_count,
     ) catch return null;
 
     const spec = FunctionBytecode.createProductionShell(&rt.memory, new_layout) catch return null;

@@ -18,9 +18,9 @@ N = 20_000_000
 CASES = ["ctrl", "builtin", "host2", "host0", "hostm2", "plugin2", "n2j1", "n2j0",
          # B-group arms (docs/perf/native-boundary-design.md section 12)
          "leaf2", "leaf_state", "method_typed", "method_managed", "getter_native", "getter_typed",
-         "site1", "site0", "prop_site"]
+         "site1", "site0", "prop_site", "prop_str"]
 # host-loop cases: the loop runs in the embedder, so no JS ctrl loop is subtracted
-HOST_LOOP = {"n2j1", "n2j0", "site1", "site0", "prop_site"}
+HOST_LOOP = {"n2j1", "n2j0", "site1", "site0", "prop_site", "prop_str"}
 UNSUPPORTED_RC = 2
 
 def run(argv, cpu):

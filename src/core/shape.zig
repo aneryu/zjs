@@ -150,7 +150,12 @@ pub const Shape = extern struct {
         // `property_storage: []u8` slice — the storage is no longer a second
         // heap allocation. `extern` pins the field order so the FAM begins at
         // exactly `@sizeOf(Shape)`.
-        std.debug.assert(@sizeOf(@This()) == 56);
+        // W1 property cache (PERF-SHAPE-ID): +8 bytes for `identity`
+        // (56 -> 64). The u64 identity is the only sound site guard: an
+        // unshared Shape mutates IN PLACE at the same address, so the
+        // pointer cannot be a guard key (native-boundary plan r3 WP2 step 1,
+        // spike/perf-t-main tspike.zig header rule R12).
+        std.debug.assert(@sizeOf(@This()) == 64);
         std.debug.assert(@alignOf(@This()) == 8);
         const header_bytes = @sizeOf(gc.GCObjectHeader);
         const list_previous_bytes = @sizeOf(?*gc.Header);
@@ -163,6 +168,7 @@ pub const Shape = extern struct {
         std.debug.assert(@offsetOf(@This(), "cold_state") == header_bytes + list_previous_bytes + 20);
         std.debug.assert(@offsetOf(@This(), "registry_hash_next") == header_bytes + list_previous_bytes + 24);
         std.debug.assert(@offsetOf(@This(), "proto") == header_bytes + list_previous_bytes + 32);
+        std.debug.assert(@offsetOf(@This(), "identity") == header_bytes + list_previous_bytes + 40);
         std.debug.assert(@sizeOf(ShapeOwnership) == 4);
         std.debug.assert(@sizeOf(ShapeColdState) == 4);
         {
@@ -188,6 +194,23 @@ pub const Shape = extern struct {
     cold_state: ShapeColdState = .{},
     registry_hash_next: ?*Shape = null, // gc-slot: weak
     proto: ?*Object = null,
+    /// Monotonic layout identity (PERF-SHAPE-ID), the guard key of the W1
+    /// property-site cache. Contract:
+    ///   - a NEW value at creation (`link`) and BEFORE every in-place
+    ///     mutation of the guarded state: property append, property delete,
+    ///     property-flag update, prototype swap, and `prepareUpdate` (the
+    ///     universal "I am about to mutate this shape" gate);
+    ///   - PRESERVED across grow-relocation (`relocateShape`), which keeps
+    ///     the same logical layout at a new address;
+    ///   - a FRESH value for the rebuilt layouts (`compactProperties`,
+    ///     `restorePropertyLayout`);
+    ///   - never reused, so a freed Shape whose address is recycled can
+    ///     never re-match a stale site (the reason the guard is not the
+    ///     pointer). Per-Registry, i.e. per-Runtime.
+    /// The guarded state is exactly: prop atom ids, their slot indices,
+    /// their flags, and `proto`. It is NOT the class of the owning object;
+    /// site arms that depend on the class carry `class_id` themselves.
+    identity: u64 = 0,
     // Inline flexible array member follows at `@sizeOf(Shape)`:
     //   [props: Property × prop_size] [hash buckets: u32 × bucketCount()]
     // Props first: every hot property access (lookup walks, transition
@@ -341,6 +364,9 @@ pub const Registry = struct {
     // shape lives on the GC object list, never a separate registry array.
     shape_hash_count: usize = 0,
     shape_hash_buckets: []?*Shape = &.{},
+    /// PERF-SHAPE-ID counter (see `Shape.identity`). Starts at 1 so that a
+    /// zero-initialised site entry can never guard-match.
+    next_identity: u64 = 1,
     // No total-live-shape counter: qjs has none — it walks gc_obj_list when it
     // needs one. Diagnostics use `gc.liveCountKind(.shape)` (derived by walking),
     // keeping the shape link/unlink hot paths free of count maintenance.
@@ -653,9 +679,16 @@ pub const Registry = struct {
             current.setHashed(false);
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
+            // PERF-SHAPE-ID: `prepareUpdate` is the universal gate in front of
+            // an in-place mutation; stamp here as well so that any future
+            // mutation site added behind it is covered by construction.
+            current.identity = self.freshIdentity();
             return;
         }
-        if (!current.isShared()) return;
+        if (!current.isShared()) {
+            current.identity = self.freshIdentity();
+            return;
+        }
         const clone = try self.cloneForMutation(current);
         shape_ptr.* = clone;
     }
@@ -665,6 +698,10 @@ pub const Registry = struct {
         if (shape.proto == proto) return null;
         const old_proto = shape.proto;
         shape.proto = proto;
+        // PERF-SHAPE-ID: a proto-arm site guards WHICH object is the
+        // prototype through the receiver's shape identity, so a swap must
+        // invalidate it.
+        shape.identity = self.freshIdentity();
         // The Shape owns the prototype edge, so the Shape is the barrier's
         // owner. Every other write to `proto` is on a freshly created or
         // relocated Shape, where the owner is young and the barrier is a
@@ -719,6 +756,10 @@ pub const Registry = struct {
             .cold_state = initialColdState(old.deletedPropCount()),
             .registry_hash_next = null, // re-established by insertShapeHash below
             .proto = old.proto, // proto ref MOVES to the new shape (old freed w/o proto cleanup)
+            // PERF-SHAPE-ID: grow-relocation keeps the SAME logical layout at
+            // a new address; identity is preserved. (ABA immunity comes from
+            // never reusing an identity value, not from the address.)
+            .identity = old.identity,
         };
 
         // Copy the prop descriptors (atom ownership moves with them).
@@ -772,7 +813,7 @@ pub const Registry = struct {
         self.rehashShape(shape, old_hash);
     }
 
-    pub fn markPropertyDeleted(_: *Registry, shape: *Shape, index: usize, flags: u6) void {
+    pub fn markPropertyDeleted(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
         std.debug.assert(index < shape.prop_count);
         const props = shape.props();
         const prop = &props[index];
@@ -804,6 +845,8 @@ pub const Registry = struct {
         prop.flags = flags;
         prop.atom_id = atom.null_atom;
         shape.incrementDeletedPropCount();
+        // PERF-SHAPE-ID: a captured slot must not be read once deleted.
+        shape.identity = self.freshIdentity();
     }
 
     /// Remove deleted shape/property slots while preserving the relative order
@@ -875,6 +918,9 @@ pub const Registry = struct {
             .cold_state = initialColdState(0),
             .registry_hash_next = null,
             .proto = old.proto,
+            // PERF-SHAPE-ID: compaction renumbers every slot -- a NEW layout,
+            // not the relocation's identity-preserving move.
+            .identity = self.freshIdentity(),
         };
         const new_props = new_shape.props();
         @memset(new_props, .{});
@@ -921,10 +967,12 @@ pub const Registry = struct {
     }
 
     pub fn updatePropertyFlags(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
-        _ = self;
         std.debug.assert(index < shape.prop_count);
         if (shape.props()[index].flags == flags) return;
         shape.props()[index].flags = flags;
+        // PERF-SHAPE-ID: flags (data/accessor kind, writable) are part of the
+        // guarded layout -- the own-write arm reads writability off them.
+        shape.identity = self.freshIdentity();
     }
 
     pub fn restorePropertyLayout(self: *Registry, shape_ptr: **Shape, baseline_props: []const Property, baseline_hash: u32, baseline_deleted_count: usize) !void {
@@ -960,6 +1008,8 @@ pub const Registry = struct {
             .cold_state = initialColdState(@intCast(baseline_deleted_count)),
             .registry_hash_next = null,
             .proto = old.proto, // proto ref moves to the new shape
+            // PERF-SHAPE-ID: a restored baseline layout is a NEW layout.
+            .identity = self.freshIdentity(),
         };
         @memset(new_shape.props(), .{});
         if (new_shape.hashBuckets().len != 0) @memset(new_shape.hashBuckets(), no_property_index);
@@ -1158,6 +1208,11 @@ pub const Registry = struct {
         };
         retained_atom_owned = false;
         shape.prop_count += 1;
+        // PERF-SHAPE-ID: an in-place append is a new layout. This is the one
+        // append choke point (`addProperty` and the unshared leg of
+        // `transitionPropertyUncached` both funnel through here); the shared
+        // leg appends to a fresh clone that `link` already stamped.
+        shape.identity = self.freshIdentity();
         // reservePropertyAppend guarantees the deleted-inclusive hash capacity,
         // so linking is infallible and the shape/value-storage commit is atomic.
         std.debug.assert(@as(usize, shape.prop_count) + @as(usize, shape.deletedPropCount()) <= shape.bucketCount());
@@ -1186,7 +1241,18 @@ pub const Registry = struct {
         shape.hashBuckets()[bucket] = @intCast(index);
     }
 
+    /// Next never-before-used layout identity (see `Shape.identity`). u64 at
+    /// one increment per shape mutation cannot wrap in any real program.
+    pub inline fn freshIdentity(self: *Registry) u64 {
+        const id = self.next_identity;
+        self.next_identity += 1;
+        return id;
+    }
+
     inline fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
+        // PERF-SHAPE-ID: every construction that links (createShape* /
+        // createShapeWithPropertyCapacity* / cloneShape) is a new layout.
+        shape.identity = self.freshIdentity();
         // Shapes are tracked solely through the GC object list (added by the
         // caller via `gc_registry.addInitializedWithSize`), exactly like qjs `add_gc_object`.
         // The only per-shape bookkeeping here is hash-table insertion.

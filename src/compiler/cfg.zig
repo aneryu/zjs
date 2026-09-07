@@ -743,14 +743,15 @@ fn tempAtomInstructionSize(op_id: u8) ?u8 {
         op.scope_in_private_field,
         => 7,
         op.scope_make_ref => 11,
-        op.get_field_opt_chain => 5,
+        // W1: `atom_cache_u8` (opcode + atom u32 + cache_idx u8).
+        op.get_field_opt_chain => 6,
         else => null,
     };
 }
 
 fn formatHasAtom(format: opcode.Format) bool {
     return switch (format) {
-        .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
+        .atom, .atom_u8, .atom_cache_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
         else => false,
     };
 }

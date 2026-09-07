@@ -512,7 +512,7 @@ noinline fn runSyncInlineRouteMoved(
     out: *core.JSValue,
 ) HostError!void {
     var boundary = if (idle_machine)
-        inline_calls.NativeBoundaryScope.initIdle(invocation)
+        inline_calls.IdleBoundaryScope.init(invocation)
     else
         inline_calls.NativeBoundaryScope.init(invocation);
     boundary.push();
@@ -547,14 +547,16 @@ pub inline fn runSyncInlineRouteCopiedArgs(
 ) HostError!void {
     std.debug.assert(inline_calls.Machine.nativeBoundarySimpleEligible(target));
     var boundary = if (idle_machine)
-        inline_calls.NativeBoundaryScope.initIdle(invocation)
+        inline_calls.IdleBoundaryScope.init(invocation)
     else
         inline_calls.NativeBoundaryScope.init(invocation);
     boundary.push();
     errdefer boundary.deinit();
 
     const machine = invocation.machine;
-    const rt = machine.ctx.runtime;
+    // Resident runtime pointer (one load) instead of machine -> ctx ->
+    // runtime, which sits in front of the admission checks.
+    const rt = machine.vm.rt;
     var lean_live: ?*inline_calls.LeanFrame = null;
     defer if (lean_live) |frame| {
         frame.in_use = false;
@@ -945,14 +947,14 @@ noinline fn callNativeCallableObject(
     switch (vmNativeCallableDispatch(function_object)) {
         .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
         .resolved_record => |target| {
-            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, target.record.arity);
+            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, target.entry.arity);
             const view = try builtin_dispatch.CallRealmView.caller(target.realm);
             const native_result = builtin_dispatch.callInternalRecordDirectInRealm(
                 view,
                 output,
                 function_object,
                 this_value,
-                target.record,
+                target.entry,
                 args,
                 caller_function,
                 caller_frame,
@@ -2426,7 +2428,7 @@ fn constructExternalHostFunction(
     if (!function_object.hasOwnProperty(core.atom.ids.prototype)) return error.TypeError;
     const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
 
-    const entry = function_object.nativeRecord() orelse return error.TypeError;
+    const entry = function_object.nativeEntry() orelse return error.TypeError;
     const result = try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, instance, entry, args, caller_function, caller_frame);
     if (result.isObject()) {
         return result;

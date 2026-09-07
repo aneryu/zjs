@@ -27,6 +27,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const labels = @import("labels.zig");
 const core = @import("../core/root.zig");
+const bytecode = @import("../bytecode.zig");
+const opcode = bytecode.opcode;
 
 pub const LabelId = labels.LabelId;
 
@@ -553,9 +555,15 @@ pub const Builder = struct {
     /// Emit an atom-bearing opcode; `atom_id` ownership (one retain)
     /// transfers into the builder ledger.
     pub fn emitAtomOpOwned(self: *Builder, op_id: u8, atom_id: core.atom.Atom) Error!void {
+        // W1: the property-site family (`get_field` / `get_field2` /
+        // `put_field`) is `atom_cache_u8`, so the phase-1 stream carries a
+        // placeholder `cache_idx` byte and every instruction size matches the
+        // final form. `resolve_labels` overwrites the placeholder.
+        const cache_bearing = opcode.carriesPropCacheIdxPhase1(op_id);
+        const size: u32 = if (cache_bearing) 6 else 5;
         // Ownership transfer is unconditional: the sink consumes the caller's
         // retained atom even when either capacity reservation fails.
-        self.reserveCode(5) catch |err| {
+        self.reserveCode(size) catch |err| {
             return err;
         };
         reserve(
@@ -575,10 +583,11 @@ pub const Builder = struct {
         self.atom_operands[self.atom_len] = atom_id;
         self.code[opcode_index] = op_id;
         std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        if (cache_bearing) self.code[opcode_index + 5] = bytecode.PropSiteCache.no_cache_idx;
 
         self.atom_len += 1;
         self.last_opcode_pos = @intCast(opcode_offset);
-        self.code_len += 5;
+        self.code_len += size;
     }
 
     /// Emit an atom-bearing opcode with a trailing u8 immediate (op + atom +

@@ -19,6 +19,8 @@
  *   n2j1 / site1    JS_Call(cb, [i]) N times    cb = function (x) { return x + 1 }
  *   n2j0 / site0    JS_Call(cb, []) N times     cb = function () {}
  *   prop_site       JS_GetPropertyStr(obj, "field") N times   obj = { x: 1, y: 2, field: 3 }
+ *   prop_str        alias of prop_site: qjs has no property-site (inline-cached) host read,
+ *                   so the same JS_GetPropertyStr row is the twin of both zjs cases
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,7 +108,7 @@ static const JSCFunctionListEntry world_proto_funcs[] = {
 static const char *const case_names[] = {
     "ctrl", "builtin", "host2", "host0",
     "leaf2", "leaf_state", "method_typed", "method_managed", "getter_native", "getter_typed",
-    "n2j1", "n2j0", "site1", "site0", "prop_site",
+    "n2j1", "n2j0", "site1", "site0", "prop_site", "prop_str",
 };
 
 static const char *loop(const char *op, char *buf) {
@@ -115,7 +117,7 @@ static const char *loop(const char *op, char *buf) {
 }
 
 static int is_host_loop(const char *cs) {
-    return !strncmp(cs, "n2j", 3) || !strncmp(cs, "site", 4) || !strcmp(cs, "prop_site");
+    return !strncmp(cs, "n2j", 3) || !strncmp(cs, "site", 4) || !strncmp(cs, "prop_", 5);
 }
 
 int main(int argc, char **argv) {
@@ -138,7 +140,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "getter_native") || !strcmp(cs, "getter_typed")) src = loop("world.time", buf);
     else if (!strcmp(cs, "n2j1") || !strcmp(cs, "site1")) src = "function cb(x) { return x + 1; }";
     else if (!strcmp(cs, "n2j0") || !strcmp(cs, "site0")) src = "function cb() {}";
-    else if (!strcmp(cs, "prop_site")) src = "var obj = { x: 1, y: 2, field: 3 };";
+    else if (!strcmp(cs, "prop_site") || !strcmp(cs, "prop_str")) src = "var obj = { x: 1, y: 2, field: 3 };";
     else { fprintf(stderr, "unsupported case %s\n", cs); return 2; }
 
     JSRuntime *rt = JS_NewRuntime();
@@ -168,7 +170,7 @@ int main(int argc, char **argv) {
     JS_FreeValue(ctx, r);
     if (is_host_loop(cs)) {
         long long s = 0;
-        if (!strcmp(cs, "prop_site")) {
+        if (!strcmp(cs, "prop_site") || !strcmp(cs, "prop_str")) {
             JSValue obj = JS_GetPropertyStr(ctx, global, "obj");
             for (int i = 0; i < n; i++) {
                 JSValue v = JS_GetPropertyStr(ctx, obj, "field");

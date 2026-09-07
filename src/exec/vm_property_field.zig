@@ -153,7 +153,10 @@ pub noinline fn field(
     opc: u8,
 ) align(16) !Step {
     const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
-    frame.pc += 4;
+    // W1: every opcode routed here is `atom_cache_u8` (atom u32 + cache_idx
+    // u8), so the operand region is five bytes. The cold shell answers
+    // generically; capture lives in the resident handlers' miss leg.
+    frame.pc += 5;
     switch (opc) {
         op.get_field, op.get_field_field2 => {
             if (stack.len() == 0) return error.StackUnderflow;
@@ -1372,7 +1375,7 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
     const index: usize = @intCast(index_i32);
     if (index >= core.string.stringValueLenUnchecked(value)) return null;
     const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
-    if (unit <= 0x7f) {
+    if (unit < 0x100) {
         const cached = rt.cachedSingleByteString(@intCast(unit)) orelse return null;
         return cached.value();
     }
@@ -1383,4 +1386,233 @@ fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.len()) return error.StackUnderflow;
     return stack.values[stack.len() - 1 - index_from_top];
+}
+
+// ===== W1 property-site inline cache (native-boundary design 8.2 / R8) =====
+//
+// Hermes `GET_BY_ID_IMPL` shape: the instruction names one `PropSiteCache`
+// slot of its own FunctionBytecode; the slot holds the receiver's
+// `Shape.identity`, the receiver's `class_id`, and a slot index. See
+// `bytecode.PropSiteCache` for the guard contract and
+// `docs/vm-value-representation-contract.md` 5.2 for why the guard is a
+// monotonic identity and never a pointer.
+//
+// Placement rule (PERF-T-SPIKE fairness rule 1): the HIT arms are inline in
+// the resident handlers; every CAPTURE body here is `noinline` and reached
+// only from a guard miss, so a hit never pays a prologue for machinery it
+// does not use.
+
+pub const PropSiteCache = bytecode.PropSiteCache;
+
+const site_empty: u8 = @intFromEnum(PropSiteCache.State.empty);
+pub const site_own: u8 = @intFromEnum(PropSiteCache.State.own);
+pub const site_proto: u8 = @intFromEnum(PropSiteCache.State.proto);
+pub const site_native_getter: u8 = @intFromEnum(PropSiteCache.State.native_getter);
+pub const site_mega: u8 = @intFromEnum(PropSiteCache.State.mega);
+
+/// Sentinel for an instruction whose `cache_idx` is `no_cache_idx`, or whose
+/// function owns no site array (hand-built fixtures, `small_inline`
+/// specialized copies of an inlined callee body). `guard_key` 0 can never
+/// match a `Shape.identity` (identities start at 1) and `.mega` keeps every
+/// capture leg off it, so one shared object serves all such sites.
+var no_prop_sites: [256]PropSiteCache = [_]PropSiteCache{.{ .state = site_mega }} ** 256;
+
+/// The retired sentinel, and a full 256-entry base of the same object: the
+/// Vm mirror points here (with count 256) once a function without a site
+/// array has been resolved, so every index of that function reads a retired
+/// site and no hot path needs a null test (see `Vm.prop_sites`).
+pub inline fn noPropSite() *PropSiteCache {
+    return &no_prop_sites[0];
+}
+
+pub inline fn noPropSiteBase() [*]PropSiteCache {
+    return &no_prop_sites;
+}
+
+/// A guard miss may overwrite the entry (Hermes overwrites rather than
+/// locking a site monomorphic; the 2026-09-06 T-spike re-run priced permanent
+/// locking at -9.8% on `poly_stress`). After `miss_budget` overwrites, or on
+/// the first receiver this cache shape cannot express, the site retires to
+/// `.mega` -- which no capture leg ever leaves, so a retired site costs one
+/// predictable compare and then takes the ordinary walk unchanged.
+pub inline fn siteCapturable(site: *const PropSiteCache) bool {
+    return site.state != site_mega;
+}
+
+fn retireSite(site: *PropSiteCache) CaptureOutcome {
+    site.state = site_mega;
+    site.guard_key = 0;
+    site.proto_key = 0;
+    return .settled;
+}
+
+/// Charge one overwrite; false once the site has retired.
+fn noteSiteMiss(site: *PropSiteCache) bool {
+    if (site.state == site_mega) return false;
+    if (site.state != site_empty) {
+        if (site.misses >= PropSiteCache.miss_budget) {
+            _ = retireSite(site);
+            return false;
+        }
+        site.misses += 1;
+    }
+    return true;
+}
+
+inline fn slotIndexOf(holder: *const core.Object, slot: *const core.JSValue) ?u16 {
+    const base = @intFromPtr(holder.prop_values);
+    const addr = @intFromPtr(slot);
+    // Shapes admit u32 slot indices; the compact cache only admits u16.
+    // An unrepresentable slot must use the ordinary property walk.
+    return std.math.cast(u16, (addr - base) / @sizeOf(core.property.Entry));
+}
+
+/// The receiver classes whose own-property probe is authoritative for a NAMED
+/// atom and whose prototype link may therefore be cached. Exotic own-property
+/// behaviour (Array `length`, typed-array and string indices, Proxy, module
+/// namespaces) is a property of the CLASS, and a Shape does not pin the class
+/// -- shapes are reused across classes (`createRegExpFromShape`, realm
+/// templates). So the prototype and native-getter arms carry `class_id` and
+/// re-check it on every hit; the own arm needs no class test at all, because
+/// a shape-identity match proves the property really is in that layout and
+/// the resident handler already probes own slots for every object class.
+inline fn siteCacheableReceiverClass(object: *const core.Object) bool {
+    // Exactly the classes whose own-property probe the resident walk itself
+    // treats as authoritative before it follows the prototype link (the
+    // `needsSlowPropertyAccess` step of `getFieldFastSlotWithExoticOrder`):
+    // everything except Array / Arguments / module namespace / Proxy /
+    // TypedArray / DataView, and anything carrying exotic methods.
+    //
+    // This was the narrower `object / global / NativeObject` triple, which
+    // retired -- on its first execution -- the site of every property read
+    // whose RECEIVER is a function, a Date, a RegExp, an Error, a Map or any
+    // other ordinary-storage class. `f.call(...)` is the boundary corpus's
+    // instance: `f` is class `bytecode_function`, so `.call` missed the own
+    // probe, failed this test, went `.mega`, and paid the full own-shape hash
+    // walk plus the prototype walk on every iteration.
+    //
+    // Widening is sound because the guard did not change: the hit arms still
+    // re-check the receiver's shape identity AND `class_id` (a Shape does not
+    // pin a class), and the prototype arm the holder's identity as well. The
+    // one fact the cached prototype link stands on is that for these classes
+    // an own-probe miss really means "no own property" -- which is what
+    // `needsSlowPropertyAccess` decides, here for the receiver exactly as the
+    // resident walk decides it for every link of the chain.
+    return !object.needsSlowPropertyAccess();
+}
+
+/// Is `accessor` a native (K3) getter -- the `.native_getter` admission test?
+/// Only the accessor SLOT is cached, never the resolved `NativeEntry`:
+/// `Object.defineProperty` can replace the getter function without changing
+/// any shape flag, so the hit arm re-reads the accessor out of the slot and
+/// re-resolves its entry every time.
+fn isNativeGetterValue(accessor: core.JSValue) bool {
+    const func_obj = object_ops.objectFromValueTrustedExpression(accessor) orelse return false;
+    if (func_obj.class_id != core.class.ids.c_function) return false;
+    const target = func_obj.nativeCallTarget() orelse return false;
+    return target.entry.kind == .getter;
+}
+
+/// What the caller must do next. `.settled` is the historical contract --
+/// the site now either guards this receiver or is retired, so re-entering the
+/// instruction terminates. `.deferred` is the one case where the site is
+/// deliberately left capturable: re-entering would come straight back here,
+/// so the caller must take the ordinary (cold) path exactly once.
+pub const CaptureOutcome = enum { settled, deferred };
+
+/// Single capture core for the read family (`get_field`, `get_field2` and the
+/// fused forms). Reached only from a guard miss, and `noinline` so the hit
+/// arms stay leaf. It re-probes rather than taking the missing handler's
+/// already-resolved slot because the three handlers resolve through three
+/// different helpers; the re-walk is paid once per site, not per access.
+pub noinline fn captureFieldSite(site: *PropSiteCache, object: *core.Object, atom_id: core.Atom, allow_native_getter: bool) CaptureOutcome {
+    if (!noteSiteMiss(site)) return .settled;
+    var slow = false;
+    if (object.findOwnDataSlotFast(atom_id, &slow)) |slot| {
+        site.slot = slotIndexOf(object, slot) orelse return retireSite(site);
+        site.class_id = object.class_id;
+        site.proto_key = 0;
+        site.guard_key = object.shape_ref.identity;
+        site.state = site_own;
+        return .settled;
+    }
+    if (slow) return retireSite(site);
+    if (!siteCacheableReceiverClass(object)) return retireSite(site);
+    const holder = object.getPrototype() orelse return retireSite(site);
+    if (holder.hasExoticMethods()) return retireSite(site);
+    var proto_slow = false;
+    if (holder.findOwnDataSlotFast(atom_id, &proto_slow)) |slot| {
+        const proto_identity = holder.shape_ref.identity;
+        // A live identity is never zero; zero is what discriminates `.own`.
+        std.debug.assert(proto_identity != 0);
+        site.slot = slotIndexOf(holder, slot) orelse return retireSite(site);
+        site.class_id = object.class_id;
+        site.proto_key = proto_identity;
+        site.guard_key = object.shape_ref.identity;
+        site.state = site_proto;
+        return .settled;
+    }
+    if (proto_slow) {
+        // The holder's entry is an accessor / var_ref / auto_init.
+        if (holder.findOwnPropertySlotTrusted(atom_id)) |lookup| {
+            if (!lookup.flags.deleted) {
+                // Only a native (K3) getter is expressible as a site arm
+                // (design 8.2).
+                if (allow_native_getter and lookup.flags.kind == .accessor and
+                    isNativeGetterValue(lookup.entry.slot.accessor.getterValue()))
+                {
+                    const index = holder.findPropertyIndexTrusted(atom_id).?;
+                    site.slot = std.math.cast(u16, index) orelse return retireSite(site);
+                    site.class_id = object.class_id;
+                    site.proto_key = holder.shape_ref.identity;
+                    site.guard_key = object.shape_ref.identity;
+                    site.state = site_native_getter;
+                    return .settled;
+                }
+                // A lazily installed builtin is a data property that has not
+                // been born yet: every intrinsic method -- `Function.prototype
+                // .call`, `Object.prototype.hasOwnProperty`, `Date.prototype
+                // .getTime` -- reads as `.auto_init` until its first access
+                // materializes the slot and flips the shape entry to `.data`
+                // (`commitAutoInitValue`). Capture runs AHEAD of that read, so
+                // retiring here locked out, permanently and on the very first
+                // execution, essentially every prototype-method site in the
+                // program. Defer instead: the caller takes the ordinary path
+                // once (which materializes), the site stays capturable, and
+                // the next execution captures the `.proto` data slot. The miss
+                // budget still bounds a placeholder that never materializes.
+                if (lookup.flags.kind == .auto_init and site.misses < PropSiteCache.miss_budget) {
+                    site.misses += 1;
+                    return .deferred;
+                }
+            }
+        }
+    }
+    return retireSite(site);
+}
+
+/// `put_field` capture: a writable own data slot only. The writable and
+/// data-kind bits live in the shape flags, so the identity guard alone proves
+/// a later direct slot write is legal.
+pub noinline fn capturePutSite(site: *PropSiteCache, object: *core.Object, atom_id: core.Atom) void {
+    if (!noteSiteMiss(site)) return;
+    // Same admission set as the resident `putFieldFastSlot` arm this cache
+    // replaces (mapped `arguments` writes must reach the mapping).
+    if (object.class_id == core.class.ids.mapped_arguments) {
+        _ = retireSite(site);
+        return;
+    }
+    var slow = false;
+    if (object.findWritableOwnDataSlotFast(atom_id, &slow)) |slot| {
+        site.slot = slotIndexOf(object, slot) orelse {
+            _ = retireSite(site);
+            return;
+        };
+        site.class_id = object.class_id;
+        site.proto_key = 0;
+        site.guard_key = object.shape_ref.identity;
+        site.state = site_own;
+        return;
+    }
+    _ = retireSite(site);
 }

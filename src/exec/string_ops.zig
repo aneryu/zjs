@@ -795,11 +795,7 @@ pub fn stringFromCharCode(
     if (args.len == 1) {
         if (args[0].asInt32()) |code| {
             const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-            if (unit <= 0xff) {
-                const byte: u8 = @intCast(unit);
-                if (try ctx.runtime.singleByteString(byte)) |cached| return cached.value();
-                return (try core.string.String.createAscii(ctx.runtime, &.{byte})).value();
-            }
+            if (unit <= 0xff) return (try ctx.runtime.singleByteString(@intCast(unit))).value();
             return (try core.string.String.createUtf16(ctx.runtime, &.{unit})).value();
         }
     }
@@ -2690,10 +2686,7 @@ pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, 
     try string_value.ensureFlat(rt);
     if (slice_len == 1) {
         const unit = string_value.codeUnitAt(slice_start);
-        if (unit <= 0x7f) {
-            const cached = (try rt.singleByteString(@intCast(unit))) orelse unreachable;
-            return cached.value();
-        }
+        if (unit < 0x100) return (try rt.singleByteString(@intCast(unit))).value();
     }
     return (try core.string.String.createSlice(rt, string_value, slice_start, slice_len)).value();
 }
@@ -3255,10 +3248,9 @@ pub fn getFastStringPrimitiveDataProperty(
 }
 
 pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
-    const value = if (unit <= 0xff) blk: {
-        const units: [1]u16 = .{unit};
-        break :blk (try core.string.String.createUtf16(rt, &units)).value();
-    } else blk: {
+    const value = if (unit < 0x100)
+        (try rt.singleByteString(@intCast(unit))).value()
+    else blk: {
         const units: [1]u16 = .{unit};
         break :blk (try core.string.String.createUtf16(rt, &units)).value();
     };
@@ -3270,20 +3262,13 @@ pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: co
     if (!value.isString()) return null;
     if (index >= core.string.stringValueLenUnchecked(value)) return core.JSValue.undefinedValue();
     const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
-    if (unit <= 0x7f) {
-        // ASCII fast path: reuse the runtime's cached single-byte
-        // strings. Hot loops like `decimalToPercentHexString` in URI sweeps
+    if (unit < 0x100) {
+        // Latin-1 fast path: reuse the runtime's single-code-unit string
+        // table. Hot loops like `decimalToPercentHexString` in URI sweeps
         // hit this path thousands of times per inner
         // iteration, and avoiding the per-call header+bytes allocation
         // pair is a major speedup.
-        const cached = (try rt.singleByteString(@intCast(unit))).?;
-        const out = cached.value();
-        return out;
-    }
-    if (unit <= 0xff) {
-        const units: [1]u16 = .{unit};
-        const out = try core.string.String.createUtf16(rt, &units);
-        return out.value();
+        return (try rt.singleByteString(@intCast(unit))).value();
     }
     const units: [1]u16 = .{unit};
     const out = try core.string.String.createUtf16(rt, &units);

@@ -13,6 +13,11 @@ pub const JSContext = zjs_binding.JSContext;
 /// Resolved-once native -> JS call target for repeated calls to one function
 /// (`zjs.CallSite.init` / `call` / `deinit`); see docs/public-api-contract.md.
 pub const CallSite = zjs_binding.CallSite;
+/// Resolved-once host-side property access for one property name
+/// (`zjs.PropertySite.init` / `get` / `set` / `deinit`); the embedder's
+/// analogue of a `get_field` inline-cache site. See
+/// docs/public-api-contract.md.
+pub const PropertySite = zjs_binding.PropertySite;
 pub const JSValue = zjs_binding.JSValue;
 pub const RuntimeOptions = zjs_binding.RuntimeOptions;
 pub const RuntimeMemoryUsage = zjs_binding.RuntimeMemoryUsage;

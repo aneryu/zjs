@@ -807,19 +807,13 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: 
 
     // Single code unit (`c <= 0xffff`, non-surrogate-pair): qjs routes these
     // through js_new_string_char (quickjs.c:3953-3962), which takes the latin1
-    // path for `c < 0x100`. Mirror that — `<= 0x7f` reuses the cached
-    // single-byte string (zero-alloc), `<= 0xff` builds a latin1 string;
-    // only `>= 0x100` and surrogate pairs reach the wide createUtf16.
+    // path for `c < 0x100`. Mirror that — a latin1 unit comes from the
+    // runtime's single-code-unit table (zero-alloc); only `>= 0x100` and
+    // surrogate pairs reach the wide createUtf16.
     if (first < 0x100) {
         iterator_object.iteratorIndexSlot().* += 1;
-        const byte: u8 = @intCast(first);
-        if (byte <= 0x7f) {
-            if (try rt.singleByteString(byte)) |cached| {
-                return iteratorResult(rt, global, cached.value(), false);
-            }
-        }
-        const out = try core.string.String.createLatin1(rt, &.{byte});
-        return iteratorResult(rt, global, out.value(), false);
+        const cached = try rt.singleByteString(@intCast(first));
+        return iteratorResult(rt, global, cached.value(), false);
     }
 
     if (isHighSurrogateUnit(first) and index + 1 < target_len) {
@@ -853,10 +847,7 @@ pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVal
     if (args.len == 1) {
         const code = args[0].asInt32() orelse return error.TypeError;
         const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-        if (unit <= 0xff) {
-            const byte: u8 = @intCast(unit);
-            if (try rt.singleByteString(byte)) |cached| return cached.value();
-        }
+        if (unit <= 0xff) return (try rt.singleByteString(@intCast(unit))).value();
     }
 
     // Most call sites pass 1-2 code points (notably the `String.fromCharCode(H, L)`
@@ -2060,7 +2051,11 @@ fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.St
     return null;
 }
 
+/// One-code-unit result string (`charAt` / `at` / the wrapper index reads).
+/// A latin1 unit is the runtime's shared table entry, matching qjs
+/// `js_new_string_char`'s narrow arm without its allocation.
 fn codeUnitStringValue(rt: *core.JSRuntime, unit: u16) !core.JSValue {
+    if (unit < 0x100) return (try rt.singleByteString(@intCast(unit))).value();
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
 }
 

@@ -53,6 +53,9 @@ pub const opcode = struct {
         label_u16,
         /// `argc:u16` + `cache_idx:u8` (call family; see opcode_logical.zig).
         npop_u8,
+        /// `atom:u32` + `cache_idx:u8` (W1 property-site family; see
+        /// opcode_logical.zig).
+        atom_cache_u8,
     };
 
     /// Phase-1 scope operand flag: the LHS reference has already selected its
@@ -795,6 +798,39 @@ pub const opcode = struct {
     /// range).
     pub fn formatOf(op_id: u8) Format {
         return if (finalInfo(op_id)) |info| info.fmt else .none;
+    }
+
+    /// True when the opcode's final form carries a trailing W1
+    /// property-site `cache_idx` byte (`Format.atom_cache_u8`). The phase-1
+    /// stream writes a `PropSiteCache.no_cache_idx` placeholder there;
+    /// `resolve_labels` is the single writer of real indices.
+    ///
+    /// Derived tables, not `formatOf*` calls: both predicates sit on the
+    /// per-instruction emit path, and `phase1Info` walks the
+    /// `lowered_direct` list before it can answer (a 6.5% fixed-work
+    /// instruction regression on Typescript when this was a call).
+    const prop_cache_idx_final: [256]bool = blk: {
+        @setEvalBranchQuota(60_000);
+        var t: [256]bool = @splat(false);
+        for (&t, 0..) |*row, i| row.* = formatOf(@intCast(i)) == .atom_cache_u8;
+        break :blk t;
+    };
+    const prop_cache_idx_phase1: [256]bool = blk: {
+        @setEvalBranchQuota(60_000);
+        var t: [256]bool = @splat(false);
+        for (&t, 0..) |*row, i| row.* = formatOfPhase1(@intCast(i)) == .atom_cache_u8;
+        break :blk t;
+    };
+
+    pub inline fn carriesPropCacheIdx(op_id: u8) bool {
+        return prop_cache_idx_final[op_id];
+    }
+
+    /// Phase-1-view twin of `carriesPropCacheIdx`. The parser emits the temp
+    /// `get_field_opt_chain` (an overlap-range id whose FINAL view names a
+    /// different opcode), so a phase-1 emitter must ask the phase-1 table.
+    pub inline fn carriesPropCacheIdxPhase1(op_id: u8) bool {
+        return prop_cache_idx_phase1[op_id];
     }
 
     /// Operand format in phase-1 streams (temp forms in the overlap
@@ -1672,7 +1708,7 @@ pub const opcode = struct {
                     flags |= FormRow.claimed_bit;
                 if (dynamic_by_form[f.value] != null) flags |= FormRow.dynamic_bit;
                 switch (info.fmt) {
-                    .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
+                    .atom, .atom_u8, .atom_cache_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
                         flags |= FormRow.atom_bit;
                         // The atom_bit contract: pc+1 is the atom. Check it
                         // against the layout rather than assuming it.
@@ -2730,7 +2766,7 @@ pub const opcode = struct {
         try std.testing.expectEqual(@as(u8, 7), sizeOfPhase1(op.scope_put_var_init));
         try std.testing.expectEqual(@as(u8, 11), sizeOfPhase1(op.scope_make_ref));
         try std.testing.expectEqual(@as(u8, 7), sizeOfPhase1(op.scope_in_private_field));
-        try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.get_field_opt_chain));
+        try std.testing.expectEqual(@as(u8, 6), sizeOfPhase1(op.get_field_opt_chain));
         try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.line_num));
         try std.testing.expectEqualStrings("scope_get_var", nameOfPhase1(op.scope_get_var));
         try std.testing.expectEqual(Format.atom_u16, formatOfPhase1(op.scope_get_var));
@@ -2807,6 +2843,7 @@ pub const format = struct {
             .label => .{ .operands = &.{.label} },
             .atom => .{ .operands = &.{.atom} },
             .atom_u8 => .{ .operands = &.{ .atom, .u8 } },
+            .atom_cache_u8 => .{ .operands = &.{ .atom, .u8 } },
             .atom_u16 => .{ .operands = &.{ .atom, .u16 } },
             .atom_label_u8 => .{ .operands = &.{ .atom, .label, .u8 } },
             .atom_label_u16 => .{ .operands = &.{ .atom, .label, .u16 } },
@@ -3514,6 +3551,13 @@ pub const function_bytecode = struct {
     /// Not a GC edge: nothing in a slot is a heap object, so no tracer visits
     /// the array. Storage is the `call_sites` FAM tail of the owning
     /// FunctionBytecode, zero-initialised with it and freed with it.
+    ///
+    /// **The interpreter does not read these slots.** The D2 verdict
+    /// (design 16.2) was that call-site quickening buys nothing on top of the
+    /// record arms, so no handler consults `entry` / `handler` / `state`; the
+    /// compiler still allocates and numbers the slots (`resolve_labels`)
+    /// because they are the JIT's feedback slot (design 15 R10). Anything
+    /// that starts writing them owes the invalidation rule first.
     pub const CallSiteCache = extern struct {
         entry: ?*const anyopaque = null,
         handler: ?*const anyopaque = null,
@@ -3529,6 +3573,81 @@ pub const function_bytecode = struct {
         comptime {
             std.debug.assert(@sizeOf(@This()) == 24);
             std.debug.assert(@alignOf(@This()) == 8);
+        }
+    };
+
+    /// Per-property-site inline cache (W1, Hermes `ReadPropertyCacheEntry`
+    /// shape; native-boundary design 8.2 / 15 R8). One slot per `get_field` /
+    /// `get_field2` / `put_field` / fused-form instruction, named by that
+    /// instruction's trailing `cache_idx` operand.
+    ///
+    /// Guards (representation contract 5.2: slot caches hold NON-OWNING
+    /// references and must be validated by version/identity, never by
+    /// pointer):
+    ///   - `guard_key` = the receiver `Shape.identity` (monotonic, never
+    ///     reused, refreshed before every in-place shape mutation), so a
+    ///     recycled Shape address can never re-match;
+    ///   - `proto_key` = the HOLDER `Shape.identity` on the prototype arms
+    ///     (zero on `.own`); the receiver's own key already pins WHICH object
+    ///     is its prototype, because `proto` lives in the shape;
+    ///   - `class_id` = the receiver's class, which the shape does NOT pin.
+    ///     Required by every arm that walks past the receiver's own shape,
+    ///     since exotic own-property behaviour (Array `length`, typed-array
+    ///     and string indices, Proxy, module namespaces) is a property of the
+    ///     class, not of the layout.
+    /// Nothing here is a GC edge: no slot holds a heap pointer. Storage is
+    /// the `prop_sites` FAM tail of the owning FunctionBytecode,
+    /// zero-initialised with it and freed with it.
+    ///
+    /// 32 bytes, i.e. a power of two, so site addressing is `base + (idx << 5)`
+    /// instead of a multiply (PERF-T-SPIKE fairness rule 2: a 24-byte stride
+    /// put a `madd` on the hit path and under-priced nothing but the cache).
+    pub const PropSiteCache = extern struct {
+        guard_key: u64 = 0,
+        proto_key: u64 = 0,
+        /// Index into the HOLDER's `prop_values` (own arm: the receiver).
+        slot: u16 = 0,
+        /// Receiver `class_id` for the arms that need it (see above).
+        class_id: u16 = 0,
+        state: u8 = @intFromEnum(State.empty),
+        misses: u8 = 0,
+        _pad: u16 = 0,
+        _reserved: u64 = 0,
+
+        pub const State = enum(u8) {
+            /// Never captured. `guard_key` is 0 and identities start at 1, so
+            /// an empty entry can never guard-match and the hit path needs no
+            /// separate emptiness test.
+            empty,
+            /// Own data slot on the receiver.
+            own,
+            /// Data slot one prototype link up.
+            proto,
+            /// Native (K3) accessor `get` one prototype link up.
+            native_getter,
+            /// Retired after `miss_budget` misses; never captured again.
+            mega,
+        };
+
+        /// The operand value that means "this site has no cache slot".
+        pub const no_cache_idx: u8 = 255;
+
+        /// Hermes overwrites a missed entry rather than locking it
+        /// monomorphic (`Interpreter.cpp` GET_BY_ID_IMPL); the 2026-09-06
+        /// T-spike re-run priced permanent locking at -9.8% on poly_stress.
+        /// A site that keeps missing after this many overwrites is genuinely
+        /// polymorphic and retires to `.mega`.
+        pub const miss_budget: u8 = 4;
+
+        comptime {
+            std.debug.assert(@sizeOf(@This()) == 32);
+            std.debug.assert(@alignOf(@This()) == 8);
+            std.debug.assert(@offsetOf(@This(), "guard_key") == 0);
+            std.debug.assert(@offsetOf(@This(), "proto_key") == 8);
+            std.debug.assert(@offsetOf(@This(), "slot") == 16);
+            std.debug.assert(@offsetOf(@This(), "class_id") == 18);
+            std.debug.assert(@offsetOf(@This(), "state") == 20);
+            std.debug.assert(@offsetOf(@This(), "misses") == 21);
         }
     };
 
@@ -3549,15 +3668,21 @@ pub const function_bytecode = struct {
         script_or_module: atom.Atom,
         ctor_alloc: CtorAllocProfile = .{},
         /// small_inline owns bytes 0..24 (CallerState pointer, borrowed
-        /// realm word, apply-forward memo byte).
-        _ctor_alloc_pad: [32]u8 = @splat(0),
+        /// realm word, apply-forward memo byte); the rest of the original
+        /// 32-byte pad now carries the W1 property-site array pointer below.
+        _ctor_alloc_pad: [24]u8 = @splat(0),
+        /// Property-site cache slots: `prop_site_count` entries at the
+        /// aligned `prop_sites` FAM tail behind the call-site tail (null when
+        /// zero). Written once by `FunctionLayout.seedHeader`.
+        prop_sites: ?[*]function_bytecode.PropSiteCache = null,
         /// Call-site cache slots: `call_site_count` entries at the aligned
         /// `call_sites` FAM tail behind this extension (null when zero).
         /// Written once by `FunctionLayout.seedHeader`; the layout re-reads
         /// `call_site_count` to size the allocation on teardown.
         call_sites: ?[*]function_bytecode.CallSiteCache = null,
         call_site_count: u16 = 0,
-        _call_sites_pad: [6]u8 = @splat(0),
+        prop_site_count: u16 = 0,
+        _call_sites_pad: [4]u8 = @splat(0),
 
         comptime {
             std.debug.assert(@sizeOf(@This()) == 64);
@@ -3566,8 +3691,10 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "_call_facts_padding") == 0x02);
             std.debug.assert(@offsetOf(@This(), "script_or_module") == 0x04);
             std.debug.assert(@offsetOf(@This(), "ctor_alloc") == 0x08);
+            std.debug.assert(@offsetOf(@This(), "prop_sites") == 0x28);
             std.debug.assert(@offsetOf(@This(), "call_sites") == 0x30);
             std.debug.assert(@offsetOf(@This(), "call_site_count") == 0x38);
+            std.debug.assert(@offsetOf(@This(), "prop_site_count") == 0x3A);
         }
     };
 
@@ -3737,6 +3864,16 @@ pub const function_bytecode = struct {
                 return canonicalHotExtension(ptr, self.byte_code_len);
             }
             return self.hotExtensionSlow();
+        }
+
+        /// Leaf-safe sibling of `hotExtension` for resident handlers: the
+        /// canonical (self-owned, materialized) layout only, never the
+        /// outlined legacy-adapter probe, so a handler that reads it in a cold
+        /// leg keeps no frame. A legacy-adapter FB reads as "no extension".
+        pub inline fn hotExtensionCanonical(self: *const FunctionBytecodeImpl) ?*align(1) const FunctionBytecodeHotExtension {
+            if (!bit(self.flag_byte18, byte18_has_extension_mask)) return null;
+            const ptr = self.byte_code orelse return null;
+            return canonicalHotExtension(ptr, self.byte_code_len);
         }
 
         pub inline fn hotExtensionMut(self: *FunctionBytecodeImpl) ?*align(1) FunctionBytecodeHotExtension {
@@ -4189,6 +4326,26 @@ pub const function_bytecode = struct {
             return &sites[idx];
         }
 
+        /// Number of W1 property-site cache slots.
+        pub inline fn propSiteCount(self: *const FunctionBytecodeImpl) u16 {
+            const hot = self.hotExtension() orelse return 0;
+            return hot.prop_site_count;
+        }
+
+        /// The property-site slot a field instruction's `cache_idx` operand
+        /// names, or null for the no-cache index (255) and for indices past
+        /// the function's slot count (fixture streams carry placeholder
+        /// bytes). The resident handlers do not call this: they read
+        /// `Vm.prop_sites` (published per frame) so the hit path is one
+        /// shifted index, no optional and no extension walk.
+        pub inline fn propSiteCache(self: *const FunctionBytecodeImpl, idx: u8) ?*function_bytecode.PropSiteCache {
+            if (idx == function_bytecode.PropSiteCache.no_cache_idx) return null;
+            const hot = self.hotExtension() orelse return null;
+            if (idx >= hot.prop_site_count) return null;
+            const sites = hot.prop_sites orelse return null;
+            return &sites[idx];
+        }
+
         fn createRaw(
             account: *memory.MemoryAccount,
             layout_value: function_bytecode.FunctionLayout,
@@ -4238,6 +4395,8 @@ pub const function_bytecode = struct {
             /// Call-site cache slots to allocate (fixture streams carry
             /// whatever `cache_idx` bytes the test wrote).
             call_site_count: u16 = 0,
+            /// W1 property-site cache slots to allocate (same fixture rule).
+            prop_site_count: u16 = 0,
         };
 
         /// Fixture-only constructor. It uses the same packed FAM topology as
@@ -4255,6 +4414,7 @@ pub const function_bytecode = struct {
                 options.closure_var_count,
                 options.byte_code.len,
                 options.call_site_count,
+                options.prop_site_count,
             );
             const fb = try createRaw(&rt.memory, layout_value);
             var raw_owned = true;
@@ -4321,8 +4481,8 @@ pub const function_bytecode = struct {
         /// and duplicate every inline atom owner. Production finalization moves
         /// those owners from the lowering ledger without refcount churn.
         ///
-        /// In every atom operand format (`atom`, `atom_u8`, `atom_u16`,
-        /// `atom_label_u8`, `atom_label_u16`) the 4-byte atom is the first
+        /// In every atom operand format (`atom`, `atom_u8`, `atom_cache_u8`,
+        /// `atom_u16`, `atom_label_u8`, `atom_label_u16`) the 4-byte atom is the first
         /// operand at `pc + 1`; `hasAtomOperandFmt` selects those formats.
         pub fn dupBytecodeAtoms(byte_code: []const u8, _: *atom.AtomTable) void {
             var pc: usize = 0;
@@ -4360,8 +4520,8 @@ pub const function_bytecode = struct {
         /// `hasAtomOperand` but lives here so the retention walk is self-contained.
         inline fn hasAtomOperandFmt(op_id: u8) bool {
             const fmt = opcode.formatOf(op_id);
-            return fmt == .atom or fmt == .atom_u8 or fmt == .atom_u16 or
-                fmt == .atom_label_u8 or fmt == .atom_label_u16;
+            return fmt == .atom or fmt == .atom_u8 or fmt == .atom_cache_u8 or
+                fmt == .atom_u16 or fmt == .atom_label_u8 or fmt == .atom_label_u16;
         }
 
         /// Iterator over the atom operands embedded in final-form bytecode.
@@ -4519,6 +4679,8 @@ pub const function_bytecode = struct {
         byte_code_len: usize,
         /// Call-site cache slots (<= 255; requires `has_extension`).
         call_site_count: usize,
+        /// W1 property-site cache slots (<= 255; requires `has_extension`).
+        prop_site_count: usize,
         cpool_off: usize,
         vardefs_off: usize,
         closure_var_off: usize,
@@ -4529,6 +4691,9 @@ pub const function_bytecode = struct {
         /// are no slots. Sits behind the hot extension so every QuickJS core
         /// offset and the extension's exact-code_end placement are untouched.
         call_sites_off: ?usize,
+        /// Aligned start of the `PropSiteCache` array, or null when there are
+        /// no slots. Sits behind the call-site tail for the same reason.
+        prop_sites_off: ?usize,
         total_size: usize,
 
         pub fn init(
@@ -4540,12 +4705,15 @@ pub const function_bytecode = struct {
             closure_var_count: usize,
             byte_code_len: usize,
             call_site_count: usize,
+            prop_site_count: usize,
         ) error{BytecodeOverflow}!@This() {
             if (arg_count > std.math.maxInt(u16) or var_count > std.math.maxInt(u16) or
                 cpool_count > std.math.maxInt(i32) or closure_var_count > std.math.maxInt(i32) or
                 byte_code_len > std.math.maxInt(i32) or
                 call_site_count > function_bytecode.CallSiteCache.no_cache_idx or
-                (call_site_count != 0 and !has_extension))
+                prop_site_count > function_bytecode.PropSiteCache.no_cache_idx or
+                (call_site_count != 0 and !has_extension) or
+                (prop_site_count != 0 and !has_extension))
             {
                 return error.BytecodeOverflow;
             }
@@ -4568,10 +4736,18 @@ pub const function_bytecode = struct {
                 std.mem.alignForward(usize, hot_end, @alignOf(function_bytecode.CallSiteCache))
             else
                 null;
-            const total_size = if (call_sites_off) |offset|
+            const call_sites_end = if (call_sites_off) |offset|
                 std.math.add(usize, offset, call_site_count * @sizeOf(function_bytecode.CallSiteCache)) catch return error.BytecodeOverflow
             else
                 hot_end;
+            const prop_sites_off: ?usize = if (prop_site_count != 0)
+                std.mem.alignForward(usize, call_sites_end, @alignOf(function_bytecode.PropSiteCache))
+            else
+                null;
+            const total_size = if (prop_sites_off) |offset|
+                std.math.add(usize, offset, prop_site_count * @sizeOf(function_bytecode.PropSiteCache)) catch return error.BytecodeOverflow
+            else
+                call_sites_end;
 
             // The pinned QuickJS order is naturally aligned for both supported
             // JSValue representations; padding there would be a layout bug.
@@ -4589,6 +4765,7 @@ pub const function_bytecode = struct {
                 .closure_var_count = closure_var_count,
                 .byte_code_len = byte_code_len,
                 .call_site_count = call_site_count,
+                .prop_site_count = prop_site_count,
                 .cpool_off = cpool_off,
                 .vardefs_off = vardefs_off,
                 .closure_var_off = closure_var_off,
@@ -4596,6 +4773,7 @@ pub const function_bytecode = struct {
                 .byte_code_end = byte_code_end,
                 .hot_off = hot_off,
                 .call_sites_off = call_sites_off,
+                .prop_sites_off = prop_sites_off,
                 .total_size = total_size,
             };
         }
@@ -4616,11 +4794,12 @@ pub const function_bytecode = struct {
                 @intCast(fb.closure_var_count),
                 @intCast(fb.byte_code_len),
                 0,
+                0,
             );
             const hot_off = base.hot_off orelse return base;
             const bytes: [*]const u8 = @ptrCast(fb);
             const hot: *align(1) const FunctionBytecodeHotExtension = @ptrCast(bytes + hot_off);
-            if (hot.call_site_count == 0) return base;
+            if (hot.call_site_count == 0 and hot.prop_site_count == 0) return base;
             return init(
                 base.has_debug,
                 base.has_extension,
@@ -4630,6 +4809,7 @@ pub const function_bytecode = struct {
                 base.closure_var_count,
                 base.byte_code_len,
                 hot.call_site_count,
+                hot.prop_site_count,
             );
         }
 
@@ -4662,6 +4842,11 @@ pub const function_bytecode = struct {
             return packedSlice(fb, function_bytecode.CallSiteCache, offset, self.call_site_count, self.total_size);
         }
 
+        pub fn propSitesSliceMut(self: @This(), fb: *FunctionBytecodeImpl) []function_bytecode.PropSiteCache {
+            const offset = self.prop_sites_off orelse return &.{};
+            return packedSlice(fb, function_bytecode.PropSiteCache, offset, self.prop_site_count, self.total_size);
+        }
+
         fn hotExtensionPtrMut(self: @This(), fb: *FunctionBytecodeImpl) ?*align(1) FunctionBytecodeHotExtension {
             const offset = self.hot_off orelse return null;
             const bytes: [*]u8 = @ptrCast(fb);
@@ -4686,6 +4871,9 @@ pub const function_bytecode = struct {
                 const sites = self.callSitesSliceMut(fb);
                 hot.call_site_count = @intCast(self.call_site_count);
                 hot.call_sites = if (sites.len == 0) null else sites.ptr;
+                const prop_sites = self.propSitesSliceMut(fb);
+                hot.prop_site_count = @intCast(self.prop_site_count);
+                hot.prop_sites = if (prop_sites.len == 0) null else prop_sites.ptr;
             }
         }
 
@@ -10574,6 +10762,7 @@ pub const pipeline_finalize = struct {
             fd.closure_var.len,
             lowered.code.len,
             lowered.call_site_count,
+            lowered.prop_site_count,
         );
 
         // Every fallible artifact allocation happens before owner commit.
@@ -11173,6 +11362,9 @@ const function_mod = struct {
         /// assigns `cache_idx` operands 0.. in emission order; sites past
         /// 255 carry the no-cache index). Sizes the FunctionBytecode tail.
         call_site_count: u16 = 0,
+        /// W1 property-site cache slots the final code addresses (same
+        /// emission-order rule as `call_site_count`).
+        prop_site_count: u16 = 0,
         flags: Flags = .{},
         entry_contract: EntryContract = .{},
         /// Precomputed bytecode-only half of simple inline-call eligibility.
@@ -12043,6 +12235,7 @@ pub const Bytecode = function_mod.Bytecode;
 pub const FunctionBytecode = function_bytecode.FunctionBytecode;
 pub const FunctionLayout = function_bytecode.FunctionLayout;
 pub const CallSiteCache = function_bytecode.CallSiteCache;
+pub const PropSiteCache = function_bytecode.PropSiteCache;
 pub const CallFacts = function_bytecode.CallFacts;
 pub const legacy_byte_code_len_sentinel = function_bytecode.legacy_byte_code_len_sentinel;
 pub const LegacyExecutionAdapter = function_mod.LegacyExecutionAdapter;

@@ -3409,7 +3409,7 @@ fn expectNativeAliasForTest(
     try std.testing.expect(source.sameValue(alias));
     const function_object = expectObjectAssumeBootstrap(source);
     try std.testing.expectEqual(core.function.nativeBuiltinId(domain, id), function_object.nativeFunctionId());
-    try std.testing.expect(function_object.nativeRecord() != null);
+    try std.testing.expect(function_object.nativeEntry() != null);
 }
 
 fn getConstructorPrototypeForTest(
@@ -3431,7 +3431,7 @@ fn expectNativeFunctionForTest(
     const value = try owner.getProperty(atom_id);
     const function_object = expectObjectAssumeBootstrap(value);
     try std.testing.expectEqual(core.function.nativeBuiltinId(domain, id), function_object.nativeFunctionId());
-    try std.testing.expect(function_object.nativeRecord() != null);
+    try std.testing.expect(function_object.nativeEntry() != null);
 }
 
 fn expectAutoInitOwnPropertyForTest(object: *core.Object, atom_id: core.Atom) !void {
@@ -3513,7 +3513,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
         const function_object = expectObjectAssumeBootstrap(method_value);
 
         try std.testing.expectEqual(core.function.nativeBuiltinId(item.domain, item.id), function_object.nativeFunctionId());
-        const record = function_object.nativeRecord() orelse return error.TestUnexpectedResult;
+        const record = function_object.nativeEntry() orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(core.native_entry.Kind.managed, record.kind);
     }
 
@@ -3522,7 +3522,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
     const escape_value = try intrinsics.global.getProperty(escape_key);
     const escape_function = expectObjectAssumeBootstrap(escape_value);
     try std.testing.expectEqual(core.function.nativeBuiltinId(.uri, core.uri.escape_id), escape_function.nativeFunctionId());
-    try std.testing.expect(escape_function.nativeRecord() != null);
+    try std.testing.expect(escape_function.nativeEntry() != null);
 }
 
 test "bootstrap aliases retain exact native identity and records" {

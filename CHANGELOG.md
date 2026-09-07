@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Property caches:** slots above index 65,535 use the ordinary property
+  path, preventing truncated indices from reading or overwriting another
+  property. Covers VM and host `PropertySite` reads, writes and native getters.
+
 - **Public API: the host function surface is replaced by `zjs.native`**
   (2026-09-06, native-boundary redesign phase A3, owner rulings D4/D8, hard
   cut without adapters). Removed: `JSContext.defineGlobalFunction` /

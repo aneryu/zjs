@@ -124,12 +124,27 @@ inline fn bytecodeStackBudgetWouldOverflow(
     rt: *const core.JSRuntime,
     planned_stack_bytes: usize,
 ) bool {
-    const accumulated = std.math.add(
-        usize,
-        rt.hot.active_bytecode_stack_bytes,
-        planned_stack_bytes,
-    ) catch return true;
-    return rt.checkNativeStackOverflow(accumulated);
+    return admissionCeilingsReject(&rt.hot, rt.hot.active_bytecode_stack_bytes +% planned_stack_bytes, planned_stack_bytes);
+}
+
+/// The two byte-priced ceilings of a bytecode push, as one predicate over the
+/// already-formed sum: the wrap test (`accumulated` went backwards) and the
+/// qjs `js_check_stack_overflow` native recursion guard. `std.math.add`'s
+/// error union made LLVM materialize the overflow flag into a byte and spill
+/// it (`cset` + `sturb` in front of every crossing); `+%` plus the backwards
+/// compare is the same predicate with the flag consumed where it is produced.
+inline fn admissionCeilingsReject(
+    hot: *const core.JSRuntime.HotExecState,
+    accumulated: usize,
+    planned_stack_bytes: usize,
+) bool {
+    // No wrap test: every accepted `accumulated` is below a native frame
+    // address (the guard below), and one planned figure is bounded by the
+    // function header's u16 slot counts, so the sum stays under 2^49. The
+    // `std.math.add` error union this replaces cost a `cset` + a `tbnz` per
+    // crossing to carry a flag that is provably never set.
+    std.debug.assert(accumulated >= planned_stack_bytes);
+    return (@frameAddress() -| accumulated) < hot.native_stack_limit;
 }
 
 pub inline fn canEnterInlineCallDepthMode(
@@ -187,10 +202,17 @@ pub inline fn tryCommitInlineCallDepthBytesRt(
     rt: *core.JSRuntime,
     planned_stack_bytes: usize,
 ) bool {
-    if (rt.hot.call_depth >= maxLogicalJsCallDepthRt(rt) or
-        bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes)) return false;
-    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.hot.call_depth += 1;
+    // One load cluster, one sum, one commit: the accumulated byte figure the
+    // ceilings test IS the figure that is stored back, so the crossing pays
+    // a single `adds` instead of the check's add plus the commit's add.
+    const hot = &rt.hot;
+    const depth = hot.call_depth;
+    const bytes = hot.active_bytecode_stack_bytes;
+    const accumulated = bytes +% planned_stack_bytes;
+    if (depth >= hot.stack_size or
+        admissionCeilingsReject(hot, accumulated, planned_stack_bytes)) return false;
+    hot.active_bytecode_stack_bytes = accumulated;
+    hot.call_depth = depth + 1;
     return true;
 }
 
@@ -497,7 +519,7 @@ pub inline fn resolvedNativeCallTargetAssumeCFunction(
 pub inline fn resolvedNativeMethodRecord(
     ctx: *core.JSContext,
     method_obj: *core.Object,
-) ?*const core.host_function.InternalRecord {
+) ?*const core.NativeEntry {
     if (method_obj.class_id != core.class.ids.c_function) return null;
     return resolvedNativeMethodRecordAssumeCFunction(ctx, method_obj);
 }
@@ -506,12 +528,12 @@ pub inline fn resolvedNativeMethodRecord(
 pub inline fn resolvedNativeMethodRecordAssumeCFunction(
     ctx: *core.JSContext,
     method_obj: *core.Object,
-) ?*const core.host_function.InternalRecord {
-    return method_obj.nativeRecordAssumeCFunction() orelse blk: {
+) ?*const core.NativeEntry {
+    return method_obj.nativeEntryAssumeCFunction() orelse blk: {
         const native_id = method_obj.nativeFunctionId();
         const nref = core.function.decodeNativeBuiltinId(native_id) orelse return null;
         const record = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
-        method_obj.nativeRecordSlot().* = record;
+        method_obj.nativeEntrySlot().* = record;
         break :blk record;
     };
 }
@@ -524,7 +546,7 @@ pub inline fn callResolvedNativeMethod(
     output: ?*std.Io.Writer,
     global: *core.Object,
     method_obj: *core.Object,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     receiver: core.JSValue,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
@@ -674,10 +696,10 @@ inline fn fastNativeMethodCall(
     // This is specifically the native c_function fast path. Bytecode functions
     // use the same FunctionPayload kind, but qjs discriminates their overlaid
     // union by class before reading `u.cfunc`; do the same before interpreting
-    // the shared call-cache slot as an InternalRecord. Bound/proxy/closure
+    // the shared call-cache slot as an NativeEntry. Bound/proxy/closure
     // callables likewise fall through to the generic dispatcher.
     if (function_object.class_id != core.class.ids.c_function) return null;
-    // Divergence B: cache the resolved `*const InternalRecord` on the func-object
+    // Divergence B: cache the resolved `*const NativeEntry` on the func-object
     // payload so the hot call skips the per-call native-id DECODE + record-table
     // LOOKUP, mirroring qjs `func = p->u.cfunc.c_function` (the dispatchable
     // handle lives on the object). SAFE memoization: `native_function_id` is

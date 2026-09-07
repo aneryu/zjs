@@ -22,6 +22,7 @@ pub const HostError = exec.exceptions.HostError;
 pub const JSRuntime = binding_root.JSRuntime;
 pub const JSContext = binding_root.JSContext;
 pub const CallSite = binding_root.CallSite;
+pub const PropertySite = binding_root.PropertySite;
 pub const JSValue = binding_root.JSValue;
 pub const Object = binding_root.Object;
 pub const Descriptor = core.Descriptor;

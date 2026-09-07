@@ -249,6 +249,57 @@ duration of the call; the result is a plain `JSValue`. Host -> JS -> native
 -> JS recursion uses the C stack and is bounded by the runtime's native
 stack limit.
 
+## Reading And Writing One Property Repeatedly
+
+`ctx.getProperty(obj, "field")` interns the name and walks the object every
+time. A host that touches the same field in a loop keeps a
+`zjs.PropertySite`: the name is interned and pinned once in `init`, and each
+access is guarded by the receiver's shape identity, exactly like a
+`get_field` inline-cache site inside the VM.
+
+```zig
+var field = try zjs.PropertySite.init(ctx, "field");
+defer field.deinit();                       // before ctx/rt are destroyed
+
+const record = try ctx.eval("({ x: 1, field: 3 })", .{});
+var total: i64 = 0;
+var i: usize = 0;
+while (i < 1000) : (i += 1) {
+    total += (try field.get(record)).asInt32() orelse return error.Unexpected;
+}
+try field.set(record, zjs.JSValue.int32(11));
+
+// An already-interned name works too, and keeps its own pin.
+const name = try zjs.host.PropName.internStatic(rt, "field");
+defer name.release(rt);
+var same = try zjs.PropertySite.initAtom(ctx, name);
+defer same.deinit();
+```
+
+What is cached, and what is not: an own data slot, a data slot one prototype
+link up (so `p.field` inherited from `P.prototype` is still one load), and a
+native K3 getter on a class prototype (`world.time`). A non-object receiver,
+a Proxy, an exotic own property, a JS accessor, or a receiver set that keeps
+changing shape falls back to the ordinary walk -- a site is always correct,
+and only sometimes fast.
+
+Nothing invalidates a site by hand. A shape takes a fresh identity before
+every mutation of the layout it guards, so adding a property to the
+receiver, deleting the cached one, freezing it, or swapping its prototype
+just makes the next access miss and re-capture:
+
+```zig
+try ctx.defineDataProperty(record, "later", zjs.JSValue.int32(1), .{});
+// the next get() re-captures against the new layout and still answers 11
+```
+
+`set` is the strict assignment: a write the object refuses (read-only
+property, non-extensible receiver, accessor without a setter) raises a
+TypeError rather than dropping the write silently, and surfaces as
+`error.TypeError` with the exception pending on the context. A site holds no
+`JSValue`, so it roots nothing; the receiver and the value `get` returns
+follow the ordinary rooting rules below.
+
 ## Rooting Rules
 
 The collector is a tracing, non-moving collector with a conservative scan of

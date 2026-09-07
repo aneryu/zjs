@@ -513,6 +513,11 @@ const Resolver = struct {
     /// call/call0..3/tail_call/call_method/tail_call_method takes the next
     /// `cache_idx` in emission order; sites past 255 get the no-cache index.
     call_sites_emitted: u32 = 0,
+    /// W1 property sites written so far: each final `get_field` /
+    /// `get_field2` / `put_field` (and the fused forms that own the atom)
+    /// takes the next `cache_idx` in emission order; sites past 255 get the
+    /// no-cache index.
+    prop_sites_emitted: u32 = 0,
 
     fn deinit(self: *Resolver) void {
         if (self.output_atom_capacity != 0)
@@ -794,7 +799,8 @@ const Resolver = struct {
                 self.fuse_b2 = 0;
             },
             op.get_field2 => {
-                self.last_sz = 5;
+                // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
+                self.last_sz = 6;
                 self.fuse_b = op.call_method;
                 self.fuse_op = op.get_field2_call_method;
                 self.fuse_b2 = 0;
@@ -813,7 +819,8 @@ const Resolver = struct {
                 self.fuse_b2 = 0;
             },
             op.get_field => {
-                self.last_sz = 5;
+                // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
+                self.last_sz = 6;
                 self.fuse_b = op.get_field2;
                 self.fuse_op = op.get_field_field2;
                 self.fuse_b2 = 0;
@@ -1907,6 +1914,23 @@ const Resolver = struct {
         return @intCast(@min(self.call_sites_emitted, bytecode.CallSiteCache.no_cache_idx));
     }
 
+    /// Next W1 property-site `cache_idx` operand (0.. in emission order, 255
+    /// once the slot budget is spent). The FunctionBytecode gets
+    /// `min(sites, 255)` slots.
+    fn nextPropSiteIndex(self: *Resolver) u8 {
+        const no_cache = bytecode.PropSiteCache.no_cache_idx;
+        const idx: u8 = if (self.prop_sites_emitted < no_cache)
+            @intCast(self.prop_sites_emitted)
+        else
+            no_cache;
+        self.prop_sites_emitted += 1;
+        return idx;
+    }
+
+    fn propSiteCount(self: *const Resolver) u16 {
+        return @intCast(@min(self.prop_sites_emitted, bytecode.PropSiteCache.no_cache_idx));
+    }
+
     /// Final writer for the plain-call family (`call` / `tail_call`): the
     /// burned-arity `call0..3` short forms carry only the cache index; the
     /// wide forms carry `argc:u16 idx:u8`. `putShortCode` cannot serve these
@@ -2228,6 +2252,17 @@ const Resolver = struct {
                 instruction.form == .call_method_apply_fwd)
             {
                 self.output[pc + 3] = self.nextCallSiteIndex();
+            }
+            // W1: the `atom_cache_u8` family copies through with its
+            // placeholder `cache_idx` byte; assign the real index here. The
+            // emit-time fusions (`get_loc0_field`, `get_field_field2`,
+            // `get_field2_call_method`, ...) only rewrite an opcode byte that
+            // has already been through this arm, so no site is counted twice.
+            if (instruction.form == .get_field or instruction.form == .get_field2 or
+                instruction.form == .put_field or instruction.form == .get_field_field2 or
+                instruction.form == .get_field2_call_method)
+            {
+                self.output[pc + 5] = self.nextPropSiteIndex();
             }
             if (comptime layout == .short) {
                 if (first == op.lt or first == op.push_this or
@@ -2876,6 +2911,7 @@ const Resolver = struct {
                     const put_position = match.positions[0];
                     try self.appendByte(op.put_field);
                     try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
+                    try self.appendByte(self.nextPropSiteIndex());
                     try self.consumeAtomsRange(position, match.end, put_position);
                     self.absorbSources(match.end);
                     try self.attachSource();
@@ -3102,6 +3138,7 @@ const Resolver = struct {
                     try self.appendByte(update_op);
                     try self.appendByte(op.put_field);
                     try self.appendU32(try readU32At(self.code, put_position, operand_off.atom));
+                    try self.appendByte(self.nextPropSiteIndex());
                     try self.consumeAtomsRange(position, match.end, put_position);
                     self.absorbSources(match.end);
                     try self.attachSource();
@@ -3664,6 +3701,7 @@ const Resolver = struct {
     /// half-install can escape by construction.
     fn commit(self: *Resolver) void {
         self.function.call_site_count = self.callSiteCount();
+        self.function.prop_site_count = self.propSiteCount();
         const owned_code = self.output[0..self.output_len];
         const owned_code_capacity = self.output_capacity;
         self.output = &.{};
@@ -3990,16 +4028,17 @@ test "compiler.resolve_labels: discarded field store delays tail sources" {
     defer product.deinitUncommitted();
     try run(.short, &harness.function, null, &product);
 
-    var expected = [_]u8{ op.put_field, 0, 0, 0, 0, op.object };
+    // W1: `put_field` is `atom_cache_u8`; site 0 is the only property site.
+    var expected = [_]u8{ op.put_field, 0, 0, 0, 0, 0, op.object };
     std.mem.writeInt(u32, expected[1..5], field, .little);
     try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
     try std.testing.expectEqualSlices(
         SourceLocSlot,
         &.{
             .{ .pc = 0, .line_num = 10, .col_num = 2 },
-            .{ .pc = 5, .line_num = 20, .col_num = 4 },
-            .{ .pc = 5, .line_num = 30, .col_num = 6 },
-            .{ .pc = 5, .line_num = 40, .col_num = 8 },
+            .{ .pc = 6, .line_num = 20, .col_num = 4 },
+            .{ .pc = 6, .line_num = 30, .col_num = 6 },
+            .{ .pc = 6, .line_num = 40, .col_num = 8 },
         },
         harness.function.source_loc_slots,
     );
@@ -4806,13 +4845,14 @@ test "compiler.resolve_labels: post-update tails publish sources afterward" {
     defer product.deinitUncommitted();
     try run(.short, &harness.function, null, &product);
 
+    // W1: `put_field` carries a trailing `cache_idx` (site 0).
     var expected = [_]u8{
-        op.inc,    op.put_loc0,
-        op.dec,    op.put_field,
-        0,         0,
-        0,         0,
-        op.inc,    op.put_array_el,
-        op.object,
+        op.inc,          op.put_loc0,
+        op.dec,          op.put_field,
+        0,               0,
+        0,               0,
+        0,               op.inc,
+        op.put_array_el, op.object,
     };
     std.mem.writeInt(u32, expected[4..8], field, .little);
     try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
@@ -4823,14 +4863,14 @@ test "compiler.resolve_labels: post-update tails publish sources afterward" {
             .{ .pc = 2, .line_num = 20, .col_num = 2 },
             .{ .pc = 2, .line_num = 30, .col_num = 3 },
             .{ .pc = 2, .line_num = 40, .col_num = 4 },
-            .{ .pc = 8, .line_num = 50, .col_num = 5 },
-            .{ .pc = 8, .line_num = 60, .col_num = 6 },
-            .{ .pc = 8, .line_num = 70, .col_num = 7 },
-            .{ .pc = 8, .line_num = 80, .col_num = 8 },
-            .{ .pc = 10, .line_num = 90, .col_num = 9 },
-            .{ .pc = 10, .line_num = 100, .col_num = 10 },
-            .{ .pc = 10, .line_num = 110, .col_num = 11 },
-            .{ .pc = 10, .line_num = 120, .col_num = 12 },
+            .{ .pc = 9, .line_num = 50, .col_num = 5 },
+            .{ .pc = 9, .line_num = 60, .col_num = 6 },
+            .{ .pc = 9, .line_num = 70, .col_num = 7 },
+            .{ .pc = 9, .line_num = 80, .col_num = 8 },
+            .{ .pc = 11, .line_num = 90, .col_num = 9 },
+            .{ .pc = 11, .line_num = 100, .col_num = 10 },
+            .{ .pc = 11, .line_num = 110, .col_num = 11 },
+            .{ .pc = 11, .line_num = 120, .col_num = 12 },
         },
         harness.function.source_loc_slots,
     );

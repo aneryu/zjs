@@ -268,6 +268,108 @@ test "embedding cookbook CallSite example resolves once and calls repeatedly" {
     try std.testing.expectEqual(@as(?i32, 42), product.asInt32());
 }
 
+test "embedding cookbook PropertySite reads and writes one field through a shape-guarded cache" {
+    const allocator = std.testing.allocator;
+    WorldState.finalized = 0;
+    const rt = try zjs.JSRuntime.create(allocator);
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = (try ctx.globalObject()).value();
+
+    // Own data slot: the first read captures the receiver's shape identity
+    // and the slot; the rest are a guard compare and an indexed load.
+    var field = try zjs.PropertySite.init(ctx, "field");
+    defer field.deinit();
+    const record = try ctx.eval("({ x: 1, field: 3 })", .{});
+    try ctx.defineDataProperty(global, "rec", record, .{});
+    var total: i64 = 0;
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        total += (try field.get(record)).asInt32() orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(i64, 300), total);
+
+    // Write through the same site, then read it back.
+    try field.set(record, zjs.JSValue.int32(11));
+    try std.testing.expect(try evalBool(ctx, "rec.field === 11"));
+    try std.testing.expectEqual(@as(?i32, 11), (try field.get(record)).asInt32());
+
+    // Invalidation is implicit: appending a property gives the receiver's
+    // shape a fresh `Shape.identity`, so the next access guard-misses and
+    // re-captures against the new layout.
+    try ctx.defineDataProperty(record, "later", zjs.JSValue.int32(1), .{});
+    try std.testing.expectEqual(@as(?i32, 11), (try field.get(record)).asInt32());
+    try field.set(record, zjs.JSValue.int32(12));
+    try std.testing.expect(try evalBool(ctx, "rec.field === 12 && rec.later === 1"));
+
+    // Deleting the cached property is the same mechanism: the read answers
+    // `undefined`, and a later write adds it back.
+    try std.testing.expect(try evalBool(ctx, "delete rec.field"));
+    try std.testing.expect((try field.get(record)).isUndefined());
+    try field.set(record, zjs.JSValue.int32(13));
+    try std.testing.expectEqual(@as(?i32, 13), (try field.get(record)).asInt32());
+
+    // Prototype holder: the value lives one link up. The site guards the
+    // receiver's own identity and re-checks the holder's, so `p.field` is
+    // still one indexed load -- out of the prototype.
+    var inherited = try zjs.PropertySite.init(ctx, "field");
+    defer inherited.deinit();
+    _ = try ctx.eval("function P() {} P.prototype.field = 5; var p = new P();", .{});
+    const p = try ctx.getProperty(global, "p");
+    total = 0;
+    i = 0;
+    while (i < 100) : (i += 1) {
+        total += (try inherited.get(p)).asInt32() orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(i64, 500), total);
+    // A write is an ordinary `Set`: it adds an own property on the receiver
+    // and leaves the prototype alone.
+    try inherited.set(p, zjs.JSValue.int32(6));
+    try std.testing.expect(try evalBool(ctx, "p.field === 6 && P.prototype.field === 5 && p.hasOwnProperty('field')"));
+
+    // A native (K3) getter on a class prototype answers from the site too.
+    _ = try ctx.defineClass(World, .{ .global_name = "World" });
+    _ = try ctx.eval("var w = new World(1);", .{});
+    const w = try ctx.getProperty(global, "w");
+    var time_name = try zjs.host.PropName.internStatic(rt, "time");
+    defer time_name.release(rt);
+    var time_site = try zjs.PropertySite.initAtom(ctx, time_name);
+    defer time_site.deinit();
+    var sum: f64 = 0;
+    i = 0;
+    while (i < 100) : (i += 1) {
+        sum += (try time_site.get(w)).asNumber() orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(f64, 150), sum);
+
+    // A refused write is the strict `Set` discipline: the TypeError is
+    // raised, not swallowed.
+    var frozen_site = try zjs.PropertySite.init(ctx, "field");
+    defer frozen_site.deinit();
+    const frozen = try ctx.eval("Object.freeze({ field: 1 })", .{});
+    try std.testing.expectError(error.TypeError, frozen_site.set(frozen, zjs.JSValue.int32(2)));
+    try std.testing.expect(try ctx.pendingExceptionMatchesErrorName("TypeError"));
+    _ = ctx.takePendingException();
+    try std.testing.expectEqual(@as(?i32, 1), (try frozen_site.get(frozen)).asInt32());
+
+    // Polymorphic use is correct, not fast: after the miss budget the site
+    // retires and every access takes the ordinary walk.
+    var poly = try zjs.PropertySite.init(ctx, "field");
+    defer poly.deinit();
+    var shape_index: usize = 0;
+    while (shape_index < 12) : (shape_index += 1) {
+        var source_buf: [64]u8 = undefined;
+        const source = try std.fmt.bufPrint(&source_buf, "({{ k{d}: 0, field: {d} }})", .{ shape_index, shape_index });
+        const receiver = try ctx.eval(source, .{});
+        try std.testing.expectEqual(@as(?i32, @intCast(shape_index)), (try poly.get(receiver)).asInt32());
+    }
+
+    // Every site is deinitialized (releasing its host atom pin) before the
+    // context and runtime go: the deferred `deinit`s above run first, and
+    // teardown then finalizes the JS-created World instance.
+}
+
 test "embedding external host function contract covers args, this, errors, and finalizer" {
     const allocator = std.testing.allocator;
     var finalized = false;
@@ -822,6 +924,7 @@ const public_root_decls = [_][]const u8{
     "JSRuntime",
     "JSContext",
     "CallSite",
+    "PropertySite",
     "JSValue",
     "RuntimeOptions",
     "RuntimeMemoryUsage",

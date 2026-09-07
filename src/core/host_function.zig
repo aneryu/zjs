@@ -179,13 +179,11 @@ pub fn isConstructorCProto(cproto: NativeCProto) bool {
 }
 
 /// NB2 (docs/perf/native-boundary-design.md §3): the dispatch record is the
-/// unified `NativeEntry`. These names are kept as aliases for the phase-A2
-/// transition; declaration tables still speak `InternalEntry` (below) and
+/// unified `NativeEntry` (`native_entry.zig`). The phase-A2 transition
+/// aliases `InternalRecord` / `SparseInternalRecord` / `InternalRecordTable`
+/// are gone; declaration tables still speak `InternalEntry` (below) and
 /// exec's `native_legacy.entryFromInternal` turns each into an entry.
 const native_entry = @import("native_entry.zig");
-pub const InternalRecord = native_entry.NativeEntry;
-pub const SparseInternalRecord = native_entry.SparseEntry;
-pub const InternalRecordTable = native_entry.EntryTable;
 
 /// Declaration-side entry: what a standard-global function-list table exports
 /// per method. The comptime builder maps these into a direct low-id prefix plus
@@ -197,11 +195,11 @@ pub const InternalEntry = struct {
     /// Domain-local method id (the low part of the encoded native builtin id).
     id: u32,
     magic: u16 = 0,
-    /// See `InternalRecord.forwards_call`.
+    /// See `NativeEntry.forwards_call`.
     forwards_call: bool = false,
     cproto: NativeCProto = .generic,
     native_function: ?NativeFunctionPtr = null,
-    /// See `InternalRecord.fallback_function`.
+    /// See `NativeEntry.fallback_function`.
     fallback_function: ?NativeGenericMagicFn = null,
     /// NB2: a body already written to the K0 prototype (no legacy thunk, no
     /// environment). Takes precedence over `cproto` / `native_function`.

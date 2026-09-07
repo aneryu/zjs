@@ -69,7 +69,7 @@ const NativeRecordStackProbe = struct {
     var calls: usize = 0;
     var recurse: bool = true;
 
-    const record: core.host_function.InternalRecord = engine.exec.native_legacy.genericEntry(&call, 0);
+    const record: core.NativeEntry = engine.exec.native_legacy.genericEntry(&call, 0);
 
     fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
         calls += 1;
@@ -3492,6 +3492,139 @@ test "hidden uninitialized globals compact at the QuickJS sawtooth bound" {
     for (names) |name| try std.testing.expect(hidden.hasOwnProperty(name));
 }
 
+test "W1 property sites stay correct across every shape mutation that invalidates them" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Every case warms one property site past the monomorphic threshold and
+    // then performs a mutation whose only invalidation channel is
+    // `Shape.identity` (there is no explicit site-invalidation hook, by
+    // design -- vm-value-representation-contract 5.2.1).
+    const result = try js.eval(
+        \\// --- own arm: delete must be observed (markPropertyDeleted) ---
+        \\function readA(o) { return o.a; }
+        \\var own = { a: 1, b: 2 };
+        \\for (var i = 0; i < 200; i++) readA(own);
+        \\delete own.a;
+        \\assert.sameValue(readA(own), undefined, "own delete");
+        \\
+        \\// --- own arm: an APPEND on the same object keeps the slot valid ---
+        \\var grow = { a: 1 };
+        \\for (var i = 0; i < 200; i++) readA(grow);
+        \\for (var i = 0; i < 40; i++) grow["k" + i] = i;   // forces FAM relocation
+        \\assert.sameValue(readA(grow), 1, "own after grow-relocation");
+        \\
+        \\// --- prototype arm: shadowing on the instance wins ---
+        \\function Proto() {}
+        \\Proto.prototype.m = 10;
+        \\function readM(o) { return o.m; }
+        \\var inst = new Proto();
+        \\for (var i = 0; i < 200; i++) readM(inst);
+        \\assert.sameValue(readM(inst), 10, "proto warm");
+        \\inst.m = 99;
+        \\assert.sameValue(readM(inst), 99, "proto shadowed by own");
+        \\
+        \\// --- prototype arm: mutating the HOLDER is observed ---
+        \\var inst2 = new Proto();
+        \\for (var i = 0; i < 200; i++) readM(inst2);
+        \\Proto.prototype.m = 11;
+        \\assert.sameValue(readM(inst2), 11, "holder value change");
+        \\delete Proto.prototype.m;
+        \\assert.sameValue(readM(inst2), undefined, "holder delete");
+        \\
+        \\// --- prototype arm: a proto SWAP is observed (replacePrototype) ---
+        \\function readP(o) { return o.p; }
+        \\var swapProtoA = { p: "A" };
+        \\var swapProtoB = { p: "B" };
+        \\var swap = Object.create(swapProtoA);
+        \\for (var i = 0; i < 200; i++) readP(swap);
+        \\assert.sameValue(readP(swap), "A", "proto swap before");
+        \\Object.setPrototypeOf(swap, swapProtoB);
+        \\assert.sameValue(readP(swap), "B", "proto swap after");
+        \\
+        \\// --- a data property turned into an ACCESSOR (updatePropertyFlags) ---
+        \\var toAccessor = { a: 1 };
+        \\for (var i = 0; i < 200; i++) readA(toAccessor);
+        \\var accessorCalls = 0;
+        \\Object.defineProperty(toAccessor, "a", { get: function () { accessorCalls++; return 7; }, configurable: true });
+        \\assert.sameValue(readA(toAccessor), 7, "data -> accessor");
+        \\assert.sameValue(accessorCalls, 1, "accessor actually ran");
+        \\
+        \\// --- put_field: a warm write site must observe read-only ---
+        \\function writeA(o, v) { o.a = v; }
+        \\var w = { a: 0 };
+        \\for (var i = 0; i < 200; i++) writeA(w, i);
+        \\assert.sameValue(w.a, 199, "warm write");
+        \\Object.defineProperty(w, "a", { writable: false });
+        \\writeA(w, 1234);
+        \\assert.sameValue(w.a, 199, "write to a frozen slot is ignored");
+        \\
+        \\// --- put_field: a warm write site must observe a setter ---
+        \\var setterSeen = null;
+        \\var ws = { a: 0 };
+        \\for (var i = 0; i < 200; i++) writeA(ws, i);
+        \\Object.defineProperty(ws, "a", { set: function (v) { setterSeen = v; }, get: function () { return -1; }, configurable: true });
+        \\writeA(ws, 42);
+        \\assert.sameValue(setterSeen, 42, "data -> setter");
+        \\
+        \\// --- polymorphic site: every shape must keep answering correctly ---
+        \\var shapes = [{ a: 1 }, { z: 0, a: 2 }, { y: 0, x: 0, a: 3 }, { a: 4, q: 0 }, Object.create({ a: 5 })];
+        \\var poly = 0;
+        \\for (var i = 0; i < 500; i++) poly += readA(shapes[i % shapes.length]);
+        \\assert.sameValue(poly, 1500, "polymorphic site sum");
+        \\
+        \\// --- exotic receivers must never take a cached arm ---
+        \\function readLen(o) { return o.length; }
+        \\var arr = [1, 2, 3];
+        \\for (var i = 0; i < 200; i++) readLen(arr);
+        \\arr.push(4);
+        \\assert.sameValue(readLen(arr), 4, "array length after push");
+        \\assert.sameValue(readLen("abcde"), 5, "string length through the same site");
+        \\
+        \\// --- a Proxy through a warmed site keeps its trap ---
+        \\var trapped = 0;
+        \\var px = new Proxy({ a: 1 }, { get: function (t, k) { trapped++; return t[k]; } });
+        \\var mixed = { a: 1 };
+        \\for (var i = 0; i < 200; i++) readA(mixed);
+        \\assert.sameValue(readA(px), 1, "proxy value");
+        \\assert.sameValue(trapped, 1, "proxy trap ran");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "W1 native-getter sites re-resolve the accessor out of the guarded slot" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The `.native_getter` arm caches the accessor SLOT, never the resolved
+    // NativeEntry: `defineProperty` can swap the getter function without
+    // touching a shape flag.
+    const result = try js.eval(
+        \\function readFlags(r) { return r.flags; }
+        \\var re = /ab/gi;
+        \\for (var i = 0; i < 200; i++) readFlags(re);
+        \\assert.sameValue(readFlags(re), "gi", "native getter warm");
+        \\assert.sameValue(readFlags(/c/m), "m", "same site, other receiver");
+        \\
+        \\function readSize(m) { return m.size; }
+        \\var map = new Map([[1, 1], [2, 2]]);
+        \\for (var i = 0; i < 200; i++) readSize(map);
+        \\map.set(3, 3);
+        \\assert.sameValue(readSize(map), 3, "Map.prototype.size after warm");
+        \\
+        \\// Replacing the prototype's getter must be observed.
+        \\function readG(o) { return o.g; }
+        \\function K() {}
+        \\Object.defineProperty(K.prototype, "g", { get: function () { return 1; }, configurable: true });
+        \\var k = new K();
+        \\for (var i = 0; i < 200; i++) readG(k);
+        \\assert.sameValue(readG(k), 1, "js getter warm");
+        \\Object.defineProperty(K.prototype, "g", { get: function () { return 2; }, configurable: true });
+        \\assert.sameValue(readG(k), 2, "js getter replaced");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "runtime-strict script still constructs its global function declaration" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5383,7 +5516,7 @@ test "call subsystem installs and invokes host globals" {
     const host_function_key = try rt.internAtom("__host_function");
     try std.testing.expect((try print_object.getOwnProperty(rt, host_function_key)) == null);
     try std.testing.expectEqual(core.host_function.ids.output, print_object.hostFunctionKindSlot().*);
-    try std.testing.expect(print_object.nativeRecord() == &engine.exec.call.output_host_entry);
+    try std.testing.expect(print_object.nativeEntry() == &engine.exec.call.output_host_entry);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -5400,7 +5533,7 @@ test "call subsystem installs and invokes host globals" {
     const log = try console_object.getProperty(log_key);
     const log_object = core.Object.fromHeader(log.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.output, log_object.hostFunctionKindSlot().*);
-    try std.testing.expect(log_object.nativeRecord() == print_object.nativeRecord());
+    try std.testing.expect(log_object.nativeEntry() == print_object.nativeEntry());
 
     const log_args = [_]core.JSValue{ core.JSValue.int32(2), core.JSValue.boolean(false) };
     const log_result = try engine.exec.call.callValue(ctx, &stream, log, &log_args);
@@ -5466,14 +5599,14 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     const abs_value = try math_object.getProperty(abs_key);
     const abs_object = core.Object.fromHeader(abs_value.refHeader().?);
     try std.testing.expect(abs_object.nativeFunctionIdSlot().* != 0);
-    const abs_record = abs_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
+    const abs_record = abs_object.nativeEntry() orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.native_entry.Kind.leaf, abs_record.kind);
     try std.testing.expectEqual(engine.exec.native_legacy.sig_f64_to_f64, abs_record.sig);
 
     const atan2_key = try rt.internAtom("atan2");
     const atan2_value = try math_object.getProperty(atan2_key);
     const atan2_object = core.Object.fromHeader(atan2_value.refHeader().?);
-    const atan2_record = atan2_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
+    const atan2_record = atan2_object.nativeEntry() orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.native_entry.Kind.leaf, atan2_record.kind);
     try std.testing.expectEqual(engine.exec.native_legacy.sig_f64_f64_to_f64, atan2_record.sig);
 
@@ -5491,7 +5624,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 
     // Plain op_call must prefer the resolved record memo. The encoded id is a
     // bootstrap key, not work to repeat after the function object is bound.
-    fake_object.nativeRecordSlot().* = abs_record;
+    fake_object.nativeEntrySlot().* = abs_record;
     fake_object.nativeFunctionIdSlot().* = 0;
     const memo_result = try engine.exec.call.callValue(ctx, null, fake, &args);
     try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(memo_result).?);
@@ -6331,7 +6464,7 @@ test "generator instances inherit shared prototype methods" {
         const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
         try std.testing.expectEqual(core.function.NativeBuiltinDomain.iterator, native_ref.domain);
         try std.testing.expectEqual(method.id, native_ref.id);
-        try std.testing.expect(function_object.nativeRecord() != null);
+        try std.testing.expect(function_object.nativeEntry() != null);
     }
 
     const array_iterator_key = try js.runtime.internAtom("arrayIteratorForNativeRecord");
@@ -6343,7 +6476,7 @@ test "generator instances inherit shared prototype methods" {
     const next_ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
     try std.testing.expectEqual(core.function.NativeBuiltinDomain.iterator, next_ref.domain);
     try std.testing.expectEqual(@intFromEnum(IntrinsicMethod.array_iterator_next), next_ref.id);
-    try std.testing.expect(next_function.nativeRecord() != null);
+    try std.testing.expect(next_function.nativeEntry() != null);
 }
 
 test "generator object uses the prototype selected after parameter initialization" {
@@ -9243,6 +9376,24 @@ test "native builtin errors capture a native callsite" {
         \\assert.sameValue(forwardedNestedStack.indexOf("    at forwardedCallTarget"), 0);
         \\assert.sameValue(forwardedNestedStack.slice(forwardedNestedFirst + 1).indexOf("    at call (native)"), 0);
         \\assert.sameValue(forwardedNestedStack.slice(forwardedNestedSecond + 1).indexOf("    at forwardedCallCaller"), 0);
+        \\// Exact-args forwarding (the O1 forwarded leaf, WP7): the frame
+        \\// carries an argument window AND the skipped native record, so the
+        \\// `target -> call/apply (native) -> caller` order must survive the
+        \\// leaf construction and its narrow return epilogue.
+        \\function forwardedArgTarget(x) { return new Error("forwarded " + x).stack; }
+        \\var forwardedArgStack = forwardedArgTarget.call(undefined, 7);
+        \\var forwardedArgNewline = forwardedArgStack.indexOf("\n");
+        \\assert.sameValue(forwardedArgStack.indexOf("    at forwardedArgTarget"), 0);
+        \\assert.sameValue(forwardedArgStack.slice(forwardedArgNewline + 1).indexOf("    at call (native)"), 0);
+        \\var forwardedApplyStack = forwardedArgTarget.apply(undefined, [8]);
+        \\var forwardedApplyNewline = forwardedApplyStack.indexOf("\n");
+        \\assert.sameValue(forwardedApplyStack.indexOf("    at forwardedArgTarget"), 0);
+        \\assert.sameValue(forwardedApplyStack.slice(forwardedApplyNewline + 1).indexOf("    at apply (native)"), 0);
+        \\function forwardedArgThrower(x) { throw new Error("boom " + x); }
+        \\var forwardedThrowStack;
+        \\try { forwardedArgThrower.call(undefined, 9); } catch (error) { forwardedThrowStack = error.stack; }
+        \\assert.sameValue(forwardedThrowStack.indexOf("    at forwardedArgThrower"), 0);
+        \\assert.sameValue(forwardedThrowStack.slice(forwardedThrowStack.indexOf("\n") + 1).indexOf("    at call (native)"), 0);
         \\var applyStack;
         \\try {
         \\    Array.prototype.map.apply([], [null]);
@@ -9386,12 +9537,12 @@ test "native record calls preflight the native stack and recover" {
     js.runtime.setNativeStackSize(64 * 1024);
     try js.ensureTest262GlobalsInstalled();
 
-    const function_value = try core.function.nativeFunction(js.context, "nativeRecordRecurse", 0);
+    const function_value = try core.function.nativeFunction(js.context, "nativeEntryRecurse", 0);
     const function_object = core.Object.fromHeader(function_value.refHeader().?);
-    function_object.nativeRecordSlot().* = &NativeRecordStackProbe.record;
+    function_object.nativeEntrySlot().* = &NativeRecordStackProbe.record;
 
     const global = try js.context.globalObject();
-    const name = try js.runtime.internAtom("nativeRecordRecurse");
+    const name = try js.runtime.internAtom("nativeEntryRecurse");
     try global.defineOwnProperty(
         js.runtime,
         name,
@@ -9406,7 +9557,7 @@ test "native record calls preflight the native stack and recover" {
     _ = try js.eval(
         \\let nativeStackResult = "missing";
         \\try {
-        \\    nativeRecordRecurse();
+        \\    nativeEntryRecurse();
         \\} catch (error) {
         \\    nativeStackResult = error.name + ":" + error.message;
         \\}
@@ -9414,7 +9565,7 @@ test "native record calls preflight the native stack and recover" {
     );
 
     NativeRecordStackProbe.recurse = false;
-    const recovery = try js.eval("assert.sameValue(nativeRecordRecurse(), 7);");
+    const recovery = try js.eval("assert.sameValue(nativeEntryRecurse(), 7);");
     try std.testing.expect(recovery.isUndefined());
 }
 
@@ -13312,134 +13463,6 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
-    try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
-    oversized.destroyUnpublishedFixture(rt);
-    oversized_alive = false;
-    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
-}
-
-test "forwarded leaf warm constructor preserves miss fallback and ownership" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-    const rt = js.runtime;
-    const ctx = js.context;
-    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
-
-    // Publication pins for the O3 forwarded-leaf shapes: the pivot body, a
-    // throwing body (abrupt coverage really crosses the arm), and the
-    // leftover-operand body (refused publication by the return-balance
-    // proof, so it never reaches the forwarded arm).
-    _ = try js.eval(
-        \\globalThis.__fwdLeaf = function () { return 1; };
-        \\globalThis.__fwdLeafThrower = function () { return (void 0).x; };
-        \\globalThis.__fwdLeafLeftover = function () { ({}); };
-        \\globalThis.__fwdNativeCall = Function.prototype.call;
-    );
-    const leaf_name = try rt.internAtom("__fwdLeaf");
-    const thrower_name = try rt.internAtom("__fwdLeafThrower");
-    const leftover_name = try rt.internAtom("__fwdLeafLeftover");
-    const native_name = try rt.internAtom("__fwdNativeCall");
-    const callable = try global.getProperty(leaf_name);
-    const thrower = try global.getProperty(thrower_name);
-    const leftover = try global.getProperty(leftover_name);
-    const native_call = try global.getProperty(native_name);
-    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
-        return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved.fb.simpleInlineEmptyLeaf());
-    const resolved_thrower = inline_calls.resolveInlineFunction(global, thrower) orelse
-        return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_thrower.fb.simpleInlineEmptyLeaf());
-    const resolved_leftover = inline_calls.resolveInlineFunction(global, leftover) orelse
-        return error.InvalidFunctionBytecode;
-    // The leftover-operand body fails the static return-balance proof, so it
-    // is refused zero-arg leaf publication entirely: forwarded calls of it
-    // ride the authoritative forwarding path and the O3 arm's len==0 guard
-    // becomes a defensive backstop rather than the routing mechanism.
-    try std.testing.expect(!resolved_leftover.fb.simpleInlineEmptyLeaf());
-
-    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
-    defer l0_function.deinit(rt);
-    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const l0_execution_function = l0_execution_adapter.init(&l0_function);
-    var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
-    defer l0_frame.deinit(&rt.memory, rt);
-    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
-    defer l0_stack.deinit(rt);
-    var catch_target: ?usize = null;
-    const l0 = inline_calls.L0State{ .level = .{
-        .frame = &l0_frame,
-        .stack = &l0_stack,
-        .catch_target = &catch_target,
-    } };
-    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
-    defer machine.deinit();
-    const initial_call_depth = ctx.runtime.hot.call_depth;
-
-    // A fresh Machine has neither Entry nor arena backing. The speculative
-    // arm must miss without consuming EITHER owned source slot (target and
-    // skipped native `call` function) or changing call depth — the adapter
-    // then restores its operand top and takes the authoritative
-    // pushForwardedCall path.
-    try l0_stack.pushOwned(callable);
-    try l0_stack.pushOwned(native_call);
-    var region_start = l0_stack.topPtr() - 2;
-    l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expect(!region_start[0].isUndefined());
-    try std.testing.expect(!region_start[1].isUndefined());
-    region_start[1] = core.JSValue.undefinedValue();
-
-    // Prime Entry and arena chunks through the authoritative zero-arg leaf
-    // constructor (the forwarded twin shares both pools).
-    const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
-    try std.testing.expect(primed.isEmptyLeaf());
-    machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    const steady_bytes = rt.memory.allocated_bytes;
-
-    // Warm hit: allocation-free, publishes the forwarded-leaf teardown shape
-    // (native ownership bit + forwarded bit, NEVER the empty-leaf bit whose
-    // resume record would overlay the live native_caller), consumes both
-    // source slots, and the paired pop releases the native frame and
-    // restores depth and watermark.
-    try l0_stack.pushOwned(callable);
-    try l0_stack.pushOwned(native_call);
-    region_start = l0_stack.topPtr() - 2;
-    l0_stack.setTopPtr(region_start);
-    const alloc_calls = rt.memory.alloc_calls;
-    const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start) orelse
-        return error.Unexpected;
-    try std.testing.expect(warm.isForwardedLeaf());
-    try std.testing.expect(warm.teardown.has_native_caller);
-    try std.testing.expect(!warm.isEmptyLeaf());
-    try std.testing.expect(!warm.isExactArgsLeaf());
-    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
-    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    try std.testing.expect(region_start[0].isUndefined());
-    try std.testing.expect(region_start[1].isUndefined());
-    machine.popReturnedForwardedLeaf(ctx.runtime);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
-
-    // An oversized operand window cannot use the active arena chunk. The
-    // fast miss is pure — both slots stay owned by the region for the
-    // authoritative fallback.
-    const oversized = try createOversizedLeafFixture(rt, resolved.fb);
-    var oversized_alive = true;
-    defer if (oversized_alive) oversized.destroyUnpublishedFixture(rt);
-    const oversized_bytes = rt.memory.allocated_bytes;
-    try l0_stack.pushOwned(callable);
-    try l0_stack.pushOwned(native_call);
-    region_start = l0_stack.topPtr() - 2;
-    l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expect(!region_start[0].isUndefined());
-    try std.testing.expect(!region_start[1].isUndefined());
-    region_start[0] = core.JSValue.undefinedValue();
-    region_start[1] = core.JSValue.undefinedValue();
     try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
     oversized_alive = false;
@@ -21133,9 +21156,12 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     std.mem.writeInt(u32, code[1..5], victim_atom, .little);
     code[5] = op.get_field2;
     std.mem.writeInt(u32, code[6..10], method_atom, .little);
-    code[10] = op.drop;
-    code[11] = op.@"return";
-    try helpers.setCodeAndStackSize(&function, code[0..12]);
+    // W1: `get_field2` is `atom_cache_u8`; this hand-built stream has no
+    // `prop_sites` tail, so the site carries the no-cache index.
+    code[10] = bytecode.PropSiteCache.no_cache_idx;
+    code[11] = op.drop;
+    code[12] = op.@"return";
+    try helpers.setCodeAndStackSize(&function, code[0..13]);
 
     var rooted_ids = [_]core.Atom{ victim_atom, method_atom };
     var rooted_slice: []core.Atom = rooted_ids[0..];

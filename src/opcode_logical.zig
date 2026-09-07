@@ -57,6 +57,15 @@ pub const Format = enum(u8) {
     /// cache). Carried by the variable-arity call family; `call_constructor`,
     /// `array_from` and `apply` keep the bare `npop` / `u16` rows.
     npop_u8,
+    /// W1 property-site cache (native-boundary design 8.2 / plan r3 WP2):
+    /// `atom:u32` followed by a `cache_idx:u8` into
+    /// `FunctionBytecode.prop_sites` (255 = no cache). Carried by
+    /// `get_field` / `get_field2` / `put_field` and the emit-time fused
+    /// forms that own the atom (`get_field_field2`,
+    /// `get_field2_call_method`); the loc/var prefixes (`get_loc0_field`,
+    /// `get_loc2_field`, `get_loc2_field2`, `get_var_field`) carry no atom
+    /// and tail into the following cache-bearing instruction.
+    atom_cache_u8,
 };
 
 pub const LogicalOpcode = enum(u16) {
@@ -1045,6 +1054,10 @@ pub fn operandTemplate(fmt: Format) ?[]const Operand {
             .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
             .{ .kind = .flags, .source = .{ .payload = .{ .index = 1, .width = .u8 } } },
         },
+        .atom_cache_u8 => &.{
+            .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
+            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u8 } } },
+        },
         .atom_u16 => &.{
             .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
             .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
@@ -1412,9 +1425,9 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .put_var_init, .fmt = .var_ref, .pop = 1, .push = 0 },
     .{ .form = .get_ref_value, .fmt = .none, .pop = 2, .push = 3 },
     .{ .form = .put_ref_value, .fmt = .none, .pop = 3, .push = 0 },
-    .{ .form = .get_field, .fmt = .atom, .pop = 1, .push = 1 },
-    .{ .form = .get_field2, .fmt = .atom, .pop = 1, .push = 2 },
-    .{ .form = .put_field, .fmt = .atom, .pop = 2, .push = 0 },
+    .{ .form = .get_field, .fmt = .atom_cache_u8, .pop = 1, .push = 1 },
+    .{ .form = .get_field2, .fmt = .atom_cache_u8, .pop = 1, .push = 2 },
+    .{ .form = .put_field, .fmt = .atom_cache_u8, .pop = 2, .push = 0 },
     .{ .form = .get_private_field, .fmt = .none, .pop = 2, .push = 1 },
     .{ .form = .put_private_field, .fmt = .none, .pop = 3, .push = 0 },
     .{ .form = .define_private_field, .fmt = .none, .pop = 3, .push = 1 },
@@ -1583,12 +1596,12 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .call1, .fmt = .npopx, .pop = 1, .push = 1 },
     .{ .form = .call2, .fmt = .npopx, .pop = 1, .push = 1 },
     .{ .form = .call3, .fmt = .npopx, .pop = 1, .push = 1 },
-    .{ .form = .get_field_field2, .fmt = .atom, .pop = 1, .push = 1 },
+    .{ .form = .get_field_field2, .fmt = .atom_cache_u8, .pop = 1, .push = 1 },
     .{ .form = .is_null, .fmt = .none, .pop = 1, .push = 1 },
     .{ .form = .get_var_field, .fmt = .var_ref, .pop = 0, .push = 1 },
     .{ .form = .get_loc2_field2, .fmt = .none_loc, .pop = 0, .push = 1 },
     .{ .form = .ext0, .fmt = .u8, .pop = 0, .push = 1 },
-    .{ .form = .get_field2_call_method, .fmt = .atom, .pop = 1, .push = 2 },
+    .{ .form = .get_field2_call_method, .fmt = .atom_cache_u8, .pop = 1, .push = 2 },
     .{ .form = .get_loc2_field, .fmt = .none_loc, .pop = 0, .push = 1 },
     .{ .form = .eq_if_false8, .fmt = .none, .pop = 2, .push = 1 },
     .{ .form = .call_method_apply_fwd, .fmt = .npop_u8, .pop = 2, .push = 1 },
@@ -1612,7 +1625,7 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .scope_get_private_field2, .fmt = .atom_u16, .pop = 1, .push = 2 },
     .{ .form = .scope_put_private_field, .fmt = .atom_u16, .pop = 2, .push = 0 },
     .{ .form = .scope_in_private_field, .fmt = .atom_u16, .pop = 1, .push = 1 },
-    .{ .form = .get_field_opt_chain, .fmt = .atom, .pop = 1, .push = 1 },
+    .{ .form = .get_field_opt_chain, .fmt = .atom_cache_u8, .pop = 1, .push = 1 },
     .{ .form = .get_array_el_opt_chain, .fmt = .none, .pop = 2, .push = 1 },
     .{ .form = .set_class_name, .fmt = .u32, .pop = 1, .push = 1 },
     .{ .form = .line_num, .fmt = .u32, .pop = 0, .push = 0 },

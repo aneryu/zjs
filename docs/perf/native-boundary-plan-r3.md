@@ -125,7 +125,12 @@ RayTrace insn −5% 以上）、`prop_dense` 微基准 +8%（T-spike 尺）、
 
 ---
 
-## WP3 fun 重新接入（fun 仓库，branch `nb2-reconnect`）
+## WP3 fun 重新接入（fun 仓库，branch `nb2-reconnect`）—— **撤回（owner 2026-09-07：fun 的重新接入不由 zjs 侧做）**
+
+下文保留为 fun 侧接入时的参考说明，不再由本轮子代理执行。fun 仓库里
+子代理留下的分支 `nb2-reconnect`（3 个 commit：fun 级微基准基线、
+`third_party/zjs` subtree 同步到 zjs `8be7b275` 的树）由 fun 侧决定去留；
+工作树已恢复到 `main` 干净状态。
 
 结论先行：**zjs 已到可接入状态**。公开面 `zjs.native.managed / leaf /
 leafWithState / Class`、`Call`、`defineFunction / createFunction /
@@ -197,7 +202,108 @@ teardown）、`src/exec/string_*.zig`、`builtin_dispatch.zig` **仅**
 
 ---
 
+## WP5 操作数访存宽度纪律（zjs，branch `nb2/storewidth`；WP1 回报后立项）
+
+WP1 收官归因（`f6cf01e7` 报告）：site1 58 cyc 里约 25、reduce 91 里约 30 是
+三处 store-to-load forwarding miss，且全在解释器通用 handler，不在边界：
+1. `op_get_arg0_fast` 用 `ldr q0` 读帧参数，而 `pushLeanEntry` /
+   `copyValueSlotPinned` 用 64 位对写（`stp`）——16 B 读不能从两条 8 B 写转发；
+2. `opBinary` 用 `ldur x10,[x1,#-24]` 读 `op_get_arg0_fast` 以 `str q0`
+   重发布的操作数 tag 半——8 B 读不能从 16 B 写转发；
+3. `op_return` 用 `ldr x10` 读 `opBinary` 以 `stur d0`（FP 寄存器）写的结果
+   ——GPR 读不能从 FP 写转发。
+X925 规则（lane C 实测）：**读写宽度必须相同且同为 GPR** 才能转发。
+
+目标：解释器操作数栈与帧槽的 16 B `JSValue` 一律以「两条 64 位 GPR 访存」
+读写（`ldp/stp` 或两条 `ldr/str`，禁 `q`/`d` 寄存器路径）。做法：
+1. 审计 `src/exec/tailcall_dispatch.zig` 里所有 `loadValueAsIntPair` /
+   `storeValueAsIntPair` 未覆盖的 JSValue 读写（`op_get_arg*_fast`、
+   `opLoc`、`op_push_*`、`opBinary` 的结果写、`op_return*` 的读、
+   `dup/swap/drop` 家族），用 `objdump -d` 找出 `ldr q` / `str q` /
+   `stur d` / `ldr d` 访问操作数栈或帧槽的指令；
+2. 对每处改为整数对访问（`JSValue.loadSlotAsIntPair` /
+   `storeSlotAsIntPair`，必要时 `call_site.pinnedLoad/pinnedStore` 的
+   inline asm 形式——LLVM 会把相邻两条 8 B 访存重新合成 `q`，asm 钉住）；
+   `opBinary` 的 float64 结果先 `fmov x, d` 再以 GPR 写；
+3. 验收：Octane fixed-work PMU（`mise run perf-screen` 或其脚本，5 套
+   ABBA）cycles 几何平均 ≤ 0.98（改善 ≥ 2%）且没有单项 > 1.01；边界语料
+   site1 ≤ 45、reduce ≤ 70、forEach ≤ 75、sort ≤ 85；`zig build test`、
+   gc-stress、test262 0 失败、`zig build merge-gate -j32 --summary all`。
+   每处改动单独度量，不划算就回退并记录。
+
+文件：`src/exec/tailcall_dispatch.zig` 的通用 handler（**不含** `get_field*`
+/ `put_field`——WP2；`op_return*` 已由 WP1 改成两条 `ldr`，在此基础上继续）、
+`src/core/value.zig`（`loadSlotAsIntPair` 等）、`src/exec/inline_calls.zig`
+的帧构造拷贝。
+
+**WP5 结案（2026-09-07，branch `nb2/storewidth` `d4ca4777`，两刀全回退）**：
+前提不成立。新工具 `tools/perf/native_boundary/forwarding_matrix.c`（4 条
+延迟链）测得规则是**寄存器域**而非宽度：`ldr x` 从 `stp`、两条 `str`、
+部分重叠的旧 store 都能转发（6.9–7.4 cyc），从 `str q`/`str d` 不能
+（10.9，tag 半 14.0）；`ldr q` 无论谁写都慢 ~4，`str q → ldr q` 最差 15.6。
+把全部三处（及 ~40 处同类）改成 GPR 后 site1 57→56、sort 106→103，
+Octane 9 套 cycles geomean 1.0008 / insn 1.0096（navier-stokes +2.3%、
+box2d +2.8%）→ 不达 ≤0.98 门槛，回退。WP1 归因的「≈25/58 cyc」不复现：
+尾调分派里操作数 load 多数不在关键路径上。⚠️另一条事实：C1_foreach8
+zjs 497 insn / 96 cyc vs qjs 523 / 69，分支误预测两边都可忽略，纯 JS
+控制循环 zjs IPC 5.2 vs qjs 7.4——回调行剩余差距是解释器整体 IPC，
+归 hermes-parity-plan E1，不在边界范围。
+
+## WP6 宿主→JS 指令减肥（zjs，branch `nb2/hostcall-diet`）
+
+现状（4 ABBA、CPU 19、每次穿越 insn / cyc，qjs 括号）：`CallSite.call1`
+286 / 56（297 / 48）、`call0` 238 / 47（185 / 28）、`callFunction(cb,[i])`
+373 / 68（297 / 48）、`callFunction(cb,[])` 327 / 57（185 / 28）。IPC ≈5
+下每 5 insn ≈ 1 cyc，差距即指令数。WP1 已归因剩余指令：
+`callFixedInto` 的准入链（`call_depth` / `stack_size` /
+`active_bytecode_stack_bytes` / 原生栈限 4 次独立 load + 4 分支）、arena
+carve、边界作用域 ~12 store、`HostInvocation` publish / unpublish、
+`callFunction` 对 CallSite 的每次构造。刀：
+1. 准入链合一：Machine 维护一个预算字（`remaining = min(...)` 在任一上限
+   变化时重算），入口一 load 一 cmp；
+2. `HostInvocation` 在 CallSite 生命期内保持 published（`init` 发布、
+   `deinit` 撤销；嵌套 JS→host→JS 的再入路径已走
+   `callValueOrBytecodeSyncInternal`，须证明不受影响）；
+3. 边界作用域 store 去重：`Vm.EntryState` 里在 lean 帧下不变的字段不存
+   （WP1 刀 4 已证 `publishPushedEntry` 覆写全部 8 字段——所以先改
+   `publishPushedEntry` 只写变的字段，再省快照）；
+4. `JSContext.callFunction` 复用 per-runtime 的 CallSite 缓存（同 callee
+   + 同 this 命中）而不是每次 `callOnceInto` 构造。
+验收：n2j1 ≤ 320 insn、site1 ≤ 250 insn、site0 ≤ 200 insn，cycles 不升；
+Octane fixed-work（`--benches` 排除 zlib，2 ABBA）cycles 无单项 > 1.01；
+四门绿。文件：`src/exec/call_site.zig`、`src/exec/host_invocation.zig`、
+`src/exec/inline_calls.zig`（lean 入口）、`src/binding/context.zig`
+（callFunction）；**不改** `tailcall_dispatch.zig` 的 handler 体
+（`popReturnedLean` 除外）。
+
+## WP7 f.call / f.apply 转发臂减肥（zjs，branch `nb2/forward-diet`）
+
+现状：N6_fcall 548 insn / 96 cyc（qjs 412 / 81）、N7_fapply 692 / 116
+（850 / 136）。perf：`op_call_method` 28%、`op_get_field2` 15%（W1 proto
+臂已接）、`op_return_general` 14%、`pushForwardedCallEntry` 10%、
+`pushExactSimpleFrame` 7%。刀：`pushForwardedCallEntry` 与
+`pushExactSimpleFrame` 合并成一次窗口重写 + 一次帧构造（现在是两段，
+各自读一遍 callee facts）；`f.call(null, x)` 的 `this` 绑定用
+`sloppy_global` 预解析臂（同 `pushWarmExactArgsLeafAndEnter(.sloppy_global)`）。
+验收：N6 ≤ 450 insn、N7 ≤ 600 insn，cycles 不升；Octane 无单项 > 1.01；
+四门绿。文件：`tailcall_dispatch.zig` 的 `pushForwardedCallEntry` /
+`op_call_method` 转发臂、`inline_calls.zig` 的对应构造器。与 WP6 串行
+（同一 lane，WP6 后做），避免 `inline_calls.zig` 双写。
+
+## WP8 宿主侧 PropertySite（zjs，branch `nb2/propsite`）
+
+现状：`prop_site`（宿主循环 `ctx.getProperty(obj, "field")`）375 insn /
+63 cyc vs qjs `JS_GetPropertyStr` 46 cyc。设计稿 §8.3 / §9：公开
+`zjs.PropertySite`（`init(ctx, atom)`、`get(obj) !JSValue`、
+`set(obj, v)`），内部一个 `PropSiteCache`（W1 同一结构，own / proto 臂，
+`Shape.identity` 守卫），miss 走 `getPropertyAtom` 并 capture；
+`getProperty(obj, []const u8)` 保持不变（每次 intern）。加 API 契约与
+cookbook 段、`prop_site` 语料改用 PropertySite（保留一行旧 API 作对照
+`prop_str`）。验收：PropertySite 命中 ≤ 30 cyc / ≤ 150 insn；四门绿；
+`public-api-contract.md` 记新面。文件：新 `src/binding/property_site.zig`
+、`src/binding/root.zig` 导出、`context.zig`、bench、docs。
+
 ## 合并顺序与验收
 
-WP4（清理最后一提交）→ WP1 → WP2 → WP3（fun 侧，依赖 zjs main 同步）。
+WP4（已合，`c6453782`）→ WP1（已合，`0f223926`）→ WP2（已合，`d9beaa14`；lazy 镜像 `a42b1cf2`）→ WP5（结案回退，只合工具 `8e72d76f`）→ WP8（已合 `400d0a8f`）→ WP6+WP7（已合 `e3a7c6c2`）。（WP3 撤回。）**第三轮全部关账，收官读数见设计稿 §16.13。**
 每次合并后 `mise run batch-gate` + 两套语料复测，读数进设计稿 §16.6。

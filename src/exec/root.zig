@@ -64,6 +64,10 @@ pub const typed_array_construct = @import("typed_array_construct.zig");
 pub const buffer_ops = @import("buffer_ops.zig");
 pub const atomics_ops = @import("atomics_ops.zig");
 pub const standard_globals = @import("standard_globals.zig");
+/// W1 property-site cache (`PropSiteCache`, capture and retire rules). The
+/// binding layer's `zjs.PropertySite` reuses the same entry and the same
+/// capture core as the VM sites.
+pub const vm_property_field = @import("vm_property_field.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {
     return bytecode.opcode.nameOf(opcode);

@@ -1133,6 +1133,7 @@ test "FunctionBytecode RealmRef edge participates in realm-global cycle collecti
         1,
         code.len,
         0,
+        0,
     );
     try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
     try std.testing.expect(fb.famBytes() > @sizeOf(engine.bytecode.function_bytecode.DebugInfo));
@@ -3339,6 +3340,38 @@ test "standalone inline object survives a rooted major mark" {
         try std.testing.expect(rt.gc.containsHeader(object.gcHeader()));
         try std.testing.expect(rt.gc.headerMarked(object.gcHeader()));
         try std.testing.expect(!object.gcHeader().metaConst().flags.young);
+    }
+}
+
+test "single-code-unit string table survives a declared-roots collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Fill every slot of the runtime's 256-entry Latin-1 table.
+    var bodies: [256]*core.string.String = undefined;
+    for (0..256) |unit| {
+        bodies[unit] = try rt.singleByteString(@intCast(unit));
+        try std.testing.expect(rt.cachedSingleByteString(@intCast(unit)) == bodies[unit]);
+    }
+    // Shared, not per-call: a second request returns the same body.
+    for (0..256) |unit| {
+        try std.testing.expect((try rt.singleByteString(@intCast(unit))) == bodies[unit]);
+    }
+
+    // `.declared_only` refuses the conservative stack scan, so the table is
+    // kept alive by `traceStringCacheRoots` or not at all.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
+    _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
+
+    for (0..256) |unit| {
+        const body = bodies[unit];
+        try std.testing.expect(rt.cachedSingleByteString(@intCast(unit)) == body);
+        try std.testing.expect(rt.gc.containsHeader(body.header()));
+        try std.testing.expect(rt.gc.headerMarked(body.header()));
+        try std.testing.expectEqual(@as(usize, 1), body.len());
+        try std.testing.expect(!body.isWide());
+        try std.testing.expectEqual(@as(u16, @intCast(unit)), body.codeUnitAt(0));
     }
 }
 
@@ -6697,6 +6730,7 @@ test "function bytecode registration is old-space accounted" {
         5,
         4,
         1,
+        0,
         0,
     );
     // Keep this above the 512-byte small-object ceiling even in the alternate

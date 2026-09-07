@@ -52,6 +52,13 @@ pub const BytecodeRoute = struct {
     /// resident host Machine (which runs under `ctx`) may execute the callee
     /// when no invocation is active.
     host_eligible: bool,
+    /// The resident host invocation this site last entered through, with the
+    /// re-target epoch that proved its Machine targets (ctx, output, global).
+    /// A matching epoch replaces `HostInvocation.acquire`'s three-field
+    /// re-proof with one compare; any other caller re-targeting the shared
+    /// Machine bumps the epoch and sends this site back through `acquire`.
+    host: ?*host_invocation_mod.HostInvocation = null,
+    host_epoch: u32 = 0,
 };
 
 pub const Route = union(enum) {
@@ -307,23 +314,31 @@ pub inline fn callOnceInto(
     out: *JSValue,
 ) HostError!void {
     try exception_ops.pollInterrupt(ctx, global);
-    if (inline_calls.resolveInlineFunction(global, callee)) |resolved| {
-        const target = resolved.bind(this_value, callee);
-        const simple = inline_calls.Machine.nativeBoundarySimpleEligible(&target);
-        if (inline_calls.activeInvocation(ctx.runtime)) |active| {
+    if (inline_calls.activeInvocation(ctx.runtime)) |active| {
+        // Nested host -> JS from inside a running callback: the callee is
+        // resolved per call (the one-shot cache below belongs to the idle
+        // resident Machine and must not be re-targeted while a call is live).
+        if (inline_calls.resolveInlineFunction(global, callee)) |resolved| {
+            const target = resolved.bind(this_value, callee);
             if (machineMatches(active.machine, ctx, output, global)) {
+                const simple = inline_calls.Machine.nativeBoundarySimpleEligible(&target);
                 return runOnInvocation(null, false, active, simple, &target, ctx, global, &this_value, &callee, args, null, out);
             }
-        } else if (hostEligible(ctx, global)) {
-            // The resident host invocation keeps the lean frame of the last
-            // callee it ran: a one-shot `callFunction` loop on one function
-            // pays the frame's initialization once (measured: a stack-local
-            // lean frame per call costs more than the generic push saves).
-            const host = try host_invocation_mod.HostInvocation.acquire(ctx.runtime, ctx, output, global);
-            const lean = host.leanFrameFor(ctx.runtime, &target);
-            host.publish(ctx);
-            defer host.unpublish(ctx);
-            return runOnInvocation(null, true, &host.invocation, simple, &target, ctx, global, &this_value, &callee, args, lean, out);
+        }
+    } else if (hostEligible(ctx, global)) {
+        // Embedder on its own C stack. The resident host invocation caches
+        // the resolved route and the lean frame of the last one-shot callee,
+        // so a `callFunction` loop over one callback pays resolution once.
+        const rt = ctx.runtime;
+        const host = try host_invocation_mod.HostInvocation.acquire(rt, ctx, output, global);
+        if (host.oneShotRoute(rt, global, callee, this_value)) |route| {
+            host.publish(rt);
+            defer host.unpublish(rt);
+            // The receiver and the callable are read out of the cached
+            // target, not out of this frame: the guard above proved
+            // `target.callable == callee`, and pointing at the parameters
+            // would spill both 16-byte values to the caller's frame.
+            return runOnInvocation(null, true, &host.invocation, route.simple, route.target, ctx, global, &route.target.this_value, &route.target.callable, args, route.lean, out);
         }
     }
     return callGeneric(ctx, output, global, this_value, callee, args, caller_function, caller_frame, out);
@@ -359,7 +374,7 @@ inline fn enterBytecode(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    route: *const BytecodeRoute,
+    route: *BytecodeRoute,
     target: *const inline_calls.InlineTarget,
     this_value: *const JSValue,
     callee: *const JSValue,
@@ -377,7 +392,7 @@ inline fn enterBytecode(
             return runOnInvocation(fixed_argc, false, active, route.simple, target, ctx, global, this_value, callee, args, lean, out);
         }
     } else if (route.host_eligible) {
-        return runOnHostInvocation(fixed_argc, ctx, output, global, route.simple, target, this_value, callee, args, lean, out);
+        return runOnHostInvocation(fixed_argc, ctx, output, global, route, target, this_value, callee, args, lean, out);
     }
     return callGeneric(ctx, output, global, this_value.*, callee.*, args, caller_function, caller_frame, out);
 }
@@ -443,7 +458,7 @@ inline fn runOnHostInvocation(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    simple: bool,
+    route: *BytecodeRoute,
     target: *const inline_calls.InlineTarget,
     this_value: *const JSValue,
     callee: *const JSValue,
@@ -451,10 +466,32 @@ inline fn runOnHostInvocation(
     lean: ?*inline_calls.LeanFrame,
     out: *JSValue,
 ) HostError!void {
-    const host = try host_invocation_mod.HostInvocation.acquire(ctx.runtime, ctx, output, global);
-    host.publish(ctx);
-    defer host.unpublish(ctx);
-    return runOnInvocation(fixed_argc, true, &host.invocation, simple, target, ctx, global, this_value, callee, args, lean, out);
+    const rt = ctx.runtime;
+    const host = blk: {
+        if (route.host) |cached| {
+            if (cached.retarget_epoch == route.host_epoch) break :blk cached;
+        }
+        break :blk try acquireForRoute(rt, ctx, output, global, route);
+    };
+    host.publish(rt);
+    defer host.unpublish(rt);
+    return runOnInvocation(fixed_argc, true, &host.invocation, route.simple, target, ctx, global, this_value, callee, args, lean, out);
+}
+
+/// Cold arm of the site's host-invocation binding: the runtime's resident
+/// invocation may not exist yet, or another caller may have re-targeted its
+/// Machine since this site last used it.
+noinline fn acquireForRoute(
+    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    route: *BytecodeRoute,
+) HostError!*host_invocation_mod.HostInvocation {
+    const host = try host_invocation_mod.HostInvocation.acquire(rt, ctx, output, global);
+    route.host = host;
+    route.host_epoch = host.retarget_epoch;
+    return host;
 }
 
 /// Resolve once: callee class + inline eligibility (`resolveInlineFunction`

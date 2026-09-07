@@ -706,6 +706,10 @@ fn runTC(m: *inline_calls.Machine) HostError!void {
     std.debug.assert(vm.ctx == m.ctx and vm.rt == m.ctx.runtime and vm.global == m.global);
     vm.machine = m;
     vm.function = func;
+    // The Vm is Machine-resident: a stale `prop_sites` mirror from the
+    // previous function would alias its cache sites by index (the hit arm
+    // does not re-check the atom), so every `function` publish carries it.
+    vm.publishPropSites(func);
     vm.frame = level.frame;
     vm.stack = level.stack;
     vm.code_base = func.byteCode().ptr;
@@ -718,16 +722,17 @@ fn runTC(m: *inline_calls.Machine) HostError!void {
 /// Errors may be caught within the callback segment; an uncaught error is
 /// bounded at the fence and returned without consulting the suspended outer
 /// bytecode frame.
-pub fn runActiveInvocationUntilNativeBoundary(
+pub inline fn runActiveInvocationUntilNativeBoundary(
     invocation: *inline_calls.ActiveInvocation,
-    scope: *const inline_calls.NativeBoundaryScope,
+    scope: anytype,
 ) HostError!void {
     const machine = invocation.machine;
-    std.debug.assert(machine.depth > scope.fence_depth);
+    const fence_depth = scope.fenceDepth();
+    std.debug.assert(machine.depth > fence_depth);
     runTC(machine) catch |err|
-        return runActiveInvocationAfterNativeBoundaryError(machine, scope, err);
-    std.debug.assert(machine.depth == scope.fence_depth);
-    std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
+        return runActiveInvocationAfterNativeBoundaryError(machine, fence_depth, scope.expectedTop(), err);
+    std.debug.assert(machine.depth == fence_depth);
+    std.debug.assert(scope.expectedTop() == null or machine.top == scope.expectedTop());
 }
 
 /// `runActiveInvocationUntilNativeBoundary` for an Entry the caller just
@@ -735,20 +740,22 @@ pub fn runActiveInvocationUntilNativeBoundary(
 /// instead of being re-derived through the Machine.
 pub inline fn runPushedEntryUntilNativeBoundary(
     invocation: *inline_calls.ActiveInvocation,
-    scope: *const inline_calls.NativeBoundaryScope,
+    scope: anytype,
     entry: *inline_calls.Entry,
     target: *const inline_calls.InlineTarget,
 ) HostError!void {
     const machine = invocation.machine;
-    std.debug.assert(machine.depth > scope.fence_depth);
+    const fence_depth = scope.fenceDepth();
+    std.debug.assert(machine.depth > fence_depth);
     const vm = &machine.vm;
     std.debug.assert(vm.ctx == machine.ctx and vm.rt == machine.ctx.runtime and vm.global == machine.global);
-    vm.publishPushedEntry(machine, entry, target);
-    // A fresh frame starts at pc 0: the first opcode is at `code_base`.
-    tailcall_dispatch.runDispatchLoopPublished(vm, vm.code_base) catch |err|
-        return runActiveInvocationAfterNativeBoundaryError(machine, scope, err);
-    std.debug.assert(machine.depth == scope.fence_depth);
-    std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
+    // A fresh frame starts at pc 0: the first opcode is at `code_base`,
+    // which the publication hands back in a register.
+    const entry_pc = vm.publishPushedEntry(machine, entry, target);
+    tailcall_dispatch.runDispatchLoopPublished(vm, entry_pc) catch |err|
+        return runActiveInvocationAfterNativeBoundaryError(machine, fence_depth, scope.expectedTop(), err);
+    std.debug.assert(machine.depth == fence_depth);
+    std.debug.assert(scope.expectedTop() == null or machine.top == scope.expectedTop());
 }
 
 /// Callback throws are uncommon but require the complete bounded-unwind loop.
@@ -756,28 +763,29 @@ pub inline fn runPushedEntryUntilNativeBoundary(
 /// short callback pays one `runTC` call and one outcome check.
 noinline fn runActiveInvocationAfterNativeBoundaryError(
     machine: *inline_calls.Machine,
-    scope: *const inline_calls.NativeBoundaryScope,
+    fence_depth: usize,
+    expected_top: ?*inline_calls.Entry,
     initial_err: HostError,
 ) HostError!void {
     var pending_err = initial_err;
     while (true) {
-        if (machine.depth <= scope.fence_depth or
+        if (machine.depth <= fence_depth or
             !try machine.unwindForErrorToDepth(
                 machine.global,
-                scope.fence_depth,
+                fence_depth,
                 pending_err,
             ))
         {
-            std.debug.assert(machine.depth == scope.fence_depth);
-            std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
+            std.debug.assert(machine.depth == fence_depth);
+            std.debug.assert(expected_top == null or machine.top == expected_top);
             return pending_err;
         }
         runTC(machine) catch |err| {
             pending_err = err;
             continue;
         };
-        std.debug.assert(machine.depth == scope.fence_depth);
-        std.debug.assert(scope.idle or machine.top == scope.view.bottom_exclusive);
+        std.debug.assert(machine.depth == fence_depth);
+        std.debug.assert(expected_top == null or machine.top == expected_top);
         return;
     }
 }

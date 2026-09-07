@@ -5119,7 +5119,7 @@ pub const Object = extern struct {
             rt.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id)
         else
             null;
-        self.nativeRecordSlot().* = record;
+        self.nativeEntrySlot().* = record;
     }
 
     // Divergence B: on-object memo of the resolved internal record. `Slot`
@@ -5127,20 +5127,20 @@ pub const Object = extern struct {
     // lazily populate it after its first DECODE+LOOKUP; the read-only accessor
     // returns null when there is no function payload (matching nativeFunctionId's
     // 0 default) so a non-native callable simply misses the memo.
-    pub fn nativeRecordSlot(self: *Object) *?*const host_function.InternalRecord {
+    pub fn nativeEntrySlot(self: *Object) *?*const native_entry.NativeEntry {
         std.debug.assert(self.class_id == class.ids.c_function);
         if (self.functionPayload()) |payload| return &payload.native.call_cache;
         std.debug.assert(self.flags.class_payload_kind == .function);
         unreachable;
     }
 
-    pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
+    pub fn nativeEntry(self: *const Object) ?*const native_entry.NativeEntry {
         if (self.class_id != class.ids.c_function) return null;
-        return self.nativeRecordAssumeCFunction();
+        return self.nativeEntryAssumeCFunction();
     }
 
     /// Caller already proved `class_id == c_function` (K1: skip the repeat).
-    pub fn nativeRecordAssumeCFunction(self: *const Object) ?*const host_function.InternalRecord {
+    pub fn nativeEntryAssumeCFunction(self: *const Object) ?*const native_entry.NativeEntry {
         if (self.functionPayloadConst()) |payload| return payload.native.call_cache;
         return null;
     }
@@ -5151,26 +5151,34 @@ pub const Object = extern struct {
     /// Keeping the pair together avoids re-entering the generic realm resolver
     /// after the call target has already proved this is a C-function object.
     pub const NativeCallTarget = struct {
-        record: *const host_function.InternalRecord,
+        entry: *const native_entry.NativeEntry,
         realm: *context_mod.RealmContext,
     };
 
     pub fn nativeCallTarget(self: *const Object) ?NativeCallTarget {
         if (self.class_id != class.ids.c_function) return null;
         const payload = self.functionPayloadConst() orelse return null;
-        const record = payload.native.call_cache orelse return null;
+        const entry = payload.native.call_cache orelse return null;
         const realm = payload.native.realm.borrow() orelse return null;
         return .{
-            .record = record,
+            .entry = entry,
             .realm = realm,
         };
+    }
+
+    /// K1/K0 handler arms: caller already proved `class_id == c_function`.
+    pub inline fn nativeCallTargetAssumeCFunction(self: *const Object) ?NativeCallTarget {
+        const payload = self.functionPayloadConst() orelse return null;
+        const entry = payload.native.call_cache orelse return null;
+        const realm = payload.native.realm.borrow() orelse return null;
+        return .{ .entry = entry, .realm = realm };
     }
 
     /// NB2: an embedder-defined native function (entry-backed, not a builtin
     /// id, not an engine host kind). Constructible iff it owns `prototype`.
     pub fn isHostEntryFunction(self: *const Object) bool {
         if (self.class_id != class.ids.c_function) return false;
-        return self.nativeRecord() != null and self.nativeFunctionId() == 0 and self.hostFunctionKind() == 0;
+        return self.nativeEntry() != null and self.nativeFunctionId() == 0 and self.hostFunctionKind() == 0;
     }
 
     /// NB2: bind a host `NativeEntry` to a plain `c_function` object. The
@@ -5178,7 +5186,7 @@ pub const Object = extern struct {
     /// kind, no registry id.
     pub fn installNativeEntry(self: *Object, entry: *const native_entry.NativeEntry) void {
         std.debug.assert(self.class_id == class.ids.c_function);
-        self.nativeRecordSlot().* = entry;
+        self.nativeEntrySlot().* = entry;
     }
 
     pub fn functionIteratorWrapMethodSlot(self: *Object, rt: *JSRuntime) !*u8 {

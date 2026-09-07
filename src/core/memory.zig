@@ -373,11 +373,32 @@ pub const SmallObjectSlab = struct {
     }
 
     /// QuickJS `js_free` returns an empty 4 KiB arena immediately
-    /// (quickjs.c:1626-1630). Keeping a per-class reserve would leave physical
-    /// backing alive after the runtime's logical/accounted bytes reached zero.
-    /// Out of line so the per-free hot path stays call-free (the mirror of qjs
-    /// keeping `js_malloc_new_arena` no_inline on the alloc side).
+    /// (quickjs.c:1626-1630), but its re-acquisition is a tcache pop; ours
+    /// is a page-aligned backing allocation, a stamp of every block header
+    /// and an address-registry insert, plus the matching removal here. A
+    /// builtin that allocates a handful of small blocks per call and frees
+    /// them before the next call (regexp `replace`'s match arrays) paid that
+    /// whole cycle on every call (~13% of its profile). So one empty arena
+    /// per class is retained: it stays on both lists (at the head of the
+    /// free list, `addFreeArena`) and registered; a second empty arena of
+    /// the class is released at once, bounding the retained backing to one
+    /// arena per class. No new slab field: the runtime's struct layout is
+    /// load-bearing for GC address geometry (typescript +3.3% insn from a
+    /// pad field alone). Out of line so the per-free hot path stays
+    /// call-free (the mirror of qjs keeping `js_malloc_new_arena` no_inline
+    /// on the alloc side).
     noinline fn releaseEmptyArena(self: *SmallObjectSlab, backing: *const std.mem.Allocator, index: usize, arena: *Arena) void {
+        const head = self.free_arenas[index].?;
+        if (head == arena) return; // already the retained spare, at the head
+        if (head.used_blocks != 0) {
+            // No spare yet: this arena becomes it, moved to the head.
+            self.removeFreeArena(index, arena);
+            arena.free_prev = null;
+            arena.free_next = self.free_arenas[index];
+            if (arena.free_next) |next| next.free_prev = arena;
+            self.free_arenas[index] = arena;
+            return;
+        }
         self.removeArena(index, arena);
         self.removeFreeArena(index, arena);
         if (self.arena_observer) |observer| observer.on_release(observer.ctx, @intFromPtr(arena));
@@ -594,6 +615,19 @@ pub const SmallObjectSlab = struct {
     }
 
     fn addFreeArena(self: *SmallObjectSlab, index: usize, arena: *Arena) void {
+        // The class's retained empty arena (see `releaseEmptyArena`) keeps
+        // the head of the free list, so a partially free arena joining the
+        // list slots in behind it. Allocation then drains the empty arena
+        // first, which is also what keeps "at most one empty arena" O(1).
+        if (self.free_arenas[index]) |head| {
+            if (head.used_blocks == 0 and head != arena) {
+                arena.free_prev = head;
+                arena.free_next = head.free_next;
+                if (arena.free_next) |next| next.free_prev = arena;
+                head.free_next = arena;
+                return;
+            }
+        }
         arena.free_prev = null;
         arena.free_next = self.free_arenas[index];
         if (arena.free_next) |next| next.free_prev = arena;
@@ -2162,7 +2196,7 @@ test "aligned byte allocations charge their slab class" {
     }
 }
 
-test "small object slab releases an empty arena immediately" {
+test "small object slab retains one empty arena per class" {
     var slab: SmallObjectSlab = .{};
     defer slab.deinit(std.testing.allocator);
 
@@ -2171,13 +2205,20 @@ test "small object slab releases an empty arena immediately" {
     const alloc = try slab.allocAtIndex(backing, index, true);
     try std.testing.expect(slab.arenas[index] != null);
 
+    const first_arena = slab.arenas[index].?;
     slab.freeAtIndex(&backing, alloc, index);
-    try std.testing.expect(slab.arenas[index] == null);
+    // Retained: still listed, at the free-list head, empty.
+    try std.testing.expect(slab.arenas[index] == first_arena);
+    try std.testing.expect(slab.free_arenas[index] == first_arena);
+    try std.testing.expect(first_arena.used_blocks == 0);
 
+    // The spare comes back without a fresh backing allocation.
     const next = try slab.allocAtIndex(backing, index, true);
-    try std.testing.expect(slab.arenas[index] != null);
+    try std.testing.expect(slab.arenas[index] == first_arena);
+    try std.testing.expect(first_arena.used_blocks == 1);
     slab.freeAtIndex(&backing, next, index);
-    try std.testing.expect(slab.arenas[index] == null);
+    try std.testing.expect(slab.arenas[index] == first_arena);
+    try std.testing.expect(first_arena.next == null);
 }
 
 test "small object slab releases excess empty arenas" {
@@ -2197,11 +2238,16 @@ test "small object slab releases excess empty arenas" {
     for (allocations[0..first_arena_capacity]) |allocation| {
         slab.freeAtIndex(&backing, allocation, index);
     }
+    // The first arena emptied and is retained; the second still holds one.
+    try std.testing.expect(slab.arenas[index] != null);
+    try std.testing.expect(slab.arenas[index].?.next != null);
+    try std.testing.expect(slab.free_arenas[index].?.used_blocks == 0);
+
+    // The second empties: one empty arena is kept, the other released.
+    slab.freeAtIndex(&backing, allocations[first_arena_capacity], index);
     try std.testing.expect(slab.arenas[index] != null);
     try std.testing.expect(slab.arenas[index].?.next == null);
-
-    slab.freeAtIndex(&backing, allocations[first_arena_capacity], index);
-    try std.testing.expect(slab.arenas[index] == null);
+    try std.testing.expect(slab.arenas[index].?.used_blocks == 0);
 }
 
 test "small slab GC allocation reuses allocator header for metadata" {

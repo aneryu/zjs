@@ -35,9 +35,9 @@ const uri = @import("uri_ops.zig");
 
 const native_legacy = @import("native_legacy.zig");
 const InternalEntry = core.host_function.InternalEntry;
-const InternalRecord = core.NativeEntry;
-const InternalRecordTable = core.native_entry.EntryTable;
-const SparseInternalRecord = core.native_entry.SparseEntry;
+const NativeEntry = core.NativeEntry;
+const EntryTable = core.native_entry.EntryTable;
+const SparseEntry = core.native_entry.SparseEntry;
 const NativeBuiltinDomain = core.function.NativeBuiltinDomain;
 
 const domain_count = count: {
@@ -50,11 +50,11 @@ const domain_count = count: {
 
 /// NB2 A2: every declaration becomes a `NativeEntry` through the one
 /// comptime adapter (validation lives there).
-fn checkedRecord(comptime entry: InternalEntry) InternalRecord {
+fn checkedRecord(comptime entry: InternalEntry) NativeEntry {
     return native_legacy.entryFromInternal(entry);
 }
 
-fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
+fn recordTable(comptime entries: []const InternalEntry) EntryTable {
     comptime {
         // Validation plus one occupancy scan is linear in the static entry
         // count, but larger domains legitimately exceed Zig's tiny default
@@ -80,15 +80,15 @@ fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
         // only when that representation is actually smaller in bytes.
         var dense_len: usize = occupied.len;
         var sparse_count: usize = 0;
-        var best_bytes = dense_len * @sizeOf(InternalRecord);
+        var best_bytes = dense_len * @sizeOf(NativeEntry);
         var tail_count = entries.len;
         for (occupied, 0..) |is_occupied, id| {
             if (!is_occupied) continue;
             tail_count -= 1;
             const proposed_dense_len = id + 1;
             const proposed_sparse_count = tail_count;
-            const proposed_bytes = proposed_dense_len * @sizeOf(InternalRecord) +
-                proposed_sparse_count * @sizeOf(SparseInternalRecord);
+            const proposed_bytes = proposed_dense_len * @sizeOf(NativeEntry) +
+                proposed_sparse_count * @sizeOf(SparseEntry);
             if (proposed_bytes < best_bytes) {
                 dense_len = proposed_dense_len;
                 sparse_count = proposed_sparse_count;
@@ -96,8 +96,8 @@ fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
             }
         }
 
-        var dense = [_]InternalRecord{core.native_entry.retired_entry} ** dense_len;
-        var sparse: [sparse_count]SparseInternalRecord = undefined;
+        var dense = [_]NativeEntry{core.native_entry.retired_entry} ** dense_len;
+        var sparse: [sparse_count]SparseEntry = undefined;
         var sparse_index: usize = 0;
         for (entries) |entry| {
             const record = checkedRecord(entry);
@@ -113,7 +113,7 @@ fn recordTable(comptime entries: []const InternalEntry) InternalRecordTable {
             for (1..sparse.len) |index| {
                 var cursor = index;
                 while (cursor > 0 and sparse[cursor].id < sparse[cursor - 1].id) : (cursor -= 1) {
-                    std.mem.swap(SparseInternalRecord, &sparse[cursor], &sparse[cursor - 1]);
+                    std.mem.swap(SparseEntry, &sparse[cursor], &sparse[cursor - 1]);
                 }
             }
         }
@@ -136,8 +136,8 @@ const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries 
 /// The static table `JSRuntime.internal_builtins` points at. Every standard
 /// native domain contributes its record entries here; exec owns both the
 /// table and the JS-visible operation implementations it dispatches to.
-pub const table: [domain_count]InternalRecordTable = build: {
-    var domains = [_]InternalRecordTable{.{}} ** domain_count;
+pub const table: [domain_count]EntryTable = build: {
+    var domains = [_]EntryTable{.{}} ** domain_count;
     domains[@intFromEnum(NativeBuiltinDomain.math)] = recordTable(&math.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.performance)] = recordTable(&performance.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.json)] = recordTable(&json.internal_entries);

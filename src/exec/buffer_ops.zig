@@ -181,7 +181,7 @@ pub const internal_entries = bufferEntries: {
         // ids onto the live `ArrayBuffer` / `SharedArrayBuffer` objects
         // (standard_globals.zig), so they must resolve to a record; without
         // these rows the id decoded but pointed past the end of the domain's
-        // record array, leaving `nativeRecordSlot` null.
+        // record array, leaving `nativeEntrySlot` null.
         //
         // `new ArrayBuffer(n)` never reaches this record: construction is
         // intercepted upstream by `array_ops.constructArrayBufferNativeRecord`

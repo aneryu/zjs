@@ -806,11 +806,12 @@ test "compiler.s2g1: optional chain field" {
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
-        .{ .op = qop.get_field_opt_chain, .size = 5, .atom = field_atom },
+        // W1: `get_field_opt_chain` is `atom_cache_u8` (6 bytes).
+        .{ .op = qop.get_field_opt_chain, .size = 6, .atom = field_atom },
     });
-    try std.testing.expectEqual(@as(u32, 20), b.code_len);
+    try std.testing.expectEqual(@as(u32, 21), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 0, 1, 21);
     try expectLabel(b, 1, 1, 15);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
@@ -1911,15 +1912,15 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
         // getLValue removes get_field before the RHS is emitted.
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.insert2, .size = 1 },
-        .{ .op = qop.put_field, .size = 5, .atom = field_atom },
+        .{ .op = qop.put_field, .size = 6, .atom = field_atom },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 9), b.code_len);
+    try std.testing.expectEqual(@as(u32, 10), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     // The getter's retained atom is transferred into the setter ledger entry.
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 8), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 9), b.last_opcode_pos);
     // truncateTail drops the removed getter's source marker; null reuses offset 1.
     try expectSourceOffsets(b, &.{ 0, 1 });
     try expectRelocIntegrity(b);
@@ -1940,21 +1941,21 @@ test "compiler.s2g4: compound field assignment reemits getter" {
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
         // keep=true re-emits get_field2 without the rewound getter's marker.
-        .{ .op = qop.get_field2, .size = 5, .atom = field_atom },
+        .{ .op = qop.get_field2, .size = 6, .atom = field_atom },
         .{ .op = qop.null, .size = 1 },
         // The compound arithmetic op is pinned to the += source event.
         .{ .op = qop.add, .size = 1 },
         .{ .op = qop.insert2, .size = 1 },
-        .{ .op = qop.put_field, .size = 5, .atom = field_atom },
+        .{ .op = qop.put_field, .size = 6, .atom = field_atom },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 15), b.code_len);
+    try std.testing.expectEqual(@as(u32, 17), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(field_atom, b.atom_operands[1]);
-    try std.testing.expectEqual(@as(i64, 14), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 7 });
+    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 8 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -2000,20 +2001,20 @@ test "compiler.s2g4: postfix field update preserves old value" {
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
-        .{ .op = qop.get_field2, .size = 5, .atom = field_atom },
+        .{ .op = qop.get_field2, .size = 6, .atom = field_atom },
         // The postfix update is pinned to the ++ source event.
         .{ .op = qop.post_inc, .size = 1 },
         .{ .op = qop.perm3, .size = 1 },
-        .{ .op = qop.put_field, .size = 5, .atom = field_atom },
+        .{ .op = qop.put_field, .size = 6, .atom = field_atom },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 14), b.code_len);
+    try std.testing.expectEqual(@as(u32, 16), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(field_atom, b.atom_operands[1]);
-    try std.testing.expectEqual(@as(i64, 13), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 0, 1, 6 });
+    try std.testing.expectEqual(@as(i64, 15), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 0, 1, 7 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -2967,7 +2968,8 @@ test "compiler.s3: parsed empty finally removes gosub" {
 
 test "compiler.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0));
-    try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field));
+    // W1: the property-site family carries a trailing `cache_idx` byte.
+    try std.testing.expectEqual(@as(u8, 6), opcode.sizeOf(qop.get_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.lt));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.inc_loc));
@@ -2979,7 +2981,7 @@ test "compiler.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.push_this_put_loc0));
-    try std.testing.expectEqual(@as(u8, 5), opcode.sizeOf(qop.get_field2_call_method));
+    try std.testing.expectEqual(@as(u8, 6), opcode.sizeOf(qop.get_field2_call_method));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc2_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.eq_if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.ext0));

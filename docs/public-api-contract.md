@@ -21,6 +21,7 @@ The stable public groups are:
 - `zjs.native` for native (host) functions callable from JavaScript:
   `managed`, `leaf`, `leafWithState`, `Call`, `Spec`, `Options`;
 - `zjs.CallSite` for repeated native -> JS calls to one function;
+- `zjs.PropertySite` for repeated host reads/writes of one property name;
 - `zjs.value` for value constructors, handle aliases, string views, and byte
   views;
 - `zjs.object` for low-level object helpers;
@@ -103,7 +104,8 @@ default builds fail closed on `--profile-opcodes`.
 - global object access;
 - native function creation and installation (`createFunction` /
   `defineFunction`, taking a `zjs.native.Spec`);
-- property get/set and own descriptor inspection;
+- property get/set and own descriptor inspection (`zjs.PropertySite` for
+  repeated access to one name);
 - function calls (`callFunction`; `zjs.CallSite` for repeated calls);
 - string conversion;
 - ArrayBuffer and byte-store creation;
@@ -192,7 +194,7 @@ The rooting rules of the native boundary (design contract C2) are:
 Public lifetime methods use three verbs:
 
 - `deinit` destroys the receiver. Use it for handle scopes, persistent
-  handles, weak handles, native pins, and `CallSite`.
+  handles, weak handles, native pins, `CallSite`, and `PropertySite`.
 - `take` transfers ownership out of the receiver. `JSValue.Persistent.take`
   removes the persistent root and returns the rooted `JSValue`.
 - `release` decrements a reference count or drops a borrowed pin. Keep this
@@ -350,6 +352,54 @@ Realms) still work through the authoritative root path. Arguments passed to
 from the host for that call. Host -> JS -> native -> JS recursion uses the
 C stack and is bounded by the runtime's native stack limit.
 
+## Host-Side Property Access
+
+`JSContext.getProperty(obj, "field")` interns the name and walks the object
+on every call; it stays the one-shot form. `zjs.PropertySite` is the
+resolved-once form for a host that reads or writes ONE property name
+repeatedly (an ECS system reading `entity.x`, a serializer walking records,
+a plugin reading a config field):
+
+```zig
+var site = try zjs.PropertySite.init(ctx, "field");   // or initAtom(ctx, prop_name)
+defer site.deinit();
+const v = try site.get(obj);
+try site.set(obj, zjs.value.int32(7));
+```
+
+`init` interns the name and pins it for the host; `deinit` releases the pin
+and must run before the context (or its runtime) is destroyed. `initAtom`
+takes a `zjs.host.PropName` the host already interned and takes its own pin,
+so the caller may release its own id independently.
+
+Internally a site is one `PropSiteCache` entry -- the same struct and the
+same capture core the VM's W1 `get_field` / `put_field` sites use -- guarded
+by the receiver's `Shape.identity`. A hit is an identity compare and an
+indexed load for an own data slot, a class and holder re-check plus an
+indexed load one prototype link up, or (for a native K3 getter on a class
+prototype) a direct typed getter call. Everything else -- a non-object
+receiver, a Proxy, an exotic own property, a JS accessor, a polymorphic
+receiver set past the four-miss budget -- takes the ordinary property walk,
+so a site is always correct and only sometimes fast.
+
+Invalidation is implicit and needs no host action: `Shape.identity` is a
+monotonic per-runtime counter that takes a fresh value at shape creation and
+before every in-place mutation of the guarded state (property append,
+property delete, flag update, prototype swap), and identities are never
+reused, so a recycled Shape address can never re-match a stale site. Adding
+a property to the receiver, deleting the cached one, freezing the object, or
+swapping its prototype simply makes the next access guard-miss and
+re-capture.
+
+`get` returns the property value as a plain `JSValue` with the usual rooting
+rules (Values And Handles). `set` is the strict `Set`: a write the object
+refuses -- read-only own or inherited data property, non-extensible
+receiver, accessor without a setter -- raises the TypeError instead of
+silently dropping the write, surfacing as `error.TypeError` with the
+exception pending on the context. A site holds no `JSValue` and is therefore
+not a GC root of anything; it is bound to the context it was created for and
+to the runtime's thread.
+
 ## Native Objects
 
 `zjs.host.NativeBinding.JSObject(T, spec)` is the public native object binding
@@ -385,7 +435,9 @@ The current public API contract is covered by:
 - `src/tests/embedding_examples.zig`, including the public-surface name
   snapshot (active only when `zjs` is the true public facade), the native
   function contract test (arguments, receiver, error mapping, finalizer
-  timing), and the CallSite cookbook test;
+  timing), the CallSite cookbook test, and the PropertySite cookbook test
+  (own hit, shape-change re-capture, prototype holder, native getter,
+  refused write, polymorphic retirement);
 - public API contract and production failure-path tests in
   `src/tests/engine_production.zig`;
 - `tools/perf/native_boundary/zjs_boundary_bench.zig`, the boundary

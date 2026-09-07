@@ -23,8 +23,10 @@ re-exports the low-level embedding API and the explicit `zjs.runtime`
 namespace.
 
 `src/binding/` contains the public adapter layer for value, string, bytes,
-property-name, native-function (`native.zig`: `zjs.native`), native-object
-(`binding.zig`), and context/CallSite (`context.zig`) surfaces. There is no
+property-name (`prop_name.zig`), property-site (`property_site.zig`:
+`zjs.PropertySite`), native-function (`native.zig`: `zjs.native`),
+native-object (`binding.zig`), and context/CallSite (`context.zig`)
+surfaces. There is no
 landed `src/kernel/` directory; earlier "kernel API" language maps to this
 adapter layer plus `src/root.zig`.
 
@@ -67,6 +69,7 @@ zjs.JSRuntime
 zjs.JSContext
 zjs.JSValue
 zjs.CallSite
+zjs.PropertySite
 zjs.native.managed / leaf / leafWithState
 zjs.native.Call / Spec / Options
 zjs.object.Object
@@ -154,7 +157,10 @@ resulting `Spec` plus per-registration `Options` (`length`, `state`,
 `finalize`, `with_prototype`, `realm_global`) into a function object. The
 reverse direction, native -> JS, is `JSContext.callFunction` (one-shot) and
 `zjs.CallSite` (resolved once, called repeatedly); both enter the same
-resident dispatch loop a builtin callback uses. The rooting, exception,
+resident dispatch loop a builtin callback uses. Host-side property access
+has the same pair: the `JSContext.getProperty` / `defineDataProperty`
+one-shots, and `zjs.PropertySite` (resolved once), which reuses the VM's W1
+`PropSiteCache` entry and its `Shape.identity` guard. The rooting, exception,
 realm, backtrace, interrupt, entry-lifetime, and thread contracts are
 C1-C10 in the design document and are restated for embedders in
 `docs/public-api-contract.md`.

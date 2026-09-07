@@ -45,6 +45,9 @@ pub const default_stack_size = core.runtime.default_stack_size;
 pub const default_gc_threshold = core.runtime.default_gc_threshold;
 
 pub const prop_name = @import("prop_name.zig");
+pub const property_site = @import("property_site.zig");
+/// Resolved-once host-side property access (see `property_site.PropertySite`).
+pub const PropertySite = property_site.PropertySite;
 pub const binding = @import("binding.zig");
 
 pub const PropNameID = prop_name.PropNameID;
@@ -66,6 +69,8 @@ pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
 
 test {
     _ = PropNameID;
+    _ = property_site;
+    _ = PropertySite;
     _ = JSString;
     _ = JSBytes;
     _ = Object;

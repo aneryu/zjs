@@ -129,6 +129,19 @@ pub const Vm = struct {
     /// ReleaseSafe suite doubles as a seam-leak detector. Occupies the
     /// RETIRED stack_base slot (X-a), preserving the measured Vm layout.
     var_refs_base: [*]*core.VarRef = undefined,
+    /// Resident `FunctionBytecode.prop_sites` / `prop_site_count` mirror (W1
+    /// property cache). Same rationale as `code_base`: the site an
+    /// `atom_cache_u8` instruction names has to be reachable in ONE load, or
+    /// the guard's dependency chain (vm -> function -> flag/byte_code/len ->
+    /// extension -> pointer) both delays the compare and pushes the resident
+    /// field handlers over the register budget -- measured: with the site
+    /// read through `FunctionBytecode.hotExtension()`, `op_get_field` and
+    /// `op_get_field2` stopped being leaves and grew a 64-byte frame plus
+    /// four callee-saved `stp` pairs that every hit then paid. Republished at
+    /// every seam that republishes `code_base`.
+    prop_sites: [*]bytecode.PropSiteCache = undefined,
+    prop_site_count: u16 = 0,
+
     /// Resident `ctx.runtime` — invariant for the Vm's lifetime (a JSContext
     /// never changes runtime), set once at driver entry. The hot call/return
     /// legs (budget commit, leaf teardown frees, arena restore) previously
@@ -177,6 +190,48 @@ pub const Vm = struct {
     /// `.reuse_release` (strict op.tail_call, ES2015 PTC) reuses the Entry
     /// AND releases the dying frame's logical charge — constant stack.
     tail_mode: TailMode = .push,
+
+    /// Publish the property-site mirror for `function` (see `prop_sites`):
+    /// lazily. Every call and return republishes `function`, and reading the
+    /// extension eagerly here (load, null test, two stores) was priced at
+    /// +26 insn per bare native callback crossing (W1 debt 2). One store
+    /// invalidates the mirror; the first site read of the activation refills
+    /// it inline (`propSite`'s cold leg), so an activation that touches no
+    /// property never pays for the mirror at all.
+    pub inline fn publishPropSites(self: *Vm, function: *const bytecode.FunctionBytecode) void {
+        _ = function;
+        self.prop_site_count = 0;
+    }
+
+    /// The site an `atom_cache_u8` instruction's `cache_idx` names. The
+    /// hot leg is one bound test and one indexed address. The cold leg
+    /// tells apart an unpublished mirror (count 0 since the last `function`
+    /// publish), which it refills INLINE from the canonical hot extension --
+    /// no call, so the resident field handlers stay leaves -- from an index
+    /// past a published count (`no_cache_idx`, 255: a function never owns
+    /// 256 sites), which reads the retired site. A function without a site
+    /// array publishes the 256-entry retired base, so every later index of
+    /// that activation is a plain retired read.
+    pub inline fn propSite(self: *Vm, idx: u8) *bytecode.PropSiteCache {
+        if (idx < self.prop_site_count) return &self.prop_sites[idx];
+        return self.propSiteCold(idx);
+    }
+
+    inline fn propSiteCold(self: *Vm, idx: u8) *bytecode.PropSiteCache {
+        @branchHint(.cold);
+        if (self.prop_site_count != 0) return vm_property_field.noPropSite();
+        if (self.function.hotExtensionCanonical()) |hot| {
+            if (hot.prop_sites) |sites| {
+                self.prop_sites = sites;
+                self.prop_site_count = hot.prop_site_count;
+                if (idx < hot.prop_site_count) return &sites[idx];
+                return vm_property_field.noPropSite();
+            }
+        }
+        self.prop_sites = vm_property_field.noPropSiteBase();
+        self.prop_site_count = 256;
+        return vm_property_field.noPropSite();
+    }
 
     /// syncDown analog: publish the register-resident pc/sp back to frame.pc /
     /// stack.top_ptr so a cold helper sees live state. `pc` points at the opcode byte;
@@ -240,12 +295,14 @@ pub const Vm = struct {
         self.property_tail_tbl = &property_tail_table;
         self.machine = undefined;
         self.function = undefined;
+        self.var_refs_base = undefined;
+        self.prop_sites = vm_property_field.noPropSiteBase();
+        self.prop_site_count = 0;
         self.frame = undefined;
         self.stack = undefined;
         self.code_base = undefined;
         self.catch_target = undefined;
         self.active_dispatch_tbl = undefined;
-        self.var_refs_base = undefined;
         self.property_holder = undefined;
         self.property_atom = undefined;
         self.local_fast_blocked = undefined;
@@ -299,6 +356,8 @@ pub const Vm = struct {
     /// (`inline_calls.NativeBoundaryScope`).
     pub const EntryState = struct {
         function: *const bytecode.FunctionBytecode,
+        prop_sites: [*]bytecode.PropSiteCache,
+        prop_site_count: u16,
         frame: *frame_mod.Frame,
         stack: *stack_mod.Stack,
         code_base: [*]const u8,
@@ -311,6 +370,8 @@ pub const Vm = struct {
     pub inline fn saveEntryState(self: *const Vm) EntryState {
         return .{
             .function = self.function,
+            .prop_sites = self.prop_sites,
+            .prop_site_count = self.prop_site_count,
             .frame = self.frame,
             .stack = self.stack,
             .code_base = self.code_base,
@@ -323,6 +384,8 @@ pub const Vm = struct {
 
     pub inline fn restoreEntryState(self: *Vm, state: *const EntryState) void {
         self.function = state.function;
+        self.prop_sites = state.prop_sites;
+        self.prop_site_count = state.prop_site_count;
         self.frame = state.frame;
         self.stack = state.stack;
         self.code_base = state.code_base;
@@ -336,24 +399,41 @@ pub const Vm = struct {
     /// pusher's registers (the same publication `enterEntry` performs for an
     /// in-handler call), so a native-boundary entry does not re-derive the
     /// frame through the machine -> top -> frame -> function -> code chain.
-    pub inline fn publishPushedEntry(self: *Vm, machine: *inline_calls.Machine, entry: *inline_calls.Entry, target: *const inline_calls.InlineTarget) void {
+    /// Returns the entry pc (a fresh frame starts at pc 0, so it is the
+    /// callee's `code_base`) in the pusher's register instead of leaving the
+    /// driver to re-read `vm.code_base` after the publication.
+    ///
+    /// A same-callee short circuit (skip the six invariant stores when
+    /// `function`/`var_refs_base` already match) was measured and REVERTED:
+    /// its three guard loads and two compares cost more than the stores plus
+    /// the bytecode load it removed (+5 insn / +1 cycle on site1/site0/n2j1,
+    /// 2026-09-07). The stores are off the entry dependency chain; only the
+    /// FB -> bytecode load in front of the first opcode fetch was ever on it.
+    pub inline fn publishPushedEntry(self: *Vm, machine: *inline_calls.Machine, entry: *inline_calls.Entry, target: *const inline_calls.InlineTarget) [*]const u8 {
         const function = target.fb;
         std.debug.assert(machine.top == entry);
         std.debug.assert(machine.depth > 0);
         std.debug.assert(entry.frame.function == function);
         std.debug.assert(entry.frame.var_refs.ptr == target.var_refs or entry.frame.var_refs.len == 0);
         std.debug.assert(entry.frame.pc == 0);
+        const var_refs_base = entry.frame.var_refs.ptr;
         self.machine = machine;
-        self.function = function;
+        self.publishPropSites(function);
         self.frame = &entry.frame;
         self.stack = &entry.stack;
         self.catch_target = &entry.catch_target;
-        self.code_base = function.byteCode().ptr;
         // Driver-prologue facts, from registers: a pushed frame is at depth
         // > 0 (fast table, no L0 stop) and its capture base is the target's.
-        self.var_refs_base = entry.frame.var_refs.ptr;
         self.local_fast_blocked = false;
         self.active_dispatch_tbl = &dispatch_table;
+        // A resolved InlineTarget's FB is finalized and materialized (its
+        // published call_facts were read from the code), so the optional
+        // probe in `byteCode` is statically satisfied here.
+        const code_base = function.byteCodeAssumeMaterialized().ptr;
+        self.function = function;
+        self.code_base = code_base;
+        self.var_refs_base = var_refs_base;
+        return code_base;
     }
 };
 
@@ -412,6 +492,9 @@ const PropertyTailSlot = enum(usize) {
     get_length_property,
     get_field_typed_property,
     get_field_absent,
+    get_field_native_getter,
+    prop_site_indirect,
+    prop_site_capture,
     put_field_add,
     put_array_el_rest,
 };
@@ -489,6 +572,28 @@ inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
 /// dispatcher already synced `frame.pc` (and consumed a following `drop`)
 /// and left the result on the stack, so only the generator stop check of
 /// `coldNext` still applies; the bounds check and table re-read are skipped.
+/// Tail of the inline K0 arm: the value lands where the window began
+/// (integer pair, as the leaf arm writes it) and dispatch continues at the
+/// next instruction. The two rare legs re-enter through the same cold
+/// helpers the dispatcher uses: a sentinel routes to `vm_native.failure`
+/// (handler lookup on the published frame), and a legacy entry stop
+/// boundary takes `coldNext` with the value pushed.
+inline fn managedInlineFinish(vm: *Vm, value: JSValue, region_start: [*]JSValue, npc: [*]const u8, vb: [*]JSValue) Outcome {
+    if (value.isException()) {
+        const region_base: usize = (@intFromPtr(region_start) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+        switch (vm_native.failure(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, region_base, builtin_dispatch.nativeHostError(vm.ctx)) catch |e| return vm.fail(e)) {
+            .caught => return coldNext(vb, vm),
+            else => unreachable,
+        }
+    }
+    storeValueAsIntPair(&region_start[0], value);
+    if (vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null) {
+        vm.stack.setTopPtr(region_start + 1);
+        return coldNext(vb, vm);
+    }
+    return @call(.always_tail, next, .{ npc, region_start + 1, vb, vm });
+}
+
 inline fn nativeHitNext(vb: [*]JSValue, vm: *Vm) Outcome {
     if (vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null) return coldNext(vb, vm);
     const npc = vm.code_base + vm.frame.pc;
@@ -677,6 +782,7 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     // FB pointer, so the entry assertion guards the direct dispatch chain.
     std.debug.assert(code_ptr == entry.frame.function.byteCode().ptr);
     vm.function = entry.frame.function;
+    vm.publishPropSites(vm.function);
     vm.frame = &entry.frame;
     vm.var_refs_base = entry.frame.var_refs.ptr;
     vm.stack = &entry.stack;
@@ -804,7 +910,7 @@ fn applyForwardCallMethod(
     if (live_bytes < total * @sizeOf(JSValue)) return .threw;
     const region_start = sp - total;
     vm.frame.pc += 3;
-    vm.stack.retreatToCallRegionFrom(sp, region_start);
+    vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
     const receiver = region_start[0];
     const method = region_start[1];
     const method_obj = object_ops.objectFromValue(method) orelse return .threw;
@@ -1159,9 +1265,33 @@ inline fn finishForwardedEntry(
     // so nothing above the published top looks like a live root.
     if (new_total < old_total) @memset(region_start[new_total..old_total], JSValue.undefinedValue());
     vm.frame.pc += 3;
-    vm.stack.retreatToCallRegionFrom(region_start + new_total, region_start);
-    const target = resolved.bind(this_arg, target_value);
+    vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, region_start + new_total, region_start);
     if (pollRetreatedCallRegion(vm, region_start, new_total)) return .threw;
+    // O1 forwarded arm: the rewritten window is already the method layout the
+    // exact-args leaf constructor takes, so `f.call(this, x)` on a published
+    // exact-args leaf builds the same frame `f_holder.f(x)` would -- one warm
+    // constructor and the narrow return epilogue instead of the general
+    // exact-simple frame plus `popOrdinaryFrame` + `reloadAfterPop`. The
+    // skipped native record still rides in `Entry.native_caller`, so the
+    // backtrace order is unchanged (see `tryPushForwardedExactArgsLeafFast`).
+    const function = resolved.fb;
+    const execution = resolved.call_facts.execution;
+    if (execution.exact_args_leaf_kind != .none and target_argc == function.arg_count and target_argc != 0) {
+        if (vm.machine.tryPushForwardedExactArgsLeafFast(
+            vm.rt,
+            vm.global,
+            vm.stack,
+            function,
+            resolved.call_facts,
+            resolved.var_refs[0..function.closureVarCount()],
+            region_start,
+            @intCast(target_argc),
+            native_caller,
+        )) |entry| {
+            return .{ .entry = .{ .entry = entry, .code_ptr = function.byteCodeAssumeMaterialized().ptr } };
+        }
+    }
+    const target = resolved.bind(this_arg, target_value);
     const entry = vm.machine.pushMethodCall(vm.global, vm.stack, &target, region_start, @intCast(target_argc)) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .handled;
@@ -1349,11 +1479,19 @@ inline fn loadValueAsIntPair(slot: *const JSValue) JSValue {
 }
 
 /// `loadValueAsIntPair` with the two 64-bit loads pinned as separate `ldr`s
-/// (AArch64). LLVM merges the pair into one `ldp`, which is a single 16-byte
-/// access on this core and does not forward from a 64-bit store of one half
-/// -- exactly what an int-arithmetic handler leaves behind (payload word
-/// rewritten, tag word untouched). Measured on `return a + b`: the merged
-/// `ldp` in op_return was a third of the handler's cycles.
+/// (AArch64). Measured on `return a + b`: the merged `ldp` in op_return was a
+/// third of the handler's cycles.
+///
+/// The reason first written here -- "`ldp` is a single 16-byte access and does
+/// not forward from a 64-bit store of one half" -- is NOT what the hardware
+/// does. `tools/perf/native_boundary/forwarding_matrix.c` (WP5, 2026-09-07)
+/// measures the whole producer/consumer matrix on this core: an `ldp` forwards
+/// from a `stp`, from two separate `str`s and from a partially overlapping
+/// OLDER store equally well (7.0-7.4 cyc, against 6.9 for a plain `ldr x`).
+/// What never forwards is a SIMD store: `str q` / `str d` costs a
+/// general-register reader ~4 cyc, ~7 on the tag half. So the split form here
+/// is worth keeping only for whatever it buys in scheduling, not for
+/// forwarding; the load-bearing rule is the register DOMAIN.
 inline fn loadValueAsSplitPair(slot: *const JSValue) JSValue {
     if (comptime builtin.cpu.arch == .aarch64) {
         var lo: u64 = undefined;
@@ -1424,14 +1562,6 @@ inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm,
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    // Lean native-boundary return (`inline_calls.LeanFrame`): the marker is
-    // only ever set with `.native_boundary`, so two loads decide it and the
-    // pop is the arena restore, the budget release and the unlink.
-    if (dying.return_action == .native_boundary and dying.continuation_payload == inline_calls.LeanFrame.marker) {
-        machine.popReturnedLean(vm.rt, dying);
-        storeValueAsIntPair(&vm.return_value, value);
-        return .native_returned;
-    }
     // Native-boundary return (builtin callback / embedder call): hand the
     // value straight back to the driver instead of detouring through the
     // scratch slot and op_return_slow (P4, native-boundary plan).
@@ -1480,6 +1610,7 @@ inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm,
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
+            vm.publishPropSites(caller_function);
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
@@ -1548,6 +1679,7 @@ inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm,
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
+            vm.publishPropSites(caller_function);
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             resume_sp[0] = delivered_value;
@@ -1556,6 +1688,47 @@ inline fn popAndResume(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm,
         }
         reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
         vm.stack.pushOwnedAssumeCapacity(delivered_value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
+    if (dying.isForwardedLeaf() and dying.stack.len() == 0) {
+        // Forwarded-leaf return (O3): `f.call(this, ...)` / `f.apply(...)` on
+        // a same-Realm bytecode `f`. Same narrow epilogue as the two leaf arms
+        // above, except that this shape has no resume record -- its 16-byte
+        // slot holds the skipped native `call` / `apply` record for the
+        // backtrace -- so the caller's resume {pc, sp} is re-derived through
+        // `prev`, the same chain `reloadAfterPop` walks. Kept HERE rather than
+        // only in `op_return_slow` (which retains the identical arm for the
+        // driver-side entries) so the forwarding shapes do not pay the scratch
+        // store, the tail hop and that body's prologue on every return.
+        //
+        // The len==0 guard is the same qjs `done:` release-loop entry the
+        // exact-args arm documents: a body that leaves operand values at
+        // `return` routes to general teardown below.
+        const caller_opt = dying.prev;
+        machine.popReturnedForwardedLeaf(vm.rt);
+        if (caller_opt) |caller| {
+            std.debug.assert(caller == machine.top.?);
+            const caller_function = caller.frame.function;
+            const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
+            const resume_sp = caller.stack.topPtr();
+            vm.frame = &caller.frame;
+            vm.var_refs_base = caller.frame.var_refs.ptr;
+            vm.stack = &caller.stack;
+            vm.catch_target = &caller.catch_target;
+            vm.function = caller_function;
+            vm.publishPropSites(caller_function);
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
+            vb2 = caller.frame.locals.ptr;
+            // The retired receiver slot at the caller's operand top is dead
+            // (its value moved into the callee frame at push), exactly where
+            // the generic path would push the result.
+            resume_sp[0] = value;
+            caller.stack.setTopPtr(resume_sp + 1);
+            return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+        }
+        reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
+        vm.stack.pushOwnedAssumeCapacity(value);
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
@@ -1614,6 +1787,7 @@ fn op_return_slow(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                 vm.stack = &caller.stack;
                 vm.catch_target = &caller.catch_target;
                 vm.function = caller_function;
+                vm.publishPropSites(caller_function);
                 vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
                 vb2 = caller.frame.locals.ptr;
                 // Deliver the result on the caller stack: the retired target
@@ -1668,6 +1842,37 @@ export var zjs_op_return_slow_tail: Handler = op_return_slow;
 // pin that size change rolled the entry alignment of every later handler
 // (measured: the untouched inline-control loop flapped +2.4% cycles at
 // bit-identical instruction counts between two layouts).
+/// Lean native-boundary return (`inline_calls.LeanFrame`): the whole
+/// completion is the arena restore, the budget release, the unlink and the
+/// two-word result hand-off, so it gets its own Handler body instead of
+/// riding `op_return`'s. `op_return` / `op_return_undef` route here BEFORE
+/// their general body, which is what lets both of them keep an empty
+/// prologue: the general body is an exported tail slot with its own
+/// callee-saved set, and the lean leg needs none.
+inline fn returnLeanTail(vm: *Vm, dying: *inline_calls.Entry, result_sp: [*]JSValue, value: JSValue) Outcome {
+    vm.syncSp(result_sp);
+    vm.machine.popReturnedLean(vm.rt, dying);
+    storeValueAsIntPair(&vm.return_value, value);
+    return .native_returned;
+}
+
+/// Shared general body of `op_return`: everything that is not a lean
+/// native-boundary return. Reached through an exported Handler slot so the
+/// two hot return opcodes carry only the lean decision.
+fn op_return_general(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    const result_sp = sp - 1;
+    const value = loadValueAsSplitPair(&result_sp[0]);
+    vm.syncSp(result_sp);
+    return popAndResume(pc, result_sp, vb, vm, value);
+}
+export var zjs_op_return_general_tail: Handler = op_return_general;
+
+fn op_return_undef_general(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) linksection(op_handler_section_tail) callconv(.c) Outcome {
+    vm.syncSp(sp);
+    return popAndResume(pc, sp, vb, vm, JSValue.undefinedValue());
+}
+export var zjs_op_return_undef_general_tail: Handler = op_return_undef_general;
+
 fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     // qjs OP_return (quickjs.c:18266) is check-free and infallible: `ret_val =
     // *--sp; goto done;` — ret_val is a plain local carried in registers to the
@@ -1687,10 +1892,12 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64)
     // Keep that compiler/verifier contract explicit in Debug instead of
     // cloning the complete teardown path for malformed bytecode in production.
     std.debug.assert(@intFromPtr(sp) > @intFromPtr(vm.stack.values));
+    const dying: *inline_calls.Entry = @alignCast(@fieldParentPtr("frame", vm.frame));
+    std.debug.assert(dying == vm.machine.topEntry());
+    if (!dying.isLeanBoundaryReturn())
+        return @call(.always_tail, zjs_op_return_general_tail, .{ pc, sp, vb, vm });
     const result_sp = sp - 1;
-    const value = loadValueAsSplitPair(&result_sp[0]);
-    vm.syncSp(result_sp);
-    return popAndResume(pc, result_sp, vb, vm, value);
+    return returnLeanTail(vm, dying, result_sp, loadValueAsSplitPair(&result_sp[0]));
 }
 /// Depth-0 sibling of op_return: finish the optional generator, publish the
 /// value, and hand control back to the driver. Calling through the exported
@@ -1711,8 +1918,11 @@ fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) ali
     if (vm.machine.depth == 0)
         return @call(.always_tail, zjs_op_return_undef_depth0_tail, .{ pc, sp, vb, vm });
 
-    vm.syncSp(sp);
-    return popAndResume(pc, sp, vb, vm, JSValue.undefinedValue());
+    const dying: *inline_calls.Entry = @alignCast(@fieldParentPtr("frame", vm.frame));
+    std.debug.assert(dying == vm.machine.topEntry());
+    if (!dying.isLeanBoundaryReturn())
+        return @call(.always_tail, zjs_op_return_undef_general_tail, .{ pc, sp, vb, vm });
+    return returnLeanTail(vm, dying, sp, JSValue.undefinedValue());
 }
 /// Depth-0 sibling of op_return_undef. Keep this body outside the handler
 /// island: calling through the exported Handler slot prevents LLVM from
@@ -1771,7 +1981,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                 else
                     null;
                 if (resolved_opt) |resolved| {
-                    vm.stack.retreatToCallRegionFrom(sp, region_start);
+                    vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
                     const execution = resolved.call_facts.execution;
                     if (argc == 0 and execution.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
@@ -1891,13 +2101,22 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         // the call-site cache variant (whose guard needs the
                         // same entry load plus the slot chain), so no cache
                         // and no quickened opcode are needed for this shape.
-                        if (func_obj.nativeRecordAssumeCFunction()) |entry| {
+                        if (func_obj.nativeCallTargetAssumeCFunction()) |target| {
+                            const entry = target.entry;
+                            const args: []const JSValue = region_start[1..][0..argc];
                             if (entry.kind == .leaf) {
-                                const args: []const JSValue = region_start[1..][0..argc];
                                 if (builtin_dispatch.invokeLeafFastEntry(entry, args)) |value| {
                                     storeValueAsIntPair(&region_start[0], value);
                                     return @call(.always_tail, next, .{ pc + insn_len, region_start + 1, vb, vm });
                                 }
+                            } else if (vm_native.managedInlineEligible(vm.rt, entry)) {
+                                // Inline K0 arm: a managed entry without an
+                                // environment is one `bl` from the handler
+                                // (qjs js_call_c_function's generic arm),
+                                // no dispatcher frame, no NativeBits detour.
+                                vm.stack.setTopPtr(sp);
+                                const value = builtin_dispatch.callManagedFromWindow(vm.rt, target.realm, entry, func_obj, JSValue.undefinedValue(), args);
+                                return managedInlineFinish(vm, value, region_start, pc + insn_len, vb);
                             }
                         }
                         vm.stack.setTopPtr(sp);
@@ -2029,7 +2248,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
                     vm.frame.pc += 3;
-                    vm.stack.retreatToCallRegionFrom(sp, region_start);
+                    vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
                     const execution = resolved.call_facts.execution;
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
@@ -2091,6 +2310,8 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // never enters NMFD (no tbnz on the hot native path). Do not keep
                 // `rec` live across the NMFD bl — that grew this handler 0x3f0→0x400
                 // and slid the island tails. NMFD re-resolves with the assume helper.
+                // Arm order: the two typed-leaf kinds, then the §5.4 forwarding
+                // bit, then the two managed-inline predicates.
                 if (vm_call.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_obj)) |rec| {
                     if (rec.kind == .leaf) {
                         // Inline K1 leaf arm for the method form (`Math.abs(x)`,
@@ -2110,15 +2331,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                             storeValueAsIntPair(&region_base_ptr[0], value);
                             return @call(.always_tail, next, .{ pc + 4, region_base_ptr + 1, vb, vm });
                         }
-                    }
-                    if (!rec.flags.forwards_call) {
-                        vm.stack.setTopPtr(sp);
-                        switch (vm_native.dispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc, .method) catch |e| return vm.fail(e)) {
-                            .hit => return nativeHitNext(vb, vm),
-                            .caught => return coldNext(vb, vm),
-                            .miss => {},
-                        }
-                    } else {
+                    } else if (rec.flags.forwards_call) {
                         // §5.4 window-rewrite arms: `f.call(...)` / `f.apply(...)`
                         // on a same-Realm bytecode `f` become a bytecode method
                         // call on `f` itself -- no native frame, no native
@@ -2126,6 +2339,19 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         // identity (qjs compares the C function pointer), and
                         // every other receiver / argument-list shape leaves the
                         // window untouched for the generic path below.
+                        //
+                        // Placed ahead of the two managed-inline predicates
+                        // rather than behind all four probes: a forwarding
+                        // entry is always `.managed` (`forward_call` /
+                        // `forward_apply` were retired as kinds,
+                        // `native_entry.zig` Kind ids 8/9), so the two leaf
+                        // probes above can never match it, while
+                        // `managedInlineEligible` and
+                        // `methodManagedInlineEligible` both reject it on this
+                        // very bit -- `f.call` used to run and fail all of
+                        // both. On the fall-through LLVM knows the bit is
+                        // clear, so the native method arms below pay nothing
+                        // for the test moving up.
                         const forwarded = if (rec.target == function_ops.call_entry_target)
                             pushForwardedCallEntry(vm, region_start, argc)
                         else if (rec.target == function_ops.apply_entry_target)
@@ -2137,6 +2363,38 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                             .handled => return coldNext(vb, vm),
                             .threw => return .threw,
                             .generic => {},
+                        }
+                    } else if (vm_native.managedInlineEligible(vm.rt, rec)) {
+                        // Inline K0 arm, method form (`host.add(i, 1)`,
+                        // `console.log(x)`): receiver from the window.
+                        if (method_obj.nativeCallTargetAssumeCFunction()) |target| {
+                            const region_base_ptr = sp - (@as(usize, argc) + 2);
+                            vm.frame.pc += 3; // argc + cache_idx, as dispatch does
+                            vm.stack.setTopPtr(sp);
+                            const value = builtin_dispatch.callManagedFromWindow(vm.rt, target.realm, rec, method_obj, loadValueAsIntPair(&region_base_ptr[0]), region_base_ptr[2..][0..argc]);
+                            return managedInlineFinish(vm, value, region_base_ptr, pc + 4, vb);
+                        }
+                    } else if (vm_native.methodManagedInlineEligible(vm.rt, rec)) {
+                        // Inline K2 managed arm (`world.query(i)`): receiver
+                        // class check + `self` unwrap here; a foreign or
+                        // disposed receiver takes the dispatcher's TypeError.
+                        const region_base_ptr = sp - (@as(usize, argc) + 2);
+                        const this_value = loadValueAsIntPair(&region_base_ptr[0]);
+                        if (builtin_dispatch.nativeReceiverSelf(this_value, rec)) |self_ptr| {
+                            if (method_obj.nativeCallTargetAssumeCFunction()) |target| {
+                                vm.frame.pc += 3;
+                                vm.stack.setTopPtr(sp);
+                                const value = builtin_dispatch.callMethodManagedFromWindow(vm.rt, target.realm, rec, method_obj, self_ptr, this_value, region_base_ptr[2..][0..argc]);
+                                return managedInlineFinish(vm, value, region_base_ptr, pc + 4, vb);
+                            }
+                        }
+                    }
+                    if (!rec.flags.forwards_call) {
+                        vm.stack.setTopPtr(sp);
+                        switch (vm_native.dispatch(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, method_obj, argc, .method) catch |e| return vm.fail(e)) {
+                            .hit => return nativeHitNext(vb, vm),
+                            .caught => return coldNext(vb, vm),
+                            .miss => {},
                         }
                     }
                 }
@@ -2191,7 +2449,7 @@ noinline fn pushDerivedConstructorEntry(
     const constructor_this = JSValue.uninitialized();
     region_start[0] = constructor_this;
     const target = candidate.resolved.bind(constructor_this, func);
-    vm.stack.retreatToCallRegion(region_start);
+    vm.stack.retreatToCallRegion(&vm.machine.pending_call_region, region_start);
     const entry = vm.machine.pushDerivedConstructorCall(
         vm.global,
         vm.stack,
@@ -2232,7 +2490,7 @@ noinline fn pushSpreadDerivedConstructorEntry(
     region_start[0] = constructor_this;
     region_start[1] = constructor_func;
     const target = candidate.resolved.bind(constructor_this, func);
-    vm.stack.retreatToCallRegion(region_start);
+    vm.stack.retreatToCallRegion(&vm.machine.pending_call_region, region_start);
     const entry = vm.machine.pushDerivedConstructorCall(
         vm.global,
         vm.stack,
@@ -2307,7 +2565,7 @@ fn enterSameMachineSpreadConstructor(
             region_start[0] = instance;
             region_start[1] = constructor_func;
             const target = candidate.resolved.bind(instance, func);
-            vm.stack.retreatToCallRegion(region_start);
+            vm.stack.retreatToCallRegion(&vm.machine.pending_call_region, region_start);
             const entry = vm.machine.pushConstructorCall(
                 vm.global,
                 vm.stack,
@@ -2465,7 +2723,7 @@ fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
                     // setup by moving the eager instance into receiver slot 0.
                     region_start[0] = instance;
                     const target = candidate.resolved.bind(instance, func);
-                    vm.stack.retreatToCallRegion(region_start);
+                    vm.stack.retreatToCallRegion(&vm.machine.pending_call_region, region_start);
                     const entry = vm.machine.pushConstructorCall(
                         vm.global,
                         vm.stack,
@@ -3548,19 +3806,39 @@ pub fn opArgStore(comptime kind: ArgStoreKind) Handler {
     }.h;
 }
 
+/// W1 property-site cache (native-boundary design 8.2 / plan r3 WP2 / R8).
+///
+/// Shape of the arms, and why they are split the way they are: the resident
+/// field handlers carry ONLY the own-slot arm (one identity compare, one
+/// `proto_key == 0` compare, one indexed load). Keeping the prototype and
+/// native-getter guards inline as well pushed `op_get_field` past the
+/// register budget, and LLVM answered with a 96-byte frame plus five
+/// callee-saved `stp` pairs that every HIT then paid on entry and exit --
+/// +10.7% fixed-work instructions on Richards, which is exactly the
+/// PERF-T-SPIKE fairness rule 1 failure (`spike/perf-t-main:tspike.zig`
+/// header). Both other arms therefore take one indirect tail into
+/// `op_prop_site_indirect_tail`, and capture takes one into
+/// `op_prop_site_capture_tail`; neither costs the resident handler a frame.
+///
+/// Guards (representation contract 5.2.1): the receiver's `Shape.identity`
+/// -- monotonic, refreshed before every in-place shape mutation, never
+/// reused, so a recycled Shape address cannot re-match and a pointer guard
+/// would be unsound. `proto_key == 0` is the own/prototype discriminator.
+/// The prototype arms additionally re-check `class_id`, because a Shape does
+/// not pin the class and exotic own-property behaviour is a class property.
 // Hot get_field mirrors qjs GET_FIELD_INLINE: the receiver's own shape-data
 // probe stays in this handler, while own misses and primitive receivers
 // tail-dispatch to separate prototype/property walkers so their uncommon
 // qualification code does not inflate the own-hit path. Exotics keep the full
 // cold resolver.
-// 5-byte op (atom u32).
+// 6-byte op (atom u32 + W1 cache_idx u8).
 fn op_get_field_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
     if (vm_property_field.primitivePrototypeDataPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |value| {
         const stack_value = value;
         (sp - 1)[0] = stack_value;
-        return cont(pc + 5, sp, var_buf, vm);
+        return cont(pc + 6, sp, var_buf, vm);
     }
     return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
 }
@@ -3606,15 +3884,28 @@ pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
         }
         return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
     }
+    if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
+        const site = vm.propSite(pc[5]);
+        if (object.shape_ref.identity == site.guard_key) {
+            if (site.proto_key == 0) {
+                const value = loadValueAsIntPair(&object.propertyEntry(site.slot).slot.data);
+                storeValueAsIntPair(&sp[0], value);
+                return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+            }
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
+        }
+        if (vm_property_field.siteCapturable(site))
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
+    }
     var absent = false;
     if (vm_property_field.getFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         storeValueAsIntPair(&sp[0], value);
-        return @call(.always_tail, op_call_method, .{ pc + 5, sp + 1, var_buf, vm });
+        return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
     }
     if (absent) {
         sp[0] = JSValue.undefinedValue();
-        return @call(.always_tail, op_call_method, .{ pc + 5, sp + 1, var_buf, vm });
+        return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -3639,7 +3930,7 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
                     // terminal call, then the ordinary continuation -- no
                     // cached-getter hop, no generic call, no coldNext.
                     if (builtin_dispatch.nativeAccessorTarget(getter, .getter)) |target| {
-                        vm.syncPc(pc, 5);
+                        vm.syncPc(pc, 6);
                         vm.stack.setTopPtr(sp);
                         const value = builtin_dispatch.callNativeAccessorTarget(vm.ctx, vm.output, vm.global, target, receiver, &.{}, vm.function, vm.frame, .getter) catch |err| {
                             const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
@@ -3649,7 +3940,7 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
                             return coldNext(var_buf, vm);
                         };
                         (sp - 1)[0] = value;
-                        return cont(pc + 5, sp, var_buf, vm);
+                        return cont(pc + 6, sp, var_buf, vm);
                     }
                     sp[0] = getter;
                     return @call(.always_tail, propertyTailHandler(vm, .get_field_cached_getter), .{ pc, sp + 1, var_buf, vm });
@@ -3663,7 +3954,7 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
             },
         };
         (sp - 1)[0] = stack_value;
-        return cont(pc + 5, sp, var_buf, vm);
+        return cont(pc + 6, sp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -3683,7 +3974,7 @@ fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
     )) |slot| {
         const value = loadValueAsIntPair(slot);
         storeValueAsIntPair(&(sp - 1)[0], value);
-        return cont(pc + 5, sp, var_buf, vm);
+        return cont(pc + 6, sp, var_buf, vm);
     }
     if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
     // K3 native accessor on an ordinary link (design §8.2 slow path): the walk
@@ -3692,7 +3983,7 @@ fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
     // place -- no property-tail hop, no third chain walk, no generic call.
     if (vm_property_field.ordinaryAccessorGetterAfterOwnMiss(vm.property_holder, atom_id)) |getter| {
         if (builtin_dispatch.nativeAccessorTarget(getter, .getter)) |target| {
-            vm.syncPc(pc, 5);
+            vm.syncPc(pc, 6);
             vm.stack.setTopPtr(sp);
             const value = builtin_dispatch.callNativeAccessorTarget(vm.ctx, vm.output, vm.global, target, receiver, &.{}, vm.function, vm.frame, .getter) catch |err| {
                 const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
@@ -3701,8 +3992,8 @@ fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
                 if (!caught) return vm.fail(err);
                 return coldNext(var_buf, vm);
             };
-            (sp - 1)[0] = value;
-            return cont(pc + 5, sp, var_buf, vm);
+            storeValueAsIntPair(&(sp - 1)[0], value);
+            return cont(pc + 6, sp, var_buf, vm);
         }
     }
     if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
@@ -3723,7 +4014,151 @@ fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
 /// `undefined` needs no dup, the receiver is consumed.
 fn op_get_field_absent_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     (sp - 1)[0] = JSValue.undefinedValue();
-    return cont(pc + 5, sp, var_buf, vm);
+    return cont(pc + 6, sp, var_buf, vm);
+}
+
+/// W1 `.native_getter` arm (native-boundary design 8.2, R8 / JSC
+/// `CustomAccessorGetter`): the site guards the receiver's shape identity and
+/// the holder's, and names the ACCESSOR slot one prototype link up. The
+/// resolved `NativeEntry` is deliberately NOT cached -- `defineProperty` can
+/// replace a getter function without touching any shape flag -- so this arm
+/// re-reads the accessor out of the guarded slot and re-resolves it. A typed
+/// (K3, `sig != 0`) getter is a class check + `self` + one direct C call +
+/// boxing, with no pc publish and no backtrace marker; an untyped native
+/// getter takes the ordinary native terminal.
+fn op_get_field_native_getter_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const object = object_ops.objectFromValueTrustedExpression(receiver) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const site = vm.propSite(pc[5]);
+    const holder = object.shape_ref.proto orelse
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+    if (object.class_id != site.class_id or holder.shape_ref.identity != site.proto_key)
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+    const accessor = holder.propertyEntry(site.slot).slot.accessor.getterValue();
+    const target = builtin_dispatch.nativeAccessorTarget(accessor, .getter) orelse
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
+    if (target.entry.sig != 0) {
+        if (builtin_dispatch.invokeTypedGetterFast(target.entry, receiver)) |value| {
+            storeValueAsIntPair(&(sp - 1)[0], value);
+            return cont(pc + 6, sp, var_buf, vm);
+        }
+    } else if (vm_native.getterInlineEligible(vm.rt, target.entry)) {
+        // Inline K3 managed-getter arm (design §8.2): pc and stack top
+        // published (the getter may throw or re-enter JS), backtrace link,
+        // one `bl`; a sentinel takes the ordinary catch leg below.
+        vm.syncPc(pc, 6);
+        vm.stack.setTopPtr(sp);
+        const raw = builtin_dispatch.callGetterFromWindow(vm.rt, target.realm, target.entry, target.func_obj, receiver);
+        if (!raw.isException()) {
+            storeValueAsIntPair(&(sp - 1)[0], raw);
+            return cont(pc + 6, sp, var_buf, vm);
+        }
+        const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+        vm.stack.setLen(operand_len - 1);
+        const err = builtin_dispatch.nativeHostError(vm.ctx);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    }
+    vm.syncPc(pc, 6);
+    vm.stack.setTopPtr(sp);
+    const value = builtin_dispatch.callNativeAccessorTarget(vm.ctx, vm.output, vm.global, target, receiver, &.{}, vm.function, vm.frame, .getter) catch |err| {
+        const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
+        vm.stack.setLen(operand_len - 1);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        if (!caught) return vm.fail(err);
+        return coldNext(var_buf, vm);
+    };
+    storeValueAsIntPair(&(sp - 1)[0], value);
+    return cont(pc + 6, sp, var_buf, vm);
+}
+
+/// W1 prototype / native-getter arm. Entered by tail call from a resident
+/// field handler whose site guarded the receiver's shape with a non-zero
+/// `proto_key`; re-checks the receiver's class (a Shape does not pin it) and
+/// the holder's own identity, then answers with the guarded slot. The
+/// continuation is the opcode's own: `get_field` replaces the receiver,
+/// `get_field2` pushes above it, and the two fused forms hand straight to
+/// their B half.
+///
+/// A guard-detail miss (class changed, prototype relayered) re-captures and
+/// re-enters the instruction. That terminates: every exit of
+/// `captureFieldSite` either sets `guard_key` to this receiver's identity or
+/// retires the site.
+fn op_prop_site_indirect_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const object = object_ops.objectFromValueTrustedExpression(receiver) orelse
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const site = vm.propSite(pc[5]);
+    const holder: ?*core.Object = blk: {
+        if (object.class_id != site.class_id) break :blk null;
+        const h = object.shape_ref.proto orelse break :blk null;
+        if (h.shape_ref.identity != site.proto_key) break :blk null;
+        break :blk h;
+    };
+    if (holder) |h| {
+        if (site.state == vm_property_field.site_proto) {
+            const value = loadValueAsIntPair(&h.propertyEntry(site.slot).slot.data);
+            switch (pc[0]) {
+                op.get_field => {
+                    storeValueAsIntPair(&(sp - 1)[0], value);
+                    return cont(pc + 6, sp, var_buf, vm);
+                },
+                op.get_field_field2 => {
+                    storeValueAsIntPair(&(sp - 1)[0], value);
+                    return @call(.always_tail, op_get_field2, .{ pc + 6, sp, var_buf, vm });
+                },
+                op.get_field2 => {
+                    storeValueAsIntPair(&sp[0], value);
+                    return cont(pc + 6, sp + 1, var_buf, vm);
+                },
+                op.get_field2_call_method => {
+                    storeValueAsIntPair(&sp[0], value);
+                    return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+                },
+                else => unreachable,
+            }
+        }
+        // `.native_getter` is only ever captured from a `get_field` site (see
+        // the capture leg), so no other opcode can reach this line.
+        return @call(.always_tail, propertyTailHandler(vm, .get_field_native_getter), .{ pc, sp, var_buf, vm });
+    }
+    // No `.deferred` arm here, deliberately: this body is the HOT prototype /
+    // native-getter hit path, and giving it the second continuation cost
+    // every W1 indirect hit ~6 instructions (measured on the embedding
+    // corpus: `world.step` 208 -> 214, `world.time` 143 -> 149). A deferral
+    // reached from here simply re-enters the instruction, whose guard misses
+    // again and routes to `op_prop_site_capture_tail` -- which does have the
+    // arm, and which charges the miss that bounds the round trip.
+    _ = vm_property_field.captureFieldSite(site, object, readInt(u32, pc + 1), pc[0] == op.get_field);
+    return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+/// W1 capture leg. Out of line so the resident field handlers stay leaf, and
+/// entered by TAIL call so they keep no frame at all; it fills (or retires)
+/// the site and then re-enters the same instruction, whose guard now either
+/// matches or is permanently retired.
+fn op_prop_site_capture_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const is_put = pc[0] == op.put_field;
+    const receiver = if (is_put) (sp - 2)[0] else (sp - 1)[0];
+    if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
+        const site = vm.propSite(pc[5]);
+        const atom_id = readInt(u32, pc + 1);
+        if (is_put) {
+            vm_property_field.capturePutSite(site, object, atom_id);
+        } else {
+            // The `.native_getter` arm has a continuation only in the
+            // `get_field` shape, so only `get_field` sites may hold it.
+            switch (vm_property_field.captureFieldSite(site, object, atom_id, pc[0] == op.get_field)) {
+                .settled => {},
+                // See `op_prop_site_indirect_tail`: the site is still
+                // capturable, so re-entering would loop. Read cold once.
+                .deferred => return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm }),
+            }
+        }
+    }
+    return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
@@ -3746,14 +4181,13 @@ fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
             },
         };
         (sp - 1)[0] = stack_value;
-        return cont(pc + 5, sp, var_buf, vm);
+        return cont(pc + 6, sp, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
     if (!receiver.isObject()) {
         if (zjs_f_tombstone_keep != 0) {
             asm volatile (".space 0x100");
@@ -3771,11 +4205,28 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // qjs's own hit is an integer load pair straight off pr->u.value
     // (quickjs.c:19131).
     const object = object_ops.objectFromValueTrustedExpression(receiver) orelse unreachable;
+    // W1 hit arm (Hermes GET_BY_ID_IMPL): guard + indexed load, ahead of the
+    // probe chain it replaces. Only the OWN arm is resident; the prototype
+    // and native-getter arms take one indirect tail, because keeping their
+    // extra guards inline pushed this handler over the register budget and
+    // gave it a 96-byte frame that every hit then paid (fairness rule 1).
+    const site = vm.propSite(pc[5]);
+    if (object.shape_ref.identity == site.guard_key) {
+        if (site.proto_key == 0) {
+            const value = loadValueAsIntPair(&object.propertyEntry(site.slot).slot.data);
+            storeValueAsIntPair(&(sp - 1)[0], value);
+            return cont(pc + 6, sp, var_buf, vm);
+        }
+        return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
+    }
+    if (vm_property_field.siteCapturable(site))
+        return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
+    const atom_id = readInt(u32, pc + 1);
     var slow_property = false;
     if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| {
         const value = loadValueAsIntPair(slot);
         storeValueAsIntPair(&(sp - 1)[0], value);
-        return cont(pc + 5, sp, var_buf, vm);
+        return cont(pc + 6, sp, var_buf, vm);
     }
     if (slow_property)
         return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
@@ -3793,7 +4244,7 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         if (prototype.findOwnDataSlotFast(atom_id, &prototype_slow)) |slot| {
             const value = loadValueAsIntPair(slot);
             storeValueAsIntPair(&(sp - 1)[0], value);
-            return cont(pc + 5, sp, var_buf, vm);
+            return cont(pc + 6, sp, var_buf, vm);
         }
         if (prototype_slow)
             return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
@@ -3814,7 +4265,7 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
     if (vm_property_field.primitivePrototypeDataPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |value| {
         const stack_value = value;
         sp[0] = stack_value;
-        return cont(pc + 5, sp + 1, var_buf, vm);
+        return cont(pc + 6, sp + 1, var_buf, vm);
     }
     // Auto-init String.prototype entries need the allocating/materializing
     // resolver; keep that existing cold call off the object get_field2 body.
@@ -3829,7 +4280,7 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
         const resolved = string_ops.getFastStringPrimitiveDataProperty(vm.ctx, vm.global, receiver, atom_id) catch |e| return vm.fail(e);
         if (resolved) |value| {
             sp[0] = value;
-            return cont(pc + 5, sp + 1, var_buf, vm);
+            return cont(pc + 6, sp + 1, var_buf, vm);
         }
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -3850,11 +4301,27 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // BORROWED from its holder slot; the receiver stays beneath as `this` and
     // keeps the holder graph live while the value is copied to the stack.
     // Integer-pair slot reload + split push avoid the aggregate reload shape.
+    // W1: `obj.m()` method reads are the prototype-arm case the OO benchmarks
+    // are made of, so this handler's own arm is resident and the prototype
+    // arm is one indirect tail away.
+    if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
+        const site = vm.propSite(pc[5]);
+        if (object.shape_ref.identity == site.guard_key) {
+            if (site.proto_key == 0) {
+                const value = loadValueAsIntPair(&object.propertyEntry(site.slot).slot.data);
+                storeValueAsIntPair(&sp[0], value);
+                return cont(pc + 6, sp + 1, var_buf, vm);
+            }
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
+        }
+        if (vm_property_field.siteCapturable(site))
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
+    }
     var absent = false;
     if (vm_property_field.getFieldFastSlotOrAbsent(vm.ctx.runtime, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         storeValueAsIntPair(&sp[0], value);
-        return cont(pc + 5, sp + 1, var_buf, vm);
+        return cont(pc + 6, sp + 1, var_buf, vm);
     }
     // Same definite-absence termination as op_get_field (quickjs.c:19141-19143).
     // get_field2 keeps the receiver beneath, so there is nothing to release and
@@ -3862,7 +4329,7 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // path's ordinaryDataPropertyValueOrUndefinedForFastPath leg pushes.
     if (absent) {
         sp[0] = JSValue.undefinedValue();
-        return cont(pc + 5, sp + 1, var_buf, vm);
+        return cont(pc + 6, sp + 1, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
@@ -4104,6 +4571,27 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     const receiver = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
     const rt = vm.ctx.runtime;
+    // W1 write arm: own writable data slot only. `capturePutSite` fills the
+    // site from `findWritableOwnDataSlotFast`, so the identity guard alone
+    // proves the direct store is legal (kind + writable live in shape flags,
+    // and every flag update refreshes the identity).
+    if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
+        const site = vm.propSite(pc[5]);
+        // Unlike the read arm, the WRITE arm is class-dependent (the resident
+        // `putFieldFastSlot` refuses mapped `arguments`, whose named store has
+        // to reach the binding), and a Shape does not pin the class -- an
+        // empty root shape is shared by proto, not by class. So the write arm
+        // carries the class check the read's own arm does not need.
+        if (owner.shape_ref.identity == site.guard_key and owner.class_id == site.class_id) {
+            const slot = &owner.propertyEntry(site.slot).slot.data;
+            const value = loadValueAsIntPair(&(sp - 1)[0]);
+            storeValueAsIntPair(slot, value);
+            rt.gc.generationalBarrierValue(owner.gcHeader(), (sp - 1)[0]);
+            return cont(pc + 6, sp - 2, var_buf, vm);
+        }
+        if (vm_property_field.siteCapturable(site) and owner.shape_ref.identity != site.guard_key)
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
+    }
     if (vm_property_field.putFieldFastSlot(rt, receiver, atom_id)) |slot| {
         const value = loadValueAsIntPair(&(sp - 1)[0]);
         storeValueAsIntPair(slot, value); // consumes the stack's ref on value
@@ -4120,7 +4608,7 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         if (object_ops.objectFromValueTrustedExpression(receiver)) |owner| {
             rt.gc.generationalBarrierValue(owner.gcHeader(), (sp - 1)[0]);
         }
-        return cont(pc + 5, sp - 2, var_buf, vm);
+        return cont(pc + 6, sp - 2, var_buf, vm);
     }
     if (zjs_f_tombstone_keep != 0) {
         asm volatile (".space 0x8");
@@ -4148,7 +4636,7 @@ pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 ///   triggered by the C_W_E append does not re-walk the two operand slots
 ///   (on `.done` they are consumed; on `.slow` the cold twin republishes).
 /// - `.done`: the helper consumed `value`; release the receiver (the cold
-///   arm's `defer obj.free`) and continue at pc + 5 with both operands popped.
+///   arm's `defer obj.free`) and continue at pc + 6 with both operands popped.
 /// - `.slow`: no state was mutated and ownership of both operands stays with
 ///   the stack; the cold twin's publish(pc, sp) re-covers them. Append /
 ///   auto_init OOM is also `.slow` — `setValueProperty` (still `!T`) is the
@@ -4164,7 +4652,7 @@ fn op_put_field_add_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
     vm.syncSp(sp - 2);
     switch (receiver.setOrDefineOwnDataPropertyForPutFieldOwned(rt, atom_id, value)) {
         .done => {
-            return cont(pc + 5, sp - 2, var_buf, vm);
+            return cont(pc + 6, sp - 2, var_buf, vm);
         },
         .slow => {
             return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -4211,7 +4699,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     // read, so normal return/throw resumes at the correct instruction.
     if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
-        vm.stack.retreatToCallRegionFrom(sp, region_start);
+        vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
     }
     vm.stack.setTopPtr(sp);
@@ -4254,11 +4742,12 @@ fn op_get_array_el_atom_key_getter(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]
 }
 
 fn op_get_field_cached_getter(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    return op_get_property_cached_getter(5, pc, sp, var_buf, vm);
+    return op_get_property_cached_getter(6, pc, sp, var_buf, vm);
 }
 
 fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    const pc_advance: usize = if (pc[0] == op.get_length) 1 else 5;
+    // W1: the field family is `atom_cache_u8` (6 bytes); `get_length` is 1.
+    const pc_advance: usize = if (pc[0] == op.get_length) 1 else 6;
     vm.syncPc(pc, pc_advance);
     const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
     vm.stack.setTopPtr(sp);
@@ -5191,7 +5680,7 @@ noinline fn dispatchInternalNativeMethod(
     comptime argc: u16,
     vm: *Vm,
     method_object: *core.Object,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     region_base: usize,
 ) InternalMethodDispatch {
     comptime std.debug.assert(return_action == .next or return_action == .to_boolean);
@@ -5217,7 +5706,7 @@ noinline fn dispatchInternalNativeMethodSlow(
     comptime argc: u16,
     vm: *Vm,
     method_object: *core.Object,
-    record: *const core.host_function.InternalRecord,
+    record: *const core.NativeEntry,
     region_base: usize,
     receiver: JSValue,
     args: []const JSValue,
@@ -5286,7 +5775,7 @@ fn internalMethodRemainderHandler(
             if (object_ops.objectFromValue(method)) |method_object| {
                 if (method_object.class_id == core.class.ids.bytecode_function) {
                     if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_object)) |resolved| {
-                        stack.retreatToCallRegion(region_start);
+                        stack.retreatToCallRegion(&vm.machine.pending_call_region, region_start);
                         const execution = resolved.call_facts.execution;
                         const leaf_kind = execution.exact_args_leaf_kind;
                         if (leaf_kind != .none and argc == resolved.fb.arg_count) {
@@ -5398,7 +5887,7 @@ inline fn tryFastDefaultInstanceof(lhs: JSValue, ctor: *core.Object, vm: *Vm) ?b
 
     const method_object = object_ops.objectFromValue(loadValueAsIntPair(method_slot)) orelse return null;
     if (method_object.class_id != core.class.ids.c_function) return null;
-    const record = method_object.nativeRecordAssumeCFunction() orelse
+    const record = method_object.nativeEntryAssumeCFunction() orelse
         vm_call.resolvedNativeMethodRecordAssumeCFunction(vm.ctx, method_object) orelse return null;
     if (!function_ops.recordIsDefaultHasInstance(record)) return null;
 
@@ -6421,7 +6910,7 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
 /// Profiling builds count in `cont`/`next` — the same two table-dispatch
 /// sites — so handler bodies stay identical to the default binary.
 const dispatch_table: [256]Handler = colds.buildTable(specials, true).table;
-const property_tail_table = [14]Handler{
+const property_tail_table = [17]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_atom_key,
@@ -6434,6 +6923,9 @@ const property_tail_table = [14]Handler{
     op_get_length_property_tail,
     op_get_field_typed_property_tail,
     op_get_field_absent_tail,
+    op_get_field_native_getter_tail,
+    op_prop_site_indirect_tail,
+    op_prop_site_capture_tail,
     op_put_field_add_tail,
     op_put_array_el_cold,
 };
@@ -6453,6 +6945,7 @@ inline fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSV
     vm.machine.loadCurrentLevel(&vm.frame, &vm.stack, &vm.catch_target);
     vm.var_refs_base = vm.frame.var_refs.ptr;
     vm.function = vm.frame.function;
+    vm.publishPropSites(vm.function);
     vm.code_base = vm.function.byteCode().ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     vm.active_dispatch_tbl = if (vm.local_fast_blocked) &cold_table else &dispatch_table;
@@ -6493,6 +6986,7 @@ inline fn reloadAfterPop(
         }
     }
     vm.function = vm.frame.function;
+    vm.publishPropSites(vm.function);
     vm.code_base = vm.function.byteCode().ptr;
     pc.* = vm.code_base + vm.frame.pc;
     sp.* = vm.stack.topPtr();
@@ -6689,11 +7183,24 @@ pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
     if (!receiver.isObject())
         return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
     const rt = vm.ctx.runtime;
+    if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
+        const site = vm.propSite(pc[5]);
+        if (object.shape_ref.identity == site.guard_key) {
+            if (site.proto_key == 0) {
+                const value = loadValueAsIntPair(&object.propertyEntry(site.slot).slot.data);
+                storeValueAsIntPair(&(sp - 1)[0], value);
+                return @call(.always_tail, op_get_field2, .{ pc + 6, sp, var_buf, vm });
+            }
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
+        }
+        if (vm_property_field.siteCapturable(site))
+            return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
+    }
     var absent = false;
     if (vm_property_field.getFieldFastSlotOrAbsent(rt, receiver, atom_id, &absent)) |slot| {
         const value = loadValueAsIntPair(slot);
         storeValueAsIntPair(&(sp - 1)[0], value);
-        return @call(.always_tail, op_get_field2, .{ pc + 5, sp, var_buf, vm });
+        return @call(.always_tail, op_get_field2, .{ pc + 6, sp, var_buf, vm });
     }
     if (absent) return @call(.always_tail, propertyTailHandler(vm, .get_field_absent), .{ pc, sp, var_buf, vm });
     // K3 native accessor on an ordinary link (design §8.2 slow path): the walk
@@ -6702,7 +7209,7 @@ pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
     // receiver and call a native getter in place.
     if (vm_property_field.ordinaryAccessorGetterAfterOwnMiss(object_ops.objectFromValueTrustedExpression(receiver).?, atom_id)) |getter| {
         if (builtin_dispatch.nativeAccessorTarget(getter, .getter)) |target| {
-            vm.syncPc(pc, 5);
+            vm.syncPc(pc, 6);
             vm.stack.setTopPtr(sp);
             const value = builtin_dispatch.callNativeAccessorTarget(vm.ctx, vm.output, vm.global, target, receiver, &.{}, vm.function, vm.frame, .getter) catch |err| {
                 const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
@@ -6711,8 +7218,8 @@ pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
                 if (!caught) return vm.fail(err);
                 return coldNext(var_buf, vm);
             };
-            (sp - 1)[0] = value;
-            return cont(pc + 5, sp, var_buf, vm);
+            storeValueAsIntPair(&(sp - 1)[0], value);
+            return cont(pc + 6, sp, var_buf, vm);
         }
     }
     if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {

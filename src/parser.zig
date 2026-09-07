@@ -4638,10 +4638,16 @@ pub const parser_core = struct {
 
     fn emitBorrowedAtomOpAssumeCapacity(s: *State, op_id: u8, atom_id: Atom) void {
         s.appendAtomOperandAssumeCapacity(atom_id);
-        var bytes: [5]u8 = undefined;
+        // W1: the `atom_cache_u8` family carries a placeholder `cache_idx`.
+        var bytes: [6]u8 = undefined;
         bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-        s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
+        if (opcode.carriesPropCacheIdxPhase1(op_id)) {
+            bytes[5] = bytecode.PropSiteCache.no_cache_idx;
+            s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
+            return;
+        }
+        s.emitOpcodeBytesNoSourceAssumeCapacity(bytes[0..5]);
     }
 
     fn emitBorrowedAtomU16OpAssumeCapacity(s: *State, op_id: u8, atom_id: Atom, scope: u16) void {
@@ -4814,7 +4820,8 @@ pub const parser_core = struct {
             opcode.op.get_field => {
                 // qjs get_lvalue (quickjs.c:25963-25966,26015-26018): take the
                 // field-name retain back before removing the getter.
-                if (pos + 5 != v2b.code_len) return Error.InvalidAssignmentTarget;
+                // W1: `get_field` is `atom_cache_u8` (opcode + atom + cache_idx).
+                if (pos + 6 != v2b.code_len) return Error.InvalidAssignmentTarget;
                 const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
                 const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return mapBuilderError(err);
                 lvalue = .{ .opcode = .field, .name = owned_name, .owns_name = true, .depth = 1 };
@@ -5708,15 +5715,20 @@ pub const parser_core = struct {
             opcode.op.get_array_el_opt_chain,
             => return rewriteOptionalChainDeleteBuilder(s, pos),
             opcode.op.get_field => {
-                if (pos + 5 != v2b.code_len or v2b.atom_len == 0) return Error.ParserInvariant;
+                // W1: `get_field` is `atom_cache_u8` (6 bytes).
+                if (pos + 6 != v2b.code_len or v2b.atom_len == 0) return Error.ParserInvariant;
                 const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
                 if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
                 if (atomNameIsPrivate(s, atom_id))
                     return s.failWithMessage(delete_position, "private fields cannot be deleted");
                 const snapshot = v2b.snapshot();
                 errdefer v2b.rollback(snapshot);
-                try emitterOp(s, opcode.op.delete);
+                // qjs rewrites the getter into `push_atom_value` in place. The
+                // replacement is one byte SHORTER than the W1 getter, so drop
+                // the trailing `cache_idx` before appending `delete`.
                 v2b.code[pos] = opcode.op.push_atom_value;
+                v2b.code_len = pos + 5;
+                try emitterOp(s, opcode.op.delete);
             },
             opcode.op.get_array_el => {
                 if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
@@ -5764,7 +5776,8 @@ pub const parser_core = struct {
     fn rewriteOptionalChainDeleteBuilder(s: *State, pos: u32) Error!void {
         const v2b = s.activeBuilder();
         const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
-        const getter_size: u32 = if (field_form) 5 else 1;
+        // W1: `get_field_opt_chain` is `atom_cache_u8` (6 bytes).
+        const getter_size: u32 = if (field_form) 6 else 1;
         if (pos + getter_size != v2b.code_len) return Error.ParserInvariant;
         const optional_label = try optionalChainExitAtEnd(s);
 
@@ -5784,6 +5797,15 @@ pub const parser_core = struct {
 
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
+        if (field_form) {
+            // qjs rewrites the pseudo getter into `push_atom_value` in place.
+            // W1 made `get_field_opt_chain` one byte longer than that
+            // replacement, so the rewrite has to happen BEFORE the tail is
+            // appended -- every offset captured below (cleanup_offset, the
+            // goto relocation, the bound label) must already be final.
+            v2b.code[pos] = opcode.op.push_atom_value;
+            v2b.code_len = pos + 5;
+        }
         const next_label = try emitterNewLabel(s);
         try emitterOpNoSource(s, opcode.op.delete);
         try emitterJumpNoSource(s, opcode.op.goto, next_label);
@@ -5793,7 +5815,6 @@ pub const parser_core = struct {
         try emitterBindParserLabel(s, next_label);
 
         if (field_form) {
-            v2b.code[pos] = opcode.op.push_atom_value;
             v2b.label_slots[optional_label.index()].bound_offset = cleanup_offset;
         } else {
             try compactAppendedTailReplacement(s, snapshot, pos);
@@ -5849,7 +5870,8 @@ pub const parser_core = struct {
             opcode.op.get_array_el_opt_chain,
             => {
                 const field_form = v2b.code[pos] == opcode.op.get_field_opt_chain;
-                const getter_size: u32 = if (field_form) 5 else 1;
+                // W1: `get_field_opt_chain` is `atom_cache_u8` (6 bytes).
+                const getter_size: u32 = if (field_form) 6 else 1;
                 if (pos + getter_size != v2b.code_len) return Error.ParserInvariant;
                 const optional_label = try optionalChainExitAtEnd(s);
                 if (field_form) {
@@ -5876,7 +5898,7 @@ pub const parser_core = struct {
                 return .{ .kind = .method, .optional_drop_count = 2 };
             },
             opcode.op.get_field => {
-                if (pos + 5 != v2b.code_len)
+                if (pos + 6 != v2b.code_len)
                     return .{ .kind = .plain, .optional_drop_count = 1 };
                 // qjs js_parse_postfix_expr: preserve receiver+callee for
                 // method dispatch by rewriting the same-width getter.
@@ -6016,7 +6038,7 @@ pub const parser_core = struct {
             try emitterBindParserLabelRaw(s, label.builder);
             if (v2b.last_opcode_pos >= 0) {
                 const pos: usize = @intCast(v2b.last_opcode_pos);
-                if (pos + 5 == getter_end and v2b.code[pos] == opcode.op.get_field) {
+                if (pos + 6 == getter_end and v2b.code[pos] == opcode.op.get_field) {
                     v2b.code[pos] = opcode.op.get_field_opt_chain;
                 } else if (pos + 1 == getter_end and v2b.code[pos] == opcode.op.get_array_el) {
                     v2b.code[pos] = opcode.op.get_array_el_opt_chain;
@@ -8150,7 +8172,8 @@ pub const parser_core = struct {
             opcode.op.scope_in_private_field,
             => 7,
             opcode.op.scope_make_ref => 11,
-            opcode.op.get_field_opt_chain => 5,
+            // W1: `atom_cache_u8` (opcode + atom u32 + cache_idx u8).
+            opcode.op.get_field_opt_chain => 6,
             else => return null,
         };
         if (pc + size > code.len or atom_index >= atoms.len) return null;
@@ -8194,7 +8217,7 @@ pub const parser_core = struct {
         };
 
         return switch (opcode.formatOf(op_id)) {
-            .atom, .atom_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
+            .atom, .atom_u8, .atom_cache_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => true,
             else => false,
         };
     }

@@ -369,6 +369,13 @@ managed 变体 `method_managed`：`fn(ctx, self: *anyopaque, this, argv, argc, e
 class_id 检查，`self` = string 指针。这把今天 `stringCharCodeAtDirect`
 的 exec_direct 手写检查变成签名驱动。
 
+`STRING_I32_TO_STRING`（`charAt` / `at`）的结果不分配：叶返回码元，
+`leafCodeUnitString` 把 `< 0x100` 的码元换成运行时**单码元字符串表**
+（`JSRuntime.single_byte_strings`，Latin-1 0..255，惰性创建，槽本身是
+根 `traceStringCacheRoots`，永不回收；`≥ 0x100` 仍分配）。同一张表服务
+`String.fromCharCode` 单参、字符串迭代器、`s[i]` 索引读与长度 1 的
+`slice`。共享不可观测：字符串按值比较且不可变，latin1 存储下字节即码元。
+
 ### 4.4 K3 `accessor`：原生 getter / setter
 
 ```zig
@@ -482,10 +489,13 @@ pub noinline fn dispatch(st: *VmExecState, func_obj: *Object, region_base: usize
 
 `Function.prototype.call/apply` 是 `flags.forwards_call` 的 managed entry；
 今天走「转发臂 + `setupFallbackInlineEntry` + `op_return_slow`」（eval §6.3）。
-本设计：在 `dispatch` 里 `forwards_call` 是 `entry.kind == .forward_call/.forward_apply`
-两个专用臂：直接把窗口重排（call：把 `[recv=f, callee=call, this, args...]`
-改写成 `[this, f, args...]` 后按 `op_call_method` 的字节码臂继续；apply：
-展开数组到窗口后同上），不经任何 native target。目标 ≤ 60 / ≤ 100 cyc。
+落地形态（lane F）：**不新增 `Kind`**（一度预留的 `forward_call` /
+`forward_apply` 从未实现，id 8/9 已在 `native_entry.zig` 注销）。判据是
+`flags.forwards_call` + target 身份（`function_ops.call_entry_target` /
+`apply_entry_target`），entry 仍是 `managed`；`op_call_method` 直接把窗口
+重排（call：把 `[recv=f, callee=call, this, args...]` 改写成
+`[this, f, args...]` 后按字节码臂继续；apply：展开数组到窗口后同上），
+不经任何 native target。目标 ≤ 60 / ≤ 100 cyc。
 
 ---
 
@@ -807,6 +817,7 @@ for (events) |ev| {
 `zjs.host.PropName`（预 intern 的 atom）保留；新增 `zjs.PropertySite`：
 `init(ctx, name)` + `get(obj) JSValue` / `set(obj, v)`，内部带一个
 单条目 shape 缓存（与 W1 条目同形），让宿主读 JS 对象字段也享有 IC。
+（已落地，§16.12；读写各一个条目，见那里的理由。）
 
 ### 9.5 旧宿主 API：不保留、不过渡（D8 裁决）
 
@@ -1244,6 +1255,291 @@ JS→native 方向：叶形态全部领先四引擎（`abs` 2 cyc 是 V8-jitless
 之一），managed 与 qjs 持平（40 vs 35），原生类 typed 方法 35 领先 qjs 60 但
 未到 20。native→JS 方向：从 2.5–3× qjs 收到 1.3–1.9×，仍未到目标；lane R
 归因是依赖链长度（IPC 5.0 vs 6.1），下一刀见 §16.3 第 1 项的三条。
+
+### 16.6 WP4：单码元字符串表（2026-09-07，branch `nb2/strtab`）
+
+§16.3 第 2 项记的「charAt / at 的余量 = 每次 `createLatin1` 单字符串分配」
+已关账。做法是把已有的 128 项 ASCII 缓存 `JSRuntime.single_byte_strings`
+扩成 256 项 Latin-1 全表（不新增字段：旧表的根、teardown、`.declared_only`
+可见性原样复用），并把全部单码元产出点接上去（§4.3 末段）。
+4 样本 ABBA、CPU 19、每次穿越 cycles / insn：
+
+| 形态 | 前 | 后 | qjs |
+|---|---:|---:|---:|
+| `charAt` | 76 / 514 | **32 / 211** | 90 / 608 |
+| `at` | 83 / 549 | **41 / 247** | 95 / 640 |
+| `charCodeAt`（对照，不产字符串） | 27 / 188 | 26 / 188 | 56 / 352 |
+
+### 16.7 WP1：再入精简帧四刀（2026-09-07，branch `nb2/reentry3`，合入 `0f223926`）
+
+四刀中两刀有效、两刀量到不划算已回退并在代码处记录：
+- 刀 1「同 callee 短路 Vm 字段」回退：3 条守卫 load + 2 比较比 6 条 store +
+  1 条字节码 load 更贵（site1 65→66）；发布 store 不在入口依赖链上。
+  保留的只有 `Vm.publishPushedEntry` 以寄存器返回入口 pc。
+- 刀 2：挂起调用窗口 threadlocal → `Machine.pending_call_region`，生命期由
+  读方判定，`Stack.setTopPtr` 变成一条 store。
+- 刀 3：`Entry.isLeanBoundaryReturn` 臂内联进 `op_return` / `op_return_undef`，
+  通用体外提为导出尾槽 → 两个 handler 序言为空；Octane fixed-work
+  richards 0.992 / deltablue 0.995 / earley-boyer 1.004 / raytrace 1.001，
+  普通返回无回归。
+- 刀 4「省 builtin 回调快照」回退：前提不成立——`publishPushedEntry` 覆写
+  全部 8 个 `Vm.EntryState` 字段且外层挂起 handler 要读回；段回溯节点承担
+  `Error().stack` 交错语义。改成 `machine.vm.rt` 直取等 4 insn 小刀。
+
+| 形态 | 前 | 后 | 目标 | qjs |
+|---|---:|---:|---:|---:|
+| `CallSite.call1` | 65 / 333 | **58 / 293** | ≤40 | 48 / 297 |
+| `CallSite.call0` | 54 / 277 | **47 / 237** | ≤30 | 28 / 185 |
+| `callFunction(cb,[i])` | 75 / 414 | **66 / 372** | ≤45 | 48 / 297 |
+| `callFunction(cb,[])` | 62 / 365 | **56 / 325** | ≤30 | 28 / 185 |
+| forEach | 100 / 534 | **94 / 486** | ≤60 | 69 / 523 |
+| reduce | 98 / 508 | **91 / 461** | ≤60 | 67 / 498 |
+| sort | 110 / 583 | **103 / 535** | ≤70 | 78 / 583 |
+
+⭐归因（perf annotate，site1 58 cyc）：三处最大的单指令停顿全是操作数交接的
+store-to-load forwarding miss，且 reduce 里是同样三处，合计 ≈25/58、≈30/91：
+(1) `op_get_arg0_fast` 的 `ldr q0` 读 `pushLeanEntry` 以 64 位对写的帧参数；
+(2) `opBinary` 的 `ldur x10` 读 `op_get_arg0_fast` 以 `str q0` 重发布的 tag 半；
+(3) `op_return` 的 `ldr x10` 读 `opBinary` 以 `stur d0`（FP）写的结果。
+这是解释器通用 handler 的访存宽度纪律问题，不是边界成本 → 立项 WP5
+（plan-r3），其余 `callFixedInto` 的准入链 / arena / 边界作用域 store 属
+insn 项，四刀已证在 IPC 5 下几乎不兑现 cycles。
+
+### 16.8 M1：K0 / K2 managed 内联臂（2026-09-07，driver 亲做）
+
+host0 归因（perf annotate）：`vm_native.dispatch` 是 noinline、912 B 帧、
+12 个 callee-saved，结果经 `HostError!Outcome` sret 与 `NativeBits`
+往返（一处 `str q` → `ldp` 转发失败），managed 体本身只占 0.3%。做法与
+B3 叶臂同形：`op_call*` / `op_call_method` 里 `nativeCallTargetAssumeCFunction`
+一次 payload 走读拿 entry + realm，`kind == .managed && !needs_env &&
+!forwards_call` 且原生栈预检通过（qjs `js_check_stack_overflow` 的
+arg_buf 预留）则发布栈顶、在 handler 自己的栈上挂 qjs `sf` 回溯链、
+一条 `bl` 进 managed 体，结果以整数对写回窗口首槽、`next`；异常哨兵走
+`vm_native.failure`（同 dispatch 的 catch 查找），遗留 stop 边界走
+`coldNext`。方法形态加 K2 `method_managed` 臂（class 检查 + `self`
+解包在 handler 里，外来接收者留给 dispatch 抛 TypeError）。⚠️`forwards_call`
+（`Function.prototype.apply`）必须排除，否则 §5.4 窗口重写臂被绕过
+（单测「synchronous apply fallbacks」抓住）。
+
+| 形态 | 前 | 后 | 目标 | qjs |
+|---|---:|---:|---:|---:|
+| `host_add(i, 1)`（managed，2 参） | 39 / 250 | **14 / 141** | ≤30 | 35 |
+| `host_noop()`（managed，0 参） | 35 / 222 | **12 / 128** | ≤20 | 23 |
+| `host.add(i, 1)`（managed 作方法） | 61 / 298 | **33 / 207** | ≤35 | 35 |
+| `world.query(i)`（K2 method_managed） | 67 / 310 | **38 / 216** | ≤45 | 53 |
+
+其余形态持平（叶臂 ±0、native→JS 不动）。dispatch 现在只剩
+`needs_env` 的遗留 generic builtin、K2 叶臂 miss 与构造形态。
+
+### 16.9 WP2：W1 属性缓存合入（2026-09-07，branch `nb2/w1` → main `d9beaa14`）
+
+Hermes `GET_BY_ID_IMPL` 形：`Shape.identity: u64`（Registry 计数器，永不复用；
+`relocateShape` 保留、其余 shape 变异全刷新）、`PropSiteCache` 32 B
+{guard_key, proto_key, slot, class_id, state{empty,own,proto,native_getter,
+mega}, misses}、`get_field`/`get_field2`/`put_field` 与两条融合形态带 u8
+cache_idx（5→6 B，无新 opcode 编号，Octane 语料字节码 +1.91%），命中臂
+own 常驻、proto / native_getter / capture 各一条尾调。合并时两处修正：
+`runTC` 未发布镜像（常驻 Vm 会沿用上一函数的站点数组按下标别名——命中臂
+不复核 atom，属正确性隐患）；WP4 改名后的 `.record`→`.entry`。
+
+Octane fixed-work（cycles，W1/main，2 ABBA）：richards **0.919**、box2d
+**0.931**、deltablue **0.958**、earley-boyer 0.984、raytrace 0.993、pdfjs
+0.995、splay 0.998、typescript 1.018（Shape 56→64 B 的 block heap 搅动）。
+边界语料（cycles，合入后 / qjs）：getter_typed **27**（52，目标 ≤30 ✅）、
+method_typed 32（58，目标 ≤25）、hostm2 26（35）、method_managed 33（53）、
+getter_native 52（53）。
+
+⚠️债（合入即量到）：每次调用/返回的 `publishPropSites`（读扩展 + 两条
+store）让裸回调行退步——n2j0 56→62、site0 47→50、site1 57→60、forEach
+93→100、sort 104→109、N6_fcall 93→99、N1m 19→20（+26 insn/穿越）。
+处理见 §16.10。
+
+### 16.10 W1 债：站点镜像改为惰性发布（2026-09-07，driver 亲做）
+
+`publishPropSites` 每次调用与返回各读一次热扩展并写两字段（+26 insn/穿越）。
+改法：发布只写 `prop_site_count = 0`（一条 store）；命中臂的越界冷分支
+区分「未发布」（count 0 → **内联**从 canonical 热扩展回填，不 `bl`，
+`op_get_field*` 仍是叶子）与「越过已发布 count」（255 哨兵或越界 → 退休
+站点）；无站点数组的函数回填成 256 项退休静态表 + count 256，避免重复
+回填。走过的两条弯路：① 经 capture 尾回填时把已命中站点当 miss 记账，
+4 次后退成 mega（box2d +6%、f.call +16%）；② proto / native_getter 尾
+改成 noinline 解析，每次命中多一次 `bl`（method_typed +23 insn）。
+
+| 形态 | W1 合入 | lazy | qjs |
+|---|---:|---:|---:|
+| `callFunction(cb,[])` | 350 / 62 | **327 / 57** | 185 / 28 |
+| `callFunction(cb,[i])` | 397 / 70 | **373 / 68** | 297 / 48 |
+| `CallSite.call1` / `call0` | 310 / 60 · 255 / 50 | **286 / 56 · 238 / 47** | 297 / 48 · 185 / 28 |
+| forEach / reduce / sort | 100 · 98 · 108 | **96 · 95 · 107** | 69 · 67 · 78 |
+| N6_fcall / N7_fapply | 559 / 98 · 703 / 118 | **548 / 96 · 692 / 116** | 412 / 81 · 850 / 136 |
+| method_typed / getter_typed | 32 · 27 | 33 · 26 | 58 · 52 |
+
+Octane 子集（cycles，lazy / W1，2 ABBA）：box2d 1.007、richards 1.008、
+deltablue 1.003、gbemu 1.005、pdfjs 1.010、typescript 0.990、earley-boyer
+0.990、raytrace 0.996；insn 全部 ±0.5% 内——噪声级，按 insn 判中立。
+
+### 16.11 WP5 结案：访存宽度前提被证伪（2026-09-07，branch `nb2/storewidth`）
+
+见 plan-r3 WP5 结案段。要点：X925 的转发规则是**寄存器域**（GPR 读
+GPR 写才转发；`str q`/`str d` 写的槽 GPR 读 10.9–14.0 cyc，`ldr q`
+无论谁写都慢 ~4），不是宽度；把三处 miss 全改 GPR 后 site1 只动 1 cyc，
+Octane insn +0.96% / cycles 1.0008 → 回退，只留工具
+`forwarding_matrix.c` 与更正的注释。回调行剩余差距 = 解释器整体
+IPC（zjs 5.2 vs qjs 7.4，连纯 JS 控制循环一样；分支误预测两边可忽略），
+归 hermes-parity E1 归因，不再计入边界账。边界侧剩余靶子全是指令数：
+WP6（宿主→JS 指令减肥）、WP7（转发臂）、WP8（PropertySite）。
+
+### 16.12 WP8：宿主侧 `zjs.PropertySite`（2026-09-07，branch `nb2/propsite`）
+
+§9.4 落地。新 `src/binding/property_site.zig`，从 `zjs` / `zjs.PropertySite`
+导出：`init(ctx, name)` / `initAtom(ctx, PropName)` / `get(obj) !JSValue` /
+`set(obj, v) !void` / `deinit`。内部复用 W1 的 `PropSiteCache` 与
+`vm_property_field` 的 capture 核（`captureFieldSite` / `capturePutSite` /
+`siteCapturable`，同一 4 次 miss 预算与 `.mega` 退休），守卫是
+`Shape.identity`：
+
+- 读臂三条，臂序与 `op_get_field` 一致：`.own`（identity 比较 + 一次索引
+  取值，内联）→ `.proto`（`class_id` 复检 + holder identity 复检，出线
+  `noinline readIndirectArm`，对应 VM 的 `op_prop_site_indirect_tail`）→
+  `.native_getter`（同两道守卫后重读访问器槽，`sig != 0` 走
+  `invokeTypedGetterFast`；不缓存已解析的 `NativeEntry`）。
+- 写臂只有 own 可写 data 槽（identity + `class_id` 双守卫，同
+  `op_put_field`），直写后补 `generationalBarrierValue`；慢路是
+  `setValuePropertyWithThrow(force_throw = true)`，即嵌入者看到的是严格
+  `Set`（只读/不可扩展/无 setter → `error.TypeError` + 挂起异常），不静默
+  丢写。
+- **读写用两个条目**（`read` / `write`），不是一个：两个 capture 核准入
+  集不同（读可缓存只读 own 槽或原型槽，写都不能直存），共用一个条目要么
+  不健全，要么在既读又写的宿主上互相打架。
+- GC 契约：站点不持 `JSValue`（只有两个 identity、槽号、class_id），不是
+  GC 边；名字是 host-pin 的 atom，`init` 取 pin、`deinit` 还 pin（必须在
+  ctx/rt 销毁前）。失效隐式：identity 在每次原地变异前换新且永不复用，
+  加属性/删属性/冻结/换原型都让下一次访问守卫失配并重新 capture。
+
+读数（cycles / insn 每次读，4 样本 ABBA，CPU 19，`sample_embed.py`）：
+
+| case | zjs insn / cyc | qjs insn / cyc |
+|---|---|---|
+| `prop_site`（PropertySite） | 24 / 7 | 310 / 46 |
+| `prop_str`（`ctx.getProperty`，对照） | 375 / 62 | 310 / 46 |
+
+验收线（≤ 30 cyc / ≤ 150 insn）达成，命中比 qjs `JS_GetPropertyStr` 快
+6.6×。语料：`prop_site` 改用 PropertySite，新增 `prop_str` 保留旧 API 一行
+作对照；qjs 侧 `prop_str` 是 `prop_site` 的别名（qjs 没有宿主侧 IC，同一
+`JS_GetPropertyStr` 行同时对照两个 zjs 用例）。
+
+### 16.13 第三轮收官读数（2026-09-07，main `e3a7c6c2`：WP1 + M1 + WP2 + lazy 镜像 + WP5 结案 + WP8 + WP6/WP7）
+
+每次穿越 insn / cycles，4 ABBA、CPU 19，对手 = 同机 qjs 尺（GCC-16）；
+「目标」= §0 解释器目标；✅ 达标，◐ 优于 qjs 但未达目标，✗ 未达。
+
+**JS → native**
+
+| 形态 | §0 起点 | 现 | 目标 | qjs | 判 |
+|---|---:|---:|---:|---:|:-:|
+| `abs(i)` | 33 | 73 / **3** | ≤18 | 122 / 26 | ✅ |
+| `Math.abs(i)` | 61 | 136 / **20** | ≤30 | 194 / 49 | ✅ |
+| `max(i,1,2)` | 29 | 118 / **5** | ≤25 | 180 / 34 | ✅ |
+| `charCodeAt` / `charAt` / `at` / `codePointAt` | 64 / 76 / 83 / — | 27 / 33 / 42 / 27 | ≤40 | 56 / 90 / 94 / 58 | ✅（at ◐） |
+| `hasOwnProperty("k")` | 83 | 372 / 59（§16.15） | ≤60 | 613 / 98 | ✅ |
+| `push/pop` | 78 | 361 / 66 | ≤50 | 518 / 82 | ◐ |
+| `f.call(null,i)` | 114 | 464 / 82（§16.15） | ≤60 | 412 / 81 | ✗（cycles 持平 qjs，insn +13%） |
+| `f.apply(null,args)` | 227 | 622 / 109（§16.15） | ≤100 | 850 / 135 | ◐ |
+| 宿主 `host_add(i,1)` managed | 56 | 142 / **14** | ≤30 | 165 / 35 | ✅ |
+| 宿主 `host_add(i,1)` typed 叶 | — | 105 / **9** | ≤15 | 无对手 | ✅ |
+| 宿主 `host_noop()` | 54 | 129 / **12** | ≤20 | 88 / 22 | ✅ |
+| 宿主 `host.add(i,1)` 作方法 | 78 | 194 / **26** | ≤35 | ≈35 | ✅ |
+| `host_tick(i)` 带状态叶 | — | 98 / 13 | — | 117 / 27 | ✅ |
+| `world.step(i)` 原生对象 typed 方法 | — | 208 / 33 | ≤20 | 236 / 59 | ◐ |
+| `world.query(i)` 原生对象 managed 方法 | — | 218 / 33 | — | 202 / 52 | ✅ |
+| `world.time` typed getter | — | 139 / **26** | ≤ IC 命中 + 10 | 195 / 52 | ✅ |
+| `world.time` 原生 getter（untyped） | — | 179 / 33（§16.14） | — | 195 / 52 | ✅ |
+
+**native → JS**
+
+| 形态 | §0 起点 | 现 | 目标 | qjs | 判 |
+|---|---:|---:|---:|---:|:-:|
+| `callFunction(cb,[i])` | 137 | 312 / 63 | ≤40 | 296 / 48 | ✗ |
+| `callFunction(cb,[])` | 120 | 266 / 51 | ≤30 | 185 / 29 | ✗ |
+| `CallSite.call1` / `call0` | — | 267 / **50** · 218 / 41 | ≤40 / ≤30 | 296 / 48 · 185 / 29 | ◐（call1 持平 qjs） |
+| forEach / reduce / map 回调 | 114 / 159 / 204 | 96 / 94 / 178 | ≤60 / ≤60 / ≤90 | 68 / 67 / 148 | ✗ |
+| sort 比较器 | 140 | 105 | ≤70 | 78 | ✗ |
+| replace 回调（每次匹配） | 2491 | ≈1840（§16.14） | ≤900 | 1303 | ✗（余量 = 规范 Get 与正则引擎，另账） |
+| 宿主读 JS 属性 `PropertySite` | — | 24 / **6** | — | 310 / 46 | ✅（新形态） |
+
+**结论与剩余账**：JS → native 方向全部形态优于 qjs，且 12/17 达到或超过
+§0 目标；三种「任何解释器都没有」的形态（解释器内 typed 叶、宿主侧
+CallSite / PropertySite、属性缓存里的原生访问器）全部落地。native → JS
+方向的指令数已到 qjs 水平（call1 267 vs 296、forEach 490 vs 523），
+剩余 cycles 差距（回调行 1.3–1.4×）在 §16.11 证实为解释器整体 IPC
+（zjs 5.2 vs qjs 7.4，与边界无关，纯 JS 控制循环同样），归
+hermes-parity-plan E1（寄存器机 / 依赖链归因），本设计不再立项。
+仍在边界账上的小尾巴：`f.call` 的 `.call` 属性查找 + 四次 native kind
+探测（≈275 insn，WP7 报告）、`callFunction` 0 参的 CallSite 构造税、
+typescript +1.8%（Shape 64 B）；untyped getter 与 `Class` 两项见 §16.14（已闭合）。
+
+### 16.14 收官后两刀（2026-09-07，driver 亲做）
+
+1. **untyped 原生 getter 内联臂**：W1 `.native_getter` 尾里 `sig == 0`、
+   `kind == .getter`、无 env 的 managed getter 不再走
+   `callNativeAccessorTarget` → `callRecordFromVmInRealm` → 环境终端三层，
+   而是发布 pc/栈顶后挂回溯链一条 `bl`（`callGetterFromWindow`），哨兵走
+   原 catch 腿。`world.time`（managed getter）52 → **33** cyc（qjs 52）。
+2. **slab 空 arena 保留一块**：replace 剖面里 ≈13% 是每次 replace 分配的
+   小块释放后 4 KiB arena 立即归还、下一次再 `rawAlloc` + 逐块打标 +
+   地址注册表 HashMap 增删。现在每个 size class 保留一块空 arena（留在
+   两条链表上、free list 头部；第二块空的才释放），**不新增字段**——
+   实测给 `SmallObjectSlab` 加一个无用字段就让 typescript 多跑 3.3%
+   指令（堆地址几何变化 → `traceHeaderEdges` 份额 7%→10.5%，GC 各阶段
+   ns 却持平；.text 填充 16 KiB 不触发），这是既有的 GC 几何敏感性，
+   记为 GC 债而非本刀成本。C5_replace_fn 每次穿越 2336 → **≈1840** cyc
+   （qjs 1303），insn −17%。Octane（cycles，2 ABBA）：splay 0.985、
+   raytrace 0.990、earley-boyer 0.993、box2d 0.994、regexp 0.995、
+   typescript 1.013（上述几何效应，insn +3.5%）、其余 ±0.5%。
+
+`Class` 债核对：bool 访问器已有 typed 签名（`fn (*Self) bool`），无 `new`
+调用构造器已抛 TypeError——两项在 lane D 已闭合，§16.13 的尾巴表更正。
+
+### 16.15 WP9：f.call / f.apply 与 0 参 callFunction 指令减肥（2026-09-07，branch `nb2/diet2`，合入 `2dd6bca3`）
+
+四刀：A1 `op_call_method` 里 `forwards_call` 位提前到 managed 内联谓词
+之前；**A2 W1 修正**——capture 遇到 holder 上尚未物化的 `.auto_init` 惰性
+builtin 原本直接退休站点，而 capture 先于物化读发生，于是**程序里每个
+内建原型方法站点首次执行就退成 mega**（连普通对象的 `hasOwnProperty`
+也是）→ 改为延后（`CaptureOutcome.deferred`）；A3 可缓存接收者类从
+`object/global/NativeObject` 三类放宽到 `!needsSlowPropertyAccess()`
+（function / Date / RegExp / Error / Map 的原型读之前根本没有缓存），
+守卫不变；A4 延后续行只放在 capture 尾（放进 indirect 尾会让每次 proto
+命中多 6 insn）。
+
+| 形态 | 前 | 后 | qjs |
+|---|---:|---:|---:|
+| N6_fcall | 508 / 84 | **464 / 82** | 412 / 81 |
+| N7_fapply | 658 / 112 | **622 / 109** | 850 / 136 |
+| N4_hasown_string | 389 / 66 | **372 / 59** ✅（目标 ≤60） | 613 / 99 |
+| n2j0 / site0 / n2j1 | 266/50 · 218/42 · 313/63 | 不变 | 185/29 · 185/29 · 296/48 |
+
+Octane cycles：splay 0.983、deltablue 0.993、pdfjs 0.996、其余 ±0.4%。
+回退：lean `pushForwardedCallEntry`（−8 insn 但 +4..8 cyc，帧构造用
+`ldr q` 读窗口，不从 GPR 对 store 转发）；`forwards_call` 提到叶探测之前
+（N1m +4 insn）；`returnLeanTail` 钉 stp（无效）。Target B（0 参
+callFunction）无刀落地：剩余 ≈200 insn 均匀分布（序言、准入 RMW、边界
+作用域 store、帧构造、`op_return_undef` 的 37 insn 边界尾声），没有
+≥20 insn 的整块；WP6 刀 1 的预算字因 `@frameAddress()` 在上限测试里
+无法预计算，值 ≤4 insn。遗留：`op_prop_site_indirect_tail` 重新从 `pc[5]`
+推站点、重新解包接收者——§16.16 判决实验证明交接更慢，关账。
+
+### 16.16 判决实验：proto 尾交接站点 / 接收者（2026-09-07，回退）
+
+WP9 遗留的「`op_prop_site_indirect_tail` 重推站点、重解包接收者」试了
+最直接的修法：常驻 handler 在 guard 命中后把 `object` 与 `site` 存进
+`Vm`（`property_holder` / 新字段 `prop_site_hit`），尾直接读。结果更慢：
+method_typed 33 → 37 cyc、method_managed 33 → 39、getter_typed 26 → 29；
+Octane richards 1.029、deltablue 1.018、earley-boyer 1.017（insn +0.5%）。
+原因是刚 store 的两个字在尾里立刻被 load，形成穿过内存的
+store→load 依赖（≈5 cyc）落在命中路径上，而原来的重推（`pc[5]` 一字节 +
+栈上接收者）都是彼此独立、可提前发出的 load。回退；这条债关账为
+「不划算」。
 
 ## 附录 A. 起点读数（eval §6.1，2026-09-06 P1–P4 后）
 

@@ -21,6 +21,7 @@ pub const HostError = internal.HostError;
 pub const JSRuntime = internal.JSRuntime;
 pub const JSContext = internal.JSContext;
 pub const CallSite = internal.CallSite;
+pub const PropertySite = internal.PropertySite;
 pub const JSValue = internal.JSValue;
 pub const Descriptor = internal.Descriptor;
 pub const Atom = internal.Atom;

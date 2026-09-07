@@ -5,6 +5,7 @@ const class = @import("class.zig");
 const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
+const native_entry = @import("native_entry.zig");
 const property = @import("property.zig");
 const runtime_mod = @import("runtime.zig");
 const string = @import("string.zig");
@@ -1104,7 +1105,7 @@ pub const FunctionPayload = struct {
         // Memoized resolved internal-record handle, mirroring qjs
         // `p->u.cfunc.c_function`. The record is comptime rodata and cannot
         // dangle.
-        call_cache: ?*const host_function.InternalRecord = null,
+        call_cache: ?*const native_entry.NativeEntry = null,
         host_function_kind: i32 = 0,
         native_function_id: i32 = 0,
         native_dispatch_name: atom.Atom = atom.null_atom,
