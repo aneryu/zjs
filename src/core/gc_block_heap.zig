@@ -2862,20 +2862,27 @@ pub const Heap = struct {
                     if (require_young_membership and young and
                         !block.cellPendingDoomed(index) and !block.isYoungListed())
                     {
-                        std.debug.print(
-                            "gc: BLOCK CELL AUDIT young cell 0x{x} index {d} in unlisted block 0x{x} (flags=0x{x}, block_flags=0x{x}, marked={any}, doomed=0x{x}, doomed_cursor={d}, doomed_word=0x{x})\n",
-                            .{
-                                cell,
-                                index,
-                                @intFromPtr(block),
-                                flags,
-                                block.flags,
-                                block.isMarked(index, self.mark_epoch),
-                                block.bitmaps().remember[index / 64],
-                                block.doomed_cursor,
-                                block.doomed_word,
-                            },
-                        );
+                        gc_audit_print.print(&.{
+                            .{ .text = "gc: BLOCK CELL AUDIT young cell 0x" },
+                            .{ .hex = cell },
+                            .{ .text = " index " },
+                            .{ .dec = index },
+                            .{ .text = " in unlisted block 0x" },
+                            .{ .hex = @intFromPtr(block) },
+                            .{ .text = " (flags=0x" },
+                            .{ .hex = flags },
+                            .{ .text = ", block_flags=0x" },
+                            .{ .hex = block.flags },
+                            .{ .text = ", marked=" },
+                            .{ .text = gc_audit_print.boolText(block.isMarked(index, self.mark_epoch)) },
+                            .{ .text = ", doomed=0x" },
+                            .{ .hex = block.bitmaps().remember[index / 64] },
+                            .{ .text = ", doomed_cursor=" },
+                            .{ .dec = block.doomed_cursor },
+                            .{ .text = ", doomed_word=0x" },
+                            .{ .hex = block.doomed_word },
+                            .{ .text = ")\n" },
+                        });
                         return error.YoungCellUnlisted;
                     }
                 }

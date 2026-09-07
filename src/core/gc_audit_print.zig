@@ -13,6 +13,11 @@ pub const Part = union(enum) {
     hex: u64,
 };
 
+/// Zig `{}` / `{any}` for `bool`.
+pub inline fn boolText(value: bool) []const u8 {
+    return if (value) "true" else "false";
+}
+
 /// Same stderr lock and ignore-errors contract as `std.debug.print`.
 pub fn print(parts: []const Part) void {
     var buffer: [64]u8 = undefined;

@@ -14,6 +14,7 @@
 const std = @import("std");
 
 const gc = @import("gc.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const carrier = @import("gc_carrier.zig");
 const gc_space = @import("gc_space.zig");
 const memory = @import("memory.zig");
@@ -248,10 +249,19 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
                 // which adoption path forgot its barrier.
                 // The cell may be unmapped memory by now: name it, do not
                 // read it.
-                std.debug.print(
-                    "gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n",
-                    .{ owner.class_id, owner.flags.fast_array, owner.arrayArm().*.capacity, header.metaConst().flags.young, @intFromPtr(cell_header) },
-                );
+                gc_audit_print.print(&.{
+                    .{ .text = "gc: PROPERTY STORAGE AUDIT: array owner class=" },
+                    .{ .dec = owner.class_id },
+                    .{ .text = " fast_array=" },
+                    .{ .text = gc_audit_print.boolText(owner.flags.fast_array) },
+                    .{ .text = " capacity=" },
+                    .{ .dec = owner.arrayArm().*.capacity },
+                    .{ .text = " young=" },
+                    .{ .text = gc_audit_print.boolText(header.metaConst().flags.young) },
+                    .{ .text = " cell=0x" },
+                    .{ .hex = @intFromPtr(cell_header) },
+                    .{ .text = "\n" },
+                });
                 return error.DanglingArrayStorageCell;
             }
             if (cell_header.metaConst().flags.kind != .array_storage)

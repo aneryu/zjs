@@ -2843,18 +2843,42 @@ const Collector = struct {
                                 else => {},
                             }
                         }
-                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, a.rt.gc.headerMarked(o.gcHeader()) });
+                        gc_audit_print.print(&.{
+                            .{ .text = "MINOR-AUDIT-WHERE owner_class=" },
+                            .{ .dec = o.class_id },
+                            .{ .text = " payload=" },
+                            .{ .text = @tagName(o.flags.class_payload_kind) },
+                            .{ .text = " where=" },
+                            .{ .text = where },
+                            .{ .text = " atom=" },
+                            .{ .text = a.rt.atoms.name(@intCast(hit_atom)) orelse "?" },
+                            .{ .text = " nprops=" },
+                            .{ .dec = o.shape_ref.prop_count },
+                            .{ .text = " owner_marked=" },
+                            .{ .text = gc_audit_print.boolText(a.rt.gc.headerMarked(o.gcHeader())) },
+                            .{ .text = "\n" },
+                        });
                     }
-                    std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child kind={s} class={d}/{s} child_young={} child_marked={}\n", .{
-                        @tagName(a.owner_kind),
-                        @intFromPtr(a.owner_ptr),
-                        a.owner_young,
-                        a.owner_remembered,
-                        @tagName(child.metaConst().flags.kind),
-                        if (c) |o| o.class_id else 0,
-                        if (c) |o| @tagName(o.flags.class_payload_kind) else "-",
-                        child.metaConst().flags.young,
-                        a.rt.gc.headerMarked(child),
+                    gc_audit_print.print(&.{
+                        .{ .text = "MINOR-AUDIT owner=" },
+                        .{ .text = @tagName(a.owner_kind) },
+                        .{ .text = "/ptr" },
+                        .{ .hex = @intFromPtr(a.owner_ptr) },
+                        .{ .text = " owner_young=" },
+                        .{ .text = gc_audit_print.boolText(a.owner_young) },
+                        .{ .text = " owner_remembered=" },
+                        .{ .text = gc_audit_print.boolText(a.owner_remembered) },
+                        .{ .text = " -> child kind=" },
+                        .{ .text = @tagName(child.metaConst().flags.kind) },
+                        .{ .text = " class=" },
+                        .{ .dec = if (c) |obj| obj.class_id else 0 },
+                        .{ .text = "/" },
+                        .{ .text = if (c) |obj| @tagName(obj.flags.class_payload_kind) else "-" },
+                        .{ .text = " child_young=" },
+                        .{ .text = gc_audit_print.boolText(child.metaConst().flags.young) },
+                        .{ .text = " child_marked=" },
+                        .{ .text = gc_audit_print.boolText(a.rt.gc.headerMarked(child)) },
+                        .{ .text = "\n" },
                     });
                     if (gc.minor_audit_fatal) @panic("MINOR-AUDIT: live owner holds an unremembered edge into the condemned young set");
                     return;

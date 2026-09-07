@@ -31,6 +31,7 @@ const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const memory_mod = @import("memory.zig");
 const array_list_erased = @import("array_list_erased.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const block_heap = @import("gc_block_heap.zig");
 const std = @import("std");
 const sort_erased = @import("sort_erased.zig");
@@ -2677,17 +2678,19 @@ pub const Object = extern struct {
         const stamped = gc.headerNeedsFinalizer(self.gcHeader());
         if (owesFinalizerWork(rt, self)) {
             if (!stamped) {
-                std.debug.print(
-                    "gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x{x} class_id={d} payload={s} " ++
-                        "weak_id={} borrowed={} reached teardown unstamped\n",
-                    .{
-                        @intFromPtr(self),
-                        self.class_id,
-                        @tagName(self.flags.class_payload_kind),
-                        self.flags.has_weak_id,
-                        self.flags.is_borrowed_reference_holder,
-                    },
-                );
+                gc_audit_print.print(&.{
+                    .{ .text = "gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x" },
+                    .{ .hex = @intFromPtr(self) },
+                    .{ .text = " class_id=" },
+                    .{ .dec = self.class_id },
+                    .{ .text = " payload=" },
+                    .{ .text = @tagName(self.flags.class_payload_kind) },
+                    .{ .text = " weak_id=" },
+                    .{ .text = gc_audit_print.boolText(self.flags.has_weak_id) },
+                    .{ .text = " borrowed=" },
+                    .{ .text = gc_audit_print.boolText(self.flags.is_borrowed_reference_holder) },
+                    .{ .text = " reached teardown unstamped\n" },
+                });
                 @panic("gc: an object owing destructor work has no needs_finalizer bit");
             }
             return;
