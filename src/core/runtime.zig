@@ -318,10 +318,7 @@ pub const VmStackArena = struct {
         for (self.chunks[0..self.chunk_count]) |chunk| {
             if (chunk.len != 0) account.free(JSValue, chunk);
         }
-        self.chunks = @splat(&.{});
-        self.used = @splat(0);
-        self.chunk_count = 0;
-        self.active = 0;
+        self.initDefault();
     }
 };
 

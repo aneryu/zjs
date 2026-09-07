@@ -6777,6 +6777,11 @@ test "VM stack arena default fill matches VmStackArena{}" {
     const empty: []core.JSValue = &.{};
     try std.testing.expectEqual(empty.ptr, arena.chunks[0].ptr);
     try std.testing.expectEqual(@as(usize, 0), arena.chunks[0].len);
+
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    arena.deinit(&account);
+    try std.testing.expectEqualDeep(core.VmStackArena{}, arena);
+    try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
 test "VM stack arena allocates and reuses a compact first chunk" {
