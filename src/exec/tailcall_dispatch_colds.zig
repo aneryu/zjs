@@ -295,7 +295,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // Register-resident cold bitwise/shift (qjs js_binary_logic_slow 15214 /
     // js_shr_slow 15735 operate in place on sp[-2]); falls back to the publishing
     // h_binary path for BigInt/string/object/symbol operands and at the generator stop.
-    inline for ([_]u8{ op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = dispatch.opLogicCold(o);
+    inline for ([_]u8{ op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = dispatch.opLogicCold;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing compareVm path internally at the generator parameter/body stop. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used

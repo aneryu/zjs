@@ -5638,40 +5638,40 @@ inline fn logicOperandInt32(v: JSValue) ?i32 {
 /// Everything else — BigInt, string, object, symbol — plus the generator
 /// parameter/body stop boundary (`local_fast_blocked`) falls to the unchanged
 /// publishing shell, exactly like `op_div_cold`/`op_mod_cold`.
-pub fn opLogicCold(comptime opc: u8) Handler {
-    return struct {
-        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            if (!vm.local_fast_blocked) {
-                if (logicOperandInt32((sp - 2)[0])) |v1| {
-                    if (logicOperandInt32((sp - 1)[0])) |v2| {
-                        switch (opc) {
-                            // qjs js_shr_slow closes with `JS_NewUint32(ctx, v1 >> (v2 & 0x1f))`
-                            // (quickjs.c:15764-15765): int32 while the u32 fits, else the exact
-                            // double — the same split OP_shr's int leg inlines.
-                            op.shr => {
-                                const r = @as(u32, @bitCast(v1)) >> @intCast(v2 & 31);
-                                if (r <= std.math.maxInt(i32)) {
-                                    (sp - 2)[0] = JSValue.int32(@intCast(r));
-                                } else {
-                                    (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
-                                }
-                            },
-                            op.shl => (sp - 2)[0] = JSValue.int32(v1 << @intCast(v2 & 31)),
-                            op.sar => (sp - 2)[0] = JSValue.int32(v1 >> @intCast(v2 & 31)),
-                            op.@"and" => (sp - 2)[0] = JSValue.int32(v1 & v2),
-                            op.@"or" => (sp - 2)[0] = JSValue.int32(v1 | v2),
-                            op.xor => (sp - 2)[0] = JSValue.int32(v1 ^ v2),
-                            else => unreachable,
+///
+/// One shared handler reads `pc[0]`. The six leftover copies were the same walk
+/// (906–937 B). `compareAt` stays per-opcode: eq vs relational had zero
+/// cross-traffic. The miss path already forwarded `pc[0]` to `binaryVm`.
+pub fn opLogicCold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    if (!vm.local_fast_blocked) {
+        if (logicOperandInt32((sp - 2)[0])) |v1| {
+            if (logicOperandInt32((sp - 1)[0])) |v2| {
+                switch (pc[0]) {
+                    // qjs js_shr_slow closes with `JS_NewUint32(ctx, v1 >> (v2 & 0x1f))`
+                    // (quickjs.c:15764-15765): int32 while the u32 fits, else the exact
+                    // double — the same split OP_shr's int leg inlines.
+                    op.shr => {
+                        const r = @as(u32, @bitCast(v1)) >> @intCast(v2 & 31);
+                        if (r <= std.math.maxInt(i32)) {
+                            (sp - 2)[0] = JSValue.int32(@intCast(r));
+                        } else {
+                            (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
                         }
-                        return cont(pc + 1, sp - 1, var_buf, vm);
-                    }
+                    },
+                    op.shl => (sp - 2)[0] = JSValue.int32(v1 << @intCast(v2 & 31)),
+                    op.sar => (sp - 2)[0] = JSValue.int32(v1 >> @intCast(v2 & 31)),
+                    op.@"and" => (sp - 2)[0] = JSValue.int32(v1 & v2),
+                    op.@"or" => (sp - 2)[0] = JSValue.int32(v1 | v2),
+                    op.xor => (sp - 2)[0] = JSValue.int32(v1 ^ v2),
+                    else => unreachable,
                 }
+                return cont(pc + 1, sp - 1, var_buf, vm);
             }
-            vm.publish(pc, sp);
-            _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
-            return coldNext(var_buf, vm);
         }
-    }.hnd;
+    }
+    vm.publish(pc, sp);
+    _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+    return coldNext(var_buf, vm);
 }
 
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
