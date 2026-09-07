@@ -2097,7 +2097,11 @@ pub const parser_core = struct {
 
         fn tokenKindLabel(self: *const State, kind: tok.TokenKind, buffer: []u8) []const u8 {
             if (kind >= 0 and kind <= std.math.maxInt(u8)) {
-                return std.fmt.bufPrint(buffer, "'{c}'", .{@as(u8, @intCast(kind))}) catch "token";
+                if (buffer.len < 3) return "token";
+                buffer[0] = '\'';
+                buffer[1] = @as(u8, @intCast(kind));
+                buffer[2] = '\'';
+                return buffer[0..3];
             }
             if (tok.isKeyword(kind)) {
                 return self.function.atoms.name(tok.keywordAtom(kind)) orelse "keyword";
