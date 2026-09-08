@@ -10933,6 +10933,37 @@ test "leftover Array.toReversed get-define through outlined arrayCopyIndex" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.sort generic set through one runtime tail" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var dense = [3, 1, 2];
+        \\assert.sameValue(dense.sort() + "", "1,2,3");
+        \\var already = [1, 2, 3];
+        \\assert.sameValue(already.sort() + "", "1,2,3");
+        \\var undefs = [undefined, 2, undefined, 1];
+        \\assert.sameValue(undefs.sort() + "", "1,2,,");
+        \\var holey = [3, , 1];
+        \\assert.sameValue(holey.sort() + "", "1,3,");
+        \\assert.sameValue(holey.hasOwnProperty("2"), false);
+        \\var o = { 0: 3, 1: 1, 2: 2, length: 3 };
+        \\assert.sameValue(Array.prototype.sort.call(o)[0], 1);
+        \\assert.sameValue(o[1], 2);
+        \\assert.sameValue(o[2], 3);
+        \\var proxy_sets = 0;
+        \\var p = new Proxy({ 0: 2, 1: 1, length: 2 }, {
+        \\    set: function(t, k, v, r) { proxy_sets += 1; t[k] = v; return true; }
+        \\});
+        \\Array.prototype.sort.call(p);
+        \\assert.sameValue(p[0], 1);
+        \\assert.sameValue(p[1], 2);
+        \\assert.sameValue(proxy_sets >= 2, true);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.fill generic set through one runtime tail" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

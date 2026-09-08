@@ -4938,22 +4938,28 @@ pub fn arraySortCall(
         std.debug.assert(index == length);
         return receiver_object_value;
     }
-    for (entries, 0..) |entry, sorted_index| {
-        // Faithful to quickjs.c:43476: when the slot's original position equals
-        // its final sorted index the receiver already holds this value at this
-        // index, so skip the write entirely (matching qjs, which also skips the
-        // setter call in that case — observable for accessor/proxy receivers).
-        if (entry.order != sorted_index) {
-            const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
-            defer key.deinit(ctx.runtime);
-            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
-        }
-        index += 1;
-    }
-    while (index < entries.len + undefined_count) : (index += 1) {
+    // Leftover generic index set: propertyAtom + setValuePropertyOrThrow.
+    // candidate123 still compiled the entries write and the undefined-fill
+    // as leftover copies of the same walk. Unique write-value vs
+    // write-undefined; unique delete-holes and dense fast-array writes stay
+    // separate. Take the write value at runtime (knife 118/120 leftover-tail
+    // shape). Does not fold arrayFillCall, arrayCopyIndex, or
+    // setValuePropertyWithThrow.
+    index = 0;
+    const write_end = entries.len + undefined_count;
+    while (index < write_end) : (index += 1) {
+        const write_value = if (index < entries.len) blk: {
+            // Faithful to quickjs.c:43476: when the slot's original position
+            // equals its final sorted index the receiver already holds this
+            // value at this index, so skip the write entirely (matching qjs,
+            // which also skips the setter call — observable for accessor /
+            // proxy receivers).
+            if (entries[index].order == index) continue;
+            break :blk entries[index].value;
+        } else core.JSValue.undefinedValue();
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
-        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, write_value, caller_function, caller_frame);
     }
     while (index < length) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
