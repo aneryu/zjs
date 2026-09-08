@@ -636,86 +636,109 @@ pub fn callStringReplaceMethod(
     );
 }
 
-pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
+const ErrorStackStringKind = enum { live, captured };
+
+/// Leftover error-stack at-line format. candidate106 still compiles
+/// `buildErrorStackStringValue` (6378) / `formatCapturedErrorStackStringValue`
+/// (5891, extra 5891, 5.2% match). The leftover is ArrayList + `"    at "` +
+/// name + native-or-`allocPrint(" ({s}:{}:{})")` + trailing newline +
+/// createStringValue. Comptime identity is live backtrace+skip vs captured
+/// CallSite array. Take that at runtime. Public names stay `inline` and
+/// pass only the kind — no leftover setup at the wrapper (knives 94/98).
+/// Does not replace leftover `allocPrint` with slice joins (knife 77).
+/// Does not retry leftover `{d}` through formatInt (knives 66/76).
+noinline fn errorStackStringValue(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    skip_name: ?[]const u8,
+    sites_value: core.JSValue,
+    site_count: usize,
+    kind: ErrorStackStringKind,
+) !core.JSValue {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
-
-    const limit = errorStackTraceLimit(ctx.runtime, global);
-    if (limit == 0) return value_ops.createStringValue(ctx.runtime, "");
-
-    const frames = try ctx.snapshotBacktraceFrames();
-    defer ctx.freeBacktraceFrameSnapshot(frames);
-    var idx = frames.len;
     var emitted: usize = 0;
-    var skipping = skip_name != null;
-    while (idx > 0) {
-        idx -= 1;
-        _ = exception_ops.resolveBacktraceFunctionName(ctx, &frames[idx]);
-        if (skipping) {
-            if (backtraceFunctionNameEql(ctx, frames[idx], skip_name.?)) skipping = false;
-            continue;
-        }
-        if (emitted >= limit) break;
-        const entry = frames[idx];
-        if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-        try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
-        try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
-        if (entry.is_native) {
-            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
-            emitted += 1;
-            continue;
-        }
-        const filename = ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>";
-        const location = entry.location();
-        const line_num = if (location.line_num > 0) location.line_num else 1;
-        const col_num = if (location.col_num > 0) location.col_num else 1;
-        const suffix = try std.fmt.allocPrint(ctx.runtime.memory.allocator, " ({s}:{}:{})", .{ filename, line_num, col_num });
-        defer ctx.runtime.memory.allocator.free(suffix);
-        try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
-        emitted += 1;
+
+    switch (kind) {
+        .live => {
+            const realm = global.?;
+            const limit = errorStackTraceLimit(ctx.runtime, realm);
+            if (limit == 0) return value_ops.createStringValue(ctx.runtime, "");
+
+            const frames = try ctx.snapshotBacktraceFrames();
+            defer ctx.freeBacktraceFrameSnapshot(frames);
+            var idx = frames.len;
+            var skipping = skip_name != null;
+            while (idx > 0) {
+                idx -= 1;
+                _ = exception_ops.resolveBacktraceFunctionName(ctx, &frames[idx]);
+                if (skipping) {
+                    if (backtraceFunctionNameEql(ctx, frames[idx], skip_name.?)) skipping = false;
+                    continue;
+                }
+                if (emitted >= limit) break;
+                const entry = frames[idx];
+                if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
+                try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
+                try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
+                if (entry.is_native) {
+                    try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+                    emitted += 1;
+                    continue;
+                }
+                const filename = ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>";
+                const location = entry.location();
+                const line_num = if (location.line_num > 0) location.line_num else 1;
+                const col_num = if (location.col_num > 0) location.col_num else 1;
+                const suffix = try std.fmt.allocPrint(ctx.runtime.memory.allocator, " ({s}:{}:{})", .{ filename, line_num, col_num });
+                defer ctx.runtime.memory.allocator.free(suffix);
+                try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
+                emitted += 1;
+            }
+        },
+        .captured => {
+            const sites = objectFromValue(sites_value) orelse return value_ops.createStringValue(ctx.runtime, "");
+            const current_length: usize = if (sites.isArray()) @intCast(sites.arrayLength()) else 0;
+            const length = @min(current_length, site_count);
+            var index: usize = 0;
+            while (index < length) : (index += 1) {
+                if (index > std.math.maxInt(u32)) break;
+                const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+                const site = objectFromValue(site_value) orelse continue;
+                if (!site.isCallSite()) continue;
+                if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
+                try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
+                try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
+                if (site.callSiteIsNative()) {
+                    try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+                    emitted += 1;
+                    continue;
+                }
+
+                var filename_bytes: std.ArrayList(u8) = .empty;
+                defer filename_bytes.deinit(ctx.runtime.memory.allocator);
+                try appendCallSiteFileName(ctx.runtime, &filename_bytes, site);
+                const suffix = try std.fmt.allocPrint(
+                    ctx.runtime.memory.allocator,
+                    " ({s}:{}:{})",
+                    .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
+                );
+                defer ctx.runtime.memory.allocator.free(suffix);
+                try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
+                emitted += 1;
+            }
+        },
     }
     if (emitted != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: core.JSValue, site_count: usize) !core.JSValue {
-    const sites = objectFromValue(sites_value) orelse return value_ops.createStringValue(ctx.runtime, "");
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+pub inline fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
+    return errorStackStringValue(ctx, global, skip_name, core.JSValue.undefinedValue(), 0, .live);
+}
 
-    const current_length: usize = if (sites.isArray()) @intCast(sites.arrayLength()) else 0;
-    const length = @min(current_length, site_count);
-    var index: usize = 0;
-    var emitted: usize = 0;
-    while (index < length) : (index += 1) {
-        if (index > std.math.maxInt(u32)) break;
-        const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
-        const site = objectFromValue(site_value) orelse continue;
-        if (!site.isCallSite()) continue;
-        if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-        try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
-        try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
-        if (site.callSiteIsNative()) {
-            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
-            emitted += 1;
-            continue;
-        }
-
-        var filename_bytes: std.ArrayList(u8) = .empty;
-        defer filename_bytes.deinit(ctx.runtime.memory.allocator);
-        try appendCallSiteFileName(ctx.runtime, &filename_bytes, site);
-        const suffix = try std.fmt.allocPrint(
-            ctx.runtime.memory.allocator,
-            " ({s}:{}:{})",
-            .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
-        );
-        defer ctx.runtime.memory.allocator.free(suffix);
-        try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
-        emitted += 1;
-    }
-    if (emitted != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-    return value_ops.createStringValue(ctx.runtime, bytes.items);
+pub inline fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: core.JSValue, site_count: usize) !core.JSValue {
+    return errorStackStringValue(ctx, null, null, sites_value, site_count, .captured);
 }
 
 pub fn stringFromCodePoint(

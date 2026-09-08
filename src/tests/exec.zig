@@ -10489,6 +10489,61 @@ test "leftover do while parse through one runtime flag" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover error stack at-line format through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function makeError() {
+        \\    return new Error("x");
+        \\}
+        \\var captured = makeError().stack;
+        \\assert.sameValue(typeof captured, "string");
+        \\assert.sameValue(captured.indexOf("    at makeError") >= 0, true);
+        \\assert.sameValue(captured.indexOf(" (") >= 0, true);
+        \\function evalThrower() {
+        \\    try { eval("]"); } catch (e) { return e; }
+        \\    return null;
+        \\}
+        \\var liveParse = evalThrower().stack;
+        \\assert.sameValue(typeof liveParse, "string");
+        \\assert.sameValue(liveParse.indexOf("    at ") >= 0, true);
+        \\assert.sameValue(liveParse.indexOf("at evalThrower") >= 0, true);
+        \\function mark() {
+        \\    Error.captureStackTrace(target);
+        \\}
+        \\var target = {};
+        \\function outer() { mark(); }
+        \\outer();
+        \\assert.sameValue(typeof target.stack, "string");
+        \\assert.sameValue(target.stack.indexOf("    at mark") >= 0, true);
+        \\assert.sameValue(target.stack.indexOf("at outer") >= 0, true);
+        \\function skipMe() {
+        \\    Error.captureStackTrace(skipped, skipMe);
+        \\}
+        \\var skipped = {};
+        \\function skipCaller() { skipMe(); }
+        \\skipCaller();
+        \\assert.sameValue(skipped.stack.indexOf("at skipMe") < 0, true);
+        \\assert.sameValue(skipped.stack.indexOf("at skipCaller") >= 0, true);
+        \\var previousLimit = Error.stackTraceLimit;
+        \\Error.stackTraceLimit = 0;
+        \\var empty = {};
+        \\Error.captureStackTrace(empty);
+        \\assert.sameValue(empty.stack, "");
+        \\Error.stackTraceLimit = previousLimit;
+        \\var previousPrepare = Error.prepareStackTrace;
+        \\Error.prepareStackTrace = function(error, sites) {
+        \\    return error.stack;
+        \\};
+        \\var reentered = new Error("y").stack;
+        \\Error.prepareStackTrace = previousPrepare;
+        \\assert.sameValue(typeof reentered, "string");
+        \\assert.sameValue(reentered.indexOf("    at ") >= 0, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover array-from array-like through one runtime destination" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
