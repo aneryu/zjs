@@ -4389,7 +4389,16 @@ pub fn typedArrayFromIteratorValue(
     );
 }
 
-pub fn typedArrayFromArrayLikeSource(
+const ArrayFromLikeKind = enum { array, typed };
+
+/// Leftover array-from array-like. candidate105 still compiles
+/// `arrayFromArrayLike` (2001) / `typedArrayFromArrayLikeSource`
+/// (1639, extra 1639, 6.2% match). The leftover is mapper CallSite
+/// + index walk + get + optional map + store. Comptime identity is
+/// array construct/length/define vs typed-array create/set. Take
+/// that at runtime. Public names stay `inline` and pass only the
+/// kind — no leftover setup at the wrapper (knives 94/98).
+noinline fn fromArrayLikeSource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4398,86 +4407,104 @@ pub fn typedArrayFromArrayLikeSource(
     fixed_length: ?usize,
     map_fn: ?core.JSValue,
     this_arg: core.JSValue,
+    kind: ArrayFromLikeKind,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const length = if (fixed_length) |length_value|
-        length_value
-    else blk: {
-        const length_value = try getValueProperty(ctx, output, global, source, core.atom.ids.length, caller_function, caller_frame);
-        break :blk try toLengthIndex(ctx, output, global, length_value);
+    const typed_length: usize = if (kind == .typed) blk: {
+        const length = if (fixed_length) |length_value|
+            length_value
+        else inner: {
+            const length_value = try getValueProperty(ctx, output, global, source, core.atom.ids.length, caller_function, caller_frame);
+            break :inner try toLengthIndex(ctx, output, global, length_value);
+        };
+        if (length > std.math.maxInt(u32)) return error.RangeError;
+        break :blk length;
+    } else 0;
+
+    const out_value = switch (kind) {
+        .typed => try typedArrayCreateWithLength(ctx, output, global, constructor_value, typed_length, caller_function, caller_frame),
+        .array => if (try call_runtime.isConstructorLike(ctx, constructor_value)) blk: {
+            if (fixed_length) |length| {
+                break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame);
+            }
+            break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame);
+        } else (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value(),
     };
-    if (length > std.math.maxInt(u32)) return error.RangeError;
-
-    const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     var mapper_call: ?CallSite = if (map_fn) |mapper|
         CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
     else
         null;
-
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const key = core.atom.atomFromUInt32(@intCast(index));
-        var item = try getValueProperty(ctx, output, global, source, key, caller_function, caller_frame);
-        if (mapper_call) |*call_site| {
-            const mapped = try call_site.call2(item, lengthIndexValue(index));
-            item = mapped;
-        }
-        try typedArraySetElementValue(ctx, output, global, out, index, item);
-    }
-    return out_value;
-}
-
-pub fn arrayFromArrayLike(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor_value: core.JSValue,
-    source: core.JSValue,
-    fixed_length: ?usize,
-    map_fn: ?core.JSValue,
-    this_arg: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const out_value = if (try call_runtime.isConstructorLike(ctx, constructor_value)) blk: {
+    if (kind == .array) {
         if (fixed_length) |length| {
-            break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame);
+            if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
+            if (out.isArray()) out.setArrayLength(@intCast(length));
         }
-        break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame);
-    } else (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value();
-    const out = objectFromValue(out_value) orelse return error.TypeError;
-    var mapper_call: ?CallSite = if (map_fn) |mapper|
-        CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
-    else
-        null;
-    if (fixed_length) |length| {
-        if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-        if (out.isArray()) out.setArrayLength(@intCast(length));
     }
 
     var index: usize = 0;
     while (true) : (index += 1) {
-        const length = if (fixed_length) |length_value|
-            length_value
-        else if (objectFromValue(source)) |source_object|
-            @as(usize, @intCast(source_object.arrayLength()))
-        else
-            0;
+        const length = switch (kind) {
+            .typed => typed_length,
+            .array => if (fixed_length) |length_value|
+                length_value
+            else if (objectFromValue(source)) |source_object|
+                @as(usize, @intCast(source_object.arrayLength()))
+            else
+                0,
+        };
         if (index >= length) break;
-        if (index > std.math.maxInt(u32)) return error.RangeError;
+        if (kind == .array and index > std.math.maxInt(u32)) return error.RangeError;
         const key = core.atom.atomFromUInt32(@intCast(index));
         var item = try getValueProperty(ctx, output, global, source, key, caller_function, caller_frame);
         if (mapper_call) |*call_site| {
-            const mapped = try call_site.call2(item, core.JSValue.int32(@intCast(index)));
+            const mapped = try call_site.call2(item, switch (kind) {
+                .typed => lengthIndexValue(index),
+                .array => core.JSValue.int32(@intCast(index)),
+            });
             item = mapped;
         }
-        try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, item, caller_function, caller_frame);
+        switch (kind) {
+            .typed => try typedArraySetElementValue(ctx, output, global, out, index, item),
+            .array => try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, item, caller_function, caller_frame),
+        }
     }
-    if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
+    if (kind == .array) {
+        if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
+        try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
+    }
     return out_value;
+}
+
+pub inline fn typedArrayFromArrayLikeSource(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    source: core.JSValue,
+    fixed_length: ?usize,
+    map_fn: ?core.JSValue,
+    this_arg: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    return fromArrayLikeSource(ctx, output, global, constructor_value, source, fixed_length, map_fn, this_arg, .typed, caller_function, caller_frame);
+}
+
+pub inline fn arrayFromArrayLike(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    source: core.JSValue,
+    fixed_length: ?usize,
+    map_fn: ?core.JSValue,
+    this_arg: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    return fromArrayLikeSource(ctx, output, global, constructor_value, source, fixed_length, map_fn, this_arg, .array, caller_function, caller_frame);
 }
 
 pub fn arrayFromIteratorLike(

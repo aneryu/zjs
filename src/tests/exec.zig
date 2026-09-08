@@ -10489,6 +10489,31 @@ test "leftover do while parse through one runtime flag" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover array-from array-like through one runtime destination" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.compareArray(Array.from([1, 2, 3]), [1, 2, 3]);
+        \\assert.compareArray(Array.from([1, 2, 3], function(x) { return x + 1; }), [2, 3, 4]);
+        \\assert.compareArray(Array.from([7, 8], function(x, i) { return x + i; }), [7, 9]);
+        \\var ta = Uint8Array.from({ length: 2, 0: 4, 1: 5 });
+        \\assert.sameValue(ta.length, 2);
+        \\assert.sameValue(ta[0], 4);
+        \\assert.sameValue(ta[1], 5);
+        \\var mapped = Uint8Array.from([1, 2], function(x) { return x * 2; });
+        \\assert.sameValue(mapped[0], 2);
+        \\assert.sameValue(mapped[1], 4);
+        \\var C = function() {};
+        \\var custom = Array.from.call(C, ["a", "b"]);
+        \\assert.sameValue(custom instanceof C, true);
+        \\assert.sameValue(custom[0], "a");
+        \\assert.sameValue(custom[1], "b");
+        \\assert.sameValue(custom.length, 2);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
