@@ -10454,6 +10454,41 @@ test "leftover instance-computed public field initializer through shared emit" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover do while parse through one runtime flag" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var n = 0;
+        \\while (n < 3) n += 1;
+        \\assert.sameValue(n, 3);
+        \\var d = 0;
+        \\do { d += 1; } while (d < 3);
+        \\assert.sameValue(d, 3);
+        \\var once = 0;
+        \\do { once += 1; } while (false);
+        \\assert.sameValue(once, 1);
+        \\var broken = 0;
+        \\outer: while (true) {
+        \\  while (true) {
+        \\    broken += 1;
+        \\    break outer;
+        \\  }
+        \\}
+        \\assert.sameValue(broken, 1);
+        \\var continued = 0;
+        \\var i = 0;
+        \\loop: do {
+        \\  i += 1;
+        \\  if (i === 1) continue loop;
+        \\  continued += 1;
+        \\} while (i < 3);
+        \\assert.sameValue(i, 3);
+        \\assert.sameValue(continued, 2);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

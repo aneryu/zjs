@@ -9268,23 +9268,33 @@ pub const parser_core = struct {
         try s.popScope();
     }
 
-    fn parseWhileStatement(s: *State) Error!void {
+    /// Leftover do/while parse. candidate103 still compiles
+    /// `parseWhileStatement` (1817) / `parseDoStatement` (1515, extra
+    /// 1515, 10.6% match). The leftover is pending-label + eval-undef +
+    /// bind loop top + break/label frames + control block + body +
+    /// continue patch + pop/patch. Comptime identity is test-first vs
+    /// body-first (expect '(', if_false/goto vs while/if_true). Take
+    /// that at runtime. Private names stay `inline` and pass only the
+    /// flag — no leftover setup at the wrapper (knives 94/98).
+    noinline fn parseDoOrWhileStatement(s: *State, is_do: bool) Error!void {
         try s.advance();
         const loop_label = s.pending_label_atom;
         s.pending_label_atom = null;
         try s.setEvalReturnUndefined();
-        try s.expectToken('(');
+        if (!is_do) try s.expectToken('(');
         // qjs TOK_WHILE: label_cont bound at the test; the back edge is
-        // emit_goto against the bound label. Loop top: condition is
-        // evaluated each iteration.
-        var top_label: Label = .{};
-        try Emitter.newLabel(s, &top_label);
-        try Emitter.bindTarget(s, &top_label);
-        try parseExpr(s);
+        // emit_goto against the bound label. TOK_DO: label1 bound at the
+        // body; if_true back edge re-enters it.
+        var loop_top: Label = .{};
+        try Emitter.newLabel(s, &loop_top);
+        try Emitter.bindTarget(s, &loop_top);
         var exit_label: Label = .{};
-        try Emitter.newLabel(s, &exit_label);
-        try Emitter.jump(s, opcode.op.if_false, &exit_label);
-        try s.expectToken(')');
+        if (!is_do) {
+            try parseExpr(s);
+            try Emitter.newLabel(s, &exit_label);
+            try Emitter.jump(s, opcode.op.if_false, &exit_label);
+            try s.expectToken(')');
+        }
         try pushBreakFrame(s);
         const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
         var loop_block: BlockEnv = undefined;
@@ -9294,10 +9304,17 @@ pub const parser_core = struct {
         try parseStatementOrDecl(s, DeclMask{});
         try patchContinueFrame(s);
         if (label_frame) |idx| try s.patchLabelContinues(idx);
-        // Back-edge to the top to re-test the condition, then patch the
-        // if_false exit to land here.
-        try Emitter.jump(s, opcode.op.goto, &top_label);
-        try Emitter.bind(s, &exit_label);
+        if (is_do) {
+            try s.expectToken(tok.TOK_WHILE);
+            try s.expectToken('(');
+            try parseExpr(s);
+            try s.expectToken(')');
+            try Emitter.jump(s, opcode.op.if_true, &loop_top);
+            if (s.isPunct(';')) try s.advance();
+        } else {
+            try Emitter.jump(s, opcode.op.goto, &loop_top);
+            try Emitter.bind(s, &exit_label);
+        }
         popControlBlock(s, &loop_block);
         loop_block_active = false;
         try popBreakFrameAndPatch(s);
@@ -9305,44 +9322,18 @@ pub const parser_core = struct {
             try s.patchLabelBreaks(idx);
             s.popLabelFrame(idx);
         }
+    }
+
+    inline fn parseWhileStatement(s: *State) Error!void {
+        return parseDoOrWhileStatement(s, false);
     }
 
     fn parseWithStatement(s: *State) Error!void {
         try parseWith(s);
     }
 
-    fn parseDoStatement(s: *State) Error!void {
-        try s.advance();
-        const loop_label = s.pending_label_atom;
-        s.pending_label_atom = null;
-        try s.setEvalReturnUndefined();
-        // qjs TOK_DO: label1 bound at the body; if_true back edge re-enters it.
-        var body_label: Label = .{};
-        try Emitter.newLabel(s, &body_label);
-        try Emitter.bindTarget(s, &body_label);
-        try pushBreakFrame(s);
-        const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
-        var loop_block: BlockEnv = undefined;
-        pushControlBlock(s, &loop_block, loop_label, true, true, false, s.scope_level, 0, false);
-        var loop_block_active = true;
-        defer if (loop_block_active) popControlBlock(s, &loop_block);
-        try parseStatementOrDecl(s, DeclMask{});
-        try patchContinueFrame(s);
-        if (label_frame) |idx| try s.patchLabelContinues(idx);
-        try s.expectToken(tok.TOK_WHILE);
-        try s.expectToken('(');
-        try parseExpr(s);
-        try s.expectToken(')');
-        // Back-edge: re-enter body when the test is truthy.
-        try Emitter.jump(s, opcode.op.if_true, &body_label);
-        if (s.isPunct(';')) try s.advance();
-        popControlBlock(s, &loop_block);
-        loop_block_active = false;
-        try popBreakFrameAndPatch(s);
-        if (label_frame) |idx| {
-            try s.patchLabelBreaks(idx);
-            s.popLabelFrame(idx);
-        }
+    inline fn parseDoStatement(s: *State) Error!void {
+        return parseDoOrWhileStatement(s, true);
     }
 
     fn parseForStatement(s: *State) Error!void {
