@@ -157,6 +157,38 @@ pub const CallSite = struct {
         self.route = .generic;
     }
 
+    /// Leftover CallSite invoke. candidate107 still compiles
+    /// `callInto` (6891) / `callWithThisInto` (6102, extra 6102, 5.9%
+    /// match). The leftover is interrupt poll + bytecode/generic route
+    /// + `enterBytecode` / `callGeneric`. Comptime identity is site
+    /// this vs caller-supplied this (plus a stack-local target copy so
+    /// reentrant WithThis cannot mutate the template). Take that at
+    /// runtime. Public names stay `inline` and pass only the optional
+    /// receiver — no leftover setup at the wrapper (knives 94/98).
+    /// Does not retry CallSite inline return-by-value memset (knife 8).
+    noinline fn callIntoReceiver(
+        self: *CallSite,
+        this_override: ?JSValue,
+        args: []const JSValue,
+        out: *JSValue,
+    ) HostError!void {
+        try exception_ops.pollInterrupt(self.ctx, self.global);
+        switch (self.route) {
+            .bytecode => |*route| {
+                if (this_override) |this_value| {
+                    var target = route.target;
+                    target.this_value = this_value;
+                    var this_slot = this_value;
+                    return enterBytecode(null, self.ctx, self.output, self.global, route, &target, &this_slot, &self.callee, args, self.caller_function, self.caller_frame, self.leanFrame(route), out);
+                }
+                return enterBytecode(null, self.ctx, self.output, self.global, route, &route.target, &self.this_value, &self.callee, args, self.caller_function, self.caller_frame, self.leanFrame(route), out);
+            },
+            .generic => {},
+        }
+        const this_value = this_override orelse self.this_value;
+        return callGeneric(self.ctx, self.output, self.global, this_value, self.callee, args, self.caller_function, self.caller_frame, out);
+    }
+
     /// Call with the site's receiver. Every call polls the interrupt once,
     /// then takes the same-Machine arm, the resident host arm, or the
     /// authoritative root path (in that order of preference).
@@ -164,16 +196,11 @@ pub const CallSite = struct {
     /// The result travels through `out` as two 64-bit words (pinned
     /// `ldp`/`stp`, see `Vm.takeNativeReturnInto`) and the error tag in a
     /// register: no 24-byte error union is materialized in memory, and the
-    /// caller's 64-bit reads of the result forward. `callInto` is outlined so
-    /// a native algorithm's loop body does not absorb the call's spill set;
-    /// `call` is the by-value convenience wrapper.
-    pub noinline fn callInto(self: *CallSite, args: []const JSValue, out: *JSValue) HostError!void {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
-        switch (self.route) {
-            .bytecode => |*route| return enterBytecode(null, self.ctx, self.output, self.global, route, &route.target, &self.this_value, &self.callee, args, self.caller_function, self.caller_frame, self.leanFrame(route), out),
-            .generic => {},
-        }
-        return callGeneric(self.ctx, self.output, self.global, self.this_value, self.callee, args, self.caller_function, self.caller_frame, out);
+    /// caller's 64-bit reads of the result forward. The invoke walk is
+    /// outlined so a native algorithm's loop body does not absorb the
+    /// call's spill set; `call` is the by-value convenience wrapper.
+    pub inline fn callInto(self: *CallSite, args: []const JSValue, out: *JSValue) HostError!void {
+        return self.callIntoReceiver(null, args, out);
     }
 
     pub inline fn call(self: *CallSite, args: []const JSValue) HostError!JSValue {
@@ -241,17 +268,8 @@ pub const CallSite = struct {
     /// stack-local so nested or reentrant calls cannot mutate the site's
     /// immutable template. `this_value` must be rooted by the caller for the
     /// duration of the call.
-    pub noinline fn callWithThisInto(self: *CallSite, this_value: JSValue, args: []const JSValue, out: *JSValue) HostError!void {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
-        switch (self.route) {
-            .bytecode => |*route| {
-                var target = route.target;
-                target.this_value = this_value;
-                return enterBytecode(null, self.ctx, self.output, self.global, route, &target, &this_value, &self.callee, args, self.caller_function, self.caller_frame, self.leanFrame(route), out);
-            },
-            .generic => {},
-        }
-        return callGeneric(self.ctx, self.output, self.global, this_value, self.callee, args, self.caller_function, self.caller_frame, out);
+    pub inline fn callWithThisInto(self: *CallSite, this_value: JSValue, args: []const JSValue, out: *JSValue) HostError!void {
+        return self.callIntoReceiver(this_value, args, out);
     }
 
     pub inline fn callWithThis(self: *CallSite, this_value: JSValue, args: []const JSValue) HostError!JSValue {
