@@ -2374,7 +2374,44 @@ fn iteratorReduceCall(
     }
 }
 
-fn iteratorStepWithNext(
+/// Leftover post-`next()` decode. candidate101 still compiles two leftover
+/// copies (`iteratorStepWithNext` 736 / `iteratorStepWithSyncCall` 729,
+/// extra 729, 14.3% match). The leftover is objectFromValue + get `done` /
+/// `value`. Comptime identity is only how `next()` is invoked. Take the
+/// already-produced result on one walk. Private names stay `inline` and
+/// keep their unique call — do not fold Next through `CallSite`.
+noinline fn iteratorStepFromNextResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    next_result: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !IteratorStep {
+    const next_object = objectFromValue(next_result) orelse return error.TypeError;
+    const done = try object_ops.getValueProperty(
+        ctx,
+        output,
+        global,
+        next_object.value(),
+        core.atom.predefinedId("done", .string).?,
+        caller_function,
+        caller_frame,
+    );
+    if (coercion_ops.valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    const value = try object_ops.getValueProperty(
+        ctx,
+        output,
+        global,
+        next_object.value(),
+        core.atom.predefinedId("value", .string).?,
+        caller_function,
+        caller_frame,
+    );
+    return .{ .value = value, .done = false };
+}
+
+inline fn iteratorStepWithNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2384,14 +2421,10 @@ fn iteratorStepWithNext(
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
     const next_result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
-    const next_object = objectFromValue(next_result) orelse return error.TypeError;
-    const done = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
-    if (coercion_ops.valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
-    return .{ .value = value, .done = false };
+    return iteratorStepFromNextResult(ctx, output, global, next_result, caller_function, caller_frame);
 }
 
-fn iteratorStepWithSyncCall(
+inline fn iteratorStepWithSyncCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2400,11 +2433,7 @@ fn iteratorStepWithSyncCall(
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
     const next_result = try next_call.call(&.{});
-    const next_object = objectFromValue(next_result) orelse return error.TypeError;
-    const done = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame);
-    if (coercion_ops.valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    const value = try object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame);
-    return .{ .value = value, .done = false };
+    return iteratorStepFromNextResult(ctx, output, global, next_result, caller_function, caller_frame);
 }
 
 fn iteratorStepWithSyncValues(

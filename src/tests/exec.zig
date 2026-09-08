@@ -10327,6 +10327,56 @@ test "buffer constructor extras leftover runtime tables preserve ArrayBuffer Sha
     try std.testing.expect(result.isUndefined());
 }
 
+test "iterator step leftover post-next decode preserves for-of and helper results" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var events = [];
+        \\var step = 0;
+        \\var custom = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() {
+        \\    if (step++ === 0) {
+        \\      return {
+        \\        get done() { events.push("n-done-false"); return false; },
+        \\        get value() { events.push("n-value"); return 7; },
+        \\      };
+        \\    }
+        \\    return {
+        \\      get done() { events.push("n-done-true"); return true; },
+        \\      get value() { throw new Error("done value was read"); },
+        \\    };
+        \\  },
+        \\};
+        \\var sum = 0;
+        \\for (var value of custom) sum += value;
+        \\assert.sameValue(sum, 7);
+        \\assert.sameValue(events.join(","), "n-done-false,n-value,n-done-true");
+        \\var helperEvents = [];
+        \\var helperStep = 0;
+        \\var source = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() {
+        \\    if (helperStep++ === 0) {
+        \\      return {
+        \\        get done() { helperEvents.push("h-done-false"); return false; },
+        \\        get value() { helperEvents.push("h-value"); return 3; },
+        \\      };
+        \\    }
+        \\    return { done: true };
+        \\  },
+        \\};
+        \\var mapped = Iterator.from(source).map(function(x) { return x + 1; });
+        \\assert.sameValue(mapped.next().value, 4);
+        \\assert.sameValue(mapped.next().done, true);
+        \\assert.sameValue(helperEvents.join(","), "h-done-false,h-value");
+        \\var bad = { [Symbol.iterator]() { return this; }, next() { return 1; } };
+        \\assert.throws(TypeError, function() { for (var x of bad) {} });
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "class field initializer leftover runtime static preserves instance static private and computed fields" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
