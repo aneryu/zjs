@@ -11917,19 +11917,6 @@ test "Engine eval preserves dense array pop host output semantics" {
     , "2\n1\ncustom:1\nown:1\n9\n0\ngetter\n");
 }
 
-test "array pop and splice admission share prototype-record walk" {
-    try helpers.expectPrints(
-        \\let a = [1, 2, 3];
-        \\print(a.pop());
-        \\print(a.join(","));
-        \\let b = [10, 20, 30];
-        \\print(b.splice(1, 1).join(","));
-        \\print(b.join(","));
-        \\print([].pop());
-        \\print([1].splice(0, 1).join(","));
-    , "3\n1,2\n20\n10,30\nundefined\n1\n");
-}
-
 test "Engine eval preserves ordinary array pop fast path semantics" {
     try helpers.expectPrints(
         \\let a = [1, 2, 3];

@@ -2594,23 +2594,6 @@ fn fastDenseArraySplice(
     return removed_value;
 }
 
-/// Leftover Array.prototype.pop / splice admission. The two copies were
-/// 365/365 B and 96.2% the same; comptime identity was only the method
-/// id / name. Take those at runtime. Does not fold push (70% match) or
-/// the pop/splice impls.
-noinline fn arrayPrototypeRecordOrName(
-    rt: *core.JSRuntime,
-    func: core.JSValue,
-    method_id: u32,
-    name: []const u8,
-) !?*core.Object {
-    const function_object = callableObjectFromValue(func) orelse return null;
-    if (!isArrayPrototypeRecord(function_object, method_id)) {
-        if (!try call_mod.nativeFunctionNameForVmEquals(rt, function_object, name)) return null;
-    }
-    return function_object;
-}
-
 pub fn arraySpliceCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2619,12 +2602,10 @@ pub fn arraySpliceCall(
     func: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    _ = (try arrayPrototypeRecordOrName(
-        ctx.runtime,
-        func,
-        @intFromEnum(method_ids.array.PrototypeMethod.splice),
-        "splice",
-    )) orelse return null;
+    const function_object = callableObjectFromValue(func) orelse return null;
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.splice))) {
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "splice")) return null;
+    }
     return arraySpliceCallImpl(ctx, output, global, receiver, args);
 }
 
@@ -3087,12 +3068,11 @@ pub fn arrayPopCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    _ = (try arrayPrototypeRecordOrName(
-        ctx.runtime,
-        func,
-        @intFromEnum(method_ids.array.PrototypeMethod.pop),
-        "pop",
-    )) orelse return null;
+    const function_object = callableObjectFromValue(func) orelse return null;
+    if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.pop))) {
+        if (!try call_mod.nativeFunctionNameForVmEquals(ctx.runtime, function_object, "pop")) return null;
+    }
+
     return arrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
 }
 
