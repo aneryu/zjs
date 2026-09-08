@@ -1197,33 +1197,52 @@ pub const builtin_method_id_lookup = struct {
         const TypedArrayAccessorMethod = builtin_method_ids.buffer.TypedArrayAccessorMethod;
 
         pub fn dataViewGetMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "getInt8")) return @intFromEnum(DataViewGetMethod.int8);
-            if (std.mem.eql(u8, name, "getUint8")) return @intFromEnum(DataViewGetMethod.uint8);
-            if (std.mem.eql(u8, name, "getInt16")) return @intFromEnum(DataViewGetMethod.int16);
-            if (std.mem.eql(u8, name, "getUint16")) return @intFromEnum(DataViewGetMethod.uint16);
-            if (std.mem.eql(u8, name, "getInt32")) return @intFromEnum(DataViewGetMethod.int32);
-            if (std.mem.eql(u8, name, "getUint32")) return @intFromEnum(DataViewGetMethod.uint32);
-            if (std.mem.eql(u8, name, "getFloat16")) return @intFromEnum(DataViewGetMethod.float16);
-            if (std.mem.eql(u8, name, "getFloat32")) return @intFromEnum(DataViewGetMethod.float32);
-            if (std.mem.eql(u8, name, "getFloat64")) return @intFromEnum(DataViewGetMethod.float64);
-            if (std.mem.eql(u8, name, "getBigInt64")) return @intFromEnum(DataViewGetMethod.big_int64);
-            if (std.mem.eql(u8, name, "getBigUint64")) return @intFromEnum(DataViewGetMethod.big_uint64);
-            return null;
+            return dataViewGetOrSetMethodId(name, false);
         }
 
         pub fn dataViewSetMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "setInt8")) return @intFromEnum(DataViewSetMethod.int8);
-            if (std.mem.eql(u8, name, "setUint8")) return @intFromEnum(DataViewSetMethod.uint8);
-            if (std.mem.eql(u8, name, "setInt16")) return @intFromEnum(DataViewSetMethod.int16);
-            if (std.mem.eql(u8, name, "setUint16")) return @intFromEnum(DataViewSetMethod.uint16);
-            if (std.mem.eql(u8, name, "setInt32")) return @intFromEnum(DataViewSetMethod.int32);
-            if (std.mem.eql(u8, name, "setUint32")) return @intFromEnum(DataViewSetMethod.uint32);
-            if (std.mem.eql(u8, name, "setFloat16")) return @intFromEnum(DataViewSetMethod.float16);
-            if (std.mem.eql(u8, name, "setFloat32")) return @intFromEnum(DataViewSetMethod.float32);
-            if (std.mem.eql(u8, name, "setFloat64")) return @intFromEnum(DataViewSetMethod.float64);
-            if (std.mem.eql(u8, name, "setBigInt64")) return @intFromEnum(DataViewSetMethod.big_int64);
-            if (std.mem.eql(u8, name, "setBigUint64")) return @intFromEnum(DataViewSetMethod.big_uint64);
-            return null;
+            return dataViewGetOrSetMethodId(name, true);
+        }
+
+        /// Leftover DataView get/set method-id walk. The two public names
+        /// differ only by the `"get"`/`"set"` prefix and the enum base
+        /// (`301` vs `321`, offset `20`). Suffix match order and ids stay
+        /// load-bearing; this does not fold other accessor lookups.
+        noinline fn dataViewGetOrSetMethodId(name: []const u8, is_set: bool) ?u32 {
+            if (name.len < 3) return null;
+            const prefix = name[0..3];
+            if (is_set) {
+                if (!std.mem.eql(u8, prefix, "set")) return null;
+            } else {
+                if (!std.mem.eql(u8, prefix, "get")) return null;
+            }
+            const suffix = name[3..];
+            const get_id: u32 = if (std.mem.eql(u8, suffix, "Int8"))
+                @intFromEnum(DataViewGetMethod.int8)
+            else if (std.mem.eql(u8, suffix, "Uint8"))
+                @intFromEnum(DataViewGetMethod.uint8)
+            else if (std.mem.eql(u8, suffix, "Int16"))
+                @intFromEnum(DataViewGetMethod.int16)
+            else if (std.mem.eql(u8, suffix, "Uint16"))
+                @intFromEnum(DataViewGetMethod.uint16)
+            else if (std.mem.eql(u8, suffix, "Int32"))
+                @intFromEnum(DataViewGetMethod.int32)
+            else if (std.mem.eql(u8, suffix, "Uint32"))
+                @intFromEnum(DataViewGetMethod.uint32)
+            else if (std.mem.eql(u8, suffix, "Float16"))
+                @intFromEnum(DataViewGetMethod.float16)
+            else if (std.mem.eql(u8, suffix, "Float32"))
+                @intFromEnum(DataViewGetMethod.float32)
+            else if (std.mem.eql(u8, suffix, "Float64"))
+                @intFromEnum(DataViewGetMethod.float64)
+            else if (std.mem.eql(u8, suffix, "BigInt64"))
+                @intFromEnum(DataViewGetMethod.big_int64)
+            else if (std.mem.eql(u8, suffix, "BigUint64"))
+                @intFromEnum(DataViewGetMethod.big_uint64)
+            else
+                return null;
+            const set_off = @intFromEnum(DataViewSetMethod.int8) - @intFromEnum(DataViewGetMethod.int8);
+            return if (is_set) get_id + set_off else get_id;
         }
 
         pub fn arrayBufferAccessorMethodId(name: []const u8) ?u32 {
@@ -1468,9 +1487,16 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, null), lookup.date.staticMethodId("nope"));
     try testing.expect(lookup.date.staticMethodId("now") != null);
 
-    // buffer: record-id round trips.
+    // buffer: record-id round trips. Get/set share one leftover walk;
+    // set ids stay get + 20.
     const get_int8 = lookup.buffer.dataViewGetMethodId("getInt8").?;
     try testing.expectEqual(@as(u32, 301), get_int8);
+    try testing.expectEqual(@as(?u32, 321), lookup.buffer.dataViewSetMethodId("setInt8"));
+    try testing.expectEqual(@as(?u32, 311), lookup.buffer.dataViewGetMethodId("getBigUint64"));
+    try testing.expectEqual(@as(?u32, 331), lookup.buffer.dataViewSetMethodId("setBigUint64"));
+    try testing.expectEqual(@as(?u32, null), lookup.buffer.dataViewGetMethodId("setInt8"));
+    try testing.expectEqual(@as(?u32, null), lookup.buffer.dataViewSetMethodId("getInt8"));
+    try testing.expectEqual(@as(?u32, null), lookup.buffer.dataViewGetMethodId("getNope"));
     try testing.expectEqual(@as(?u32, 1), lookup.buffer.dataViewGetKindFromRecordId(get_int8));
     try testing.expectEqualStrings("byteLength", lookup.buffer.arrayBufferAccessorNameFromRecordId(401).?);
     try testing.expectEqual(@as(?u32, 465), lookup.buffer.typedArrayAccessorMethodId("[Symbol.toStringTag]"));
