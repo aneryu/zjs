@@ -718,13 +718,10 @@ fn globalObjectFromGlobals(_: *core.JSRuntime, globals: []const globals_mod.Slot
     return expectObject(global_value) catch null;
 }
 
-// mirror of iterator_ops.defineToStringTag, keep in sync (kept local: this
-// file does not otherwise import iterator_ops).
-fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
-    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
-    const tag_value = try core.string.String.createUtf8(rt, tag_name);
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
-}
+// Leftover collection toStringTag install. object_ops / promise_ops already
+// alias `iterator_ops.defineToStringTag`; this file already imports it.
+// The local copy used createUtf8 only; the shared walk uses createStringValue.
+const defineToStringTag = iterator_ops.defineToStringTag;
 
 fn collectionIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, iterator: *core.Object) !core.JSValue {
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return error.TypeError;
@@ -772,6 +769,31 @@ fn iteratorValue(rt: *core.JSRuntime, global: ?*core.Object, class_id: core.Clas
 /// callers hand over their reference to `value`.
 fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue {
     return iterator_ops.createIteratorResult(rt, global, value, done);
+}
+
+test "defineToStringTag leftover alias preserves collection iterator tags" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol).?;
+
+    const map_iter = try core.Object.create(rt, core.class.ids.object, null);
+    try defineToStringTag(rt, map_iter, "Map Iterator");
+    const map_desc = (try map_iter.getOwnProperty(rt, tag_atom)).?;
+    try std.testing.expectEqual(false, map_desc.writable);
+    try std.testing.expectEqual(false, map_desc.enumerable);
+    try std.testing.expectEqual(true, map_desc.configurable);
+    try std.testing.expect(map_desc.value.asStringBody().?.eqlBytes("Map Iterator"));
+
+    const set_iter = try core.Object.create(rt, core.class.ids.object, null);
+    try defineToStringTag(rt, set_iter, "Set Iterator");
+    const set_desc = (try set_iter.getOwnProperty(rt, tag_atom)).?;
+    try std.testing.expect(set_desc.value.asStringBody().?.eqlBytes("Set Iterator"));
+
+    const fallback = try core.Object.create(rt, core.class.ids.object, null);
+    try defineToStringTag(rt, fallback, "Iterator");
+    const fallback_desc = (try fallback.getOwnProperty(rt, tag_atom)).?;
+    try std.testing.expect(fallback_desc.value.asStringBody().?.eqlBytes("Iterator"));
 }
 
 test "collection iteratorResult roots direct function bytecode value while creating result" {
