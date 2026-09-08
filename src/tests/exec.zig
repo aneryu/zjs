@@ -10259,6 +10259,37 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "disposable stack extras leftover runtime metadata preserves dispose aliases and disposed" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(DisposableStack.prototype[Symbol.toStringTag], "DisposableStack");
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.toStringTag], "AsyncDisposableStack");
+        \\assert.sameValue(DisposableStack.prototype[Symbol.dispose], DisposableStack.prototype.dispose);
+        \\assert.sameValue(DisposableStack.prototype[Symbol.dispose].name, "dispose");
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose], AsyncDisposableStack.prototype.disposeAsync);
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose].name, "disposeAsync");
+        \\var disposedDesc = Object.getOwnPropertyDescriptor(DisposableStack.prototype, "disposed");
+        \\assert.sameValue(disposedDesc.get.name, "get disposed");
+        \\assert.sameValue(disposedDesc.get.call(new DisposableStack()), false);
+        \\assert.throws(TypeError, function() { disposedDesc.get.call({}); });
+        \\var asyncDisposedDesc = Object.getOwnPropertyDescriptor(AsyncDisposableStack.prototype, "disposed");
+        \\assert.sameValue(asyncDisposedDesc.get.name, "get disposed");
+        \\assert.sameValue(asyncDisposedDesc.get.call(new AsyncDisposableStack()), false);
+        \\assert.throws(TypeError, function() { asyncDisposedDesc.get.call({}); });
+        \\var stack = new DisposableStack();
+        \\var called = 0;
+        \\stack.adopt({}, function() { called++; });
+        \\var moved = stack.move();
+        \\assert.sameValue(stack.disposed, true);
+        \\moved.dispose();
+        \\assert.sameValue(called, 1);
+        \\assert.sameValue(moved.disposed, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "buffer constructor extras leftover runtime tables preserve ArrayBuffer SharedArrayBuffer and DataView" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

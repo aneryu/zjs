@@ -3167,46 +3167,58 @@ fn installPrototypeToStringTag(rt: *core.JSRuntime, global: *core.Object, tag_na
     try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_name, Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
 }
 
-fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 3);
-
-    const disposed_key = core.atom.ids.disposed;
-    try defineLazyNativeGetterAtomWithRealmAndMetadata(
+inline fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+    return installDisposableStackCtorExtras(
         rt,
-        proto,
-        disposed_key,
-        "get disposed",
-        .{ .tag = .{ .disposable_stack_method = 6 } },
-        Flags{ .writable = false, .enumerable = false, .configurable = true },
         global,
+        ctor,
+        .{ .tag = .{ .disposable_stack_method = 6 } },
+        core.atom.predefinedId("dispose", .string).?,
+        core.atom.ids.Symbol_dispose,
+        "DisposableStack",
     );
-
-    const dispose_atom = core.atom.predefinedId("dispose", .string).?;
-    try publishMethodAlias(rt, proto, proto, dispose_atom, core.atom.ids.Symbol_dispose, false);
-
-    try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "DisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
 }
 
-fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+inline fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+    return installDisposableStackCtorExtras(
+        rt,
+        global,
+        ctor,
+        .{ .tag = .{ .async_disposable_stack_method = 6 } },
+        core.atom.ids.disposeAsync,
+        core.atom.ids.Symbol_asyncDispose,
+        "AsyncDisposableStack",
+    );
+}
+
+/// Leftover DisposableStack/AsyncDisposableStack extras. candidate95 still
+/// compiled two leftover copies (`installDisposableStackExtras` 719,
+/// `installAsyncDisposableStackExtras` 522, extra 522). The leftover is
+/// proto reserve + disposed getter + dispose alias + toStringTag;
+/// comptime identity is the method tag, alias atoms, and tag string.
+/// Take those at runtime. Does not fold Error/Iterator extras.
+noinline fn installDisposableStackCtorExtras(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    ctor: *core.Object,
+    disposed_metadata: NativeFunctionMetadata,
+    alias_from: core.Atom,
+    alias_to: core.Atom,
+    tag: []const u8,
+) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 3);
-
-    const disposed_key = core.atom.ids.disposed;
     try defineLazyNativeGetterAtomWithRealmAndMetadata(
         rt,
         proto,
-        disposed_key,
+        core.atom.ids.disposed,
         "get disposed",
-        .{ .tag = .{ .async_disposable_stack_method = 6 } },
+        disposed_metadata,
         Flags{ .writable = false, .enumerable = false, .configurable = true },
         global,
     );
-
-    const dispose_async_key = core.atom.ids.disposeAsync;
-    try publishMethodAlias(rt, proto, proto, dispose_async_key, core.atom.ids.Symbol_asyncDispose, false);
-
-    try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "AsyncDisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
+    try publishMethodAlias(rt, proto, proto, alias_from, alias_to, false);
+    try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag, Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
 }
 
 fn installDOMExceptionExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
