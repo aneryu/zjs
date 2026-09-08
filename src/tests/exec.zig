@@ -10327,6 +10327,39 @@ test "buffer constructor extras leftover runtime tables preserve ArrayBuffer Sha
     try std.testing.expect(result.isUndefined());
 }
 
+test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\async function* g() { yield 1; return 2; }
+        \\var AsyncGeneratorPrototype = Object.getPrototypeOf(g.prototype);
+        \\assert.sameValue(AsyncGeneratorPrototype[Symbol.toStringTag], "AsyncGenerator");
+        \\assert.sameValue(AsyncGeneratorPrototype.next.length, 1);
+        \\assert.sameValue(AsyncGeneratorPrototype.return.length, 1);
+        \\assert.sameValue(AsyncGeneratorPrototype.throw.length, 1);
+        \\assert.sameValue(AsyncGeneratorPrototype.next.name, "next");
+        \\assert.sameValue(AsyncGeneratorPrototype.return.name, "return");
+        \\assert.sameValue(AsyncGeneratorPrototype.throw.name, "throw");
+        \\var helper = Iterator.from([1, 2]).map(function(x) { return x + 1; });
+        \\var proto = Object.getPrototypeOf(helper);
+        \\assert.sameValue(Object.prototype.toString.call(helper), "[object Iterator Helper]");
+        \\assert.sameValue(helper.next, proto.next);
+        \\assert.sameValue(helper.return, proto.return);
+        \\assert.sameValue(proto.next.name, "next");
+        \\assert.sameValue(proto.return.name, "return");
+        \\assert.sameValue(proto.next.length, 0);
+        \\assert.sameValue(helper.next().value, 2);
+        \\assert.sameValue(helper.next().value, 3);
+        \\assert.sameValue(helper.return().done, true);
+        \\var concat = Iterator.concat([7]);
+        \\assert.sameValue(Object.prototype.toString.call(concat), "[object Iterator Concat]");
+        \\assert.sameValue(concat.next().value, 7);
+        \\assert.sameValue(concat.return().done, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "fast prototype method leftover runtime domain preserves regexp and collection lookups" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

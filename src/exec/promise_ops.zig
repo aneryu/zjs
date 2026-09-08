@@ -195,11 +195,8 @@ pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *co
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
 }
 
-pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
-    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+pub inline fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
+    return builtin_glue.defineStampedNativeDataMethod(rt, global, object, atom_id, length, .async_generator, 0);
 }
 
 pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {

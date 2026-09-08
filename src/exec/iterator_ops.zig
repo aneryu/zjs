@@ -1361,18 +1361,14 @@ pub const IteratorFromResult = struct {
     wrap: bool = false,
 };
 
-pub fn installIteratorHelperMethod(
+pub inline fn installIteratorHelperMethod(
     rt: *core.JSRuntime,
     global: *core.Object,
     helper: *core.Object,
     key: core.Atom,
     method_id: i32,
 ) !void {
-    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(key), 0);
-    const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    if (method_id < 1 or method_id > 2) return error.TypeError;
-    if (!try method_object.addIteratorHelperMethod(rt, @intCast(method_id))) return error.TypeError;
-    try helper.defineOwnProperty(rt, key, core.Descriptor.data(method, true, false, true));
+    return builtin_glue.defineStampedNativeDataMethod(rt, global, helper, key, 0, .iterator_helper, method_id);
 }
 
 fn iteratorMethodsPrototype(

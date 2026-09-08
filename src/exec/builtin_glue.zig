@@ -667,6 +667,37 @@ noinline fn defineNativeDataMethodMaybeId(
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 
+/// Rare-payload stamp after minting a native data method. This is a
+/// leftover of `defineAsyncGeneratorDataMethod` /
+/// `installIteratorHelperMethod` (candidate99: 463 / 518, extra 463,
+/// 32.6% match). It is **not** an extension of
+/// `defineNativeDataMethodMaybeId` (knife 93: do not fold the
+/// async-generator stamp into that walk).
+pub const NativeDataMethodRareStamp = enum { async_generator, iterator_helper };
+
+pub noinline fn defineStampedNativeDataMethod(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    object: *core.Object,
+    atom_id: core.Atom,
+    length: i32,
+    stamp: NativeDataMethodRareStamp,
+    helper_id: i32,
+) !void {
+    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
+    const method_object = property_ops.expectObject(method) catch return error.TypeError;
+    switch (stamp) {
+        .async_generator => {
+            if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
+        },
+        .iterator_helper => {
+            if (helper_id < 1 or helper_id > 2) return error.TypeError;
+            if (!try method_object.addIteratorHelperMethod(rt, @intCast(helper_id))) return error.TypeError;
+        },
+    }
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+}
+
 /// Bytes-taking form for the one caller whose method name comes out of a table
 /// rather than a predefined-atom constant (`object_ops` CallSite prototype).
 pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
