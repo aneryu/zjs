@@ -5169,6 +5169,26 @@ test "Uint8Array.fromHex/fromBase64 use realm intrinsic prototypes after global 
     try std.testing.expect(result.isUndefined());
 }
 
+test "Uint8Array fromBase64/toBase64 named options preserve alphabet and lastChunkHandling" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var def = Uint8Array.fromBase64("YQ==");
+        \\assert.sameValue(def.length, 1);
+        \\assert.sameValue(def[0], 0x61);
+        \\var url = Uint8Array.fromBase64("YQ", {alphabet: "base64url", lastChunkHandling: "loose"});
+        \\assert.sameValue(url[0], 0x61);
+        \\assert.sameValue(new Uint8Array([0x61]).toBase64({alphabet: "base64url", omitPadding: true}), "YQ");
+        \\assert.sameValue(new Uint8Array([0x61]).toBase64({alphabet: "base64"}), "YQ==");
+        \\assert.throws(TypeError, function() { Uint8Array.fromBase64("YQ==", {alphabet: "nope"}); });
+        \\assert.throws(TypeError, function() { Uint8Array.fromBase64("YQ==", {lastChunkHandling: "nope"}); });
+        \\assert.sameValue(Uint8Array.fromBase64("YQ==", {})[0], 0x61);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "native Error Reflect.construct fallback uses the realm intrinsic after global mutation" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

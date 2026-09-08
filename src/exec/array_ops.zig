@@ -5747,6 +5747,17 @@ pub fn expectUint8ArrayObject(value: core.JSValue) !*core.Object {
     return object;
 }
 
+const base64_alphabet_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "base64", .id = @intFromEnum(Uint8ArrayBase64Alphabet.base64) },
+    .{ .name = "base64url", .id = @intFromEnum(Uint8ArrayBase64Alphabet.base64url) },
+};
+
+const base64_last_chunk_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "loose", .id = @intFromEnum(Uint8ArrayBase64LastChunkHandling.loose) },
+    .{ .name = "strict", .id = @intFromEnum(Uint8ArrayBase64LastChunkHandling.strict) },
+    .{ .name = "stop-before-partial", .id = @intFromEnum(Uint8ArrayBase64LastChunkHandling.stop_before_partial) },
+};
+
 pub fn uint8ArrayBase64Alphabet(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5755,16 +5766,18 @@ pub fn uint8ArrayBase64Alphabet(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !Uint8ArrayBase64Alphabet {
-    const rt = ctx.runtime;
-    if (!options.isObject()) return .base64;
-    const key = core.atom.ids.alphabet;
-    const value = try getValueProperty(ctx, output, global, options, key, caller_function, caller_frame);
-    if (value.isUndefined()) return .base64;
-    var text = try uint8ArrayStringBytes(rt, value);
-    defer text.deinit(rt.memory.allocator);
-    if (std.mem.eql(u8, text.items, "base64")) return .base64;
-    if (std.mem.eql(u8, text.items, "base64url")) return .base64url;
-    return error.TypeError;
+    const id = try uint8ArrayBase64NamedOption(
+        ctx,
+        output,
+        global,
+        options,
+        caller_function,
+        caller_frame,
+        core.atom.ids.alphabet,
+        @intFromEnum(Uint8ArrayBase64Alphabet.base64),
+        &base64_alphabet_ids,
+    );
+    return @enumFromInt(id);
 }
 
 pub fn uint8ArrayBase64LastChunkHandling(
@@ -5775,17 +5788,40 @@ pub fn uint8ArrayBase64LastChunkHandling(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !Uint8ArrayBase64LastChunkHandling {
-    const rt = ctx.runtime;
-    if (!options.isObject()) return .loose;
-    const key = core.atom.ids.lastChunkHandling;
+    const id = try uint8ArrayBase64NamedOption(
+        ctx,
+        output,
+        global,
+        options,
+        caller_function,
+        caller_frame,
+        core.atom.ids.lastChunkHandling,
+        @intFromEnum(Uint8ArrayBase64LastChunkHandling.loose),
+        &base64_last_chunk_ids,
+    );
+    return @enumFromInt(id);
+}
+
+/// Leftover Uint8Array base64 named-option admission. The two public
+/// names share get-property + stringify + table match; comptime identity
+/// is only the atom, default, and table. Does not fold `omitPadding`.
+noinline fn uint8ArrayBase64NamedOption(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    options: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    key: core.Atom,
+    default_id: u32,
+    table: []const core.host_function.name_id.Entry,
+) !u32 {
+    if (!options.isObject()) return default_id;
     const value = try getValueProperty(ctx, output, global, options, key, caller_function, caller_frame);
-    if (value.isUndefined()) return .loose;
-    var text = try uint8ArrayStringBytes(rt, value);
-    defer text.deinit(rt.memory.allocator);
-    if (std.mem.eql(u8, text.items, "loose")) return .loose;
-    if (std.mem.eql(u8, text.items, "strict")) return .strict;
-    if (std.mem.eql(u8, text.items, "stop-before-partial")) return .stop_before_partial;
-    return error.TypeError;
+    if (value.isUndefined()) return default_id;
+    var text = try uint8ArrayStringBytes(ctx.runtime, value);
+    defer text.deinit(ctx.runtime.memory.allocator);
+    return core.host_function.name_id.lookup(text.items, table) orelse error.TypeError;
 }
 
 pub fn uint8ArrayOmitPadding(
