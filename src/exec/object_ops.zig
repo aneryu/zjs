@@ -3181,7 +3181,17 @@ pub fn objectProtoSetterCall(
     return core.JSValue.undefinedValue();
 }
 
-pub fn objectIsExtensibleCall(
+/// Leftover Object/Reflect.isExtensible trap walk. candidate113 still
+/// compiles `objectIsExtensibleCall` (847) as a third copy of
+/// `proxyAwareExtensibleOp` (960, extra 847, 4.5% match). The leftover
+/// is target+handler + get isExtensible + missing-trap recurse +
+/// call(`[target]`) + invariant. Comptime identity is the builtin
+/// JSValue/primitive admission. Take that in this wrapper and reuse
+/// the already-outlined ExtensibleOp walk (knives 103/112/113). Does
+/// not turn ExtensibleOp into an inline wrapper (knives 94/108). Does
+/// not retry leftover isExtensible/prevent merge (knife 111) or
+/// [[Set]] / [[Has]] / [[GetPrototypeOf]].
+pub inline fn objectIsExtensibleCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3191,18 +3201,7 @@ pub fn objectIsExtensibleCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return core.JSValue.boolean(false);
-    if (object.proxyTarget() == null) return core.JSValue.boolean(object.isExtensible());
-    const proxy_target_value = object.proxyTarget() orelse return core.JSValue.boolean(object.isExtensible());
-    const target = objectFromValue(proxy_target_value) orelse return error.TypeError;
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_key = core.atom.ids.isExtensible;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return core.JSValue.boolean(try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame));
-    if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{proxy_target_value}, caller_function, caller_frame);
-    const extensible = valueTruthy(result);
-    if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
-    return core.JSValue.boolean(extensible);
+    return core.JSValue.boolean(try proxyAwareIsExtensible(ctx, output, global, object, caller_function, caller_frame));
 }
 
 pub fn objectSetPrototypeOfCall(

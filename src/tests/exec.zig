@@ -10723,6 +10723,39 @@ test "leftover proxy getPrototypeOf through one outlined walk" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Object.isExtensible builtin through outlined extensible op" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Object.isExtensible(1), false);
+        \\assert.sameValue(Object.isExtensible(undefined), false);
+        \\assert.sameValue(Reflect.isExtensible({}), true);
+        \\var seen = [];
+        \\var p = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("is"); return Object.isExtensible(t); }
+        \\});
+        \\assert.sameValue(Object.isExtensible(p), true);
+        \\assert.sameValue(Reflect.isExtensible(p), true);
+        \\assert.sameValue(seen + "", "is,is");
+        \\var inner = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("inner"); return Object.isExtensible(t); }
+        \\});
+        \\assert.sameValue(Object.isExtensible(new Proxy(inner, {})), true);
+        \\assert.sameValue(seen + "", "is,is,inner");
+        \\var sealed = Object.preventExtensions({});
+        \\var mismatch = new Proxy(sealed, { isExtensible: function () { return true; } });
+        \\var threw = false;
+        \\try { Object.isExtensible(mismatch); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var plain = {};
+        \\assert.sameValue(Object.isExtensible(plain), true);
+        \\Object.preventExtensions(plain);
+        \\assert.sameValue(Object.isExtensible(plain), false);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
