@@ -3264,31 +3264,56 @@ pub fn iteratorFromSourceForIteratorFrom(
     return .{ .iterator = resolved, .next_method = next_method, .wrap = true };
 }
 
-pub fn iteratorWrapNext(
+const IteratorWrapKind = enum { next, return_ };
+
+/// Leftover Iterator.from wrap next/return. candidate104 still compiles
+/// `iteratorWrapNext` (720) / `iteratorWrapReturn` (766, extra 720,
+/// 4.6% match). The leftover is method-id check + wrap object + target
+/// + get method + call + object result. Comptime identity is next
+/// (cached method) vs return (missing-return result). Take that at
+/// runtime. Public names stay `inline` and pass only the kind — no
+/// leftover setup at the wrapper (knives 94/98).
+noinline fn iteratorWrapMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
+    kind: IteratorWrapKind,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (function_object.functionIteratorWrapMethod() != 1) return null;
+    const expected: u8 = switch (kind) {
+        .next => 1,
+        .return_ => 2,
+    };
+    if (function_object.functionIteratorWrapMethod() != expected) return null;
     const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
     if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
     const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
-    const next_method = if (wrapper.iteratorNext()) |stored| stored else blk: {
-        const next_key = core.atom.ids.next;
-        const method = try object_ops.getValueProperty(ctx, output, global, iterator, next_key, caller_function, caller_frame);
-        if (!call_runtime.isCallableValue(method)) return error.TypeError;
-        break :blk method;
+    const method = switch (kind) {
+        .next => if (wrapper.iteratorNext()) |stored| stored else blk: {
+            const next_key = core.atom.ids.next;
+            const next_method = try object_ops.getValueProperty(ctx, output, global, iterator, next_key, caller_function, caller_frame);
+            if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+            break :blk next_method;
+        },
+        .return_ => blk: {
+            const return_key = core.atom.ids.return_;
+            const return_method = try object_ops.getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
+            if (return_method.isUndefined() or return_method.isNull()) {
+                return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+            }
+            if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
+            break :blk return_method;
+        },
     };
-    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator, method, &.{}, caller_function, caller_frame);
     _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
 }
 
-pub fn iteratorWrapReturn(
+pub inline fn iteratorWrapNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3297,19 +3322,19 @@ pub fn iteratorWrapReturn(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (function_object.functionIteratorWrapMethod() != 2) return null;
-    const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
-    if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
-    const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
-    const return_key = core.atom.ids.return_;
-    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
-    if (return_method.isUndefined() or return_method.isNull()) {
-        return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    }
-    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
-    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
-    _ = object_ops.objectFromValue(result) orelse return error.TypeError;
-    return result;
+    return iteratorWrapMethodCall(ctx, output, global, receiver, function_object, .next, caller_function, caller_frame);
+}
+
+pub inline fn iteratorWrapReturn(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    function_object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    return iteratorWrapMethodCall(ctx, output, global, receiver, function_object, .return_, caller_function, caller_frame);
 }
 
 /// The single owner of ES `CreateIterResultObject` (7.4.14). `value` stays a

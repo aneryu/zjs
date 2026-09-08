@@ -10489,6 +10489,34 @@ test "leftover do while parse through one runtime flag" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover iterator wrap next return through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var sealed = Object.preventExtensions({
+        \\  next: function() { return { done: false, value: 3 }; },
+        \\  return: function() { return { done: true, value: 9 }; },
+        \\});
+        \\var wrapped = Iterator.from(sealed);
+        \\assert.sameValue(wrapped === sealed, false);
+        \\assert.sameValue(wrapped.next().value, 3);
+        \\assert.sameValue(wrapped.return().done, true);
+        \\assert.sameValue(wrapped.return().value, 9);
+        \\var no_return = Object.preventExtensions({
+        \\  next: function() { return { done: true }; },
+        \\});
+        \\var wrapped2 = Iterator.from(no_return);
+        \\assert.sameValue(wrapped2.return().done, true);
+        \\assert.sameValue(wrapped2.return().value, undefined);
+        \\var bad = Iterator.from({ next: 1 });
+        \\var threw = false;
+        \\try { bad.next(); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
