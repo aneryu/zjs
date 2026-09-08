@@ -17,6 +17,7 @@ const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const parser = @import("../parser.zig");
 const unicode_lib = @import("../libs/unicode.zig");
+const number_format = @import("../libs/number_format.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
 const construct_mod = @import("construct.zig");
@@ -5065,7 +5066,7 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
     }
     if (core.atom.isTaggedInt(atom_id)) {
         var buf: [10]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
+        const text = number_format.formatInt64(&buf, @as(i64, core.atom.atomToUInt32(atom_id)));
         try bytes.appendSlice(rt.memory.allocator, text);
         return value_ops.createStringValue(rt, bytes.items);
     }
