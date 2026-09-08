@@ -10856,6 +10856,31 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.toReversed get-define through outlined arrayCopyIndex" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var rev = [1, , 3].toReversed();
+        \\assert.sameValue(rev + "", "3,,1");
+        \\assert.sameValue(rev.hasOwnProperty("1"), true);
+        \\assert.sameValue(rev[1], undefined);
+        \\var with_h = [1, , 3].with(1, 8);
+        \\assert.sameValue(with_h + "", "1,8,3");
+        \\assert.sameValue([1, , 3].with(0, 9) + "", "9,,3");
+        \\var spliced = [1, , 3, 4].toSpliced(1, 1, 8, 9);
+        \\assert.sameValue(spliced + "", "1,8,9,3,4");
+        \\var kept = [1, , 3, 4].toSpliced(1, 2);
+        \\assert.sameValue(kept + "", "1,4");
+        \\assert.sameValue(kept.hasOwnProperty("1"), true);
+        \\assert.sameValue([3, 1, 2].toSorted() + "", "1,2,3");
+        \\var o = { 0: 7, 2: 9, length: 3 };
+        \\assert.sameValue(Array.prototype.toReversed.call(o) + "", "9,,7");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.fill generic set through one runtime tail" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

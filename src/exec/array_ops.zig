@@ -5166,10 +5166,7 @@ pub fn arrayByCopyCall(
         const out = try createArrayByCopyOutput(ctx.runtime, global, length);
         var index: usize = 0;
         while (index < length) : (index += 1) {
-            const from_key = try propertyAtomFromLengthIndex(ctx.runtime, length - index - 1);
-            defer from_key.deinit(ctx.runtime);
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, caller_function, caller_frame);
-            try defineArrayByCopyElement(ctx.runtime, out, index, item);
+            try arrayCopyIndex(ctx, output, global, receiver_object_value, out, length - index - 1, index, caller_function, caller_frame);
         }
         return out.value();
     }
@@ -5224,10 +5221,7 @@ pub fn arrayByCopyCall(
                 try defineArrayByCopyElement(ctx.runtime, out, index, replacement);
                 continue;
             }
-            const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-            defer key.deinit(ctx.runtime);
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-            try defineArrayByCopyElement(ctx.runtime, out, index, item);
+            try arrayCopyIndex(ctx, output, global, receiver_object_value, out, index, index, caller_function, caller_frame);
         }
         return out.value();
     }
@@ -5253,10 +5247,7 @@ pub fn arrayByCopyCall(
     const out = try createArrayByCopyOutput(ctx.runtime, global, new_length);
     var write_index: usize = 0;
     while (write_index < actual_start) : (write_index += 1) {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, write_index);
-        defer key.deinit(ctx.runtime);
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-        try defineArrayByCopyElement(ctx.runtime, out, write_index, item);
+        try arrayCopyIndex(ctx, output, global, receiver_object_value, out, write_index, write_index, caller_function, caller_frame);
     }
     if (args.len > 2) {
         for (args[2..], 0..) |item, item_index| {
@@ -5269,10 +5260,7 @@ pub fn arrayByCopyCall(
         read_index += 1;
         write_index += 1;
     }) {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, read_index);
-        defer key.deinit(ctx.runtime);
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-        try defineArrayByCopyElement(ctx.runtime, out, write_index, item);
+        try arrayCopyIndex(ctx, output, global, receiver_object_value, out, read_index, write_index, caller_function, caller_frame);
     }
     return out.value();
 }
@@ -5511,6 +5499,27 @@ pub fn typedArrayByCopyCoerceValue(
 pub fn defineArrayByCopyElement(rt: *core.JSRuntime, out: *core.Object, index: usize, value: core.JSValue) !void {
     const key = core.atom.atomFromUInt32(@intCast(index));
     try out.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+}
+
+/// Leftover Array.toReversed / with / toSpliced get+define (no has-check).
+/// Missing source indexes become `undefined` on the copy. Distinct from
+/// outlined `arrayCopyPresentIndex`, which skips missing indexes via
+/// createDataPropertyOrThrow.
+pub noinline fn arrayCopyIndex(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source_receiver: core.JSValue,
+    dest: *core.Object,
+    from_index: usize,
+    to_index: usize,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const key = try propertyAtomFromLengthIndex(ctx.runtime, from_index);
+    defer key.deinit(ctx.runtime);
+    const item = try getValueProperty(ctx, output, global, source_receiver, key.atom, caller_function, caller_frame);
+    try defineArrayByCopyElement(ctx.runtime, dest, to_index, item);
 }
 
 pub fn toIntegerOrInfinityForArrayByCopy(
