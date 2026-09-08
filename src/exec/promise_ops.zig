@@ -1952,19 +1952,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
 
-pub fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
-    var rooted_payload = payload;
-    var root_frame = core.runtime.rootValues(.{&rooted_payload});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const record = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
-    const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
-    try defineValueProperty(rt, record, core.atom.ids.status, status);
-    try defineValueProperty(rt, record, if (rejected) core.atom.ids.reason else core.atom.ids.value, rooted_payload);
-    return record.value();
-}
+pub const promiseSettlementRecord = call_mod.createPromiseSettlementRecord;
 
 test "promiseSettlementRecord roots direct symbol payload while defining status" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

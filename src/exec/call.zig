@@ -685,7 +685,10 @@ fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: co
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
-fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
+/// Leftover Promise.allSettled record mint. `promise_ops.promiseSettlementRecord`
+/// is the same walk (defineValueProperty == defineObjectProperty). Keep one
+/// outlined copy; do not fold other combinator callbacks.
+pub noinline fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
     var rooted_payload = payload;
     var root_frame = core.runtime.rootValues(.{&rooted_payload});
     root_frame.activate(rt);
