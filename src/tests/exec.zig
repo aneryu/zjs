@@ -10259,6 +10259,28 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1].values().next().value, 1);
+        \\assert.sameValue("ab"[Symbol.iterator]().next().value, "a");
+        \\function* g() { yield 7; }
+        \\var it = g();
+        \\assert.sameValue(it.next().value, 7);
+        \\assert.sameValue(it.return().done, true);
+        \\var sealed = Object.preventExtensions({
+        \\  next: function() { return { value: 9, done: false }; },
+        \\  return: function() { return { value: 8, done: true }; },
+        \\});
+        \\var wrap = Iterator.from(sealed);
+        \\assert.sameValue(wrap.next().value, 9);
+        \\assert.sameValue(wrap.return().done, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "createStringValue leftover noinline preserves empty flags and ascii strings" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

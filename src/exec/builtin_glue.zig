@@ -634,18 +634,36 @@ pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.obj
     try global.setCachedRealmValue(rt, slot, value);
 }
 
-pub fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
-    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+/// Leftover native data-method define. candidate91 still compiled two
+/// leftover copies (`defineNativeDataMethod` 387,
+/// `defineNativeDataMethodWithNativeId` 584, extra 387, 37.5% match).
+/// The leftover is nativeFunctionForGlobal + defineOwnProperty; comptime
+/// identity is only whether a native-builtin id is stamped. Take that id
+/// as `?i32` on one walk. Both public names stay as `inline` wrappers.
+pub inline fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
+    return defineNativeDataMethodMaybeId(rt, global, object, atom_id, length, null);
 }
 
 /// Same as `defineNativeDataMethod`, but stamps the function object with a
 /// native-builtin record id so calls dispatch through the integer record
 /// mechanism instead of the legacy name chain.
-pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32, native_builtin_id: i32) !void {
+pub inline fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32, native_builtin_id: i32) !void {
+    return defineNativeDataMethodMaybeId(rt, global, object, atom_id, length, native_builtin_id);
+}
+
+noinline fn defineNativeDataMethodMaybeId(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    object: *core.Object,
+    atom_id: core.Atom,
+    length: i32,
+    native_builtin_id: ?i32,
+) !void {
     const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);
+    if (native_builtin_id) |id| {
+        const method_object = property_ops.expectObject(method) catch return error.TypeError;
+        method_object.setNativeBuiltinIdAndRecord(rt, id);
+    }
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 
