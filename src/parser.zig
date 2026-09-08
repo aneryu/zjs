@@ -14183,13 +14183,16 @@ pub const parser_core = struct {
         s.is_static = saved.is_static;
     }
 
-    /// Leftover class field-initializer emit. candidate100 still compiles
+    /// Leftover class field-initializer emit. candidate100 still compiled
     /// two leftover copies (`emitInstanceFieldInitializer` 1116 /
-    /// `emitStaticFieldInitializer` 1326, extra 1116, 14.6% match). The
-    /// leftover is enter-child + receiver + optional init + define + drop.
-    /// Comptime identity is static vs instance (which child, `this` opcode,
-    /// computed-key arm). Take those at runtime. Private names stay `inline`
-    /// and pass only flags — no leftover setup at the wrapper (knives 94/98).
+    /// `emitStaticFieldInitializer` 1326). candidate102 still compiles a
+    /// third leftover (`emitInstanceComputedPublicFieldInitializer` 1016
+    /// beside this helper 1314, extra 1016, 5.3% match). The leftover is
+    /// enter-child + receiver + optional init + define + drop. Comptime
+    /// identity is static vs instance vs computed (which child, `this`
+    /// opcode, get-key / define_array_el arm). Take those at runtime.
+    /// Private names stay `inline` and pass only flags — no leftover setup
+    /// at the wrapper (knives 94/98).
     noinline fn emitFieldInitializer(
         s: *State,
         atom_id: Atom,
@@ -14216,7 +14219,7 @@ pub const parser_core = struct {
             // receiver supplied as this.
             try Emitter.op(s, opcode.op.push_this);
         }
-        if (is_private or (is_static and is_computed)) try s.emitScopeGetVar(atom_id);
+        if (is_private or is_computed) try s.emitScopeGetVar(atom_id);
         if (has_initializer) {
             try parseAssignExpr(s);
             if (is_private or is_computed)
@@ -14517,33 +14520,11 @@ pub const parser_core = struct {
         _ = try s.expectSemicolon();
     }
 
-    fn emitInstanceComputedPublicFieldInitializer(s: *State, key_atom: Atom, has_initializer: bool) Error!void {
-        const child_index = try ensureClassFieldsInitFunction(s);
-        const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
-        const init_fd = parent_fd.child_list[child_index];
-
-        const saved_ctx = try enterFieldInitFunction(s, init_fd);
-        errdefer leaveFieldInitFunction(s, saved_ctx);
-
-        // qjs js_parse_class: computed instance fields begin from the
-        // receiver supplied as this.
-        try Emitter.op(s, opcode.op.push_this);
-        try s.emitScopeGetVar(key_atom);
-        if (has_initializer) {
-            try parseAssignExpr(s);
-            try setObjectNameComputed(s);
-        } else {
-            // qjs js_parse_class: an uninitialized computed field receives
-            // undefined in the fields initializer child.
-            try Emitter.op(s, opcode.op.undefined);
-        }
-        // qjs js_parse_class: define the computed instance public field.
-        try Emitter.op(s, opcode.op.define_array_el);
-        // qjs js_parse_class: discard the computed field definition result.
-        try Emitter.op(s, opcode.op.drop);
-
-        leaveFieldInitFunction(s, saved_ctx);
+    /// Leftover instance-computed public field-initializer through the
+    /// already-shared emit walk. Knife 101 left instance `is_computed=false`;
+    /// the get-key arm is `is_private or is_computed`.
+    inline fn emitInstanceComputedPublicFieldInitializer(s: *State, key_atom: Atom, has_initializer: bool) Error!void {
+        return emitFieldInitializer(s, key_atom, false, true, has_initializer, false);
     }
 
     fn emitInstanceClassComputedElement(s: *State, kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {

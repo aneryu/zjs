@@ -10420,6 +10420,40 @@ test "class field initializer leftover runtime static preserves instance static 
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover instance-computed public field initializer through shared emit" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var key = "comp";
+        \\class C {
+        \\  [key];
+        \\  [key + "Init"] = 7;
+        \\  named = 1;
+        \\  static [key + "S"] = 8;
+        \\}
+        \\var o = new C();
+        \\assert.sameValue(o.comp, undefined);
+        \\assert.sameValue(o.compInit, 7);
+        \\assert.sameValue(o.named, 1);
+        \\assert.sameValue(C.compS, 8);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(o, "comp"), true);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(o, "compInit"), true);
+        \\class D {
+        \\  [key + "Name"] = class { static { this.seen = this.name; } };
+        \\}
+        \\assert.sameValue((new D()).compName.seen, "compName");
+        \\class E {
+        \\  ["x"] = 1;
+        \\  ["y"];
+        \\}
+        \\var e = new E();
+        \\assert.sameValue(e.x, 1);
+        \\assert.sameValue(e.y, undefined);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
