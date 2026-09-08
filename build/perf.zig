@@ -11,6 +11,19 @@ pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void {
     const install_zjs_profile = artifacts.install_zjs_profile;
     const internal_fast_mod = artifacts.internal_fast_mod;
 
+    const jetstream_mod = b.createModule(.{
+        .root_source_file = b.path("tools/perf/jetstream3/shell.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .omit_frame_pointer = true,
+        .imports = &.{.{ .name = "zjs", .module = internal_fast_mod }},
+    });
+    const jetstream_exe = b.addExecutable(.{ .name = "zjs-jetstream", .root_module = jetstream_mod });
+    forceLlvmBackendOnDebug(jetstream_exe);
+    const install_jetstream = b.addInstallArtifact(jetstream_exe, .{});
+    b.step("perf-jetstream-shell", "Build the diagnostic JetStream shell").dependOn(&install_jetstream.step);
+
     const run_perf_benchmark = b.addRunArtifact(zjs_exe);
     run_perf_benchmark.addArg("--perf-json");
     run_perf_benchmark.addArg("tests/perf/microbench.js");
