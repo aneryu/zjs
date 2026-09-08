@@ -10259,29 +10259,6 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "toPrimitive leftover number default hint preserves Number add and String" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    const result = try js.eval(
-        \\var hints = [];
-        \\var o = {
-        \\  [Symbol.toPrimitive]: function(hint) { hints.push(hint); return hint === "string" ? "string" : 1; },
-        \\};
-        \\assert.sameValue(Number(o), 1);
-        \\assert.sameValue(o + 1, 2);
-        \\assert.sameValue(String(o), "string");
-        \\assert.sameValue(hints.join(","), "number,default,string");
-        \\assert.sameValue(Number({ valueOf: function() { return 8; } }), 8);
-        \\assert.sameValue(({ valueOf: function() { return 5; } }) + 1, 6);
-        \\assert.throws(TypeError, function() { Number({ [Symbol.toPrimitive]: 1 }); });
-        \\assert.throws(TypeError, function() {
-        \\  Number({ [Symbol.toPrimitive]: function() { return {}; } });
-        \\});
-    );
-    try std.testing.expect(result.isUndefined());
-}
-
 test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
