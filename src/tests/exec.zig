@@ -10569,6 +10569,50 @@ test "leftover array-from array-like through one runtime destination" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover regexp exec test admission through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var hit = /a/.exec("ba");
+        \\assert.sameValue(hit[0], "a");
+        \\assert.sameValue(hit.index, 1);
+        \\assert.sameValue(hit.input, "ba");
+        \\assert.sameValue(/z/.exec("ba"), null);
+        \\assert.sameValue(/a/.test("ba"), true);
+        \\assert.sameValue(/z/.test("ba"), false);
+        \\assert.sameValue(/9/.exec(97)[0], "9");
+        \\assert.sameValue(/9/.test(97), true);
+        \\assert.sameValue(/a/.test(), false);
+        \\var execThrew = false;
+        \\try { RegExp.prototype.exec.call(1, "a"); } catch (e) { execThrew = e instanceof TypeError; }
+        \\assert.sameValue(execThrew, true);
+        \\var testThrew = false;
+        \\try { RegExp.prototype.test.call(1, "a"); } catch (e) { testThrew = e instanceof TypeError; }
+        \\assert.sameValue(testThrew, true);
+        \\var notRegexpThrew = false;
+        \\try { RegExp.prototype.exec.call({}, "a"); } catch (e) { notRegexpThrew = e instanceof TypeError; }
+        \\assert.sameValue(notRegexpThrew, true);
+        \\var customHits = 0;
+        \\var custom = {
+        \\    exec: function(s) { customHits++; return s === "hit" ? ["hit"] : null; },
+        \\};
+        \\assert.sameValue(RegExp.prototype.test.call(custom, "hit"), true);
+        \\assert.sameValue(RegExp.prototype.test.call(custom, "miss"), false);
+        \\assert.sameValue(customHits, 2);
+        \\var sticky = /a/y;
+        \\sticky.lastIndex = 1;
+        \\assert.sameValue(sticky.test("ba"), true);
+        \\assert.sameValue(sticky.lastIndex, 2);
+        \\var global = /a/g;
+        \\assert.sameValue(global.exec("aab")[0], "a");
+        \\assert.sameValue(global.lastIndex, 1);
+        \\assert.sameValue(global.exec("aab")[0], "a");
+        \\assert.sameValue(global.lastIndex, 2);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
