@@ -438,7 +438,7 @@ pub fn regExpCompile(
     return this_value;
 }
 
-pub inline fn regExpSpeciesConstructor(
+pub fn regExpSpeciesConstructor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -448,16 +448,23 @@ pub inline fn regExpSpeciesConstructor(
 ) !core.JSValue {
     // JS_SpeciesConstructor(ctx, rx, ctx->regexp_ctor): the default is the
     // realm intrinsic, not the observable and replaceable global binding.
-    return object_ops.speciesConstructorOrDefault(
-        ctx,
-        output,
-        global,
-        rx,
-        try regExpConstructorFromGlobal(ctx.runtime, global),
-        true,
-        caller_function,
-        caller_frame,
-    );
+    const default_constructor = try regExpConstructorFromGlobal(ctx.runtime, global);
+
+    const constructor_value = try getValueProperty(ctx, output, global, rx, core.atom.ids.constructor, caller_function, caller_frame);
+    if (constructor_value.isUndefined()) return default_constructor;
+    if (!constructor_value.isObject()) {
+        return error.TypeError;
+    }
+
+    const species_atom = (comptime core.atom.predefinedId("Symbol.species", .symbol)) orelse {
+        return error.TypeError;
+    };
+    const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
+    if (species_value.isUndefined() or species_value.isNull()) return default_constructor;
+    if (!(try isConstructorLike(ctx, species_value))) {
+        return error.TypeError;
+    }
+    return species_value;
 }
 
 pub fn regExpFlagsAreFullUnicode(rt: *core.JSRuntime, flags_string: core.JSValue) !bool {

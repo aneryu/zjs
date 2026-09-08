@@ -150,35 +150,6 @@ pub fn constructorPrototypeFromGlobalAtom(rt: *core.JSRuntime, global: *core.Obj
     return null;
 }
 
-/// Leftover Promise/RegExp species constructor. candidate97 still
-/// compiled two leftover copies (`promiseSpeciesConstructor` 456,
-/// `regExpSpeciesConstructor` 504, extra 456). The leftover is get
-/// constructor + get @@species + default fallback; comptime identity
-/// is the default constructor and whether species must be
-/// constructor-like. Take those at runtime. Does not fold
-/// `typedArraySpeciesConstructorForObject` (extra object default) or
-/// `arraySpeciesCreate`.
-pub noinline fn speciesConstructorOrDefault(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    default_constructor: core.JSValue,
-    require_constructor: bool,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const constructor_value = try getValueProperty(ctx, output, global, receiver, core.atom.ids.constructor, caller_function, caller_frame);
-    if (constructor_value.isUndefined()) return default_constructor;
-    if (!constructor_value.isObject()) return error.TypeError;
-
-    const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TypeError;
-    const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
-    if (species_value.isUndefined() or species_value.isNull()) return default_constructor;
-    if (require_constructor and !(try isConstructorLike(ctx, species_value))) return error.TypeError;
-    return species_value;
-}
-
 pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Function);
 }
