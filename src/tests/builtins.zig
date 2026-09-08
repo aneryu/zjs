@@ -5889,6 +5889,34 @@ test "URI decodeUriUnits walks latin1 and utf16 widths" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "ArrayBuffer construct args share maxByteLength walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var ab = new ArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(ab.byteLength, 8);
+        \\assert.sameValue(ab.maxByteLength, 16);
+        \\assert.sameValue(ab.resizable, true);
+        \\assert.sameValue(ab instanceof ArrayBuffer, true);
+        \\var sab = new SharedArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(sab.byteLength, 8);
+        \\assert.sameValue(sab.maxByteLength, 16);
+        \\assert.sameValue(sab.growable, true);
+        \\assert.sameValue(sab instanceof SharedArrayBuffer, true);
+        \\assert.sameValue(sab instanceof ArrayBuffer, false);
+        \\assert.sameValue(new ArrayBuffer(4).resizable, false);
+        \\var abRange = false;
+        \\try { new ArrayBuffer(8, { maxByteLength: 4 }); } catch (e) { abRange = e instanceof RangeError; }
+        \\assert.sameValue(abRange, true);
+        \\var sabRange = false;
+        \\try { new SharedArrayBuffer(8, { maxByteLength: 4 }); } catch (e) { sabRange = e instanceof RangeError; }
+        \\assert.sameValue(sabRange, true);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval builds frozen tagged template objects with raw arrays" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
