@@ -1759,65 +1759,42 @@ pub fn arrayReduceCall(
         return try arrayReduceRightSparseLarge(ctx, object, receiver_object_value, &callback_call, args.len >= 2, accumulator, length);
     }
 
-    if (from_right) {
-        var cursor = length;
-        while (cursor > 0) {
-            cursor -= 1;
-            const item = if (is_typed_array) blk: {
-                if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else if (object.isArray() and object.arrayElementStorageMode() == .dense and cursor <= std.math.maxInt(u32)) blk: {
-                // Dense own element: qjs js_array_reduce's fast-array arm
-                // (no HasProperty/Get through the generic property path).
-                if (object.getDenseArrayElementValue(@intCast(cursor))) |dense_item| break :blk dense_item;
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
-            if (!accumulator_set) {
-                accumulator = item;
-                accumulator_set = true;
-                continue;
-            }
-            const index_value = lengthIndexValue(cursor);
-            const next = try callback_call.call4(accumulator, item, index_value, receiver_object_value);
-            accumulator = next;
+    // Leftover reduce / reduceRight per-element walk. candidate117 still
+    // compiles both directions as leftover copies inside `arrayReduceCall`
+    // (6718). The leftover is typed/dense/generic present-element get +
+    // first-present accumulator + call4. Comptime identity is left-to-right
+    // vs right-to-left. Take direction at runtime (same shape as
+    // arrayIterationModeCall find/findLast). Does not fold
+    // arrayReduceRightSparseLarge, arrayCopyPresentIndex, or iteration-mode
+    // callbacks.
+    var step: usize = 0;
+    while (step < length) : (step += 1) {
+        const cursor = if (from_right) length - 1 - step else step;
+        const item = if (is_typed_array) blk: {
+            if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
+            break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
+        } else if (object.isArray() and object.arrayElementStorageMode() == .dense and cursor <= std.math.maxInt(u32)) blk: {
+            // Dense own element: qjs js_array_reduce's fast-array arm
+            // (no HasProperty/Get through the generic property path).
+            if (object.getDenseArrayElementValue(@intCast(cursor))) |dense_item| break :blk dense_item;
+            const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+            defer key.deinit(ctx.runtime);
+            if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+            break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        } else blk: {
+            const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+            defer key.deinit(ctx.runtime);
+            if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+            break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        };
+        if (!accumulator_set) {
+            accumulator = item;
+            accumulator_set = true;
+            continue;
         }
-    } else {
-        var cursor: usize = 0;
-        while (cursor < length) : (cursor += 1) {
-            const item = if (is_typed_array) blk: {
-                if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else if (object.isArray() and object.arrayElementStorageMode() == .dense and cursor <= std.math.maxInt(u32)) blk: {
-                // Dense own element: qjs js_array_reduce's fast-array arm
-                // (no HasProperty/Get through the generic property path).
-                if (object.getDenseArrayElementValue(@intCast(cursor))) |dense_item| break :blk dense_item;
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
-            if (!accumulator_set) {
-                accumulator = item;
-                accumulator_set = true;
-                continue;
-            }
-            const index_value = lengthIndexValue(cursor);
-            const next = try callback_call.call4(accumulator, item, index_value, receiver_object_value);
-            accumulator = next;
-        }
+        const index_value = lengthIndexValue(cursor);
+        const next = try callback_call.call4(accumulator, item, index_value, receiver_object_value);
+        accumulator = next;
     }
 
     if (!accumulator_set) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "empty array"));

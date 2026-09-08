@@ -10856,6 +10856,33 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.reduce direction through one runtime walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1, 2, 3].reduce(function(a, v) { return a + v; }, 0), 6);
+        \\assert.sameValue([1, 2, 3].reduceRight(function(a, v) { return a + v; }, 0), 6);
+        \\assert.sameValue([1, 2, 3].reduce(function(a, v) { return a + v; }), 6);
+        \\assert.sameValue([1, 2, 3].reduceRight(function(a, v) { return a - v; }), 0);
+        \\var seen = [];
+        \\assert.sameValue([1, , 3].reduce(function(a, v, i) { seen.push(i); return a + v; }, 0), 4);
+        \\assert.sameValue(seen + "", "0,2");
+        \\var seen_r = [];
+        \\assert.sameValue([1, , 3].reduceRight(function(a, v, i) { seen_r.push(i); return a + v; }, 0), 4);
+        \\assert.sameValue(seen_r + "", "2,0");
+        \\assert.sameValue([, ,].reduce(function(a, v) { return v; }, 7), 7);
+        \\var threw = false;
+        \\try { [, ,].reduce(function(a, v) { return v; }); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var threw_r = false;
+        \\try { [, ,].reduceRight(function(a, v) { return v; }); } catch (e) { threw_r = e instanceof TypeError; }
+        \\assert.sameValue(threw_r, true);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
