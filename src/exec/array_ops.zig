@@ -2308,13 +2308,19 @@ pub fn arraySliceCall(
         from += 1;
         to += 1;
     }) {
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-        defer from_key.deinit(ctx.runtime);
-        if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) continue;
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-        defer to_key.deinit(ctx.runtime);
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, to_key.atom, item, null, null);
+        try arrayCopyPresentIndex(
+            ctx,
+            output,
+            global,
+            receiver_object_value,
+            object,
+            from,
+            out_value,
+            out,
+            to,
+            null,
+            null,
+        );
     }
 
     return out_value;
@@ -2677,14 +2683,19 @@ pub fn arraySpliceCallImpl(
     const removed = try property_ops.expectObject(removed_value);
     var index: usize = 0;
     while (index < actual_delete_count) : (index += 1) {
-        const from = actual_start + index;
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-        defer from_key.deinit(ctx.runtime);
-        if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) continue;
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-        defer to_key.deinit(ctx.runtime);
-        try createDataPropertyOrThrow(ctx, output, global, removed_value, removed, to_key.atom, item, null, null);
+        try arrayCopyPresentIndex(
+            ctx,
+            output,
+            global,
+            receiver_object_value,
+            object,
+            actual_start + index,
+            removed_value,
+            removed,
+            index,
+            null,
+            null,
+        );
     }
     _ = try setValueProperty(ctx, output, global, removed_value, core.atom.ids.length, lengthIndexValue(actual_delete_count), null, null);
 
@@ -3449,7 +3460,7 @@ pub fn arrayUnshiftSparseLarge(
 /// Comptime identity is `to = from + insert_count` vs an explicit
 /// destination, plus unshift's `ensureSettable` before set. Take those
 /// at runtime. Helper stays outlined (knives 94/108). Does not fold
-/// slice/removed createDataPropertyOrThrow copies or reverse swap.
+/// skip-missing createDataPropertyOrThrow copies (knife 117) or reverse swap.
 pub noinline fn arrayMoveIndex(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3471,6 +3482,40 @@ pub noinline fn arrayMoveIndex(
     } else {
         try deleteValuePropertyOrThrow(ctx, output, global, receiver, object, to_key.atom);
     }
+}
+
+/// Leftover skip-missing CreateDataPropertyOrThrow copy onto a new array.
+/// candidate116 still compiles `arraySliceCall` (2954) and splice-removed
+/// as leftover copies of outlined `concatAppendValue` (1967, extra 1967,
+/// 4.2–5.7%). The leftover is propertyAtom pair + has + get +
+/// createDataPropertyOrThrow. Missing source indexes are skipped so holes
+/// stay holes. Dest/source indexes and caller frame are taken at runtime.
+/// Helper stays outlined (knives 94/108). `concatAppendValue` stays a real
+/// caller so its unique spread/single dispatch does not re-expand.
+/// Does not fold flatten (mapper + recursive flatten), arrayByCopy
+/// (no has-check), or in-place `arrayMoveIndex`.
+pub noinline fn arrayCopyPresentIndex(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source_receiver: core.JSValue,
+    source: *core.Object,
+    from_index: usize,
+    dest_value: core.JSValue,
+    dest: *core.Object,
+    to_index: usize,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index);
+    defer from_key.deinit(ctx.runtime);
+    if (!try hasValueProperty(ctx, output, global, source_receiver, source, from_key.atom, null, null)) {
+        return;
+    }
+    const item = try getValueProperty(ctx, output, global, source_receiver, from_key.atom, caller_function, caller_frame);
+    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to_index);
+    defer to_key.deinit(ctx.runtime);
+    try createDataPropertyOrThrow(ctx, output, global, dest_value, dest, to_key.atom, item, caller_function, caller_frame);
 }
 
 pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom) !void {

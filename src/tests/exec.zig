@@ -10825,6 +10825,37 @@ test "leftover Array.shift index-move through outlined arrayMoveIndex" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.slice present-index through outlined arrayCopyPresentIndex" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var a = [1, , 3, 4];
+        \\var sliced = a.slice(0, 3);
+        \\assert.sameValue(sliced + "", "1,,3");
+        \\assert.sameValue(sliced.hasOwnProperty("1"), false);
+        \\assert.sameValue(1 in sliced, false);
+        \\assert.sameValue(sliced[2], 3);
+        \\assert.sameValue([1, 2, 3].slice(1) + "", "2,3");
+        \\var shrink = [1, , 3, 4, 5];
+        \\var removed = shrink.splice(0, 3);
+        \\assert.sameValue(removed + "", "1,,3");
+        \\assert.sameValue(removed.hasOwnProperty("1"), false);
+        \\assert.sameValue(shrink + "", "4,5");
+        \\var grow = [1, 2, 3];
+        \\assert.sameValue(grow.splice(1, 0, 8, 9) + "", "");
+        \\assert.sameValue(grow + "", "1,8,9,2,3");
+        \\var c = [1, , 3].concat([, 5]);
+        \\assert.sameValue(c + "", "1,,3,,5");
+        \\assert.sameValue(c.hasOwnProperty("1"), false);
+        \\assert.sameValue(c.hasOwnProperty("3"), false);
+        \\var o = { 0: 9, length: 1 };
+        \\assert.sameValue([1].concat(o) + "", "1,[object Object]");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

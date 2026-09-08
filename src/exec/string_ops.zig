@@ -51,6 +51,7 @@ const arrayLastIndexStart = array_ops.arrayLastIndexStart;
 const arrayMethodTypedArrayLength = array_ops.arrayMethodTypedArrayLength;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
+const arrayCopyPresentIndex = array_ops.arrayCopyPresentIndex;
 const arraySpeciesCreate = array_ops.arraySpeciesCreate;
 const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
@@ -3108,14 +3109,19 @@ pub fn concatAppendValue(
             var index: usize = 0;
             while (index < length) : (index += 1) {
                 if (next_index.* > core.array.max_array_length) return error.RangeError;
-                const from_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-                defer from_key.deinit(ctx.runtime);
-                if (try hasValueProperty(ctx, output, global, value, object, from_key.atom, null, null)) {
-                    const item = try getValueProperty(ctx, output, global, value, from_key.atom, caller_function, caller_frame);
-                    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, next_index.*);
-                    defer to_key.deinit(ctx.runtime);
-                    try createDataPropertyOrThrow(ctx, output, global, out.value(), out, to_key.atom, item, caller_function, caller_frame);
-                }
+                try arrayCopyPresentIndex(
+                    ctx,
+                    output,
+                    global,
+                    value,
+                    object,
+                    index,
+                    out.value(),
+                    out,
+                    next_index.*,
+                    caller_function,
+                    caller_frame,
+                );
                 next_index.* += 1;
             }
             return;
