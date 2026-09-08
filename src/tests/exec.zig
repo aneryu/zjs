@@ -10856,6 +10856,32 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.fill generic set through one runtime tail" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var dense = [1, 2, 3, 4];
+        \\assert.sameValue(dense.fill(9, 1, 3) + "", "1,9,9,4");
+        \\var holey = new Array(5);
+        \\assert.sameValue(holey.fill(7, 2, 4) + "", ",,7,7,");
+        \\assert.sameValue(holey.hasOwnProperty("0"), false);
+        \\assert.sameValue(holey[2], 7);
+        \\var o = { 0: 1, 1: 2, length: 3 };
+        \\assert.sameValue(Array.prototype.fill.call(o, 8, 0, 2)[0], 8);
+        \\assert.sameValue(o[1], 8);
+        \\assert.sameValue(o[2], undefined);
+        \\var ta = new Uint8Array([1, 2, 3, 4]);
+        \\ta.fill(9, 1, 3);
+        \\assert.sameValue(ta[0], 1);
+        \\assert.sameValue(ta[1], 9);
+        \\assert.sameValue(ta[2], 9);
+        \\assert.sameValue(ta[3], 4);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.indexOf direction through one runtime walk" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

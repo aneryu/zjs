@@ -2892,6 +2892,11 @@ pub fn arrayFillCall(
     // dense extent. A holey array whose fill range begins past `array_count`
     // (e.g. `new Array(5).fill(7,2,4)`) would otherwise no-op the leading
     // appends; route those through the generic setValueProperty loop below.
+    // Leftover generic present-index set: propertyAtom + setValuePropertyOrThrow.
+    // The dense path may stop early; fall through to one generic tail instead of
+    // compiling a leftover copy of the same walk (knife 118/119 leftover-tail
+    // shape). Unique dense define stays separate.
+    var index = start;
     if (object.isArray() and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object) and start <= @as(usize, @intCast(object.fastArrayCount()))) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
@@ -2906,18 +2911,10 @@ pub fn arrayFillCall(
                 if (!try object.defineDenseArrayDataProperty(ctx.runtime, @intCast(dense_index), value)) break;
             }
             if (dense_index == final) return receiver_object_value;
-
-            var index = dense_index;
-            while (index < final) : (index += 1) {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-                defer key.deinit(ctx.runtime);
-                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, value, null, null);
-            }
-            return receiver_object_value;
+            index = dense_index;
         }
     }
 
-    var index = start;
     while (index < final) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
