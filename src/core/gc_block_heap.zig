@@ -306,6 +306,15 @@ pub fn canAllocCellSize(n: usize) bool {
     return space.classIndexForPayload(n) != null;
 }
 
+/// Comptime size-class pair for a cell payload that `canAllocCellSize`.
+/// Callers keep proving `n` at comptime; the outlined pop takes these
+/// values at runtime so leftover `n` copies share one walk.
+pub inline fn cellClassForPayload(comptime n: usize) struct { idx: usize, size: u32 } {
+    comptime std.debug.assert(canAllocCellSize(n));
+    const idx = space.classIndexForPayload(n).?;
+    return .{ .idx = idx, .size = @intCast(space.classes[idx]) };
+}
+
 /// Accounting twin of `allocCell`: map a requested physical cell payload to
 /// the block class that serves it, then exclude the metadata prefix. This pure
 /// calculation is the shared credit/debit authority; tests pin it against the
@@ -1112,15 +1121,6 @@ pub const Heap = struct {
         const class_idx = space.classIndexForPayload(n) orelse return null;
         const cell_size: u32 = @intCast(space.classes[class_idx]);
         return try self.allocSmallCell(class_idx, cell_size);
-    }
-
-    /// Comptime size-class pair for a cell payload that `canAllocCellSize`.
-    /// Callers keep proving `n` at comptime; the outlined pop takes these
-    /// values at runtime so leftover `n` copies share one walk.
-    pub inline fn cellClassForPayload(comptime n: usize) struct { idx: usize, size: u32 } {
-        comptime std.debug.assert(canAllocCellSize(n));
-        const idx = space.classIndexForPayload(n).?;
-        return .{ .idx = idx, .size = @intCast(space.classes[idx]) };
     }
 
     /// Fixed-size twin used by typed Object allocation. The caller's type
