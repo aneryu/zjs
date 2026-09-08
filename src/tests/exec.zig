@@ -10355,6 +10355,43 @@ test "data view extras leftover optional species preserves accessors and omits s
     try std.testing.expect(result.isUndefined());
 }
 
+test "species constructor leftover optional constructor-like preserves Promise and RegExp" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\class MarkedPromise extends Promise {}
+        \\var marked = MarkedPromise.resolve(1).then(function (value) { return value + 1; });
+        \\assert.sameValue(marked instanceof MarkedPromise, true);
+        \\var flagged = Promise.resolve(2);
+        \\function Species(executor) {
+        \\    var promise = new Promise(executor);
+        \\    promise.flagged = true;
+        \\    return promise;
+        \\}
+        \\flagged.constructor = { [Symbol.species]: Species };
+        \\var thenned = flagged.then(function (value) { return value; });
+        \\assert.sameValue(thenned.flagged, true);
+        \\var missingCtor = Promise.resolve(3);
+        \\Object.defineProperty(missingCtor, "constructor", { value: undefined, configurable: true });
+        \\assert.sameValue(missingCtor.then(function (value) { return value; }) instanceof Promise, true);
+        \\var badCtor = Promise.resolve(4);
+        \\badCtor.constructor = 1;
+        \\assert.throws(TypeError, function () { badCtor.then(function (value) { return value; }); });
+        \\function Splitter() { this.lastIndex = 0; this.exec = function () { return null; }; }
+        \\var rx = /,/;
+        \\rx.constructor = { [Symbol.species]: Splitter };
+        \\assert.sameValue("a,b".split(rx).join("|"), "a,b");
+        \\var notCtor = /,/;
+        \\notCtor.constructor = { [Symbol.species]: 1 };
+        \\assert.throws(TypeError, function () { "a,b".split(notCtor); });
+        \\var defaultRx = /,/;
+        \\Object.defineProperty(defaultRx, "constructor", { value: undefined, configurable: true });
+        \\assert.sameValue(defaultRx[Symbol.split]("a,b").join("|"), "a|b");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

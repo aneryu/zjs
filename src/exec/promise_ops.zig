@@ -2150,7 +2150,7 @@ pub fn promiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !co
     return try global.getProperty(promise_key);
 }
 
-pub fn promiseSpeciesConstructor(
+pub inline fn promiseSpeciesConstructor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2158,17 +2158,16 @@ pub fn promiseSpeciesConstructor(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const default_constructor = try promiseDefaultConstructor(ctx, global);
-
-    const constructor_value = try getValueProperty(ctx, output, global, receiver, core.atom.ids.constructor, caller_function, caller_frame);
-    if (constructor_value.isUndefined()) return default_constructor;
-    if (!constructor_value.isObject()) return error.TypeError;
-
-    const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TypeError;
-    const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
-    if (species_value.isUndefined() or species_value.isNull()) return default_constructor;
-
-    return species_value;
+    return object_ops.speciesConstructorOrDefault(
+        ctx,
+        output,
+        global,
+        receiver,
+        try promiseDefaultConstructor(ctx, global),
+        false,
+        caller_function,
+        caller_frame,
+    );
 }
 
 pub fn promiseConstructorRealmGlobal(constructor_value: core.JSValue, fallback_global: *core.Object) *core.Object {
