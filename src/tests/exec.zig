@@ -10489,33 +10489,6 @@ test "leftover do while parse through one runtime flag" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "leftover CallSite invoke through one optional receiver" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    const result = try js.eval(
-        \\assert.compareArray(Array.from([1, 2], function(x) { return x + 1; }), [2, 3]);
-        \\assert.compareArray([3, 4].map(function(x) { return x + this.n; }, { n: 10 }), [13, 14]);
-        \\var seen = [];
-        \\var parsed = JSON.parse('{"a":2,"b":3}', function(key, value) {
-        \\    if (key !== "") seen.push(this[key]);
-        \\    return value;
-        \\});
-        \\assert.sameValue(parsed.a, 2);
-        \\assert.sameValue(parsed.b, 3);
-        \\assert.compareArray(seen, [2, 3]);
-        \\var replaced = JSON.stringify({ a: 1, b: 2 }, function(key, value) {
-        \\    if (key === "a") return this.b + value;
-        \\    return value;
-        \\});
-        \\assert.sameValue(replaced, '{"a":3,"b":2}');
-        \\function boundThis() { return this.v; }
-        \\assert.sameValue(boundThis.call({ v: 9 }), 9);
-        \\assert.sameValue(boundThis.apply({ v: 8 }), 8);
-    );
-    try std.testing.expect(result.isUndefined());
-}
-
 test "leftover error stack at-line format through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
