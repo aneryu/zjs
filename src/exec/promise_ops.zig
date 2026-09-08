@@ -128,9 +128,7 @@ pub const atomicsWaitAsyncPromise = atomics_ops.atomicsWaitAsyncPromise;
 
 pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     if (global.cachedPromiseProto(rt)) |prototype| return prototype;
-    const promise_atom = core.atom.ids.Promise;
-    const promise_constructor = global.getOwnDataObjectBorrowed(promise_atom) orelse return null;
-    return promise_constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
+    return object_ops.constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Promise);
 }
 
 pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {

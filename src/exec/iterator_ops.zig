@@ -1247,8 +1247,7 @@ pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
         if (realm.classPrototypeObject(core.class.ids.iterator)) |proto| return proto;
     }
     const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return null;
-    const iterator = global.getOwnDataObjectBorrowed(iterator_key) orelse return null;
-    return iterator.getOwnDataObjectBorrowed(core.atom.ids.prototype);
+    return object_ops.constructorPrototypeFromGlobalAtom(rt, global, iterator_key);
 }
 
 pub fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
