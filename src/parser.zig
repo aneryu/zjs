@@ -2177,13 +2177,11 @@ pub const parser_core = struct {
             var actual_buffer: [16]u8 = undefined;
             const actual_name = self.currentTokenKindLabel(&actual_buffer);
             var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
-            const prefix = "unexpected ";
-            const needed = prefix.len + actual_name.len;
-            const message = if (needed > message_buffer.len) "UnexpectedToken" else blk: {
-                @memcpy(message_buffer[0..prefix.len], prefix);
-                @memcpy(message_buffer[prefix.len..][0..actual_name.len], actual_name);
-                break :blk message_buffer[0..needed];
-            };
+            const message = std.fmt.bufPrint(
+                &message_buffer,
+                "unexpected {s}",
+                .{actual_name},
+            ) catch "UnexpectedToken";
             self.setPendingDiagnostic(error.UnexpectedToken, self.currentDiagnosticPosition(), message);
             return error.UnexpectedToken;
         }
