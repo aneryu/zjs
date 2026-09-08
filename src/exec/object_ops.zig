@@ -4615,50 +4615,90 @@ pub fn proxyAwareExistsOwnProperty(
     return (try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, caller_function, caller_frame)) != null;
 }
 
-pub fn proxyAwareIsExtensible(
+const ProxyExtensibleKind = enum { is_extensible, prevent };
+
+/// Leftover proxy isExtensible/preventExtensions trap walk. candidate110
+/// still compiles `proxyAwareIsExtensible` (779) /
+/// `proxyAwarePreventExtensions` (756, extra 756, 14.9% match). The
+/// leftover is target+handler + get trap + callable check +
+/// call(`[target]`). Comptime identity is missing-proxy /
+/// missing-trap recurse / result check. Take that at runtime.
+/// Public names stay `inline` and pass only the kind. Explicit
+/// `HostError` so Prevent's IsExtensible check and missing-trap
+/// recurse do not form an inferred-error-set cycle (knives 109/110).
+/// Does not fold SetPrototypeOf. Does not retry leftover [[Set]] trap
+/// (knife 110).
+noinline fn proxyAwareExtensibleOp(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     object: *core.Object,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
-    if (object.proxyTarget() == null) return object.isExtensible();
+    kind: ProxyExtensibleKind,
+) HostError!bool {
+    switch (kind) {
+        .is_extensible => {
+            if (object.proxyTarget() == null) return object.isExtensible();
+        },
+        .prevent => {
+            if (object.proxyTarget() == null) {
+                object.preventExtensions();
+                return true;
+            }
+        },
+    }
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = core.atom.ids.isExtensible;
+    const trap_atom = switch (kind) {
+        .is_extensible => core.atom.ids.isExtensible,
+        .prevent => core.atom.ids.preventExtensions,
+    };
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) {
+        return proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, kind);
+    }
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    const extensible = valueTruthy(result);
-    if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
-    return extensible;
+    switch (kind) {
+        .is_extensible => {
+            const extensible = valueTruthy(result);
+            if (extensible != try proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, .is_extensible)) {
+                return error.TypeError;
+            }
+            return extensible;
+        },
+        .prevent => {
+            if (!valueTruthy(result)) return false;
+            if (try proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, .is_extensible)) {
+                return error.TypeError;
+            }
+            return true;
+        },
+    }
 }
 
-pub fn proxyAwarePreventExtensions(
+pub inline fn proxyAwareIsExtensible(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     object: *core.Object,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
-    const target_value = object.proxyTarget() orelse {
-        object.preventExtensions();
-        return true;
-    };
-    const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = core.atom.ids.preventExtensions;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return proxyAwarePreventExtensions(ctx, output, global, target, caller_function, caller_frame);
-    if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    if (!valueTruthy(result)) return false;
-    if (try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
-    return true;
+) HostError!bool {
+    return proxyAwareExtensibleOp(ctx, output, global, object, caller_function, caller_frame, .is_extensible);
+}
+
+pub inline fn proxyAwarePreventExtensions(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!bool {
+    return proxyAwareExtensibleOp(ctx, output, global, object, caller_function, caller_frame, .prevent);
 }
 
 pub fn proxyAwareSetPrototypeOf(

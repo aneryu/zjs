@@ -10598,6 +10598,56 @@ test "leftover proxy set trap through one runtime kind" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover proxy extensible trap through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\"use strict";
+        \\var seen = [];
+        \\var p = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("is"); return Object.isExtensible(t); }
+        \\});
+        \\assert.sameValue(Object.isExtensible(p), true);
+        \\assert.sameValue(seen + "", "is");
+        \\var preventTarget = {};
+        \\var preventProxy = new Proxy(preventTarget, {
+        \\  preventExtensions: function (t) { seen.push("prevent"); Object.preventExtensions(t); return true; }
+        \\});
+        \\Object.preventExtensions(preventProxy);
+        \\assert.sameValue(Object.isExtensible(preventTarget), false);
+        \\assert.sameValue(Object.isExtensible(preventProxy), false);
+        \\assert.sameValue(seen + "", "is,prevent");
+        \\var inner = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("inner"); return Object.isExtensible(t); }
+        \\});
+        \\var outer = new Proxy(inner, {});
+        \\assert.sameValue(Object.isExtensible(outer), true);
+        \\assert.sameValue(seen + "", "is,prevent,inner");
+        \\Object.preventExtensions(outer);
+        \\assert.sameValue(Object.isExtensible(outer), false);
+        \\var rejected = new Proxy({}, { preventExtensions: function () { return false; } });
+        \\assert.sameValue(Reflect.preventExtensions(rejected), false);
+        \\var threw = false;
+        \\try { Object.preventExtensions(rejected); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var sealed = Object.preventExtensions({});
+        \\var mismatch = new Proxy(sealed, { isExtensible: function () { return true; } });
+        \\var threw2 = false;
+        \\try { Object.isExtensible(mismatch); } catch (e) { threw2 = e instanceof TypeError; }
+        \\assert.sameValue(threw2, true);
+        \\var mismatchPrevent = new Proxy({}, { preventExtensions: function () { return true; } });
+        \\var threw3 = false;
+        \\try { Object.preventExtensions(mismatchPrevent); } catch (e) { threw3 = e instanceof TypeError; }
+        \\assert.sameValue(threw3, true);
+        \\var plain = {};
+        \\assert.sameValue(Object.isExtensible(plain), true);
+        \\Object.preventExtensions(plain);
+        \\assert.sameValue(Object.isExtensible(plain), false);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
