@@ -6937,13 +6937,11 @@ pub const parser_core = struct {
             try s.advance();
         } else if (k == tok.TOK_NUMBER) {
             const is_bigint = s.token.payload.num.is_bigint;
+            var number_buf: [64]u8 = undefined;
             const text = if (is_bigint)
                 try formatBigIntPropertyName(s, s.token.payload.num.bigint_text)
-            else blk: {
-                var buf: [32]u8 = undefined;
-                break :blk formatFiniteNumber(&buf, s.token.payload.num.value) catch
-                    return Error.InvalidNumberLiteral;
-            };
+            else
+                core.value_format.formatFiniteNumberAssumeCapacity(&number_buf, s.token.payload.num.value);
             defer if (is_bigint) s.function.memory.allocator.free(text);
             atom_id = try s.function.atoms.internString(text);
             retained = true;
@@ -7208,14 +7206,6 @@ pub const parser_core = struct {
 
     fn atomNameIsPrivate(s: *State, atom_id: Atom) bool {
         return s.function.atoms.kind(atom_id) == .private;
-    }
-
-    fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
-        const abs_value = @abs(value);
-        if (abs_value != 0 and (abs_value < 0.000001 or abs_value >= 1000000000000000000000.0)) {
-            return std.fmt.bufPrint(buffer, "{e}", .{value});
-        }
-        return std.fmt.bufPrint(buffer, "{d}", .{value});
     }
 
     fn formatBigIntPropertyName(s: *State, text: []const u8) Error![]const u8 {
