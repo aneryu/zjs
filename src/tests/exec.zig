@@ -10856,6 +10856,34 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover integer binary through live bitwise and number arms" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(2 + 3, 5);
+        \\assert.sameValue(8 - 3, 5);
+        \\assert.sameValue(4 * 5, 20);
+        \\assert.sameValue(10 / 2, 5);
+        \\assert.sameValue(10 % 3, 1);
+        \\assert.sameValue(2 ** 3, 8);
+        \\assert.sameValue(1.5 + 2.25, 3.75);
+        \\assert.sameValue(5 & 3, 1);
+        \\assert.sameValue(5 | 2, 7);
+        \\assert.sameValue(5 ^ 1, 4);
+        \\assert.sameValue(8 << 1, 16);
+        \\assert.sameValue(8 >> 1, 4);
+        \\assert.sameValue(8 >>> 1, 4);
+        \\assert.sameValue("2" * 3, 6);
+        \\assert.sameValue("5" & 3, 1);
+        \\assert.sameValue(1n + 2n, 3n);
+        \\assert.sameValue("a" + "b", "ab");
+        \\assert.sameValue(1 + "2", "12");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.map generic get through one runtime tail" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
