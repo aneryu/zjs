@@ -1114,14 +1114,22 @@ pub const Heap = struct {
         return try self.allocSmallCell(class_idx, cell_size);
     }
 
+    /// Comptime size-class pair for a cell payload that `canAllocCellSize`.
+    /// Callers keep proving `n` at comptime; the outlined pop takes these
+    /// values at runtime so leftover `n` copies share one walk.
+    pub inline fn cellClassForPayload(comptime n: usize) struct { idx: usize, size: u32 } {
+        comptime std.debug.assert(canAllocCellSize(n));
+        const idx = space.classIndexForPayload(n).?;
+        return .{ .idx = idx, .size = @intCast(space.classes[idx]) };
+    }
+
     /// Fixed-size twin used by typed Object allocation. The caller's type
     /// proves the payload at comptime, so runtime size classification would be
     /// duplicate work on every cell. Keep its entry on an instruction-cache
     /// line: the active-block pop is the allocation front end for every Object.
-    pub noinline fn allocCellFixedPtr(self: *Heap, comptime n: usize) align(64) ?[*]u8 {
-        comptime std.debug.assert(canAllocCellSize(n));
-        const class_idx = comptime space.classIndexForPayload(n).?;
-        const cell_size: u32 = comptime @intCast(space.classes[class_idx]);
+    /// `class_idx` / `cell_size` are the already-proven class, not a second
+    /// `classIndexForPayload` walk (do not fold this through `allocCell`).
+    pub noinline fn allocCellFixedPtr(self: *Heap, class_idx: usize, cell_size: u32) align(64) ?[*]u8 {
         return self.allocSmallCell(class_idx, cell_size) catch return null;
     }
 

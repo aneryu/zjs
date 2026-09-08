@@ -1527,7 +1527,8 @@ pub const MemoryAccount = struct {
                         try self.checkAllocation(prospective_accounted);
                         if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
                         if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
-                        if (heap.allocCellFixedPtr(gc_prefix_size + bytes)) |cell| {
+                        const cell_class = comptime gc_block_heap.cellClassForPayload(gc_prefix_size + bytes);
+                        if (heap.allocCellFixedPtr(cell_class.idx, cell_class.size)) |cell| {
                             initGcPrefixBlockCell(T, cell);
                             self.creditAlloc(prospective_accounted, null);
                             if (comptime block_tracking_enabled) {

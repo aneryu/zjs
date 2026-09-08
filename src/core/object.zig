@@ -582,8 +582,8 @@ pub const Object = extern struct {
 
     /// `allocCell` for the constructors whose class is a literal. The tail is
     /// then a compile-time constant, which is what keeps the block heap's
-    /// specialized `allocCellFixedPtr` route (and the comptime slab class)
-    /// alive after ③ turned the cell size into a function of `class_id`.
+    /// `allocCellFixedPtr` route (and the comptime slab class) alive after ③
+    /// turned the cell size into a function of `class_id`.
     inline fn allocCellConst(
         rt: *JSRuntime,
         comptime class_id: class.ClassId,
