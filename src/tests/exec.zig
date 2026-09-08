@@ -10327,6 +10327,34 @@ test "buffer constructor extras leftover runtime tables preserve ArrayBuffer Sha
     try std.testing.expect(result.isUndefined());
 }
 
+test "data view extras leftover optional species preserves accessors and omits species" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView, Symbol.species), undefined);
+        \\assert.sameValue(ArrayBuffer[Symbol.species], ArrayBuffer);
+        \\assert.sameValue(SharedArrayBuffer[Symbol.species], SharedArrayBuffer);
+        \\assert.sameValue(DataView.prototype[Symbol.toStringTag], "DataView");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "buffer").get.name, "get buffer");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get.name, "get byteLength");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset").get.name, "get byteOffset");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "resizable"), undefined);
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "growable"), undefined);
+        \\var dv = new DataView(new ArrayBuffer(4), 1, 2);
+        \\assert.sameValue(dv.byteLength, 2);
+        \\assert.sameValue(dv.byteOffset, 1);
+        \\assert.sameValue(dv.buffer.byteLength, 4);
+        \\dv.setUint8(0, 0xab);
+        \\assert.sameValue(dv.getUint8(0), 0xab);
+        \\assert.sameValue(dv.getInt8(1), 0);
+        \\assert.throws(TypeError, function() {
+        \\    Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get.call({});
+        \\});
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
