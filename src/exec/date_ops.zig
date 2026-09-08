@@ -22,6 +22,7 @@ const exception_ops = @import("exception_ops.zig");
 const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
+const number_format = @import("../libs/number_format.zig");
 
 const HostError = exceptions.HostError;
 
@@ -1168,14 +1169,27 @@ fn monthName(mon: usize) []const u8 {
     return month_names[mon * 3 ..][0..3];
 }
 
+/// Zero-pad a non-negative decimal through already-outlined `formatInt64`.
+/// Kept `inline` so leftover date `Writer.print` can leave without a new
+/// outlined min-width / HMS helper (knife 72).
+inline fn writePaddedDec(w: *std.Io.Writer, value: u64, min_width: u8) !void {
+    var buf: [20]u8 = undefined;
+    const digits = number_format.formatInt64(&buf, @as(i64, @intCast(value)));
+    if (digits.len < min_width) {
+        try w.writeAll("000000"[0 .. min_width - digits.len]);
+    }
+    try w.writeAll(digits);
+}
+
 /// snprintf "%0*d" with width 4 + (y < 0): sign counts toward the width.
 /// (unsigned operand: Zig 0.16 std.fmt zero-fill prints an explicit '+' for
 /// signed integers.)
 fn writeYearPadded4(w: *std.Io.Writer, y: i64) !void {
     if (y < 0) {
-        try w.print("-{d:0>4}", .{@as(u64, @intCast(-y))});
+        try w.writeByte('-');
+        try writePaddedDec(w, @as(u64, @intCast(-y)), 4);
     } else {
-        try w.print("{d:0>4}", .{@as(u64, @intCast(y))});
+        try writePaddedDec(w, @as(u64, @intCast(y)), 4);
     }
 }
 
@@ -1236,27 +1250,46 @@ fn writeDateString(
     if (part & 1 != 0) { // date part
         switch (fmt) {
             0 => {
-                try w.print("{s}, {d:0>2} {s} ", .{ dayName(wd), d, monthName(mon) });
+                try w.writeAll(dayName(wd));
+                try w.writeAll(", ");
+                try writePaddedDec(w, d, 2);
+                try w.writeByte(' ');
+                try w.writeAll(monthName(mon));
+                try w.writeByte(' ');
                 try writeYearPadded4(w, y);
                 try w.writeByte(' ');
             },
             1 => {
-                try w.print("{s} {s} {d:0>2} ", .{ dayName(wd), monthName(mon), d });
+                try w.writeAll(dayName(wd));
+                try w.writeByte(' ');
+                try w.writeAll(monthName(mon));
+                try w.writeByte(' ');
+                try writePaddedDec(w, d, 2);
+                try w.writeByte(' ');
                 try writeYearPadded4(w, y);
                 if (part == 3) try w.writeByte(' ');
             },
             2 => {
                 if (y >= 0 and y <= 9999) {
-                    try w.print("{d:0>4}", .{@as(u64, @intCast(y))});
+                    try writePaddedDec(w, @as(u64, @intCast(y)), 4);
                 } else if (y < 0) {
-                    try w.print("-{d:0>6}", .{@as(u64, @intCast(-y))});
+                    try w.writeByte('-');
+                    try writePaddedDec(w, @as(u64, @intCast(-y)), 6);
                 } else {
-                    try w.print("+{d:0>6}", .{@as(u64, @intCast(y))});
+                    try w.writeByte('+');
+                    try writePaddedDec(w, @as(u64, @intCast(y)), 6);
                 }
-                try w.print("-{d:0>2}-{d:0>2}T", .{ mon + 1, d });
+                try w.writeByte('-');
+                try writePaddedDec(w, mon + 1, 2);
+                try w.writeByte('-');
+                try writePaddedDec(w, d, 2);
+                try w.writeByte('T');
             },
             3 => {
-                try w.print("{d:0>2}/{d:0>2}/", .{ mon + 1, d });
+                try writePaddedDec(w, mon + 1, 2);
+                try w.writeByte('/');
+                try writePaddedDec(w, d, 2);
+                try w.writeByte('/');
                 try writeYearPadded4(w, y);
                 if (part == 3) try w.writeAll(", ");
             },
@@ -1265,21 +1298,51 @@ fn writeDateString(
     }
     if (part & 2 != 0) { // time part
         switch (fmt) {
-            0 => try w.print("{d:0>2}:{d:0>2}:{d:0>2} GMT", .{ h, m, s }),
+            0 => {
+                try writePaddedDec(w, h, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, m, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, s, 2);
+                try w.writeAll(" GMT");
+            },
             1 => {
-                try w.print("{d:0>2}:{d:0>2}:{d:0>2} GMT", .{ h, m, s });
+                try writePaddedDec(w, h, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, m, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, s, 2);
+                try w.writeAll(" GMT");
                 if (tz < 0) {
                     try w.writeByte('-');
                     tz = -tz;
                 } else {
                     try w.writeByte('+');
                 }
-                // tz is >= 0, can use remainders
                 const tzu: u32 = @intCast(tz);
-                try w.print("{d:0>2}{d:0>2}", .{ tzu / 60, tzu % 60 });
+                try writePaddedDec(w, tzu / 60, 2);
+                try writePaddedDec(w, tzu % 60, 2);
             },
-            2 => try w.print("{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ h, m, s, msec }),
-            3 => try w.print("{d:0>2}:{d:0>2}:{d:0>2} {c}M", .{ @rem(h + 11, 12) + 1, m, s, @as(u8, if (h < 12) 'A' else 'P') }),
+            2 => {
+                try writePaddedDec(w, h, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, m, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, s, 2);
+                try w.writeByte('.');
+                try writePaddedDec(w, msec, 3);
+                try w.writeByte('Z');
+            },
+            3 => {
+                try writePaddedDec(w, @rem(h + 11, 12) + 1, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, m, 2);
+                try w.writeByte(':');
+                try writePaddedDec(w, s, 2);
+                try w.writeByte(' ');
+                try w.writeByte(if (h < 12) 'A' else 'P');
+                try w.writeByte('M');
+            },
             else => {},
         }
     }
