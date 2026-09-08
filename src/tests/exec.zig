@@ -10259,6 +10259,43 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "buffer constructor extras leftover runtime tables preserve ArrayBuffer SharedArrayBuffer and DataView" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(ArrayBuffer[Symbol.species], ArrayBuffer);
+        \\assert.sameValue(SharedArrayBuffer[Symbol.species], SharedArrayBuffer);
+        \\assert.sameValue(ArrayBuffer.prototype[Symbol.toStringTag], "ArrayBuffer");
+        \\assert.sameValue(SharedArrayBuffer.prototype[Symbol.toStringTag], "SharedArrayBuffer");
+        \\assert.sameValue(DataView.prototype[Symbol.toStringTag], "DataView");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get.name, "get byteLength");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "growable").get.name, "get growable");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "growable"), undefined);
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "resizable"), undefined);
+        \\var ab = new ArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(ab.byteLength, 8);
+        \\assert.sameValue(ab.maxByteLength, 16);
+        \\assert.sameValue(ab.resizable, true);
+        \\assert.sameValue(ab.detached, false);
+        \\assert.sameValue(ab.immutable, false);
+        \\ab.resize(12);
+        \\assert.sameValue(ab.byteLength, 12);
+        \\assert.sameValue(ab.slice(0, 4).byteLength, 4);
+        \\var sab = new SharedArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(sab.byteLength, 8);
+        \\assert.sameValue(sab.maxByteLength, 16);
+        \\assert.sameValue(sab.growable, true);
+        \\sab.grow(12);
+        \\assert.sameValue(sab.byteLength, 12);
+        \\var dv = new DataView(new ArrayBuffer(4), 1, 2);
+        \\assert.sameValue(dv.byteLength, 2);
+        \\assert.sameValue(dv.byteOffset, 1);
+        \\assert.sameValue(dv.buffer.byteLength, 4);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

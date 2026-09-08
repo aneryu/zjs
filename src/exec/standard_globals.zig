@@ -2731,63 +2731,95 @@ fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor:
     );
 }
 
-fn installArrayBufferExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 1);
-    try defineLazyNativeGetterAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), accessor_flags);
+const BufferCtorAccessor = struct {
+    property_name: []const u8,
+    getter_name: []const u8,
+};
 
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    const accessors = [_]struct {
-        property_name: []const u8,
-        getter_name: []const u8,
-    }{
-        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
-        .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength" },
-        .{ .property_name = "resizable", .getter_name = "get resizable" },
-        .{ .property_name = "detached", .getter_name = "get detached" },
-        .{ .property_name = "immutable", .getter_name = "get immutable" },
-    };
-    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + 1);
-    for (accessors) |accessor| {
-        const native_id = if (buffer_ops.arrayBufferAccessorMethodId(accessor.property_name)) |id|
-            core.function.nativeBuiltinId(.buffer, id)
-        else
-            0;
-        const atom = try temporaryStringAtom(rt, accessor.property_name);
-        defer freeTemporaryStringAtom(rt, atom);
-        try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, native_id, accessor_flags, global);
-    }
+const array_buffer_ctor_accessors = [_]BufferCtorAccessor{
+    .{ .property_name = "byteLength", .getter_name = "get byteLength" },
+    .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength" },
+    .{ .property_name = "resizable", .getter_name = "get resizable" },
+    .{ .property_name = "detached", .getter_name = "get detached" },
+    .{ .property_name = "immutable", .getter_name = "get immutable" },
+};
 
-    try defineNativeMethodsAssumingNewWithRealm(rt, proto, &buffer_prototype, global);
-    try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "ArrayBuffer", Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
+const shared_array_buffer_ctor_accessors = [_]BufferCtorAccessor{
+    .{ .property_name = "byteLength", .getter_name = "get byteLength" },
+    .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength" },
+    .{ .property_name = "growable", .getter_name = "get growable" },
+};
+
+inline fn installArrayBufferExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+    return installBufferConstructorExtras(
+        rt,
+        global,
+        ctor,
+        &array_buffer_ctor_accessors,
+        &buffer_prototype,
+        "ArrayBuffer",
+        false,
+        false,
+    );
 }
 
-fn installSharedArrayBufferExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+inline fn installSharedArrayBufferExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+    return installBufferConstructorExtras(
+        rt,
+        global,
+        ctor,
+        &shared_array_buffer_ctor_accessors,
+        &shared_buffer_prototype,
+        "SharedArrayBuffer",
+        true,
+        true,
+    );
+}
+
+/// Leftover ArrayBuffer/SharedArrayBuffer extras. candidate93 still
+/// compiled two leftover copies (`installArrayBufferExtras` 1027,
+/// `installSharedArrayBufferExtras` 1647, extra 1027). The leftover is
+/// species getter + proto accessor loop + methods + toStringTag;
+/// comptime identity is the tables, tag, and atom/id strategy. Take
+/// those at runtime. Does not fold `installDataViewExtras` (no species).
+noinline fn installBufferConstructorExtras(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    ctor: *core.Object,
+    accessors: []const BufferCtorAccessor,
+    methods: []const Method,
+    tag: []const u8,
+    predefined_atoms: bool,
+    shared_ids: bool,
+) !void {
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 1);
     try defineLazyNativeGetterAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), accessor_flags);
 
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    const accessors = [_]struct {
-        property_name: []const u8,
-        getter_name: []const u8,
-    }{
-        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
-        .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength" },
-        .{ .property_name = "growable", .getter_name = "get growable" },
-    };
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + 1);
     for (accessors) |accessor| {
-        const native_id = if (buffer_ops.sharedArrayBufferAccessorMethodId(accessor.property_name)) |id|
+        const native_id = if (shared_ids)
+            if (buffer_ops.sharedArrayBufferAccessorMethodId(accessor.property_name)) |id|
+                core.function.nativeBuiltinId(.buffer, id)
+            else
+                0
+        else if (buffer_ops.arrayBufferAccessorMethodId(accessor.property_name)) |id|
             core.function.nativeBuiltinId(.buffer, id)
         else
             0;
-        const atom = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
-        try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, native_id, accessor_flags, global);
+        if (predefined_atoms) {
+            const atom = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
+            try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, native_id, accessor_flags, global);
+        } else {
+            const atom = try temporaryStringAtom(rt, accessor.property_name);
+            defer freeTemporaryStringAtom(rt, atom);
+            try defineLazyNativeGetterAtomWithRealm(rt, proto, atom, accessor.getter_name, native_id, accessor_flags, global);
+        }
     }
 
-    try defineNativeMethodsAssumingNewWithRealm(rt, proto, &shared_buffer_prototype, global);
-    try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "SharedArrayBuffer", Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
+    try defineNativeMethodsAssumingNewWithRealm(rt, proto, methods, global);
+    try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag, Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
 }
 
 fn installDataViewExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
