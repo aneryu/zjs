@@ -6760,7 +6760,7 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const out_value = (try objectEnumerableOwnPropertiesCall(ctx, null, global, &args, .values, null, null)) orelse return error.TypeError;
+    const out_value = (try objectEnumerableOwnPropertiesCall(ctx, null, global, &args, .values, .message, null, null)) orelse return error.TypeError;
     const out = try property_ops.expectObject(out_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);

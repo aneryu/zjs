@@ -3102,17 +3102,36 @@ pub const PendingPropertyDescriptor = struct {
     pub fn destroy(_: PendingPropertyDescriptor, _: *core.JSRuntime) void {}
 };
 
+/// Leftover Object.getOwnPropertyNames/Symbols own-keys array fill.
+/// candidate114 still compiles `objectOwnPropertyKeysCall` (1438) as a
+/// second copy of `objectEnumerableOwnPropertiesCall` (2672, extra 1438,
+/// 6.4% match). The leftover is ToObject + ownKeys + createArray + loop
+/// + define. Comptime identity is names/symbols (no enumerable/gopd;
+/// string vs symbol filter; bare TypeError) vs keys/values/entries
+/// (gopd + enumerable; message TypeError). Take unique admission in the
+/// names/symbols wrapper and reuse this already-outlined walk (knives
+/// 103/112/113/114). Does not turn this helper into an inline wrapper
+/// (knives 94/108). Does not fold `ownEntriesArray` / assign / integrity.
+pub const OwnPropertiesKind = enum { keys, values, entries, own_names, own_symbols };
+pub const NullishOwnError = enum { message, bare };
+
 pub fn objectEnumerableOwnPropertiesCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    mode: core.object.EntriesMode,
+    kind: OwnPropertiesKind,
+    nullish: NullishOwnError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
+    if (args[0].isNull() or args[0].isUndefined()) {
+        return switch (nullish) {
+            .message => @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object")),
+            .bare => error.TypeError,
+        };
+    }
 
     var object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
@@ -3130,15 +3149,28 @@ pub fn objectEnumerableOwnPropertiesCall(
     defer root_frame.deactivate(ctx.runtime);
 
     for (keys) |key| {
-        if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
-        if (desc.enumerable != true) continue;
-
-        element = switch (mode) {
-            .keys => try ctx.runtime.atoms.toStringValue(ctx.runtime, key),
-            .values => try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame),
-            .entries => try objectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
-        };
+        const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
+        switch (kind) {
+            .own_names => {
+                if (is_symbol) continue;
+                element = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
+            },
+            .own_symbols => {
+                if (!is_symbol) continue;
+                element = try ctx.runtime.symbolValue(key);
+            },
+            .keys, .values, .entries => {
+                if (is_symbol) continue;
+                const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
+                if (desc.enumerable != true) continue;
+                element = switch (kind) {
+                    .keys => try ctx.runtime.atoms.toStringValue(ctx.runtime, key),
+                    .values => try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame),
+                    .entries => try objectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
+                    .own_names, .own_symbols => unreachable,
+                };
+            },
+        }
         errdefer {
             element = core.JSValue.undefinedValue();
         }

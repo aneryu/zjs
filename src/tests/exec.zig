@@ -10756,6 +10756,39 @@ test "leftover Object.isExtensible builtin through outlined extensible op" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Object.getOwnPropertyNames through outlined enumerable own properties" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var o = Object.defineProperty({ a: 1, b: 2 }, "hidden", { value: 9, enumerable: false });
+        \\var s = Symbol("s");
+        \\o[s] = 3;
+        \\assert.sameValue(Object.getOwnPropertyNames(o) + "", "a,b,hidden");
+        \\assert.sameValue(Object.keys(o) + "", "a,b");
+        \\assert.sameValue(Object.values(o) + "", "1,2");
+        \\assert.sameValue(Object.entries(o) + "", "a,1,b,2");
+        \\assert.sameValue(Object.getOwnPropertySymbols(o).length, 1);
+        \\assert.sameValue(Object.getOwnPropertySymbols(o)[0], s);
+        \\assert.sameValue(Object.getOwnPropertyNames("ab") + "", "0,1,length");
+        \\var threw_names = false;
+        \\try { Object.getOwnPropertyNames(null); } catch (e) { threw_names = e instanceof TypeError; }
+        \\assert.sameValue(threw_names, true);
+        \\var threw_keys = false;
+        \\try { Object.keys(undefined); } catch (e) { threw_keys = e instanceof TypeError; }
+        \\assert.sameValue(threw_keys, true);
+        \\var seen = [];
+        \\var p = new Proxy({ x: 1, y: 2 }, {
+        \\  ownKeys: function (t) { seen.push("keys"); return Object.getOwnPropertyNames(t); }
+        \\});
+        \\assert.sameValue(Object.getOwnPropertyNames(p) + "", "x,y");
+        \\assert.sameValue(Object.keys(p) + "", "x,y");
+        \\assert.sameValue(seen + "", "keys,keys");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
