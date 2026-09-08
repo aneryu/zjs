@@ -1776,7 +1776,17 @@ pub fn objectGetPrototypeOfStep(
     return result_proto;
 }
 
-pub fn objectGetPrototypeOfValue(
+/// Leftover proxy [[GetPrototypeOf]] trap. candidate112 still
+/// compiles `objectGetPrototypeOfValue` (1001) as a second copy of
+/// `objectGetPrototypeOfStep` (835, extra 835, 7.4% match). The
+/// leftover is non-proxy thrower / proxy target+handler + get
+/// getPrototypeOf + missing-trap recurse + call(`[target]`) +
+/// isExtensible invariant. Comptime identity is `?*Object` vs
+/// JSValue. Take the JSValue wrap in this wrapper and reuse the
+/// already-outlined Step walk (knives 103/112). Does not turn
+/// Step into an inline wrapper (knives 94/108). Does not fold
+/// SetPrototypeOf / [[Set]] / [[Has]] / isExtensible.
+pub inline fn objectGetPrototypeOfValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1784,35 +1794,8 @@ pub fn objectGetPrototypeOfValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!object.isProxy()) {
-        if (isThrowTypeErrorIntrinsicObject(object)) {
-            if (object.getPrototype()) |prototype| return prototype.value();
-            if (functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global)) |prototype| return prototype.value();
-            return core.JSValue.nullValue();
-        }
-        if (object.getPrototype()) |prototype| return prototype.value();
-        return core.JSValue.nullValue();
-    }
-    if (object.proxyHandler() == null) return error.TypeError;
-    const target_value = object.proxyTarget() orelse return error.TypeError;
-    const target = objectFromValue(target_value) orelse return error.TypeError;
-    const handler_value = object.proxyHandler().?;
-    const trap_key = core.atom.ids.getPrototypeOf;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return objectGetPrototypeOfValue(ctx, output, global, target, caller_function, caller_frame);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    if (!result.isNull() and objectFromValue(result) == null) return error.TypeError;
-    if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
-        const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
-        const same = if (result.isNull())
-            target_proto == null
-        else if (objectFromValue(result)) |result_object|
-            target_proto != null and target_proto.? == result_object
-        else
-            false;
-        if (!same) return error.TypeError;
-    }
-    return result;
+    const proto = try objectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
+    return if (proto) |prototype| prototype.value() else core.JSValue.nullValue();
 }
 
 pub fn destructuringObjectRest(

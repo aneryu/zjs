@@ -10685,6 +10685,44 @@ test "leftover proxy has trap through one outlined walk" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover proxy getPrototypeOf through one outlined walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var proto = { marker: 1 };
+        \\var target = Object.create(proto);
+        \\var seen = [];
+        \\var p = new Proxy(target, {
+        \\  getPrototypeOf: function (t) { seen.push("trap"); return Object.getPrototypeOf(t); }
+        \\});
+        \\assert.sameValue(Object.getPrototypeOf(p), proto);
+        \\assert.sameValue(Reflect.getPrototypeOf(p), proto);
+        \\assert.sameValue(p.__proto__, proto);
+        \\assert.sameValue(seen + "", "trap,trap,trap");
+        \\var inner = new Proxy(Object.create(proto), {
+        \\  getPrototypeOf: function (t) { seen.push("inner"); return Object.getPrototypeOf(t); }
+        \\});
+        \\var outer = new Proxy(inner, {});
+        \\assert.sameValue(Object.getPrototypeOf(outer), proto);
+        \\assert.sameValue(seen + "", "trap,trap,trap,inner");
+        \\var mismatch = new Proxy(Object.preventExtensions(Object.create(proto)), {
+        \\  getPrototypeOf: function () { return {}; }
+        \\});
+        \\var threw = false;
+        \\try { Object.getPrototypeOf(mismatch); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var bad = new Proxy({}, { getPrototypeOf: function () { return 1; } });
+        \\var threw2 = false;
+        \\try { Object.getPrototypeOf(bad); } catch (e) { threw2 = e instanceof TypeError; }
+        \\assert.sameValue(threw2, true);
+        \\var plain = {};
+        \\assert.sameValue(Object.getPrototypeOf(plain), Object.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(Object.prototype), null);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
