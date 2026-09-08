@@ -25,7 +25,6 @@ const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 const parser = @import("../parser.zig");
 const value_ops = @import("value_ops.zig");
-const number_format = @import("../libs/number_format.zig");
 
 const atom_default = core.atom.predefinedId("default", .string).?;
 const atom_star = core.atom.predefinedId("*", .string).?;
@@ -1023,18 +1022,11 @@ fn preloadFileModuleGraphInnerMode(
             const global_object = try @import("zjs_vm.zig").contextGlobal(context);
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
-            var line_buf: [20]u8 = undefined;
-            var col_buf: [20]u8 = undefined;
-            try array_list_erased.appendSlices(&msg_buf, runtime.memory.allocator, &.{
-                "SYNTAX ERROR in ",
-                path,
-                ":",
-                number_format.formatInt64(&line_buf, @as(i64, err.position.line)),
-                ":",
-                number_format.formatInt64(&col_buf, @as(i64, err.position.column)),
-                " - ",
-                err.message,
-            });
+            try msg_buf.print(
+                runtime.memory.allocator,
+                "SYNTAX ERROR in {s}:{d}:{d} - {s}",
+                .{ path, err.position.line, err.position.column, err.message },
+            );
             const error_val = try exception_ops.createNamedError(
                 context,
                 global_object,
@@ -1127,11 +1119,7 @@ pub fn throwCouldNotLoadModule(ctx: *core.JSContext, filename: []const u8) !void
     const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
     var msg_buf = std.ArrayList(u8).empty;
     defer msg_buf.deinit(ctx.runtime.memory.allocator);
-    try array_list_erased.appendSlices(&msg_buf, ctx.runtime.memory.allocator, &.{
-        "could not load module filename '",
-        filename,
-        "'",
-    });
+    try msg_buf.print(ctx.runtime.memory.allocator, "could not load module filename '{s}'", .{filename});
     const error_val = try exception_ops.createNamedError(ctx, global_object, "ReferenceError", msg_buf.items);
     _ = ctx.throwValue(error_val);
 }

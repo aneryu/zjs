@@ -18,7 +18,6 @@ const parser = @import("../parser.zig");
 const exec = @import("root.zig");
 const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
-const number_format = @import("../libs/number_format.zig");
 
 pub const HostHooks = struct {
     ptr: *anyopaque,
@@ -800,11 +799,7 @@ fn dynamicImportRejectionValue(
         error.ModuleNotFound, error.FileNotFound => {
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(ctx.runtime.memory.allocator);
-            try array_list_erased.appendSlices(&msg_buf, ctx.runtime.memory.allocator, &.{
-                "could not load module filename '",
-                specifier,
-                "'",
-            });
+            try msg_buf.print(ctx.runtime.memory.allocator, "could not load module filename '{s}'", .{specifier});
             return exec.exception_ops.createNamedError(ctx, global, "ReferenceError", msg_buf.items);
         },
         else => {
@@ -1932,30 +1927,13 @@ pub fn throwModuleLinkError(
         const export_name = runtime.atoms.name(info.export_name) orelse "";
         const in_module = runtime.atoms.name(info.module_name) orelse "";
         switch (kind) {
-            .missing_export => try array_list_erased.appendSlices(&msg_buf, runtime.memory.allocator, &.{
-                "Could not find export '",
-                export_name,
-                "' in module '",
-                in_module,
-                "'",
-            }),
-            .ambiguous_export => try array_list_erased.appendSlices(&msg_buf, runtime.memory.allocator, &.{
-                "export '",
-                export_name,
-                "' in module '",
-                in_module,
-                "' is ambiguous",
-            }),
+            .missing_export => try msg_buf.print(runtime.memory.allocator, "Could not find export '{s}' in module '{s}'", .{ export_name, in_module }),
+            .ambiguous_export => try msg_buf.print(runtime.memory.allocator, "export '{s}' in module '{s}' is ambiguous", .{ export_name, in_module }),
         }
         formatted_diagnostic = true;
     };
     if (!formatted_diagnostic) {
-        try array_list_erased.appendSlices(&msg_buf, runtime.memory.allocator, &.{
-            "could not link module '",
-            filename,
-            "': ",
-            @errorName(err),
-        });
+        try msg_buf.print(runtime.memory.allocator, "could not link module '{s}': {s}", .{ filename, @errorName(err) });
     }
     const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
     _ = context.throwValue(error_val);
@@ -2228,18 +2206,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
         const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
-        var line_buf: [20]u8 = undefined;
-        var col_buf: [20]u8 = undefined;
-        try array_list_erased.appendSlices(&msg_buf, runtime.memory.allocator, &.{
-            "SYNTAX ERROR in ",
-            path,
-            ":",
-            number_format.formatInt64(&line_buf, @as(i64, err.position.line)),
-            ":",
-            number_format.formatInt64(&col_buf, @as(i64, err.position.column)),
-            " - ",
-            err.message,
-        });
+        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
         const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return error.SyntaxError;
