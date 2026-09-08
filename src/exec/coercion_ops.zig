@@ -51,22 +51,7 @@ fn toPrimitiveForAdditionObject(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
-    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    if (!method.isUndefined() and !method.isNull()) {
-        // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
-        // Symbol.toPrimitive is still called and reports "not a function"; an
-        // object return value throws "toPrimitive" (quickjs.c:11104).
-        if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
-        const hint = try value_ops.createStringValue(ctx.runtime, "default");
-        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
-        if (primitive.isObject()) {
-            return throwTypeErrorMessage(ctx, global, "toPrimitive");
-        }
-        return primitive;
-    }
-
-    return toOrdinaryPrimitive(ctx, output, global, value);
+    return toPrimitiveObjectWithHint(ctx, output, global, value, "default");
 }
 
 pub fn toPrimitiveForNumber(
@@ -76,22 +61,38 @@ pub fn toPrimitiveForNumber(
     value: core.JSValue,
 ) !core.JSValue {
     if (!value.isObject()) return value;
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitiveNumber(ctx, output, global, value);
+    return toPrimitiveObjectWithHint(ctx, output, global, value, "number");
+}
+
+/// Leftover number/default ToPrimitive. candidate93 still compiled two
+/// leftover copies (`toPrimitiveForNumber` 1197,
+/// `toPrimitiveForAdditionObject` 1170, extra 1170). The leftover is
+/// Symbol.toPrimitive get+call plus OrdinaryToPrimitive (valueOf first);
+/// comptime identity is only the hint string. Take the hint at runtime.
+/// Does not fold `toPrimitiveForString` (toString-first ordinary order).
+noinline fn toPrimitiveObjectWithHint(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    hint: []const u8,
+) !core.JSValue {
+    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
     if (!method.isUndefined() and !method.isNull()) {
         // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
         // object return value throws "toPrimitive" (quickjs.c:11104).
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
-        const hint = try value_ops.createStringValue(ctx.runtime, "number");
-        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
+        const hint_value = try value_ops.createStringValue(ctx.runtime, hint);
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint_value}, null, null);
         if (primitive.isObject()) {
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
         }
         return primitive;
     }
 
-    return toOrdinaryPrimitiveNumber(ctx, output, global, value);
+    return toOrdinaryPrimitive(ctx, output, global, value);
 }
 
 pub fn toOrdinaryPrimitive(
@@ -106,16 +107,20 @@ pub fn toOrdinaryPrimitive(
     return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
 
-pub fn toOrdinaryPrimitiveNumber(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
-    // JS_ToPrimitiveInternal (quickjs.c:11131): no primitive from valueOf/toString.
-    return throwTypeErrorMessage(ctx, global, "toPrimitive");
+pub const toOrdinaryPrimitiveNumber = toOrdinaryPrimitive;
+
+test "toPrimitive leftover number default hint shares the walk" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+
+    const number = try toPrimitiveForNumber(ctx, null, global, core.JSValue.int32(3));
+    try std.testing.expectEqual(@as(?i32, 3), number.asInt32());
+
+    const again = try toPrimitiveForNumber(ctx, null, global, core.JSValue.float64(1.5));
+    try std.testing.expectEqual(@as(?f64, 1.5), again.asFloat64());
 }
 
 pub fn valueTruthy(value: core.JSValue) bool {
