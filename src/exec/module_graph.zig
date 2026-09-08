@@ -17,7 +17,6 @@ const jobs_mod = core.jobs;
 const parser = @import("../parser.zig");
 const exec = @import("root.zig");
 const bytecode = @import("../bytecode.zig");
-const number_format = @import("../libs/number_format.zig");
 const frame_mod = @import("frame.zig");
 
 pub const HostHooks = struct {
@@ -2372,7 +2371,7 @@ fn wrapSourceByKind(
             for (source, 0..) |b, i| {
                 if (i > 0) try bytes_list.appendSlice(allocator, ",");
                 var buf: [16]u8 = undefined;
-                const slice = number_format.formatInt64(&buf, @as(i64, b));
+                const slice = std.fmt.bufPrint(&buf, "{d}", .{b}) catch unreachable;
                 try bytes_list.appendSlice(allocator, slice);
             }
             try bytes_list.appendSlice(allocator, "]);\nconst module = new WebAssembly.Module(bytes);\nconst instance = new WebAssembly.Instance(module);\nexport default instance.exports;\n");

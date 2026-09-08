@@ -299,7 +299,6 @@ pub const parser_core = struct {
         return rt.checkNativeStackOverflow(alloca_size);
     }
     const libs_bignum = @import("libs/bigint.zig");
-    const number_format = @import("libs/number_format.zig");
     const simple_token = @import("simple_token.zig");
     const unicode = @import("libs/unicode.zig");
     const memory = @import("core/memory.zig");
@@ -6648,7 +6647,7 @@ pub const parser_core = struct {
                     try Emitter.op(s, opcode.op.inc);
                 } else if (sparse_active) {
                     var index_buf: [16]u8 = undefined;
-                    const index_name = number_format.formatInt64(&index_buf, @as(i64, sparse_index));
+                    const index_name = std.fmt.bufPrint(&index_buf, "{d}", .{sparse_index}) catch return Error.ParserInvariant;
                     const index_atom = try s.function.atoms.internString(index_name);
                     try Emitter.opAtom(s, opcode.op.define_field, index_atom);
                     sparse_index += 1;

@@ -16,7 +16,6 @@ const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
-const number_format = @import("../libs/number_format.zig");
 
 const SourceLocation = core.BacktraceLocation;
 
@@ -417,7 +416,7 @@ pub fn throwReferenceErrorNotDefined(ctx: *core.JSContext, global: *core.Object,
     const allocator = ctx.runtime.memory.allocator;
     var index_buf: [16]u8 = undefined;
     const name: []const u8 = if (core.atom.isTaggedInt(atom_id))
-        number_format.formatInt64(&index_buf, @as(i64, core.atom.atomToUInt32(atom_id)))
+        std.fmt.bufPrint(&index_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable
     else
         ctx.runtime.atoms.name(atom_id) orelse "";
     const message = try std.fmt.allocPrint(allocator, "'{s}' is not defined", .{name});

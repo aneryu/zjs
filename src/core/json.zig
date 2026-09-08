@@ -13,7 +13,6 @@ const std = @import("std");
 const core = @import("root.zig");
 const gc_audit_print = @import("gc_audit_print.zig");
 const unicode = @import("../libs/unicode.zig");
-const number_format = @import("../libs/number_format.zig");
 
 /// Wrap finished serializer bytes in a JSValue string, choosing the ASCII
 /// fast path when the buffer holds no high bytes.
@@ -55,7 +54,7 @@ pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), va
 pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void {
     if (core.atom.isTaggedInt(atom_id)) {
         var int_buf: [10]u8 = undefined;
-        const printed = number_format.formatInt64(&int_buf, @as(i64, core.atom.atomToUInt32(atom_id)));
+        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
         return appendEscapedJsonString(rt, buffer, printed);
     }
     const name = rt.atoms.name(atom_id) orelse "";

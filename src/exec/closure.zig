@@ -13,7 +13,6 @@ const bytecode = @import("../bytecode.zig");
 const globals_mod = core.global_slots;
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
-const number_format = @import("../libs/number_format.zig");
 
 pub const LogMode = enum { initial, again };
 
@@ -866,7 +865,7 @@ const expectObject = core.value_semantics.expectObject;
 
 fn appendIntField(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {
     var int_buf: [32]u8 = undefined;
-    const printed = number_format.formatInt64(&int_buf, @as(i64, value));
+    const printed = std.fmt.bufPrint(&int_buf, "{d}", .{value}) catch unreachable;
     try buffer.appendSlice(rt.memory.allocator, label);
     try buffer.appendSlice(rt.memory.allocator, printed);
     try buffer.append(rt.memory.allocator, ',');
