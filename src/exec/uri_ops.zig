@@ -150,14 +150,37 @@ fn uriHexDigitValue(unit: u32) ?u8 {
     };
 }
 
+fn uriUnitCount(bytes: []const u8, unit_size: u8) usize {
+    std.debug.assert(unit_size == 1 or unit_size == 2);
+    std.debug.assert(bytes.len % @as(usize, unit_size) == 0);
+    return bytes.len / unit_size;
+}
+
+inline fn uriUnitAt(bytes: []const u8, unit_size: u8, index: usize) u32 {
+    if (unit_size == 1) return bytes[index];
+    const ptr: *const u16 = @ptrCast(@alignCast(bytes.ptr + index * 2));
+    return ptr.*;
+}
+
+fn uriUtf16Bytes(units: []const u16) []const u8 {
+    return std.mem.sliceAsBytes(units);
+}
+
 /// qjs `hex_decode` (quickjs.c:54744): `k` must point at '%' (else URIError
 /// "expecting %"); two hex digits must follow within the string, else URIError
 /// "expecting hex digit".
-fn uriHexDecodeAt(comptime T: type, ctx: *core.JSContext, global: ?*core.Object, units: []const T, k: usize) HostError!u8 {
-    if (k >= units.len or units[k] != '%') return throwUriErrorMessage(ctx, global, "expecting %");
-    if (k + 3 > units.len) return throwUriErrorMessage(ctx, global, "expecting hex digit");
-    const hi = uriHexDigitValue(units[k + 1]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
-    const lo = uriHexDigitValue(units[k + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
+fn uriHexDecodeAt(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    bytes: []const u8,
+    unit_size: u8,
+    k: usize,
+) HostError!u8 {
+    const n = uriUnitCount(bytes, unit_size);
+    if (k >= n or uriUnitAt(bytes, unit_size, k) != '%') return throwUriErrorMessage(ctx, global, "expecting %");
+    if (k + 3 > n) return throwUriErrorMessage(ctx, global, "expecting hex digit");
+    const hi = uriHexDigitValue(uriUnitAt(bytes, unit_size, k + 1)) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
+    const lo = uriHexDigitValue(uriUnitAt(bytes, unit_size, k + 2)) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
     return (hi << 4) | lo;
 }
 
@@ -173,16 +196,23 @@ fn isUriReservedChar(c: u32) bool {
 /// surrogates -> URIError "malformed UTF-8", thrown via `throwUriErrorMessage`)
 /// and emitted as a code point (surrogate pair when > 0xFFFF, the qjs
 /// string_buffer_putc); non-component keeps URI-reserved ASCII escaped.
-fn decodeUriUnits(comptime T: type, ctx: *core.JSContext, global: ?*core.Object, units: []const T, component: bool) HostError!core.JSValue {
+noinline fn decodeUriUnits(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    bytes: []const u8,
+    unit_size: u8,
+    component: bool,
+) HostError!core.JSValue {
     const rt = ctx.runtime;
+    const unit_len = uriUnitCount(bytes, unit_size);
     var out = std.ArrayList(u16).empty;
     defer out.deinit(rt.memory.allocator);
-    try out.ensureTotalCapacity(rt.memory.allocator, units.len);
+    try out.ensureTotalCapacity(rt.memory.allocator, unit_len);
     var k: usize = 0;
-    while (k < units.len) {
-        var c: u32 = units[k];
+    while (k < unit_len) {
+        var c: u32 = uriUnitAt(bytes, unit_size, k);
         if (c == '%') {
-            const lead = try uriHexDecodeAt(T, ctx, global, units, k);
+            const lead = try uriHexDecodeAt(ctx, global, bytes, unit_size, k);
             k += 3;
             c = lead;
             if (lead < 0x80) {
@@ -211,7 +241,7 @@ fn decodeUriUnits(comptime T: type, ctx: *core.JSContext, global: ?*core.Object,
                     c = 0;
                 }
                 while (n > 0) : (n -= 1) {
-                    const c1 = try uriHexDecodeAt(T, ctx, global, units, k);
+                    const c1 = try uriHexDecodeAt(ctx, global, bytes, unit_size, k);
                     k += 3;
                     if ((c1 & 0xc0) != 0x80) {
                         c = 0;
@@ -266,12 +296,12 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
                     // (previously non-ASCII was mangled byte-wise).
                     .latin1 => |bytes| {
                         for (bytes) |byte| {
-                            if (byte >= 0x80) return decodeUriUnits(u8, ctx, global, bytes, mode == 4);
+                            if (byte >= 0x80) return decodeUriUnits(ctx, global, bytes, 1, mode == 4);
                         }
                     },
                     .utf16 => |units| {
                         for (units) |unit| {
-                            if (unit >= 0x80) return decodeUriUnits(u16, ctx, global, units, mode == 4);
+                            if (unit >= 0x80) return decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, mode == 4);
                         }
                     },
                 }
@@ -300,8 +330,8 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
         const coerced = try core.string.String.createUtf8(rt, bytes.items);
         try coerced.ensureFlat(rt);
         return switch (coerced.resolveData()) {
-            .latin1 => |latin1| decodeUriUnits(u8, ctx, global, latin1, mode == 4),
-            .utf16 => |units| decodeUriUnits(u16, ctx, global, units, mode == 4),
+            .latin1 => |latin1| decodeUriUnits(ctx, global, latin1, 1, mode == 4),
+            .utf16 => |units| decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, mode == 4),
         };
     }
 

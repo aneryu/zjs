@@ -5861,6 +5861,34 @@ test "URI four byte decode range preserves globals and completion" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "URI decodeUriUnits walks latin1 and utf16 widths" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // ASCII-only "%XX" uses decodeStringDataFast. A leading non-ASCII
+    // unit forces decodeUriUnits for both latin1 and utf16 storage.
+    const result = try js.eval(
+        \\assert.sameValue(decodeURI(String.fromCharCode(0xA0) + "%41"), String.fromCharCode(0xA0, 0x41));
+        \\assert.sameValue(decodeURI(String.fromCharCode(0x100) + "%41"), String.fromCharCode(0x100, 0x41));
+        \\assert.sameValue(decodeURI(String.fromCharCode(0xA0) + "%23"), String.fromCharCode(0xA0) + "%23");
+        \\assert.sameValue(decodeURIComponent(String.fromCharCode(0xA0) + "%23"), String.fromCharCode(0xA0, 0x23));
+        \\assert.sameValue(decodeURI(String.fromCharCode(0x100) + "%23"), String.fromCharCode(0x100) + "%23");
+        \\assert.sameValue(decodeURIComponent(String.fromCharCode(0x100) + "%23"), String.fromCharCode(0x100, 0x23));
+        \\assert.sameValue(
+        \\  decodeURI(String.fromCharCode(0xA0) + "%F0%A0%80%80"),
+        \\  String.fromCharCode(0xA0, 0xD840, 0xDC00)
+        \\);
+        \\var latin1Bad = false;
+        \\try { decodeURI(String.fromCharCode(0xA0) + "%ZZ"); } catch (e) { latin1Bad = e instanceof URIError; }
+        \\assert.sameValue(latin1Bad, true);
+        \\var utf16Bad = false;
+        \\try { decodeURI(String.fromCharCode(0x100) + "%ZZ"); } catch (e) { utf16Bad = e instanceof URIError; }
+        \\assert.sameValue(utf16Bad, true);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval builds frozen tagged template objects with raw arrays" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
