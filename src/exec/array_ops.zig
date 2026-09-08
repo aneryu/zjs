@@ -2692,16 +2692,7 @@ pub fn arraySpliceCallImpl(
         var from = actual_start + actual_delete_count;
         while (from < length) : (from += 1) {
             const to = from - actual_delete_count + insert_count;
-            const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-            defer from_key.deinit(ctx.runtime);
-            const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-            defer to_key.deinit(ctx.runtime);
-            if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-                const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            } else {
-                try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-            }
+            try arrayMoveIndex(ctx, output, global, receiver_object_value, object, from, to, false);
         }
         var delete_index = length;
         while (delete_index > new_length) {
@@ -2715,16 +2706,7 @@ pub fn arraySpliceCallImpl(
         while (from > actual_start + actual_delete_count) {
             from -= 1;
             const to = from - actual_delete_count + insert_count;
-            const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-            defer from_key.deinit(ctx.runtime);
-            const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-            defer to_key.deinit(ctx.runtime);
-            if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-                const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            } else {
-                try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-            }
+            try arrayMoveIndex(ctx, output, global, receiver_object_value, object, from, to, false);
         }
     }
 
@@ -2839,16 +2821,7 @@ pub fn arrayCopyWithinCall(
     }
 
     while (count > 0) {
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-        defer from_key.deinit(ctx.runtime);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-        defer to_key.deinit(ctx.runtime);
-        if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-        } else {
-            try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-        }
+        try arrayMoveIndex(ctx, output, global, receiver_object_value, object, from, to, false);
         count -= 1;
         if (count == 0) break;
         if (direction > 0) {
@@ -3180,16 +3153,7 @@ pub fn arrayShiftCall(
 
     var index: usize = 1;
     while (index < length) : (index += 1) {
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-        defer from_key.deinit(ctx.runtime);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, index - 1);
-        defer to_key.deinit(ctx.runtime);
-        if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-        } else {
-            try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-        }
+        try arrayMoveIndex(ctx, output, global, receiver_object_value, object, index, index - 1, false);
     }
 
     const tail_key = try propertyAtomFromLengthIndex(ctx.runtime, length - 1);
@@ -3226,7 +3190,7 @@ fn fastDenseArrayShift(object: *core.Object) ?core.JSValue {
 /// index to already be in bounds, so its in-place branch never fires for the
 /// growing unshift shift; this routine performs the structurally identical
 /// move after growing capacity. Returns the new length on success, or null to
-/// fall through to the generic per-element unshiftMoveIndex path for anything
+/// fall through to the generic per-element arrayMoveIndex path for anything
 /// not provably an ordinary dense array with no prototype index interactions.
 fn fastDenseArrayUnshift(
     rt: *core.JSRuntime,
@@ -3321,7 +3285,7 @@ pub fn arrayUnshiftCall(
             var k = length;
             while (k > 0) {
                 k -= 1;
-                try unshiftMoveIndex(ctx, output, global, receiver_object_value, object, k, insert_count);
+                try arrayMoveIndex(ctx, output, global, receiver_object_value, object, k, k + insert_count, true);
             }
         } else {
             try arrayUnshiftSparseLarge(ctx, output, global, receiver_object_value, object, length, insert_count);
@@ -3474,26 +3438,35 @@ pub fn arrayUnshiftSparseLarge(
     for (candidates.items) |index| {
         if (previous != null and previous.? == index) continue;
         previous = index;
-        try unshiftMoveIndex(ctx, output, global, receiver, object, index, insert_count);
+        try arrayMoveIndex(ctx, output, global, receiver, object, index, index + insert_count, true);
     }
 }
 
-pub fn unshiftMoveIndex(
+/// Leftover in-place array index-move. candidate115 still compiles
+/// `arrayShiftCall` (2839), splice shrink/grow, and `arrayCopyWithinCall`
+/// as leftover copies of `unshiftMoveIndex` (1349, extra 1349, 5.2–5.9%).
+/// The leftover is propertyAtom pair + has + get/set or delete.
+/// Comptime identity is `to = from + insert_count` vs an explicit
+/// destination, plus unshift's `ensureSettable` before set. Take those
+/// at runtime. Helper stays outlined (knives 94/108). Does not fold
+/// slice/removed createDataPropertyOrThrow copies or reverse swap.
+pub noinline fn arrayMoveIndex(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
     object: *core.Object,
     from_index: usize,
-    insert_count: usize,
+    to_index: usize,
+    ensure_settable: bool,
 ) !void {
     const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index);
     defer from_key.deinit(ctx.runtime);
-    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index + insert_count);
+    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to_index);
     defer to_key.deinit(ctx.runtime);
     if (try hasValueProperty(ctx, output, global, receiver, object, from_key.atom, null, null)) {
         const item = try getValueProperty(ctx, output, global, receiver, from_key.atom, null, null);
-        try ensureSettableForArrayBuiltin(ctx, object, to_key.atom);
+        if (ensure_settable) try ensureSettableForArrayBuiltin(ctx, object, to_key.atom);
         try setValuePropertyOrThrow(ctx, output, global, receiver, to_key.atom, item, null, null);
     } else {
         try deleteValuePropertyOrThrow(ctx, output, global, receiver, object, to_key.atom);

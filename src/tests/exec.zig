@@ -10789,6 +10789,42 @@ test "leftover Object.getOwnPropertyNames through outlined enumerable own proper
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.shift index-move through outlined arrayMoveIndex" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var a = [1, , 3, 4];
+        \\assert.sameValue(a.shift(), 1);
+        \\assert.sameValue(a + "", ",3,4");
+        \\assert.sameValue(a.hasOwnProperty("0"), false);
+        \\assert.sameValue(0 in a, false);
+        \\assert.sameValue(a[1], 3);
+        \\var u = [1, , 3];
+        \\assert.sameValue(u.unshift(0), 4);
+        \\assert.sameValue(u + "", "0,1,,3");
+        \\assert.sameValue(u.hasOwnProperty("2"), false);
+        \\var sealed = Object.seal([1, 2, 3]);
+        \\var threw_unshift = false;
+        \\try { sealed.unshift(0); } catch (e) { threw_unshift = e instanceof TypeError; }
+        \\assert.sameValue(threw_unshift, true);
+        \\var shrink = [1, 2, , 4, 5];
+        \\assert.sameValue(shrink.splice(1, 1) + "", "2");
+        \\assert.sameValue(shrink + "", "1,,4,5");
+        \\assert.sameValue(shrink.hasOwnProperty("1"), false);
+        \\var grow = [1, 2, 3];
+        \\assert.sameValue(grow.splice(1, 0, 8, 9) + "", "");
+        \\assert.sameValue(grow + "", "1,8,9,2,3");
+        \\var c = [1, , 3, 4];
+        \\assert.sameValue(c.copyWithin(0, 1, 3) + "", ",3,3,4");
+        \\assert.sameValue(c.hasOwnProperty("0"), false);
+        \\var overlap = [1, 2, 3, 4];
+        \\assert.sameValue(overlap.copyWithin(1, 0, 3) + "", "1,1,2,3");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
