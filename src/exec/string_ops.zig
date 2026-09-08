@@ -2728,34 +2728,37 @@ pub fn bigIntPrototypeToString(
     return value_ops.createStringValue(ctx.runtime, text);
 }
 
+const standard_string_method_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "substring", .id = 1 },
+    .{ .name = "toUpperCase", .id = 2 },
+    .{ .name = "toLocaleUpperCase", .id = 2 },
+    .{ .name = "toLowerCase", .id = 3 },
+    .{ .name = "toLocaleLowerCase", .id = 3 },
+    .{ .name = "indexOf", .id = 4 },
+    .{ .name = "includes", .id = 5 },
+    .{ .name = "startsWith", .id = 6 },
+    .{ .name = "endsWith", .id = 7 },
+    .{ .name = "trim", .id = 8 },
+    .{ .name = "lastIndexOf", .id = 28 },
+    .{ .name = "charCodeAt", .id = 29 },
+    .{ .name = "at", .id = 30 },
+    .{ .name = "codePointAt", .id = 31 },
+    .{ .name = "slice", .id = 32 },
+    .{ .name = "repeat", .id = 33 },
+    .{ .name = "padStart", .id = 34 },
+    .{ .name = "padEnd", .id = 35 },
+    .{ .name = "localeCompare", .id = 36 },
+    .{ .name = "normalize", .id = string_id_lookup.legacy_normalize_method_id },
+    .{ .name = "isWellFormed", .id = 38 },
+    .{ .name = "toWellFormed", .id = 39 },
+    .{ .name = "search", .id = string_id_lookup.legacy_search_method_id },
+    .{ .name = "match", .id = string_id_lookup.legacy_match_method_id },
+    .{ .name = "replaceAll", .id = string_id_lookup.legacy_replace_all_method_id },
+    .{ .name = "matchAll", .id = string_id_lookup.legacy_match_all_method_id },
+};
+
 pub fn standardStringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "substring")) return 1;
-    if (std.mem.eql(u8, name, "toUpperCase")) return 2;
-    if (std.mem.eql(u8, name, "toLocaleUpperCase")) return 2;
-    if (std.mem.eql(u8, name, "toLowerCase")) return 3;
-    if (std.mem.eql(u8, name, "toLocaleLowerCase")) return 3;
-    if (std.mem.eql(u8, name, "indexOf")) return 4;
-    if (std.mem.eql(u8, name, "includes")) return 5;
-    if (std.mem.eql(u8, name, "startsWith")) return 6;
-    if (std.mem.eql(u8, name, "endsWith")) return 7;
-    if (std.mem.eql(u8, name, "trim")) return 8;
-    if (std.mem.eql(u8, name, "lastIndexOf")) return 28;
-    if (std.mem.eql(u8, name, "charCodeAt")) return 29;
-    if (std.mem.eql(u8, name, "at")) return 30;
-    if (std.mem.eql(u8, name, "codePointAt")) return 31;
-    if (std.mem.eql(u8, name, "slice")) return 32;
-    if (std.mem.eql(u8, name, "repeat")) return 33;
-    if (std.mem.eql(u8, name, "padStart")) return 34;
-    if (std.mem.eql(u8, name, "padEnd")) return 35;
-    if (std.mem.eql(u8, name, "localeCompare")) return 36;
-    if (std.mem.eql(u8, name, "normalize")) return string_id_lookup.legacy_normalize_method_id;
-    if (std.mem.eql(u8, name, "isWellFormed")) return 38;
-    if (std.mem.eql(u8, name, "toWellFormed")) return 39;
-    if (std.mem.eql(u8, name, "search")) return string_id_lookup.legacy_search_method_id;
-    if (std.mem.eql(u8, name, "match")) return string_id_lookup.legacy_match_method_id;
-    if (std.mem.eql(u8, name, "replaceAll")) return string_id_lookup.legacy_replace_all_method_id;
-    if (std.mem.eql(u8, name, "matchAll")) return string_id_lookup.legacy_match_all_method_id;
-    return null;
+    return core.host_function.name_id.lookup(name, &standard_string_method_ids);
 }
 
 pub fn isStringMethodReceiver(value: core.JSValue) bool {
@@ -2765,27 +2768,30 @@ pub fn isStringMethodReceiver(value: core.JSValue) bool {
     return object.class_id == core.class.ids.string;
 }
 
+const annexb_string_method_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "anchor", .id = 11 },
+    .{ .name = "big", .id = 12 },
+    .{ .name = "blink", .id = 13 },
+    .{ .name = "bold", .id = 14 },
+    .{ .name = "fixed", .id = 15 },
+    .{ .name = "fontcolor", .id = 16 },
+    .{ .name = "fontsize", .id = 17 },
+    .{ .name = "italics", .id = 18 },
+    .{ .name = "link", .id = 19 },
+    .{ .name = "small", .id = 20 },
+    .{ .name = "trimLeft", .id = 21 },
+    .{ .name = "trimStart", .id = 21 },
+    .{ .name = "trimRight", .id = 22 },
+    .{ .name = "trimEnd", .id = 22 },
+    .{ .name = "strike", .id = 23 },
+    .{ .name = "sub", .id = 24 },
+    .{ .name = "substr", .id = 25 },
+    .{ .name = "sup", .id = 26 },
+    .{ .name = "split", .id = string_id_lookup.legacy_split_method_id },
+};
+
 pub fn annexBStringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "anchor")) return 11;
-    if (std.mem.eql(u8, name, "big")) return 12;
-    if (std.mem.eql(u8, name, "blink")) return 13;
-    if (std.mem.eql(u8, name, "bold")) return 14;
-    if (std.mem.eql(u8, name, "fixed")) return 15;
-    if (std.mem.eql(u8, name, "fontcolor")) return 16;
-    if (std.mem.eql(u8, name, "fontsize")) return 17;
-    if (std.mem.eql(u8, name, "italics")) return 18;
-    if (std.mem.eql(u8, name, "link")) return 19;
-    if (std.mem.eql(u8, name, "small")) return 20;
-    if (std.mem.eql(u8, name, "trimLeft")) return 21;
-    if (std.mem.eql(u8, name, "trimStart")) return 21;
-    if (std.mem.eql(u8, name, "trimRight")) return 22;
-    if (std.mem.eql(u8, name, "trimEnd")) return 22;
-    if (std.mem.eql(u8, name, "strike")) return 23;
-    if (std.mem.eql(u8, name, "sub")) return 24;
-    if (std.mem.eql(u8, name, "substr")) return 25;
-    if (std.mem.eql(u8, name, "sup")) return 26;
-    if (std.mem.eql(u8, name, "split")) return string_id_lookup.legacy_split_method_id;
-    return null;
+    return core.host_function.name_id.lookup(name, &annexb_string_method_ids);
 }
 
 pub fn errorToStringCall(
@@ -3442,6 +3448,17 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         core.class.ids.array_buffer => "ArrayBuffer",
         else => "Object",
     };
+}
+
+test "standard and annexB string method-id tables preserve load-bearing ids" {
+    try std.testing.expectEqual(@as(?u32, 1), standardStringMethodId("substring"));
+    try std.testing.expectEqual(@as(?u32, 2), standardStringMethodId("toLocaleUpperCase"));
+    try std.testing.expectEqual(@as(?u32, string_id_lookup.legacy_match_all_method_id), standardStringMethodId("matchAll"));
+    try std.testing.expectEqual(@as(?u32, null), standardStringMethodId("big"));
+    try std.testing.expectEqual(@as(?u32, 12), annexBStringMethodId("big"));
+    try std.testing.expectEqual(@as(?u32, 21), annexBStringMethodId("trimLeft"));
+    try std.testing.expectEqual(@as(?u32, string_id_lookup.legacy_split_method_id), annexBStringMethodId("split"));
+    try std.testing.expectEqual(@as(?u32, null), annexBStringMethodId("substring"));
 }
 
 test "default object tag distinguishes bytecode function classes" {

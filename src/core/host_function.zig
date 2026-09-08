@@ -19,6 +19,20 @@ const class = @import("class.zig");
 const errors = @import("errors.zig");
 const ClassId = class.ClassId;
 
+/// Leftover unique name→id if-ladders share one runtime scan. Tables stay
+/// caller-owned; this is not a leftover clone collapse and does not go on
+/// the public embedder API.
+pub const name_id = struct {
+    pub const Entry = struct { name: []const u8, id: u32 };
+
+    pub noinline fn lookup(name: []const u8, table: []const Entry) ?u32 {
+        for (table) |entry| {
+            if (std.mem.eql(u8, name, entry.name)) return entry.id;
+        }
+        return null;
+    }
+};
+
 pub const ids = struct {
     pub const output = 1;
 };
@@ -1005,29 +1019,32 @@ pub const builtin_method_id_lookup = struct {
             };
         }
 
+        const prototype_method_ids = [_]name_id.Entry{
+            .{ .name = "set", .id = @intFromEnum(PrototypeMethod.set) },
+            .{ .name = "get", .id = @intFromEnum(PrototypeMethod.get) },
+            .{ .name = "has", .id = @intFromEnum(PrototypeMethod.has) },
+            .{ .name = "delete", .id = @intFromEnum(PrototypeMethod.delete) },
+            .{ .name = "clear", .id = @intFromEnum(PrototypeMethod.clear) },
+            .{ .name = "add", .id = @intFromEnum(PrototypeMethod.add) },
+            .{ .name = "keys", .id = @intFromEnum(PrototypeMethod.keys) },
+            .{ .name = "values", .id = @intFromEnum(PrototypeMethod.values) },
+            .{ .name = "entries", .id = @intFromEnum(PrototypeMethod.entries) },
+            .{ .name = "forEach", .id = @intFromEnum(PrototypeMethod.for_each) },
+            .{ .name = "getOrInsert", .id = @intFromEnum(PrototypeMethod.get_or_insert) },
+            .{ .name = "getOrInsertComputed", .id = @intFromEnum(PrototypeMethod.get_or_insert_computed) },
+            .{ .name = "next", .id = @intFromEnum(PrototypeMethod.iterator_next) },
+            .{ .name = "get size", .id = @intFromEnum(PrototypeMethod.size_getter) },
+            .{ .name = "difference", .id = @intFromEnum(PrototypeMethod.difference) },
+            .{ .name = "intersection", .id = @intFromEnum(PrototypeMethod.intersection) },
+            .{ .name = "isDisjointFrom", .id = @intFromEnum(PrototypeMethod.is_disjoint_from) },
+            .{ .name = "isSubsetOf", .id = @intFromEnum(PrototypeMethod.is_subset_of) },
+            .{ .name = "isSupersetOf", .id = @intFromEnum(PrototypeMethod.is_superset_of) },
+            .{ .name = "symmetricDifference", .id = @intFromEnum(PrototypeMethod.symmetric_difference) },
+            .{ .name = "union", .id = @intFromEnum(PrototypeMethod.union_) },
+        };
+
         pub fn prototypeMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "set")) return @intFromEnum(PrototypeMethod.set);
-            if (std.mem.eql(u8, name, "get")) return @intFromEnum(PrototypeMethod.get);
-            if (std.mem.eql(u8, name, "has")) return @intFromEnum(PrototypeMethod.has);
-            if (std.mem.eql(u8, name, "delete")) return @intFromEnum(PrototypeMethod.delete);
-            if (std.mem.eql(u8, name, "clear")) return @intFromEnum(PrototypeMethod.clear);
-            if (std.mem.eql(u8, name, "add")) return @intFromEnum(PrototypeMethod.add);
-            if (std.mem.eql(u8, name, "keys")) return @intFromEnum(PrototypeMethod.keys);
-            if (std.mem.eql(u8, name, "values")) return @intFromEnum(PrototypeMethod.values);
-            if (std.mem.eql(u8, name, "entries")) return @intFromEnum(PrototypeMethod.entries);
-            if (std.mem.eql(u8, name, "forEach")) return @intFromEnum(PrototypeMethod.for_each);
-            if (std.mem.eql(u8, name, "getOrInsert")) return @intFromEnum(PrototypeMethod.get_or_insert);
-            if (std.mem.eql(u8, name, "getOrInsertComputed")) return @intFromEnum(PrototypeMethod.get_or_insert_computed);
-            if (std.mem.eql(u8, name, "next")) return @intFromEnum(PrototypeMethod.iterator_next);
-            if (std.mem.eql(u8, name, "get size")) return @intFromEnum(PrototypeMethod.size_getter);
-            if (std.mem.eql(u8, name, "difference")) return @intFromEnum(PrototypeMethod.difference);
-            if (std.mem.eql(u8, name, "intersection")) return @intFromEnum(PrototypeMethod.intersection);
-            if (std.mem.eql(u8, name, "isDisjointFrom")) return @intFromEnum(PrototypeMethod.is_disjoint_from);
-            if (std.mem.eql(u8, name, "isSubsetOf")) return @intFromEnum(PrototypeMethod.is_subset_of);
-            if (std.mem.eql(u8, name, "isSupersetOf")) return @intFromEnum(PrototypeMethod.is_superset_of);
-            if (std.mem.eql(u8, name, "symmetricDifference")) return @intFromEnum(PrototypeMethod.symmetric_difference);
-            if (std.mem.eql(u8, name, "union")) return @intFromEnum(PrototypeMethod.union_);
-            return null;
+            return name_id.lookup(name, &prototype_method_ids);
         }
 
         fn legacyBasePrototypeMethodId(id: u32) ?u32 {
@@ -1363,18 +1380,21 @@ pub const builtin_method_id_lookup = struct {
         /// re-exports each under its original name. Returned values are
         /// load-bearing (baked into the `.regexp` record table and compiled
         /// bytecode native ids) and must not change here.
+        const accessor_method_ids = [_]name_id.Entry{
+            .{ .name = "source", .id = @intFromEnum(AccessorMethod.source) },
+            .{ .name = "flags", .id = @intFromEnum(AccessorMethod.flags) },
+            .{ .name = "global", .id = @intFromEnum(AccessorMethod.global) },
+            .{ .name = "ignoreCase", .id = @intFromEnum(AccessorMethod.ignore_case) },
+            .{ .name = "multiline", .id = @intFromEnum(AccessorMethod.multiline) },
+            .{ .name = "dotAll", .id = @intFromEnum(AccessorMethod.dot_all) },
+            .{ .name = "unicode", .id = @intFromEnum(AccessorMethod.unicode) },
+            .{ .name = "sticky", .id = @intFromEnum(AccessorMethod.sticky) },
+            .{ .name = "hasIndices", .id = @intFromEnum(AccessorMethod.has_indices) },
+            .{ .name = "unicodeSets", .id = @intFromEnum(AccessorMethod.unicode_sets) },
+        };
+
         pub fn accessorMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "source")) return @intFromEnum(AccessorMethod.source);
-            if (std.mem.eql(u8, name, "flags")) return @intFromEnum(AccessorMethod.flags);
-            if (std.mem.eql(u8, name, "global")) return @intFromEnum(AccessorMethod.global);
-            if (std.mem.eql(u8, name, "ignoreCase")) return @intFromEnum(AccessorMethod.ignore_case);
-            if (std.mem.eql(u8, name, "multiline")) return @intFromEnum(AccessorMethod.multiline);
-            if (std.mem.eql(u8, name, "dotAll")) return @intFromEnum(AccessorMethod.dot_all);
-            if (std.mem.eql(u8, name, "unicode")) return @intFromEnum(AccessorMethod.unicode);
-            if (std.mem.eql(u8, name, "sticky")) return @intFromEnum(AccessorMethod.sticky);
-            if (std.mem.eql(u8, name, "hasIndices")) return @intFromEnum(AccessorMethod.has_indices);
-            if (std.mem.eql(u8, name, "unicodeSets")) return @intFromEnum(AccessorMethod.unicode_sets);
-            return null;
+            return name_id.lookup(name, &accessor_method_ids);
         }
 
         pub fn accessorNameFromId(id: u32) ?[]const u8 {
@@ -1477,11 +1497,20 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, 13), lookup.array.decodePrototypeMethodId(@intFromEnum(builtin_method_ids.array.PrototypeMethod.push)));
     try testing.expectEqual(@as(?u32, null), lookup.array.decodePrototypeMethodId(0));
 
-    // collection: class-keyed fast-path filter.
+    // collection: class-keyed fast-path filter. Table walker keeps load-bearing ids.
     try testing.expectEqual(lookup.collection.prototypeMethodId("get"), lookup.collection.fastPrototypeMethodIdForClass(class.ids.map, "get"));
+    try testing.expectEqual(@as(?u32, 2), lookup.collection.prototypeMethodId("get"));
+    try testing.expectEqual(@as(?u32, 14), lookup.collection.prototypeMethodId("get size"));
+    try testing.expectEqual(@as(?u32, 21), lookup.collection.prototypeMethodId("union"));
+    try testing.expectEqual(@as(?u32, null), lookup.collection.prototypeMethodId("nope"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.set, "get"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.regexp, "get"));
     try testing.expect(lookup.collection.legacyClosureMethodId("set") != null);
+
+    // regexp accessors share the same name-id walker.
+    try testing.expectEqual(@as(?u32, 201), lookup.regexp.accessorMethodId("source"));
+    try testing.expectEqual(@as(?u32, 210), lookup.regexp.accessorMethodId("unicodeSets"));
+    try testing.expectEqual(@as(?u32, null), lookup.regexp.accessorMethodId("nope"));
 
     // date.
     try testing.expectEqual(@as(?u32, null), lookup.date.staticMethodId("nope"));
