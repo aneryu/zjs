@@ -10243,6 +10243,22 @@ test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue("x".italics(), "<i>x</i>");
+        \\assert.sameValue("x".sub(), "<sub>x</sub>");
+        \\assert.sameValue("".bold(), "<b></b>");
+        \\assert.sameValue("x".fontcolor(), '<font color="undefined">x</font>');
+        \\assert.sameValue("x".fontsize(7), '<font size="7">x</font>');
+        \\assert.sameValue("x".link('a"b'), '<a href="a&quot;b">x</a>');
+        \\assert.throws(TypeError, function() { "x".anchor("a", "b"); });
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
     {
         var js = try helpers.TestEngine.init(std.testing.allocator);

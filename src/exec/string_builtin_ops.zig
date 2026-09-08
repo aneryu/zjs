@@ -1381,34 +1381,55 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
 }
 
-fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.append(rt.memory.allocator, '<');
-    try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, '>');
-    try out.appendSlice(rt.memory.allocator, bytes);
-    try out.appendSlice(rt.memory.allocator, "</");
-    try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, '>');
-    return createStringValue(rt, out.items);
+inline fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue {
+    return htmlTagged(rt, bytes, tag, null, &.{});
 }
 
-fn htmlWithAttribute(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8, attr: []const u8, args: []const core.JSValue) !core.JSValue {
-    if (args.len > 1) return error.TypeError;
+inline fn htmlWithAttribute(
+    rt: *core.JSRuntime,
+    bytes: []const u8,
+    tag: []const u8,
+    attr: []const u8,
+    args: []const core.JSValue,
+) !core.JSValue {
+    return htmlTagged(rt, bytes, tag, attr, args);
+}
+
+/// Leftover Annex B HTML document wrap. The two copies were 1898 / 3761 B
+/// leftover walks of the same `<tag>…</tag>` skeleton; comptime identity is
+/// only whether an optional `attr="…"` is inserted. Take that at runtime.
+/// Does not fold wrap through the attribute helper (that would inject
+/// `attr="undefined"`).
+noinline fn htmlTagged(
+    rt: *core.JSRuntime,
+    bytes: []const u8,
+    tag: []const u8,
+    attr: ?[]const u8,
+    args: []const core.JSValue,
+) !core.JSValue {
     var attr_bytes = std.ArrayList(u8).empty;
     defer attr_bytes.deinit(rt.memory.allocator);
-    if (args.len >= 1) try appendValueString(rt, &attr_bytes, args[0]) else try attr_bytes.appendSlice(rt.memory.allocator, "undefined");
+    if (attr != null) {
+        if (args.len > 1) return error.TypeError;
+        if (args.len >= 1)
+            try appendValueString(rt, &attr_bytes, args[0])
+        else
+            try attr_bytes.appendSlice(rt.memory.allocator, "undefined");
+    }
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     try out.append(rt.memory.allocator, '<');
     try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, ' ');
-    try out.appendSlice(rt.memory.allocator, attr);
-    try out.appendSlice(rt.memory.allocator, "=\"");
-    try appendEscapedHtmlAttribute(rt, &out, attr_bytes.items);
-    try out.appendSlice(rt.memory.allocator, "\">");
+    if (attr) |attr_name| {
+        try out.append(rt.memory.allocator, ' ');
+        try out.appendSlice(rt.memory.allocator, attr_name);
+        try out.appendSlice(rt.memory.allocator, "=\"");
+        try appendEscapedHtmlAttribute(rt, &out, attr_bytes.items);
+        try out.appendSlice(rt.memory.allocator, "\">");
+    } else {
+        try out.append(rt.memory.allocator, '>');
+    }
     try out.appendSlice(rt.memory.allocator, bytes);
     try out.appendSlice(rt.memory.allocator, "</");
     try out.appendSlice(rt.memory.allocator, tag);
@@ -1424,6 +1445,34 @@ fn appendEscapedHtmlAttribute(rt: *core.JSRuntime, out: *std.ArrayList(u8), byte
             try out.append(rt.memory.allocator, byte);
         }
     }
+}
+
+test "html wrap leftover optional attribute shares the document wrap" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const wrap = try htmlWrap(rt, "x", "big");
+    try std.testing.expect(wrap.asStringBody().?.eqlBytes("<big>x</big>"));
+
+    const empty = try htmlWrap(rt, "", "i");
+    try std.testing.expect(empty.asStringBody().?.eqlBytes("<i></i>"));
+
+    const quoted = try core.string.String.createUtf8(rt, "a\"b");
+    const attr = try htmlWithAttribute(rt, "x", "a", "name", &.{quoted.value()});
+    try std.testing.expect(attr.asStringBody().?.eqlBytes("<a name=\"a&quot;b\">x</a>"));
+
+    const missing = try htmlWithAttribute(rt, "x", "font", "color", &.{});
+    try std.testing.expect(missing.asStringBody().?.eqlBytes("<font color=\"undefined\">x</font>"));
+
+    const number_attr = try htmlWithAttribute(rt, "x", "font", "size", &.{core.JSValue.int32(7)});
+    try std.testing.expect(number_attr.asStringBody().?.eqlBytes("<font size=\"7\">x</font>"));
+
+    const extra_a = try core.string.String.createUtf8(rt, "a");
+    const extra_b = try core.string.String.createUtf8(rt, "b");
+    try std.testing.expectError(
+        error.TypeError,
+        htmlWithAttribute(rt, "x", "a", "href", &.{ extra_a.value(), extra_b.value() }),
+    );
 }
 
 fn trimStartAscii(bytes: []const u8) []const u8 {
