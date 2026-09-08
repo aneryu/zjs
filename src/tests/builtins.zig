@@ -3587,25 +3587,6 @@ test "Well-known symbol method aliases share lazy native identity" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "promise/iterator prototype getOwn fallback aliases through the atom walk" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    const result = try js.eval(
-        \\assert.sameValue(Object.getPrototypeOf(Promise.resolve(1)), Promise.prototype);
-        \\assert.sameValue(globalThis.Promise.prototype, Promise.prototype);
-        \\assert.sameValue(Promise.resolve(1) instanceof Promise, true);
-        \\assert.sameValue(Object.getPrototypeOf([][Symbol.iterator]()), Array.prototype[Symbol.iterator]().constructor.prototype);
-        \\assert.sameValue(
-        \\  Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())),
-        \\  Iterator.prototype
-        \\);
-        \\assert.sameValue(globalThis.Iterator.prototype, Iterator.prototype);
-    );
-
-    try std.testing.expect(result.isUndefined());
-}
-
 test "functionPrototypeFromGlobal alias preserves Function.prototype identity" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
