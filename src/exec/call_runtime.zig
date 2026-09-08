@@ -1256,9 +1256,6 @@ noinline fn callNativeCallableByName(
         const proto_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         return object_ops.objectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "set")) {
-        if (try array_ops.typedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-    }
     if (std.mem.eql(u8, name, "join")) {
         if (try array_ops.arrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
     }

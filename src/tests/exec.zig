@@ -10884,6 +10884,32 @@ test "leftover integer binary through live bitwise and number arms" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover name-cascade set through one TypedArray.set admission" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var ta = new Uint8Array([1, 2, 3, 4]);
+        \\ta.set(new Uint8Array([9, 8]), 1);
+        \\assert.sameValue(ta[0], 1);
+        \\assert.sameValue(ta[1], 9);
+        \\assert.sameValue(ta[2], 8);
+        \\assert.sameValue(ta[3], 4);
+        \\var tb = new Uint16Array([1, 2, 3]);
+        \\tb.set([7, 6], 1);
+        \\assert.sameValue(tb[0], 1);
+        \\assert.sameValue(tb[1], 7);
+        \\assert.sameValue(tb[2], 6);
+        \\var m = new Map();
+        \\m.set("k", 1);
+        \\assert.sameValue(m.get("k"), 1);
+        \\m.set("k", 2);
+        \\assert.sameValue(m.get("k"), 2);
+        \\assert.sameValue(m.size, 1);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.map generic get through one runtime tail" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
