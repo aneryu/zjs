@@ -289,13 +289,7 @@ pub fn disposableStackMove(
     stack: *core.Object,
 ) !core.JSValue {
     _ = global;
-    if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const prototype = ctx.classPrototypeObject(core.class.ids.disposable_stack) orelse return error.InvalidBuiltinRegistry;
-    const moved = try core.Object.create(ctx.runtime, core.class.ids.disposable_stack, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, moved.gcHeader());
-    try stack.moveDisposableResourcesTo(ctx.runtime, moved);
-    stack.disposableStackDisposedSlot().* = true;
-    return moved.value();
+    return disposableStackMoveWithClass(ctx, stack, core.class.ids.disposable_stack);
 }
 
 pub fn usingCreateAsyncDisposableStack(
@@ -474,9 +468,20 @@ pub fn asyncDisposableStackMove(
     stack: *core.Object,
 ) !core.JSValue {
     _ = global;
+    return disposableStackMoveWithClass(ctx, stack, core.class.ids.async_disposable_stack);
+}
+
+/// Leftover DisposableStack / AsyncDisposableStack move walk. The two
+/// copies were 318/318 B and 95.6% the same; comptime identity was only
+/// the class id / prototype. Take `class_id` at runtime.
+noinline fn disposableStackMoveWithClass(
+    ctx: *core.JSContext,
+    stack: *core.Object,
+    class_id: core.class.ClassId,
+) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.ReferenceError;
-    const prototype = ctx.classPrototypeObject(core.class.ids.async_disposable_stack) orelse return error.InvalidBuiltinRegistry;
-    const moved = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
+    const prototype = ctx.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry;
+    const moved = try core.Object.create(ctx.runtime, class_id, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, moved.gcHeader());
     try stack.moveDisposableResourcesTo(ctx.runtime, moved);
     stack.disposableStackDisposedSlot().* = true;
