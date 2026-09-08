@@ -151,11 +151,7 @@ pub fn constructorPrototypeFromGlobalAtom(rt: *core.JSRuntime, global: *core.Obj
 }
 
 pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    _ = rt;
-    if (global.getOwnDataObjectBorrowed(core.atom.ids.Function)) |constructor| {
-        if (constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
-    }
-    return null;
+    return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Function);
 }
 
 pub fn cachedRealmObject(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot) ?*core.Object {

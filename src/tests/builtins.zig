@@ -3587,6 +3587,23 @@ test "Well-known symbol method aliases share lazy native identity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "functionPrototypeFromGlobal alias preserves Function.prototype identity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Object.getPrototypeOf(function () {}), Function.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(Function), Function.prototype);
+        \\assert.sameValue(globalThis.Function.prototype, Function.prototype);
+        \\function C() {}
+        \\assert.sameValue(Object.getPrototypeOf(C), Function.prototype);
+        \\assert.sameValue(new C() instanceof Function, false);
+        \\assert.sameValue(C instanceof Function, true);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Date/Function prototype auto-init install preserves toPrimitive and hasInstance descriptors" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
