@@ -273,18 +273,7 @@ fn regExpConstructCallInNativeScope(
     return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype.object(), pattern, flags, caller_function, caller_frame);
 }
 
-const RegExpExecOrTestKind = enum { exec, test_ };
-
-/// Leftover RegExp exec/test admission. candidate107 still compiles
-/// `regExpExecMethod` (591) / `regExpTestMethod` (1497, extra 591,
-/// 46.0% match). The leftover is expectObject + TypeError + args[0]
-/// or undefined + toStringForAnnexB. Comptime identity is exec
-/// class-check+result vs test default-exec/generic boolean. Take
-/// that at runtime. Public names stay `inline` and pass only the
-/// kind — no leftover setup at the wrapper (knives 94/98/108).
-/// Does not fold compile or species. Does not retry leftover
-/// Promise/RegExp species (knife 98).
-noinline fn regExpExecOrTest(
+pub fn regExpExecMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -292,12 +281,11 @@ noinline fn regExpExecOrTest(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-    kind: RegExpExecOrTestKind,
 ) !core.JSValue {
-    const receiver_object = property_ops.expectObject(this_value) catch {
+    const regexp_object = property_ops.expectObject(this_value) catch {
         return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
     };
-    if (kind == .exec and receiver_object.class_id != core.class.ids.regexp) {
+    if (regexp_object.class_id != core.class.ids.regexp) {
         return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
     }
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -307,56 +295,10 @@ noinline fn regExpExecOrTest(
         owned_string = value;
         break :blk value;
     };
-    switch (kind) {
-        .exec => return (try regExpExecResult(
-            ctx,
-            output,
-            global,
-            this_value,
-            receiver_object,
-            string_value,
-            true,
-            caller_function,
-            caller_frame,
-        )) orelse error.TypeError,
-        .test_ => {
-            const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
-            if (regExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
-                if (try regExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
-                    return core.JSValue.boolean(matched);
-                }
-                const result = try regExpExecResult(
-                    ctx,
-                    output,
-                    global,
-                    this_value,
-                    receiver_object,
-                    string_value,
-                    true,
-                    caller_function,
-                    caller_frame,
-                ) orelse return core.JSValue.boolean(false);
-                return core.JSValue.boolean(!result.isNull());
-            }
-            const result = try regExpExecGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
-            return core.JSValue.boolean(!result.isNull());
-        },
-    }
+    return (try regExpExecResult(ctx, output, global, this_value, regexp_object, string_value, true, caller_function, caller_frame)) orelse error.TypeError;
 }
 
-pub inline fn regExpExecMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    return regExpExecOrTest(ctx, output, global, this_value, args, caller_function, caller_frame, .exec);
-}
-
-pub inline fn regExpTestMethod(
+pub fn regExpTestMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -365,7 +307,27 @@ pub inline fn regExpTestMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    return try regExpExecOrTest(ctx, output, global, this_value, args, caller_function, caller_frame, .test_);
+    const receiver_object = property_ops.expectObject(this_value) catch {
+        return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
+    };
+    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    var owned_string: ?core.JSValue = null;
+    const string_value = if (input.isString()) input else blk: {
+        const value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+        owned_string = value;
+        break :blk value;
+    };
+    const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
+    if (regExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
+        if (try regExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
+            return core.JSValue.boolean(matched);
+        }
+        const result = try regExpExecResult(ctx, output, global, this_value, receiver_object, string_value, true, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
+        return core.JSValue.boolean(!result.isNull());
+    }
+
+    const result = try regExpExecGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
+    return core.JSValue.boolean(!result.isNull());
 }
 
 pub fn regExpTestFastNoResult(
@@ -585,26 +547,7 @@ pub fn regExpExecGeneric(
         const rx_object = objectFromValue(rx) orelse return error.TypeError;
         if (rx_object.class_id != core.class.ids.regexp) return error.TypeError;
     }
-    // Builtin exec fallback. Do not call `regExpExecMethod` here: that name
-    // is now an inline wrapper around `regExpExecOrTest`, whose test arm
-    // already calls this generic walk (inferred-error-set cycle).
-    const regexp_object = objectFromValue(rx) orelse {
-        return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
-    };
-    if (regexp_object.class_id != core.class.ids.regexp) {
-        return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
-    }
-    return (try regExpExecResult(
-        ctx,
-        output,
-        global,
-        rx,
-        regexp_object,
-        string_value,
-        true,
-        caller_function,
-        caller_frame,
-    )) orelse error.TypeError;
+    return try regExpExecMethod(ctx, output, global, rx, &.{string_value}, caller_function, caller_frame);
 }
 
 pub fn regExpLegacyAccessor(
