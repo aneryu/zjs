@@ -3587,6 +3587,33 @@ test "Well-known symbol method aliases share lazy native identity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "Date/Function prototype auto-init install preserves toPrimitive and hasInstance descriptors" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var dateDesc = Object.getOwnPropertyDescriptor(Date.prototype, Symbol.toPrimitive);
+        \\assert.sameValue(typeof dateDesc.value, "function");
+        \\assert.sameValue(dateDesc.value.length, 1);
+        \\assert.sameValue(dateDesc.writable, false);
+        \\assert.sameValue(dateDesc.enumerable, false);
+        \\assert.sameValue(dateDesc.configurable, true);
+        \\assert.sameValue((new Date(0))[Symbol.toPrimitive]("number"), 0);
+        \\
+        \\var hasInstanceDesc = Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance);
+        \\assert.sameValue(typeof hasInstanceDesc.value, "function");
+        \\assert.sameValue(hasInstanceDesc.value.length, 1);
+        \\assert.sameValue(hasInstanceDesc.writable, false);
+        \\assert.sameValue(hasInstanceDesc.enumerable, false);
+        \\assert.sameValue(hasInstanceDesc.configurable, false);
+        \\function C() {}
+        \\assert.sameValue(new C() instanceof C, true);
+        \\assert.sameValue(1 instanceof C, false);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Lazy standard native accessors preserve descriptors and receiver markers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -2829,21 +2829,42 @@ fn defineDatePrototypeMethodsAssumingNew(rt: *core.JSRuntime, global: *core.Obje
     }
 }
 
-fn installDatePrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+/// Leftover Date `[Symbol.toPrimitive]` / Function `[Symbol.hasInstance]`
+/// one-property auto-init install. Comptime identity is only the atom,
+/// flags, and auto-init pointer; take those at runtime on one walk.
+noinline fn installOnePrototypeAutoInit(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    ctor: *core.Object,
+    atom_id: core.atom.Atom,
+    flags: core.property.Flags,
+    info: *const core.property.AutoInit,
+) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
-    const to_primitive_atom = core.atom.predefinedId("Symbol.toPrimitive", .symbol).?;
-    const to_primitive_flags = core.property.Flags.data(false, false, true);
-    try proto.defineAutoInitPropertyFromDescriptor(rt, to_primitive_atom, to_primitive_flags, global, &date_to_primitive_auto_init);
+    try proto.defineAutoInitPropertyFromDescriptor(rt, atom_id, flags, global, info);
 }
 
-fn installFunctionPrototypeExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
+inline fn installDatePrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+    return installOnePrototypeAutoInit(
+        rt,
+        global,
+        ctor,
+        core.atom.predefinedId("Symbol.toPrimitive", .symbol).?,
+        core.property.Flags.data(false, false, true),
+        &date_to_primitive_auto_init,
+    );
+}
 
-    const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.InvalidBuiltinRegistry;
-    const has_instance_flags = core.property.Flags.data(false, false, false);
-    try proto.defineAutoInitPropertyFromDescriptor(rt, has_instance_atom, has_instance_flags, global, &function_has_instance_auto_init);
+inline fn installFunctionPrototypeExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
+    return installOnePrototypeAutoInit(
+        rt,
+        global,
+        ctor,
+        core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.InvalidBuiltinRegistry,
+        core.property.Flags.data(false, false, false),
+        &function_has_instance_auto_init,
+    );
 }
 
 fn installErrorPrototypeExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
