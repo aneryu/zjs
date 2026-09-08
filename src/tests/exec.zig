@@ -10569,6 +10569,35 @@ test "leftover array-from array-like through one runtime destination" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover proxy set trap through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\"use strict";
+        \\var set = [];
+        \\var p = new Proxy({}, { set: function (o, k, v) { set.push(k); o[k] = v; return true; }});
+        \\p.foo = 1;
+        \\assert.sameValue(set + "", "foo");
+        \\assert.sameValue(p.foo, 1);
+        \\assert.sameValue(Reflect.set(p, "bar", 2), true);
+        \\assert.sameValue(p.bar, 2);
+        \\var rejected = new Proxy({}, { set: function() { return false; } });
+        \\var threw = false;
+        \\try { rejected.x = 3; } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\assert.sameValue(Reflect.set(rejected, "y", 3), false);
+        \\var passthrough = new Proxy({ a: 0 }, {});
+        \\passthrough.a = 4;
+        \\assert.sameValue(passthrough.a, 4);
+        \\var stackProxy = new Proxy(new Error("x"), {});
+        \\Object.defineProperty(stackProxy, "stack", Object.getOwnPropertyDescriptor(Error.prototype, "stack"));
+        \\stackProxy.stack = "updated";
+        \\assert.sameValue(stackProxy.stack, "updated");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

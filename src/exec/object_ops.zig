@@ -4394,7 +4394,57 @@ test "private brand creation does not allocate atom for non-extensible home obje
 
 // --- Combined from proxy_ops.zig ---
 
-pub fn proxySetTrapForErrorStackSetter(
+const ProxySetKind = enum { value, error_stack };
+
+/// Leftover proxy [[Set]] trap walk. candidate107 still compiles
+/// `proxySetTrapForErrorStackSetter` (1065) / `proxySetValueProperty`
+/// (1113, extra 1065, 10.2% match). The leftover is target+handler +
+/// get `set` + callable check + trap key + call + validateProxySetResult.
+/// Comptime identity is missing-target / missing-trap / falsy-trap
+/// policy. Take that at runtime. Public names stay `inline` and pass
+/// only the kind — no leftover setup at the wrapper (knives 94/98/108).
+/// Explicit `HostError` so `ordinarySetWithReceiver` can still call the
+/// value wrapper without an inferred-error-set cycle (knife 109).
+/// Does not fold PreventExtensions / IsExtensible.
+noinline fn proxySetWithTrap(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    kind: ProxySetKind,
+) HostError!bool {
+    const target_value = proxy.proxyTarget() orelse {
+        return if (kind == .error_stack) false else error.TypeError;
+    };
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const set_atom = core.atom.ids.set;
+    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) {
+        switch (kind) {
+            .error_stack => return false,
+            .value => {
+                const target = try property_ops.expectObject(target_value);
+                return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
+            },
+        }
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    if (!valueTruthy(result)) {
+        return if (kind == .error_stack) error.TypeError else false;
+    }
+    const target = try property_ops.expectObject(target_value);
+    try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
+    return true;
+}
+
+pub inline fn proxySetTrapForErrorStackSetter(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4404,20 +4454,8 @@ pub fn proxySetTrapForErrorStackSetter(
     value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
-    const target_value = receiver.proxyTarget() orelse return false;
-    const handler_value = receiver.proxyHandler() orelse return error.TypeError;
-    const set_atom = core.atom.ids.set;
-    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return false;
-    if (!isCallableValue(trap)) return error.TypeError;
-
-    const key_value = try proxyTrapKeyValue(ctx.runtime, stack_key);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
-    if (!valueTruthy(result)) return error.TypeError;
-    const target = try property_ops.expectObject(target_value);
-    try validateProxySetResult(ctx, output, global, target, stack_key, value, caller_function, caller_frame);
-    return true;
+) HostError!bool {
+    return proxySetWithTrap(ctx, output, global, receiver_value, receiver, stack_key, value, caller_function, caller_frame, .error_stack);
 }
 
 pub fn proxyCreateDataPropertyOrThrow(
@@ -4861,7 +4899,7 @@ pub fn firstProxyInPrototypeSetPath(rt: *core.JSRuntime, object: *core.Object, a
     return null;
 }
 
-pub fn proxySetValueProperty(
+pub inline fn proxySetValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4872,21 +4910,7 @@ pub fn proxySetValueProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!bool {
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const set_atom = core.atom.ids.set;
-    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) {
-        const target = try property_ops.expectObject(target_value);
-        return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
-    }
-    if (!isCallableValue(trap)) return error.TypeError;
-    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
-    if (!valueTruthy(result)) return false;
-    const target = try property_ops.expectObject(target_value);
-    try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
-    return true;
+    return proxySetWithTrap(ctx, output, global, receiver_value, proxy, atom_id, value, caller_function, caller_frame, .value);
 }
 
 pub fn validateProxySetResult(
