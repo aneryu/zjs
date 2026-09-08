@@ -10856,6 +10856,30 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.map generic get through one runtime tail" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1, 2, 3].map(function(v) { return v + 1; }) + "", "2,3,4");
+        \\var seen = [];
+        \\assert.sameValue([1, , 3].map(function(v, i) { seen.push(i); return v; }) + "", "1,,3");
+        \\assert.sameValue(seen + "", "0,2");
+        \\var fe = [];
+        \\[1, , 3].forEach(function(v, i) { fe.push(i); });
+        \\assert.sameValue(fe + "", "0,2");
+        \\assert.sameValue([1, , 3].findIndex(function(v) { return v === undefined; }), 1);
+        \\assert.sameValue([1, , 3].findLastIndex(function(v) { return v === undefined; }), 1);
+        \\assert.sameValue([1, 2, 3].findLast(function(v) { return v > 1; }), 3);
+        \\assert.sameValue([1, 2, 3].every(function(v) { return v > 0; }), true);
+        \\assert.sameValue([1, , 3].some(function(v) { return v === undefined; }), false);
+        \\var o = { 0: 7, 2: 9, length: 3 };
+        \\assert.sameValue(Array.prototype.map.call(o, function(v) { return v + 1; }) + "", "8,,10");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.toReversed get-define through outlined arrayCopyIndex" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

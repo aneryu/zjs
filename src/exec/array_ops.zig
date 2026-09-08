@@ -1529,17 +1529,14 @@ noinline fn arrayIterationModeCall(
                 if (index >= current_length) continue;
             }
             break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-        } else if (object.isArray() and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) blk: {
-            if (object.getDenseArrayElementValue(@intCast(index))) |dense_item| break :blk dense_item;
-            const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-            defer key.deinit(ctx.runtime);
-            if (!find_family and
-                !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null))
-            {
-                continue;
-            }
-            break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
         } else blk: {
+            // Unique dense hit stays separate. Leftover generic present-element
+            // get (propertyAtom + has except find-family + get) is shared: a
+            // dense miss falls through instead of compiling a leftover copy
+            // of the same walk (knife 120 leftover-tail shape).
+            if (object.isArray() and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) {
+                if (object.getDenseArrayElementValue(@intCast(index))) |dense_item| break :blk dense_item;
+            }
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
             if (!find_family and
