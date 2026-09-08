@@ -10327,6 +10327,49 @@ test "buffer constructor extras leftover runtime tables preserve ArrayBuffer Sha
     try std.testing.expect(result.isUndefined());
 }
 
+test "class field initializer leftover runtime static preserves instance static private and computed fields" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var key = "comp";
+        \\class C {
+        \\  inst;
+        \\  instInit = 1;
+        \\  #priv;
+        \\  #privInit = 2;
+        \\  static st;
+        \\  static stInit = 3;
+        \\  static #spriv;
+        \\  static #sprivInit = 4;
+        \\  static [key];
+        \\  static [key + "Init"] = 5;
+        \\  readPriv() { return this.#priv; }
+        \\  readPrivInit() { return this.#privInit; }
+        \\  static readSpriv() { return C.#spriv; }
+        \\  static readSprivInit() { return C.#sprivInit; }
+        \\}
+        \\var o = new C();
+        \\assert.sameValue(o.inst, undefined);
+        \\assert.sameValue(o.instInit, 1);
+        \\assert.sameValue(o.readPriv(), undefined);
+        \\assert.sameValue(o.readPrivInit(), 2);
+        \\assert.sameValue(C.st, undefined);
+        \\assert.sameValue(C.stInit, 3);
+        \\assert.sameValue(C.readSpriv(), undefined);
+        \\assert.sameValue(C.readSprivInit(), 4);
+        \\assert.sameValue(C.comp, undefined);
+        \\assert.sameValue(C.compInit, 5);
+        \\class D {
+        \\  nameField = class { static { this.seen = this.name; } };
+        \\  static staticName = class { static { this.seen = this.name; } };
+        \\}
+        \\assert.sameValue((new D()).nameField.seen, "nameField");
+        \\assert.sameValue(D.staticName.seen, "staticName");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

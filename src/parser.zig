@@ -14183,14 +14183,25 @@ pub const parser_core = struct {
         s.is_static = saved.is_static;
     }
 
-    fn emitStaticFieldInitializer(
+    /// Leftover class field-initializer emit. candidate100 still compiles
+    /// two leftover copies (`emitInstanceFieldInitializer` 1116 /
+    /// `emitStaticFieldInitializer` 1326, extra 1116, 14.6% match). The
+    /// leftover is enter-child + receiver + optional init + define + drop.
+    /// Comptime identity is static vs instance (which child, `this` opcode,
+    /// computed-key arm). Take those at runtime. Private names stay `inline`
+    /// and pass only flags — no leftover setup at the wrapper (knives 94/98).
+    noinline fn emitFieldInitializer(
         s: *State,
         atom_id: Atom,
         is_private: bool,
         is_computed: bool,
         has_initializer: bool,
+        is_static: bool,
     ) Error!void {
-        const child_index = try ensureClassStaticInitFunction(s);
+        const child_index = if (is_static)
+            try ensureClassStaticInitFunction(s)
+        else
+            try ensureClassFieldsInitFunction(s);
         const parent_fd = s.curFunc();
         if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
         const init_fd = parent_fd.child_list[child_index];
@@ -14198,8 +14209,14 @@ pub const parser_core = struct {
         const saved_ctx = try enterFieldInitFunction(s, init_fd);
         errdefer leaveFieldInitFunction(s, saved_ctx);
 
-        try s.emitScopeGetVar(atom_this);
-        if (is_private or is_computed) try s.emitScopeGetVar(atom_id);
+        if (is_static) {
+            try s.emitScopeGetVar(atom_this);
+        } else {
+            // qjs js_parse_class: instance field initializers begin from the
+            // receiver supplied as this.
+            try Emitter.op(s, opcode.op.push_this);
+        }
+        if (is_private or (is_static and is_computed)) try s.emitScopeGetVar(atom_id);
         if (has_initializer) {
             try parseAssignExpr(s);
             if (is_private or is_computed)
@@ -14207,32 +14224,30 @@ pub const parser_core = struct {
             else
                 try setObjectName(s, atom_id);
         } else {
-            // qjs js_parse_class: an uninitialized static field receives
-            // undefined in the static initializer child.
+            // qjs js_parse_class: an uninitialized field receives undefined
+            // in the initializer child.
             try Emitter.op(s, opcode.op.undefined);
         }
         if (is_private) {
-            // qjs js_parse_class: define the private static field on the
-            // constructor captured as this.
             try Emitter.op(s, opcode.op.define_private_field);
-            // qjs js_parse_class: discard the private-field definition
-            // result in the initializer child.
-            try Emitter.op(s, opcode.op.drop);
         } else if (is_computed) {
-            // qjs js_parse_class: define a computed static public field.
             try Emitter.op(s, opcode.op.define_array_el);
-            // qjs js_parse_class: discard the computed field definition
-            // result in the initializer child.
-            try Emitter.op(s, opcode.op.drop);
         } else {
-            // qjs js_parse_class: define a named static public field.
             try Emitter.opAtom(s, opcode.op.define_field, atom_id);
-            // qjs js_parse_class: discard the named field definition
-            // result in the initializer child.
-            try Emitter.op(s, opcode.op.drop);
         }
+        try Emitter.op(s, opcode.op.drop);
 
         leaveFieldInitFunction(s, saved_ctx);
+    }
+
+    inline fn emitStaticFieldInitializer(
+        s: *State,
+        atom_id: Atom,
+        is_private: bool,
+        is_computed: bool,
+        has_initializer: bool,
+    ) Error!void {
+        return emitFieldInitializer(s, atom_id, is_private, is_computed, has_initializer, true);
     }
 
     fn emitPublicFieldNoInitializer(s: *State, atom_id: Atom) Error!void {
@@ -14243,47 +14258,13 @@ pub const parser_core = struct {
         try emitInstanceFieldInitializer(s, atom_id, false, false);
     }
 
-    fn emitInstanceFieldInitializer(
+    inline fn emitInstanceFieldInitializer(
         s: *State,
         atom_id: Atom,
         has_initializer: bool,
         is_private: bool,
     ) Error!void {
-        const child_index = try ensureClassFieldsInitFunction(s);
-        const parent_fd = s.curFunc();
-        if (child_index >= parent_fd.child_list.len) return Error.ParserInvariant;
-        const init_fd = parent_fd.child_list[child_index];
-
-        const saved_ctx = try enterFieldInitFunction(s, init_fd);
-        errdefer leaveFieldInitFunction(s, saved_ctx);
-
-        // qjs js_parse_class: instance field initializers begin from the
-        // receiver supplied as this.
-        try Emitter.op(s, opcode.op.push_this);
-        if (is_private) try s.emitScopeGetVar(atom_id);
-        if (has_initializer) {
-            try parseAssignExpr(s);
-            if (is_private)
-                try setObjectNameComputed(s)
-            else
-                try setObjectName(s, atom_id);
-        } else {
-            // qjs js_parse_class: an uninitialized instance field receives
-            // undefined in the fields initializer child.
-            try Emitter.op(s, opcode.op.undefined);
-        }
-        if (is_private) {
-            // qjs js_parse_class: define the private instance field on
-            // this using its private symbol.
-            try Emitter.op(s, opcode.op.define_private_field);
-        } else {
-            // qjs js_parse_class: define the named public instance field.
-            try Emitter.opAtom(s, opcode.op.define_field, atom_id);
-        }
-        // qjs js_parse_class: discard the instance field definition result.
-        try Emitter.op(s, opcode.op.drop);
-
-        leaveFieldInitFunction(s, saved_ctx);
+        return emitFieldInitializer(s, atom_id, is_private, false, has_initializer, false);
     }
 
     fn ensureClassFieldsInitFunction(s: *State) Error!usize {
