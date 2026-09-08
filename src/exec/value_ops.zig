@@ -502,16 +502,18 @@ test "createStringValue leftover noinline shares empty and ascii mint" {
 
     const empty = try createStringValue(rt, "");
     const cached = try rt.emptyString();
-    try std.testing.expect(empty.asStringBody().? == cached);
+    try std.testing.expect(empty.asStringBodyRaw().? == cached);
 
     const again = try createStringValue(rt, "");
-    try std.testing.expect(again.asStringBody().? == cached);
+    try std.testing.expect(again.asStringBodyRaw().? == cached);
 
     const ascii = try createStringValue(rt, "abc");
     try std.testing.expect(ascii.asStringBody().?.eqlBytes("abc"));
 
-    const utf8 = try createStringValue(rt, "é");
-    try std.testing.expect(utf8.asStringBody().?.eqlBytes("é"));
+    const utf8_bytes = "\xc3\xa9";
+    const utf8 = try createStringValue(rt, utf8_bytes);
+    const expected_utf8 = try core.string.String.createUtf8(rt, utf8_bytes);
+    try std.testing.expect(utf8.asStringBody().?.eqlString(expected_utf8));
 }
 
 pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {
