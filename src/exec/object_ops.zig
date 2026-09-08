@@ -3680,7 +3680,18 @@ pub fn sameObjectIdentity(a: core.JSValue, b: core.JSValue) bool {
     return a_header == b_header;
 }
 
-pub fn hasPropertyForWith(
+/// Leftover proxy [[Has]] trap. candidate111 still compiles
+/// `hasPropertyForWith` (860) as a second copy of `hasValueProperty`
+/// (795, extra 795, 5.3% match). The leftover is target+handler +
+/// get `has` + missing-trap recurse + trap key + call +
+/// `validateProxyHasResult`. Comptime identity is the incoming
+/// JSValue vs `*Object` receiver. Take expectObject in the with
+/// wrapper and reuse the already-outlined `hasValueProperty` walk
+/// (knife 103: add leftover copy to a helper that already has the
+/// walk). Does not turn `hasValueProperty` into an inline wrapper
+/// (knives 94/108). Does not fold [[Set]] / isExtensible /
+/// PreventExtensions / SetPrototypeOf / [[Get]] / [[Delete]].
+pub inline fn hasPropertyForWith(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3688,19 +3699,9 @@ pub fn hasPropertyForWith(
     atom_id: core.Atom,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
+) HostError!bool {
     const object = try property_ops.expectObject(object_value);
-    const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, false, caller_function, caller_frame);
-    const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const has_atom = core.atom.ids.has;
-    const trap = try getValueProperty(ctx, output, global, handler_value, has_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) {
-        return hasPropertyForWith(ctx, output, global, target_value, atom_id, caller_function, caller_frame);
-    }
-    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
-    return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
+    return hasValueProperty(ctx, output, global, object_value, object, atom_id, caller_function, caller_frame);
 }
 
 pub fn hasValueProperty(

@@ -10648,6 +10648,43 @@ test "leftover proxy extensible trap through one runtime kind" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover proxy has trap through one outlined walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var seen = [];
+        \\var target = { foo: 1 };
+        \\var p = new Proxy(target, {
+        \\  has: function (t, k) { seen.push(k); return Reflect.has(t, k); }
+        \\});
+        \\assert.sameValue("foo" in p, true);
+        \\assert.sameValue("bar" in p, false);
+        \\assert.sameValue(Reflect.has(p, "foo"), true);
+        \\var withHit = false;
+        \\with (p) { withHit = typeof foo === "number"; }
+        \\assert.sameValue(withHit, true);
+        \\assert.sameValue(seen.indexOf("foo") >= 0, true);
+        \\assert.sameValue(seen.indexOf("bar") >= 0, true);
+        \\assert.sameValue(seen.length >= 4, true);
+        \\var passthrough = new Proxy({ a: 2 }, {});
+        \\assert.sameValue("a" in passthrough, true);
+        \\var withPass = 0;
+        \\with (passthrough) { withPass = a; }
+        \\assert.sameValue(withPass, 2);
+        \\var sealed = Object.preventExtensions({ hidden: 1 });
+        \\Object.defineProperty(sealed, "hidden", { configurable: false });
+        \\var mismatch = new Proxy(sealed, { has: function () { return false; } });
+        \\var threw = false;
+        \\try { "hidden" in mismatch; } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var plain = { x: 3 };
+        \\assert.sameValue("x" in plain, true);
+        \\assert.sameValue("y" in plain, false);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover iterator wrap next return through one runtime kind" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
