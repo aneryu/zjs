@@ -10254,7 +10254,7 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
         \\assert.sameValue("x".fontcolor(), '<font color="undefined">x</font>');
         \\assert.sameValue("x".fontsize(7), '<font size="7">x</font>');
         \\assert.sameValue("x".link('a"b'), '<a href="a&quot;b">x</a>');
-        \\assert.throws(TypeError, function() { "x".anchor("a", "b"); });
+        \\assert.sameValue("x".anchor("a", "b"), '<a name="a">x</a>');
     );
     try std.testing.expect(result.isUndefined());
 }
