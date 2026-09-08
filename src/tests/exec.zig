@@ -10327,6 +10327,58 @@ test "buffer constructor extras leftover runtime tables preserve ArrayBuffer Sha
     try std.testing.expect(result.isUndefined());
 }
 
+test "fast prototype method leftover runtime domain preserves regexp and collection lookups" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var re = /a/;
+        \\assert.sameValue(re.test, RegExp.prototype.test);
+        \\assert.sameValue(re.exec, RegExp.prototype.exec);
+        \\assert.sameValue(re.test("a"), true);
+        \\assert.sameValue(re.exec("a")[0], "a");
+        \\assert.sameValue(re.toString, RegExp.prototype.toString);
+        \\re.test = 1;
+        \\assert.sameValue(re.test, 1);
+        \\delete re.test;
+        \\assert.sameValue(re.test, RegExp.prototype.test);
+        \\var savedTest = RegExp.prototype.test;
+        \\RegExp.prototype.test = function(input) { return "patched:" + input; };
+        \\assert.sameValue(re.test("a"), "patched:a");
+        \\RegExp.prototype.test = savedTest;
+        \\assert.sameValue(re.test("a"), true);
+        \\var map = new Map([[1, 2]]);
+        \\assert.sameValue(map.get, Map.prototype.get);
+        \\assert.sameValue(map.set, Map.prototype.set);
+        \\assert.sameValue(map.get(1), 2);
+        \\map.get = 3;
+        \\assert.sameValue(map.get, 3);
+        \\delete map.get;
+        \\assert.sameValue(map.get, Map.prototype.get);
+        \\var savedGet = Map.prototype.get;
+        \\Map.prototype.get = function(key) { return "mapped:" + key; };
+        \\assert.sameValue(map.get(1), "mapped:1");
+        \\Map.prototype.get = savedGet;
+        \\assert.sameValue(map.get(1), 2);
+        \\var set = new Set([1]);
+        \\assert.sameValue(set.has, Set.prototype.has);
+        \\assert.sameValue(set.add, Set.prototype.add);
+        \\assert.sameValue(set.has(1), true);
+        \\var wm = new WeakMap();
+        \\var key = {};
+        \\wm.set(key, 4);
+        \\assert.sameValue(wm.get, WeakMap.prototype.get);
+        \\assert.sameValue(wm.get(key), 4);
+        \\var ws = new WeakSet();
+        \\ws.add(key);
+        \\assert.sameValue(ws.has, WeakSet.prototype.has);
+        \\assert.sameValue(ws.has(key), true);
+        \\assert.sameValue(set.get, undefined);
+        \\assert.sameValue(({}).test, undefined);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "data view extras leftover optional species preserves accessors and omits species" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
