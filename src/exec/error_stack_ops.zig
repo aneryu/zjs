@@ -15,6 +15,8 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
+const number_format = @import("../libs/number_format.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // error-stack cluster).
@@ -135,7 +137,17 @@ fn defineParseErrorSurface(
 
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(rt.memory.allocator);
-    try bytes.print(rt.memory.allocator, "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
+    var line_buf: [20]u8 = undefined;
+    var col_buf: [20]u8 = undefined;
+    try array_list_erased.appendSlices(&bytes, rt.memory.allocator, &.{
+        "    at ",
+        filename,
+        ":",
+        number_format.formatInt64(&line_buf, @as(i64, line_num)),
+        ":",
+        number_format.formatInt64(&col_buf, @as(i64, col_num)),
+        "\n",
+    });
     const frames_value = try buildErrorStackStringValue(ctx, global, null);
     try value_ops.appendRawString(rt, &bytes, frames_value);
     const stack_value = try value_ops.createStringValue(rt, bytes.items);

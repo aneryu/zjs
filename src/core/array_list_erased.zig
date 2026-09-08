@@ -5,6 +5,8 @@
 //! `rawAlloc` / `rawFree` with the element's alignment — not `alloc(u8)` and
 //! not GC `TraceHeader` lists. `u8` / `u64` append sites and `u8`
 //! `toOwnedSlice` sites stay on std (`u64` includes GC pause samples).
+//! Last-user `Aligned(u8).print` sites join ready slices here so that leftover
+//! print instantiation can leave.
 
 const std = @import("std");
 
@@ -179,4 +181,14 @@ noinline fn toOwnedSliceErased(
     len_slot.* = 0;
     cap_slot.* = 0;
     return new_ptr[0..used_bytes];
+}
+
+/// Join ready slices into `ArrayList(u8)`. Last-user leftover `print` sites
+/// keep field mapping at the call site; this is not a format language.
+pub inline fn appendSlices(
+    list: *std.ArrayList(u8),
+    gpa: Allocator,
+    pieces: []const []const u8,
+) Allocator.Error!void {
+    for (pieces) |piece| try list.appendSlice(gpa, piece);
 }

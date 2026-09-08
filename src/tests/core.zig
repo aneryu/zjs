@@ -18800,6 +18800,111 @@ test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
     }
 }
 
+test "array_list_erased appendSlices matches leftover ArrayList.print diagnostics" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const number_format = @import("../libs/number_format.zig");
+    const allocator = std.testing.allocator;
+
+    const cases = [_]struct {
+        fmt: []const u8,
+        path: []const u8,
+        other: []const u8,
+        line: i64,
+        column: i64,
+    }{
+        .{ .fmt = "could not load module filename '{s}'", .path = "./missing.mjs", .other = "", .line = 0, .column = 0 },
+        .{ .fmt = "Could not find export '{s}' in module '{s}'", .path = "indirectFirst", .other = "/fixture/link-failures.mjs", .line = 0, .column = 0 },
+        .{ .fmt = "export '{s}' in module '{s}' is ambiguous", .path = "name", .other = "mod.mjs", .line = 0, .column = 0 },
+        .{ .fmt = "could not link module '{s}': {s}", .path = "app.mjs", .other = "InvalidBytecode", .line = 0, .column = 0 },
+        .{ .fmt = "SYNTAX ERROR in {s}:{d}:{d} - {s}", .path = "mod.mjs", .other = "expected ';'", .line = 12, .column = 4 },
+        .{ .fmt = "SYNTAX ERROR in {s}:{d}:{d} - {s}", .path = "wide.mjs", .other = "ok", .line = 100000, .column = 2147483647 },
+        .{ .fmt = "    at {s}:{d}:{d}\n", .path = "parse.js", .other = "", .line = 1, .column = 1 },
+        .{ .fmt = "    at {s}:{d}:{d}\n", .path = "neg.js", .other = "", .line = -5, .column = 0 },
+    };
+
+    for (cases) |case| {
+        var printed: std.ArrayList(u8) = .empty;
+        defer printed.deinit(allocator);
+        if (std.mem.eql(u8, case.fmt, "could not load module filename '{s}'")) {
+            try printed.print(allocator, case.fmt, .{case.path});
+        } else if (std.mem.eql(u8, case.fmt, "Could not find export '{s}' in module '{s}'") or
+            std.mem.eql(u8, case.fmt, "export '{s}' in module '{s}' is ambiguous") or
+            std.mem.eql(u8, case.fmt, "could not link module '{s}': {s}"))
+        {
+            try printed.print(allocator, case.fmt, .{ case.path, case.other });
+        } else if (std.mem.eql(u8, case.fmt, "SYNTAX ERROR in {s}:{d}:{d} - {s}")) {
+            try printed.print(allocator, case.fmt, .{ case.path, case.line, case.column, case.other });
+        } else {
+            try printed.print(allocator, case.fmt, .{ case.path, case.line, case.column });
+        }
+
+        var joined: std.ArrayList(u8) = .empty;
+        defer joined.deinit(allocator);
+        var line_buf: [20]u8 = undefined;
+        var col_buf: [20]u8 = undefined;
+        if (std.mem.eql(u8, case.fmt, "could not load module filename '{s}'")) {
+            try array_list_erased.appendSlices(&joined, allocator, &.{
+                "could not load module filename '",
+                case.path,
+                "'",
+            });
+        } else if (std.mem.eql(u8, case.fmt, "Could not find export '{s}' in module '{s}'")) {
+            try array_list_erased.appendSlices(&joined, allocator, &.{
+                "Could not find export '",
+                case.path,
+                "' in module '",
+                case.other,
+                "'",
+            });
+        } else if (std.mem.eql(u8, case.fmt, "export '{s}' in module '{s}' is ambiguous")) {
+            try array_list_erased.appendSlices(&joined, allocator, &.{
+                "export '",
+                case.path,
+                "' in module '",
+                case.other,
+                "' is ambiguous",
+            });
+        } else if (std.mem.eql(u8, case.fmt, "could not link module '{s}': {s}")) {
+            try array_list_erased.appendSlices(&joined, allocator, &.{
+                "could not link module '",
+                case.path,
+                "': ",
+                case.other,
+            });
+        } else if (std.mem.eql(u8, case.fmt, "SYNTAX ERROR in {s}:{d}:{d} - {s}")) {
+            try array_list_erased.appendSlices(&joined, allocator, &.{
+                "SYNTAX ERROR in ",
+                case.path,
+                ":",
+                number_format.formatInt64(&line_buf, case.line),
+                ":",
+                number_format.formatInt64(&col_buf, case.column),
+                " - ",
+                case.other,
+            });
+        } else {
+            try array_list_erased.appendSlices(&joined, allocator, &.{
+                "    at ",
+                case.path,
+                ":",
+                number_format.formatInt64(&line_buf, case.line),
+                ":",
+                number_format.formatInt64(&col_buf, case.column),
+                "\n",
+            });
+        }
+
+        try std.testing.expectEqualStrings(printed.items, joined.items);
+    }
+
+    var failing: std.ArrayList(u8) = .empty;
+    defer failing.deinit(std.testing.failing_allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        array_list_erased.appendSlices(&failing, std.testing.failing_allocator, &.{"x"}),
+    );
+}
+
 test "sort_erased heap matches std.sort.heap" {
     const sort_erased = @import("../core/sort_erased.zig");
     const Sample = struct { key: u32, order: u32 };
