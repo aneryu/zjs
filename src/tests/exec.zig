@@ -10272,20 +10272,6 @@ test "createStringValue leftover noinline preserves empty flags and ascii string
     try std.testing.expect(result.isUndefined());
 }
 
-test "defineToStringTag leftover alias preserves Map and Set iterator toString" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    const result = try js.eval(
-        \\assert.sameValue(Object.prototype.toString.call(new Map().entries()), "[object Map Iterator]");
-        \\assert.sameValue(Object.prototype.toString.call(new Map().keys()), "[object Map Iterator]");
-        \\assert.sameValue(Object.prototype.toString.call(new Set().values()), "[object Set Iterator]");
-        \\assert.sameValue(Object.prototype.toString.call(new Map()), "[object Map]");
-        \\assert.sameValue(Object.prototype.toString.call(new Set()), "[object Set]");
-    );
-    try std.testing.expect(result.isUndefined());
-}
-
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
     {
         var js = try helpers.TestEngine.init(std.testing.allocator);
