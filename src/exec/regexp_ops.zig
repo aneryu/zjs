@@ -21,6 +21,7 @@ const object_ops = @import("object_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const array_ops = @import("array_ops.zig");
 const exception_ops = @import("exception_ops.zig");
+const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
 
@@ -803,18 +804,9 @@ fn expectString(value: core.JSValue) !*core.string.String {
     return value.asStringBody() orelse return error.TypeError;
 }
 
-fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    // qjs `js_new_string8_len(..., 0)` returns the canonical empty atom
-    // string. RegExp `flags` reaches this case for every flagless receiver, so
-    // allocating a fresh zero-length body here adds an alloc/free pair to
-    // `@@split` before the sticky flag is appended.
-    if (bytes.len == 0) return (try rt.emptyString()).value();
-    const str = if (core.string.isAsciiBytes(bytes))
-        try core.string.String.createAscii(rt, bytes)
-    else
-        try core.string.String.createUtf8(rt, bytes);
-    return str.value();
-}
+// Leftover empty + ascii/utf8 mint. Same walk as `value_ops.createStringValue`
+// (including the canonical empty atom for flagless `flags` / `@@split`).
+const createStringValue = value_ops.createStringValue;
 
 fn getInternalSource(object: *core.Object) !core.JSValue {
     return (object.regexpSource() orelse return error.TypeError);

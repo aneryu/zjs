@@ -10259,6 +10259,19 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "createStringValue leftover noinline preserves empty flags and ascii strings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(/abc/.flags, "");
+        \\assert.sameValue(/abc/.source, "abc");
+        \\assert.sameValue("".bold(), "<b></b>");
+        \\assert.sameValue("é".big(), "<big>é</big>");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
     {
         var js = try helpers.TestEngine.init(std.testing.allocator);

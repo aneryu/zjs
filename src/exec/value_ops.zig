@@ -473,7 +473,10 @@ pub fn numberToValue(value: f64) core.JSValue {
     return core.JSValue.float64(value);
 }
 
-pub fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
+/// Leftover empty + ascii/utf8 string mint. candidate90 still compiled two
+/// leftover local copies (`string_builtin_ops` 173, `regexp_ops` 271) plus
+/// many inlined sites of this same walk. Take the mint once as `noinline`.
+pub noinline fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     if (bytes.len == 0) {
         const cached = try rt.emptyString();
         return cached.value();
@@ -491,6 +494,24 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
         return cached.value();
     }
     return (try core.string.String.createAscii(rt, bytes)).value();
+}
+
+test "createStringValue leftover noinline shares empty and ascii mint" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const empty = try createStringValue(rt, "");
+    const cached = try rt.emptyString();
+    try std.testing.expect(empty.asStringBody().? == cached);
+
+    const again = try createStringValue(rt, "");
+    try std.testing.expect(again.asStringBody().? == cached);
+
+    const ascii = try createStringValue(rt, "abc");
+    try std.testing.expect(ascii.asStringBody().?.eqlBytes("abc"));
+
+    const utf8 = try createStringValue(rt, "é");
+    try std.testing.expect(utf8.asStringBody().?.eqlBytes("é"));
 }
 
 pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {

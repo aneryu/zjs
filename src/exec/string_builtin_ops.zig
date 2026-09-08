@@ -2010,13 +2010,7 @@ fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), ta
     try appendValueString(rt, buffer, target);
 }
 
-fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const str = if (core.string.isAsciiBytes(bytes))
-        try core.string.String.createAscii(rt, bytes)
-    else
-        try core.string.String.createUtf8(rt, bytes);
-    return str.value();
-}
+const createStringValue = value_ops.createStringValue;
 
 fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) return value;
