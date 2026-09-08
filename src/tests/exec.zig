@@ -10856,6 +10856,34 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
     try std.testing.expect(result.isUndefined());
 }
 
+test "leftover Array.indexOf direction through one runtime walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1, 2, 3, 2].indexOf(2), 1);
+        \\assert.sameValue([1, 2, 3, 2].lastIndexOf(2), 3);
+        \\assert.sameValue([1, 2, 3].indexOf(9), -1);
+        \\assert.sameValue([1, 2, 3].lastIndexOf(9), -1);
+        \\assert.sameValue([1, 2, 3].indexOf(2, 2), -1);
+        \\assert.sameValue([1, 2, 3, 2].lastIndexOf(2, 2), 1);
+        \\assert.sameValue([1, , 3].indexOf(undefined), -1);
+        \\assert.sameValue([1, , 3].includes(undefined), true);
+        \\assert.sameValue([1, , 3].lastIndexOf(undefined), -1);
+        \\assert.sameValue([1, , 3].lastIndexOf(3, 1), -1);
+        \\assert.sameValue([1, , 3].lastIndexOf(1, 1), 0);
+        \\assert.sameValue([NaN].includes(NaN), true);
+        \\assert.sameValue([NaN].indexOf(NaN), -1);
+        \\assert.sameValue([NaN].lastIndexOf(NaN), -1);
+        \\var o = { 0: 7, 2: 9, length: 3 };
+        \\assert.sameValue(Array.prototype.indexOf.call(o, 9), 2);
+        \\assert.sameValue(Array.prototype.lastIndexOf.call(o, 7), 0);
+        \\assert.sameValue(Array.prototype.includes.call(o, undefined), true);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
 test "leftover Array.reduce direction through one runtime walk" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

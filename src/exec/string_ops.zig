@@ -2987,15 +2987,18 @@ pub fn arraySearchCall(
     if (mode == .last_index_of and length > 1_000_000) {
         return try arrayLastIndexSparseLarge(ctx, output, global, object, receiver_object_value, args, length, search_value);
     }
-    if (mode == .last_index_of) {
-        var cursor = try arrayLastIndexStart(ctx, output, global, args, length);
-        // Dense fast scan (qjs js_array_lastIndexOf js_get_fast_array loop,
-        // quickjs.c:42476): if the receiver is still a dense fast array and the
-        // fromIndex coercion above did not resize it, scan the borrowed element
-        // slice directly — no per-element propertyAtomFromLengthIndex intern +
-        // generic getValueProperty. `===` runs no user code, so the slice stays
-        // valid for the whole loop.
-        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
+
+    // Unique dense paths stay separate. lastIndexOf requires a full-density
+    // fast array and returns -1 if the dense scan misses. indexOf/includes
+    // scan the dense PREFIX then fall through to the generic tail (qjs
+    // js_array_indexOf/includes, quickjs.c:42426-42483).
+    const from_right = mode == .last_index_of;
+    var cursor = if (from_right)
+        try arrayLastIndexStart(ctx, output, global, args, length)
+    else
+        try arrayFirstIndexStart(ctx, output, global, args, length);
+    if (from_right) {
+        if (object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
             const elements = object.arrayElements();
             if (cursor > elements.len) cursor = elements.len;
             while (cursor > 0) {
@@ -3004,57 +3007,37 @@ pub fn arraySearchCall(
             }
             return core.JSValue.int32(-1);
         }
-        while (cursor > 0) {
-            cursor -= 1;
-            const item = if (is_typed_array) blk: {
-                const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
-                if (cursor >= current_length) continue;
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
-            if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
-        }
-    } else {
-        var cursor = try arrayFirstIndexStart(ctx, output, global, args, length);
-        // Dense fast PREFIX scan, then fall through to the generic tail (qjs
-        // js_array_indexOf/includes: js_get_fast_array dense loop over [0, count) then the
-        // generic loop over [count, len) for the tail holes, quickjs.c:42426-42483). Unlike
-        // a full-density gate, this also fast-scans the dense prefix of an L3 holey fast
-        // array (array_count < length) before the proto-aware tail.
-        if (!is_typed_array and object.isFastArray()) {
-            const elements = object.arrayElements();
-            const dense_end = @min(elements.len, length);
-            while (cursor < dense_end) : (cursor += 1) {
-                const item = elements[cursor];
-                if (mode == .includes) {
-                    if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
-                } else {
-                    if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
-                }
-            }
-            // cursor == dense_end; the generic loop below covers [dense_end, length) holes.
-        }
-        while (cursor < length) : (cursor += 1) {
-            const item = if (is_typed_array) blk: {
-                if (mode != .includes) {
-                    const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
-                    if (cursor >= current_length) continue;
-                }
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (mode != .includes and !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
+    } else if (object.isFastArray()) {
+        const elements = object.arrayElements();
+        const dense_end = @min(elements.len, length);
+        while (cursor < dense_end) : (cursor += 1) {
+            const item = elements[cursor];
             if (mode == .includes) {
                 if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
-                continue;
+            } else {
+                if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
             }
+        }
+    }
+
+    // Leftover generic present-element search: propertyAtom + has (except
+    // includes) + get + sameValueZero / valuesStrictEqual. Direction is
+    // taken at runtime (knife 118 leftover-direction shape). After the
+    // typed-array early return above, the previous in-loop typed-array
+    // arms are dead.
+    var remaining: usize = if (from_right) cursor else length - cursor;
+    while (remaining > 0) : ({
+        remaining -= 1;
+        if (!from_right) cursor += 1;
+    }) {
+        if (from_right) cursor -= 1;
+        const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+        defer key.deinit(ctx.runtime);
+        if (mode != .includes and !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        if (mode == .includes) {
+            if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
+        } else {
             if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
         }
     }
