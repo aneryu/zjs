@@ -18805,96 +18805,81 @@ test "array_list_erased appendSlices matches leftover ArrayList.print diagnostic
     const number_format = @import("../libs/number_format.zig");
     const allocator = std.testing.allocator;
 
-    const cases = [_]struct {
-        fmt: []const u8,
-        path: []const u8,
-        other: []const u8,
-        line: i64,
-        column: i64,
-    }{
-        .{ .fmt = "could not load module filename '{s}'", .path = "./missing.mjs", .other = "", .line = 0, .column = 0 },
-        .{ .fmt = "Could not find export '{s}' in module '{s}'", .path = "indirectFirst", .other = "/fixture/link-failures.mjs", .line = 0, .column = 0 },
-        .{ .fmt = "export '{s}' in module '{s}' is ambiguous", .path = "name", .other = "mod.mjs", .line = 0, .column = 0 },
-        .{ .fmt = "could not link module '{s}': {s}", .path = "app.mjs", .other = "InvalidBytecode", .line = 0, .column = 0 },
-        .{ .fmt = "SYNTAX ERROR in {s}:{d}:{d} - {s}", .path = "mod.mjs", .other = "expected ';'", .line = 12, .column = 4 },
-        .{ .fmt = "SYNTAX ERROR in {s}:{d}:{d} - {s}", .path = "wide.mjs", .other = "ok", .line = 100000, .column = 2147483647 },
-        .{ .fmt = "    at {s}:{d}:{d}\n", .path = "parse.js", .other = "", .line = 1, .column = 1 },
-        .{ .fmt = "    at {s}:{d}:{d}\n", .path = "neg.js", .other = "", .line = -5, .column = 0 },
+    const Expect = struct {
+        fn match(
+            comptime fmt: []const u8,
+            args: anytype,
+            pieces: []const []const u8,
+        ) !void {
+            var printed: std.ArrayList(u8) = .empty;
+            defer printed.deinit(allocator);
+            try printed.print(allocator, fmt, args);
+            var joined: std.ArrayList(u8) = .empty;
+            defer joined.deinit(allocator);
+            try array_list_erased.appendSlices(&joined, allocator, pieces);
+            try std.testing.expectEqualStrings(printed.items, joined.items);
+        }
     };
 
-    for (cases) |case| {
-        var printed: std.ArrayList(u8) = .empty;
-        defer printed.deinit(allocator);
-        if (std.mem.eql(u8, case.fmt, "could not load module filename '{s}'")) {
-            try printed.print(allocator, case.fmt, .{case.path});
-        } else if (std.mem.eql(u8, case.fmt, "Could not find export '{s}' in module '{s}'") or
-            std.mem.eql(u8, case.fmt, "export '{s}' in module '{s}' is ambiguous") or
-            std.mem.eql(u8, case.fmt, "could not link module '{s}': {s}"))
-        {
-            try printed.print(allocator, case.fmt, .{ case.path, case.other });
-        } else if (std.mem.eql(u8, case.fmt, "SYNTAX ERROR in {s}:{d}:{d} - {s}")) {
-            try printed.print(allocator, case.fmt, .{ case.path, case.line, case.column, case.other });
-        } else {
-            try printed.print(allocator, case.fmt, .{ case.path, case.line, case.column });
-        }
+    try Expect.match("could not load module filename '{s}'", .{"./missing.mjs"}, &.{
+        "could not load module filename '",
+        "./missing.mjs",
+        "'",
+    });
+    try Expect.match("Could not find export '{s}' in module '{s}'", .{ "indirectFirst", "/fixture/link-failures.mjs" }, &.{
+        "Could not find export '",
+        "indirectFirst",
+        "' in module '",
+        "/fixture/link-failures.mjs",
+        "'",
+    });
+    try Expect.match("export '{s}' in module '{s}' is ambiguous", .{ "name", "mod.mjs" }, &.{
+        "export '",
+        "name",
+        "' in module '",
+        "mod.mjs",
+        "' is ambiguous",
+    });
+    try Expect.match("could not link module '{s}': {s}", .{ "app.mjs", "InvalidBytecode" }, &.{
+        "could not link module '",
+        "app.mjs",
+        "': ",
+        "InvalidBytecode",
+    });
 
-        var joined: std.ArrayList(u8) = .empty;
-        defer joined.deinit(allocator);
+    inline for (.{
+        .{ .path = "mod.mjs", .other = "expected ';'", .line = @as(i64, 12), .column = @as(i64, 4) },
+        .{ .path = "wide.mjs", .other = "ok", .line = @as(i64, 100000), .column = @as(i64, 2147483647) },
+    }) |case| {
         var line_buf: [20]u8 = undefined;
         var col_buf: [20]u8 = undefined;
-        if (std.mem.eql(u8, case.fmt, "could not load module filename '{s}'")) {
-            try array_list_erased.appendSlices(&joined, allocator, &.{
-                "could not load module filename '",
-                case.path,
-                "'",
-            });
-        } else if (std.mem.eql(u8, case.fmt, "Could not find export '{s}' in module '{s}'")) {
-            try array_list_erased.appendSlices(&joined, allocator, &.{
-                "Could not find export '",
-                case.path,
-                "' in module '",
-                case.other,
-                "'",
-            });
-        } else if (std.mem.eql(u8, case.fmt, "export '{s}' in module '{s}' is ambiguous")) {
-            try array_list_erased.appendSlices(&joined, allocator, &.{
-                "export '",
-                case.path,
-                "' in module '",
-                case.other,
-                "' is ambiguous",
-            });
-        } else if (std.mem.eql(u8, case.fmt, "could not link module '{s}': {s}")) {
-            try array_list_erased.appendSlices(&joined, allocator, &.{
-                "could not link module '",
-                case.path,
-                "': ",
-                case.other,
-            });
-        } else if (std.mem.eql(u8, case.fmt, "SYNTAX ERROR in {s}:{d}:{d} - {s}")) {
-            try array_list_erased.appendSlices(&joined, allocator, &.{
-                "SYNTAX ERROR in ",
-                case.path,
-                ":",
-                number_format.formatInt64(&line_buf, case.line),
-                ":",
-                number_format.formatInt64(&col_buf, case.column),
-                " - ",
-                case.other,
-            });
-        } else {
-            try array_list_erased.appendSlices(&joined, allocator, &.{
-                "    at ",
-                case.path,
-                ":",
-                number_format.formatInt64(&line_buf, case.line),
-                ":",
-                number_format.formatInt64(&col_buf, case.column),
-                "\n",
-            });
-        }
+        try Expect.match("SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ case.path, case.line, case.column, case.other }, &.{
+            "SYNTAX ERROR in ",
+            case.path,
+            ":",
+            number_format.formatInt64(&line_buf, case.line),
+            ":",
+            number_format.formatInt64(&col_buf, case.column),
+            " - ",
+            case.other,
+        });
+    }
 
-        try std.testing.expectEqualStrings(printed.items, joined.items);
+    inline for (.{
+        .{ .path = "parse.js", .line = @as(i64, 1), .column = @as(i64, 1) },
+        .{ .path = "neg.js", .line = @as(i64, -5), .column = @as(i64, 0) },
+    }) |case| {
+        var line_buf: [20]u8 = undefined;
+        var col_buf: [20]u8 = undefined;
+        try Expect.match("    at {s}:{d}:{d}\n", .{ case.path, case.line, case.column }, &.{
+            "    at ",
+            case.path,
+            ":",
+            number_format.formatInt64(&line_buf, case.line),
+            ":",
+            number_format.formatInt64(&col_buf, case.column),
+            "\n",
+        });
     }
 
     var failing: std.ArrayList(u8) = .empty;
