@@ -5752,6 +5752,27 @@ test "shape registry hash grows and reuses object root shapes" {
     try std.testing.expect(first.isShared());
 }
 
+test "createObjectRoot leftover reserved flag shares hashed proto roots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try rt.shapes.createObjectRoot(null);
+    const reserved_hit = try rt.shapes.createObjectRootReserved(null);
+    try std.testing.expectEqual(first, reserved_hit);
+    try std.testing.expect(first.isShared());
+
+    const proto = try core.Object.create(rt, core.class.ids.object, null);
+    const live_before = rt.gc.liveCountKind(.shape);
+    const reserved_miss = try rt.shapes.createObjectRootReserved(proto);
+    try std.testing.expect(!reserved_miss.header.metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(live_before, rt.gc.liveCountKind(.shape));
+    rt.shapes.publish(reserved_miss);
+    try std.testing.expect(reserved_miss.header.metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(live_before + 1, rt.gc.liveCountKind(.shape));
+    const published = try rt.shapes.createObjectRoot(proto);
+    try std.testing.expectEqual(reserved_miss, published);
+}
+
 test "reserved object root shapes reuse only an exact property capacity" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
