@@ -56,6 +56,26 @@ class GateSmokeEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('fixed-work smoke: all clean', result.stdout)
 
+    def test_parallel_mode_probes_on_the_parallel_list_not_the_placeholder_cpu(self):
+        # The merge gate passes a placeholder positional CPU in parallel mode
+        # (build/gates.zig). A host without that CPU must still run: the stats
+        # probe pins to the parallel list, not the placeholder.
+        env = dict(self.env)
+        env['ZJS_GATE_PARALLEL_CPUS'] = self.cpu
+        result = subprocess.run(['bash', str(self.entry), str(self.binary), str(self.corpus), '4095', '1'],
+                                cwd=self.root, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('fixed-work smoke: all clean', result.stdout)
+
+    def test_parallel_list_is_validated_before_the_stats_probe(self):
+        env = dict(self.env)
+        env['ZJS_GATE_PARALLEL_CPUS'] = 'not-a-list'
+        result = subprocess.run(['bash', str(self.entry), str(self.binary), str(self.corpus), self.cpu, '1'],
+                                cwd=self.root, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('ZJS_GATE_PARALLEL_CPUS must be a taskset CPU list', result.stderr)
+        self.assertNotIn('does not emit the collector stats lines', result.stderr)
+
     def test_explicit_wrong_artifact_is_rejected_by_stats_probe(self):
         result = self.run_gate(shutil.which('true'), self.corpus, self.cpu, '1')
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
