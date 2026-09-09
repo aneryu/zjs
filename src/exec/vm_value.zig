@@ -517,6 +517,7 @@ fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
+        !core.class.isAsyncFunctionResumeClass(object.class_id) and
         object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
     return object;

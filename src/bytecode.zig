@@ -3199,6 +3199,7 @@ pub const CompileContext = struct {
 };
 
 pub const function_bytecode = struct {
+    pub const AsyncExecutionPolicy = enum(u16) { unknown, no_suspend, may_suspend };
     const std = @import("std");
     const builtin = @import("builtin");
     const build_options = @import("build_options");
@@ -3599,6 +3600,9 @@ pub const function_bytecode = struct {
     ///     since exotic own-property behaviour (Array `length`, typed-array
     ///     and string indices, Proxy, module namespaces) is a property of the
     ///     class, not of the layout.
+    ///   - `secondary_guard_key` = a second own-data layout identity, zero
+    ///     unless `.own`; `secondary_slot` is its receiver slot. Prototype
+    ///     and native-getter arms never carry a secondary entry.
     /// Nothing here is a GC edge: no slot holds a heap pointer. Storage is
     /// the `prop_sites` FAM tail of the owning FunctionBytecode,
     /// zero-initialised with it and freed with it.
@@ -3615,15 +3619,16 @@ pub const function_bytecode = struct {
         class_id: u16 = 0,
         state: u8 = @intFromEnum(State.empty),
         misses: u8 = 0,
-        _pad: u16 = 0,
-        _reserved: u64 = 0,
+        /// Second own-data arm; its guard is zero on every non-own state.
+        secondary_slot: u16 = 0,
+        secondary_guard_key: u64 = 0,
 
         pub const State = enum(u8) {
             /// Never captured. `guard_key` is 0 and identities start at 1, so
             /// an empty entry can never guard-match and the hit path needs no
             /// separate emptiness test.
             empty,
-            /// Own data slot on the receiver.
+            /// Up to two own-data layouts on the receiver.
             own,
             /// Data slot one prototype link up.
             proto,
@@ -3652,6 +3657,8 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "class_id") == 18);
             std.debug.assert(@offsetOf(@This(), "state") == 20);
             std.debug.assert(@offsetOf(@This(), "misses") == 21);
+            std.debug.assert(@offsetOf(@This(), "secondary_slot") == 22);
+            std.debug.assert(@offsetOf(@This(), "secondary_guard_key") == 24);
         }
     };
 
@@ -3667,7 +3674,7 @@ pub const function_bytecode = struct {
         call_facts: function_bytecode.CallFacts,
         /// Preserve ScriptOrModule's aligned offset without widening CallFacts
         /// back into a second semantic carrier.
-        _call_facts_padding: u16 = 0,
+        async_execution_policy: u16 = 0,
         /// Stable ScriptOrModule identity used as the dynamic-import referrer.
         script_or_module: atom.Atom,
         ctor_alloc: CtorAllocProfile = .{},
@@ -3692,7 +3699,7 @@ pub const function_bytecode = struct {
             std.debug.assert(@sizeOf(@This()) == 64);
             std.debug.assert(@sizeOf(@This()) % 8 == 0);
             std.debug.assert(@offsetOf(@This(), "call_facts") == 0x00);
-            std.debug.assert(@offsetOf(@This(), "_call_facts_padding") == 0x02);
+            std.debug.assert(@offsetOf(@This(), "async_execution_policy") == 0x02);
             std.debug.assert(@offsetOf(@This(), "script_or_module") == 0x04);
             std.debug.assert(@offsetOf(@This(), "ctor_alloc") == 0x08);
             std.debug.assert(@offsetOf(@This(), "prop_sites") == 0x28);
@@ -11956,6 +11963,32 @@ const function_mod = struct {
     /// tables/code and the normal stack-BFS result are complete. These facts
     /// are deliberately kept out of attach and call resolution: both paths
     /// must remain allocation-free and scan-free like qjs JSFunctionBytecode.
+    const AsyncExecutionPolicy = function_bytecode.AsyncExecutionPolicy;
+
+    /// A conservative whole-code proof: even unreachable suspension rejects.
+    /// Final canonical bytecode has already passed decoder/CFG validation.
+    /// Adapters borrow mutable bytes and are never given a reusable proof.
+    pub fn classifyAsyncExecution(fb: *const FunctionBytecode) AsyncExecutionPolicy {
+        if (fb.functionKind() != .async or fb.byte_code == null) return .unknown;
+        const code = fb.byteCode();
+        if (code.len == 0) return .unknown;
+        var pc: u32 = 0;
+        while (pc < code.len) {
+            const h = opcode.decode.headerAt(.final, code, pc) catch return .unknown;
+            const form = if (h.form == .ext0) blk: {
+                const tag = opcode.decode.operandAt(h, code, 0, u8) catch return .unknown;
+                break :blk opcode.logical.subForm(tag) orelse return .unknown;
+            } else h.form;
+            switch (opcode.logical.asyncSuspension(form)) {
+                .none => {},
+                .possible => return .may_suspend,
+                .unknown => return .unknown,
+            }
+            pc = h.next_pc();
+        }
+        return .no_suspend;
+    }
+
     pub fn publishExecutionFlags(
         fb: *FunctionBytecode,
         materializes_arguments_object: bool,
@@ -12033,6 +12066,7 @@ const function_mod = struct {
             .entry_rejects_plain_call = entry_rejects_plain_call,
             .small_inline_eligible = small_inline_eligible,
         };
+        fb.hotExtensionRequiredMut().async_execution_policy = @intFromEnum(classifyAsyncExecution(fb));
         fb.hotExtensionRequiredMut().call_facts = call_facts;
         // Keep the header-resident hot mirror coherent with the authoritative
         // FAM word (canonicalCallFacts reads the mirror).

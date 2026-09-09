@@ -3430,6 +3430,8 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         core.class.ids.c_function,
         core.class.ids.bound_function,
         core.class.ids.c_function_data,
+        core.class.ids.async_function_resolve,
+        core.class.ids.async_function_reject,
         core.class.ids.c_closure,
         => "Function",
         core.class.ids.boolean => "Boolean",

@@ -830,6 +830,9 @@ const VmNativeCallableDispatch = union(enum) {
 fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispatch {
     return switch (function_object.class_id) {
         core.class.ids.bound_function => .bound_function,
+        core.class.ids.async_function_resolve,
+        core.class.ids.async_function_reject,
+        => .{ .internal = .async_function_resume },
         core.class.ids.c_function => blk: {
             if (function_object.nativeCallTarget()) |target| {
                 break :blk .{ .resolved_record = target };
@@ -1039,6 +1042,8 @@ pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
             },
             core.class.ids.c_function,
             core.class.ids.c_function_data,
+            core.class.ids.async_function_resolve,
+            core.class.ids.async_function_reject,
             core.class.ids.c_closure,
             core.class.ids.bound_function,
             => return callNativeCallableObject(ctx, output, global, this_value, func, object, args, caller_function, caller_frame),
@@ -4478,6 +4483,7 @@ pub fn functionBytecodeFromValue(value: core.JSValue) ?*const bytecode.FunctionB
 pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {
     return class_id == core.class.ids.c_function or
         class_id == core.class.ids.c_function_data or
+        core.class.isAsyncFunctionResumeClass(class_id) or
         class_id == core.class.ids.c_closure or
         core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function;
@@ -4557,7 +4563,8 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
         }
-        if (function_object.class_id == core.class.ids.c_function_data) return false;
+        if (function_object.class_id == core.class.ids.c_function_data or
+            core.class.isAsyncFunctionResumeClass(function_object.class_id)) return false;
         if (function_object.flags.is_html_dda) return false;
         if (function_object.isHostEntryFunction()) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);

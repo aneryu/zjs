@@ -856,6 +856,311 @@ test "RealmContext owns the five QuickJS initial layouts as Shapes" {
     try std.testing.expectEqual(ctx.array_shape.?, array.shape_ref);
 }
 
+test "array target barrier: known append immediately shades the new target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var roots = core.runtime.rootObjects(.{&array_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    try array_slot.?.reserveDenseArrayElements(rt, 8);
+    const target = try core.Object.createPlainObject(rt, null);
+    const child = try core.Object.createPlainObject(rt, null);
+    const key = try rt.internAtom("array_target_child");
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+
+    // Only the array is a declared root. Keep the real incremental cycle
+    // open after its initial graph has been fully scanned.
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    try std.testing.expect(rt.gc.headerMarked(array_slot.?.gcHeader()));
+    try std.testing.expect(!rt.gc.headerMarked(target.gcHeader()));
+    try std.testing.expect(!rt.gc.headerMarked(child.gcHeader()));
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.marking.stack.len);
+
+    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), target.value()));
+    // This is the new mechanism's red assertion: an owner-only requeue
+    // leaves target white until the owner is scanned again.
+    try std.testing.expectEqual(true, rt.gc.headerMarked(target.gcHeader()));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.marking.queue.len());
+    const queued = rt.gc.marking.queue.pop().?;
+    try std.testing.expectEqual(target.gcHeader(), queued);
+    try std.testing.expect(rt.gc.marking.queue.push(queued));
+
+    // Retract the edge before tracing. The target and its child must still
+    // survive this cycle through the target barrier's frontier entry.
+    try std.testing.expect(array_slot.?.setFastArrayElementOwned(rt, 0, core.JSValue.undefinedValue()));
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
+    try std.testing.expect(rt.gc.containsHeader(child.gcHeader()));
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.gc.containsHeader(target.gcHeader()));
+    try std.testing.expect(!rt.gc.containsHeader(child.gcHeader()));
+}
+
+test "array target barrier: three append routes cover grey and black owners" {
+    for ([_]bool{ false, true }) |drain_owner| {
+        for (0..3) |route| {
+            for ([_]bool{ false, true }) |reference_value| {
+                const rt = try core.JSRuntime.create(std.testing.allocator);
+                defer rt.destroy();
+                rt.forcePreciseRootScanForTest();
+                rt.setGCThreshold(std.math.maxInt(usize));
+                var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+                var roots = core.runtime.rootObjects(.{&array_slot});
+                roots.activate(rt);
+                defer roots.deactivate(rt);
+                if (route != 2) try array_slot.?.reserveDenseArrayElements(rt, 8);
+                const target = try core.Object.createPlainObject(rt, null);
+                try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+                if (drain_owner) {
+                    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+                } else {
+                    try std.testing.expect(rt.gc.marking.stack.len != 0);
+                }
+                try std.testing.expect(rt.gc.headerMarked(array_slot.?.gcHeader()));
+                try std.testing.expect(!rt.gc.headerMarked(target.gcHeader()));
+                try std.testing.expect(rt.gc.marking.queue.isEmpty());
+                const value = if (reference_value) target.value() else core.JSValue.int32(37);
+                switch (route) {
+                    0 => try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value)),
+                    1 => try std.testing.expect(try array_slot.?.appendDenseArrayDefineIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value)),
+                    2 => try array_slot.?.initDenseArrayIndexZeroAssumingEmpty(rt, value),
+                    else => unreachable,
+                }
+                try std.testing.expectEqual(reference_value, rt.gc.headerMarked(target.gcHeader()));
+                const expected_entries: usize = @as(usize, @intFromBool(reference_value)) + @as(usize, @intFromBool(route == 2));
+                try std.testing.expectEqual(expected_entries, rt.gc.marking.queue.len());
+                var queued: [2]*core.gc.Header = undefined;
+                var count: usize = 0;
+                while (rt.gc.marking.queue.pop()) |header| : (count += 1) {
+                    try std.testing.expect(count < queued.len);
+                    try std.testing.expect(header != array_slot.?.gcHeader());
+                    const storage: *core.gc.Header = @ptrCast(@alignCast(array_slot.?.arrayElements().ptr));
+                    try std.testing.expect(header == target.gcHeader() or header == storage);
+                    queued[count] = header;
+                }
+                for (queued[0..count]) |header| try std.testing.expect(rt.gc.marking.queue.push(header));
+                while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+                _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+                try std.testing.expectEqual(@as(u32, 1), array_slot.?.arrayLength());
+                if (reference_value) {
+                    try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
+                    try std.testing.expectEqual(target.gcHeader(), array_slot.?.arrayElements()[0].refHeader().?);
+                } else {
+                    try std.testing.expectEqual(@as(?i32, 37), array_slot.?.arrayElements()[0].asInt32());
+                }
+            }
+        }
+    }
+}
+
+test "array target barrier: capacity growth shades only storage and preserves copied edges" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var roots = core.runtime.rootObjects(.{&array_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    try array_slot.?.reserveDenseArrayElements(rt, 2);
+    const capacity: u32 = @intCast(array_slot.?.arrayElementsCapacity());
+    const old_child = try core.Object.createPlainObject(rt, null);
+    for (0..capacity) |n| {
+        const index: u32 = @intCast(n);
+        const value = if (n == 0) old_child.value() else core.JSValue.int32(@intCast(n));
+        try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, index, core.atom.atomFromUInt32(index), value));
+    }
+    const target = try core.Object.createPlainObject(rt, null);
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    try std.testing.expect(rt.gc.headerMarked(old_child.gcHeader()));
+    try std.testing.expect(!rt.gc.headerMarked(target.gcHeader()));
+    const old_storage = array_slot.?.arrayElements().ptr;
+    try array_slot.?.fastArrayEnsureCapacity(rt, capacity + 1);
+    const new_storage = array_slot.?.arrayElements().ptr;
+    const storage_header: *core.gc.Header = @ptrCast(@alignCast(new_storage));
+    try std.testing.expect(old_storage != new_storage);
+    try std.testing.expectEqual(capacity, array_slot.?.fastArrayCount());
+    try std.testing.expect(rt.gc.headerMarked(storage_header));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.marking.queue.len());
+    try std.testing.expectEqual(storage_header, rt.gc.marking.queue.pop().?);
+    try std.testing.expect(rt.gc.marking.queue.push(storage_header));
+    try std.testing.expect(try array_slot.?.appendDenseArrayDefineIndexOwned(rt, capacity, core.atom.atomFromUInt32(capacity), target.value()));
+    try std.testing.expect(rt.gc.headerMarked(target.gcHeader()));
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(storage_header));
+    try std.testing.expect(rt.gc.containsHeader(old_child.gcHeader()));
+    try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
+    try std.testing.expectEqual(old_child.gcHeader(), array_slot.?.arrayElements()[0].refHeader().?);
+    try std.testing.expectEqual(target.gcHeader(), array_slot.?.arrayElements()[capacity].refHeader().?);
+    for (1..capacity) |n| try std.testing.expectEqual(@as(?i32, @intCast(n)), array_slot.?.arrayElements()[n].asInt32());
+}
+
+test "array target barrier: public uninitialized slot still queues its owner" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var roots = core.runtime.rootObjects(.{&array_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    try array_slot.?.reserveDenseArrayElements(rt, 4);
+    const target = try core.Object.createPlainObject(rt, null);
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    const slot = try array_slot.?.appendUninitializedFastArraySlot(rt);
+    slot.* = target.value();
+    array_slot.?.setArrayLength(1);
+    try std.testing.expect(!rt.gc.headerMarked(target.gcHeader()));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.marking.queue.len());
+    try std.testing.expectEqual(array_slot.?.gcHeader(), rt.gc.marking.queue.pop().?);
+    try std.testing.expect(rt.gc.marking.queue.push(array_slot.?.gcHeader()));
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    try std.testing.expect(rt.gc.headerMarked(target.gcHeader()));
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
+}
+
+test "array target barrier: old array remembers first storage and appended target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var value_slot: ?*core.Object = null;
+    var roots = core.runtime.rootObjects(.{ &array_slot, &value_slot });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!array_slot.?.gcHeader().metaConst().flags.young);
+    value_slot = try core.Object.createPlainObject(rt, null);
+    const target = value_slot.?.gcHeader();
+    try std.testing.expect(target.metaConst().flags.young);
+    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value_slot.?.value()));
+    value_slot = null;
+    const storage: *core.gc.Header = @ptrCast(@alignCast(array_slot.?.arrayElements().ptr));
+    try std.testing.expect(storage.metaConst().flags.young);
+    try std.testing.expect(rt.gc.generation.rememberedCount() != 0);
+    const before = rt.gc.generation.stats.minor_collections;
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expectEqual(before + 1, rt.gc.generation.stats.minor_collections);
+    try std.testing.expect(rt.gc.containsHeader(storage));
+    try std.testing.expect(rt.gc.containsHeader(target));
+    try std.testing.expectEqual(target, array_slot.?.arrayElements()[0].refHeader().?);
+}
+
+test "array target barrier: failed capacity allocation leaves count and value unchanged" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var value_slot: ?*core.Object = try core.Object.createPlainObject(rt, null);
+    var roots = core.runtime.rootObjects(.{ &array_slot, &value_slot });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = rt.runObjectCycleRemoval();
+    const old_pointer = array_slot.?.arrayElements().ptr;
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(error.OutOfMemory, array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value_slot.?.value()));
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(@as(u32, 0), array_slot.?.fastArrayCount());
+    try std.testing.expectEqual(@as(u32, 0), array_slot.?.arrayLength());
+    try std.testing.expectEqual(@as(usize, 0), array_slot.?.arrayElementsCapacity());
+    try std.testing.expectEqual(old_pointer, array_slot.?.arrayElements().ptr);
+    try std.testing.expect(rt.ownsObject(value_slot.?));
+    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value_slot.?.value()));
+    try std.testing.expectEqual(@as(u32, 1), array_slot.?.fastArrayCount());
+    try std.testing.expectEqual(value_slot.?.gcHeader(), array_slot.?.arrayElements()[0].refHeader().?);
+}
+
+test "array target barrier: frontier OOM fails closed after a committed store" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+    var roots = core.runtime.rootObjects(.{&array_slot});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const target_count = core.gc.mark_queue.entries_per_segment * (core.gc.mark_queue.cached_segment_limit + 2);
+    const targets = try std.testing.allocator.alloc(*core.Object, target_count);
+    defer std.testing.allocator.free(targets);
+    try array_slot.?.reserveDenseArrayElements(rt, target_count);
+    for (targets) |*target| target.* = try core.Object.createPlainObject(rt, null);
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
+    try std.testing.expect(!rt.gc.headerMarked(targets[0].gcHeader()));
+    rt.gc.marking.queue.failBackingAllocationsForTest(1);
+    var stored: u32 = 0;
+    while (stored < targets.len and rt.gc.marking.queue.failure() == .none) : (stored += 1) {
+        try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, stored, core.atom.atomFromUInt32(stored), targets[stored].value()));
+    }
+    try std.testing.expect(stored > 0 and stored <= target_count);
+    try std.testing.expectEqual(core.gc.mark_queue.Failure.out_of_memory, rt.gc.marking.queue.failure());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.marking.queue.stats().pool.allocation_failures);
+    try std.testing.expect(rt.gc.headerMarked(targets[stored - 1].gcHeader()));
+    try std.testing.expectEqual(stored, array_slot.?.fastArrayCount());
+    const failed_before = rt.gc.stats.failed_collections;
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    try std.testing.expectError(error.OutOfMemory, rt.pollGC(null, .safepoint));
+    try std.testing.expectEqual(failed_before + 1, rt.gc.stats.failed_collections);
+    try std.testing.expect(!rt.gc.incremental.markingActive());
+    try std.testing.expect(rt.gc.containsHeader(targets[stored - 1].gcHeader()));
+    rt.setGCThreshold(std.math.maxInt(usize));
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(stored, array_slot.?.fastArrayCount());
+    try std.testing.expectEqual(targets[stored - 1].gcHeader(), array_slot.?.arrayElements()[stored - 1].refHeader().?);
+    try std.testing.expect(rt.gc.containsHeader(targets[0].gcHeader()));
+    try std.testing.expect(rt.gc.containsHeader(targets[stored - 1].gcHeader()));
+}
+
+test "array target barrier: literal fill marks new edges after owner scanning" {
+    for ([_]bool{ false, true }) |trusted| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        rt.forcePreciseRootScanForTest();
+        rt.setGCThreshold(std.math.maxInt(usize));
+        var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
+        var roots = core.runtime.rootObjects(.{&array_slot});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        const target = try core.Object.createPlainObject(rt, null);
+        const child = try core.Object.createPlainObject(rt, null);
+        const key = try rt.internAtom("literal_target_child");
+        try target.setProperty(rt, key, child.value());
+        try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+        while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+        try std.testing.expect(rt.gc.headerMarked(array_slot.?.gcHeader()));
+        try std.testing.expect(!rt.gc.headerMarked(target.gcHeader()));
+        try std.testing.expect(rt.gc.marking.queue.isEmpty());
+        const values = [_]core.JSValue{ core.JSValue.int32(37), target.value() };
+        if (trusted) {
+            try array_slot.?.initDenseArrayLiteralValuesOwnedTrusted(rt, &values);
+        } else {
+            try std.testing.expect(try array_slot.?.initDenseArrayLiteralValuesAssumingEmpty(rt, &values));
+        }
+        while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
+        try std.testing.expectEqual(true, rt.gc.headerMarked(target.gcHeader()));
+        try std.testing.expect(rt.gc.headerMarked(child.gcHeader()));
+        _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+        try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
+        try std.testing.expect(rt.gc.containsHeader(child.gcHeader()));
+        try std.testing.expectEqual(@as(u32, 2), array_slot.?.arrayLength());
+        try std.testing.expectEqual(@as(?i32, 37), array_slot.?.arrayElements()[0].asInt32());
+        try std.testing.expectEqual(target.gcHeader(), array_slot.?.arrayElements()[1].refHeader().?);
+    }
+}
+
 test "Runtime queues retain their originating Realm until owned jobs are released" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -8240,8 +8545,8 @@ fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, act
     // Shapes are GC objects now, so cycle reclaim counts include collected
     // object shapes in addition to the JS objects themselves. TGC S4-b added
     // the property/element storage cells and TGC S4-c the a-class payload
-    // cells (`.ordinary`, `.promise`, `.proxy`, `.bound_function`, ...), so a
-    // reclaimed payload-bearing object contributes one more than before.
+    // cells (`.ordinary`, `.proxy`, `.bound_function`, ...), so an out-of-line
+    // payload contributes one more. Built-in Promise state is now inline.
     try std.testing.expectEqual(@as(usize, expected), actual);
     try expectNoLiveGc(rt);
 }
@@ -10089,7 +10394,11 @@ test "async continuation function cycle is released by runtime cycle removal" {
     (try continuation.functionAsyncContinuationSlot(rt)).* = promise.value();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
+    // Two objects, their two shapes and the property storage; Promise state
+    // is part of its owner and no longer contributes a sixth GC cell.
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCountKind(.object));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "async generator promise cycle is released by runtime cycle removal" {
@@ -10103,7 +10412,11 @@ test "async generator promise cycle is released by runtime cycle removal" {
     generator.generatorAsyncPromiseSlot().* = promise.value();
     try promise.defineOwnProperty(rt, key, core.Descriptor.data(generator.value(), true, true, true));
 
-    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
+    // Two objects, their two shapes and the property storage; Promise state
+    // is part of its owner and no longer contributes a sixth GC cell.
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCountKind(.object));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "materialized native function cycle is released by runtime cycle removal" {
@@ -15077,6 +15390,163 @@ test "frontier requeue admission checks a prior claim without executing one" {
     try std.testing.expect(rt.gc.marking.queue.isEmpty());
 }
 
+test "G-Shape indexed adoption shades the Shape once without requeueing the array" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const owner = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.array, null, 128);
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.setHeaderMarked(owner.gcHeader());
+    rt.gc.setHeaderUnmarked(&owner.shape_ref.header);
+    rt.gc.setMajorMarkingActive(true);
+    defer {
+        rt.gc.setMajorMarkingActive(false);
+        rt.gc.marking.queue.reset();
+    }
+    for (0..128) |i| {
+        try owner.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)), core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+        try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
+        try std.testing.expect(rt.gc.marking.queue.isEmpty());
+    }
+}
+
+test "G-Shape adoption traces prototype children and symbol keys but skips white owners" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const prototype = try core.Object.createPlainObject(rt, null);
+    const child = try core.Object.createPlainObject(rt, null);
+    const key = try rt.internAtom("child");
+    try prototype.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+    const owner = try core.Object.createPlainObject(rt, prototype);
+    const symbol = try rt.atoms.newValueSymbol("G-Shape existing key");
+    _ = try rt.symbolValue(symbol);
+    try owner.defineOwnProperty(rt, symbol, core.Descriptor.data(core.JSValue.int32(9), true, true, true));
+    const body = s3AtomEntry(rt, symbol).str.?.header();
+    const target = &owner.shape_ref.header;
+    for ([_]*core.gc.Header{ owner.gcHeader(), target, prototype.gcHeader(), child.gcHeader(), body }) |h|
+        rt.gc.setHeaderUnmarked(h);
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.setMajorMarkingActive(true);
+    defer {
+        rt.gc.setMajorMarkingActive(false);
+        rt.gc.marking.queue.reset();
+    }
+    rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+    try std.testing.expect(!rt.gc.headerMarked(target));
+    try std.testing.expect(!rt.gc.headerMarked(body));
+    try std.testing.expect(rt.gc.marking.queue.isEmpty());
+    rt.gc.setHeaderMarked(owner.gcHeader());
+    rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+    try std.testing.expect(rt.gc.headerMarked(target));
+    try std.testing.expect(rt.gc.headerMarked(prototype.gcHeader()));
+    try std.testing.expect(rt.gc.headerMarked(body));
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.marking.queue.len());
+    const queued = rt.gc.marking.queue.len();
+    rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+    try std.testing.expectEqual(queued, rt.gc.marking.queue.len());
+    _ = try core.gc_trace_stw.remarkBarrierQueueForTest(rt);
+    try std.testing.expect(rt.gc.headerMarked(child.gcHeader()));
+
+    const later_symbol = try rt.atoms.newValueSymbol("G-Shape later key");
+    _ = try rt.symbolValue(later_symbol);
+    const later_body = s3AtomEntry(rt, later_symbol).str.?.header();
+    rt.gc.setHeaderUnmarked(later_body);
+    try owner.defineOwnProperty(rt, later_symbol, core.Descriptor.data(core.JSValue.int32(10), true, true, true));
+    try std.testing.expect(rt.gc.headerMarked(later_body));
+}
+
+test "G-Shape prototype frontier OOM fails before tracing or sweeping" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const prototype = try core.Object.createPlainObject(rt, null);
+    const owner = try core.Object.createPlainObject(rt, prototype);
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.marking.queue.failBackingAllocationsForTest(1);
+    rt.gc.setHeaderMarked(owner.gcHeader());
+    rt.gc.setHeaderUnmarked(&owner.shape_ref.header);
+    rt.gc.setHeaderUnmarked(prototype.gcHeader());
+    rt.gc.setMajorMarkingActive(true);
+    defer rt.gc.abortIncrementalCycle();
+    rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+    try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
+    try std.testing.expect(rt.gc.headerMarked(prototype.gcHeader()));
+    try std.testing.expectEqual(core.gc.mark_queue.Failure.out_of_memory, rt.gc.marking.queue.failure());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.marking.queue.stats().pool.allocation_failures);
+    try std.testing.expectError(error.OutOfMemory, core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64)));
+    try std.testing.expect(!rt.gc.morgue.pending);
+}
+
+test "G-Shape relocation leaves no raw Shape queued and survives declared major GC" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    const owner = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.array, null, 2);
+    try rt.gc.pinHeader(owner.gcHeader());
+    defer rt.gc.unpinHeader(owner.gcHeader());
+    rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
+    rt.gc.setHeaderMarked(owner.gcHeader());
+    rt.gc.setHeaderUnmarked(&owner.shape_ref.header);
+    rt.gc.setMajorMarkingActive(true);
+    var relocations: usize = 0;
+    for (0..64) |i| {
+        const before = @intFromPtr(owner.shape_ref);
+        try owner.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)), core.Descriptor.data(core.JSValue.int32(@intCast(i)), true, true, true));
+        if (@intFromPtr(owner.shape_ref) != before) relocations += 1;
+        try std.testing.expect(rt.gc.incremental.markingActive());
+        try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
+        // Storage growth can queue the owner; an immediately freed Shape
+        // must never appear here. No pointer is dereferenced after its free.
+        while (rt.gc.marking.queue.pop()) |h| {
+            try std.testing.expect(h.meta().flags.kind != .shape);
+            try std.testing.expect(h.meta().flags.kind != .realm_context);
+        }
+    }
+    try std.testing.expect(relocations >= 2);
+    rt.gc.setMajorMarkingActive(false);
+    _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
+    for (0..64) |i| {
+        const desc = (try owner.getOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)))).?;
+        try std.testing.expectEqual(@as(i32, @intCast(i)), desc.value.asInt32().?);
+    }
+}
+
+test "G-Shape unpublished adoption does not publish a pending owner or target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const owner = try core.Object.createPlainObject(rt, null);
+    const header = &owner.shape_ref.header;
+    rt.gc.setHeaderMarked(owner.gcHeader());
+    rt.gc.setHeaderUnmarked(header);
+    rt.gc.setMajorMarkingActive(true);
+    defer rt.gc.setMajorMarkingActive(false);
+    {
+        owner.gcHeader().meta().alloc_info.heap_accounted = false;
+        defer owner.gcHeader().meta().alloc_info.heap_accounted = true;
+        rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+        try std.testing.expect(!rt.gc.headerMarked(header));
+        try std.testing.expect(rt.gc.marking.queue.isEmpty());
+    }
+    {
+        header.meta().alloc_info.heap_accounted = false;
+        defer header.meta().alloc_info.heap_accounted = true;
+        rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+        try std.testing.expect(!rt.gc.headerMarked(header));
+        try std.testing.expect(rt.gc.marking.queue.isEmpty());
+    }
+    rt.shapes.adoptionBarrier(owner, owner.shape_ref);
+    try std.testing.expect(rt.gc.headerMarked(header));
+}
+
 test "Shape barrier requeues only an owner with a prior mark claim" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -17775,6 +18245,82 @@ fn registerS4cPayloadClass(
     return id;
 }
 
+test "promise coallocation: state and reactions survive through the sole owner" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    var promise: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
+    var temporary: ?*core.Object = null;
+    var roots = core.runtime.rootObjects(.{ &promise, &temporary });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    try std.testing.expect(!promise.?.hasTracerOwnedPayloadCell());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+    const payload = promise.?.promisePayload().?;
+    const base = @intFromPtr(promise.?);
+    try std.testing.expect(@intFromPtr(payload) >= base + @sizeOf(core.Object));
+    try std.testing.expect(@intFromPtr(payload) + @sizeOf(@TypeOf(payload.*)) <= base + core.Object.objectBodyBytes(core.class.ids.promise, false));
+    const result_slot = promise.?.promiseResultSlot();
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!promise.?.gcHeader().metaConst().flags.young);
+    var targets: [4]*core.gc.Header = undefined;
+    for (&targets, 0..) |*header, index| {
+        temporary = try core.Object.create(rt, core.class.ids.object, null);
+        header.* = temporary.?.gcHeader();
+        switch (index) {
+            0 => try promise.?.setPromiseResult(rt, temporary.?.value()),
+            1 => try promise.?.setPromiseReactionCallback(rt, temporary.?.value()),
+            2 => try promise.?.setPromiseReactionArg(rt, temporary.?.value()),
+            3 => for (0..6) |_| {
+                try engine.exec.promise_ops.appendPromiseReaction(rt, promise.?, temporary.?.value());
+            },
+            else => unreachable,
+        }
+    }
+    temporary = null;
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    for (targets) |header| try std.testing.expect(rt.gc.containsHeader(header));
+    _ = rt.runObjectCycleRemoval();
+    for (targets) |header| try std.testing.expect(rt.gc.containsHeader(header));
+    try std.testing.expectEqual(result_slot, promise.?.promiseResultSlot());
+    try std.testing.expectEqual(@as(usize, 6), promise.?.promiseReactions().len);
+    // Only the final reaction backing is a standalone payload cell.
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.payload));
+    promise = null;
+    _ = rt.runObjectCycleRemoval();
+    for (targets) |header| try std.testing.expect(!rt.gc.containsHeader(header));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+}
+
+test "promise coallocation: accounting and allocation failure share the object cell" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    var promise: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
+    var roots = core.runtime.rootObjects(.{&promise});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = rt.runObjectCycleRemoval();
+    const raw_bytes = rt.gc.block_heap.rawBytesForCell(@intFromPtr(promise.?), core.gc.metadata_prefix_size).?;
+    const expected = raw_bytes - core.gc.metadata_prefix_size;
+    try std.testing.expectEqual(expected, promise.?.bodyBytes());
+    try std.testing.expectEqual(expected, promise.?.allocationSize(rt));
+    try std.testing.expectEqual(expected, core.gc.Registry.heapByteSizeFromHeader(rt, promise.?.gcHeader()));
+    const objects_before = rt.gc.liveCountKind(.object);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, core.class.ids.promise, null));
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(objects_before, rt.gc.liveCountKind(.object));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+    const next = try core.Object.create(rt, core.class.ids.promise, null);
+    try std.testing.expect(next.promiseResult() == null);
+    try std.testing.expectEqual(objects_before + 1, rt.gc.liveCountKind(.object));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+}
+
 test "TGC S4-c: every a-class payload is a cell that dies one major after its owner" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -17787,7 +18333,12 @@ test "TGC S4-c: every a-class payload is a cell that dies one major after its ow
     const regexp_class = try registerS4cPayloadClass(rt, "S4cRegExp", .regexp);
     defer rt.classes.unregisterDynamic(regexp_class);
 
-    // One owner per a-class payload kind. `.ordinary`, `.global` and `.proxy`
+    const promise_class = try registerS4cPayloadClass(rt, "S4cPromise", .promise);
+    defer rt.classes.unregisterDynamic(promise_class);
+
+    // One owner per out-of-line a-class payload kind. Built-in Promise state
+    // is inline; a custom class still exercises its separate payload cell.
+    // `.ordinary`, `.global` and `.proxy`
     // attach lazily; the rest are minted by `createInternal`.
     var ordinary_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
     var arguments_slot: ?*core.Object = try core.Object.create(rt, arguments_class, null);
@@ -17795,7 +18346,7 @@ test "TGC S4-c: every a-class payload is a cell that dies one major after its ow
     var bound_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bound_function, null);
     var proxy_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.proxy, null);
     var var_ref_slot: ?*core.Object = try core.Object.create(rt, var_ref_class, null);
-    var promise_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
+    var promise_slot: ?*core.Object = try core.Object.create(rt, promise_class, null);
     var stack_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.disposable_stack, null);
     var global_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.global_object, null);
     var regexp_slot: ?*core.Object = try core.Object.create(rt, regexp_class, null);

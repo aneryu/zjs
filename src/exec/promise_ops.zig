@@ -11,6 +11,7 @@
 //! quickjs.c:53415-54663.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const function_ops = @import("function_ops.zig");
 const atomics_ops = @import("atomics_ops.zig");
 const bytecode = @import("../bytecode.zig");
@@ -471,7 +472,7 @@ pub fn promiseReactionRecord(
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const record = try core.Object.create(rt, core.class.ids.object, null);
+    const record = try core.Object.createPromiseReactionRecord(rt);
     errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
     try record.setPromiseReactionOnFulfilled(rt, rooted_on_fulfilled);
     try record.setPromiseReactionOnRejected(rt, rooted_on_rejected);
@@ -894,13 +895,13 @@ fn settlePromiseResolutionWithReservedOwner(
 fn publishPromiseResolution(
     ctx: *core.JSContext,
     global: *core.Object,
-    state: *core.Object,
+    state: ?*core.Object,
     target: *core.Object,
     completion: core.JSValue,
     rejected: bool,
 ) HostError!void {
     if (!promiseSettlementMayAllocate(target)) {
-        (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
+        if (state) |shared| (try shared.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
         try promiseSettleValue(ctx, global, target, completion, rejected);
         return;
     }
@@ -908,7 +909,7 @@ fn publishPromiseResolution(
     try ctx.runtime.job_queue.reserveEntries(1);
     var slot_reserved = true;
     defer if (slot_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
-    (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
+    if (state) |shared| (try shared.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
     try settlePromiseResolutionWithReservedOwner(ctx, global, target, completion, rejected, &slot_reserved);
 }
 
@@ -926,8 +927,40 @@ pub fn promiseResolvingFunctionCall(
     if (target.class_id != core.class.ids.promise) return core.JSValue.undefinedValue();
     const state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
+    return try resolvePromiseWithState(
+        ctx,
+        output,
+        global,
+        target,
+        state,
+        if (args.len >= 1) args[0] else core.JSValue.undefinedValue(),
+        function_object.functionPromiseResolvingReject(),
+        function_object,
+        caller_function,
+        caller_frame,
+    );
+}
+
+/// Shared Promise resolution algorithm. Public resolving functions and async
+/// completion use the same reserve-before-observation protocol. Public
+/// resolving functions require a shared once owner; null is an internal
+/// invocation whose fresh local state cannot be observed or called again.
+/// A function origin is needed only for a public resolver's self-error realm.
+fn resolvePromiseWithState(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target: *core.Object,
+    state: ?*core.Object,
+    value: core.JSValue,
+    reject: bool,
+    resolving_function: ?*core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    const target_value = target.value();
     if (target.promiseResult() != null) return core.JSValue.undefinedValue();
-    if (state.promiseAlreadyResolved()) {
+    if (state != null and state.?.promiseAlreadyResolved()) {
         // A prior call won the shared once-guard. Any allocation-sensitive
         // completion that could not settle synchronously is owned by the
         // Runtime FIFO, so later calls are true no-ops rather than an
@@ -935,12 +968,13 @@ pub fn promiseResolvingFunctionCall(
         return core.JSValue.undefinedValue();
     }
 
-    const reject = function_object.functionPromiseResolvingReject();
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!reject and value.sameValue(target_value)) {
         // qjs js_promise_resolve_function_call (quickjs.c:53608):
         // JS_ThrowTypeError(ctx, "promise self resolution").
-        const error_global = objectRealmGlobal(function_object) orelse global;
+        const error_global = if (resolving_function) |function_object|
+            objectRealmGlobal(function_object) orelse global
+        else
+            global;
         const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution");
         try publishPromiseResolution(ctx, global, state, target, error_value, true);
         return core.JSValue.undefinedValue();
@@ -967,7 +1001,7 @@ pub fn promiseResolvingFunctionCall(
             var thenable_slot_reserved = true;
             defer if (thenable_slot_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
 
-            (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
+            if (state) |shared| (try shared.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
             const then_value = getValueProperty(ctx, output, global, value, then_key, caller_function, caller_frame) catch |err| {
                 const reason = try promiseErrorValue(ctx, global, err);
                 try settlePromiseResolutionWithReservedOwner(ctx, global, target, reason, true, &thenable_slot_reserved);
@@ -1495,8 +1529,9 @@ pub fn promiseReactionJobCall(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     const reaction = objectFromValue(payload.reaction) orelse return error.TypeError;
-    const resolve_value = reaction.promiseReactionResolve() orelse return error.TypeError;
-    const reject_value = reaction.promiseReactionReject() orelse return error.TypeError;
+    const intrinsic = reaction.promiseReactionIntrinsicCapability();
+    const resolve_value = if (intrinsic == null) reaction.promiseReactionResolve() orelse return error.TypeError else core.JSValue.undefinedValue();
+    const reject_value = if (intrinsic == null) reaction.promiseReactionReject() orelse return error.TypeError else core.JSValue.undefinedValue();
 
     invoke: {
         if (payload.phase == .invoke) {
@@ -1535,6 +1570,22 @@ pub fn promiseReactionJobCall(
             payload.replaceValueOwned(ctx.runtime, callback_result);
             payload.phase = .resolve;
         }
+    }
+
+    if (intrinsic) |capability| {
+        // The old resolver call polled before dispatch. Keep that observation
+        // point, and preserve its construction realm for self-resolution errors.
+        try exception_ops.pollInterrupt(ctx, global);
+        const rejected = payload.phase == .reject;
+        const target = objectFromValue(capability.target) orelse unreachable;
+        const resolve_global = if (!rejected and payload.value.sameValue(capability.target))
+            objectFromValue(capability.self_error_global) orelse unreachable
+        else
+            global;
+        _ = try resolvePromiseWithState(ctx, output, resolve_global, target, null, payload.value, rejected, null, caller_function, caller_frame);
+        reaction.clearPromiseReactionIntrinsicCapability();
+        if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics.intrinsic_settle += 1;
+        return core.JSValue.undefinedValue();
     }
 
     const settle = switch (payload.phase) {
@@ -1605,6 +1656,71 @@ pub const PromiseCapabilityVm = struct {
     resolve: core.JSValue,
     reject: core.JSValue,
 };
+
+pub const ThenCapabilityTestMetrics = struct {
+    intrinsic_prepare: usize = 0,
+    intrinsic: usize = 0,
+    fallback: usize = 0,
+    intrinsic_settle: usize = 0,
+    intrinsic_retry: usize = 0,
+};
+const ThenCapabilityTestStorage = if (builtin.is_test) struct {
+    var metrics: ThenCapabilityTestMetrics = .{};
+} else struct {};
+
+pub fn resetThenCapabilityTestMetrics() void {
+    if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics = .{};
+}
+
+pub fn thenCapabilityTestMetrics() ThenCapabilityTestMetrics {
+    return if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics else .{};
+}
+
+const ThenCapability = struct {
+    promise: core.JSValue,
+    resolve: core.JSValue = core.JSValue.undefinedValue(),
+    reject: core.JSValue = core.JSValue.undefinedValue(),
+    intrinsic_global: core.JSValue = core.JSValue.undefinedValue(),
+};
+
+/// Called only after SpeciesConstructor, so its observable Gets are never
+/// skipped or replayed. The cached intrinsic's own data prototype also avoids
+/// consulting a replaced globalThis.Promise binding.
+fn thenCapability(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor: core.JSValue, legacy_wait_async: bool, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame) HostError!ThenCapability {
+    if (!legacy_wait_async) {
+        if (global.cachedRealmValue(ctx.runtime, .promise_constructor)) |intrinsic| {
+            if (constructor.sameValue(intrinsic)) {
+                const object = objectFromValue(intrinsic) orelse unreachable;
+                if (object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| {
+                    if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics.intrinsic_prepare += 1;
+                    const promise = try core.promise.constructWithPrototype(ctx, prototype);
+                    if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics.intrinsic += 1;
+                    return .{ .promise = promise, .intrinsic_global = global.value() };
+                }
+            }
+        }
+    }
+    const capability = try promiseCapability(ctx, output, global, constructor, caller_function, caller_frame);
+    if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics.fallback += 1;
+    return .{ .promise = capability.promise, .resolve = capability.resolve, .reject = capability.reject };
+}
+
+/// The caller roots the capability for the entire subscription transaction.
+/// Only handlers need additional roots while the private record is allocated.
+fn thenReactionRecord(rt: *core.JSRuntime, capability: *const ThenCapability, on_fulfilled: core.JSValue, on_rejected: core.JSValue) HostError!core.JSValue {
+    if (capability.intrinsic_global.isUndefined()) return promiseReactionRecord(rt, on_fulfilled, on_rejected, capability.resolve, capability.reject);
+    var fulfilled = on_fulfilled;
+    var rejected = on_rejected;
+    var roots = core.runtime.rootValues(.{ &fulfilled, &rejected });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const record = try core.Object.createPromiseReactionRecord(rt);
+    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
+    try record.setPromiseReactionOnFulfilled(rt, fulfilled);
+    try record.setPromiseReactionOnRejected(rt, rejected);
+    record.setPromiseReactionIntrinsicCapability(rt, capability.promise, capability.intrinsic_global);
+    return record.value();
+}
 
 pub fn promiseCapabilityExecutorCall(ctx: *core.JSContext, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
     const slot_value = function_object.functionPromiseCapabilitySlot() orelse return null;
@@ -2634,11 +2750,36 @@ pub fn asyncFunctionAwait(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
-    const promise_constructor = try promiseDefaultConstructor(ctx, global);
-    const awaited = try promiseStaticCall(ctx, output, global, promise_constructor, &.{awaited_value}, .resolve, caller_function, caller_frame);
+    var continuation_value = continuation.value();
+    var awaited = awaited_value;
+    var on_fulfilled = core.JSValue.undefinedValue();
+    var on_rejected = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &continuation_value, &awaited, &on_fulfilled, &on_rejected });
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
 
-    const on_fulfilled = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, false);
-    const on_rejected = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
+    const promise_constructor = try promiseDefaultConstructor(ctx, global);
+    awaited = try promiseStaticCall(ctx, output, global, promise_constructor, &.{awaited}, .resolve, caller_function, caller_frame);
+
+    // PromiseResolve can run a constructor getter that settles its input.
+    // Only the resulting fulfilled Promise has an immutable value ready for
+    // direct scheduling. Pending/rejected keep the paired internal handlers.
+    const fulfilled = if (objectFromValue(awaited)) |promise|
+        promise.class_id == core.class.ids.promise and promise.promiseResult() != null and !promise.promiseIsRejected()
+    else
+        false;
+    if (fulfilled) {
+        // PromiseResolve (including any constructor getter) has completed.
+        // Await has no observable result capability: one typed FIFO entry is
+        // the complete reaction. Prepare capacity while the source Promise
+        // and continuation are rooted, then publish without allocating.
+        const promise = objectFromValue(awaited).?;
+        try ctx.runtime.job_queue.reserveEntries(1);
+        ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initAsyncResume(ctx, continuation_value, promise.promiseResult().?));
+        return;
+    }
+    on_fulfilled = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, false);
+    on_rejected = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
 
     // qjs js_async_function_resume (quickjs.c:21268-21290): the resume
     // callbacks attach through the INTERNAL perform_promise_then with
@@ -2647,18 +2788,77 @@ pub fn asyncFunctionAwait(
     try performPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
+test "fulfilled await preparation OOM never publishes a partial FIFO job" {
+    var failures: usize = 0;
+    var successes: usize = 0;
+    for ([_]usize{ 0, 40, 80, 160, 240, 320, 640, 1280 }) |allowance| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+        const global = try testStandardGlobal(ctx);
+        var continuation = (try core.Object.create(rt, core.class.ids.object, null)).value();
+        var awaited = core.JSValue.undefinedValue();
+        var roots = core.runtime.rootValues(.{ &continuation, &awaited });
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        awaited = try core.promise.fulfilledWithPrototype(ctx, core.JSValue.int32(42), promisePrototypeFromGlobal(rt, global));
+        // Prime the intrinsic, but leave the FIFO empty so the allocation
+        // limit tests the remaining preparation failure: queue storage.
+        _ = try promiseDefaultConstructor(ctx, global);
+        try std.testing.expectEqual(@as(usize, 0), rt.job_queue.capacity);
+        rt.suppressLimitCollectionForTest(true);
+        defer rt.suppressLimitCollectionForTest(false);
+        rt.setMemoryLimit(rt.memory.allocated_bytes + allowance);
+        defer rt.setMemoryLimit(null);
+        asyncFunctionAwait(ctx, null, global, try core.Object.expect(continuation), awaited, null, null) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+            try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
+            try std.testing.expectEqual(@as(?i32, 42), (try core.Object.expect(awaited)).promiseResult().?.asInt32());
+            failures += 1;
+            continue;
+        };
+        successes += 1;
+        try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+        try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
+    }
+    try std.testing.expect(failures > 0);
+    try std.testing.expect(successes > 0);
+}
+
 pub fn asyncFunctionResumeCallback(
     rt: *core.JSRuntime,
     global: *core.Object,
     continuation: *core.Object,
     rejected: bool,
 ) !core.JSValue {
-    const callback = try builtin_glue.createDataFunction(rt, global, "", 1);
-    const callback_object = objectFromValue(callback) orelse return error.TypeError;
-    try callback_object.setInternalCallableTag(rt, .async_function_resume);
-    try callback_object.setOptionalValueSlot(rt, try callback_object.functionAsyncContinuationSlot(rt), continuation.value());
-    (try callback_object.functionAsyncContinuationRejectedSlot(rt)).* = rejected;
-    return callback;
+    var rooted_continuation: ?*core.Object = continuation;
+    var roots = core.runtime.rootObjects(.{&rooted_continuation});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // qjs js_async_function_resolve_create: internal Await handlers carry
+    // only the continuation; the class distinguishes fulfillment/rejection.
+    // User thenables receive separate, fully described resolving functions.
+    const prototype = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
+    const class_id = if (rejected) core.class.ids.async_function_reject else core.class.ids.async_function_resolve;
+    const callback = try core.Object.create(rt, class_id, prototype);
+    callback.setAsyncResumeContinuation(rt, rooted_continuation);
+    return callback.value();
+}
+
+fn asyncResumeJobCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    payload: *const jobs_mod.AsyncResumePayload,
+) HostError!void {
+    // Keep the former internal callback's outer call-entry poll. The existing
+    // resume path below retains its stack guard, inner poll and function realm.
+    try exception_ops.pollInterrupt(ctx, global);
+    const continuation = objectFromValue(payload.continuation) orelse unreachable;
+    try asyncFunctionRunAndSettle(ctx, output, global, continuation, payload.value, false);
 }
 
 pub fn asyncFunctionResumeCallbackCall(
@@ -2670,14 +2870,128 @@ pub fn asyncFunctionResumeCallbackCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    const continuation_value = function_object.functionAsyncContinuation() orelse return null;
-    const continuation = objectFromValue(continuation_value) orelse return error.TypeError;
-    const rejected = function_object.functionAsyncContinuationRejected();
+    const continuation = function_object.asyncResumeContinuation() orelse return null;
+    const rejected = function_object.class_id == core.class.ids.async_function_reject;
     const resume_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try asyncFunctionRunAndSettle(ctx, output, objectRealmGlobal(continuation) orelse global, continuation, resume_value, rejected);
     _ = caller_function;
     _ = caller_frame;
     return core.JSValue.undefinedValue();
+}
+
+test "async resume callbacks keep only internal state and trace their continuation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    const function_proto = functionPrototypeFromGlobal(rt, global).?;
+    const marker_key = try rt.internAtom("continuation-marker");
+
+    for ([_]bool{ false, true }) |rejected| {
+        var continuation: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+        var callback: ?*core.Object = null;
+        var roots = core.runtime.rootObjects(.{ &continuation, &callback });
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        const marker = try rt.atoms.newValueSymbol("async-resume-continuation-root");
+        try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(try rt.takeSymbolValue(marker), true, true, true));
+        const old_threshold = rt.gcThreshold();
+        rt.setGCThreshold(0);
+        defer rt.setGCThreshold(old_threshold);
+        callback = try core.Object.expect(try asyncFunctionResumeCallback(rt, global, continuation.?, rejected));
+
+        try std.testing.expectEqual(if (rejected) core.class.ids.async_function_reject else core.class.ids.async_function_resolve, callback.?.class_id);
+        try std.testing.expectEqual(core.class.PayloadKind.none, callback.?.flags.class_payload_kind);
+        try std.testing.expect(call_mod.isCallableObjectValue(callback.?.value()));
+        try std.testing.expect(call_runtime.isCallableValue(callback.?.value()));
+        try std.testing.expect(!try call_runtime.isConstructorLike(ctx, callback.?.value()));
+        try std.testing.expect(callback.?.externalClassPayload() == null);
+        try std.testing.expect(callback.?.externalClassPayloadConst() == null);
+        try std.testing.expect(!core.Object.payloadKindNeedsFinalizer(callback.?.class_id, callback.?.flags.class_payload_kind));
+        try std.testing.expectEqual(function_proto, callback.?.getPrototype().?);
+        try std.testing.expectEqual(@as(u32, 0), callback.?.shape_ref.prop_count);
+        try std.testing.expect(callback.?.functionRealmGlobalPtr() == null);
+        try std.testing.expectEqual(core.atom.null_atom, callback.?.nativeDispatchName());
+
+        // The callback must be the sole root of its continuation at this boundary.
+        continuation = null;
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(marker) != null);
+        const retained = callback.?.asyncResumeContinuation().?;
+        try std.testing.expectEqual(marker, (try retained.getProperty(marker_key)).asSymbolAtom().?);
+        callback = null;
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(marker) == null);
+    }
+}
+
+test "async resume callback allocation failure preserves its continuation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    var continuation: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var roots = core.runtime.rootObjects(.{&continuation});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const marker_key = try rt.internAtom("continuation-marker");
+    try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
+    // The object boundary may collect unrelated bootstrap garbage first;
+    // zero keeps the allocation forbidden even after that reclamation.
+    rt.setMemoryLimit(0);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, asyncFunctionResumeCallback(rt, global, continuation.?, false));
+    rt.setMemoryLimit(null);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(?i32, 42), (try continuation.?.getProperty(marker_key)).asInt32());
+    const callback = try core.Object.expect(try asyncFunctionResumeCallback(rt, global, continuation.?, true));
+    try std.testing.expectEqual(continuation.?, callback.asyncResumeContinuation().?);
+}
+
+test "async resume callback continuation barrier preserves young state" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    const initial = try core.Object.create(rt, core.class.ids.object, null);
+    var callback: ?*core.Object = try core.Object.expect(try asyncFunctionResumeCallback(rt, global, initial, false));
+    var roots = core.runtime.rootObjects(.{&callback});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!callback.?.gcHeader().metaConst().flags.young);
+
+    const young = try core.Object.create(rt, core.class.ids.object, null);
+    try std.testing.expect(young.gcHeader().metaConst().flags.young);
+    callback.?.setAsyncResumeContinuation(rt, young);
+    try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(callback.?.gcHeader())));
+    // Declared-only collection cannot rescue young through this Zig local.
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.ownsObject(young));
+    try std.testing.expectEqual(young, callback.?.asyncResumeContinuation().?);
+
+    const removed = try core.Object.create(rt, core.class.ids.object, null);
+    callback.?.setAsyncResumeContinuation(rt, removed);
+    callback.?.setAsyncResumeContinuation(rt, null);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!rt.ownsObject(removed));
+}
+
+/// Settle a rooted ordinary-frame async result without a generator carrier.
+pub fn settleAsyncPromise(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, promise: core.JSValue, value: core.JSValue, rejected: bool) HostError!void {
+    var rooted_promise = promise;
+    var rooted_value = value;
+    var roots = core.runtime.rootValues(.{ &rooted_promise, &rooted_value });
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const target = objectFromValue(rooted_promise) orelse return error.TypeError;
+    std.debug.assert(target.class_id == core.class.ids.promise);
+    try exception_ops.pollInterrupt(ctx, global);
+    const view = try builtin_dispatch.CallRealmView.caller(ctx);
+    _ = try resolvePromiseWithState(view.realm, output, view.global, target, null, rooted_value, rejected, null, null, null);
 }
 
 pub fn asyncFunctionSettle(
@@ -2691,14 +3005,181 @@ pub fn asyncFunctionSettle(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     var rooted_value = value;
-    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    var rooted_continuation = continuation.value();
+    var promise_value = continuation.generatorAsyncPromise() orelse return error.TypeError;
+    var root_frame = core.runtime.rootValues(.{ &rooted_value, &rooted_continuation, &promise_value });
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    const promise_value = continuation.generatorAsyncPromise() orelse return error.TypeError;
-    const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise_value);
-    const settle = if (rejected) resolving.reject else resolving.resolve;
-    _ = try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{rooted_value}, caller_function, caller_frame);
+    const target = objectFromValue(promise_value) orelse return error.TypeError;
+    std.debug.assert(target.class_id == core.class.ids.promise);
+    // Preserve the former JS_Call entry poll and C_FUNCTION_DATA caller realm.
+    // The fresh internal resolver had no private function-realm override; its
+    // self-resolution error therefore also used this caller view. No resolver
+    // can expose this invocation's fresh once state, so it needs no heap cell.
+    // Observing a then getter still reserves durable FIFO ownership first;
+    // the eventual thenable job creates its own externally shared once state.
+    try exception_ops.pollInterrupt(ctx, global);
+    const view = try builtin_dispatch.CallRealmView.caller(ctx);
+    _ = try resolvePromiseWithState(view.realm, output, view.global, target, null, rooted_value, rejected, null, caller_function, caller_frame);
+}
+
+test "asyncFunctionSettle roots continuation target and result through interrupt GC" {
+    const Probe = struct {
+        calls: usize = 0,
+
+        fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(user_context.?));
+            self.calls += 1;
+            _ = rt.runObjectCycleRemoval();
+            return false;
+        }
+    };
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    var promise_value = core.JSValue.undefinedValue();
+    var continuation_value = core.JSValue.undefinedValue();
+    var result_value = core.JSValue.undefinedValue();
+    var setup_roots = core.runtime.rootValues(.{ &promise_value, &continuation_value, &result_value });
+    setup_roots.activate(rt);
+    var setup_active = true;
+    defer if (setup_active) setup_roots.deactivate(rt);
+    promise_value = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
+    const target = objectFromValue(promise_value) orelse unreachable;
+    const continuation = try core.Object.create(rt, core.class.ids.generator, null);
+    continuation_value = continuation.value();
+    try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise_value);
+    const symbol_atom = try rt.atoms.newValueSymbol("interrupt-async-settle-symbol");
+    result_value = try rt.takeSymbolValue(symbol_atom);
+
+    // Remove setup roots so only the callee can keep these values alive.
+    // Declared-root collection ignores the native pointer locals above.
+    setup_roots.deactivate(rt);
+    setup_active = false;
+    var probe = Probe{};
+    rt.setInterruptHandler(Probe.run, &probe);
+    defer rt.setInterruptHandler(null, null);
+    ctx.interrupt_counter = 1;
+    try asyncFunctionSettle(ctx, null, global, continuation, result_value, false, null, null);
+
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(rt.ownsObject(continuation));
+    try std.testing.expect(rt.ownsObject(target));
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    try std.testing.expectEqual(symbol_atom, target.promiseResult().?.asSymbolAtom().?);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.ownsObject(continuation));
+    try std.testing.expect(!rt.ownsObject(target));
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+test "asyncFunctionSettle needs no allocation for scalar completion" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    var promise_value = core.JSValue.undefinedValue();
+    var continuation_value = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &promise_value, &continuation_value });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    for ([_]bool{ false, true }) |rejected| {
+        promise_value = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
+        const continuation = try core.Object.create(rt, core.class.ids.generator, null);
+        continuation_value = continuation.value();
+        try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise_value);
+        _ = rt.runObjectCycleRemoval();
+        rt.suppressLimitCollectionForTest(true);
+        defer rt.suppressLimitCollectionForTest(false);
+        const allocated = rt.memory.allocated_bytes;
+        rt.setMemoryLimit(allocated);
+        defer rt.setMemoryLimit(null);
+        // Keep this an allocation test; interrupt-triggered collection has
+        // its own coverage and must not release memory to hide an allocation.
+        ctx.interrupt_counter = core.JSContext.interrupt_counter_reset;
+        try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), rejected, null, null);
+        const target = objectFromValue(promise_value) orelse unreachable;
+        try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.asInt32());
+        try std.testing.expectEqual(rejected, target.promiseIsRejected());
+        try std.testing.expectEqual(allocated, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+    }
+}
+
+test "asyncFunctionSettle fits the allocation budget of its shared state" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    // Warm metadata and allocator classes before pricing the one completion.
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
+    var promise_root = promise;
+    var roots = core.runtime.rootValues(.{&promise_root});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try createPromiseResolvingPair(rt, global, promise);
+    const continuation = try core.Object.create(rt, core.class.ids.generator, null);
+    try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise);
+
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
+    const allocated = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(allocated + 1024);
+    defer rt.setMemoryLimit(null);
+    try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), false, null, null);
+    const target = objectFromValue(promise) orelse unreachable;
+    try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.asInt32());
+    try std.testing.expect(!target.promiseIsRejected());
+}
+
+test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    defer rt.setMemoryLimit(null);
+
+    var target_value = core.JSValue.undefinedValue();
+    var continuation_value = core.JSValue.undefinedValue();
+    var thenable_value = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &target_value, &continuation_value, &thenable_value });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    target_value = target.value();
+    try appendDummyPromiseReaction(rt, target);
+    const continuation = try core.Object.create(rt, core.class.ids.generator, null);
+    continuation_value = continuation.value();
+    try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), target_value);
+    const thenable = try core.Object.create(rt, core.class.ids.object, null);
+    thenable_value = thenable.value();
+    var probe = PromiseJobOomProbe{ .fail = false };
+    const getter = try promiseJobOomProbeFunction(ctx, &probe, "asyncThenGetterOomProbe");
+    try thenable.defineOwnProperty(rt, core.atom.ids.then, core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true));
+
+    try asyncFunctionSettle(ctx, null, global, continuation, thenable_value, false, null, null);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
+    // The temporary once state and continuation may die. The FIFO owns the
+    // target and observed completion; retrying must not read the getter again.
+    continuation_value = core.JSValue.undefinedValue();
+    thenable_value = core.JSValue.undefinedValue();
+    _ = rt.runObjectCycleRemoval();
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expect(target.promiseResult().?.sameValue(thenable.value()));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.empty, try drainOnePendingJob(ctx, null, global));
 }
 
 test "asyncFunctionSettle roots direct symbol result before promise stores it" {
@@ -3282,7 +3763,10 @@ pub fn promiseThen(
         return error.TypeError;
     }
     const constructor_value = try promiseSpeciesConstructor(ctx, output, global, receiver, caller_function, caller_frame);
-    const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
+    var capability = try thenCapability(ctx, output, global, constructor_value, atomicsWaitAsyncPromise(ctx.runtime, object), caller_function, caller_frame);
+    var capability_roots = core.runtime.rootValues(.{ &capability.promise, &capability.resolve, &capability.reject, &capability.intrinsic_global });
+    capability_roots.activate(ctx.runtime);
+    defer capability_roots.deactivate(ctx.runtime);
     const on_fulfilled = if (is_catch) core.JSValue.undefinedValue() else if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const on_rejected = if (is_catch) (if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) else if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const stored_on_fulfilled = if (isCallableValue(on_fulfilled)) on_fulfilled else core.JSValue.undefinedValue();
@@ -3298,19 +3782,19 @@ pub fn promiseThen(
             // `.then` capability so the returned promise settles with that
             // result — otherwise `waitAsync(...).value.then(a).then(b)` drops the
             // chain after the first reaction (b never runs).
-            const chain_reaction = try promiseReactionRecord(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), capability.resolve, capability.reject);
+            const chain_reaction = try thenReactionRecord(ctx.runtime, &capability, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
             try appendPromiseReaction(ctx.runtime, object, chain_reaction);
             if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
             return capability.promise;
         }
-        const reaction = try promiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, capability.resolve, capability.reject);
+        const reaction = try thenReactionRecord(ctx.runtime, &capability, stored_on_fulfilled, stored_on_rejected);
         try appendPromiseReaction(ctx.runtime, object, reaction);
         if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
         return capability.promise;
     }
     const result_value = if (object.promiseResult()) |stored| stored else core.JSValue.undefinedValue();
 
-    const reaction = try promiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, capability.resolve, capability.reject);
+    const reaction = try thenReactionRecord(ctx.runtime, &capability, stored_on_fulfilled, stored_on_rejected);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
     const rejected = object.promiseIsRejected();
     var prepared_job = ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
@@ -3481,6 +3965,10 @@ pub fn drainPendingPromiseJobs(
 fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactionPayload) bool {
     if (payload.phase == .invoke) return false;
     const reaction = objectFromValue(payload.reaction) orelse return false;
+    if (reaction.promiseReactionIntrinsicCapability() != null) {
+        if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics.intrinsic_retry += 1;
+        return true;
+    }
     const settle = switch (payload.phase) {
         .invoke => unreachable,
         .resolve => reaction.promiseReactionResolve(),
@@ -3552,6 +4040,14 @@ pub fn drainOnePendingJob(
             };
             ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
             std.debug.assert(ctx.runtime.job_queue.unlinked_head_slots == unlinked_before);
+        },
+        .async_resume => |*payload| {
+            asyncResumeJobCall(job_ctx, output, job_global, payload) catch |err| {
+                // As in an Await reaction with undefined resolving functions,
+                // consume the callback's abrupt completion. The body may have
+                // already run; this entry must never replay it after OOM.
+                _ = try promiseErrorValue(job_ctx, job_global, err);
+            };
         },
         .promise_thenable => |*payload| {
             const unlinked_before = ctx.runtime.job_queue.unlinked_head_slots;
@@ -3721,4 +4217,205 @@ test "promise enqueues reactions and executes jobs via engine" {
     try drainPendingPromiseJobs(ctx, null, global);
 
     try std.testing.expectEqual(@as(usize, 3), promise_jobs);
+}
+
+test "promise reaction carrier uses a dedicated traced payload" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const u = core.JSValue.undefinedValue();
+    const value = try promiseReactionRecord(rt, u, u, u, u);
+    const record = try core.Object.expect(value);
+    try std.testing.expectEqual(core.class.ids.object, record.class_id);
+    try std.testing.expectEqual(core.class.PayloadKind.promise_reaction_record, record.flags.class_payload_kind);
+    try std.testing.expect(record.ordinaryPayloadForAudit() == null);
+    try std.testing.expect(!core.Object.payloadKindNeedsFinalizer(record.class_id, record.flags.class_payload_kind));
+    try std.testing.expectEqual(@as(u32, 0), record.shape_ref.prop_count);
+}
+
+test "promise reaction carrier barriers cover all four slots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const u = core.JSValue.undefinedValue();
+    var record: ?*core.Object = try core.Object.expect(try promiseReactionRecord(rt, u, u, u, u));
+    var roots = core.runtime.rootObjects(.{&record});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!record.?.gcHeader().metaConst().flags.young);
+    inline for (.{
+        .{ "setPromiseReactionOnFulfilled", "promiseReactionOnFulfilled" },
+        .{ "setPromiseReactionOnRejected", "promiseReactionOnRejected" },
+        .{ "setPromiseReactionResolve", "promiseReactionResolve" },
+        .{ "setPromiseReactionReject", "promiseReactionReject" },
+    }) |accessors| {
+        const child = try core.Object.create(rt, core.class.ids.object, null);
+        try std.testing.expect(child.gcHeader().metaConst().flags.young);
+        try @field(core.Object, accessors[0])(record.?, rt, child.value());
+        try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(record.?.gcHeader())));
+        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        try std.testing.expect(rt.ownsObject(child));
+        try std.testing.expect(@field(core.Object, accessors[1])(record.?).?.same(child.value()));
+        const removed = try core.Object.create(rt, core.class.ids.object, null);
+        try @field(core.Object, accessors[0])(record.?, rt, removed.value());
+        try @field(core.Object, accessors[0])(record.?, rt, null);
+        _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+        try std.testing.expect(!rt.ownsObject(removed));
+    }
+}
+
+test "promise reaction carrier promotion preserves values across OOM and GC" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    var values: [4]core.JSValue = undefined;
+    var symbols: [4]core.Atom = undefined;
+    for (&values, &symbols) |*value, *symbol| {
+        symbol.* = try rt.atoms.newValueSymbol("reaction-promotion");
+        value.* = try rt.takeSymbolValue(symbol.*);
+    }
+    var record: ?*core.Object = try core.Object.expect(try promiseReactionRecord(rt, values[0], values[1], values[2], values[3]));
+    var roots = core.runtime.rootObjects(.{&record});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values = @splat(core.JSValue.undefinedValue());
+    _ = rt.runObjectCycleRemoval();
+    rt.setMemoryLimit(0);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, record.?.ensureOrdinaryPayload(rt));
+    try std.testing.expectEqual(core.class.PayloadKind.promise_reaction_record, record.?.flags.class_payload_kind);
+    rt.setMemoryLimit(null);
+    rt.setGCThreshold(0);
+    (try record.?.promiseAlreadyResolvedSlot(rt)).* = true;
+    try std.testing.expect(record.?.promiseAlreadyResolved());
+    try std.testing.expectEqual(core.class.PayloadKind.ordinary, record.?.flags.class_payload_kind);
+    _ = rt.runObjectCycleRemoval();
+    const getters = .{ "promiseReactionOnFulfilled", "promiseReactionOnRejected", "promiseReactionResolve", "promiseReactionReject" };
+    inline for (getters, 0..) |getter, i| {
+        try std.testing.expect(rt.atoms.name(symbols[i]) != null);
+        try std.testing.expectEqual(symbols[i], @field(core.Object, getter)(record.?).?.asSymbolAtom().?);
+    }
+    record = null;
+    _ = rt.runObjectCycleRemoval();
+    for (symbols) |symbol| try std.testing.expect(rt.atoms.name(symbol) == null);
+}
+
+test "promise reaction carrier allocation failure preserves input roots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    var input: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
+    var record: ?*core.Object = null;
+    var roots = core.runtime.rootObjects(.{ &input, &record });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    rt.setMemoryLimit(0);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, promiseReactionRecord(rt, input.?.value(), input.?.value(), input.?.value(), input.?.value()));
+    rt.setMemoryLimit(null);
+    rt.setGCThreshold(0);
+    record = try core.Object.expect(try promiseReactionRecord(rt, input.?.value(), input.?.value(), input.?.value(), input.?.value()));
+    const child = input.?;
+    input = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.ownsObject(child));
+    try std.testing.expect(record.?.promiseReactionReject().?.same(child.value()));
+    record = null;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.ownsObject(child));
+}
+
+test "P-Cap target and error realm edges survive remembered and declared-only tracing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    var record: ?*core.Object = try core.Object.createPromiseReactionRecord(rt);
+    var roots = core.runtime.rootObjects(.{&record});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!record.?.gcHeader().metaConst().flags.young);
+
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    const error_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    try std.testing.expect(target.gcHeader().metaConst().flags.young);
+    record.?.setPromiseReactionIntrinsicCapability(rt, target.value(), error_global.value());
+    try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(record.?.gcHeader())));
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.ownsObject(target));
+    try std.testing.expect(rt.ownsObject(error_global));
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try std.testing.expect(record.?.promiseReactionIntrinsicCapability().?.target.sameValue(target.value()));
+    try std.testing.expect(record.?.promiseReactionIntrinsicCapability().?.self_error_global.sameValue(error_global.value()));
+
+    _ = try record.?.ensureOrdinaryPayload(rt);
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try std.testing.expect(rt.ownsObject(target));
+    try std.testing.expect(rt.ownsObject(error_global));
+    try std.testing.expect(record.?.promiseReactionIntrinsicCapability().?.target.sameValue(target.value()));
+    record.?.clearPromiseReactionIntrinsicCapability();
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try std.testing.expect(!rt.ownsObject(target));
+    try std.testing.expect(!rt.ownsObject(error_global));
+}
+
+test "P-Cap intrinsic construction OOM leaves no published reaction" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    const constructor = try promiseDefaultConstructor(ctx, global);
+    var source = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
+    var roots = core.runtime.rootValues(.{&source});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    rt.suppressLimitCollectionForTest(true);
+    defer rt.suppressLimitCollectionForTest(false);
+    rt.setMemoryLimit(0);
+    defer rt.setMemoryLimit(null);
+    resetThenCapabilityTestMetrics();
+    try std.testing.expectError(error.OutOfMemory, thenCapability(ctx, null, global, constructor, false, null, null));
+    try std.testing.expectEqual(@as(usize, 1), thenCapabilityTestMetrics().intrinsic_prepare);
+    try std.testing.expectEqual(@as(usize, 0), thenCapabilityTestMetrics().intrinsic);
+    try std.testing.expectEqual(@as(usize, 0), thenCapabilityTestMetrics().fallback);
+    try std.testing.expectEqual(@as(usize, 0), objectFromValue(source).?.promiseReactions().len);
+    try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+}
+
+test "fulfilled await uses only its reserved FIFO slot" {
+    for (0..3) |kind| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+        const global = try testStandardGlobal(ctx);
+        var continuation = (try core.Object.create(rt, core.class.ids.object, null)).value();
+        var value = core.JSValue.undefinedValue();
+        var awaited = core.JSValue.undefinedValue();
+        var roots = core.runtime.rootValues(.{ &continuation, &value, &awaited });
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        value = switch (kind) {
+            0 => core.JSValue.int32(42),
+            1 => try rt.takeSymbolValue(try rt.atoms.newValueSymbol("direct-await-value")),
+            else => (try core.Object.create(rt, core.class.ids.object, null)).value(),
+        };
+        awaited = try core.promise.fulfilledWithPrototype(ctx, value, promisePrototypeFromGlobal(rt, global));
+        _ = try promiseDefaultConstructor(ctx, global);
+        try rt.job_queue.reserveEntries(1);
+        rt.job_queue.releaseReservedEntries(1);
+        const before = rt.memory.allocated_bytes;
+        rt.suppressLimitCollectionForTest(true);
+        defer rt.suppressLimitCollectionForTest(false);
+        rt.setMemoryLimit(before);
+        defer rt.setMemoryLimit(null);
+        try asyncFunctionAwait(ctx, null, global, try core.Object.expect(continuation), awaited, null, null);
+        try std.testing.expectEqual(before, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+        try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
+        const job = &rt.job_queue.jobs[0];
+        try std.testing.expectEqual(jobs_mod.Kind.async_resume, std.meta.activeTag(job.payload));
+        try std.testing.expect(job.payload.async_resume.continuation.sameValue(continuation));
+        try std.testing.expect(job.payload.async_resume.value.sameValue(value));
+        try std.testing.expectEqual(ctx, job.realm.borrow().?);
+    }
 }

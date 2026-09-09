@@ -34,6 +34,7 @@ pub fn traceRoots(invocation_ptr: *anyopaque, visitor: *RootVisitor) RootTraceEr
 fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTraceError!void {
     const rt = machine.ctx.runtime;
     const pending = &machine.pending_call_region;
+    try machine.async_completions.trace(visitor);
     try traceFrame(rt, machine.l0.level.frame, visitor);
     try traceStack(machine.l0.level.stack, pending, visitor);
     // A generator/module shell stays deliberately unpublished (off

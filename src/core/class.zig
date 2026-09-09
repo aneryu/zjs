@@ -161,6 +161,7 @@ pub const PayloadKind = enum(u5) {
     global,
     realm_record,
     weak_ref,
+    promise_reaction_record,
 };
 
 pub const Payload = ?*anyopaque;
@@ -197,6 +198,11 @@ pub inline fn isBytecodeFunctionClass(id: ClassId) bool {
         => true,
         else => false,
     };
+}
+
+/// Internal Await reaction handlers, with one continuation edge in Object.u.
+pub inline fn isAsyncFunctionResumeClass(id: ClassId) bool {
+    return id == ids.async_function_resolve or id == ids.async_function_reject;
 }
 
 pub const PayloadVisitor = struct {
@@ -917,9 +923,10 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.generator_function,
         ids.async_function,
         ids.async_generator_function,
-        ids.async_function_resolve,
-        ids.async_function_reject,
         => .function,
+        // qjs u.async_function_data: the object word is the continuation,
+        // not an out-of-line native-function payload.
+        ids.async_function_resolve, ids.async_function_reject => .none,
         ids.bound_function => .bound_function,
         ids.for_in_iterator,
         ids.iterator,

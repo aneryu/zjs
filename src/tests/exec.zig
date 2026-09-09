@@ -3492,6 +3492,63 @@ test "hidden uninitialized globals compact at the QuickJS sawtooth bound" {
     for (names) |name| try std.testing.expect(hidden.hasOwnProperty(name));
 }
 
+test "W1 two own layouts keep the VM property site active" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    _ = try js.eval(
+        \\function readTwo(o) { return o.field; }
+        \\var a = { field: 3, x: 1 };
+        \\var b = { y: 2, field: 5 };
+        \\var total = 0;
+        \\for (var i = 0; i < 64; i++) total += readTwo(i % 2 ? a : b);
+        \\assert.sameValue(total, 256);
+        \\readTwo;
+    );
+    const function = try globalFunctionBytecode(js, "readTwo");
+    const hot = function.hotExtension() orelse return error.InvalidFunctionBytecode;
+    try std.testing.expectEqual(@as(u16, 1), hot.prop_site_count);
+    const site = &hot.prop_sites.?[0];
+    try std.testing.expectEqual(engine.exec.vm_property_field.site_own, site.state);
+    try std.testing.expectEqual(@as(u8, 1), site.misses);
+    try std.testing.expect(site.secondary_guard_key != 0);
+    try std.testing.expect(site.secondary_guard_key != site.guard_key);
+    try std.testing.expect(site.secondary_slot != site.slot);
+
+    // b was captured first and is the secondary arm. Changing its property
+    // kind must miss that guard and invoke the getter exactly once.
+    _ = try js.eval(
+        \\var getterCalls = 0;
+        \\Object.defineProperty(b, "field", { get: function () { getterCalls++; return 7; }, configurable: true });
+        \\assert.sameValue(readTwo(b), 7);
+        \\assert.sameValue(getterCalls, 1);
+        \\assert.sameValue(readTwo(a), 3);
+    );
+    try std.testing.expectEqual(engine.exec.vm_property_field.site_mega, site.state);
+    try std.testing.expectEqual(@as(u64, 0), site.secondary_guard_key);
+
+    // A site encountering more than two layouts retains the existing finite
+    // miss policy. A second arm must not bypass retirement.
+    _ = try js.eval(
+        \\function readMany(o) { return o.field; }
+        \\var many = [];
+        \\for (var j = 0; j < 8; j++) {
+        \\    var o = {};
+        \\    for (var k = 0; k <= j; k++) o["p" + k] = k;
+        \\    o.field = j;
+        \\    many.push(o);
+        \\}
+        \\var sum = 0;
+        \\for (var i = 0; i < 64; i++) sum += readMany(many[i % 8]);
+        \\assert.sameValue(sum, 224);
+    );
+    const many_function = try globalFunctionBytecode(js, "readMany");
+    const many_hot = many_function.hotExtension().?;
+    try std.testing.expectEqual(@as(u16, 1), many_hot.prop_site_count);
+    const many_site = &many_hot.prop_sites.?[0];
+    try std.testing.expectEqual(engine.exec.vm_property_field.site_mega, many_site.state);
+    try std.testing.expectEqual(@as(u64, 0), many_site.secondary_guard_key);
+}
+
 test "W1 property sites stay correct across every shape mutation that invalidates them" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -16819,6 +16876,332 @@ test "FunctionRealm query separates owned carriers from caller-semantics classes
     js.context.clearException();
 }
 
+test "async resume callbacks remain callable and nonconstructible to all consumers" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("internalResumeCallback");
+    for ([_]bool{ false, true }) |rejected| {
+        const continuation = try core.Object.create(js.runtime, core.class.ids.object, null);
+        const callback = try engine.exec.promise_ops.asyncFunctionResumeCallback(js.runtime, global, continuation, rejected);
+        try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(callback, true, true, true));
+        _ = try js.eval(
+            \\assert.sameValue(typeof internalResumeCallback, 'function');
+            \\assert.sameValue(Object.prototype.toString.call(internalResumeCallback), '[object Function]');
+            \\assert(Function.prototype.toString.call(internalResumeCallback).includes('[native code]'));
+            \\assert.sameValue(JSON.stringify({ f: internalResumeCallback }), '{}');
+            \\assert.sameValue(JSON.stringify([internalResumeCallback]), '[null]');
+            \\assert.throws(TypeError, () => Reflect.construct(internalResumeCallback, []));
+            \\assert.throws(TypeError, () => Reflect.construct(function () {}, [], internalResumeCallback));
+        );
+    }
+}
+
+test "fulfilled await queues a direct resume and retains suspended values" {
+    const ActiveProbe = struct {
+        canary: *core.Object,
+        hits: usize = 0,
+        saw_empty_queue: bool = false,
+        reclaimed: bool = false,
+        fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(user_context.?));
+            self.hits += 1;
+            self.saw_empty_queue = rt.job_queue.jobs.len == 0;
+            _ = rt.runObjectCycleRemoval();
+            self.reclaimed = !rt.ownsObject(self.canary);
+            return false;
+        }
+    };
+    for (0..3) |kind| {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        _ = try js.eval(
+            \\globalThis.resumeCount = 0;
+            \\globalThis.awaitProbe = async function (value) {
+            \\    const result = await value;
+            \\    resumeCount++;
+            \\    return result;
+            \\};
+        );
+        const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+        const function = try global.getProperty(try js.runtime.internAtom("awaitProbe"));
+        var input = core.JSValue.undefinedValue();
+        var output = core.JSValue.undefinedValue();
+        var roots = core.runtime.rootValues(.{ &input, &output });
+        roots.activate(js.runtime);
+        defer roots.deactivate(js.runtime);
+        input = switch (kind) {
+            0 => core.JSValue.undefinedValue(),
+            1 => try js.runtime.takeSymbolValue(try js.runtime.atoms.newValueSymbol("await-root")),
+            else => (try core.Object.create(js.runtime, core.class.ids.object, null)).value(),
+        };
+        const expected = input;
+        output = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, global, core.JSValue.undefinedValue(), function, &.{input}, null, null);
+        input = core.JSValue.undefinedValue();
+        const promise = try core.Object.expect(output);
+        try std.testing.expect(promise.promiseResult() == null);
+        try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+        const job = &js.runtime.job_queue.jobs[0];
+        try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(job.payload));
+        try std.testing.expect(job.payload.async_resume.value.sameValue(expected));
+        const continuation = try core.Object.expect(job.payload.async_resume.continuation);
+
+        // Collect with only the queued job and returned Promise retaining the
+        // suspended execution/value. An unrooted canary proves reclamation ran.
+        const canary = try core.Object.create(js.runtime, core.class.ids.object, null);
+        _ = js.runtime.runObjectCycleRemoval();
+        try std.testing.expect(!js.runtime.ownsObject(canary));
+        try std.testing.expect(js.runtime.ownsObject(continuation));
+        // Force a second actual collection after takeFirst, before the body
+        // installs its frame roots: ActiveJobRoot alone retains the payload.
+        var active_probe = ActiveProbe{ .canary = try core.Object.create(js.runtime, core.class.ids.object, null) };
+        js.runtime.setInterruptHandler(ActiveProbe.run, &active_probe);
+        defer js.runtime.setInterruptHandler(null, null);
+        js.context.interrupt_counter = 1;
+        try std.testing.expectEqual(core.jobs.RunOneStatus.success, try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global));
+        try std.testing.expectEqual(@as(usize, 1), active_probe.hits);
+        try std.testing.expect(active_probe.saw_empty_queue);
+        try std.testing.expect(active_probe.reclaimed);
+        try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
+        try std.testing.expect(!promise.promiseIsRejected());
+        try std.testing.expect(promise.promiseResult().?.sameValue(expected));
+        try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(try js.runtime.internAtom("resumeCount"))).asInt32());
+    }
+}
+
+test "fulfilled await checks state after the constructor getter settles its input" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\let release;
+        \\globalThis.getterReads = 0;
+        \\const input = new Promise(resolve => { release = resolve; });
+        \\Object.defineProperty(input, 'constructor', { get() {
+        \\    getterReads++;
+        \\    release(42);
+        \\    return Promise;
+        \\}});
+        \\globalThis.awaitProbe = async function () { return await input; };
+    );
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const function = try global.getProperty(try js.runtime.internAtom("awaitProbe"));
+    var output = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, global, core.JSValue.undefinedValue(), function, &.{}, null, null);
+    var roots = core.runtime.rootValues(.{&output});
+    roots.activate(js.runtime);
+    defer roots.deactivate(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(try js.runtime.internAtom("getterReads"))).asInt32());
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    const job = &js.runtime.job_queue.jobs[0];
+    try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(job.payload));
+    try std.testing.expectEqual(@as(?i32, 42), job.payload.async_resume.value.asInt32());
+    try js.runJobs();
+    try std.testing.expectEqual(@as(?i32, 42), (try core.Object.expect(output)).promiseResult().?.asInt32());
+}
+
+test "fulfilled await roots its continuation through constructor getter GC" {
+    const Probe = struct {
+        calls: usize = 0,
+        canary: *core.Object,
+        reclaimed_canary: bool = false,
+        fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(user_context.?));
+            self.calls += 1;
+            _ = rt.runObjectCycleRemoval();
+            // Snapshot before await's subsequent allocations can reuse the
+            // freed address; a later ownsObject(pointer) cannot prove identity.
+            self.reclaimed_canary = !rt.ownsObject(self.canary);
+            return false;
+        }
+    };
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    defer while (js.runtime.job_queue.takeFirst()) |queued| {
+        var job = queued;
+        job.deinit();
+    };
+    _ = try js.eval(
+        \\globalThis.awaitInput = Promise.resolve(Symbol('constructor-root'));
+        \\Object.defineProperty(awaitInput, 'constructor', {get() { return Promise; }});
+    );
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("awaitInput");
+    var awaited = try global.getProperty(key);
+    var continuation_value = core.JSValue.undefinedValue();
+    var setup_roots = core.runtime.rootValues(.{ &awaited, &continuation_value });
+    setup_roots.activate(js.runtime);
+    var setup_active = true;
+    defer if (setup_active) setup_roots.deactivate(js.runtime);
+    // A synthetic continuation isolates the Await callee's roots from the
+    // normal VM caller. Its queued continuation is inspected, never executed.
+    const continuation = try core.Object.create(js.runtime, core.class.ids.object, null);
+    continuation_value = continuation.value();
+    const input = try core.Object.expect(awaited);
+    const symbol = input.promiseResult().?.asSymbolAtom().?;
+    try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    const canary = try core.Object.create(js.runtime, core.class.ids.object, null);
+    setup_roots.deactivate(js.runtime);
+    setup_active = false;
+    var probe = Probe{ .canary = canary };
+    js.runtime.setInterruptHandler(Probe.run, &probe);
+    defer js.runtime.setInterruptHandler(null, null);
+    js.context.interrupt_counter = 1;
+    try engine.exec.promise_ops.asyncFunctionAwait(js.context, null, global, continuation, awaited, null, null);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(probe.reclaimed_canary);
+    try std.testing.expect(js.runtime.ownsObject(continuation));
+    try std.testing.expect(js.runtime.ownsObject(input));
+    try std.testing.expect(js.runtime.atoms.name(symbol) != null);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    var job = js.runtime.job_queue.takeFirst().?;
+    job.deinit();
+    _ = js.runtime.runObjectCycleRemoval();
+    try std.testing.expect(!js.runtime.ownsObject(continuation));
+    try std.testing.expect(!js.runtime.ownsObject(input));
+    try std.testing.expect(js.runtime.atoms.name(symbol) == null);
+}
+
+test "pending and rejected await retain both callbacks and execute rejection recovery" {
+    for ([_]bool{ false, true }) |initially_settled| {
+        for ([_]bool{ false, true }) |rejected| {
+            if (initially_settled and !rejected) continue;
+            var js = try helpers.TestEngine.init(std.testing.allocator);
+            defer js.deinit();
+            _ = try js.eval(
+                \\globalThis.input = new Promise(() => {});
+                \\globalThis.awaitProbe = async function () {
+                \\    try { return await input; } catch (reason) { return reason + 1; }
+                \\};
+            );
+            const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+            const input = try core.Object.expect(try global.getProperty(try js.runtime.internAtom("input")));
+            if (initially_settled) try engine.exec.promise_ops.promiseSettleValue(js.context, global, input, core.JSValue.int32(41), rejected);
+            const function = try global.getProperty(try js.runtime.internAtom("awaitProbe"));
+            var output = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, global, core.JSValue.undefinedValue(), function, &.{}, null, null);
+            var roots = core.runtime.rootValues(.{&output});
+            roots.activate(js.runtime);
+            defer roots.deactivate(js.runtime);
+            const record = if (initially_settled) blk: {
+                try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+                try std.testing.expectEqual(core.jobs.Kind.promise_reaction, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
+                break :blk try core.Object.expect(js.runtime.job_queue.jobs[0].payload.promise_reaction.reaction);
+            } else blk: {
+                try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
+                try std.testing.expectEqual(@as(usize, 1), input.promiseReactions().len);
+                break :blk try core.Object.expect(input.promiseReactions()[0]);
+            };
+            try std.testing.expectEqual(core.class.ids.async_function_resolve, (try core.Object.expect(record.promiseReactionOnFulfilled().?)).class_id);
+            try std.testing.expectEqual(core.class.ids.async_function_reject, (try core.Object.expect(record.promiseReactionOnRejected().?)).class_id);
+            if (!initially_settled) try engine.exec.promise_ops.promiseSettleValue(js.context, global, input, core.JSValue.int32(41), rejected);
+            try js.runJobs();
+            const result = try core.Object.expect(output);
+            try std.testing.expect(!result.promiseIsRejected());
+            try std.testing.expectEqual(@as(?i32, if (rejected) 42 else 41), result.promiseResult().?.asInt32());
+        }
+    }
+}
+
+test "async direct settlement preserves adoption self resolution and once guards" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\let reads = 0, calls = 0, phase = 'sync';
+        \\const adopted = (async () => ({ get then() {
+        \\    reads++;
+        \\    return function (resolve, reject) {
+        \\        calls++;
+        \\        assert.sameValue(phase, 'jobs');
+        \\        assert.sameValue(resolve.name, '');
+        \\        assert.sameValue(resolve.length, 1);
+        \\        resolve(42); reject(43); resolve(44); throw Error('late');
+        \\    };
+        \\} }))();
+        \\assert.sameValue(reads, 1);
+        \\assert.sameValue(calls, 0);
+        \\phase = 'jobs';
+        \\let self;
+        \\self = (async () => { await 0; return self; })();
+        \\const selfCheck = self.then(() => { throw Error('self fulfilled'); }, error => {
+        \\    assert(error instanceof TypeError);
+        \\});
+        \\const sentinel = {};
+        \\const rejected = (async () => { throw sentinel; })().catch(error => {
+        \\    assert.sameValue(error, sentinel);
+        \\});
+        \\let nativeThenCalls = 0;
+        \\const native = Promise.resolve(5);
+        \\native.then = function (resolve) { nativeThenCalls++; resolve(6); };
+        \\const returnedNative = (async () => native)();
+        \\Promise.all([adopted, selfCheck, rejected, returnedNative]).then(values => {
+        \\    assert.sameValue(values[0], 42);
+        \\    assert.sameValue(values[3], 6);
+        \\    assert.sameValue(reads, 1);
+        \\    assert.sameValue(calls, 1);
+        \\    assert.sameValue(nativeThenCalls, 1);
+        \\    globalThis.directSettlementDone = true;
+        \\});
+    );
+    try js.runJobs();
+    _ = try js.eval("assert.sameValue(directSettlementDone, true);");
+}
+
+test "async resume callbacks preserve thenable metadata microtasks and realms" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\function check(v, m) { if (!v) throw Error(m); }
+        \\const events = [];
+        \\const originalThen = Promise.prototype.then;
+        \\let release;
+        \\const pending = new Promise(resolve => { release = resolve; });
+        \\Promise.prototype.then = function () { throw Error('await called patched then'); };
+        \\const p = (async () => {
+        \\    events.push('enter');
+        \\    check(await pending === 42, 'pending result');
+        \\    events.push('resume');
+        \\    return 43;
+        \\})();
+        \\release(42);
+        \\Promise.prototype.then = originalThen;
+        \\Promise.resolve().then(() => events.push('queued'));
+        \\let metadataChecks = 0;
+        \\const thenable = {
+        \\    then(resolve, reject) {
+        \\        for (const f of [resolve, reject]) {
+        \\            const length = Object.getOwnPropertyDescriptor(f, 'length');
+        \\            const name = Object.getOwnPropertyDescriptor(f, 'name');
+        \\            check(typeof f === 'function' && length.value === 1 && name.value === '', 'resolving metadata');
+        \\            check(!length.writable && !length.enumerable && length.configurable, 'length descriptor');
+        \\            check(!name.writable && !name.enumerable && name.configurable, 'name descriptor');
+        \\            metadataChecks++;
+        \\        }
+        \\        resolve(7); reject(8); throw Error('after resolve');
+        \\    }
+        \\};
+        \\const sentinel = {};
+        \\const a = (async () => {
+        \\    check(await thenable === 7, 'thenable result');
+        \\    try { await Promise.reject(sentinel); throw Error('missing rejection'); }
+        \\    catch (e) { check(e === sentinel, 'rejection identity'); }
+        \\    try { await { get then() { throw sentinel; } }; throw Error('missing getter throw'); }
+        \\    catch (e) { check(e === sentinel, 'then getter identity'); }
+        \\    return 9;
+        \\})();
+        \\const foreign = $262.createRealm().global;
+        \\foreign.eval('globalThis.saved = 11; globalThis.fn = async function () { await 0; return [globalThis, saved]; };');
+        \\const b = foreign.fn();
+        \\Promise.all([p, a, b]).then(values => {
+        \\    check(values[0] === 43 && values[1] === 9, 'results');
+        \\    check(values[2][0] === foreign && values[2][1] === 11, 'realm');
+        \\    check(events.join(',') === 'enter,resume,queued', 'microtask order');
+        \\    check(metadataChecks === 2, 'thenable route coverage');
+        \\    globalThis.__asyncCallbackDone = true;
+        \\});
+    );
+    try js.runJobs();
+    _ = try js.eval("assert.sameValue(globalThis.__asyncCallbackDone, true);");
+}
+
 test "generator async and wrapper noncarriers derive cross-realm state across GC" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -21291,4 +21674,508 @@ test "print / console.log dump objects like QuickJS JS_PrintValue (qjs-generated
         \\{ nested: { arr: [Array] } } {  } {  }
         \\
     );
+}
+
+test "no-suspend async uses a same-Machine completion boundary" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    inline_calls.resetMachineTestMetrics();
+    _ = try js.eval(
+        \\async function leaf(x) { return x + 1; }
+        \\var result = leaf(41);
+        \\assert.sameValue(result instanceof Promise, true);
+        \\assert.sameValue(Object.prototype.toString.call(leaf), "[object AsyncFunction]");
+        \\assert.throws(TypeError, function () { new leaf(); });
+    );
+    try std.testing.expectEqual(@as(usize, 1), inline_calls.machineTestMetrics().same_machine_async_calls);
+}
+
+test "no-suspend async preserves parameter exceptions finally aliases and nested boundaries" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    inline_calls.resetMachineTestMetrics();
+    _ = try js.eval(
+        \\function fail(x) { throw x; }
+        \\async function parameters(a = 1, f = () => a) { var a = 2; return [f(), a]; }
+        \\async function bad(x = fail('parameter')) { throw 'body'; }
+        \\assert.throws(Error, function () { bad((function () { throw Error('argument'); })()); });
+        \\let p;
+        \\try { p = bad(); } catch (_) { throw Error('synchronous parameter throw'); }
+        \\async function outer(n) { if (n) return outer(n - 1); return 17; }
+        \\async function final(x) { try { if (x) throw 3; return 4; } finally { if (x) return 5; } }
+        \\const receiver = { value: 21, async method(a) { return this.value + a; } };
+        \\async function alias(a) { let change = () => a++; change(); arguments[0]++; return a; }
+        \\Promise.all([parameters(), p.catch(e => e), outer(20), final(false), final(true), receiver.method(21), alias(5)]).then(v => {
+        \\    assert.sameValue(v[0][0], 1); assert.sameValue(v[0][1], 2);
+        \\    assert.sameValue(v[1], 'parameter'); assert.sameValue(v[2], 17);
+        \\    assert.sameValue(v[3], 4); assert.sameValue(v[4], 5);
+        \\    assert.sameValue(v[5], 42); assert.sameValue(v[6], 7);
+        \\    globalThis.e2BoundaryDone = true;
+        \\});
+    );
+    // 1 parameter + 1 rejected parameter + 21 recursive + 2 finally + method + alias.
+    try std.testing.expectEqual(@as(usize, 27), inline_calls.machineTestMetrics().same_machine_async_calls);
+    try js.runJobs();
+    _ = try js.eval("assert.sameValue(e2BoundaryDone, true);");
+}
+
+test "no-suspend async leaves suspension eval host-observed cadence and wrappers on fallback" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    inline_calls.resetMachineTestMetrics();
+    _ = try js.eval(
+        \\async function suspended() { await 0; return 1; }
+        \\async function dynamic() { return eval('2'); }
+        \\async function leaf() { return 3; }
+        \\suspended(); dynamic(); leaf.bind(null)(); new Proxy(leaf, {})();
+    );
+    try std.testing.expectEqual(@as(usize, 0), inline_calls.machineTestMetrics().same_machine_async_calls);
+    try js.runJobs();
+    var interrupt = InterruptTestState{};
+    js.runtime.setInterruptHandler(InterruptTestState.run, &interrupt);
+    defer js.runtime.setInterruptHandler(null, null);
+    _ = try js.eval("leaf();");
+    try std.testing.expectEqual(@as(usize, 0), inline_calls.machineTestMetrics().same_machine_async_calls);
+}
+
+test "no-suspend async completion roots survive declared-only GC before and after frame pop" {
+    const Probe = struct {
+        running: usize = 0,
+        completing: usize = 0,
+        fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const rt = invocation.realm.runtime;
+            const active = inline_calls.activeInvocation(rt) orelse return error.TestUnexpectedResult;
+            const store = &active.machine.async_completions;
+            try std.testing.expect(store.count != 0);
+            const slot = store.at(store.count - 1);
+            try std.testing.expect(slot.promise.isObject());
+            if (slot.value.isUndefined()) self.running += 1 else self.completing += 1;
+            const old_major = rt.gc.stats.cycle_gc_count;
+            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try std.testing.expect(rt.gc.stats.cycle_gc_count > old_major);
+            return core.JSValue.undefinedValue();
+        }
+    };
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var probe = Probe{};
+    try js.ensureTest262GlobalsInstalled();
+    try js.defineGlobalExternalHostFunction("__e2BoundaryGC", 0, &probe, Probe.call, null);
+    inline_calls.resetMachineTestMetrics();
+    _ = try js.eval(
+        \\async function nested() { return 8; }
+        \\async function work() {
+        \\    __e2BoundaryGC();
+        \\    return { marker: 'alive', get then() {
+        \\        __e2BoundaryGC();
+        \\        nested();
+        \\        return null;
+        \\    }};
+        \\}
+        \\work().then(v => { assert.sameValue(v.marker, 'alive'); globalThis.e2RootsDone = true; });
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.running);
+    try std.testing.expectEqual(@as(usize, 1), probe.completing);
+    try std.testing.expectEqual(@as(usize, 2), inline_calls.machineTestMetrics().same_machine_async_calls);
+    try js.runJobs();
+    _ = try js.eval("assert.sameValue(e2RootsDone, true);");
+}
+
+test "no-suspend async final code policy includes hidden suspension and excludes nested bodies" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\async function e2Plain() { return 1; }
+        \\async function e2Nested() { return async function () { await 0; }; }
+        \\async function e2ForAwait(xs) { for await (const x of xs) {} }
+        \\async function e2Await() { await 0; }
+        \\async function e2Eval() { return eval('1'); }
+    );
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const Policy = bytecode.function_bytecode.AsyncExecutionPolicy;
+    const rows = .{
+        .{ "e2Plain", Policy.no_suspend },     .{ "e2Nested", Policy.no_suspend },
+        .{ "e2ForAwait", Policy.may_suspend }, .{ "e2Await", Policy.may_suspend },
+        .{ "e2Eval", Policy.unknown },
+    };
+    inline for (rows) |row| {
+        const value = try global.getProperty(try js.runtime.internAtom(row[0]));
+        const obj = try core.Object.expect(value);
+        const fb = obj.bytecodeFunctionStoragePtr().function_bytecode.?;
+        try std.testing.expectEqual(@as(u16, @intFromEnum(row[1])), fb.hotExtensionCanonical().?.async_execution_policy);
+        try std.testing.expectEqual(@as(@TypeOf(fb.functionKind()), .async), fb.functionKind());
+    }
+}
+
+test "no-suspend async transfers post-body OOM to FIFO without replay" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            const rt = invocation.realm.runtime;
+            const active = inline_calls.activeInvocation(rt) orelse return error.TestUnexpectedResult;
+            const store = &active.machine.async_completions;
+            try std.testing.expectEqual(@as(u32, 1), store.count);
+            const slot = store.at(0);
+            try std.testing.expect(slot.value.isObject()); // Callee already popped.
+            const promise = try core.Object.expect(slot.promise);
+            const ops = engine.exec.promise_ops;
+            const undefined_value = core.JSValue.undefinedValue();
+            const reaction = try ops.promiseReactionRecord(rt, undefined_value, undefined_value, undefined_value, undefined_value);
+            try ops.appendPromiseReaction(rt, promise, reaction);
+            rt.suppressLimitCollectionForTest(true);
+            // Getter frame teardown returns accounted bytes; zero keeps the
+            // following settlement allocation failing after that teardown.
+            rt.setMemoryLimit(0);
+            return undefined_value;
+        }
+    };
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    defer js.runtime.setMemoryLimit(null);
+    defer js.runtime.suppressLimitCollectionForTest(false);
+    var probe = Probe{};
+    try js.ensureTest262GlobalsInstalled();
+    try js.defineGlobalExternalHostFunction("__e2CompletionOOM", 0, &probe, Probe.call, null);
+    _ = try js.eval(
+        \\var e2OomPromise, e2OomBodyCount = 0, e2OomGetterCount = 0;
+        \\async function e2OomWork() {
+        \\    e2OomBodyCount++;
+        \\    return {marker: 42, get then() { e2OomGetterCount++; return __e2CompletionOOM(); }};
+        \\}
+    );
+    inline_calls.resetMachineTestMetrics();
+    // TestEngine.eval also drains jobs. The body has finished and the FIFO
+    // retry is published; that immediate drain must fail while the limit is
+    // still armed and preserve the same settlement for a later retry.
+    try std.testing.expectError(error.OutOfMemory, js.eval("e2OomPromise = e2OomWork();"));
+    try std.testing.expectEqual(@as(usize, 1), inline_calls.machineTestMetrics().same_machine_async_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    try std.testing.expectEqual(core.jobs.Kind.promise_settlement, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
+    js.runtime.setMemoryLimit(null);
+    js.runtime.suppressLimitCollectionForTest(false);
+    _ = try js.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try js.runJobs();
+    _ = try js.eval(
+        \\assert.sameValue(e2OomBodyCount, 1); assert.sameValue(e2OomGetterCount, 1);
+        \\e2OomPromise.then(v => { assert.sameValue(v.marker, 42); globalThis.e2OomDone = true; });
+    );
+    try js.runJobs();
+    _ = try js.eval("assert.sameValue(e2OomDone, true);");
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "P-Cap intrinsic then preserves independent results and pending handlers" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ops = engine.exec.promise_ops;
+    ops.resetThenCapabilityTestMetrics();
+    _ = try js.eval(
+        \\var wake, pending = new Promise(r => { wake = r; });
+        \\var first = pending.then(v => { globalThis.pcapFirst = v; return v + 1; });
+        \\var second = Promise.resolve(8).then(v => { globalThis.pcapSecond = v; });
+        \\assert.sameValue(first === pending, false);
+        \\assert.sameValue(first === second, false);
+        \\assert.sameValue(Object.getPrototypeOf(first), Promise.prototype);
+        \\wake(41);
+    );
+    try std.testing.expectEqual(@as(usize, 2), ops.thenCapabilityTestMetrics().intrinsic);
+    try std.testing.expectEqual(@as(usize, 2), ops.thenCapabilityTestMetrics().intrinsic_settle);
+    try std.testing.expectEqual(@as(usize, 0), ops.thenCapabilityTestMetrics().fallback);
+    _ = try js.eval("assert.sameValue(pcapFirst, 41); assert.sameValue(pcapSecond, 8);");
+}
+
+test "P-Cap species observation keeps custom capability handshake" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ops = engine.exec.promise_ops;
+    ops.resetThenCapabilityTestMetrics();
+    _ = try js.eval(
+        \\var pcapLog = [], marker = {}, source = Promise.resolve(3);
+        \\function C(executor) {
+        \\    pcapLog.push('construct');
+        \\    executor(v => pcapLog.push('resolve:' + v), e => pcapLog.push('reject:' + e));
+        \\    return marker;
+        \\}
+        \\Object.defineProperty(source, 'constructor', {get() {
+        \\    pcapLog.push('constructor');
+        \\    return {get [Symbol.species]() { pcapLog.push('species'); return C; }};
+        \\}});
+        \\var result = source.then(v => { pcapLog.push('handler'); return v + 4; });
+        \\assert.sameValue(result, marker);
+    );
+    try std.testing.expectEqual(@as(usize, 0), ops.thenCapabilityTestMetrics().intrinsic);
+    try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().fallback);
+    _ = try js.eval("assert.sameValue(pcapLog.join(','), 'constructor,species,construct,handler,resolve:7');");
+}
+
+test "P-Cap intrinsic prototype survives species replacing global Promise" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ops = engine.exec.promise_ops;
+    ops.resetThenCapabilityTestMetrics();
+    _ = try js.eval(
+        \\var originalPromise = Promise, pcapSpeciesGets = 0, pcapResult;
+        \\var source = originalPromise.resolve(9);
+        \\source.constructor = {get [Symbol.species]() {
+        \\    pcapSpeciesGets++;
+        \\    globalThis.Promise = function Replacement() { throw Error('replacement called'); };
+        \\    return originalPromise;
+        \\}};
+        \\var child = source.then(v => { pcapResult = v; });
+        \\assert.sameValue(Object.getPrototypeOf(child), originalPromise.prototype);
+        \\assert.sameValue(pcapSpeciesGets, 1);
+        \\globalThis.Promise = originalPromise;
+    );
+    try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic);
+    try std.testing.expectEqual(@as(usize, 0), ops.thenCapabilityTestMetrics().fallback);
+    _ = try js.eval("assert.sameValue(pcapResult, 9);");
+}
+
+test "P-Cap thenable resolution identity thrower and FIFO preserve single observation" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ops = engine.exec.promise_ops;
+    ops.resetThenCapabilityTestMetrics();
+    _ = try js.eval(
+        \\var pcapOrder = [], pcapGetter = 0, pcapThen = 0, pcapSelf, pcapThrower;
+        \\var p = Promise.resolve(1), self;
+        \\self = p.then(() => self);
+        \\self.catch(e => { pcapSelf = e instanceof TypeError; });
+        \\p.then(() => { pcapOrder.push('handler'); return {get then() {
+        \\    pcapGetter++; return function(resolve, reject) { pcapThen++; pcapOrder.push('then'); resolve(42); reject(0); };
+        \\}}; }).then(v => { assert.sameValue(v, 42); pcapOrder.push('result'); });
+        \\p.then(() => { pcapOrder.push('peer'); });
+        \\Promise.reject('reason').then().catch(e => { pcapThrower = e; });
+        \\p.then().then(v => { assert.sameValue(v, 1); });
+    );
+    try std.testing.expectEqual(@as(usize, 9), ops.thenCapabilityTestMetrics().intrinsic);
+    try std.testing.expectEqual(@as(usize, 0), ops.thenCapabilityTestMetrics().fallback);
+    _ = try js.eval(
+        \\assert.sameValue(pcapOrder.join(','), 'handler,peer,then,result');
+        \\assert.sameValue(pcapGetter, 1); assert.sameValue(pcapThen, 1);
+        \\assert.sameValue(pcapSelf, true); assert.sameValue(pcapThrower, 'reason');
+    );
+}
+
+test "P-Cap foreign species falls back and delayed foreign settlement keeps self error realm" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ops = engine.exec.promise_ops;
+    ops.resetThenCapabilityTestMetrics();
+    _ = try js.eval(
+        \\var pcapForeign = $262.createRealm();
+        \\var source = Promise.resolve(1);
+        \\source.constructor = {[Symbol.species]: pcapForeign.global.Promise};
+        \\var foreignChild = source.then(v => v + 1);
+        \\assert.sameValue(Object.getPrototypeOf(foreignChild), pcapForeign.global.Promise.prototype);
+        \\pcapForeign.evalScript('globalThis.pending = new Promise(r => { globalThis.wake = r; });');
+        \\var foreignSource = pcapForeign.global.pending, local, pcapRealmOK = false;
+        \\// Select the local intrinsic while the pending source will settle in the foreign Realm.
+        \\foreignSource.constructor = {[Symbol.species]: Promise};
+        \\local = Promise.prototype.then.call(foreignSource, () => local);
+        \\local.catch(e => { pcapRealmOK = e instanceof TypeError && !(e instanceof pcapForeign.global.TypeError); });
+        \\pcapForeign.evalScript('wake(1);');
+    );
+    try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().fallback);
+    try std.testing.expectEqual(@as(usize, 2), ops.thenCapabilityTestMetrics().intrinsic);
+    _ = try js.eval("assert.sameValue(pcapRealmOK, true);");
+}
+
+test "P-Cap post-handler and post-getter OOM retain FIFO completion without replay" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            const rt = invocation.realm.runtime;
+            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            rt.suppressLimitCollectionForTest(true);
+            rt.setMemoryLimit(0);
+            return core.JSValue.int32(42);
+        }
+    };
+    for ([_]bool{ false, true }) |getter| {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        defer js.runtime.setMemoryLimit(null);
+        defer js.runtime.suppressLimitCollectionForTest(false);
+        var probe = Probe{};
+        try js.ensureTest262GlobalsInstalled();
+        try js.defineGlobalExternalHostFunction("__pcapArmOOM", 0, &probe, Probe.call, null);
+        _ = try js.eval(
+            \\var pcapBodyCalls = 0, pcapGetterCalls = 0, pcapFinal, pcapChild;
+            \\function primitive() { pcapBodyCalls++; return __pcapArmOOM(); }
+            \\function objectResult() { pcapBodyCalls++; return {marker: 42, get then() { pcapGetterCalls++; __pcapArmOOM(); return null; }}; }
+        );
+        const ops = engine.exec.promise_ops;
+        ops.resetThenCapabilityTestMetrics();
+        try std.testing.expectError(error.OutOfMemory, js.eval(if (getter)
+            "pcapChild = Promise.resolve(1).then(objectResult); pcapChild.then(v => { pcapFinal = v.marker; });"
+        else
+            "pcapChild = Promise.resolve(1).then(primitive); pcapChild.then(v => { pcapFinal = v; });"));
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+        try std.testing.expectEqual(@as(usize, 2), ops.thenCapabilityTestMetrics().intrinsic);
+        try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic_settle);
+        try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+        try std.testing.expectEqual(core.jobs.Kind.promise_settlement, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
+        js.runtime.setMemoryLimit(null);
+        js.runtime.suppressLimitCollectionForTest(false);
+        _ = try js.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        try js.runJobs();
+        try std.testing.expectEqual(@as(usize, 2), ops.thenCapabilityTestMetrics().intrinsic_settle);
+        _ = try js.eval(if (getter)
+            "assert.sameValue(pcapBodyCalls, 1); assert.sameValue(pcapGetterCalls, 1); assert.sameValue(pcapFinal, 42);"
+        else
+            "assert.sameValue(pcapBodyCalls, 1); assert.sameValue(pcapGetterCalls, 0); assert.sameValue(pcapFinal, 42);");
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    }
+}
+
+test "P-Cap retries reserved reaction phase before then getter without replaying handler" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            invocation.realm.runtime.suppressLimitCollectionForTest(true);
+            invocation.realm.runtime.setMemoryLimit(0);
+            return core.JSValue.undefinedValue();
+        }
+        fn tail(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
+            return core.JSValue.undefinedValue();
+        }
+    };
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    defer js.runtime.setMemoryLimit(null);
+    defer js.runtime.suppressLimitCollectionForTest(false);
+    var probe = Probe{};
+    try js.ensureTest262GlobalsInstalled();
+    try js.defineGlobalExternalHostFunction("__pcapReserveOOM", 0, &probe, Probe.call, null);
+    _ = try js.eval(
+        \\var pcapReserveGetter = 0, pcapReserveChild;
+        \\var pcapReserveObject = {marker: 73, get then() { pcapReserveGetter++; return null; }};
+        \\function pcapSchedule() {
+        \\    pcapReserveChild = Promise.resolve(1).then(() => { __pcapReserveOOM(); return pcapReserveObject; });
+        \\}
+    );
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const schedule = try global.getProperty(try js.runtime.internAtom("pcapSchedule"));
+    const ops = engine.exec.promise_ops;
+    ops.resetThenCapabilityTestMetrics();
+    // Invoke without the TestEngine.eval auto-drain, then fill the current
+    // queue capacity. The unlinked head is reserved for retry, so the
+    // resolution's extra durable slot must grow and actually hit OOM.
+    _ = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, global, core.JSValue.undefinedValue(), schedule, &.{}, null, null);
+    while (js.runtime.job_queue.jobs.len < js.runtime.job_queue.capacity) {
+        try js.runtime.job_queue.enqueueFunc(js.context, Probe.tail, &.{});
+    }
+    const queued = js.runtime.job_queue.jobs.len;
+    try std.testing.expectError(error.OutOfMemory, ops.drainOnePendingJob(js.context, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic);
+    try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic_retry);
+    try std.testing.expectEqual(queued, js.runtime.job_queue.jobs.len);
+    try std.testing.expectEqual(core.jobs.PromiseReactionPhase.resolve, js.runtime.job_queue.jobs[0].payload.promise_reaction.phase);
+    const getter_key = try js.runtime.internAtom("pcapReserveGetter");
+    try std.testing.expectEqual(@as(?i32, 0), (try global.getProperty(getter_key)).asInt32());
+    js.runtime.setMemoryLimit(null);
+    js.runtime.suppressLimitCollectionForTest(false);
+    _ = try js.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try js.runJobs();
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 1), ops.thenCapabilityTestMetrics().intrinsic_settle);
+    _ = try js.eval("assert.sameValue(pcapReserveGetter, 1);");
+}
+
+test "fulfilled await preserves FIFO and bypasses an overridden then" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\var directOrder = [], directThen = Promise.prototype.then;
+        \\Promise.prototype.then = function () { throw new Error('observable then'); };
+        \\async function directSequence() {
+        \\    directOrder.push('start');
+        \\    await 0;
+        \\    directOrder.push('first');
+        \\    await 1;
+        \\    directOrder.push('second');
+        \\}
+        \\directSequence();
+        \\directThen.call(Promise.resolve(), () => directOrder.push('then'));
+        \\directOrder.push('sync');
+    );
+    _ = try js.eval("if (directOrder.join(',') !== 'start,sync,first,then,second') throw new Error(directOrder);");
+}
+
+test "fulfilled await preserves the registration and body realms" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var parent_facade = zjs.JSContext.borrowCore(js.context);
+    const parent_global = try parent_facade.globalObject();
+    var child_holder = try engine.exec.call.createRealmObject(js.context);
+    var child_root = core.runtime.rootValues(.{&child_holder});
+    child_root.activate(js.runtime);
+    defer child_root.deactivate(js.runtime);
+    const child = (try core.Object.expect(child_holder)).realmContext().?;
+    const child_global = try engine.exec.zjs_vm.contextGlobal(child);
+    var child_facade = zjs.JSContext.borrowCore(child);
+    _ = try child_facade.eval("globalThis.foreignDirect = async function () { await 0; return new Error('foreign'); };", .{});
+    const function = try child_global.getProperty(try js.runtime.internAtom("foreignDirect"));
+    var output = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, parent_global, core.JSValue.undefinedValue(), function, &.{}, null, null);
+    var roots = core.runtime.rootValues(.{&output});
+    roots.activate(js.runtime);
+    defer roots.deactivate(js.runtime);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    const job = &js.runtime.job_queue.jobs[0];
+    try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(job.payload));
+    try std.testing.expectEqual(js.context, job.realm.borrow().?);
+    try std.testing.expectEqual(core.jobs.RunOneStatus.success, try engine.exec.promise_ops.drainOnePendingJob(child, null, child_global));
+    const promise = try core.Object.expect(output);
+    try std.testing.expect(!promise.promiseIsRejected());
+    const result = try core.Object.expect(promise.promiseResult().?);
+    try std.testing.expectEqual(object_ops.constructorPrototypeFromGlobal(js.runtime, child_global, "Error").?, result.getPrototype().?);
+}
+
+test "fulfilled await does not replay a resumed body after allocation failure" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            invocation.realm.runtime.suppressLimitCollectionForTest(true);
+            invocation.realm.runtime.setMemoryLimit(0);
+            return core.JSValue.undefinedValue();
+        }
+    };
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    defer js.runtime.setMemoryLimit(null);
+    defer js.runtime.suppressLimitCollectionForTest(false);
+    var probe = Probe{};
+    try js.defineGlobalExternalHostFunction("directResumeOOM", 0, &probe, Probe.call, null);
+    _ = try js.eval("globalThis.directFail = async function () { await 0; directResumeOOM(); return {marker: 42}; };");
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const function = try global.getProperty(try js.runtime.internAtom("directFail"));
+    var output = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, global, core.JSValue.undefinedValue(), function, &.{}, null, null);
+    var roots = core.runtime.rootValues(.{&output});
+    roots.activate(js.runtime);
+    defer roots.deactivate(js.runtime);
+    try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(js.runtime.job_queue.jobs[0].payload));
+    _ = try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
+    const promise = try core.Object.expect(output);
+    try std.testing.expect(promise.promiseIsRejected());
+    try std.testing.expect(promise.promiseResult() != null);
+    core.promise.markHandled(js.context, promise);
+    engine.exec.promise_ops.clearHandledRejectionException(js.context);
+    js.runtime.setMemoryLimit(null);
+    js.runtime.suppressLimitCollectionForTest(false);
+    try js.runJobs();
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }

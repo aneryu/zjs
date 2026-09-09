@@ -2751,8 +2751,8 @@ const Collector = struct {
                                 .{ "ordinary.callsite_function", op.callsite_function },
                                 .{ "ordinary.promise_reaction_on_fulfilled", op.promise_reaction_on_fulfilled },
                                 .{ "ordinary.promise_reaction_on_rejected", op.promise_reaction_on_rejected },
-                                .{ "ordinary.promise_reaction_resolve", op.promise_reaction_resolve },
-                                .{ "ordinary.promise_reaction_reject", op.promise_reaction_reject },
+                                .{ "ordinary.promise_reaction_resolve", o.promiseReactionResolve() },
+                                .{ "ordinary.promise_reaction_reject", o.promiseReactionReject() },
                                 .{ "ordinary.promise_capability_resolve", op.promise_capability_resolve },
                                 .{ "ordinary.promise_capability_reject", op.promise_capability_reject },
                                 .{ "ordinary.promise_combinator_resolve", op.promise_combinator_resolve },
@@ -2767,6 +2767,10 @@ const Collector = struct {
                                     where = field[0];
                                 };
                             }
+                        }
+                        if (o.promiseReactionIntrinsicCapability()) |capability| {
+                            if (capability.target.cycleMarkHeader() == child) where = "reaction.intrinsic_target";
+                            if (capability.self_error_global.cycleMarkHeader() == child) where = "reaction.self_error_global";
                         }
                         if (o.cachedIteratorNextSlotForCycleGc(a.rt)) |slot| {
                             if (slot.*) |v| if (v.cycleMarkHeader() == child) {

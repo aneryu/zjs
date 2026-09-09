@@ -1380,6 +1380,14 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     vm.return_action = .next;
     vm.return_payload = 0;
     switch (action) {
+        .async_complete => {
+            vm.machine.async_completions.at(payload).value = result;
+            const promise = vm.machine.completeAsync(payload, false) catch |err| {
+                if (!callSetupRecover(vm, err)) return .threw;
+                return coldNext(var_buf, vm);
+            };
+            vm.stack.pushOwnedAssumeCapacity(promise);
+        },
         .proxy_get => completeProxyGetContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
         .to_boolean => {
             std.debug.assert(payload == 0);
@@ -1755,6 +1763,18 @@ fn op_return_slow(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
     var vb2: [*]JSValue = undefined;
 
     if (dying.hasSpecialReturn()) {
+        if (dying.return_action == .async_complete) {
+            const id = dying.continuation_payload;
+            machine.async_completions.at(id).value = value;
+            _ = machine.popReturnedFrame();
+            reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+            const promise = machine.completeAsync(id, false) catch |err| {
+                if (!callSetupRecover(vm, err)) return .threw;
+                return coldNext(vb2, vm);
+            };
+            vm.stack.pushOwnedAssumeCapacity(promise);
+            return coldNext(vb2, vm);
+        }
         if (dying.isNativeBoundaryReturn()) {
             machine.popReturnedNativeBoundary(vm.rt);
             storeValueAsIntPair(&vm.return_value, value);
@@ -2120,6 +2140,8 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                             .caught => return coldNext(vb, vm),
                             .miss => {},
                         }
+                    } else if (func_obj.class_id == core.class.ids.async_function) {
+                        return @call(.always_tail, zjs_async_call_handlers[@intFromEnum(argc_source)], .{ pc, sp, vb, vm });
                     }
                 }
             }
@@ -2134,6 +2156,93 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
         }
     }.h;
 }
+
+/// Scope publication precedes allocation, and operand ownership changes only
+/// once the Promise/boundary are rooted. No user code is replayed on failure.
+inline fn enterNoSuspendAsync(vm: *Vm, vb: [*]JSValue, sp: [*]JSValue, region: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout, resolved: inline_calls.InlineTarget) Outcome {
+    vm.stack.setTopPtr(sp);
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    const store = &vm.machine.async_completions;
+    const id = store.begin(vm.rt, resolved.callable) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    const boundary = store.at(id);
+    boundary.promise = core.promise.constructWithPrototype(vm.ctx, @import("promise_ops.zig").promisePrototypeFromGlobal(vm.rt, vm.global)) catch |err| {
+        store.release(id);
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    var target = resolved;
+    if (layout == .method) target.this_value = region[0];
+    vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region);
+    const entry = vm.machine.pushAsyncMovedCall(&target, region[0 .. @as(usize, argc) + (if (layout == .method) @as(usize, 2) else 1)], layout, id) catch |err| {
+        store.release(id);
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+}
+
+/// Async setup owns substantially more native temporaries than ordinary
+/// call dispatch. Keep it behind a matching tail-handler ABI, reached only
+/// after the ordinary bytecode/native class arms, so their register allocation
+/// and stack frame do not inherit the async boundary constructor.
+fn opAsyncCall(comptime argc_source: CallArgcSource) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            const argc: u16 = switch (argc_source) {
+                .operand => readInt(u16, pc + 1),
+                .zero => 0,
+                .one => 1,
+                .two => 2,
+                .three => 3,
+            };
+            const region = sp - (@as(usize, argc) + 1);
+            if (inline_calls.resolveNoSuspendAsync(vm.ctx, vm.global, region[0])) |target|
+                return enterNoSuspendAsync(vm, vb, sp, region, argc, .plain, target);
+            // opCall already advanced the caller PC and proved the operands.
+            vm.stack.setTopPtr(sp);
+            switch (call_runtime.execCall(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, argc, vm.output, vm.global, false, &vm.tail_request) catch |err| return vm.fail(err)) {
+                .done, .continue_loop => return coldNext(vb, vm),
+                .inline_call => {
+                    vm.tail_mode = .push;
+                    return .tail;
+                },
+            }
+        }
+    }.h;
+}
+
+fn op_async_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const argc = readInt(u16, pc + 1);
+    const region = sp - (@as(usize, argc) + 2);
+    if (inline_calls.resolveNoSuspendAsync(vm.ctx, vm.global, region[1])) |target| {
+        vm.frame.pc += 3;
+        return enterNoSuspendAsync(vm, vb, sp, region, argc, .method, target);
+    }
+    // On a miss the method PC still points to argc, as callMethod requires.
+    vm.stack.setTopPtr(sp);
+    switch (vm_call.callMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, false, &vm.tail_request) catch |err| return vm.fail(err)) {
+        .done, .continue_loop => return coldNext(vb, vm),
+        .inline_call => {
+            vm.tail_mode = .push;
+            return .tail;
+        },
+        .inline_constructor => unreachable,
+    }
+}
+
+// Exported Handler slots keep LLVM from folding the cold setup back into
+// hot handlers while retaining the exact C tail-dispatch signature.
+export var zjs_async_call_handlers: [5]Handler = .{
+    opAsyncCall(.operand), opAsyncCall(.zero),  opAsyncCall(.one),
+    opAsyncCall(.two),     opAsyncCall(.three),
+};
+export var zjs_async_call_method_tail: Handler = op_async_call_method;
 
 const op_call = opCall(.operand);
 const op_call0 = opCall(.zero);
@@ -2393,6 +2502,8 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         }
                     }
                 }
+            } else if (method_obj.class_id == core.class.ids.async_function) {
+                return @call(.always_tail, zjs_async_call_method_tail, .{ pc, sp, vb, vm });
             }
         }
     }
@@ -3876,6 +3987,11 @@ pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
             }
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
         }
+        if (object.shape_ref.identity == site.secondary_guard_key) {
+            const value = loadValueAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
+            storeValueAsIntPair(&sp[0], value);
+            return @call(.always_tail, op_call_method, .{ pc + 6, sp + 1, var_buf, vm });
+        }
         if (vm_property_field.siteCapturable(site))
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
     }
@@ -4201,6 +4317,11 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         }
         return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
     }
+    if (object.shape_ref.identity == site.secondary_guard_key) {
+        const value = loadValueAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
+        storeValueAsIntPair(&(sp - 1)[0], value);
+        return cont(pc + 6, sp, var_buf, vm);
+    }
     if (vm_property_field.siteCapturable(site))
         return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
     const atom_id = readInt(u32, pc + 1);
@@ -4295,6 +4416,11 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
                 return cont(pc + 6, sp + 1, var_buf, vm);
             }
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
+        }
+        if (object.shape_ref.identity == site.secondary_guard_key) {
+            const value = loadValueAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
+            storeValueAsIntPair(&sp[0], value);
+            return cont(pc + 6, sp + 1, var_buf, vm);
         }
         if (vm_property_field.siteCapturable(site))
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
@@ -7043,6 +7169,13 @@ noinline fn driveReturnedContinuation(vm: *Vm) HostError!bool {
     const result = vm.return_value;
     vm.return_value = JSValue.undefinedValue();
     switch (continuation.action) {
+        .async_complete => {
+            const promise = vm.machine.completeAsync(continuation.payload, false) catch |err| {
+                if (!callSetupRecover(vm, err)) return vm.pending_error;
+                return false;
+            };
+            vm.stack.pushOwnedAssumeCapacity(promise);
+        },
         .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
         .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
         .to_boolean => {
@@ -7072,12 +7205,13 @@ noinline fn driveTailRequest(vm: *Vm) HostError!void {
         // requests reuse at machine depth > 0; constructor
         // completions keep their own frame.
         .reuse_chain => !(vm.machine.depth > 0 and
-            vm.machine.topEntry().completesConstructor()),
+            (vm.machine.topEntry().completesConstructor() or vm.machine.topEntry().return_action == .async_complete)),
         // strict PTC additionally requires no live catch handler
         // (a protected call is not in tail position) and a real
         // machine frame to retire (L0 host entry pushes).
         .reuse_release => vm.machine.depth > 0 and
             !vm.machine.topEntry().completesConstructor() and
+            vm.machine.topEntry().return_action != .async_complete and
             vm.catch_target.* == null,
     };
     if (reuse) {
@@ -7174,6 +7308,11 @@ pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
                 return @call(.always_tail, op_get_field2, .{ pc + 6, sp, var_buf, vm });
             }
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_indirect), .{ pc, sp, var_buf, vm });
+        }
+        if (object.shape_ref.identity == site.secondary_guard_key) {
+            const value = loadValueAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
+            storeValueAsIntPair(&(sp - 1)[0], value);
+            return @call(.always_tail, op_get_field2, .{ pc + 6, sp, var_buf, vm });
         }
         if (vm_property_field.siteCapturable(site))
             return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });

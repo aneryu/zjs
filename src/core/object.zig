@@ -114,6 +114,8 @@ pub const FinalizationRegistryCellState = object_payloads.FinalizationRegistryCe
 pub const FinalizationRegistryCell = object_payloads.FinalizationRegistryCell;
 pub const DataPropertyLookup = object_payloads.DataPropertyLookup;
 pub const OrdinaryPayload = object_payloads.OrdinaryPayload;
+pub const PromiseReactionRecordPayload = object_payloads.PromiseReactionRecordPayload;
+pub const IntrinsicPromiseReaction = object_payloads.IntrinsicPromiseReaction;
 pub const IteratorPayload = object_payloads.IteratorPayload;
 pub const WeakReferenceHolderLink = object_payloads.WeakReferenceHolderLink;
 pub const CollectionPayload = object_payloads.CollectionPayload;
@@ -172,8 +174,8 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
     // -- the sweep returns the cell. The arms that used to run here only
     // stored nulls into memory that was about to be reclaimed, which is the
     // same waste S4-d deleted from `destroyFromHeaderSlow`'s payload switch.
-    // (regexp is inline in the Object allocation rather than a cell, and its
-    // destroy has been a no-op since S4-c.)
+    // (Built-in regexp and Promise state live in the Object allocation;
+    // neither owns a resource requiring a destructor.)
     if (Object.payloadKindIsTracerOwnedCellOrNone(payload_kind)) return;
     switch (payload_kind) {
         .iterator => {
@@ -231,6 +233,7 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         // payload kind cannot be added without classifying it.
         .none,
         .ordinary,
+        .promise_reaction_record,
         .arguments,
         .object_data,
         .bound_function,
@@ -383,6 +386,7 @@ pub const DenseArrayStorage = extern struct {
 pub const ObjectStorage = extern union {
     /// Out-of-line payload for non-array classes (Map/Proxy/native function/...).
     payload: class.Payload,
+    async_continuation: ?*Object,
     array: DenseArrayStorage,
     bytecode_function: BytecodeFunctionStorage,
     regexp: RegExpPayload,
@@ -558,7 +562,10 @@ pub const Object = extern struct {
             std.debug.assert(class_id == class.ids.object);
             return trailing_property_bytes;
         }
-        return unionArmBytes(class_id);
+        // The built-in Promise owns its unchanged state in the same cell.
+        // Keep the payload-pointer arm so all existing slot APIs stay stable;
+        // custom classes selecting `.promise` still own a separate cell.
+        return unionArmBytes(class_id) + if (class_id == class.ids.promise) @sizeOf(PromisePayload) else @as(usize, 0);
     }
 
     inline fn allocCell(rt: *JSRuntime, class_id: class.ClassId, comptime has_trailing: bool) !*Object {
@@ -637,6 +644,22 @@ pub const Object = extern struct {
     pub inline fn payloadArm(self: *const Object) *class.Payload {
         std.debug.assert(!self.hasSlots2Layout());
         return @ptrFromInt(self.armBase());
+    }
+
+    fn asyncResumeArm(self: *const Object) *?*Object {
+        std.debug.assert(class.isAsyncFunctionResumeClass(self.class_id));
+        std.debug.assert(self.flags.class_payload_kind == .none);
+        std.debug.assert(!self.hasSlots2Layout());
+        return @ptrFromInt(self.armBase());
+    }
+
+    pub fn asyncResumeContinuation(self: *const Object) ?*Object {
+        return self.asyncResumeArm().*;
+    }
+
+    pub fn setAsyncResumeContinuation(self: *Object, rt: *JSRuntime, continuation: ?*Object) void {
+        self.asyncResumeArm().* = continuation;
+        if (continuation) |stored| rt.gc.generationalBarrier(self.gcHeader(), stored.gcHeader());
     }
 
     pub inline fn arrayArm(self: *const Object) *DenseArrayStorage {
@@ -1552,6 +1575,9 @@ pub const Object = extern struct {
             // only custom classes selecting `.regexp` retain the generic
             // out-of-line payload path.
             class_payload_kind = .regexp;
+        } else if (class_id == class.ids.promise) {
+            std.debug.assert(payload_kind == .promise);
+            class_payload_kind = .promise;
         } else if (payload_kind == .function and class.isBytecodeFunctionClass(class_id)) {
             // qjs stores bytecode callable state directly in JSObject.u.func.
             class_payload_kind = .function;
@@ -1673,6 +1699,13 @@ pub const Object = extern struct {
             class.ids.mapped_arguments,
             => self.initArmPayload(null),
             class.ids.regexp => self.regexpArm().* = .{},
+            class.ids.promise => {
+                // No separate publication or pressure point: this state has
+                // exactly the lifetime of the object that traces its values.
+                const payload: *PromisePayload = @ptrFromInt(@intFromPtr(self) + @sizeOf(Object) + unionArmBytes(class.ids.promise));
+                payload.* = .{};
+                self.initArmPayload(payload);
+            },
             else => self.initArmPayload(class_payload),
         }
         if (property_template) |template| {
@@ -1741,6 +1774,7 @@ pub const Object = extern struct {
     pub inline fn payloadKindIsTracerOwnedCell(payload_kind: class.PayloadKind) bool {
         return switch (payload_kind) {
             .ordinary,
+            .promise_reaction_record,
             .arguments,
             .object_data,
             .bound_function,
@@ -1799,7 +1833,7 @@ pub const Object = extern struct {
 
     pub inline fn hasTracerOwnedPayloadCell(self: *const Object) bool {
         if (!payloadKindIsTracerOwnedCell(self.flags.class_payload_kind)) return false;
-        return self.class_id != class.ids.regexp;
+        return self.class_id != class.ids.regexp and self.class_id != class.ids.promise;
     }
 
     /// TGC S4-c: mint a zero-initialized a-class payload as a `.payload` GC
@@ -1864,6 +1898,7 @@ pub const Object = extern struct {
     noinline fn allocClassPayloadCell(rt: *JSRuntime, payload_kind: class.PayloadKind) !class.Payload {
         return switch (payload_kind) {
             .ordinary => @ptrCast(try mintPayloadCell(rt, OrdinaryPayload)),
+            .promise_reaction_record => @ptrCast(try mintPayloadCell(rt, PromiseReactionRecordPayload)),
             .arguments => @ptrCast(try mintPayloadCell(rt, ArgumentsPayload)),
             .object_data => @ptrCast(try mintPayloadCell(rt, ObjectDataPayload)),
             .bound_function => @ptrCast(try mintPayloadCell(rt, BoundFunctionPayload)),
@@ -1882,6 +1917,7 @@ pub const Object = extern struct {
     inline fn classPayloadCellBytes(payload_kind: class.PayloadKind) usize {
         return switch (payload_kind) {
             .ordinary => @sizeOf(OrdinaryPayload),
+            .promise_reaction_record => @sizeOf(PromiseReactionRecordPayload),
             .arguments => @sizeOf(ArgumentsPayload),
             .object_data => @sizeOf(ObjectDataPayload),
             .bound_function => @sizeOf(BoundFunctionPayload),
@@ -1976,6 +2012,7 @@ pub const Object = extern struct {
             // would put a non-cell allocation behind a `storageCell` edge.
             .none,
             .ordinary,
+            .promise_reaction_record,
             .global,
             .regexp,
             .bound_function,
@@ -2022,7 +2059,7 @@ pub const Object = extern struct {
             .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
             .disposable_stack => {},
             .realm_record => rt.destroyRuntime(RealmRecordPayload, @ptrCast(@alignCast(ptr))),
-            .none, .ordinary, .global => {},
+            .none, .ordinary, .promise_reaction_record, .global => {},
         }
     }
 
@@ -2229,8 +2266,38 @@ pub const Object = extern struct {
         rt.cached_iterator_next_entries = rt.cached_iterator_next_entries.ptr[0..last_index];
     }
 
+    /// A reaction is still an ordinary object; only its private payload is
+    /// specialized. Keep the object rooted across the payload allocation.
+    pub fn createPromiseReactionRecord(rt: *JSRuntime) !*Object {
+        var record: ?*Object = try Object.create(rt, class.ids.object, null);
+        errdefer Object.destroyFromHeader(rt, record.?.gcHeader());
+        var roots = runtime_mod.rootObjects(.{&record});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        const payload = try createPayloadCell(rt, PromiseReactionRecordPayload);
+        record.?.payloadSlot().* = @ptrCast(payload);
+        record.?.flags.class_payload_kind = .promise_reaction_record;
+        rt.gc.rememberOwnerForBulkWrite(record.?.gcHeader());
+        return record.?;
+    }
+
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
         if (self.ordinaryPayload()) |payload| return payload;
+        if (self.promiseReactionRecordPayload()) |record| {
+            // Preserve the ordinary-object API if a native caller later uses
+            // a different private role. The old cell stays traced until the
+            // fully initialized replacement is published; OOM changes nothing.
+            const payload = try createPayloadCell(rt, OrdinaryPayload);
+            payload.* = .{
+                .promise_reaction_on_fulfilled = record.on_fulfilled,
+                .promise_reaction_on_rejected = record.on_rejected,
+                .promise_reaction_capability = record.capability,
+            };
+            self.payloadSlot().* = @ptrCast(payload);
+            self.flags.class_payload_kind = .ordinary;
+            rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
+            return payload;
+        }
         std.debug.assert(self.flags.class_payload_kind == .none);
         // TGC S4-c: a slots2 body's two inline property entries occupy the
         // payload word. Move them out of line FIRST so the arm word is the
@@ -2475,7 +2542,7 @@ pub const Object = extern struct {
         // non-payload inline/dense arms; trailing-inline payload classes stay
         // eligible because their word 0 really is the payload pointer. A new
         // inline/dense arm must join this exclusion before storing union data.
-        if (self.hasSlots2Layout() or self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
+        if (self.hasSlots2Layout() or self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or class.isAsyncFunctionResumeClass(self.class_id) or self.flags.class_payload_kind != .none) return null;
         assertOnlyPayloadWordIsLive(self);
         std.debug.assert(self.payloadArm().* == null or @intFromPtr(self.payloadArm().*.?) != @alignOf(JSValue));
         return self.payloadArm().*;
@@ -2483,7 +2550,7 @@ pub const Object = extern struct {
 
     pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
         // Keep this exclusion and its Debug proof paired with the mutable arm.
-        if (self.hasSlots2Layout() or self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.flags.class_payload_kind != .none) return null;
+        if (self.hasSlots2Layout() or self.isArray() or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or class.isAsyncFunctionResumeClass(self.class_id) or self.flags.class_payload_kind != .none) return null;
         assertOnlyPayloadWordIsLive(self);
         std.debug.assert(self.payloadArm().* == null or @intFromPtr(self.payloadArm().*.?) != @alignOf(JSValue));
         return self.payloadArm().*;
@@ -4626,12 +4693,23 @@ pub const Object = extern struct {
         }
         self.arrayArm().*.values = next;
         self.arrayArm().*.capacity = @intCast(next_capacity);
-        // A long-lived array adopting a cell published moments ago is an
-        // old-to-young edge; the minor's sticky marks stop at the owner.
-        // (`appendUninitializedFastArraySlot` and the other entries remember
-        // the owner too, but `fastArrayEnsureCapacity` can be called on its
-        // own and the cell must survive the next minor either way.)
-        rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
+        // The new edge is the storage cell. Copied elements were already
+        // owned by this array; their logical edges have not changed. Shade
+        // the new cell during a major, or remember an old owner during a
+        // minor, without queueing another scan of all existing elements.
+        rt.gc.generationalBarrier(self.gcHeader(), arrayStorageCellHeader(next));
+    }
+
+    /// The caller holds `new_value` across capacity allocation, as with the
+    /// raw-slot API below. Once the initialized slot is visible, its exact
+    /// target barrier covers the new edge; a primitive adds no GC edge.
+    fn appendInitializedFastArrayValue(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
+        const index = self.arrayArm().*.count;
+        try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
+        self.arrayArm().*.values[@intCast(index)] = new_value;
+        self.arrayArm().*.count = index + 1;
+        self.flags.fast_array = true;
+        rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader());
     }
 
     pub fn appendUninitializedFastArraySlot(self: *Object, rt: *JSRuntime) !*JSValue {
@@ -4639,11 +4717,9 @@ pub const Object = extern struct {
         try self.ensureArrayBufferCapacity(rt, @as(usize, @intCast(index)) + 1);
         self.arrayArm().*.count = index + 1;
         self.flags.fast_array = true;
-        // Every dense append reaches its storage through here and then writes
-        // the slot itself, in four different callers. Remembering the owner at
-        // the one shared point is what keeps a young element reachable from an
-        // old array visible to the minor, whose sticky marks stop the trace at
-        // the array.
+        // This API cannot know the value its caller will write. Keep the
+        // whole-owner barrier for that future edge; internal callers that
+        // already know their value use appendInitializedFastArrayValue.
         rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
         return &self.arrayArm().*.values[@intCast(index)];
     }
@@ -5850,11 +5926,13 @@ pub const Object = extern struct {
     }
 
     pub fn promiseReactionOnFulfilledSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.promiseReactionRecordPayload()) |payload| return &payload.on_fulfilled;
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.promise_reaction_on_fulfilled;
     }
 
     pub fn promiseReactionOnFulfilled(self: *const Object) ?JSValue {
+        if (self.promiseReactionRecordPayloadConst()) |payload| return payload.on_fulfilled;
         if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_on_fulfilled;
         return null;
     }
@@ -5864,11 +5942,13 @@ pub const Object = extern struct {
     }
 
     pub fn promiseReactionOnRejectedSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.promiseReactionRecordPayload()) |payload| return &payload.on_rejected;
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.promise_reaction_on_rejected;
     }
 
     pub fn promiseReactionOnRejected(self: *const Object) ?JSValue {
+        if (self.promiseReactionRecordPayloadConst()) |payload| return payload.on_rejected;
         if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_on_rejected;
         return null;
     }
@@ -5878,12 +5958,24 @@ pub const Object = extern struct {
     }
 
     pub fn promiseReactionResolveSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.promiseReactionRecordPayload()) |payload| {
+            std.debug.assert(payload.capability == .external);
+            return &payload.capability.external.resolve;
+        }
         const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.promise_reaction_resolve;
+        std.debug.assert(payload.promise_reaction_capability == .external);
+        return &payload.promise_reaction_capability.external.resolve;
     }
 
     pub fn promiseReactionResolve(self: *const Object) ?JSValue {
-        if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_resolve;
+        if (self.promiseReactionRecordPayloadConst()) |payload| return switch (payload.capability) {
+            .external => |external| external.resolve,
+            .intrinsic => null,
+        };
+        if (self.ordinaryPayloadConst()) |payload| return switch (payload.promise_reaction_capability) {
+            .external => |external| external.resolve,
+            .intrinsic => null,
+        };
         return null;
     }
 
@@ -5892,17 +5984,65 @@ pub const Object = extern struct {
     }
 
     pub fn promiseReactionRejectSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
+        if (self.promiseReactionRecordPayload()) |payload| {
+            std.debug.assert(payload.capability == .external);
+            return &payload.capability.external.reject;
+        }
         const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.promise_reaction_reject;
+        std.debug.assert(payload.promise_reaction_capability == .external);
+        return &payload.promise_reaction_capability.external.reject;
     }
 
     pub fn promiseReactionReject(self: *const Object) ?JSValue {
-        if (self.ordinaryPayloadConst()) |payload| return payload.promise_reaction_reject;
+        if (self.promiseReactionRecordPayloadConst()) |payload| return switch (payload.capability) {
+            .external => |external| external.reject,
+            .intrinsic => null,
+        };
+        if (self.ordinaryPayloadConst()) |payload| return switch (payload.promise_reaction_capability) {
+            .external => |external| external.reject,
+            .intrinsic => null,
+        };
         return null;
     }
 
     pub fn setPromiseReactionReject(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
         try self.setOptionalValueSlot(rt, try self.promiseReactionRejectSlot(rt), next_value);
+    }
+
+    pub fn promiseReactionIntrinsicCapability(self: *const Object) ?IntrinsicPromiseReaction {
+        const capability = if (self.promiseReactionRecordPayloadConst()) |payload|
+            payload.capability
+        else if (self.ordinaryPayloadConst()) |payload|
+            payload.promise_reaction_capability
+        else
+            return null;
+        return switch (capability) {
+            .external => null,
+            .intrinsic => |intrinsic| intrinsic,
+        };
+    }
+
+    /// A newly allocated private reaction already owns its payload. Publishing
+    /// the capability needs no allocation, but both new edges need barriers.
+    pub fn setPromiseReactionIntrinsicCapability(self: *Object, rt: *JSRuntime, target: JSValue, self_error_global: JSValue) void {
+        const capability = self.promiseReactionCapabilityPtr();
+        capability.* = .{ .intrinsic = .{ .target = target, .self_error_global = self_error_global } };
+        rt.gc.generationalBarrier(self.gcHeader(), target.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.gcHeader(), self_error_global.cycleMarkHeader());
+    }
+
+    /// Successful settlement either completed the target or transferred it to
+    /// a typed FIFO owner. The consumed reaction must no longer retain it.
+    pub fn clearPromiseReactionIntrinsicCapability(self: *Object) void {
+        const capability = self.promiseReactionCapabilityPtr();
+        std.debug.assert(capability.* == .intrinsic);
+        capability.* = .{ .external = .{} };
+    }
+
+    fn promiseReactionCapabilityPtr(self: *Object) *object_payloads.PromiseReactionCapability {
+        if (self.promiseReactionRecordPayload()) |payload| return &payload.capability;
+        if (self.ordinaryPayload()) |payload| return &payload.promise_reaction_capability;
+        unreachable;
     }
 
     pub fn promiseAlreadyResolvedSlot(self: *Object, rt: *JSRuntime) !*bool {
@@ -6174,6 +6314,16 @@ pub const Object = extern struct {
     /// Read-only view for the minor audit's edge naming (`gc_trace_stw`).
     pub fn ordinaryPayloadForAudit(self: *const Object) ?*const OrdinaryPayload {
         return self.ordinaryPayloadConst();
+    }
+
+    fn promiseReactionRecordPayload(self: *Object) ?*PromiseReactionRecordPayload {
+        if (self.flags.class_payload_kind != .promise_reaction_record) return null;
+        return @ptrCast(@alignCast(self.payloadSlot().*.?));
+    }
+
+    fn promiseReactionRecordPayloadConst(self: *const Object) ?*const PromiseReactionRecordPayload {
+        if (self.flags.class_payload_kind != .promise_reaction_record) return null;
+        return @ptrCast(@alignCast(self.payloadSlot().*.?));
     }
 
     fn ordinaryPayload(self: *const Object) ?*OrdinaryPayload {
@@ -6807,6 +6957,9 @@ pub const Object = extern struct {
 
         switch (self.flags.class_payload_kind) {
             .none => {},
+            .promise_reaction_record => if (self.promiseReactionRecordPayloadConst()) |payload| {
+                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(PromiseReactionRecordPayload), @sizeOf(PromiseReactionRecordPayload));
+            },
             .ordinary => if (self.ordinaryPayloadConst()) |payload| {
                 Helper.allocation(recorder, .trace_payload, payload, @sizeOf(OrdinaryPayload), @sizeOf(OrdinaryPayload));
             },
@@ -6856,7 +7009,9 @@ pub const Object = extern struct {
                 Helper.allocation(recorder, .trace_payload, payload, @sizeOf(RealmRecordPayload), @sizeOf(RealmRecordPayload));
             },
             .promise => if (self.promisePayloadConst()) |payload| {
-                Helper.allocation(recorder, .trace_payload, payload, @sizeOf(PromisePayload), @sizeOf(PromisePayload));
+                // Built-in state is already included in the Object body.
+                if (self.class_id != class.ids.promise)
+                    Helper.allocation(recorder, .trace_payload, payload, @sizeOf(PromisePayload), @sizeOf(PromisePayload));
                 Helper.backing(recorder, payload.reactions.ptr, payload.reactions_capacity, payload.reactions.len, JSValue);
             },
             .generator => if (self.generatorPayloadConst()) |payload| {
@@ -7060,6 +7215,9 @@ pub const Object = extern struct {
         if (self.ordinaryPayload()) |payload| {
             try payload.traceChildEdges(visitor);
         }
+        if (self.promiseReactionRecordPayload()) |payload| {
+            try payload.traceChildEdges(visitor);
+        }
         // TGC S4-b spec 2.2: the dense element buffer is an `.array_storage`
         // GC cell with no edges of its own. The guard is the arm-derived
         // `denseArmNamesStorageCell` (Q21: not `flags.fast_array`), the same
@@ -7084,6 +7242,11 @@ pub const Object = extern struct {
         }
         if (self.objectDataPayload()) |payload| {
             try payload.traceChildEdges(visitor);
+        }
+        if (class.isAsyncFunctionResumeClass(self.class_id)) {
+            // qjs js_async_function_resolve_mark. This is a strong object
+            // edge; the inline pointer has no separate storage/finalizer.
+            try Helper.callVisitObject(visitor, self.asyncResumeArm());
         }
         if (self.bufferPayload()) |payload| {
             try payload.traceChildEdges(visitor);
@@ -8806,8 +8969,7 @@ pub const Object = extern struct {
         if (!self.canExtendFastArray()) return false;
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
 
-        const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = if (take_ownership) new_value else new_value;
+        try self.appendInitializedFastArrayValue(rt, if (take_ownership) new_value else new_value);
         if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
@@ -8842,8 +9004,7 @@ pub const Object = extern struct {
         std.debug.assert(self.arrayElements().len == 0);
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
-        const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = new_value;
+        try self.appendInitializedFastArrayValue(rt, new_value);
         if (self.arrayArm().*.length < 1) self.arrayArm().*.length = 1;
         self.markIndexedProperties(rt);
     }
@@ -8873,8 +9034,7 @@ pub const Object = extern struct {
         if (!self.flags.extensible) return false;
         if (self.shape_ref.prop_count != 0 and self.findPropertyIndexTrusted(atom_id) != null) return false;
 
-        const element_slot = try self.appendUninitializedFastArraySlot(rt);
-        element_slot.* = if (take_ownership) new_value else new_value;
+        try self.appendInitializedFastArrayValue(rt, if (take_ownership) new_value else new_value);
         if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
@@ -8893,6 +9053,7 @@ pub const Object = extern struct {
             const element_slot = &self.arrayArm().*.values[index];
             element_slot.* = item;
         }
+        self.barrierInitializedDenseArrayValues(rt, values);
         if (values.len != 0) self.markIndexedProperties(rt);
         return true;
     }
@@ -8919,7 +9080,22 @@ pub const Object = extern struct {
         self.setFastArrayCountAssumeCapacity(@intCast(values.len));
         self.arrayArm().*.length = @intCast(values.len);
         @memcpy(self.arrayArm().*.values[0..values.len], values);
+        // Capacity growth shades only the storage cell. The filled slots
+        // add separate edges, even if this empty owner was already scanned.
+        self.barrierInitializedDenseArrayValues(rt, values);
         self.markIndexedProperties(rt);
+    }
+
+    inline fn barrierInitializedDenseArrayValues(self: *Object, rt: *JSRuntime, values: []const JSValue) void {
+        // The owner and GC phase cannot change between these stores. A young
+        // or already-remembered owner can skip the entire range outside a
+        // major; keep that common decision out of the per-element loop.
+        if (rt.gc.barrierOwnerSkips(self.gcHeader())) return;
+        self.barrierInitializedDenseArrayValuesSlow(rt, values);
+    }
+
+    noinline fn barrierInitializedDenseArrayValuesSlow(self: *Object, rt: *JSRuntime, values: []const JSValue) void {
+        for (values) |item| rt.gc.generationalBarrierValue(self.gcHeader(), item);
     }
 
     pub fn reserveDenseArrayElements(self: *Object, rt: *JSRuntime, needed: u32) !void {
@@ -10228,7 +10404,7 @@ pub const Object = extern struct {
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
-            rt.gc.generationalBarrier(self.gcHeader(), &self.shape_ref.header);
+            rt.shapes.adoptionBarrier(self, self.shape_ref);
             return;
         }
         try rt.shapes.transitionPropertyUncached(&self.shape_ref, atom_id, flags, property_capacity);
@@ -10237,7 +10413,7 @@ pub const Object = extern struct {
         // minor's sticky marks stop the trace at the old owner, so without
         // this the new Shape is swept and the next property read walks a
         // destroyed `props()` array.
-        rt.gc.generationalBarrier(self.gcHeader(), &self.shape_ref.header);
+        rt.shapes.adoptionBarrier(self, self.shape_ref);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {

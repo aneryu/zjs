@@ -700,7 +700,7 @@ test "CallFacts is one 16-bit execution snapshot" {
     );
     try std.testing.expectEqual(
         @as(usize, 2),
-        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "_call_facts_padding"),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "async_execution_policy"),
     );
     try std.testing.expectEqual(
         @as(usize, 4),
@@ -904,7 +904,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     first.closureVar()[0].kind_flags = 0xff;
     first.closureVar()[0].var_idx = 0xffff;
     first.hotExtensionMut().?.call_facts = @bitCast(@as(u16, 0xffff));
-    first.hotExtensionMut().?._call_facts_padding = 0xffff;
+    first.hotExtensionMut().?.async_execution_policy = 0xffff;
     first.hotExtensionMut().?.ctor_alloc = .{ .capacity = 0xffff, .state = .live };
     first.destroyUnpublishedFixture(rt);
 
@@ -934,7 +934,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     try std.testing.expectEqual(@as(u16, 0), second.closureVar()[0].var_idx);
     try std.testing.expectEqual(atom_module.null_atom, second.closureVar()[0].var_name);
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), second.hotExtension().?.call_facts);
-    try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?._call_facts_padding);
+    try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?.async_execution_policy);
     try std.testing.expectEqual(atom_module.null_atom, second.hotExtension().?.script_or_module);
     try std.testing.expectEqual(
         bytecode.function_bytecode.CtorAllocState.empty,

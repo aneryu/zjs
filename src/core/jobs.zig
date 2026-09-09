@@ -50,6 +50,14 @@ pub const PromiseReactionPayload = struct {
     }
 };
 
+/// An internal Await fulfillment. The continuation and result are precise
+/// roots; no JavaScript callable or reaction record is needed for this task.
+/// The common Job.realm preserves the registration context's interrupt poll.
+pub const AsyncResumePayload = struct {
+    continuation: core.JSValue, // gc-slot: immutable; Job.initAsyncResume seals it before FIFO publication.
+    value: core.JSValue, // gc-slot: immutable; Job.traceChildEdges roots it until dequeue/deinit.
+};
+
 pub const PromiseThenablePhase = enum {
     prepare,
     invoke,
@@ -129,6 +137,7 @@ pub const Payload = union(enum) {
     dynamic_import: DynamicImportPayload,
     atomics_waiter: AtomicsWaiterPayload,
     finalization: FinalizationPayload,
+    async_resume: AsyncResumePayload,
 };
 pub const Kind = std.meta.Tag(Payload);
 
@@ -196,6 +205,16 @@ pub const Job = struct {
                 .value = value,
                 .rejected = rejected,
             } },
+        };
+    }
+
+    /// Internal fulfilled-Await entry for an already reserved FIFO slot.
+    pub fn initAsyncResume(context: *core.JSContext, continuation: core.JSValue, value: core.JSValue) Job {
+        std.debug.assert(continuation.isObject());
+        return .{
+            .runtime = context.runtime,
+            .realm = core.RealmRef.retain(context),
+            .payload = .{ .async_resume = .{ .continuation = continuation, .value = value } },
         };
     }
 
@@ -315,6 +334,10 @@ pub const Job = struct {
                 payload.reaction = core.JSValue.undefinedValue();
                 payload.value = core.JSValue.undefinedValue();
             },
+            .async_resume => |*payload| {
+                payload.continuation = core.JSValue.undefinedValue();
+                payload.value = core.JSValue.undefinedValue();
+            },
             .promise_thenable => |*payload| {
                 payload.target = core.JSValue.undefinedValue();
                 payload.thenable = core.JSValue.undefinedValue();
@@ -361,6 +384,10 @@ pub const Job = struct {
             .promise => |*payload| try visitor.value(&payload.value),
             .promise_reaction => |*payload| {
                 try visitor.value(&payload.reaction);
+                try visitor.value(&payload.value);
+            },
+            .async_resume => |*payload| {
+                try visitor.value(&payload.continuation);
                 try visitor.value(&payload.value);
             },
             .promise_thenable => |*payload| {

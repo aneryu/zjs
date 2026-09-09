@@ -238,13 +238,64 @@ pub const DataPropertyLookup = struct {
     value: JSValue,
 };
 
+/// Internal Promise reaction state. Unlike OrdinaryPayload this carries only
+/// the four slots used by pending subscribers and reaction jobs. The Object
+/// owns this tracer-managed cell; no native resource or finalizer is needed.
+pub const IntrinsicPromiseReaction = struct {
+    target: JSValue, // gc-slot: heap; Object.setPromiseReactionIntrinsicCapability barriers the target.
+    self_error_global: JSValue, // gc-slot: heap; the same bulk setter barriers the realm global.
+};
+
+pub const PromiseReactionCapability = union(enum) {
+    external: struct { resolve: ?JSValue = null, reject: ?JSValue = null },
+    intrinsic: IntrinsicPromiseReaction,
+
+    pub fn traceChildEdges(self: *PromiseReactionCapability, visitor: anytype) !void {
+        switch (self.*) {
+            .external => |*external| {
+                try traceOptValue(visitor, &external.resolve);
+                try traceOptValue(visitor, &external.reject);
+            },
+            .intrinsic => |*intrinsic| {
+                try callVisitValue(visitor, &intrinsic.target);
+                try callVisitValue(visitor, &intrinsic.self_error_global);
+            },
+        }
+    }
+
+    pub fn destroy(self: *PromiseReactionCapability, rt: *JSRuntime) void {
+        switch (self.*) {
+            .external => |*external| {
+                destroyOptionalValue(rt, &external.resolve);
+                destroyOptionalValue(rt, &external.reject);
+            },
+            .intrinsic => |*intrinsic| {
+                destroyOwnedValue(rt, &intrinsic.target);
+                destroyOwnedValue(rt, &intrinsic.self_error_global);
+            },
+        }
+        self.* = .{ .external = .{} };
+    }
+};
+
+pub const PromiseReactionRecordPayload = struct {
+    on_fulfilled: ?JSValue = null, // gc-slot: heap; Object.setPromiseReactionOnFulfilled uses setOptionalValueSlot.
+    on_rejected: ?JSValue = null, // gc-slot: heap; Object.setPromiseReactionOnRejected uses setOptionalValueSlot.
+    capability: PromiseReactionCapability = .{ .external = .{} },
+
+    pub fn traceChildEdges(self: *PromiseReactionRecordPayload, visitor: anytype) !void {
+        try traceOptValue(visitor, &self.on_fulfilled);
+        try traceOptValue(visitor, &self.on_rejected);
+        try self.capability.traceChildEdges(visitor);
+    }
+};
+
 pub const OrdinaryPayload = struct {
     callsite_file: ?JSValue = null,
     callsite_function: ?JSValue = null,
     promise_reaction_on_fulfilled: ?JSValue = null,
     promise_reaction_on_rejected: ?JSValue = null,
-    promise_reaction_resolve: ?JSValue = null,
-    promise_reaction_reject: ?JSValue = null,
+    promise_reaction_capability: PromiseReactionCapability = .{ .external = .{} },
     promise_capability_resolve: ?JSValue = null,
     promise_capability_reject: ?JSValue = null,
     promise_combinator_resolve: ?JSValue = null,
@@ -266,8 +317,7 @@ pub const OrdinaryPayload = struct {
         destroyOptionalValue(rt, &self.callsite_function);
         destroyOptionalValue(rt, &self.promise_reaction_on_fulfilled);
         destroyOptionalValue(rt, &self.promise_reaction_on_rejected);
-        destroyOptionalValue(rt, &self.promise_reaction_resolve);
-        destroyOptionalValue(rt, &self.promise_reaction_reject);
+        self.promise_reaction_capability.destroy(rt);
         destroyOptionalValue(rt, &self.promise_capability_resolve);
         destroyOptionalValue(rt, &self.promise_capability_reject);
         destroyOptionalValue(rt, &self.promise_combinator_resolve);
@@ -284,8 +334,7 @@ pub const OrdinaryPayload = struct {
         try traceOptValue(visitor, &self.callsite_function);
         try traceOptValue(visitor, &self.promise_reaction_on_fulfilled);
         try traceOptValue(visitor, &self.promise_reaction_on_rejected);
-        try traceOptValue(visitor, &self.promise_reaction_resolve);
-        try traceOptValue(visitor, &self.promise_reaction_reject);
+        try self.promise_reaction_capability.traceChildEdges(visitor);
         try traceOptValue(visitor, &self.promise_capability_resolve);
         try traceOptValue(visitor, &self.promise_capability_reject);
         try traceOptValue(visitor, &self.promise_combinator_resolve);

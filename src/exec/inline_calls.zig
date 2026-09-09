@@ -32,6 +32,7 @@ pub const MachineTestMetrics = struct {
     machine_inits: usize = 0,
     entry_chunk_allocations: usize = 0,
     same_machine_sync_calls: usize = 0,
+    same_machine_async_calls: usize = 0,
     max_depth: usize = 0,
 };
 
@@ -190,6 +191,24 @@ pub inline fn resolveInlineFunctionFromObject(global: *core.Object, function_obj
     };
 }
 
+/// Same-Realm canonical async with a final-code proof. Reflection and function
+/// kind stay async; no normal-function leaf classification is reused.
+pub fn resolveNoSuspendAsync(ctx: *core.JSContext, global: *core.Object, func: core.JSValue) ?InlineTarget {
+    // The first prototype preserves the legacy multi-entry interrupt contract
+    // whenever a host callback can observe its cadence.
+    if (ctx.runtime.hasInterruptHandler()) return null;
+    const obj = object_ops.objectFromValue(func) orelse return null;
+    if (obj.class_id != core.class.ids.async_function) return null;
+    const data = obj.bytecodeFunctionStoragePtr();
+    const fb = data.function_bytecode orelse return null;
+    if (fb.functionKind() != .async) return null;
+    const ext = fb.hotExtensionCanonical() orelse return null;
+    if (ext.async_execution_policy != @intFromEnum(bytecode.function_bytecode.AsyncExecutionPolicy.no_suspend)) return null;
+    const realm = fb.realmContext() orelse return null;
+    if (realm.global != global) return null;
+    return .{ .var_refs = @ptrCast(data.var_refs), .callable = func, .fb = fb, .call_facts = fb.canonicalCallFacts(), .this_value = core.JSValue.undefinedValue() };
+}
+
 /// Direct-constructor same-Machine resolver. It admits ordinary functions and
 /// derived constructors, but not base classes: paired PMU measurements show
 /// that entering a base class through the resident generic frame costs more
@@ -297,6 +316,8 @@ pub const ReturnAction = enum(u8) {
     /// this bytecode frame. The result must not reach the suspended outer
     /// bytecode caller stack or resume its next opcode.
     native_boundary,
+    // Preserve the ordinary zero tag and the existing continuation encodings.
+    async_complete,
 };
 
 pub const ReturnContinuation = struct {
@@ -1283,6 +1304,7 @@ pub const LeanFrame = struct {
 };
 
 pub const Machine = struct {
+    async_completions: @import("async_completion.zig").Store = .{},
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1352,6 +1374,7 @@ pub const Machine = struct {
     /// JSContext its `ctx` field last pointed at).
     pub fn deinitStorage(self: *Machine, rt: *core.JSRuntime) void {
         std.debug.assert(self.depth == 0);
+        self.async_completions.deinit(rt);
         for (self.chunks[0..self.chunk_count]) |chunk| {
             rt.memory.destroy(@TypeOf(chunk.*), chunk);
         }
@@ -1367,6 +1390,7 @@ pub const Machine = struct {
     pub fn deinit(self: *Machine) void {
         while (self.depth > 0) {
             var continuation = self.popFrame();
+            if (continuation.action == .async_complete) self.async_completions.release(continuation.payload);
             continuation.deinit(self.ctx.runtime);
         }
         self.deinitStorage(self.ctx.runtime);
@@ -4454,11 +4478,39 @@ pub const Machine = struct {
             .for_of_next => continuation_payload,
             .to_boolean => 0,
             .native_boundary => 0,
-            .constructor => unreachable,
+            .constructor, .async_complete => unreachable,
         };
         std.debug.assert(return_action != .native_boundary or
             (!entry.isEmptyLeaf() and !entry.isExactArgsLeaf() and !entry.isForwardedLeaf()));
         return entry;
+    }
+
+    pub fn pushAsyncMovedCall(self: *Machine, target: *const InlineTarget, moved_values: []core.JSValue, layout: RegionLayout, id: u32) HostError!*Entry {
+        const entry = try self.pushFrame(.generic, false, true, self.global, target, ArgsSource.initMoved(moved_values, layout == .method));
+        entry.return_action = .async_complete;
+        entry.continuation_payload = id;
+        entry.teardown.special_return = true;
+        if (comptime builtin.is_test) TestMetricStorage.metrics.same_machine_async_calls += 1;
+        return entry;
+    }
+
+    pub fn completeAsync(self: *Machine, id: u32, rejected: bool) HostError!core.JSValue {
+        const boundary = self.async_completions.at(id);
+        defer self.async_completions.release(id);
+        try @import("promise_ops.zig").settleAsyncPromise(self.ctx, self.output, self.global, boundary.promise, boundary.value, rejected);
+        if (rejected) @import("promise_ops.zig").clearHandledRejectionException(self.ctx);
+        return boundary.promise;
+    }
+
+    /// The faulting frame has exhausted its own catch/finally handlers.
+    fn catchAsyncBoundary(self: *Machine, err: HostError) HostError!bool {
+        if (self.topEntry().return_action != .async_complete) return false;
+        const id = self.topEntry().continuation_payload;
+        self.async_completions.at(id).value = try exception_ops.promiseErrorValue(self.ctx, self.global, err);
+        _ = self.popFrame();
+        const promise = try self.completeAsync(id, true);
+        self.currentLevel().stack.pushOwnedAssumeCapacity(promise);
+        return true;
     }
 
     /// Try to push a simple bytecode iterator `next()` while borrowing the
@@ -5020,6 +5072,8 @@ pub const Machine = struct {
     /// return slot until their post-call action runs. Takes ownership of
     /// `result` either way and returns the selected action.
     pub fn popReturn(self: *Machine, result: core.JSValue) ReturnContinuation {
+        if (self.topEntry().return_action == .async_complete)
+            self.async_completions.at(self.topEntry().continuation_payload).value = result;
         if (self.topEntry().isNativeBoundaryReturn()) {
             self.popReturnedNativeBoundary(self.ctx.runtime);
             return .{ .action = .native_boundary, .payload = 0 };
@@ -5107,6 +5161,7 @@ pub const Machine = struct {
         std.debug.assert(depth <= self.depth);
         while (self.depth > depth) {
             var continuation = self.popFrame();
+            if (continuation.action == .async_complete) self.async_completions.release(continuation.payload);
             continuation.deinit(self.ctx.runtime);
         }
     }
@@ -5119,12 +5174,13 @@ pub const Machine = struct {
         self: *Machine,
         global: *core.Object,
         fence_depth: usize,
-        err: anyerror,
+        err: HostError,
     ) HostError!bool {
         std.debug.assert(fence_depth <= self.depth);
         errdefer self.discardToDepth(fence_depth);
         const ctx = self.ctx;
         while (self.depth > fence_depth) {
+            if (try self.catchAsyncBoundary(err)) return true;
             var continuation = self.popFrame();
             const iterator_next_depth: ?u8 = if (continuation.action == .for_of_next)
                 continuation.takeForOfDepth()
@@ -5152,9 +5208,10 @@ pub const Machine = struct {
     /// current level is then the handling frame. Returns false when the
     /// error must propagate out of the dispatch loop (all inline frames are
     /// then already torn down).
-    pub fn unwindForError(self: *Machine, global: *core.Object, err: anyerror) HostError!bool {
+    pub fn unwindForError(self: *Machine, global: *core.Object, err: HostError) HostError!bool {
         const ctx = self.ctx;
         while (self.depth > 0) {
+            if (try self.catchAsyncBoundary(err)) return true;
             var continuation = self.popFrame();
             const iterator_next_depth: ?u8 = if (continuation.action == .for_of_next)
                 continuation.takeForOfDepth()

@@ -1435,6 +1435,7 @@ fn retireSite(site: *PropSiteCache) CaptureOutcome {
     site.state = site_mega;
     site.guard_key = 0;
     site.proto_key = 0;
+    site.secondary_guard_key = 0;
     return .settled;
 }
 
@@ -1521,13 +1522,20 @@ pub noinline fn captureFieldSite(site: *PropSiteCache, object: *core.Object, ato
     if (!noteSiteMiss(site)) return .settled;
     var slow = false;
     if (object.findOwnDataSlotFast(atom_id, &slow)) |slot| {
-        site.slot = slotIndexOf(object, slot) orelse return retireSite(site);
+        const index = slotIndexOf(object, slot) orelse return retireSite(site);
+        // Keep the previous own layout, rather than charging alternating
+        // receivers another capture until a two-shape site retires forever.
+        // No pointer is retained; mutation and address reuse miss by identity.
+        site.secondary_guard_key = if (site.state == site_own) site.guard_key else 0;
+        site.secondary_slot = site.slot;
+        site.slot = index;
         site.class_id = object.class_id;
         site.proto_key = 0;
         site.guard_key = object.shape_ref.identity;
         site.state = site_own;
         return .settled;
     }
+    site.secondary_guard_key = 0;
     if (slow) return retireSite(site);
     if (!siteCacheableReceiverClass(object)) return retireSite(site);
     const holder = object.getPrototype() orelse return retireSite(site);
@@ -1587,6 +1595,7 @@ pub noinline fn captureFieldSite(site: *PropSiteCache, object: *core.Object, ato
 /// data-kind bits live in the shape flags, so the identity guard alone proves
 /// a later direct slot write is legal.
 pub noinline fn capturePutSite(site: *PropSiteCache, object: *core.Object, atom_id: core.Atom) void {
+    site.secondary_guard_key = 0;
     if (!noteSiteMiss(site)) return;
     // Same admission set as the resident `putFieldFastSlot` arm this cache
     // replaces (mapped `arguments` writes must reach the mapping).

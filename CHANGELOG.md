@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Promises:** built-in Promise objects and their state share one allocation; custom class payload ownership is preserved.
+
+- **GC:** initialized dense-array writes shade their exact new targets; buffer adoption and literal fills retain explicit storage/value barriers without rescanning the whole array on each append.
+
+- **Async functions:** fulfilled awaits queue their continuation and value directly, avoiding internal callback and reaction allocations while preserving PromiseResolve observations and asynchronous job ordering.
+
+- **Property caches:** field reads retain two own-property layouts without repeated recapture, using the existing cache storage.
+
+- **GC:** adopting a Shape during incremental marking traces its prototype and
+  property keys directly, avoiding repeated scans of the owning array.
+
+- **Promise reactions:** same-realm intrinsic `then` capabilities hold their
+  result Promise directly. Species observations, custom constructors, FIFO
+  ordering and allocation-failure recovery retain their existing behavior.
+
+- **Async functions:** functions proven unable to suspend can execute in the
+  caller's VM with an independently rooted result Promise. Suspension, eval,
+  wrappers and observable interrupt cadence retain the existing entry path.
+
+- **Async functions:** result settlement calls the shared Promise resolution
+  operation directly, avoiding temporary resolver functions and their unexposed
+  once-state allocation. Public resolver once guards, thenable jobs, error realms
+  and interrupt accounting are preserved.
+
+- **Promise reactions:** internal reaction records use a dedicated four-slot
+  payload, reducing allocation and tracing work while retaining job ordering
+  and resolving-function behavior.
+
+- **Async functions:** internal await handlers store their continuation directly
+  in the callback object, avoiding generic native-function metadata and payload
+  allocations. Thenable resolving functions retain their observable metadata.
+
 - **Property caches:** slots above index 65,535 use the ordinary property
   path, preventing truncated indices from reading or overwriting another
   property. Covers VM and host `PropertySite` reads, writes and native getters.

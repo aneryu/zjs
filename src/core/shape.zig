@@ -359,6 +359,7 @@ pub const Registry = struct {
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
     gc_registry: *gc.Registry,
+
     shape_hash_bits: u6 = initial_shape_hash_bits,
     // qjs only counts *hashed* shapes (quickjs.c:388 `shape_hash_count`); every
     // shape lives on the GC object list, never a separate registry array.
@@ -370,6 +371,48 @@ pub const Registry = struct {
     // No total-live-shape counter: qjs has none — it walks gc_obj_list when it
     // needs one. Diagnostics use `gc.liveCountKind(.shape)` (derived by walking),
     // keeping the shape link/unlink hot paths free of count maintenance.
+
+    /// A complete Shape adoption exposes the prototype and key atoms. Trace
+    /// those edges while the mutator still owns the Shape: an unshared Shape
+    /// may relocate or be freed before the next marking increment. Property
+    /// values retain their independent slot barriers in Object.
+    pub inline fn adoptionBarrier(self: *Registry, owner: *Object, target: *Shape) void {
+        if (self.gc_registry.barrierOwnerSkips(owner.gcHeader())) return;
+        if (!self.gc_registry.incremental.markingActive()) {
+            self.gc_registry.generationalBarrier(owner.gcHeader(), &target.header);
+            return;
+        }
+        self.shadeAdoptedShape(owner, target);
+    }
+
+    noinline fn shadeAdoptedShape(self: *Registry, owner: *Object, target: *Shape) void {
+        const registry = self.gc_registry;
+        if (registry.headerMarkedKnownNonBlock(&target.header)) return;
+        if (!owner.gcHeader().meta().alloc_info.heap_accounted or
+            !target.header.meta().alloc_info.heap_accounted) return;
+        // White owners need no rescan: their first trace sees the new Shape.
+        if (!registry.headerMarked(owner.gcHeader())) return;
+        const Visitor = struct {
+            shapes: *Registry,
+            owner_header: *gc.Header,
+
+            pub fn visitObject(vis: *@This(), slot: *?*Object) void {
+                if (slot.*) |prototype|
+                    vis.shapes.gc_registry.shadeForIncrementalMark(vis.owner_header, prototype.gcHeader());
+            }
+
+            pub fn visitAtom(vis: *@This(), key: atom.Atom) void {
+                vis.shapes.atoms.shadeAtomIfMarking(key);
+            }
+        };
+        registry.setHeaderMarked(&target.header);
+        var visitor = Visitor{ .shapes = self, .owner_header = owner.gcHeader() };
+        // This includes symbol-key bodies, not only the prototype. The
+        // visitors allocate no JS storage; frontier OOM invalidates the cycle
+        // through the existing barriers before a sweep can take place.
+        target.traceChildEdgesNoFail(self.runtime, &visitor);
+        registry.retireTracedYoung(&target.header);
+    }
 
     pub fn init(runtime: *JSRuntime, account: *memory.MemoryAccount, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
         return .{ .runtime = runtime, .memory = account, .atoms = atoms, .gc_registry = gc_registry };

@@ -96,6 +96,7 @@ fn isFunctionLikeClassId(class_id: core.ClassId) bool {
         core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function or
         class_id == core.class.ids.c_function_data or
+        core.class.isAsyncFunctionResumeClass(class_id) or
         class_id == core.class.ids.c_closure;
 }
 

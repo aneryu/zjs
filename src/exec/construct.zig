@@ -1027,6 +1027,7 @@ fn isCallableObject(value: core.JSValue) bool {
     const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
+        core.class.isAsyncFunctionResumeClass(object.class_id) or
         object.class_id == core.class.ids.c_closure or
         core.class.isBytecodeFunctionClass(object.class_id) or
         object.class_id == core.class.ids.bound_function;

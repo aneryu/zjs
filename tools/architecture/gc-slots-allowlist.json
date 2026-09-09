@@ -1011,22 +1011,6 @@
     },
     {
       "file": "src/core/object_payloads.zig",
-      "struct": "OrdinaryPayload",
-      "field": "promise_reaction_reject",
-      "type": "?JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/object_payloads.zig",
-      "struct": "OrdinaryPayload",
-      "field": "promise_reaction_resolve",
-      "type": "?JSValue",
-      "kind": "mutable",
-      "reason": "Stage 2 seed (inventory \u00a72); shrinking allowlist"
-    },
-    {
-      "file": "src/core/object_payloads.zig",
       "struct": "PromisePayload",
       "field": "reaction_arg",
       "type": "?JSValue",

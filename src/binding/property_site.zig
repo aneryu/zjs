@@ -12,7 +12,7 @@
 //!
 //! Arms, in the order the guard tests them (mirroring `op_get_field` and
 //! `op_prop_site_indirect_tail` in `src/exec/tailcall_dispatch.zig`):
-//!   - `.own`: identity match and `proto_key == 0` -> one indexed load;
+//!   - `.own`: primary or secondary own identity match -> one indexed load;
 //!   - `.proto`: identity match, receiver `class_id` re-check, holder
 //!     identity re-check -> one indexed load out of the prototype;
 //!   - `.native_getter`: the same two guards, then the accessor slot one
@@ -117,6 +117,9 @@ pub const PropertySite = struct {
                     return JSValue.loadSlotAsIntPair(&object.propertyEntry(site.slot).slot.data);
                 }
                 if (self.readIndirectArm(object, obj)) |value| return value;
+            }
+            if (object.shape_ref.identity == site.secondary_guard_key) {
+                return JSValue.loadSlotAsIntPair(&object.propertyEntry(site.secondary_slot).slot.data);
             }
         }
         return self.getSlow(obj);
@@ -294,4 +297,23 @@ test "PropertySite and VM field caches handle slots beyond u16" {
     defer getter_site.deinit();
     try std.testing.expectEqual(@as(?i32, 1), (try getter_site.get(inherited)).asInt32());
     try std.testing.expectEqual(vm_property_field.site_mega, getter_site.read.state);
+}
+
+test "PropertySite retains two own layouts without recapture" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try JSContext.create(rt);
+    defer ctx.destroy();
+    const a = try ctx.eval("({ field: 3, x: 1 })", .{});
+    const b = try ctx.eval("({ y: 2, field: 5 })", .{});
+    var site = try PropertySite.init(ctx, "field");
+    defer site.deinit();
+    for (0..32) |_| {
+        try std.testing.expectEqual(@as(?i32, 3), (try site.get(a)).asInt32());
+        try std.testing.expectEqual(@as(?i32, 5), (try site.get(b)).asInt32());
+    }
+    try std.testing.expectEqual(vm_property_field.site_own, site.read.state);
+    try std.testing.expectEqual(@as(u8, 1), site.read.misses);
+    try std.testing.expect(site.read.secondary_guard_key != 0);
+    try std.testing.expect(site.read.secondary_slot != site.read.slot);
 }

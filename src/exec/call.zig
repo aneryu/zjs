@@ -211,8 +211,11 @@ pub fn callValueWithThisGlobalsAndGlobal(
     if (try promiseResolvingFunctionCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCapabilityExecutorCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCombinatorElementCall(ctx, output, global, globals, object, args)) |value| return value;
-    if (object.class_id == core.class.ids.c_function_data) {
-        const tag = object.internalCallableTag();
+    if (object.class_id == core.class.ids.c_function_data or core.class.isAsyncFunctionResumeClass(object.class_id)) {
+        const tag = if (core.class.isAsyncFunctionResumeClass(object.class_id))
+            core.host_function.InternalCallableTag.async_function_resume
+        else
+            object.internalCallableTag();
         if (tag != .none) {
             const active_global = global orelse ctx.global orelse return error.TypeError;
             if (try call_runtime.callInternalCallableByTag(ctx, output, active_global, object, tag, args, null, null)) |value| return value;
@@ -448,6 +451,7 @@ pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
+        !core.class.isAsyncFunctionResumeClass(object.class_id) and
         !core.class.isBytecodeFunctionClass(object.class_id) and
         object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
@@ -1443,6 +1447,7 @@ pub fn isCallableObjectValue(value: core.JSValue) bool {
     const object = thisObject(value) orelse return false;
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
+        core.class.isAsyncFunctionResumeClass(object.class_id) or
         object.class_id == core.class.ids.c_closure or
         object.class_id == core.class.ids.bound_function or
         core.class.isBytecodeFunctionClass(object.class_id);
@@ -1873,6 +1878,8 @@ fn defaultObjectTag(object: *core.Object) []const u8 {
         core.class.ids.bytecode_function,
         core.class.ids.bound_function,
         core.class.ids.c_function_data,
+        core.class.ids.async_function_resolve,
+        core.class.ids.async_function_reject,
         core.class.ids.c_closure,
         => "[object Function]",
         core.class.ids.map => "[object Map]",
@@ -2531,6 +2538,7 @@ fn isFunctionClass(class_id: core.ClassId) bool {
         core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function or
         class_id == core.class.ids.c_function_data or
+        core.class.isAsyncFunctionResumeClass(class_id) or
         class_id == core.class.ids.c_closure;
 }
 
