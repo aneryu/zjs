@@ -151,11 +151,7 @@ pub fn constructorPrototypeFromGlobalAtom(rt: *core.JSRuntime, global: *core.Obj
 }
 
 pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    _ = rt;
-    if (global.getOwnDataObjectBorrowed(core.atom.ids.Function)) |constructor| {
-        if (constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
-    }
-    return null;
+    return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Function);
 }
 
 pub fn cachedRealmObject(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
@@ -1780,7 +1776,17 @@ pub fn objectGetPrototypeOfStep(
     return result_proto;
 }
 
-pub fn objectGetPrototypeOfValue(
+/// Leftover proxy [[GetPrototypeOf]] trap. candidate112 still
+/// compiles `objectGetPrototypeOfValue` (1001) as a second copy of
+/// `objectGetPrototypeOfStep` (835, extra 835, 7.4% match). The
+/// leftover is non-proxy thrower / proxy target+handler + get
+/// getPrototypeOf + missing-trap recurse + call(`[target]`) +
+/// isExtensible invariant. Comptime identity is `?*Object` vs
+/// JSValue. Take the JSValue wrap in this wrapper and reuse the
+/// already-outlined Step walk (knives 103/112). Does not turn
+/// Step into an inline wrapper (knives 94/108). Does not fold
+/// SetPrototypeOf / [[Set]] / [[Has]] / isExtensible.
+pub inline fn objectGetPrototypeOfValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1788,35 +1794,8 @@ pub fn objectGetPrototypeOfValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!object.isProxy()) {
-        if (isThrowTypeErrorIntrinsicObject(object)) {
-            if (object.getPrototype()) |prototype| return prototype.value();
-            if (functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global)) |prototype| return prototype.value();
-            return core.JSValue.nullValue();
-        }
-        if (object.getPrototype()) |prototype| return prototype.value();
-        return core.JSValue.nullValue();
-    }
-    if (object.proxyHandler() == null) return error.TypeError;
-    const target_value = object.proxyTarget() orelse return error.TypeError;
-    const target = objectFromValue(target_value) orelse return error.TypeError;
-    const handler_value = object.proxyHandler().?;
-    const trap_key = core.atom.ids.getPrototypeOf;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return objectGetPrototypeOfValue(ctx, output, global, target, caller_function, caller_frame);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    if (!result.isNull() and objectFromValue(result) == null) return error.TypeError;
-    if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
-        const target_proto = try objectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
-        const same = if (result.isNull())
-            target_proto == null
-        else if (objectFromValue(result)) |result_object|
-            target_proto != null and target_proto.? == result_object
-        else
-            false;
-        if (!same) return error.TypeError;
-    }
-    return result;
+    const proto = try objectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
+    return if (proto) |prototype| prototype.value() else core.JSValue.nullValue();
 }
 
 pub fn destructuringObjectRest(
@@ -3123,17 +3102,36 @@ pub const PendingPropertyDescriptor = struct {
     pub fn destroy(_: PendingPropertyDescriptor, _: *core.JSRuntime) void {}
 };
 
+/// Leftover Object.getOwnPropertyNames/Symbols own-keys array fill.
+/// candidate114 still compiles `objectOwnPropertyKeysCall` (1438) as a
+/// second copy of `objectEnumerableOwnPropertiesCall` (2672, extra 1438,
+/// 6.4% match). The leftover is ToObject + ownKeys + createArray + loop
+/// + define. Comptime identity is names/symbols (no enumerable/gopd;
+/// string vs symbol filter; bare TypeError) vs keys/values/entries
+/// (gopd + enumerable; message TypeError). Take unique admission in the
+/// names/symbols wrapper and reuse this already-outlined walk (knives
+/// 103/112/113/114). Does not turn this helper into an inline wrapper
+/// (knives 94/108). Does not fold `ownEntriesArray` / assign / integrity.
+pub const OwnPropertiesKind = enum { keys, values, entries, own_names, own_symbols };
+pub const NullishOwnError = enum { message, bare };
+
 pub fn objectEnumerableOwnPropertiesCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    mode: core.object.EntriesMode,
+    kind: OwnPropertiesKind,
+    nullish: NullishOwnError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
+    if (args[0].isNull() or args[0].isUndefined()) {
+        return switch (nullish) {
+            .message => @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object")),
+            .bare => error.TypeError,
+        };
+    }
 
     var object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
@@ -3151,15 +3149,28 @@ pub fn objectEnumerableOwnPropertiesCall(
     defer root_frame.deactivate(ctx.runtime);
 
     for (keys) |key| {
-        if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
-        if (desc.enumerable != true) continue;
-
-        element = switch (mode) {
-            .keys => try ctx.runtime.atoms.toStringValue(ctx.runtime, key),
-            .values => try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame),
-            .entries => try objectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
-        };
+        const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
+        switch (kind) {
+            .own_names => {
+                if (is_symbol) continue;
+                element = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
+            },
+            .own_symbols => {
+                if (!is_symbol) continue;
+                element = try ctx.runtime.symbolValue(key);
+            },
+            .keys, .values, .entries => {
+                if (is_symbol) continue;
+                const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
+                if (desc.enumerable != true) continue;
+                element = switch (kind) {
+                    .keys => try ctx.runtime.atoms.toStringValue(ctx.runtime, key),
+                    .values => try getValueProperty(ctx, output, global, object_value, key, caller_function, caller_frame),
+                    .entries => try objectEntryArrayValue(ctx, output, global, object_value, key, caller_function, caller_frame),
+                    .own_names, .own_symbols => unreachable,
+                };
+            },
+        }
         errdefer {
             element = core.JSValue.undefinedValue();
         }
@@ -3202,7 +3213,17 @@ pub fn objectProtoSetterCall(
     return core.JSValue.undefinedValue();
 }
 
-pub fn objectIsExtensibleCall(
+/// Leftover Object/Reflect.isExtensible trap walk. candidate113 still
+/// compiles `objectIsExtensibleCall` (847) as a third copy of
+/// `proxyAwareExtensibleOp` (960, extra 847, 4.5% match). The leftover
+/// is target+handler + get isExtensible + missing-trap recurse +
+/// call(`[target]`) + invariant. Comptime identity is the builtin
+/// JSValue/primitive admission. Take that in this wrapper and reuse
+/// the already-outlined ExtensibleOp walk (knives 103/112/113). Does
+/// not turn ExtensibleOp into an inline wrapper (knives 94/108). Does
+/// not retry leftover isExtensible/prevent merge (knife 111) or
+/// [[Set]] / [[Has]] / [[GetPrototypeOf]].
+pub inline fn objectIsExtensibleCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3212,18 +3233,7 @@ pub fn objectIsExtensibleCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return core.JSValue.boolean(false);
-    if (object.proxyTarget() == null) return core.JSValue.boolean(object.isExtensible());
-    const proxy_target_value = object.proxyTarget() orelse return core.JSValue.boolean(object.isExtensible());
-    const target = objectFromValue(proxy_target_value) orelse return error.TypeError;
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_key = core.atom.ids.isExtensible;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return core.JSValue.boolean(try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame));
-    if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{proxy_target_value}, caller_function, caller_frame);
-    const extensible = valueTruthy(result);
-    if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
-    return core.JSValue.boolean(extensible);
+    return core.JSValue.boolean(try proxyAwareIsExtensible(ctx, output, global, object, caller_function, caller_frame));
 }
 
 pub fn objectSetPrototypeOfCall(
@@ -3684,7 +3694,18 @@ pub fn sameObjectIdentity(a: core.JSValue, b: core.JSValue) bool {
     return a_header == b_header;
 }
 
-pub fn hasPropertyForWith(
+/// Leftover proxy [[Has]] trap. candidate111 still compiles
+/// `hasPropertyForWith` (860) as a second copy of `hasValueProperty`
+/// (795, extra 795, 5.3% match). The leftover is target+handler +
+/// get `has` + missing-trap recurse + trap key + call +
+/// `validateProxyHasResult`. Comptime identity is the incoming
+/// JSValue vs `*Object` receiver. Take expectObject in the with
+/// wrapper and reuse the already-outlined `hasValueProperty` walk
+/// (knife 103: add leftover copy to a helper that already has the
+/// walk). Does not turn `hasValueProperty` into an inline wrapper
+/// (knives 94/108). Does not fold [[Set]] / isExtensible /
+/// PreventExtensions / SetPrototypeOf / [[Get]] / [[Delete]].
+pub inline fn hasPropertyForWith(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3692,19 +3713,9 @@ pub fn hasPropertyForWith(
     atom_id: core.Atom,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
+) HostError!bool {
     const object = try property_ops.expectObject(object_value);
-    const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, false, caller_function, caller_frame);
-    const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const has_atom = core.atom.ids.has;
-    const trap = try getValueProperty(ctx, output, global, handler_value, has_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) {
-        return hasPropertyForWith(ctx, output, global, target_value, atom_id, caller_function, caller_frame);
-    }
-    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
-    return try validateProxyHasResult(ctx, output, global, target, atom_id, valueTruthy(result), caller_function, caller_frame);
+    return hasValueProperty(ctx, output, global, object_value, object, atom_id, caller_function, caller_frame);
 }
 
 pub fn hasValueProperty(
@@ -4398,7 +4409,57 @@ test "private brand creation does not allocate atom for non-extensible home obje
 
 // --- Combined from proxy_ops.zig ---
 
-pub fn proxySetTrapForErrorStackSetter(
+const ProxySetKind = enum { value, error_stack };
+
+/// Leftover proxy [[Set]] trap walk. candidate107 still compiles
+/// `proxySetTrapForErrorStackSetter` (1065) / `proxySetValueProperty`
+/// (1113, extra 1065, 10.2% match). The leftover is target+handler +
+/// get `set` + callable check + trap key + call + validateProxySetResult.
+/// Comptime identity is missing-target / missing-trap / falsy-trap
+/// policy. Take that at runtime. Public names stay `inline` and pass
+/// only the kind — no leftover setup at the wrapper (knives 94/98/108).
+/// Explicit `HostError` so `ordinarySetWithReceiver` can still call the
+/// value wrapper without an inferred-error-set cycle (knife 109).
+/// Does not fold PreventExtensions / IsExtensible.
+noinline fn proxySetWithTrap(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    kind: ProxySetKind,
+) HostError!bool {
+    const target_value = proxy.proxyTarget() orelse {
+        return if (kind == .error_stack) false else error.TypeError;
+    };
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const set_atom = core.atom.ids.set;
+    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) {
+        switch (kind) {
+            .error_stack => return false,
+            .value => {
+                const target = try property_ops.expectObject(target_value);
+                return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
+            },
+        }
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    if (!valueTruthy(result)) {
+        return if (kind == .error_stack) error.TypeError else false;
+    }
+    const target = try property_ops.expectObject(target_value);
+    try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
+    return true;
+}
+
+pub inline fn proxySetTrapForErrorStackSetter(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4408,20 +4469,8 @@ pub fn proxySetTrapForErrorStackSetter(
     value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
-    const target_value = receiver.proxyTarget() orelse return false;
-    const handler_value = receiver.proxyHandler() orelse return error.TypeError;
-    const set_atom = core.atom.ids.set;
-    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return false;
-    if (!isCallableValue(trap)) return error.TypeError;
-
-    const key_value = try proxyTrapKeyValue(ctx.runtime, stack_key);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
-    if (!valueTruthy(result)) return error.TypeError;
-    const target = try property_ops.expectObject(target_value);
-    try validateProxySetResult(ctx, output, global, target, stack_key, value, caller_function, caller_frame);
-    return true;
+) HostError!bool {
+    return proxySetWithTrap(ctx, output, global, receiver_value, receiver, stack_key, value, caller_function, caller_frame, .error_stack);
 }
 
 pub fn proxyCreateDataPropertyOrThrow(
@@ -4581,50 +4630,90 @@ pub fn proxyAwareExistsOwnProperty(
     return (try proxyAwareOwnPropertyDescriptor(ctx, output, global, source, key, caller_function, caller_frame)) != null;
 }
 
-pub fn proxyAwareIsExtensible(
+const ProxyExtensibleKind = enum { is_extensible, prevent };
+
+/// Leftover proxy isExtensible/preventExtensions trap walk. candidate110
+/// still compiles `proxyAwareIsExtensible` (779) /
+/// `proxyAwarePreventExtensions` (756, extra 756, 14.9% match). The
+/// leftover is target+handler + get trap + callable check +
+/// call(`[target]`). Comptime identity is missing-proxy /
+/// missing-trap recurse / result check. Take that at runtime.
+/// Public names stay `inline` and pass only the kind. Explicit
+/// `HostError` so Prevent's IsExtensible check and missing-trap
+/// recurse do not form an inferred-error-set cycle (knives 109/110).
+/// Does not fold SetPrototypeOf. Does not retry leftover [[Set]] trap
+/// (knife 110).
+noinline fn proxyAwareExtensibleOp(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     object: *core.Object,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
-    if (object.proxyTarget() == null) return object.isExtensible();
+    kind: ProxyExtensibleKind,
+) HostError!bool {
+    switch (kind) {
+        .is_extensible => {
+            if (object.proxyTarget() == null) return object.isExtensible();
+        },
+        .prevent => {
+            if (object.proxyTarget() == null) {
+                object.preventExtensions();
+                return true;
+            }
+        },
+    }
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = core.atom.ids.isExtensible;
+    const trap_atom = switch (kind) {
+        .is_extensible => core.atom.ids.isExtensible,
+        .prevent => core.atom.ids.preventExtensions,
+    };
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    if (trap.isUndefined() or trap.isNull()) {
+        return proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, kind);
+    }
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    const extensible = valueTruthy(result);
-    if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
-    return extensible;
+    switch (kind) {
+        .is_extensible => {
+            const extensible = valueTruthy(result);
+            if (extensible != try proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, .is_extensible)) {
+                return error.TypeError;
+            }
+            return extensible;
+        },
+        .prevent => {
+            if (!valueTruthy(result)) return false;
+            if (try proxyAwareExtensibleOp(ctx, output, global, target, caller_function, caller_frame, .is_extensible)) {
+                return error.TypeError;
+            }
+            return true;
+        },
+    }
 }
 
-pub fn proxyAwarePreventExtensions(
+pub inline fn proxyAwareIsExtensible(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     object: *core.Object,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !bool {
-    const target_value = object.proxyTarget() orelse {
-        object.preventExtensions();
-        return true;
-    };
-    const target = try property_ops.expectObject(target_value);
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_atom = core.atom.ids.preventExtensions;
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) return proxyAwarePreventExtensions(ctx, output, global, target, caller_function, caller_frame);
-    if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
-    if (!valueTruthy(result)) return false;
-    if (try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
-    return true;
+) HostError!bool {
+    return proxyAwareExtensibleOp(ctx, output, global, object, caller_function, caller_frame, .is_extensible);
+}
+
+pub inline fn proxyAwarePreventExtensions(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!bool {
+    return proxyAwareExtensibleOp(ctx, output, global, object, caller_function, caller_frame, .prevent);
 }
 
 pub fn proxyAwareSetPrototypeOf(
@@ -4865,7 +4954,7 @@ pub fn firstProxyInPrototypeSetPath(rt: *core.JSRuntime, object: *core.Object, a
     return null;
 }
 
-pub fn proxySetValueProperty(
+pub inline fn proxySetValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4876,21 +4965,7 @@ pub fn proxySetValueProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!bool {
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const set_atom = core.atom.ids.set;
-    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
-    if (trap.isUndefined() or trap.isNull()) {
-        const target = try property_ops.expectObject(target_value);
-        return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
-    }
-    if (!isCallableValue(trap)) return error.TypeError;
-    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
-    if (!valueTruthy(result)) return false;
-    const target = try property_ops.expectObject(target_value);
-    try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
-    return true;
+    return proxySetWithTrap(ctx, output, global, receiver_value, proxy, atom_id, value, caller_function, caller_frame, .value);
 }
 
 pub fn validateProxySetResult(

@@ -65,6 +65,10 @@ if [[ ! "$CPU" =~ ^[0-9]+([,-][0-9]+)*$ ]]; then
     echo "fixed-work smoke: invalid taskset CPU list: $CPU" >&2
     exit 2
 fi
+if [[ -n "${ZJS_GATE_PARALLEL_CPUS:-}" && ! "$ZJS_GATE_PARALLEL_CPUS" =~ ^[0-9]+([,-][0-9]+)*$ ]]; then
+    echo "fixed-work smoke: ZJS_GATE_PARALLEL_CPUS must be a taskset CPU list" >&2
+    exit 2
+fi
 if [[ ! "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
     echo "fixed-work smoke: RUNS must be a positive integer: $RUNS" >&2
     exit 2
@@ -85,9 +89,13 @@ fi
 # like a stats regression when the real problem was the wrong variant under
 # test. The rc collector is gone, but the probe stays -- it is one `--gc-stats`
 # run, and it also catches "you passed a stale or non-zjs binary as $1".
+# Parallel mode pins the probe to the same list as the runs: the build graph
+# passes a placeholder positional CPU there, and on a host without that CPU
+# the pinned probe would fail and read as "wrong binary".
+probe_cpu="${ZJS_GATE_PARALLEL_CPUS:-$CPU}"
 variant_probe=$(mktemp --suffix=.js)
 echo "0;" > "$variant_probe"
-variant_out=$(taskset -c "$CPU" "$BIN" --gc-gate-settle --gc-stats "$variant_probe" 2>/dev/null || true)
+variant_out=$(taskset -c "$probe_cpu" "$BIN" --gc-gate-settle --gc-stats "$variant_probe" 2>/dev/null || true)
 rm -f "$variant_probe"
 if ! grep -q "^gc: endpoint doomed_pending" <<< "$variant_out" ||
    ! grep -q "^gc: settled doomed_pending" <<< "$variant_out"; then
@@ -148,11 +156,8 @@ if [[ -n "${ZJS_GATE_PARALLEL_CPUS:-}" ]]; then
     # shared-cache contention cannot fake a pass, and every per-benchmark
     # artifact is still written and checked. Serial remains the default; the
     # 2026-08-30 batch-gate accounting found the serial sweep dominating the
-    # whole gate (~8 of ~12 minutes).
-    if [[ ! "$ZJS_GATE_PARALLEL_CPUS" =~ ^[0-9]+([,-][0-9]+)*$ ]]; then
-        echo "fixed-work smoke: ZJS_GATE_PARALLEL_CPUS must be a taskset CPU list" >&2
-        exit 2
-    fi
+    # whole gate (~8 of ~12 minutes). The list was validated above, before
+    # the stats probe.
     pids=()
     for js in "${scripts[@]}"; do
         name=$(basename "$js" .js)

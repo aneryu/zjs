@@ -441,25 +441,19 @@ pub const Registry = struct {
         self.gc_registry.addInitializedShape(&shape_ref.header, shape_ref.accountedAllocationSize());
     }
 
-    pub fn createObjectRoot(self: *Registry, proto: ?*Object) !*Shape {
-        // qjs find_hashed_shape_proto (quickjs.c:5514-5527) rejects bucket
-        // co-residents on the already-loaded `hash` field before touching
-        // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
-        // sh1->prop_count == 0`. Mirror that check order.
-        const expected_hash = initialHash(proto);
-        var current = self.firstShapeWithHash(expected_hash);
-        while (current) |found| : (current = found.registry_hash_next) {
-            if (found.hash != expected_hash) continue;
-            if (found.proto != proto or found.prop_count != 0) continue;
-            found.markShared();
-            return found;
-        }
-        return self.createShape(proto);
+    pub inline fn createObjectRoot(self: *Registry, proto: ?*Object) !*Shape {
+        return createObjectRootMaybeReserved(self, proto, false);
     }
 
     /// Reserve/initialize a root shape without publishing it onto the GC list.
     /// Object constructors collect, then `publish`, then register the object.
-    pub fn createObjectRootReserved(self: *Registry, proto: ?*Object) !*Shape {
+    pub inline fn createObjectRootReserved(self: *Registry, proto: ?*Object) !*Shape {
+        return createObjectRootMaybeReserved(self, proto, true);
+    }
+
+    /// Leftover hashed proto-root lookup. Comptime identity is only whether a
+    /// miss calls `createShape` or `createShapeReserved`; take that at runtime.
+    noinline fn createObjectRootMaybeReserved(self: *Registry, proto: ?*Object, reserved: bool) !*Shape {
         // qjs find_hashed_shape_proto (quickjs.c:5514-5527) rejects bucket
         // co-residents on the already-loaded `hash` field before touching
         // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
@@ -472,7 +466,8 @@ pub const Registry = struct {
             found.markShared();
             return found;
         }
-        return self.createShapeReserved(proto);
+        if (reserved) return self.createShapeReserved(proto);
+        return self.createShape(proto);
     }
 
     pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {

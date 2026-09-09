@@ -49,24 +49,9 @@ pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !co
     {
         return binaryNumber(rt, op, a, b);
     }
-    const lhs = try toInt32(rt, a);
-    const rhs = try toInt32(rt, b);
-    const out = switch (op) {
-        bytecode.opcode.op.mul => lhs * rhs,
-        bytecode.opcode.op.div => @divTrunc(lhs, rhs),
-        bytecode.opcode.op.mod => @rem(lhs, rhs),
-        bytecode.opcode.op.add => lhs + rhs,
-        bytecode.opcode.op.sub => lhs - rhs,
-        bytecode.opcode.op.shl => lhs << @intCast(rhs & 31),
-        bytecode.opcode.op.sar => lhs >> @intCast(rhs & 31),
-        bytecode.opcode.op.shr => @as(i32, @bitCast(@as(u32, @bitCast(lhs)) >> @intCast(rhs & 31))),
-        bytecode.opcode.op.@"and" => lhs & rhs,
-        bytecode.opcode.op.xor => lhs ^ rhs,
-        bytecode.opcode.op.@"or" => lhs | rhs,
-        bytecode.opcode.op.pow => powI32(lhs, rhs),
-        else => unreachable,
-    };
-    return core.JSValue.int32(out);
+    // Leftover integer toInt32+switch after the bitwise and number/arith
+    // arms was unreachable: every production binop is handled above.
+    unreachable;
 }
 
 pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
@@ -473,7 +458,10 @@ pub fn numberToValue(value: f64) core.JSValue {
     return core.JSValue.float64(value);
 }
 
-pub fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
+/// Leftover empty + ascii/utf8 string mint. candidate90 still compiled two
+/// leftover local copies (`string_builtin_ops` 173, `regexp_ops` 271) plus
+/// many inlined sites of this same walk. Take the mint once as `noinline`.
+pub noinline fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     if (bytes.len == 0) {
         const cached = try rt.emptyString();
         return cached.value();
@@ -491,6 +479,26 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
         return cached.value();
     }
     return (try core.string.String.createAscii(rt, bytes)).value();
+}
+
+test "createStringValue leftover noinline shares empty and ascii mint" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const empty = try createStringValue(rt, "");
+    const cached = try rt.emptyString();
+    try std.testing.expect(empty.asStringBodyRaw().? == cached);
+
+    const again = try createStringValue(rt, "");
+    try std.testing.expect(again.asStringBodyRaw().? == cached);
+
+    const ascii = try createStringValue(rt, "abc");
+    try std.testing.expect(ascii.asStringBody().?.eqlBytes("abc"));
+
+    const utf8_bytes = "\xc3\xa9";
+    const utf8 = try createStringValue(rt, utf8_bytes);
+    const expected_utf8 = try core.string.String.createUtf8(rt, utf8_bytes);
+    try std.testing.expect(utf8.asStringBody().?.eqlString(expected_utf8));
 }
 
 pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {
@@ -1181,14 +1189,6 @@ fn compareStringValues(a: core.JSValue, b: core.JSValue, eq_only: bool) ?i32 {
 fn jsMathPow(lhs: f64, rhs: f64) f64 {
     if (!std.math.isFinite(rhs) and @abs(lhs) == 1) return std.math.nan(f64);
     return std.math.pow(f64, lhs, rhs);
-}
-
-fn powI32(lhs: i32, rhs: i32) i32 {
-    if (rhs < 0) return 0;
-    var out: i32 = 1;
-    var i: i32 = 0;
-    while (i < rhs) : (i += 1) out *= lhs;
-    return out;
 }
 
 // Strict equality over runtime values (moved from the VM call runtime).

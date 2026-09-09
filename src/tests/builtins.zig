@@ -3587,6 +3587,50 @@ test "Well-known symbol method aliases share lazy native identity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "functionPrototypeFromGlobal alias preserves Function.prototype identity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Object.getPrototypeOf(function () {}), Function.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(Function), Function.prototype);
+        \\assert.sameValue(globalThis.Function.prototype, Function.prototype);
+        \\function C() {}
+        \\assert.sameValue(Object.getPrototypeOf(C), Function.prototype);
+        \\assert.sameValue(new C() instanceof Function, false);
+        \\assert.sameValue(C instanceof Function, true);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Date/Function prototype auto-init install preserves toPrimitive and hasInstance descriptors" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var dateDesc = Object.getOwnPropertyDescriptor(Date.prototype, Symbol.toPrimitive);
+        \\assert.sameValue(typeof dateDesc.value, "function");
+        \\assert.sameValue(dateDesc.value.length, 1);
+        \\assert.sameValue(dateDesc.writable, false);
+        \\assert.sameValue(dateDesc.enumerable, false);
+        \\assert.sameValue(dateDesc.configurable, true);
+        \\assert.sameValue((new Date(0))[Symbol.toPrimitive]("number"), 0);
+        \\
+        \\var hasInstanceDesc = Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance);
+        \\assert.sameValue(typeof hasInstanceDesc.value, "function");
+        \\assert.sameValue(hasInstanceDesc.value.length, 1);
+        \\assert.sameValue(hasInstanceDesc.writable, false);
+        \\assert.sameValue(hasInstanceDesc.enumerable, false);
+        \\assert.sameValue(hasInstanceDesc.configurable, false);
+        \\function C() {}
+        \\assert.sameValue(new C() instanceof C, true);
+        \\assert.sameValue(1 instanceof C, false);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Lazy standard native accessors preserve descriptors and receiver markers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5169,6 +5213,26 @@ test "Uint8Array.fromHex/fromBase64 use realm intrinsic prototypes after global 
     try std.testing.expect(result.isUndefined());
 }
 
+test "Uint8Array fromBase64/toBase64 named options preserve alphabet and lastChunkHandling" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var def = Uint8Array.fromBase64("YQ==");
+        \\assert.sameValue(def.length, 1);
+        \\assert.sameValue(def[0], 0x61);
+        \\var url = Uint8Array.fromBase64("YQ", {alphabet: "base64url", lastChunkHandling: "loose"});
+        \\assert.sameValue(url[0], 0x61);
+        \\assert.sameValue(new Uint8Array([0x61]).toBase64({alphabet: "base64url", omitPadding: true}), "YQ");
+        \\assert.sameValue(new Uint8Array([0x61]).toBase64({alphabet: "base64"}), "YQ==");
+        \\assert.throws(TypeError, function() { Uint8Array.fromBase64("YQ==", {alphabet: "nope"}); });
+        \\assert.throws(TypeError, function() { Uint8Array.fromBase64("YQ==", {lastChunkHandling: "nope"}); });
+        \\assert.sameValue(Uint8Array.fromBase64("YQ==", {})[0], 0x61);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "native Error Reflect.construct fallback uses the realm intrinsic after global mutation" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -5856,6 +5920,62 @@ test "URI four byte decode range preserves globals and completion" {
         \\  }
         \\}
         \\`), 3);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "URI decodeUriUnits walks latin1 and utf16 widths" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // ASCII-only "%XX" uses decodeStringDataFast. A leading non-ASCII
+    // unit forces decodeUriUnits for both latin1 and utf16 storage.
+    const result = try js.eval(
+        \\assert.sameValue(decodeURI(String.fromCharCode(0xA0) + "%41"), String.fromCharCode(0xA0, 0x41));
+        \\assert.sameValue(decodeURI(String.fromCharCode(0x100) + "%41"), String.fromCharCode(0x100, 0x41));
+        \\assert.sameValue(decodeURI(String.fromCharCode(0xA0) + "%23"), String.fromCharCode(0xA0) + "%23");
+        \\assert.sameValue(decodeURIComponent(String.fromCharCode(0xA0) + "%23"), String.fromCharCode(0xA0, 0x23));
+        \\assert.sameValue(decodeURI(String.fromCharCode(0x100) + "%23"), String.fromCharCode(0x100) + "%23");
+        \\assert.sameValue(decodeURIComponent(String.fromCharCode(0x100) + "%23"), String.fromCharCode(0x100, 0x23));
+        \\assert.sameValue(
+        \\  decodeURI(String.fromCharCode(0xA0) + "%F0%A0%80%80"),
+        \\  String.fromCharCode(0xA0, 0xD840, 0xDC00)
+        \\);
+        \\var latin1Bad = false;
+        \\try { decodeURI(String.fromCharCode(0xA0) + "%ZZ"); } catch (e) { latin1Bad = e instanceof URIError; }
+        \\assert.sameValue(latin1Bad, true);
+        \\var utf16Bad = false;
+        \\try { decodeURI(String.fromCharCode(0x100) + "%ZZ"); } catch (e) { utf16Bad = e instanceof URIError; }
+        \\assert.sameValue(utf16Bad, true);
+    );
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "ArrayBuffer construct args share maxByteLength walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var ab = new ArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(ab.byteLength, 8);
+        \\assert.sameValue(ab.maxByteLength, 16);
+        \\assert.sameValue(ab.resizable, true);
+        \\assert.sameValue(ab instanceof ArrayBuffer, true);
+        \\var sab = new SharedArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(sab.byteLength, 8);
+        \\assert.sameValue(sab.maxByteLength, 16);
+        \\assert.sameValue(sab.growable, true);
+        \\assert.sameValue(sab instanceof SharedArrayBuffer, true);
+        \\assert.sameValue(sab instanceof ArrayBuffer, false);
+        \\assert.sameValue(new ArrayBuffer(4).resizable, false);
+        \\var abRange = false;
+        \\try { new ArrayBuffer(8, { maxByteLength: 4 }); } catch (e) { abRange = e instanceof RangeError; }
+        \\assert.sameValue(abRange, true);
+        \\var sabRange = false;
+        \\try { new SharedArrayBuffer(8, { maxByteLength: 4 }); } catch (e) { sabRange = e instanceof RangeError; }
+        \\assert.sameValue(sabRange, true);
     );
 
     try std.testing.expect(result.isUndefined());

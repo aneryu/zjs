@@ -14,6 +14,7 @@
 const std = @import("std");
 
 const gc = @import("gc.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const carrier = @import("gc_carrier.zig");
 const gc_space = @import("gc_space.zig");
 const memory = @import("memory.zig");
@@ -248,10 +249,19 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
                 // which adoption path forgot its barrier.
                 // The cell may be unmapped memory by now: name it, do not
                 // read it.
-                std.debug.print(
-                    "gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n",
-                    .{ owner.class_id, owner.flags.fast_array, owner.arrayArm().*.capacity, header.metaConst().flags.young, @intFromPtr(cell_header) },
-                );
+                gc_audit_print.print(&.{
+                    .{ .text = "gc: PROPERTY STORAGE AUDIT: array owner class=" },
+                    .{ .dec = owner.class_id },
+                    .{ .text = " fast_array=" },
+                    .{ .text = gc_audit_print.boolText(owner.flags.fast_array) },
+                    .{ .text = " capacity=" },
+                    .{ .dec = owner.arrayArm().*.capacity },
+                    .{ .text = " young=" },
+                    .{ .text = gc_audit_print.boolText(header.metaConst().flags.young) },
+                    .{ .text = " cell=0x" },
+                    .{ .hex = @intFromPtr(cell_header) },
+                    .{ .text = "\n" },
+                });
                 return error.DanglingArrayStorageCell;
             }
             if (cell_header.metaConst().flags.kind != .array_storage)
@@ -494,19 +504,28 @@ fn verifyPublishedHeaderRepresentation(
     const meta = header.metaConst();
     const kind = expected_kind orelse meta.flags.kind;
     verifyMetadataSemantics(meta, kind, .registry_published) catch |err| {
-        std.debug.print(
-            "gc: REPRESENTATION HEADER population={s} header=0x{x} kind={s} size_class={d} alloc_info=0x{x:0>2} flags=0x{x:0>2} lifetime=0x{x:0>8} error={s}\n",
-            .{
-                if (expected_kind == null) "live" else "doomed",
-                @intFromPtr(header),
-                @tagName(kind),
-                meta.size_class,
-                @as(u8, @bitCast(meta.alloc_info)),
-                @as(u8, @bitCast(meta.flags)),
-                @as(u32, @bitCast(meta.lifetime)),
-                @errorName(err),
-            },
-        );
+        var alloc_info_buf: [16]u8 = undefined;
+        var flags_buf: [16]u8 = undefined;
+        var lifetime_buf: [16]u8 = undefined;
+        gc_audit_print.print(&.{
+            .{ .text = "gc: REPRESENTATION HEADER population=" },
+            .{ .text = if (expected_kind == null) "live" else "doomed" },
+            .{ .text = " header=0x" },
+            .{ .hex = @intFromPtr(header) },
+            .{ .text = " kind=" },
+            .{ .text = @tagName(kind) },
+            .{ .text = " size_class=" },
+            .{ .dec = meta.size_class },
+            .{ .text = " alloc_info=0x" },
+            .{ .text = gc_audit_print.hexPad(@as(u8, @bitCast(meta.alloc_info)), 2, &alloc_info_buf) },
+            .{ .text = " flags=0x" },
+            .{ .text = gc_audit_print.hexPad(@as(u8, @bitCast(meta.flags)), 2, &flags_buf) },
+            .{ .text = " lifetime=0x" },
+            .{ .text = gc_audit_print.hexPad(@as(u32, @bitCast(meta.lifetime)), 8, &lifetime_buf) },
+            .{ .text = " error=" },
+            .{ .text = @errorName(err) },
+            .{ .text = "\n" },
+        });
         return err;
     };
 

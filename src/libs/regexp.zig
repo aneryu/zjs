@@ -1,6 +1,8 @@
 //! ECMAScript regular-expression compiler and QuickJS `libregexp.c`-style backtracking bytecode executor.
 //! Patterns and inputs are borrowed; `Compiled` owns bytecode, and scratch storage owns only inline-buffer overflow.
 const std = @import("std");
+const array_list_erased = @import("../core/array_list_erased.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const unicode = @import("unicode.zig");
 const regexp_properties = @import("unicode/regexp_properties.zig");
 
@@ -83,6 +85,16 @@ const CaptureSlotBuffer = struct {
     heap_slots: []usize = &.{},
     slots: []usize = &.{},
 
+    /// `CaptureSlotBuffer{}` memcpy's a 544-byte `.rodata` template: 64 zero
+    /// slots plus two empty `[]usize` whose pointer is `@alignOf(usize)`.
+    /// Zero in place and store `&.{}` so that template can leave.
+    fn initDefault(self: *CaptureSlotBuffer) void {
+        self.* = std.mem.zeroes(CaptureSlotBuffer);
+        const empty: []usize = &.{};
+        self.heap_slots = empty;
+        self.slots = empty;
+    }
+
     fn init(self: *CaptureSlotBuffer, allocator: std.mem.Allocator, count: usize) !void {
         if (count <= self.inline_slots.len) {
             self.slots = self.inline_slots[0..count];
@@ -94,7 +106,7 @@ const CaptureSlotBuffer = struct {
 
     fn deinit(self: *CaptureSlotBuffer, allocator: std.mem.Allocator) void {
         if (self.heap_slots.len != 0) allocator.free(self.heap_slots);
-        self.* = .{};
+        self.initDefault();
     }
 };
 
@@ -461,7 +473,8 @@ pub fn execIntoMatchWithOptions(
     out_match: *Match,
 ) !ExecResult {
     const header = try parseHeader(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
+    var capture_buf: CaptureSlotBuffer = undefined;
+    capture_buf.initDefault();
     try capture_buf.init(allocator, try checkedAllocCount(header));
     defer capture_buf.deinit(allocator);
 
@@ -483,7 +496,8 @@ pub fn execIntoMatchTrustedWithOptions(
     out_match: *Match,
 ) !ExecResult {
     const header = parseHeaderTrusted(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
+    var capture_buf: CaptureSlotBuffer = undefined;
+    capture_buf.initDefault();
     try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
     defer capture_buf.deinit(allocator);
 
@@ -578,7 +592,8 @@ fn execCaptureSlotsParsed(
 /// See `execIntoMatchTrustedWithOptions` for the safety contract.
 pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
     const header = parseHeaderTrusted(bytecode);
-    var capture_buf = CaptureSlotBuffer{};
+    var capture_buf: CaptureSlotBuffer = undefined;
+    capture_buf.initDefault();
     try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
     defer capture_buf.deinit(allocator);
     return (try execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
@@ -1784,7 +1799,7 @@ const REStringList = struct {
             self.ranges.allocator.free(s);
             return;
         }
-        try self.strings.append(self.ranges.allocator, s);
+        try array_list_erased.append(&self.strings, self.ranges.allocator, s);
     }
 
     fn unionWith(self: *REStringList, other: *const REStringList) !void {
@@ -1793,7 +1808,7 @@ const REStringList = struct {
             if (self.containsString(s)) continue;
             const copy = try self.ranges.allocator.dupe(u21, s);
             errdefer self.ranges.allocator.free(copy);
-            try self.strings.append(self.ranges.allocator, copy);
+            try array_list_erased.append(&self.strings, self.ranges.allocator, copy);
         }
     }
 
@@ -2825,7 +2840,7 @@ const REParseState = struct {
         // uses its ordinary rqsort with only a length comparator
         // (libregexp.c:1308). Avoid a large stable block-sort instance here.
         const items = set.strings.items;
-        std.sort.heap([]u21, items, {}, struct {
+        sort_erased.heap([]u21, items, {}, struct {
             fn longerFirst(_: void, lhs: []u21, rhs: []u21) bool {
                 return lhs.len > rhs.len;
             }
@@ -3332,7 +3347,7 @@ const REParseState = struct {
             ctx.s.allocator.free(copy);
             return;
         }
-        try ctx.set.strings.append(ctx.s.allocator, copy);
+        try array_list_erased.append(&ctx.set.strings, ctx.s.allocator, copy);
     }
 
     fn parseUnicodePropertyEscapeWithOrdering(self: *REParseState, inverted: bool) CompileError!CharRange {

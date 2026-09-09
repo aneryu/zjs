@@ -952,12 +952,18 @@ fn unresolvedModuleAutoInit(
     return error.InvalidBuiltinRegistry;
 }
 
-fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
-    const next = try account.alloc(T, slice.*.len + 1);
-    errdefer account.free(T, next);
-    @memcpy(next[0..slice.*.len], slice.*);
-    next[slice.*.len] = item;
+inline fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
     const old = slice.*;
+    const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
+    const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);
+    const new_buf = try account.reallocElements(
+        old_ptr,
+        old.len,
+        new_count,
+        @sizeOf(T),
+        comptime std.mem.Alignment.of(T),
+    );
+    const next: []T = @as([*]T, @ptrCast(@alignCast(new_buf.ptr)))[0..new_count];
+    next[old.len] = item;
     slice.* = next;
-    if (old.len != 0) account.free(T, old);
 }

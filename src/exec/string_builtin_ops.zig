@@ -22,6 +22,7 @@ const native_legacy = @import("native_legacy.zig");
 // Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
 // exec-only in `exec/string_ops.zig`.
 const string_ops = @import("string_ops.zig");
+const value_ops = @import("value_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 
@@ -874,7 +875,7 @@ pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVa
     defer units.deinit(rt.memory.allocator);
     for (args) |value| {
         if (value.isSymbol()) return error.TypeError;
-        const number = try toIntegerOrInfinity(rt, value);
+        const number = try value_ops.toIntegerOrInfinity(rt, value);
         if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
             return error.RangeError;
         }
@@ -1380,34 +1381,55 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
 }
 
-fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.append(rt.memory.allocator, '<');
-    try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, '>');
-    try out.appendSlice(rt.memory.allocator, bytes);
-    try out.appendSlice(rt.memory.allocator, "</");
-    try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, '>');
-    return createStringValue(rt, out.items);
+inline fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue {
+    return htmlTagged(rt, bytes, tag, null, &.{});
 }
 
-fn htmlWithAttribute(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8, attr: []const u8, args: []const core.JSValue) !core.JSValue {
-    if (args.len > 1) return error.TypeError;
+inline fn htmlWithAttribute(
+    rt: *core.JSRuntime,
+    bytes: []const u8,
+    tag: []const u8,
+    attr: []const u8,
+    args: []const core.JSValue,
+) !core.JSValue {
+    return htmlTagged(rt, bytes, tag, attr, args);
+}
+
+/// Leftover Annex B HTML document wrap. The two copies were 1898 / 3761 B
+/// leftover walks of the same `<tag>…</tag>` skeleton; comptime identity is
+/// only whether an optional `attr="…"` is inserted. Take that at runtime.
+/// Does not fold wrap through the attribute helper (that would inject
+/// `attr="undefined"`).
+noinline fn htmlTagged(
+    rt: *core.JSRuntime,
+    bytes: []const u8,
+    tag: []const u8,
+    attr: ?[]const u8,
+    args: []const core.JSValue,
+) !core.JSValue {
     var attr_bytes = std.ArrayList(u8).empty;
     defer attr_bytes.deinit(rt.memory.allocator);
-    if (args.len >= 1) try appendValueString(rt, &attr_bytes, args[0]) else try attr_bytes.appendSlice(rt.memory.allocator, "undefined");
+    if (attr != null) {
+        if (args.len > 1) return error.TypeError;
+        if (args.len >= 1)
+            try appendValueString(rt, &attr_bytes, args[0])
+        else
+            try attr_bytes.appendSlice(rt.memory.allocator, "undefined");
+    }
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     try out.append(rt.memory.allocator, '<');
     try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, ' ');
-    try out.appendSlice(rt.memory.allocator, attr);
-    try out.appendSlice(rt.memory.allocator, "=\"");
-    try appendEscapedHtmlAttribute(rt, &out, attr_bytes.items);
-    try out.appendSlice(rt.memory.allocator, "\">");
+    if (attr) |attr_name| {
+        try out.append(rt.memory.allocator, ' ');
+        try out.appendSlice(rt.memory.allocator, attr_name);
+        try out.appendSlice(rt.memory.allocator, "=\"");
+        try appendEscapedHtmlAttribute(rt, &out, attr_bytes.items);
+        try out.appendSlice(rt.memory.allocator, "\">");
+    } else {
+        try out.append(rt.memory.allocator, '>');
+    }
     try out.appendSlice(rt.memory.allocator, bytes);
     try out.appendSlice(rt.memory.allocator, "</");
     try out.appendSlice(rt.memory.allocator, tag);
@@ -1423,6 +1445,34 @@ fn appendEscapedHtmlAttribute(rt: *core.JSRuntime, out: *std.ArrayList(u8), byte
             try out.append(rt.memory.allocator, byte);
         }
     }
+}
+
+test "html wrap leftover optional attribute shares the document wrap" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const wrap = try htmlWrap(rt, "x", "big");
+    try std.testing.expect(wrap.asStringBody().?.eqlBytes("<big>x</big>"));
+
+    const empty = try htmlWrap(rt, "", "i");
+    try std.testing.expect(empty.asStringBody().?.eqlBytes("<i></i>"));
+
+    const quoted = try core.string.String.createUtf8(rt, "a\"b");
+    const attr = try htmlWithAttribute(rt, "x", "a", "name", &.{quoted.value()});
+    try std.testing.expect(attr.asStringBody().?.eqlBytes("<a name=\"a&quot;b\">x</a>"));
+
+    const missing = try htmlWithAttribute(rt, "x", "font", "color", &.{});
+    try std.testing.expect(missing.asStringBody().?.eqlBytes("<font color=\"undefined\">x</font>"));
+
+    const number_attr = try htmlWithAttribute(rt, "x", "font", "size", &.{core.JSValue.int32(7)});
+    try std.testing.expect(number_attr.asStringBody().?.eqlBytes("<font size=\"7\">x</font>"));
+
+    const extra_a = try core.string.String.createUtf8(rt, "a");
+    const extra_b = try core.string.String.createUtf8(rt, "b");
+    try std.testing.expectError(
+        error.TypeError,
+        htmlWithAttribute(rt, "x", "a", "href", &.{ extra_a.value(), extra_b.value() }),
+    );
 }
 
 fn trimStartAscii(bytes: []const u8) []const u8 {
@@ -1960,13 +2010,7 @@ fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), ta
     try appendValueString(rt, buffer, target);
 }
 
-fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const str = if (core.string.isAsciiBytes(bytes))
-        try core.string.String.createAscii(rt, bytes)
-    else
-        try core.string.String.createUtf8(rt, bytes);
-    return str.value();
-}
+const createStringValue = value_ops.createStringValue;
 
 fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) return value;
@@ -2187,7 +2231,7 @@ fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: cor
 }
 
 fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize {
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or number <= 0) return 0;
     if (std.math.isPositiveInf(number)) return length;
     const truncated = @trunc(number);
@@ -2196,7 +2240,7 @@ fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !u
 }
 
 fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.JSValue) !usize {
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return default_start;
     if (number <= 0) return 0;
     if (std.math.isPositiveInf(number)) return default_start;
@@ -2207,31 +2251,16 @@ fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.
 
 fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
     if (value.isBigInt() or value.isSymbol()) return error.TypeError;
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
     const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
     const modulo = @mod(integer, 4294967296.0);
     return @intFromFloat(modulo);
 }
 
-fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
-    if (numberValue(value)) |number| return number;
-    // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
-    // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
-    if (value.isBigInt()) return error.TypeError;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
-
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try appendValueString(rt, &buffer, value);
-    return parseJsNumber(buffer.items);
-}
-
 fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
     if (value.asInt32()) |int_value| return int_value;
-    const number = try toIntegerOrInfinity(rt, value);
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return 0;
     if (std.math.isPositiveInf(number)) return std.math.maxInt(i64);
     if (std.math.isNegativeInf(number)) return std.math.minInt(i64);
@@ -2239,15 +2268,6 @@ fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
     return @intFromFloat(integer);
 }
 
-fn parseJsNumber(bytes: []const u8) f64 {
-    return core.value_format.parseJsNumber(bytes);
-}
-
-fn numberValue(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    return null;
-}
 
 fn isTrimCodeUnit(unit: u16) bool {
     return unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);

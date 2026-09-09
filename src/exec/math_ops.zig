@@ -33,8 +33,8 @@ pub const sum_precise_method_id: u32 = 37;
 /// magic pattern for its js_math_op entries). Entry order is the namespace
 /// property definition order (kept from the former centralized install table).
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    mathMinMaxEntry("min", 7, false),
-    mathMinMaxEntry("max", 8, true),
+    mathMinMaxEntry("min", 7),
+    mathMinMaxEntry("max", 8),
     mathUnaryEntry("abs", 1),
     mathUnaryEntry("floor", 2),
     mathUnaryEntry("ceil", 3),
@@ -79,33 +79,31 @@ fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
 /// `Math.min` / `Math.max`: the shared `mathOpCall` record plus an exec_direct
 /// arm (`js_call_c_function` shape) whose hot leg is qjs `js_math_min_max`
 /// (quickjs.c:46952) over int32 / float64 arguments only.
-fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32, comptime is_max: bool) core.host_function.InternalEntry {
+fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
     var entry = mathOpEntry(name, 2, id);
-    entry.managed = mathMinMaxDirect(is_max);
+    entry.managed = &mathMinMaxDirect;
     return entry;
 }
 
-/// Exec-direct twin of the `mathOpCall` min/max arm. `is_max` is baked at
-/// comptime (qjs passes it as `magic`); the miss leg (any argument that is
-/// not an int32 / float64) is the unchanged realm path `preparedOpCall`, so
-/// ToPrimitive / ToNumber ordering and exceptions stay with the generic code.
-fn mathMinMaxDirect(comptime is_max: bool) core.native_entry.ManagedFn {
-    return &struct {
-        fn direct(
-            ctx: *core.JSContext,
-            this_value: core.JSValue,
-            argv: [*]const core.JSValue,
-            argc: u32,
-            _: *const core.NativeEntry,
-            _: ?*core.Object,
-        ) callconv(.c) core.JSValue {
-            _ = this_value;
-            const args = argv[0..argc];
-            if (mathMinMaxNumberFast(args, is_max)) |value| return value;
-            const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-            return builtin_dispatch.hostResultToValue(ctx, preparedOpCall(ctx, builtin_dispatch.vmCallerView(ctx).output, global, if (is_max) 8 else 7, args));
-        }
-    }.direct;
+/// Exec-direct twin of the `mathOpCall` min/max arm. `is_max` comes from
+/// `entry.magic` (qjs passes it as `magic`: 8 = max, 7 = min). The miss
+/// leg (any argument that is not an int32 / float64) is the unchanged
+/// realm path `preparedOpCall`, so ToPrimitive / ToNumber ordering and
+/// exceptions stay with the generic code.
+noinline fn mathMinMaxDirect(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    argv: [*]const core.JSValue,
+    argc: u32,
+    entry: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    _ = this_value;
+    const is_max = entry.magic == 8;
+    const args = argv[0..argc];
+    if (mathMinMaxNumberFast(args, is_max)) |value| return value;
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    return builtin_dispatch.hostResultToValue(ctx, preparedOpCall(ctx, builtin_dispatch.vmCallerView(ctx).output, global, if (is_max) 8 else 7, args));
 }
 
 /// qjs `js_math_min_max` (quickjs.c:46952-47003) restricted to arguments that
@@ -115,7 +113,7 @@ fn mathMinMaxDirect(comptime is_max: bool) core.native_entry.ManagedFn {
 /// `js_fmin` signed-zero rules, returning through `JS_NewFloat64` (int-valued
 /// doubles collapse back to int32, as `numberToValue` does). Any other
 /// argument type returns null so the caller takes the ToNumber path.
-pub fn mathMinMaxNumberFast(args: []const core.JSValue, comptime is_max: bool) ?core.JSValue {
+pub fn mathMinMaxNumberFast(args: []const core.JSValue, is_max: bool) ?core.JSValue {
     if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
     var index: usize = 1;
     var result: f64 = undefined;
@@ -189,41 +187,52 @@ fn mathBinaryEntry(comptime name: []const u8, comptime id: u32) core.host_functi
 }
 
 fn mathUnaryNative(comptime id: u32) core.host_function.NativeF64Fn {
+    // Keep the illegal-id check at the table site so a new unary entry
+    // still fails at compile time. The outlined walk takes `id` at
+    // runtime so the leftover typed copies can share one body.
+    _ = switch (id) {
+        1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36 => {},
+        else => @compileError("unsupported unary Math cproto id"),
+    };
     return &struct {
         fn invoke(value: f64) f64 {
-            return switch (id) {
-                1 => @abs(value),
-                2 => @floor(value),
-                3 => @ceil(value),
-                4 => mathRound(value),
-                5 => @sqrt(value),
-                10 => exp(value),
-                11 => @sin(value),
-                12 => @cos(value),
-                13 => @tan(value),
-                14 => std.math.acos(value),
-                15 => std.math.asin(value),
-                16 => std.math.atan(value),
-                18 => std.math.acosh(value),
-                19 => std.math.asinh(value),
-                20 => std.math.atanh(value),
-                21 => @log(value),
-                22 => if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) value else if (value < 0) -@floor(@abs(value)) else @floor(value),
-                23 => std.math.cbrt(value),
-                25 => std.math.cosh(value),
-                26 => std.math.expm1(value),
-                27 => @as(f64, @floatCast(@as(f16, @floatCast(value)))),
-                28 => @as(f64, @floatCast(@as(f32, @floatCast(value)))),
-                31 => std.math.log1p(value),
-                32 => log2(value),
-                33 => @log10(value),
-                34 => mathSign(value),
-                35 => std.math.sinh(value),
-                36 => std.math.tanh(value),
-                else => @compileError("unsupported unary Math cproto id"),
-            };
+            return mathUnaryInvoke(id, value);
         }
     }.invoke;
+}
+
+noinline fn mathUnaryInvoke(id: u32, value: f64) f64 {
+    return switch (id) {
+        1 => @abs(value),
+        2 => @floor(value),
+        3 => @ceil(value),
+        4 => mathRound(value),
+        5 => @sqrt(value),
+        10 => exp(value),
+        11 => @sin(value),
+        12 => @cos(value),
+        13 => @tan(value),
+        14 => std.math.acos(value),
+        15 => std.math.asin(value),
+        16 => std.math.atan(value),
+        18 => std.math.acosh(value),
+        19 => std.math.asinh(value),
+        20 => std.math.atanh(value),
+        21 => @log(value),
+        22 => if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) value else if (value < 0) -@floor(@abs(value)) else @floor(value),
+        23 => std.math.cbrt(value),
+        25 => std.math.cosh(value),
+        26 => std.math.expm1(value),
+        27 => @as(f64, @floatCast(@as(f16, @floatCast(value)))),
+        28 => @as(f64, @floatCast(@as(f32, @floatCast(value)))),
+        31 => std.math.log1p(value),
+        32 => log2(value),
+        33 => @log10(value),
+        34 => mathSign(value),
+        35 => std.math.sinh(value),
+        36 => std.math.tanh(value),
+        else => unreachable,
+    };
 }
 
 fn mathBinaryNative(comptime id: u32) core.host_function.NativeF64F64Fn {
@@ -727,11 +736,7 @@ test "Math.min/max entries carry the exec_direct arm on the shared handler" {
         seen += 1;
         try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &mathOpCall);
         try std.testing.expect(entry.managed != null);
-        const expected = if (entry.id == 8)
-            mathMinMaxDirect(true)
-        else
-            mathMinMaxDirect(false);
-        try std.testing.expect(entry.managed.? == expected);
+        try std.testing.expect(entry.managed.? == &mathMinMaxDirect);
     }
     try std.testing.expectEqual(@as(u8, 2), seen);
 }
@@ -762,4 +767,21 @@ test "mathMinMaxNumberFast mirrors js_math_min_max over int32/float64 and misses
     try std.testing.expect(mathMinMaxNumberFast(&.{ int(1), core.JSValue.boolean(true) }, true) == null);
     try std.testing.expect(mathMinMaxNumberFast(&.{core.JSValue.undefinedValue()}, false) == null);
     try std.testing.expect(mathMinMaxNumberFast(&.{ flt(1.5), core.JSValue.nullValue() }, true) == null);
+}
+
+test "mathUnaryInvoke shares one walk across unary Math ids" {
+    const ids = [_]u32{ 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 31, 32, 33, 34, 35, 36 };
+    const samples = [_]f64{ 0.25, -2.5, 0, 1, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) };
+    inline for (ids) |id| {
+        const specialized = mathUnaryNative(id);
+        for (samples) |sample| {
+            const via_id = mathUnaryInvoke(id, sample);
+            const via_fn = specialized(sample);
+            if (std.math.isNan(via_fn)) {
+                try std.testing.expect(std.math.isNan(via_id));
+            } else {
+                try std.testing.expectEqual(via_fn, via_id);
+            }
+        }
+    }
 }

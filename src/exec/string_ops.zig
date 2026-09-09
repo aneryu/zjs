@@ -51,6 +51,7 @@ const arrayLastIndexStart = array_ops.arrayLastIndexStart;
 const arrayMethodTypedArrayLength = array_ops.arrayMethodTypedArrayLength;
 const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
+const arrayCopyPresentIndex = array_ops.arrayCopyPresentIndex;
 const arraySpeciesCreate = array_ops.arraySpeciesCreate;
 const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
@@ -636,86 +637,109 @@ pub fn callStringReplaceMethod(
     );
 }
 
-pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
+const ErrorStackStringKind = enum { live, captured };
+
+/// Leftover error-stack at-line format. candidate106 still compiles
+/// `buildErrorStackStringValue` (6378) / `formatCapturedErrorStackStringValue`
+/// (5891, extra 5891, 5.2% match). The leftover is ArrayList + `"    at "` +
+/// name + native-or-`allocPrint(" ({s}:{}:{})")` + trailing newline +
+/// createStringValue. Comptime identity is live backtrace+skip vs captured
+/// CallSite array. Take that at runtime. Public names stay `inline` and
+/// pass only the kind — no leftover setup at the wrapper (knives 94/98).
+/// Does not replace leftover `allocPrint` with slice joins (knife 77).
+/// Does not retry leftover `{d}` through formatInt (knives 66/76).
+noinline fn errorStackStringValue(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    skip_name: ?[]const u8,
+    sites_value: core.JSValue,
+    site_count: usize,
+    kind: ErrorStackStringKind,
+) !core.JSValue {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
-
-    const limit = errorStackTraceLimit(ctx.runtime, global);
-    if (limit == 0) return value_ops.createStringValue(ctx.runtime, "");
-
-    const frames = try ctx.snapshotBacktraceFrames();
-    defer ctx.freeBacktraceFrameSnapshot(frames);
-    var idx = frames.len;
     var emitted: usize = 0;
-    var skipping = skip_name != null;
-    while (idx > 0) {
-        idx -= 1;
-        _ = exception_ops.resolveBacktraceFunctionName(ctx, &frames[idx]);
-        if (skipping) {
-            if (backtraceFunctionNameEql(ctx, frames[idx], skip_name.?)) skipping = false;
-            continue;
-        }
-        if (emitted >= limit) break;
-        const entry = frames[idx];
-        if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-        try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
-        try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
-        if (entry.is_native) {
-            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
-            emitted += 1;
-            continue;
-        }
-        const filename = ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>";
-        const location = entry.location();
-        const line_num = if (location.line_num > 0) location.line_num else 1;
-        const col_num = if (location.col_num > 0) location.col_num else 1;
-        const suffix = try std.fmt.allocPrint(ctx.runtime.memory.allocator, " ({s}:{}:{})", .{ filename, line_num, col_num });
-        defer ctx.runtime.memory.allocator.free(suffix);
-        try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
-        emitted += 1;
+
+    switch (kind) {
+        .live => {
+            const realm = global.?;
+            const limit = errorStackTraceLimit(ctx.runtime, realm);
+            if (limit == 0) return value_ops.createStringValue(ctx.runtime, "");
+
+            const frames = try ctx.snapshotBacktraceFrames();
+            defer ctx.freeBacktraceFrameSnapshot(frames);
+            var idx = frames.len;
+            var skipping = skip_name != null;
+            while (idx > 0) {
+                idx -= 1;
+                _ = exception_ops.resolveBacktraceFunctionName(ctx, &frames[idx]);
+                if (skipping) {
+                    if (backtraceFunctionNameEql(ctx, frames[idx], skip_name.?)) skipping = false;
+                    continue;
+                }
+                if (emitted >= limit) break;
+                const entry = frames[idx];
+                if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
+                try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
+                try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
+                if (entry.is_native) {
+                    try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+                    emitted += 1;
+                    continue;
+                }
+                const filename = ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>";
+                const location = entry.location();
+                const line_num = if (location.line_num > 0) location.line_num else 1;
+                const col_num = if (location.col_num > 0) location.col_num else 1;
+                const suffix = try std.fmt.allocPrint(ctx.runtime.memory.allocator, " ({s}:{}:{})", .{ filename, line_num, col_num });
+                defer ctx.runtime.memory.allocator.free(suffix);
+                try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
+                emitted += 1;
+            }
+        },
+        .captured => {
+            const sites = objectFromValue(sites_value) orelse return value_ops.createStringValue(ctx.runtime, "");
+            const current_length: usize = if (sites.isArray()) @intCast(sites.arrayLength()) else 0;
+            const length = @min(current_length, site_count);
+            var index: usize = 0;
+            while (index < length) : (index += 1) {
+                if (index > std.math.maxInt(u32)) break;
+                const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+                const site = objectFromValue(site_value) orelse continue;
+                if (!site.isCallSite()) continue;
+                if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
+                try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
+                try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
+                if (site.callSiteIsNative()) {
+                    try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+                    emitted += 1;
+                    continue;
+                }
+
+                var filename_bytes: std.ArrayList(u8) = .empty;
+                defer filename_bytes.deinit(ctx.runtime.memory.allocator);
+                try appendCallSiteFileName(ctx.runtime, &filename_bytes, site);
+                const suffix = try std.fmt.allocPrint(
+                    ctx.runtime.memory.allocator,
+                    " ({s}:{}:{})",
+                    .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
+                );
+                defer ctx.runtime.memory.allocator.free(suffix);
+                try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
+                emitted += 1;
+            }
+        },
     }
     if (emitted != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: core.JSValue, site_count: usize) !core.JSValue {
-    const sites = objectFromValue(sites_value) orelse return value_ops.createStringValue(ctx.runtime, "");
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+pub inline fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue {
+    return errorStackStringValue(ctx, global, skip_name, core.JSValue.undefinedValue(), 0, .live);
+}
 
-    const current_length: usize = if (sites.isArray()) @intCast(sites.arrayLength()) else 0;
-    const length = @min(current_length, site_count);
-    var index: usize = 0;
-    var emitted: usize = 0;
-    while (index < length) : (index += 1) {
-        if (index > std.math.maxInt(u32)) break;
-        const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
-        const site = objectFromValue(site_value) orelse continue;
-        if (!site.isCallSite()) continue;
-        if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-        try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
-        try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
-        if (site.callSiteIsNative()) {
-            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
-            emitted += 1;
-            continue;
-        }
-
-        var filename_bytes: std.ArrayList(u8) = .empty;
-        defer filename_bytes.deinit(ctx.runtime.memory.allocator);
-        try appendCallSiteFileName(ctx.runtime, &filename_bytes, site);
-        const suffix = try std.fmt.allocPrint(
-            ctx.runtime.memory.allocator,
-            " ({s}:{}:{})",
-            .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
-        );
-        defer ctx.runtime.memory.allocator.free(suffix);
-        try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
-        emitted += 1;
-    }
-    if (emitted != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-    return value_ops.createStringValue(ctx.runtime, bytes.items);
+pub inline fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: core.JSValue, site_count: usize) !core.JSValue {
+    return errorStackStringValue(ctx, null, null, sites_value, site_count, .captured);
 }
 
 pub fn stringFromCodePoint(
@@ -2728,34 +2752,37 @@ pub fn bigIntPrototypeToString(
     return value_ops.createStringValue(ctx.runtime, text);
 }
 
+const standard_string_method_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "substring", .id = 1 },
+    .{ .name = "toUpperCase", .id = 2 },
+    .{ .name = "toLocaleUpperCase", .id = 2 },
+    .{ .name = "toLowerCase", .id = 3 },
+    .{ .name = "toLocaleLowerCase", .id = 3 },
+    .{ .name = "indexOf", .id = 4 },
+    .{ .name = "includes", .id = 5 },
+    .{ .name = "startsWith", .id = 6 },
+    .{ .name = "endsWith", .id = 7 },
+    .{ .name = "trim", .id = 8 },
+    .{ .name = "lastIndexOf", .id = 28 },
+    .{ .name = "charCodeAt", .id = 29 },
+    .{ .name = "at", .id = 30 },
+    .{ .name = "codePointAt", .id = 31 },
+    .{ .name = "slice", .id = 32 },
+    .{ .name = "repeat", .id = 33 },
+    .{ .name = "padStart", .id = 34 },
+    .{ .name = "padEnd", .id = 35 },
+    .{ .name = "localeCompare", .id = 36 },
+    .{ .name = "normalize", .id = string_id_lookup.legacy_normalize_method_id },
+    .{ .name = "isWellFormed", .id = 38 },
+    .{ .name = "toWellFormed", .id = 39 },
+    .{ .name = "search", .id = string_id_lookup.legacy_search_method_id },
+    .{ .name = "match", .id = string_id_lookup.legacy_match_method_id },
+    .{ .name = "replaceAll", .id = string_id_lookup.legacy_replace_all_method_id },
+    .{ .name = "matchAll", .id = string_id_lookup.legacy_match_all_method_id },
+};
+
 pub fn standardStringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "substring")) return 1;
-    if (std.mem.eql(u8, name, "toUpperCase")) return 2;
-    if (std.mem.eql(u8, name, "toLocaleUpperCase")) return 2;
-    if (std.mem.eql(u8, name, "toLowerCase")) return 3;
-    if (std.mem.eql(u8, name, "toLocaleLowerCase")) return 3;
-    if (std.mem.eql(u8, name, "indexOf")) return 4;
-    if (std.mem.eql(u8, name, "includes")) return 5;
-    if (std.mem.eql(u8, name, "startsWith")) return 6;
-    if (std.mem.eql(u8, name, "endsWith")) return 7;
-    if (std.mem.eql(u8, name, "trim")) return 8;
-    if (std.mem.eql(u8, name, "lastIndexOf")) return 28;
-    if (std.mem.eql(u8, name, "charCodeAt")) return 29;
-    if (std.mem.eql(u8, name, "at")) return 30;
-    if (std.mem.eql(u8, name, "codePointAt")) return 31;
-    if (std.mem.eql(u8, name, "slice")) return 32;
-    if (std.mem.eql(u8, name, "repeat")) return 33;
-    if (std.mem.eql(u8, name, "padStart")) return 34;
-    if (std.mem.eql(u8, name, "padEnd")) return 35;
-    if (std.mem.eql(u8, name, "localeCompare")) return 36;
-    if (std.mem.eql(u8, name, "normalize")) return string_id_lookup.legacy_normalize_method_id;
-    if (std.mem.eql(u8, name, "isWellFormed")) return 38;
-    if (std.mem.eql(u8, name, "toWellFormed")) return 39;
-    if (std.mem.eql(u8, name, "search")) return string_id_lookup.legacy_search_method_id;
-    if (std.mem.eql(u8, name, "match")) return string_id_lookup.legacy_match_method_id;
-    if (std.mem.eql(u8, name, "replaceAll")) return string_id_lookup.legacy_replace_all_method_id;
-    if (std.mem.eql(u8, name, "matchAll")) return string_id_lookup.legacy_match_all_method_id;
-    return null;
+    return core.host_function.name_id.lookup(name, &standard_string_method_ids);
 }
 
 pub fn isStringMethodReceiver(value: core.JSValue) bool {
@@ -2765,27 +2792,30 @@ pub fn isStringMethodReceiver(value: core.JSValue) bool {
     return object.class_id == core.class.ids.string;
 }
 
+const annexb_string_method_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "anchor", .id = 11 },
+    .{ .name = "big", .id = 12 },
+    .{ .name = "blink", .id = 13 },
+    .{ .name = "bold", .id = 14 },
+    .{ .name = "fixed", .id = 15 },
+    .{ .name = "fontcolor", .id = 16 },
+    .{ .name = "fontsize", .id = 17 },
+    .{ .name = "italics", .id = 18 },
+    .{ .name = "link", .id = 19 },
+    .{ .name = "small", .id = 20 },
+    .{ .name = "trimLeft", .id = 21 },
+    .{ .name = "trimStart", .id = 21 },
+    .{ .name = "trimRight", .id = 22 },
+    .{ .name = "trimEnd", .id = 22 },
+    .{ .name = "strike", .id = 23 },
+    .{ .name = "sub", .id = 24 },
+    .{ .name = "substr", .id = 25 },
+    .{ .name = "sup", .id = 26 },
+    .{ .name = "split", .id = string_id_lookup.legacy_split_method_id },
+};
+
 pub fn annexBStringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "anchor")) return 11;
-    if (std.mem.eql(u8, name, "big")) return 12;
-    if (std.mem.eql(u8, name, "blink")) return 13;
-    if (std.mem.eql(u8, name, "bold")) return 14;
-    if (std.mem.eql(u8, name, "fixed")) return 15;
-    if (std.mem.eql(u8, name, "fontcolor")) return 16;
-    if (std.mem.eql(u8, name, "fontsize")) return 17;
-    if (std.mem.eql(u8, name, "italics")) return 18;
-    if (std.mem.eql(u8, name, "link")) return 19;
-    if (std.mem.eql(u8, name, "small")) return 20;
-    if (std.mem.eql(u8, name, "trimLeft")) return 21;
-    if (std.mem.eql(u8, name, "trimStart")) return 21;
-    if (std.mem.eql(u8, name, "trimRight")) return 22;
-    if (std.mem.eql(u8, name, "trimEnd")) return 22;
-    if (std.mem.eql(u8, name, "strike")) return 23;
-    if (std.mem.eql(u8, name, "sub")) return 24;
-    if (std.mem.eql(u8, name, "substr")) return 25;
-    if (std.mem.eql(u8, name, "sup")) return 26;
-    if (std.mem.eql(u8, name, "split")) return string_id_lookup.legacy_split_method_id;
-    return null;
+    return core.host_function.name_id.lookup(name, &annexb_string_method_ids);
 }
 
 pub fn errorToStringCall(
@@ -2957,15 +2987,18 @@ pub fn arraySearchCall(
     if (mode == .last_index_of and length > 1_000_000) {
         return try arrayLastIndexSparseLarge(ctx, output, global, object, receiver_object_value, args, length, search_value);
     }
-    if (mode == .last_index_of) {
-        var cursor = try arrayLastIndexStart(ctx, output, global, args, length);
-        // Dense fast scan (qjs js_array_lastIndexOf js_get_fast_array loop,
-        // quickjs.c:42476): if the receiver is still a dense fast array and the
-        // fromIndex coercion above did not resize it, scan the borrowed element
-        // slice directly — no per-element propertyAtomFromLengthIndex intern +
-        // generic getValueProperty. `===` runs no user code, so the slice stays
-        // valid for the whole loop.
-        if (!is_typed_array and object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
+
+    // Unique dense paths stay separate. lastIndexOf requires a full-density
+    // fast array and returns -1 if the dense scan misses. indexOf/includes
+    // scan the dense PREFIX then fall through to the generic tail (qjs
+    // js_array_indexOf/includes, quickjs.c:42426-42483).
+    const from_right = mode == .last_index_of;
+    var cursor = if (from_right)
+        try arrayLastIndexStart(ctx, output, global, args, length)
+    else
+        try arrayFirstIndexStart(ctx, output, global, args, length);
+    if (from_right) {
+        if (object.isFastArray() and @as(usize, @intCast(object.arrayLength())) == length and object.arrayElements().len == length) {
             const elements = object.arrayElements();
             if (cursor > elements.len) cursor = elements.len;
             while (cursor > 0) {
@@ -2974,57 +3007,37 @@ pub fn arraySearchCall(
             }
             return core.JSValue.int32(-1);
         }
-        while (cursor > 0) {
-            cursor -= 1;
-            const item = if (is_typed_array) blk: {
-                const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
-                if (cursor >= current_length) continue;
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
-            if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
-        }
-    } else {
-        var cursor = try arrayFirstIndexStart(ctx, output, global, args, length);
-        // Dense fast PREFIX scan, then fall through to the generic tail (qjs
-        // js_array_indexOf/includes: js_get_fast_array dense loop over [0, count) then the
-        // generic loop over [count, len) for the tail holes, quickjs.c:42426-42483). Unlike
-        // a full-density gate, this also fast-scans the dense prefix of an L3 holey fast
-        // array (array_count < length) before the proto-aware tail.
-        if (!is_typed_array and object.isFastArray()) {
-            const elements = object.arrayElements();
-            const dense_end = @min(elements.len, length);
-            while (cursor < dense_end) : (cursor += 1) {
-                const item = elements[cursor];
-                if (mode == .includes) {
-                    if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
-                } else {
-                    if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
-                }
-            }
-            // cursor == dense_end; the generic loop below covers [dense_end, length) holes.
-        }
-        while (cursor < length) : (cursor += 1) {
-            const item = if (is_typed_array) blk: {
-                if (mode != .includes) {
-                    const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
-                    if (cursor >= current_length) continue;
-                }
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (mode != .includes and !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
+    } else if (object.isFastArray()) {
+        const elements = object.arrayElements();
+        const dense_end = @min(elements.len, length);
+        while (cursor < dense_end) : (cursor += 1) {
+            const item = elements[cursor];
             if (mode == .includes) {
                 if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
-                continue;
+            } else {
+                if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
             }
+        }
+    }
+
+    // Leftover generic present-element search: propertyAtom + has (except
+    // includes) + get + sameValueZero / valuesStrictEqual. Direction is
+    // taken at runtime (knife 118 leftover-direction shape). After the
+    // typed-array early return above, the previous in-loop typed-array
+    // arms are dead.
+    var remaining: usize = if (from_right) cursor else length - cursor;
+    while (remaining > 0) : ({
+        remaining -= 1;
+        if (!from_right) cursor += 1;
+    }) {
+        if (from_right) cursor -= 1;
+        const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+        defer key.deinit(ctx.runtime);
+        if (mode != .includes and !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        if (mode == .includes) {
+            if (item.sameValueZero(search_value)) return core.JSValue.boolean(true);
+        } else {
             if (try valuesStrictEqual(ctx.runtime, item, search_value)) return lengthIndexValue(cursor);
         }
     }
@@ -3079,14 +3092,19 @@ pub fn concatAppendValue(
             var index: usize = 0;
             while (index < length) : (index += 1) {
                 if (next_index.* > core.array.max_array_length) return error.RangeError;
-                const from_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-                defer from_key.deinit(ctx.runtime);
-                if (try hasValueProperty(ctx, output, global, value, object, from_key.atom, null, null)) {
-                    const item = try getValueProperty(ctx, output, global, value, from_key.atom, caller_function, caller_frame);
-                    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, next_index.*);
-                    defer to_key.deinit(ctx.runtime);
-                    try createDataPropertyOrThrow(ctx, output, global, out.value(), out, to_key.atom, item, caller_function, caller_frame);
-                }
+                try arrayCopyPresentIndex(
+                    ctx,
+                    output,
+                    global,
+                    value,
+                    object,
+                    index,
+                    out.value(),
+                    out,
+                    next_index.*,
+                    caller_function,
+                    caller_frame,
+                );
                 next_index.* += 1;
             }
             return;
@@ -3442,6 +3460,17 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         core.class.ids.array_buffer => "ArrayBuffer",
         else => "Object",
     };
+}
+
+test "standard and annexB string method-id tables preserve load-bearing ids" {
+    try std.testing.expectEqual(@as(?u32, 1), standardStringMethodId("substring"));
+    try std.testing.expectEqual(@as(?u32, 2), standardStringMethodId("toLocaleUpperCase"));
+    try std.testing.expectEqual(@as(?u32, string_id_lookup.legacy_match_all_method_id), standardStringMethodId("matchAll"));
+    try std.testing.expectEqual(@as(?u32, null), standardStringMethodId("big"));
+    try std.testing.expectEqual(@as(?u32, 12), annexBStringMethodId("big"));
+    try std.testing.expectEqual(@as(?u32, 21), annexBStringMethodId("trimLeft"));
+    try std.testing.expectEqual(@as(?u32, string_id_lookup.legacy_split_method_id), annexBStringMethodId("split"));
+    try std.testing.expectEqual(@as(?u32, null), annexBStringMethodId("substring"));
 }
 
 test "default object tag distinguishes bytecode function classes" {

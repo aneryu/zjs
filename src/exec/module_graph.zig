@@ -12,6 +12,7 @@
 const std = @import("std");
 const atomics_ops = @import("atomics_ops.zig");
 const core = @import("../core/root.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
 const jobs_mod = core.jobs;
 const parser = @import("../parser.zig");
 const exec = @import("root.zig");
@@ -1192,7 +1193,7 @@ fn appendModuleEvalStepRetainingOnError(
                     .keep_result = true,
                     .completed = true,
                 };
-                try continuations.append(allocator, continuation);
+                try array_list_erased.append(continuations, allocator, continuation);
             } else {}
         },
         .suspended => |suspended| {
@@ -1207,7 +1208,7 @@ fn appendModuleEvalStepRetainingOnError(
                 .awaited = suspended.awaited,
                 .keep_result = keep_result,
             };
-            try continuations.append(allocator, continuation);
+            try array_list_erased.append(continuations, allocator, continuation);
         },
     }
 }
@@ -1238,7 +1239,7 @@ fn enqueueDeferredModuleStart(
         .keep_result = keep_result,
         .deferred_start = true,
     };
-    try continuations.append(allocator, continuation);
+    try array_list_erased.append(continuations, allocator, continuation);
     module_record.status = .evaluating;
 }
 
@@ -2068,7 +2069,7 @@ fn appendPendingModuleEvalPostorder(
     const path = runtime.atoms.name(module_name) orelse return error.InvalidAtom;
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
-    try postorder.append(allocator, owned_path);
+    try array_list_erased.append(postorder, allocator, owned_path);
 }
 
 fn rebuildPendingModuleEvalPostorder(
@@ -2182,7 +2183,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
     const owned_path = try allocator.dupe(u8, path);
     var seen_owns_path = false;
     errdefer if (!seen_owns_path) allocator.free(owned_path);
-    try seen.append(allocator, owned_path);
+    try array_list_erased.append(seen, allocator, owned_path);
     seen_owns_path = true;
 
     const module_name = try runtime.internAtom(path);
@@ -2333,7 +2334,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
 
     const order_path = try allocator.dupe(u8, path);
     errdefer allocator.free(order_path);
-    try postorder.append(allocator, order_path);
+    try array_list_erased.append(postorder, allocator, order_path);
 }
 
 fn wrapSourceByKind(

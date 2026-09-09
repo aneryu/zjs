@@ -295,7 +295,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // Register-resident cold bitwise/shift (qjs js_binary_logic_slow 15214 /
     // js_shr_slow 15735 operate in place on sp[-2]); falls back to the publishing
     // h_binary path for BigInt/string/object/symbol operands and at the generator stop.
-    inline for ([_]u8{ op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = dispatch.opLogicCold(o);
+    inline for ([_]u8{ op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = dispatch.opLogicCold;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing compareVm path internally at the generator parameter/body stop. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
@@ -863,8 +863,8 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // The resident zjs twins preserve the allocating constructor/rooting path
     // while continuing with their register pc/sp; the all-cold table above
     // remains the stop-boundary implementation.
-    t[op.fclosure] = dispatch.opFclosure(true);
-    t[op.fclosure8] = dispatch.opFclosure(false);
+    t[op.fclosure] = dispatch.opFclosure;
+    t[op.fclosure8] = dispatch.opFclosure;
     t[op.get_arg] = dispatch.op_get_arg;
     t[op.get_arg0] = dispatch.op_get_arg0_fast;
     t[op.get_arg1] = dispatch.op_get_arg1_fast;
@@ -991,20 +991,20 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         .{ .o = op.get_var_ref3, .h = dispatch.opGetVarRef(.c3) },
         .{ .o = op.get_var_ref, .h = dispatch.opGetVarRef(.half) },
         .{ .o = op.get_var_ref_check, .h = dispatch.opGetVarRef(.half) },
-        .{ .o = op.put_var_ref0, .h = dispatch.opPutVarRef(.c0) },
-        .{ .o = op.put_var_ref1, .h = dispatch.opPutVarRef(.c1) },
-        .{ .o = op.put_var_ref2, .h = dispatch.opPutVarRef(.c2) },
-        .{ .o = op.put_var_ref3, .h = dispatch.opPutVarRef(.c3) },
-        .{ .o = op.put_var_ref, .h = dispatch.opPutVarRef(.half) },
+        .{ .o = op.put_var_ref0, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref1, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref2, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref3, .h = dispatch.opPutVarRef },
+        .{ .o = op.put_var_ref, .h = dispatch.opPutVarRef },
         // qjs OP_put_var_ref_check (quickjs.c:18670-18682): TDZ probe + set_value.
         // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
         // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
         .{ .o = op.put_var_ref_check, .h = dispatch.op_put_var_ref_check },
-        .{ .o = op.set_var_ref0, .h = dispatch.opSetVarRef(.c0) },
-        .{ .o = op.set_var_ref1, .h = dispatch.opSetVarRef(.c1) },
-        .{ .o = op.set_var_ref2, .h = dispatch.opSetVarRef(.c2) },
-        .{ .o = op.set_var_ref3, .h = dispatch.opSetVarRef(.c3) },
-        .{ .o = op.set_var_ref, .h = dispatch.opSetVarRef(.half) },
+        .{ .o = op.set_var_ref0, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref1, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref2, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref3, .h = dispatch.opSetVarRef },
+        .{ .o = op.set_var_ref, .h = dispatch.opSetVarRef },
     }) |e| t[e.o] = e.h;
     return .{ .table = t, .keep = keep };
 }

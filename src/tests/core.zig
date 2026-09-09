@@ -2790,6 +2790,39 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.async_disposable_stack));
 }
 
+test "class Record default fill matches Record{} without a template" {
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(core.class.Record));
+    try std.testing.expectEqual(@as(usize, 90), @offsetOf(core.class.Record, "inline_payload_align"));
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    try std.testing.expect(!rt.classes.isRegistered(core.class.invalid_class_id));
+    try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
+    try std.testing.expectEqualDeep(core.class.Record{}, rt.classes.records[core.class.invalid_class_id]);
+    try std.testing.expectEqualDeep(core.class.Record{}, rt.classes.records[core.class.ids.proxy]);
+    try std.testing.expectEqual(@as(u16, 1), rt.classes.records[core.class.ids.proxy].inline_payload_align);
+}
+
+test "class prototype inline slots start as JSValue.nullValue" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(usize, 69 * 16), @sizeOf(@TypeOf(ctx.class_prototypes_inline)));
+    try std.testing.expectEqual(ctx.class_prototypes_inline[0..].ptr, ctx.class_prototypes.ptr);
+    try std.testing.expectEqualDeep(core.JSValue.nullValue(), ctx.class_prototypes[core.class.invalid_class_id]);
+    try std.testing.expectEqualDeep(core.JSValue.nullValue(), ctx.class_prototypes[core.class.ids.proxy]);
+    try std.testing.expect(ctx.class_prototypes[core.class.ids.proxy].isNull());
+}
+
+test "class standard_plans match standardPayloadKind before and after register" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    try std.testing.expectEqual(core.class.standardPayloadKind(core.class.ids.proxy), rt.classes.standard_plans[core.class.ids.proxy].payload_kind);
+    try std.testing.expectEqual(@as(u16, 1), rt.classes.standard_plans[core.class.ids.proxy].inline_payload_align);
+    try std.testing.expectEqual(core.class.standardPayloadKind(core.class.ids.object), rt.classes.standard_plans[core.class.ids.object].payload_kind);
+    try std.testing.expectEqual(rt.classes.record(core.class.ids.object).?.payload_kind, rt.classes.standard_plans[core.class.ids.object].payload_kind);
+}
+
 var finalizer_calls: usize = 0;
 var payload_finalizer_calls: usize = 0;
 var payload_mark_calls: usize = 0;
@@ -5719,6 +5752,27 @@ test "shape registry hash grows and reuses object root shapes" {
     try std.testing.expect(first.isShared());
 }
 
+test "createObjectRoot leftover reserved flag shares hashed proto roots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try rt.shapes.createObjectRoot(null);
+    const reserved_hit = try rt.shapes.createObjectRootReserved(null);
+    try std.testing.expectEqual(first, reserved_hit);
+    try std.testing.expect(first.isShared());
+
+    const proto = try core.Object.create(rt, core.class.ids.object, null);
+    const live_before = rt.gc.liveCountKind(.shape);
+    const reserved_miss = try rt.shapes.createObjectRootReserved(proto);
+    try std.testing.expect(!reserved_miss.header.metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(live_before, rt.gc.liveCountKind(.shape));
+    rt.shapes.publish(reserved_miss);
+    try std.testing.expect(reserved_miss.header.metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(live_before + 1, rt.gc.liveCountKind(.shape));
+    const published = try rt.shapes.createObjectRoot(proto);
+    try std.testing.expectEqual(reserved_miss, published);
+}
+
 test "reserved object root shapes reuse only an exact property capacity" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6733,6 +6787,21 @@ test "memory account treats zero-length allocations as inert" {
     account.free(u8, empty);
     try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "VM stack arena default fill matches VmStackArena{}" {
+    var arena: core.VmStackArena = undefined;
+    arena.initDefault();
+    try std.testing.expectEqualDeep(core.VmStackArena{}, arena);
+    try std.testing.expectEqual(@as(usize, 1552), @sizeOf(core.VmStackArena));
+    const empty: []core.JSValue = &.{};
+    try std.testing.expectEqual(empty.ptr, arena.chunks[0].ptr);
+    try std.testing.expectEqual(@as(usize, 0), arena.chunks[0].len);
+
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    arena.deinit(&account);
+    try std.testing.expectEqualDeep(core.VmStackArena{}, arena);
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
@@ -18001,6 +18070,44 @@ fn fillS4bDenseArray(rt: *core.JSRuntime, arr: *core.Object, count: u32) !void {
     }
 }
 
+test "storage-cell mint writes runtime kind tags on block and extent paths" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const cases = [_]struct { u8, core.gc.GcKind }{
+        .{ core.gc.representation.payload_kind_tag, .payload },
+        .{ core.gc.representation.property_storage_kind_tag, .property_storage },
+        .{ core.gc.representation.array_storage_kind_tag, .array_storage },
+        .{ core.gc.representation.string_buffer_kind_tag, .string_buffer },
+    };
+    // Prefix + 16-byte body. For `.string_buffer` that body is the 8-byte
+    // StringBuffer header plus 8 latin1 units — teardown sizes the cell
+    // from `capacity`, so the header must match the request.
+    const small = core.gc.metadata_prefix_size + 16;
+    const large = core.gc_space.large_min_bytes;
+    for (cases) |case| {
+        const small_body = try rt.gc.createStorageCellPublished(case[0], small);
+        installMintedStringBufferBody(case[1], small_body, small);
+        const small_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(small_body));
+        try std.testing.expectEqual(case[1], small_header.metaConst().flags.kind);
+        try std.testing.expect(core.gc.Registry.isBlockCellHeader(small_header));
+
+        const large_body = try rt.gc.createStorageCellPublished(case[0], large);
+        installMintedStringBufferBody(case[1], large_body, large);
+        const large_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(large_body));
+        try std.testing.expectEqual(case[1], large_header.metaConst().flags.kind);
+        try std.testing.expect(!core.gc.Registry.isBlockCellHeader(large_header));
+    }
+}
+
+fn installMintedStringBufferBody(kind: core.gc.GcKind, body: [*]u8, total_bytes: usize) void {
+    if (kind != .string_buffer) return;
+    const buf: *core.string.StringBuffer = @ptrCast(@alignCast(body));
+    buf.* = .{
+        .capacity = @intCast(total_bytes - core.gc.metadata_prefix_size - core.string.StringBuffer.units_offset),
+        .is_wide = false,
+    };
+}
+
 test "TGC S4-b: an external property buffer survives with its owner and dies one major later" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -18563,4 +18670,629 @@ test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent rou
     target_slot = null;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
+}
+
+test "array_list_erased append matches std ArrayList growth" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const types = .{ u32, Sample, []const u8 };
+
+    inline for (types) |T| {
+        var std_list: std.ArrayList(T) = .empty;
+        defer std_list.deinit(std.testing.allocator);
+        var erased: std.ArrayList(T) = .empty;
+        defer erased.deinit(std.testing.allocator);
+
+        var i: u32 = 0;
+        while (i < 64) : (i += 1) {
+            const item: T = switch (T) {
+                u32 => i,
+                Sample => .{ .a = i, .b = i + 1, .c = i },
+                []const u8 => "item",
+                else => unreachable,
+            };
+            try std_list.append(std.testing.allocator, item);
+            try array_list_erased.append(&erased, std.testing.allocator, item);
+            try std.testing.expectEqual(std_list.items.len, erased.items.len);
+            try std.testing.expectEqual(std_list.capacity, erased.capacity);
+            try std.testing.expectEqual(std_list.items[i], erased.items[i]);
+        }
+    }
+
+    var failing: std.ArrayList(u32) = .empty;
+    defer failing.deinit(std.testing.failing_allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        array_list_erased.append(&failing, std.testing.failing_allocator, 1),
+    );
+}
+
+test "array_list_erased append matches MemoryAccount allocator ledger" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const account_mod = @import("../core/memory.zig");
+
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var typed = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer typed.small_slab.deinit(std.testing.allocator);
+        typed.small_slab_enabled = slab_enabled;
+        var erased_account = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer erased_account.small_slab.deinit(std.testing.allocator);
+        erased_account.small_slab_enabled = slab_enabled;
+
+        const typed_gpa = typed.accountedAllocator();
+        const erased_gpa = erased_account.accountedAllocator();
+        var std_list: std.ArrayList(Sample) = .empty;
+        defer std_list.deinit(typed_gpa);
+        var erased: std.ArrayList(Sample) = .empty;
+        defer erased.deinit(erased_gpa);
+
+        var i: u32 = 0;
+        while (i < 32) : (i += 1) {
+            const item = Sample{ .a = i, .b = i + 1, .c = i };
+            try std_list.append(typed_gpa, item);
+            try array_list_erased.append(&erased, erased_gpa, item);
+            try std.testing.expectEqual(typed.allocated_bytes, erased_account.allocated_bytes);
+            try std.testing.expectEqual(std_list.capacity, erased.capacity);
+            try std.testing.expectEqual(std_list.items.len, erased.items.len);
+        }
+    }
+}
+
+test "array_list_erased toOwnedSlice matches std ArrayList shrink-to-fit" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const types = .{ u32, Sample, []const u8 };
+
+    inline for (types) |T| {
+        var empty: std.ArrayList(T) = .empty;
+        const empty_owned = try array_list_erased.toOwnedSlice(&empty, std.testing.allocator);
+        defer std.testing.allocator.free(empty_owned);
+        try std.testing.expectEqual(@as(usize, 0), empty_owned.len);
+        try std.testing.expectEqual(@as(usize, 0), empty.items.len);
+        try std.testing.expectEqual(@as(usize, 0), empty.capacity);
+
+        var std_list: std.ArrayList(T) = .empty;
+        defer std_list.deinit(std.testing.allocator);
+        var erased: std.ArrayList(T) = .empty;
+        defer erased.deinit(std.testing.allocator);
+
+        var i: u32 = 0;
+        while (i < 64) : (i += 1) {
+            const item: T = switch (T) {
+                u32 => i,
+                Sample => .{ .a = i, .b = i + 1, .c = i },
+                []const u8 => "item",
+                else => unreachable,
+            };
+            try std_list.append(std.testing.allocator, item);
+            try array_list_erased.append(&erased, std.testing.allocator, item);
+        }
+
+        const std_owned = try std_list.toOwnedSlice(std.testing.allocator);
+        defer std.testing.allocator.free(std_owned);
+        const erased_owned = try array_list_erased.toOwnedSlice(&erased, std.testing.allocator);
+        defer std.testing.allocator.free(erased_owned);
+        try std.testing.expectEqual(std_owned.len, erased_owned.len);
+        try std.testing.expectEqualSlices(T, std_owned, erased_owned);
+        try std.testing.expectEqual(@as(usize, 0), std_list.items.len);
+        try std.testing.expectEqual(@as(usize, 0), erased.items.len);
+        try std.testing.expectEqual(@as(usize, 0), std_list.capacity);
+        try std.testing.expectEqual(@as(usize, 0), erased.capacity);
+    }
+}
+
+test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
+    const array_list_erased = @import("../core/array_list_erased.zig");
+    const Sample = struct { a: u64, b: u64, c: u32 };
+    const account_mod = @import("../core/memory.zig");
+
+    for ([_]bool{ false, true }) |slab_enabled| {
+        var typed = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer typed.small_slab.deinit(std.testing.allocator);
+        typed.small_slab_enabled = slab_enabled;
+        var erased_account = account_mod.MemoryAccount.init(std.testing.allocator);
+        defer erased_account.small_slab.deinit(std.testing.allocator);
+        erased_account.small_slab_enabled = slab_enabled;
+
+        const typed_gpa = typed.accountedAllocator();
+        const erased_gpa = erased_account.accountedAllocator();
+        var std_list: std.ArrayList(Sample) = .empty;
+        defer std_list.deinit(typed_gpa);
+        var erased: std.ArrayList(Sample) = .empty;
+        defer erased.deinit(erased_gpa);
+
+        var i: u32 = 0;
+        while (i < 32) : (i += 1) {
+            const item = Sample{ .a = i, .b = i + 1, .c = i };
+            try std_list.append(typed_gpa, item);
+            try array_list_erased.append(&erased, erased_gpa, item);
+        }
+
+        const std_owned = try std_list.toOwnedSlice(typed_gpa);
+        defer typed_gpa.free(std_owned);
+        const erased_owned = try array_list_erased.toOwnedSlice(&erased, erased_gpa);
+        defer erased_gpa.free(erased_owned);
+        try std.testing.expectEqual(typed.allocated_bytes, erased_account.allocated_bytes);
+        try std.testing.expectEqual(std_owned.len, erased_owned.len);
+        try std.testing.expectEqualSlices(Sample, std_owned, erased_owned);
+        try std.testing.expectEqual(@as(usize, 0), std_list.capacity);
+        try std.testing.expectEqual(@as(usize, 0), erased.capacity);
+    }
+}
+
+test "sort_erased heap matches std.sort.heap" {
+    const sort_erased = @import("../core/sort_erased.zig");
+    const Sample = struct { key: u32, order: u32 };
+
+    var empty: [0]u32 = .{};
+    sort_erased.heap(u32, &empty, {}, std.sort.asc(u32));
+
+    var std_nums = [_]u32{ 7, 1, 4, 1, 9, 0, 3 };
+    var erased_nums = std_nums;
+    std.sort.heap(u32, &std_nums, {}, std.sort.asc(u32));
+    sort_erased.heap(u32, &erased_nums, {}, std.sort.asc(u32));
+    try std.testing.expectEqualSlices(u32, &std_nums, &erased_nums);
+
+    var std_desc = [_]u32{ 3, 8, 2, 8, 1 };
+    var erased_desc = std_desc;
+    std.sort.heap(u32, &std_desc, {}, std.sort.desc(u32));
+    sort_erased.heap(u32, &erased_desc, {}, std.sort.desc(u32));
+    try std.testing.expectEqualSlices(u32, &std_desc, &erased_desc);
+
+    var std_samples = [_]Sample{
+        .{ .key = 2, .order = 0 },
+        .{ .key = 1, .order = 1 },
+        .{ .key = 2, .order = 2 },
+        .{ .key = 0, .order = 3 },
+    };
+    var erased_samples = std_samples;
+    const lessThan = struct {
+        fn lessThan(_: void, a: Sample, b: Sample) bool {
+            return a.key < b.key or (a.key == b.key and a.order < b.order);
+        }
+    }.lessThan;
+    std.sort.heap(Sample, &std_samples, {}, lessThan);
+    sort_erased.heap(Sample, &erased_samples, {}, lessThan);
+    try std.testing.expectEqualSlices(Sample, &std_samples, &erased_samples);
+}
+
+fn expectAuditPrintMatchesFmt(
+    comptime fmt: []const u8,
+    args: anytype,
+    parts: []const @import("../core/gc_audit_print.zig").Part,
+) !void {
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, fmt, args);
+    var actual_buf: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&actual_buf);
+    try @import("../core/gc_audit_print.zig").write(&writer, parts);
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "gc_audit_print leftover formats match debug.print digits" {
+    const gc_audit_print = @import("../core/gc_audit_print.zig");
+
+    try expectAuditPrintMatchesFmt(
+        "gc: {s} AUDIT: {s}\n",
+        .{ "ADDRESS INDEX", "OutOfMemory" },
+        &.{
+            .{ .text = "gc: " },
+            .{ .text = "ADDRESS INDEX" },
+            .{ .text = " AUDIT: " },
+            .{ .text = "OutOfMemory" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: ARENA AUDIT: {d} free blocks read live, {d} live objects unresolvable\n",
+        .{ @as(usize, 3), @as(usize, 11) },
+        &.{
+            .{ .text = "gc: ARENA AUDIT: " },
+            .{ .dec = 3 },
+            .{ .text = " free blocks read live, " },
+            .{ .dec = 11 },
+            .{ .text = " live objects unresolvable\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: DOOMED RECLAIM AUDIT: {s} block=0x{x} allocated_count={d}\n",
+        .{ "AllocCountMismatch", @as(usize, 0x7fabc0), @as(u32, 17) },
+        &.{
+            .{ .text = "gc: DOOMED RECLAIM AUDIT: " },
+            .{ .text = "AllocCountMismatch" },
+            .{ .text = " block=0x" },
+            .{ .hex = 0x7fabc0 },
+            .{ .text = " allocated_count=" },
+            .{ .dec = 17 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT free head out of range block=0x{x} head={d} cells={d}\n",
+        .{ @as(usize, 0x1000), @as(u32, 64), @as(u32, 32) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT free head out of range block=0x" },
+            .{ .hex = 0x1000 },
+            .{ .text = " head=" },
+            .{ .dec = 64 },
+            .{ .text = " cells=" },
+            .{ .dec = 32 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x{x} link={d} walked={d}\n",
+        .{ @as(usize, 0x20), @as(u32, 7), @as(u32, 4) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x" },
+            .{ .hex = 0x20 },
+            .{ .text = " link=" },
+            .{ .dec = 7 },
+            .{ .text = " walked=" },
+            .{ .dec = 4 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT free poison mismatch block=0x{x} link={d} raw=0x{x} walked={d} head={d} bump={d} allocated={d}\n",
+        .{ @as(usize, 0xabcdef), @as(u32, 9), @as(u32, 0xdead), @as(u32, 2), @as(u32, 1), @as(u32, 8), @as(u32, 3) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT free poison mismatch block=0x" },
+            .{ .hex = 0xabcdef },
+            .{ .text = " link=" },
+            .{ .dec = 9 },
+            .{ .text = " raw=0x" },
+            .{ .hex = 0xdead },
+            .{ .text = " walked=" },
+            .{ .dec = 2 },
+            .{ .text = " head=" },
+            .{ .dec = 1 },
+            .{ .text = " bump=" },
+            .{ .dec = 8 },
+            .{ .text = " allocated=" },
+            .{ .dec = 3 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK HEAP AUDIT incomplete free chain block=0x{x} walked={d} expected={d} head={d} bump={d} allocated={d}\n",
+        .{ @as(usize, 0xf0), @as(u32, 5), @as(u32, 6), @as(u32, 0), @as(u32, 9), @as(u32, 3) },
+        &.{
+            .{ .text = "gc: BLOCK HEAP AUDIT incomplete free chain block=0x" },
+            .{ .hex = 0xf0 },
+            .{ .text = " walked=" },
+            .{ .dec = 5 },
+            .{ .text = " expected=" },
+            .{ .dec = 6 },
+            .{ .text = " head=" },
+            .{ .dec = 0 },
+            .{ .text = " bump=" },
+            .{ .dec = 9 },
+            .{ .text = " allocated=" },
+            .{ .dec = 3 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MAJOR condemned-but-reachable source={s} kind={s}\n",
+        .{ "precise", "object" },
+        &.{
+            .{ .text = "VERIFY-MAJOR condemned-but-reachable source=" },
+            .{ .text = "precise" },
+            .{ .text = " kind=" },
+            .{ .text = "object" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MAJOR {d} precise, {d} conservative-only condemned-but-reachable\n",
+        .{ @as(usize, 2), @as(usize, 5) },
+        &.{
+            .{ .text = "VERIFY-MAJOR " },
+            .{ .dec = 2 },
+            .{ .text = " precise, " },
+            .{ .dec = 5 },
+            .{ .text = " conservative-only condemned-but-reachable\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MINOR setup failed: {s}\n",
+        .{"OutOfMemory"},
+        &.{
+            .{ .text = "VERIFY-MINOR setup failed: " },
+            .{ .text = "OutOfMemory" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n",
+        .{ "precise", @as(u16, 12), "array" },
+        &.{
+            .{ .text = "VERIFY-MINOR condemned-but-reachable source=" },
+            .{ .text = "precise" },
+            .{ .text = " kind=object class=" },
+            .{ .dec = 12 },
+            .{ .text = " payload=" },
+            .{ .text = "array" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n",
+        .{ @as(usize, 4), @as(usize, 9), @as(usize, 1), @as(usize, 3) },
+        &.{
+            .{ .text = "VERIFY-MINOR " },
+            .{ .dec = 4 },
+            .{ .text = " of " },
+            .{ .dec = 9 },
+            .{ .text = " condemned objects are reachable by a full trace (" },
+            .{ .dec = 1 },
+            .{ .text = " precise, " },
+            .{ .dec = 3 },
+            .{ .text = " conservative-only)\n" },
+        },
+    );
+    const Kind = enum { shape, object };
+    try expectAuditPrintMatchesFmt(
+        "gc: ARENA AUDIT live object at 0x{x} (kind {any}) does not resolve\n",
+        .{ @as(usize, 0xabc), Kind.shape },
+        &.{
+            .{ .text = "gc: ARENA AUDIT live object at 0x" },
+            .{ .hex = 0xabc },
+            .{ .text = " (kind ." },
+            .{ .text = @tagName(Kind.shape) },
+            .{ .text = ") does not resolve\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n",
+        .{ @as(u16, 4), "array", "prop_data", "x", @as(u32, 3), true },
+        &.{
+            .{ .text = "MINOR-AUDIT-WHERE owner_class=" },
+            .{ .dec = 4 },
+            .{ .text = " payload=" },
+            .{ .text = "array" },
+            .{ .text = " where=" },
+            .{ .text = "prop_data" },
+            .{ .text = " atom=" },
+            .{ .text = "x" },
+            .{ .text = " nprops=" },
+            .{ .dec = 3 },
+            .{ .text = " owner_marked=" },
+            .{ .text = gc_audit_print.boolText(true) },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child kind={s} class={d}/{s} child_young={} child_marked={}\n",
+        .{ "object", @as(usize, 0x10), false, true, "string", @as(u32, 0), "-", true, false },
+        &.{
+            .{ .text = "MINOR-AUDIT owner=" },
+            .{ .text = "object" },
+            .{ .text = "/ptr" },
+            .{ .hex = 0x10 },
+            .{ .text = " owner_young=" },
+            .{ .text = gc_audit_print.boolText(false) },
+            .{ .text = " owner_remembered=" },
+            .{ .text = gc_audit_print.boolText(true) },
+            .{ .text = " -> child kind=" },
+            .{ .text = "string" },
+            .{ .text = " class=" },
+            .{ .dec = 0 },
+            .{ .text = "/" },
+            .{ .text = "-" },
+            .{ .text = " child_young=" },
+            .{ .text = gc_audit_print.boolText(true) },
+            .{ .text = " child_marked=" },
+            .{ .text = gc_audit_print.boolText(false) },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: BLOCK CELL AUDIT young cell 0x{x} index {d} in unlisted block 0x{x} (flags=0x{x}, block_flags=0x{x}, marked={any}, doomed=0x{x}, doomed_cursor={d}, doomed_word=0x{x})\n",
+        .{ @as(usize, 0x20), @as(u32, 3), @as(usize, 0x40), @as(u8, 0x11), @as(u8, 0x2), true, @as(u64, 0x8), @as(u32, 1), @as(u64, 0xff) },
+        &.{
+            .{ .text = "gc: BLOCK CELL AUDIT young cell 0x" },
+            .{ .hex = 0x20 },
+            .{ .text = " index " },
+            .{ .dec = 3 },
+            .{ .text = " in unlisted block 0x" },
+            .{ .hex = 0x40 },
+            .{ .text = " (flags=0x" },
+            .{ .hex = 0x11 },
+            .{ .text = ", block_flags=0x" },
+            .{ .hex = 0x2 },
+            .{ .text = ", marked=" },
+            .{ .text = gc_audit_print.boolText(true) },
+            .{ .text = ", doomed=0x" },
+            .{ .hex = 0x8 },
+            .{ .text = ", doomed_cursor=" },
+            .{ .dec = 1 },
+            .{ .text = ", doomed_word=0x" },
+            .{ .hex = 0xff },
+            .{ .text = ")\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x{x} class_id={d} payload={s} weak_id={} borrowed={} reached teardown unstamped\n",
+        .{ @as(usize, 0xabc), @as(u16, 1), "none", true, false },
+        &.{
+            .{ .text = "gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x" },
+            .{ .hex = 0xabc },
+            .{ .text = " class_id=" },
+            .{ .dec = 1 },
+            .{ .text = " payload=" },
+            .{ .text = "none" },
+            .{ .text = " weak_id=" },
+            .{ .text = gc_audit_print.boolText(true) },
+            .{ .text = " borrowed=" },
+            .{ .text = gc_audit_print.boolText(false) },
+            .{ .text = " reached teardown unstamped\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "UNBARRIERED-STORE site={s} hit={d} owner_kind={s} owner_class={d} child_kind={s}\n",
+        .{ "set_property_data_overwrite", @as(usize, 2), "object", @as(u32, 7), "string" },
+        &.{
+            .{ .text = "UNBARRIERED-STORE site=" },
+            .{ .text = "set_property_data_overwrite" },
+            .{ .text = " hit=" },
+            .{ .dec = 2 },
+            .{ .text = " owner_kind=" },
+            .{ .text = "object" },
+            .{ .text = " owner_class=" },
+            .{ .dec = 7 },
+            .{ .text = " child_kind=" },
+            .{ .text = "string" },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: ARENA AUDIT free block at 0x{x} reads heap_accounted (kind {any}, lifetime_word 0x{x})\n",
+        .{ @as(usize, 0x50), Kind.object, @as(u32, 0x11) },
+        &.{
+            .{ .text = "gc: ARENA AUDIT free block at 0x" },
+            .{ .hex = 0x50 },
+            .{ .text = " reads heap_accounted (kind ." },
+            .{ .text = @tagName(Kind.object) },
+            .{ .text = ", lifetime_word 0x" },
+            .{ .hex = 0x11 },
+            .{ .text = ")\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n",
+        .{ @as(u16, 8), true, @as(u32, 16), false, @as(usize, 0x90) },
+        &.{
+            .{ .text = "gc: PROPERTY STORAGE AUDIT: array owner class=" },
+            .{ .dec = 8 },
+            .{ .text = " fast_array=" },
+            .{ .text = gc_audit_print.boolText(true) },
+            .{ .text = " capacity=" },
+            .{ .dec = 16 },
+            .{ .text = " young=" },
+            .{ .text = gc_audit_print.boolText(false) },
+            .{ .text = " cell=0x" },
+            .{ .hex = 0x90 },
+            .{ .text = "\n" },
+        },
+    );
+    var alloc_info_buf: [16]u8 = undefined;
+    var flags_buf: [16]u8 = undefined;
+    var lifetime_buf: [16]u8 = undefined;
+    try expectAuditPrintMatchesFmt(
+        "gc: REPRESENTATION HEADER population={s} header=0x{x} kind={s} size_class={d} alloc_info=0x{x:0>2} flags=0x{x:0>2} lifetime=0x{x:0>8} error={s}\n",
+        .{ "live", @as(usize, 0xabc), "object", @as(u8, 3), @as(u8, 0xa), @as(u8, 0), @as(u32, 0x11), "DoomedBitForFreeCell" },
+        &.{
+            .{ .text = "gc: REPRESENTATION HEADER population=" },
+            .{ .text = "live" },
+            .{ .text = " header=0x" },
+            .{ .hex = 0xabc },
+            .{ .text = " kind=" },
+            .{ .text = "object" },
+            .{ .text = " size_class=" },
+            .{ .dec = 3 },
+            .{ .text = " alloc_info=0x" },
+            .{ .text = gc_audit_print.hexPad(0xa, 2, &alloc_info_buf) },
+            .{ .text = " flags=0x" },
+            .{ .text = gc_audit_print.hexPad(0, 2, &flags_buf) },
+            .{ .text = " lifetime=0x" },
+            .{ .text = gc_audit_print.hexPad(0x11, 8, &lifetime_buf) },
+            .{ .text = " error=" },
+            .{ .text = "DoomedBitForFreeCell" },
+            .{ .text = "\n" },
+        },
+    );
+}
+
+test "gc_audit_print hexPad matches zero-padded hex widths" {
+    const gc_audit_print = @import("../core/gc_audit_print.zig");
+    const cases = .{
+        .{ 0, 2, "{x:0>2}" },
+        .{ 0xa, 2, "{x:0>2}" },
+        .{ 0xff, 2, "{x:0>2}" },
+        .{ 0x100, 2, "{x:0>2}" },
+        .{ 0, 4, "{x:0>4}" },
+        .{ 0x1, 4, "{x:0>4}" },
+        .{ 0x1f, 4, "{x:0>4}" },
+        .{ 0x7f, 4, "{x:0>4}" },
+        .{ 0xffff, 4, "{x:0>4}" },
+        .{ 0x10000, 4, "{x:0>4}" },
+        .{ 0, 8, "{x:0>8}" },
+        .{ 0x11, 8, "{x:0>8}" },
+        .{ 0xffffffff, 8, "{x:0>8}" },
+        .{ std.math.maxInt(u64), 8, "{x:0>8}" },
+    };
+    inline for (cases) |case| {
+        var expected_buf: [32]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buf, case[2], .{@as(u64, case[0])});
+        var actual_buf: [16]u8 = undefined;
+        const actual = gc_audit_print.hexPad(case[0], case[1], &actual_buf);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "json leftover unicode escapes match hexPad min-width" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(rt.memory.allocator);
+    try core.json.appendEscapedJsonString(rt, &buffer, &[_]u8{ 0x01, 0x1f, 'A' });
+    try std.testing.expectEqualStrings("\"\\u0001\\u001fA\"", buffer.items);
+}
+
+test "gc_audit_print handles full unsigned range and writer errors" {
+    const gc_audit_print = @import("../core/gc_audit_print.zig");
+    const max_u64 = std.math.maxInt(u64);
+    try expectAuditPrintMatchesFmt(
+        "zero {d} hex {x} max {d} hexmax {x}\n",
+        .{ @as(u64, 0), @as(u64, 0), max_u64, max_u64 },
+        &.{
+            .{ .text = "zero " },
+            .{ .dec = 0 },
+            .{ .text = " hex " },
+            .{ .hex = 0 },
+            .{ .text = " max " },
+            .{ .dec = max_u64 },
+            .{ .text = " hexmax " },
+            .{ .hex = max_u64 },
+            .{ .text = "\n" },
+        },
+    );
+    try expectAuditPrintMatchesFmt(
+        "{d} {d} {d} {x} {x} {x}",
+        .{ @as(u64, 1), @as(u64, 9), @as(u64, 10), @as(u64, 0xa), @as(u64, 0xff), @as(u64, 0x1000) },
+        &.{
+            .{ .dec = 1 },
+            .{ .text = " " },
+            .{ .dec = 9 },
+            .{ .text = " " },
+            .{ .dec = 10 },
+            .{ .text = " " },
+            .{ .hex = 0xa },
+            .{ .text = " " },
+            .{ .hex = 0xff },
+            .{ .text = " " },
+            .{ .hex = 0x1000 },
+        },
+    );
+
+    var buffer: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(buffer[0..1]);
+    try std.testing.expectError(error.WriteFailed, gc_audit_print.write(&writer, &.{
+        .{ .text = "gc: " },
+        .{ .dec = 12 },
+    }));
+    writer = std.Io.Writer.fixed(buffer[0..5]);
+    try std.testing.expectError(error.WriteFailed, gc_audit_print.write(&writer, &.{
+        .{ .text = "gc: " },
+        .{ .dec = 12 },
+        .{ .text = " more" },
+    }));
+    writer = std.Io.Writer.fixed(buffer[0..8]);
+    try std.testing.expectError(error.WriteFailed, gc_audit_print.write(&writer, &.{
+        .{ .text = "prefix " },
+        .{ .dec = max_u64 },
+    }));
 }

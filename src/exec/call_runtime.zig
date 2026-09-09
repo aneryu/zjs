@@ -605,7 +605,7 @@ noinline fn runSyncInlineRouteMovedArgs(
 }
 
 pub noinline fn runSyncInlineRouteOwnedCopy(
-    comptime idle_machine: bool,
+    idle_machine: bool,
     invocation: *inline_calls.ActiveInvocation,
     target: *const inline_calls.InlineTarget,
     ctx: *core.JSContext,
@@ -618,7 +618,13 @@ pub noinline fn runSyncInlineRouteOwnedCopy(
     var owned_args = OwnedArgList{};
     try owned_args.init(ctx.runtime, this_value, func, args);
     defer owned_args.deinit();
-    return runSyncInlineRouteMoved(idle_machine, invocation, target, global, owned_args.values, out);
+    // One outlined copy owns the arg list. The idle vs active fence stays
+    // specialized in `runSyncInlineRouteMoved`; a runtime branch here avoids
+    // instantiating this helper twice for a comptime bool.
+    if (idle_machine) {
+        return runSyncInlineRouteMoved(true, invocation, target, global, owned_args.values, out);
+    }
+    return runSyncInlineRouteMoved(false, invocation, target, global, owned_args.values, out);
 }
 
 noinline fn runSyncInlineRouteOwnedArgsGeneral(
@@ -1125,15 +1131,7 @@ noinline fn callNativeCallableByName(
                 return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
             },
             'f' => if (std.mem.eql(u8, name, "fromCharCode")) {
-                // Skip the long `std.mem.eql` chain below for the
-                // canonical `String.fromCharCode` shape; routes
-                // straight to the same handler the slow path uses,
-                // so coercion semantics (e.g. string args, BigInt
-                // rejection) stay identical.
                 return string_ops.stringFromCharCode(ctx, output, global, args);
-            },
-            'r' => if (std.mem.eql(u8, name, "raw")) {
-                return string_ops.stringRaw(ctx, output, global, args, caller_function, caller_frame);
             },
             else => {},
         }
@@ -1143,13 +1141,6 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "GeneratorFunction")) return function_ops.constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx, func, args, &.{});
-    if (std.mem.eql(u8, name, "Array") and function_object.arrayBuiltinMarker() == .constructor) {
-        return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
-    }
-    if (std.mem.eql(u8, name, "String")) return string_ops.stringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "Number")) return builtin_glue.numberFunctionCall(ctx, output, global, args);
-    if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.bigIntFunctionCall(ctx, output, global, args);
     if (std.mem.eql(u8, name, "parseInt")) return builtin_glue.globalParseInt(ctx, output, global, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.globalParseFloat(ctx, output, global, args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.globalIsNaNOrFinite(ctx, output, global, this_value, args, true);
@@ -1233,14 +1224,8 @@ noinline fn callNativeCallableByName(
         if (try generatorReturn(ctx, output, global, this_value, args)) |value| return value;
         if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
     }
-    if (std.mem.eql(u8, name, "fromCharCode")) {
-        return string_ops.stringFromCharCode(ctx, output, global, args);
-    }
     if (std.mem.eql(u8, name, "fromCodePoint")) {
         return string_ops.stringFromCodePoint(ctx, output, global, args);
-    }
-    if (std.mem.eql(u8, name, "raw")) {
-        return string_ops.stringRaw(ctx, output, global, args, caller_function, caller_frame);
     }
     if (core.host_function.builtin_method_id_lookup.date.staticMethodId(name)) |method_id| {
         if (object_ops.objectFromValue(this_value)) |receiver_object| {

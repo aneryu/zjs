@@ -10,6 +10,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("../core/root.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
 const labels = @import("labels.zig");
@@ -2933,7 +2934,7 @@ pub fn auditBoundaryUniqueness(
             return error.OutOfMemory;
         defer memory.free(OptimizationBoundary, sorted_bounds);
         @memcpy(sorted_bounds, opt_bounds);
-        std.sort.heap(OptimizationBoundary, sorted_bounds, {}, optimizationBoundaryLessThan);
+        sort_erased.heap(OptimizationBoundary, sorted_bounds, {}, optimizationBoundaryLessThan);
         if (duplicateReplacementOwner(sorted_bounds)) |duplicate| {
             var key_buffer: [384]u8 = undefined;
             var key_writer = std.Io.Writer.fixed(&key_buffer);
@@ -3324,7 +3325,7 @@ test "compiler.cfg: unreachable self-loop does not retain its block" {
         .{ .input_offset = input.label_slots[dead.index()].bound_offset, .label_index = dead.index() },
         .{ .input_offset = input.label_slots[merge.index()].bound_offset, .label_index = merge.index() },
     };
-    std.sort.heap(BindEntry, &binds, {}, bindLessThan);
+    sort_erased.heap(BindEntry, &binds, {}, bindLessThan);
 
     var graph = try build(&rt.memory, &input, &binds);
     defer graph.deinit();
@@ -3367,7 +3368,7 @@ test "compiler.cfg: alias group coalescing is downstream-indistinguishable" {
             .label_index = alias.index(),
         },
     };
-    std.sort.heap(BindEntry, &binds, {}, bindLessThan);
+    sort_erased.heap(BindEntry, &binds, {}, bindLessThan);
 
     var graph = try build(&rt.memory, &input, &binds);
     defer graph.deinit();

@@ -3945,6 +3945,22 @@ test "a dynamic function outlives its teardown when its object held the last byt
     try std.testing.expectEqualStrings("16\n", stream.buffered());
 }
 
+test "string leftover ToIntegerOrInfinity matches value_ops including bigint TypeError" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    _ = try js.evalWithOutput(
+        \\print("ab".repeat(2));
+        \\print("hello".slice(1.9, 4));
+        \\print("hello".indexOf("l", true));
+        \\try { "ab".repeat(1n); print("no throw"); } catch (e) { print(e.name); }
+        \\try { String.fromCodePoint(1n); print("from-no"); } catch (e) { print(e.name); }
+    , &stream);
+    try std.testing.expectEqualStrings("abab\nell\n2\nTypeError\nTypeError\n", stream.buffered());
+}
+
 test "vm executes push constants arithmetic comparisons and return" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -10223,6 +10239,984 @@ test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
         \\assert.sameValue(isFinite("1"), true);
         \\assert.sameValue(isFinite(Infinity), false);
         \\assert.sameValue(Math.trunc(-1.9), -1);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue("x".italics(), "<i>x</i>");
+        \\assert.sameValue("x".sub(), "<sub>x</sub>");
+        \\assert.sameValue("".bold(), "<b></b>");
+        \\assert.sameValue("x".fontcolor(), '<font color="undefined">x</font>');
+        \\assert.sameValue("x".fontsize(7), '<font size="7">x</font>');
+        \\assert.sameValue("x".link('a"b'), '<a href="a&quot;b">x</a>');
+        \\assert.sameValue("x".anchor("a", "b"), '<a name="a">x</a>');
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "disposable stack extras leftover runtime metadata preserves dispose aliases and disposed" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(DisposableStack.prototype[Symbol.toStringTag], "DisposableStack");
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.toStringTag], "AsyncDisposableStack");
+        \\assert.sameValue(DisposableStack.prototype[Symbol.dispose], DisposableStack.prototype.dispose);
+        \\assert.sameValue(DisposableStack.prototype[Symbol.dispose].name, "dispose");
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose], AsyncDisposableStack.prototype.disposeAsync);
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose].name, "disposeAsync");
+        \\var disposedDesc = Object.getOwnPropertyDescriptor(DisposableStack.prototype, "disposed");
+        \\assert.sameValue(disposedDesc.get.name, "get disposed");
+        \\assert.sameValue(disposedDesc.get.call(new DisposableStack()), false);
+        \\assert.throws(TypeError, function() { disposedDesc.get.call({}); });
+        \\var asyncDisposedDesc = Object.getOwnPropertyDescriptor(AsyncDisposableStack.prototype, "disposed");
+        \\assert.sameValue(asyncDisposedDesc.get.name, "get disposed");
+        \\assert.sameValue(asyncDisposedDesc.get.call(new AsyncDisposableStack()), false);
+        \\assert.throws(TypeError, function() { asyncDisposedDesc.get.call({}); });
+        \\var stack = new DisposableStack();
+        \\var called = 0;
+        \\stack.adopt({}, function() { called++; });
+        \\var moved = stack.move();
+        \\assert.sameValue(stack.disposed, true);
+        \\moved.dispose();
+        \\assert.sameValue(called, 1);
+        \\assert.sameValue(moved.disposed, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "buffer constructor extras leftover runtime tables preserve ArrayBuffer SharedArrayBuffer and DataView" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(ArrayBuffer[Symbol.species], ArrayBuffer);
+        \\assert.sameValue(SharedArrayBuffer[Symbol.species], SharedArrayBuffer);
+        \\assert.sameValue(ArrayBuffer.prototype[Symbol.toStringTag], "ArrayBuffer");
+        \\assert.sameValue(SharedArrayBuffer.prototype[Symbol.toStringTag], "SharedArrayBuffer");
+        \\assert.sameValue(DataView.prototype[Symbol.toStringTag], "DataView");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get.name, "get byteLength");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "growable").get.name, "get growable");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "growable"), undefined);
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "resizable"), undefined);
+        \\var ab = new ArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(ab.byteLength, 8);
+        \\assert.sameValue(ab.maxByteLength, 16);
+        \\assert.sameValue(ab.resizable, true);
+        \\assert.sameValue(ab.detached, false);
+        \\assert.sameValue(ab.immutable, false);
+        \\ab.resize(12);
+        \\assert.sameValue(ab.byteLength, 12);
+        \\assert.sameValue(ab.slice(0, 4).byteLength, 4);
+        \\var sab = new SharedArrayBuffer(8, { maxByteLength: 16 });
+        \\assert.sameValue(sab.byteLength, 8);
+        \\assert.sameValue(sab.maxByteLength, 16);
+        \\assert.sameValue(sab.growable, true);
+        \\sab.grow(12);
+        \\assert.sameValue(sab.byteLength, 12);
+        \\var dv = new DataView(new ArrayBuffer(4), 1, 2);
+        \\assert.sameValue(dv.byteLength, 2);
+        \\assert.sameValue(dv.byteOffset, 1);
+        \\assert.sameValue(dv.buffer.byteLength, 4);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "iterator step leftover post-next decode preserves for-of and helper results" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var events = [];
+        \\var step = 0;
+        \\var custom = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() {
+        \\    if (step++ === 0) {
+        \\      return {
+        \\        get done() { events.push("n-done-false"); return false; },
+        \\        get value() { events.push("n-value"); return 7; },
+        \\      };
+        \\    }
+        \\    return {
+        \\      get done() { events.push("n-done-true"); return true; },
+        \\      get value() { throw new Error("done value was read"); },
+        \\    };
+        \\  },
+        \\};
+        \\var sum = 0;
+        \\for (var value of custom) sum += value;
+        \\assert.sameValue(sum, 7);
+        \\assert.sameValue(events.join(","), "n-done-false,n-value,n-done-true");
+        \\var helperEvents = [];
+        \\var helperStep = 0;
+        \\var source = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() {
+        \\    if (helperStep++ === 0) {
+        \\      return {
+        \\        get done() { helperEvents.push("h-done-false"); return false; },
+        \\        get value() { helperEvents.push("h-value"); return 3; },
+        \\      };
+        \\    }
+        \\    return { done: true };
+        \\  },
+        \\};
+        \\var mapped = Iterator.from(source).map(function(x) { return x + 1; });
+        \\assert.sameValue(mapped.next().value, 4);
+        \\assert.sameValue(mapped.next().done, true);
+        \\assert.sameValue(helperEvents.join(","), "h-done-false,h-value");
+        \\var bad = { [Symbol.iterator]() { return this; }, next() { return 1; } };
+        \\assert.throws(TypeError, function() { for (var x of bad) {} });
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "class field initializer leftover runtime static preserves instance static private and computed fields" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var key = "comp";
+        \\class C {
+        \\  inst;
+        \\  instInit = 1;
+        \\  #priv;
+        \\  #privInit = 2;
+        \\  static st;
+        \\  static stInit = 3;
+        \\  static #spriv;
+        \\  static #sprivInit = 4;
+        \\  static [key];
+        \\  static [key + "Init"] = 5;
+        \\  readPriv() { return this.#priv; }
+        \\  readPrivInit() { return this.#privInit; }
+        \\  static readSpriv() { return C.#spriv; }
+        \\  static readSprivInit() { return C.#sprivInit; }
+        \\}
+        \\var o = new C();
+        \\assert.sameValue(o.inst, undefined);
+        \\assert.sameValue(o.instInit, 1);
+        \\assert.sameValue(o.readPriv(), undefined);
+        \\assert.sameValue(o.readPrivInit(), 2);
+        \\assert.sameValue(C.st, undefined);
+        \\assert.sameValue(C.stInit, 3);
+        \\assert.sameValue(C.readSpriv(), undefined);
+        \\assert.sameValue(C.readSprivInit(), 4);
+        \\assert.sameValue(C.comp, undefined);
+        \\assert.sameValue(C.compInit, 5);
+        \\class D {
+        \\  nameField = class { static { this.seen = this.name; } };
+        \\  static staticName = class { static { this.seen = this.name; } };
+        \\}
+        \\assert.sameValue((new D()).nameField.seen, "nameField");
+        \\assert.sameValue(D.staticName.seen, "staticName");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover instance-computed public field initializer through shared emit" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var key = "comp";
+        \\class C {
+        \\  [key];
+        \\  [key + "Init"] = 7;
+        \\  named = 1;
+        \\  static [key + "S"] = 8;
+        \\}
+        \\var o = new C();
+        \\assert.sameValue(o.comp, undefined);
+        \\assert.sameValue(o.compInit, 7);
+        \\assert.sameValue(o.named, 1);
+        \\assert.sameValue(C.compS, 8);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(o, "comp"), true);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(o, "compInit"), true);
+        \\class D {
+        \\  [key + "Name"] = class { static { this.seen = this.name; } };
+        \\}
+        \\assert.sameValue((new D()).compName.seen, "compName");
+        \\class E {
+        \\  ["x"] = 1;
+        \\  ["y"];
+        \\}
+        \\var e = new E();
+        \\assert.sameValue(e.x, 1);
+        \\assert.sameValue(e.y, undefined);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover do while parse through one runtime flag" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var n = 0;
+        \\while (n < 3) n += 1;
+        \\assert.sameValue(n, 3);
+        \\var d = 0;
+        \\do { d += 1; } while (d < 3);
+        \\assert.sameValue(d, 3);
+        \\var once = 0;
+        \\do { once += 1; } while (false);
+        \\assert.sameValue(once, 1);
+        \\var broken = 0;
+        \\outer: while (true) {
+        \\  while (true) {
+        \\    broken += 1;
+        \\    break outer;
+        \\  }
+        \\}
+        \\assert.sameValue(broken, 1);
+        \\var continued = 0;
+        \\var i = 0;
+        \\loop: do {
+        \\  i += 1;
+        \\  if (i === 1) continue loop;
+        \\  continued += 1;
+        \\} while (i < 3);
+        \\assert.sameValue(i, 3);
+        \\assert.sameValue(continued, 2);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover error stack at-line format through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function makeError() {
+        \\    return new Error("x");
+        \\}
+        \\var captured = makeError().stack;
+        \\assert.sameValue(typeof captured, "string");
+        \\assert.sameValue(captured.indexOf("    at makeError") >= 0, true);
+        \\assert.sameValue(captured.indexOf(" (") >= 0, true);
+        \\function evalThrower() {
+        \\    try { eval("]"); } catch (e) { return e; }
+        \\    return null;
+        \\}
+        \\var liveParse = evalThrower().stack;
+        \\assert.sameValue(typeof liveParse, "string");
+        \\assert.sameValue(liveParse.indexOf("    at ") >= 0, true);
+        \\assert.sameValue(liveParse.indexOf("at evalThrower") >= 0, true);
+        \\function mark() {
+        \\    Error.captureStackTrace(target);
+        \\}
+        \\var target = {};
+        \\function outer() { mark(); }
+        \\outer();
+        \\assert.sameValue(typeof target.stack, "string");
+        \\assert.sameValue(target.stack.indexOf("    at mark") >= 0, true);
+        \\assert.sameValue(target.stack.indexOf("at outer") >= 0, true);
+        \\function skipMe() {
+        \\    Error.captureStackTrace(skipped, skipMe);
+        \\}
+        \\var skipped = {};
+        \\function skipCaller() { skipMe(); }
+        \\skipCaller();
+        \\assert.sameValue(skipped.stack.indexOf("at skipMe") < 0, true);
+        \\assert.sameValue(skipped.stack.indexOf("at skipCaller") >= 0, true);
+        \\var previousLimit = Error.stackTraceLimit;
+        \\Error.stackTraceLimit = 0;
+        \\var empty = {};
+        \\Error.captureStackTrace(empty);
+        \\assert.sameValue(empty.stack, "");
+        \\Error.stackTraceLimit = previousLimit;
+        \\var previousPrepare = Error.prepareStackTrace;
+        \\Error.prepareStackTrace = function(error, sites) {
+        \\    return error.stack;
+        \\};
+        \\var reentered = new Error("y").stack;
+        \\Error.prepareStackTrace = previousPrepare;
+        \\assert.sameValue(typeof reentered, "string");
+        \\assert.sameValue(reentered.indexOf("    at ") >= 0, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover array-from array-like through one runtime destination" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.compareArray(Array.from([1, 2, 3]), [1, 2, 3]);
+        \\assert.compareArray(Array.from([1, 2, 3], function(x) { return x + 1; }), [2, 3, 4]);
+        \\assert.compareArray(Array.from([7, 8], function(x, i) { return x + i; }), [7, 9]);
+        \\var ta = Uint8Array.from({ length: 2, 0: 4, 1: 5 });
+        \\assert.sameValue(ta.length, 2);
+        \\assert.sameValue(ta[0], 4);
+        \\assert.sameValue(ta[1], 5);
+        \\var mapped = Uint8Array.from([1, 2], function(x) { return x * 2; });
+        \\assert.sameValue(mapped[0], 2);
+        \\assert.sameValue(mapped[1], 4);
+        \\var C = function() {};
+        \\var custom = Array.from.call(C, ["a", "b"]);
+        \\assert.sameValue(custom instanceof C, true);
+        \\assert.sameValue(custom[0], "a");
+        \\assert.sameValue(custom[1], "b");
+        \\assert.sameValue(custom.length, 2);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover proxy set trap through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\"use strict";
+        \\var set = [];
+        \\var p = new Proxy({}, { set: function (o, k, v) { set.push(k); o[k] = v; return true; }});
+        \\p.foo = 1;
+        \\assert.sameValue(set + "", "foo");
+        \\assert.sameValue(p.foo, 1);
+        \\assert.sameValue(Reflect.set(p, "bar", 2), true);
+        \\assert.sameValue(p.bar, 2);
+        \\var rejected = new Proxy({}, { set: function() { return false; } });
+        \\var threw = false;
+        \\try { rejected.x = 3; } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\assert.sameValue(Reflect.set(rejected, "y", 3), false);
+        \\var passthrough = new Proxy({ a: 0 }, {});
+        \\passthrough.a = 4;
+        \\assert.sameValue(passthrough.a, 4);
+        \\var stackProxy = new Proxy(new Error("x"), {});
+        \\Object.defineProperty(stackProxy, "stack", Object.getOwnPropertyDescriptor(Error.prototype, "stack"));
+        \\stackProxy.stack = "updated";
+        \\assert.sameValue(stackProxy.stack, "updated");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover proxy extensible trap through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\"use strict";
+        \\var seen = [];
+        \\var p = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("is"); return Object.isExtensible(t); }
+        \\});
+        \\assert.sameValue(Object.isExtensible(p), true);
+        \\assert.sameValue(seen + "", "is");
+        \\var preventTarget = {};
+        \\var preventProxy = new Proxy(preventTarget, {
+        \\  preventExtensions: function (t) { seen.push("prevent"); Object.preventExtensions(t); return true; }
+        \\});
+        \\Object.preventExtensions(preventProxy);
+        \\assert.sameValue(Object.isExtensible(preventTarget), false);
+        \\assert.sameValue(Object.isExtensible(preventProxy), false);
+        \\assert.sameValue(seen + "", "is,prevent");
+        \\var inner = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("inner"); return Object.isExtensible(t); }
+        \\});
+        \\var outer = new Proxy(inner, {});
+        \\assert.sameValue(Object.isExtensible(outer), true);
+        \\assert.sameValue(seen + "", "is,prevent,inner");
+        \\Object.preventExtensions(outer);
+        \\assert.sameValue(Object.isExtensible(outer), false);
+        \\var rejected = new Proxy({}, { preventExtensions: function () { return false; } });
+        \\assert.sameValue(Reflect.preventExtensions(rejected), false);
+        \\var threw = false;
+        \\try { Object.preventExtensions(rejected); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var sealed = Object.preventExtensions({});
+        \\var mismatch = new Proxy(sealed, { isExtensible: function () { return true; } });
+        \\var threw2 = false;
+        \\try { Object.isExtensible(mismatch); } catch (e) { threw2 = e instanceof TypeError; }
+        \\assert.sameValue(threw2, true);
+        \\var mismatchPrevent = new Proxy({}, { preventExtensions: function () { return true; } });
+        \\var threw3 = false;
+        \\try { Object.preventExtensions(mismatchPrevent); } catch (e) { threw3 = e instanceof TypeError; }
+        \\assert.sameValue(threw3, true);
+        \\var plain = {};
+        \\assert.sameValue(Object.isExtensible(plain), true);
+        \\Object.preventExtensions(plain);
+        \\assert.sameValue(Object.isExtensible(plain), false);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover proxy has trap through one outlined walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var seen = [];
+        \\var target = { foo: 1 };
+        \\var p = new Proxy(target, {
+        \\  has: function (t, k) { seen.push(k); return Reflect.has(t, k); }
+        \\});
+        \\assert.sameValue("foo" in p, true);
+        \\assert.sameValue("bar" in p, false);
+        \\assert.sameValue(Reflect.has(p, "foo"), true);
+        \\var withHit = false;
+        \\with (p) { withHit = typeof foo === "number"; }
+        \\assert.sameValue(withHit, true);
+        \\assert.sameValue(seen.indexOf("foo") >= 0, true);
+        \\assert.sameValue(seen.indexOf("bar") >= 0, true);
+        \\assert.sameValue(seen.length >= 4, true);
+        \\var passthrough = new Proxy({ a: 2 }, {});
+        \\assert.sameValue("a" in passthrough, true);
+        \\var withPass = 0;
+        \\with (passthrough) { withPass = a; }
+        \\assert.sameValue(withPass, 2);
+        \\var sealed = Object.preventExtensions({ hidden: 1 });
+        \\Object.defineProperty(sealed, "hidden", { configurable: false });
+        \\var mismatch = new Proxy(sealed, { has: function () { return false; } });
+        \\var threw = false;
+        \\try { "hidden" in mismatch; } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var plain = { x: 3 };
+        \\assert.sameValue("x" in plain, true);
+        \\assert.sameValue("y" in plain, false);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover proxy getPrototypeOf through one outlined walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var proto = { marker: 1 };
+        \\var target = Object.create(proto);
+        \\var seen = [];
+        \\var p = new Proxy(target, {
+        \\  getPrototypeOf: function (t) { seen.push("trap"); return Object.getPrototypeOf(t); }
+        \\});
+        \\assert.sameValue(Object.getPrototypeOf(p), proto);
+        \\assert.sameValue(Reflect.getPrototypeOf(p), proto);
+        \\assert.sameValue(p.__proto__, proto);
+        \\assert.sameValue(seen + "", "trap,trap,trap");
+        \\var inner = new Proxy(Object.create(proto), {
+        \\  getPrototypeOf: function (t) { seen.push("inner"); return Object.getPrototypeOf(t); }
+        \\});
+        \\var outer = new Proxy(inner, {});
+        \\assert.sameValue(Object.getPrototypeOf(outer), proto);
+        \\assert.sameValue(seen + "", "trap,trap,trap,inner");
+        \\var mismatch = new Proxy(Object.preventExtensions(Object.create(proto)), {
+        \\  getPrototypeOf: function () { return {}; }
+        \\});
+        \\var threw = false;
+        \\try { Object.getPrototypeOf(mismatch); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var bad = new Proxy({}, { getPrototypeOf: function () { return 1; } });
+        \\var threw2 = false;
+        \\try { Object.getPrototypeOf(bad); } catch (e) { threw2 = e instanceof TypeError; }
+        \\assert.sameValue(threw2, true);
+        \\var plain = {};
+        \\assert.sameValue(Object.getPrototypeOf(plain), Object.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(Object.prototype), null);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Object.isExtensible builtin through outlined extensible op" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Object.isExtensible(1), false);
+        \\assert.sameValue(Object.isExtensible(undefined), false);
+        \\assert.sameValue(Reflect.isExtensible({}), true);
+        \\var seen = [];
+        \\var p = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("is"); return Object.isExtensible(t); }
+        \\});
+        \\assert.sameValue(Object.isExtensible(p), true);
+        \\assert.sameValue(Reflect.isExtensible(p), true);
+        \\assert.sameValue(seen + "", "is,is");
+        \\var inner = new Proxy({}, {
+        \\  isExtensible: function (t) { seen.push("inner"); return Object.isExtensible(t); }
+        \\});
+        \\assert.sameValue(Object.isExtensible(new Proxy(inner, {})), true);
+        \\assert.sameValue(seen + "", "is,is,inner");
+        \\var sealed = Object.preventExtensions({});
+        \\var mismatch = new Proxy(sealed, { isExtensible: function () { return true; } });
+        \\var threw = false;
+        \\try { Object.isExtensible(mismatch); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var plain = {};
+        \\assert.sameValue(Object.isExtensible(plain), true);
+        \\Object.preventExtensions(plain);
+        \\assert.sameValue(Object.isExtensible(plain), false);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Object.getOwnPropertyNames through outlined enumerable own properties" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var o = Object.defineProperty({ a: 1, b: 2 }, "hidden", { value: 9, enumerable: false });
+        \\var s = Symbol("s");
+        \\o[s] = 3;
+        \\assert.sameValue(Object.getOwnPropertyNames(o) + "", "a,b,hidden");
+        \\assert.sameValue(Object.keys(o) + "", "a,b");
+        \\assert.sameValue(Object.values(o) + "", "1,2");
+        \\assert.sameValue(Object.entries(o) + "", "a,1,b,2");
+        \\assert.sameValue(Object.getOwnPropertySymbols(o).length, 1);
+        \\assert.sameValue(Object.getOwnPropertySymbols(o)[0], s);
+        \\assert.sameValue(Object.getOwnPropertyNames("ab") + "", "0,1,length");
+        \\var threw_names = false;
+        \\try { Object.getOwnPropertyNames(null); } catch (e) { threw_names = e instanceof TypeError; }
+        \\assert.sameValue(threw_names, true);
+        \\var threw_keys = false;
+        \\try { Object.keys(undefined); } catch (e) { threw_keys = e instanceof TypeError; }
+        \\assert.sameValue(threw_keys, true);
+        \\var seen = [];
+        \\var p = new Proxy({ x: 1, y: 2 }, {
+        \\  ownKeys: function (t) { seen.push("keys"); return Object.getOwnPropertyNames(t); }
+        \\});
+        \\assert.sameValue(Object.getOwnPropertyNames(p) + "", "x,y");
+        \\assert.sameValue(Object.keys(p) + "", "x,y");
+        \\assert.sameValue(seen + "", "keys,keys");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.shift index-move through outlined arrayMoveIndex" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var a = [1, , 3, 4];
+        \\assert.sameValue(a.shift(), 1);
+        \\assert.sameValue(a + "", ",3,4");
+        \\assert.sameValue(a.hasOwnProperty("0"), false);
+        \\assert.sameValue(0 in a, false);
+        \\assert.sameValue(a[1], 3);
+        \\var u = [1, , 3];
+        \\assert.sameValue(u.unshift(0), 4);
+        \\assert.sameValue(u + "", "0,1,,3");
+        \\assert.sameValue(u.hasOwnProperty("2"), false);
+        \\var sealed = Object.seal([1, 2, 3]);
+        \\var threw_unshift = false;
+        \\try { sealed.unshift(0); } catch (e) { threw_unshift = e instanceof TypeError; }
+        \\assert.sameValue(threw_unshift, true);
+        \\var shrink = [1, 2, , 4, 5];
+        \\assert.sameValue(shrink.splice(1, 1) + "", "2");
+        \\assert.sameValue(shrink + "", "1,,4,5");
+        \\assert.sameValue(shrink.hasOwnProperty("1"), false);
+        \\var grow = [1, 2, 3];
+        \\assert.sameValue(grow.splice(1, 0, 8, 9) + "", "");
+        \\assert.sameValue(grow + "", "1,8,9,2,3");
+        \\var c = [1, , 3, 4];
+        \\assert.sameValue(c.copyWithin(0, 1, 3) + "", ",3,3,4");
+        \\assert.sameValue(c.hasOwnProperty("0"), false);
+        \\var overlap = [1, 2, 3, 4];
+        \\assert.sameValue(overlap.copyWithin(1, 0, 3) + "", "1,1,2,3");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.slice present-index through outlined arrayCopyPresentIndex" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var a = [1, , 3, 4];
+        \\var sliced = a.slice(0, 3);
+        \\assert.sameValue(sliced + "", "1,,3");
+        \\assert.sameValue(sliced.hasOwnProperty("1"), false);
+        \\assert.sameValue(1 in sliced, false);
+        \\assert.sameValue(sliced[2], 3);
+        \\assert.sameValue([1, 2, 3].slice(1) + "", "2,3");
+        \\var shrink = [1, , 3, 4, 5];
+        \\var removed = shrink.splice(0, 3);
+        \\assert.sameValue(removed + "", "1,,3");
+        \\assert.sameValue(removed.hasOwnProperty("1"), false);
+        \\assert.sameValue(shrink + "", "4,5");
+        \\var grow = [1, 2, 3];
+        \\assert.sameValue(grow.splice(1, 0, 8, 9) + "", "");
+        \\assert.sameValue(grow + "", "1,8,9,2,3");
+        \\var c = [1, , 3].concat([, 5]);
+        \\assert.sameValue(c + "", "1,,3,,5");
+        \\assert.sameValue(c.hasOwnProperty("1"), false);
+        \\assert.sameValue(c.hasOwnProperty("3"), false);
+        \\var o = { 0: 9, length: 1 };
+        \\assert.sameValue([1].concat(o) + "", "1,[object Object]");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover integer binary through live bitwise and number arms" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(2 + 3, 5);
+        \\assert.sameValue(8 - 3, 5);
+        \\assert.sameValue(4 * 5, 20);
+        \\assert.sameValue(10 / 2, 5);
+        \\assert.sameValue(10 % 3, 1);
+        \\assert.sameValue(2 ** 3, 8);
+        \\assert.sameValue(1.5 + 2.25, 3.75);
+        \\assert.sameValue(5 & 3, 1);
+        \\assert.sameValue(5 | 2, 7);
+        \\assert.sameValue(5 ^ 1, 4);
+        \\assert.sameValue(8 << 1, 16);
+        \\assert.sameValue(8 >> 1, 4);
+        \\assert.sameValue(8 >>> 1, 4);
+        \\assert.sameValue("2" * 3, 6);
+        \\assert.sameValue("5" & 3, 1);
+        \\assert.sameValue(1n + 2n, 3n);
+        \\assert.sameValue("a" + "b", "ab");
+        \\assert.sameValue(1 + "2", "12");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.map generic get through one runtime tail" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1, 2, 3].map(function(v) { return v + 1; }) + "", "2,3,4");
+        \\var seen = [];
+        \\assert.sameValue([1, , 3].map(function(v, i) { seen.push(i); return v; }) + "", "1,,3");
+        \\assert.sameValue(seen + "", "0,2");
+        \\var fe = [];
+        \\[1, , 3].forEach(function(v, i) { fe.push(i); });
+        \\assert.sameValue(fe + "", "0,2");
+        \\assert.sameValue([1, , 3].findIndex(function(v) { return v === undefined; }), 1);
+        \\assert.sameValue([1, , 3].findLastIndex(function(v) { return v === undefined; }), 1);
+        \\assert.sameValue([1, 2, 3].findLast(function(v) { return v > 1; }), 3);
+        \\assert.sameValue([1, 2, 3].every(function(v) { return v > 0; }), true);
+        \\assert.sameValue([1, , 3].some(function(v) { return v === undefined; }), false);
+        \\var o = { 0: 7, 2: 9, length: 3 };
+        \\assert.sameValue(Array.prototype.map.call(o, function(v) { return v + 1; }) + "", "8,,10");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.toReversed get-define through outlined arrayCopyIndex" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var rev = [1, , 3].toReversed();
+        \\assert.sameValue(rev + "", "3,,1");
+        \\assert.sameValue(rev.hasOwnProperty("1"), true);
+        \\assert.sameValue(rev[1], undefined);
+        \\var with_h = [1, , 3].with(1, 8);
+        \\assert.sameValue(with_h + "", "1,8,3");
+        \\assert.sameValue([1, , 3].with(0, 9) + "", "9,,3");
+        \\var spliced = [1, , 3, 4].toSpliced(1, 1, 8, 9);
+        \\assert.sameValue(spliced + "", "1,8,9,3,4");
+        \\var kept = [1, , 3, 4].toSpliced(1, 2);
+        \\assert.sameValue(kept + "", "1,4");
+        \\assert.sameValue(kept.hasOwnProperty("1"), true);
+        \\assert.sameValue([3, 1, 2].toSorted() + "", "1,2,3");
+        \\var o = { 0: 7, 2: 9, length: 3 };
+        \\assert.sameValue(Array.prototype.toReversed.call(o) + "", "9,,7");
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.sort generic set through one runtime tail" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var dense = [3, 1, 2];
+        \\assert.sameValue(dense.sort() + "", "1,2,3");
+        \\var already = [1, 2, 3];
+        \\assert.sameValue(already.sort() + "", "1,2,3");
+        \\var undefs = [undefined, 2, undefined, 1];
+        \\assert.sameValue(undefs.sort() + "", "1,2,,");
+        \\var holey = [3, , 1];
+        \\assert.sameValue(holey.sort() + "", "1,3,");
+        \\assert.sameValue(holey.hasOwnProperty("2"), false);
+        \\var o = { 0: 3, 1: 1, 2: 2, length: 3 };
+        \\assert.sameValue(Array.prototype.sort.call(o)[0], 1);
+        \\assert.sameValue(o[1], 2);
+        \\assert.sameValue(o[2], 3);
+        \\var proxy_sets = 0;
+        \\var p = new Proxy({ 0: 2, 1: 1, length: 2 }, {
+        \\    set: function(t, k, v, r) { proxy_sets += 1; t[k] = v; return true; }
+        \\});
+        \\Array.prototype.sort.call(p);
+        \\assert.sameValue(p[0], 1);
+        \\assert.sameValue(p[1], 2);
+        \\assert.sameValue(proxy_sets >= 2, true);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.fill generic set through one runtime tail" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var dense = [1, 2, 3, 4];
+        \\assert.sameValue(dense.fill(9, 1, 3) + "", "1,9,9,4");
+        \\var holey = new Array(5);
+        \\assert.sameValue(holey.fill(7, 2, 4) + "", ",,7,7,");
+        \\assert.sameValue(holey.hasOwnProperty("0"), false);
+        \\assert.sameValue(holey[2], 7);
+        \\var o = { 0: 1, 1: 2, length: 3 };
+        \\assert.sameValue(Array.prototype.fill.call(o, 8, 0, 2)[0], 8);
+        \\assert.sameValue(o[1], 8);
+        \\assert.sameValue(o[2], undefined);
+        \\var ta = new Uint8Array([1, 2, 3, 4]);
+        \\ta.fill(9, 1, 3);
+        \\assert.sameValue(ta[0], 1);
+        \\assert.sameValue(ta[1], 9);
+        \\assert.sameValue(ta[2], 9);
+        \\assert.sameValue(ta[3], 4);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.indexOf direction through one runtime walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1, 2, 3, 2].indexOf(2), 1);
+        \\assert.sameValue([1, 2, 3, 2].lastIndexOf(2), 3);
+        \\assert.sameValue([1, 2, 3].indexOf(9), -1);
+        \\assert.sameValue([1, 2, 3].lastIndexOf(9), -1);
+        \\assert.sameValue([1, 2, 3].indexOf(2, 2), -1);
+        \\assert.sameValue([1, 2, 3, 2].lastIndexOf(2, 2), 1);
+        \\assert.sameValue([1, , 3].indexOf(undefined), -1);
+        \\assert.sameValue([1, , 3].includes(undefined), true);
+        \\assert.sameValue([1, , 3].lastIndexOf(undefined), -1);
+        \\assert.sameValue([1, , 3].lastIndexOf(3, 1), -1);
+        \\assert.sameValue([1, , 3].lastIndexOf(1, 1), 0);
+        \\assert.sameValue([NaN].includes(NaN), true);
+        \\assert.sameValue([NaN].indexOf(NaN), -1);
+        \\assert.sameValue([NaN].lastIndexOf(NaN), -1);
+        \\var o = { 0: 7, 2: 9, length: 3 };
+        \\assert.sameValue(Array.prototype.indexOf.call(o, 9), 2);
+        \\assert.sameValue(Array.prototype.lastIndexOf.call(o, 7), 0);
+        \\assert.sameValue(Array.prototype.includes.call(o, undefined), true);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover Array.reduce direction through one runtime walk" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1, 2, 3].reduce(function(a, v) { return a + v; }, 0), 6);
+        \\assert.sameValue([1, 2, 3].reduceRight(function(a, v) { return a + v; }, 0), 6);
+        \\assert.sameValue([1, 2, 3].reduce(function(a, v) { return a + v; }), 6);
+        \\assert.sameValue([1, 2, 3].reduceRight(function(a, v) { return a - v; }), 0);
+        \\var seen = [];
+        \\assert.sameValue([1, , 3].reduce(function(a, v, i) { seen.push(i); return a + v; }, 0), 4);
+        \\assert.sameValue(seen + "", "0,2");
+        \\var seen_r = [];
+        \\assert.sameValue([1, , 3].reduceRight(function(a, v, i) { seen_r.push(i); return a + v; }, 0), 4);
+        \\assert.sameValue(seen_r + "", "2,0");
+        \\assert.sameValue([, ,].reduce(function(a, v) { return v; }, 7), 7);
+        \\var threw = false;
+        \\try { [, ,].reduce(function(a, v) { return v; }); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+        \\var threw_r = false;
+        \\try { [, ,].reduceRight(function(a, v) { return v; }); } catch (e) { threw_r = e instanceof TypeError; }
+        \\assert.sameValue(threw_r, true);
+        \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "leftover iterator wrap next return through one runtime kind" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var sealed = Object.preventExtensions({
+        \\  next: function() { return { done: false, value: 3 }; },
+        \\  return: function() { return { done: true, value: 9 }; },
+        \\});
+        \\var wrapped = Iterator.from(sealed);
+        \\assert.sameValue(wrapped === sealed, false);
+        \\assert.sameValue(wrapped.next().value, 3);
+        \\assert.sameValue(wrapped.return().done, true);
+        \\assert.sameValue(wrapped.return().value, 9);
+        \\var no_return = Object.preventExtensions({
+        \\  next: function() { return { done: true }; },
+        \\});
+        \\var wrapped2 = Iterator.from(no_return);
+        \\assert.sameValue(wrapped2.return().done, true);
+        \\assert.sameValue(wrapped2.return().value, undefined);
+        \\var bad = Iterator.from({ next: 1 });
+        \\var threw = false;
+        \\try { bad.next(); } catch (e) { threw = e instanceof TypeError; }
+        \\assert.sameValue(threw, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\async function* g() { yield 1; return 2; }
+        \\var AsyncGeneratorPrototype = Object.getPrototypeOf(g.prototype);
+        \\assert.sameValue(AsyncGeneratorPrototype[Symbol.toStringTag], "AsyncGenerator");
+        \\assert.sameValue(AsyncGeneratorPrototype.next.length, 1);
+        \\assert.sameValue(AsyncGeneratorPrototype.return.length, 1);
+        \\assert.sameValue(AsyncGeneratorPrototype.throw.length, 1);
+        \\assert.sameValue(AsyncGeneratorPrototype.next.name, "next");
+        \\assert.sameValue(AsyncGeneratorPrototype.return.name, "return");
+        \\assert.sameValue(AsyncGeneratorPrototype.throw.name, "throw");
+        \\var helper = Iterator.from([1, 2]).map(function(x) { return x + 1; });
+        \\var proto = Object.getPrototypeOf(helper);
+        \\assert.sameValue(Object.prototype.toString.call(helper), "[object Iterator Helper]");
+        \\assert.sameValue(helper.next, proto.next);
+        \\assert.sameValue(helper.return, proto.return);
+        \\assert.sameValue(proto.next.name, "next");
+        \\assert.sameValue(proto.return.name, "return");
+        \\assert.sameValue(proto.next.length, 0);
+        \\assert.sameValue(helper.next().value, 2);
+        \\assert.sameValue(helper.next().value, 3);
+        \\assert.sameValue(helper.return().done, true);
+        \\var concat = Iterator.concat([7]);
+        \\assert.sameValue(Object.prototype.toString.call(concat), "[object Iterator Concat]");
+        \\assert.sameValue(concat.next().value, 7);
+        \\assert.sameValue(concat.return().done, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "fast prototype method leftover runtime domain preserves regexp and collection lookups" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var re = /a/;
+        \\assert.sameValue(re.test, RegExp.prototype.test);
+        \\assert.sameValue(re.exec, RegExp.prototype.exec);
+        \\assert.sameValue(re.test("a"), true);
+        \\assert.sameValue(re.exec("a")[0], "a");
+        \\assert.sameValue(re.toString, RegExp.prototype.toString);
+        \\re.test = 1;
+        \\assert.sameValue(re.test, 1);
+        \\delete re.test;
+        \\assert.sameValue(re.test, RegExp.prototype.test);
+        \\var savedTest = RegExp.prototype.test;
+        \\RegExp.prototype.test = function(input) { return "patched:" + input; };
+        \\assert.sameValue(re.test("a"), "patched:a");
+        \\RegExp.prototype.test = savedTest;
+        \\assert.sameValue(re.test("a"), true);
+        \\var map = new Map([[1, 2]]);
+        \\assert.sameValue(map.get, Map.prototype.get);
+        \\assert.sameValue(map.set, Map.prototype.set);
+        \\assert.sameValue(map.get(1), 2);
+        \\map.get = 3;
+        \\assert.sameValue(map.get, 3);
+        \\delete map.get;
+        \\assert.sameValue(map.get, Map.prototype.get);
+        \\var savedGet = Map.prototype.get;
+        \\Map.prototype.get = function(key) { return "mapped:" + key; };
+        \\assert.sameValue(map.get(1), "mapped:1");
+        \\Map.prototype.get = savedGet;
+        \\assert.sameValue(map.get(1), 2);
+        \\var set = new Set([1]);
+        \\assert.sameValue(set.has, Set.prototype.has);
+        \\assert.sameValue(set.add, Set.prototype.add);
+        \\assert.sameValue(set.has(1), true);
+        \\var wm = new WeakMap();
+        \\var key = {};
+        \\wm.set(key, 4);
+        \\assert.sameValue(wm.get, WeakMap.prototype.get);
+        \\assert.sameValue(wm.get(key), 4);
+        \\var ws = new WeakSet();
+        \\ws.add(key);
+        \\assert.sameValue(ws.has, WeakSet.prototype.has);
+        \\assert.sameValue(ws.has(key), true);
+        \\assert.sameValue(set.get, undefined);
+        \\assert.sameValue(({}).test, undefined);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "data view extras leftover optional species preserves accessors and omits species" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView, Symbol.species), undefined);
+        \\assert.sameValue(ArrayBuffer[Symbol.species], ArrayBuffer);
+        \\assert.sameValue(SharedArrayBuffer[Symbol.species], SharedArrayBuffer);
+        \\assert.sameValue(DataView.prototype[Symbol.toStringTag], "DataView");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "buffer").get.name, "get buffer");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get.name, "get byteLength");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset").get.name, "get byteOffset");
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "resizable"), undefined);
+        \\assert.sameValue(Object.getOwnPropertyDescriptor(DataView.prototype, "growable"), undefined);
+        \\var dv = new DataView(new ArrayBuffer(4), 1, 2);
+        \\assert.sameValue(dv.byteLength, 2);
+        \\assert.sameValue(dv.byteOffset, 1);
+        \\assert.sameValue(dv.buffer.byteLength, 4);
+        \\dv.setUint8(0, 0xab);
+        \\assert.sameValue(dv.getUint8(0), 0xab);
+        \\assert.sameValue(dv.getInt8(1), 0);
+        \\assert.throws(TypeError, function() {
+        \\    Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get.call({});
+        \\});
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue([1].values().next().value, 1);
+        \\assert.sameValue("ab"[Symbol.iterator]().next().value, "a");
+        \\function* g() { yield 7; }
+        \\var it = g();
+        \\assert.sameValue(it.next().value, 7);
+        \\assert.sameValue(it.return().done, true);
+        \\var sealed = Object.preventExtensions({
+        \\  next: function() { return { value: 9, done: false }; },
+        \\  return: function() { return { value: 8, done: true }; },
+        \\});
+        \\var wrap = Iterator.from(sealed);
+        \\assert.sameValue(wrap.next().value, 9);
+        \\assert.sameValue(wrap.return().done, true);
+    );
+    try std.testing.expect(result.isUndefined());
+}
+
+test "createStringValue leftover noinline preserves empty flags and ascii strings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(/abc/.flags, "");
+        \\assert.sameValue(/abc/.source, "abc");
+        \\assert.sameValue("".bold(), "<b></b>");
+        \\assert.sameValue("é".big(), "<big>é</big>");
     );
     try std.testing.expect(result.isUndefined());
 }
@@ -22178,4 +23172,12 @@ test "fulfilled await does not replay a resumed body after allocation failure" {
     js.runtime.suppressLimitCollectionForTest(false);
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "print writes top-level strings raw including latin1 high bytes" {
+    try helpers.expectPrints(
+        \\print("ascii", String.fromCharCode(0xC9), { s: String.fromCharCode(0xC9) });
+    ,
+        "ascii É { s: \"É\" }\n",
+    );
 }

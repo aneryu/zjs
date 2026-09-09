@@ -249,12 +249,22 @@ fn traceCallerStateAtoms(
     }
 }
 
+/// `CallerState{}` is zeros except `apply_forward[i].call_pc = no_forward_pc`.
+/// Assigning `state.* = .{}` copies a 3592-byte `.rodata` template. Zero the
+/// bytes, then store the sentinel so every defined field still equals `{}`.
+fn fillDefaultCallerState(state: *CallerState) void {
+    @memset(std.mem.asBytes(state), 0);
+    for (&state.apply_forward) |*fwd| {
+        fwd.call_pc = no_forward_pc;
+    }
+}
+
 fn ensureCallerState(rt: *JSRuntime, fb: *FunctionBytecode) ?*CallerState {
     if (rt.small_inline_destroy == null) rt.small_inline_destroy = destroyCallerStateOpaque;
     if (rt.small_inline_trace_atoms == null) rt.small_inline_trace_atoms = traceCallerStateAtoms;
     if (callerStateMut(fb)) |existing| return existing;
     const state = rt.memory.create(CallerState) catch return null;
-    state.* = .{};
+    fillDefaultCallerState(state);
     setCallerState(fb, state);
     return state;
 }
@@ -1539,4 +1549,16 @@ test "rewrite sc_Pair-shaped body keeps put_field" {
     // Structural: loc rewrite of get_arg0/1 + push_this must stay in budget.
     try std.testing.expect(max_code == 40);
     try std.testing.expect(monomorph_hits == 8);
+}
+
+test "fillDefaultCallerState matches CallerState defaults" {
+    var expected: CallerState = .{};
+    var filled: CallerState = undefined;
+    fillDefaultCallerState(&filled);
+    try std.testing.expectEqual(expected.site_len, filled.site_len);
+    try std.testing.expectEqual(expected.copies, filled.copies);
+    try std.testing.expectEqual(expected.inlined_len, filled.inlined_len);
+    try std.testing.expectEqual(expected.specialized, filled.specialized);
+    try std.testing.expectEqualSlices(SiteCount, &expected.sites, &filled.sites);
+    try std.testing.expectEqualSlices(ApplyForwardCold, &expected.apply_forward, &filled.apply_forward);
 }

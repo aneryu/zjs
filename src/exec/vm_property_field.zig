@@ -1313,51 +1313,54 @@ inline fn storeElementBytes(dst: []u8, scratch: *const [8]u8, width: u32) void {
     }
 }
 
-fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    const object = objectFromValue(value) orelse return null;
-    if (object.class_id != core.class.ids.regexp) return null;
-    const name = rt.atoms.name(atom_id) orelse return null;
-    const expected_id: u32 = if (std.mem.eql(u8, name, "test"))
-        @intFromEnum(method_ids.regexp.PrototypeMethod.test_)
-    else if (std.mem.eql(u8, name, "exec"))
-        @intFromEnum(method_ids.regexp.PrototypeMethod.exec)
-    else
-        return null;
+const FastPrototypeMethodKind = enum { regexp, collection };
 
+/// Shared leftover: hasOwn + proto getOwn + native-id check. Comptime
+/// identity is the domain and expected-id resolution (RegExp test/exec
+/// vs collection class+name). Private names stay `inline` so call sites
+/// pass only a runtime kind — no leftover setup at the wrapper (knives 94/98).
+noinline fn fastPrototypeMethodValue(
+    rt: *core.JSRuntime,
+    value: core.JSValue,
+    atom_id: core.Atom,
+    kind: FastPrototypeMethodKind,
+) ?core.JSValue {
+    const object = objectFromValue(value) orelse return null;
+    const name = rt.atoms.name(atom_id) orelse return null;
+    const expected_id: u32 = switch (kind) {
+        .regexp => blk: {
+            if (object.class_id != core.class.ids.regexp) return null;
+            if (std.mem.eql(u8, name, "test"))
+                break :blk @intFromEnum(method_ids.regexp.PrototypeMethod.test_);
+            if (std.mem.eql(u8, name, "exec"))
+                break :blk @intFromEnum(method_ids.regexp.PrototypeMethod.exec);
+            return null;
+        },
+        .collection => core.host_function.builtin_method_id_lookup.collection.fastPrototypeMethodIdForClass(
+            object.class_id,
+            name,
+        ) orelse return null,
+    };
     if (object.hasOwnProperty(atom_id)) return null;
     const proto = object.getPrototype() orelse return null;
     const lookup = proto.getOwnDataPropertyLookup(atom_id) orelse return null;
     const method = lookup.value;
-    const function_object = objectFromValue(method) orelse {
-        return null;
+    const function_object = objectFromValue(method) orelse return null;
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
+    const domain: core.function.NativeBuiltinDomain = switch (kind) {
+        .regexp => .regexp,
+        .collection => .collection,
     };
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
-        return null;
-    };
-    if (native_ref.domain != .regexp or native_ref.id != expected_id) {
-        return null;
-    }
+    if (native_ref.domain != domain or native_ref.id != expected_id) return null;
     return method;
 }
 
-fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    const object = objectFromValue(value) orelse return null;
-    const name = rt.atoms.name(atom_id) orelse return null;
-    const expected_id = core.host_function.builtin_method_id_lookup.collection.fastPrototypeMethodIdForClass(object.class_id, name) orelse return null;
-    if (object.hasOwnProperty(atom_id)) return null;
-    const proto = object.getPrototype() orelse return null;
-    const lookup = proto.getOwnDataPropertyLookup(atom_id) orelse return null;
-    const method = lookup.value;
-    const function_object = objectFromValue(method) orelse {
-        return null;
-    };
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
-        return null;
-    };
-    if (native_ref.domain != .collection or native_ref.id != expected_id) {
-        return null;
-    }
-    return method;
+inline fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    return fastPrototypeMethodValue(rt, value, atom_id, .regexp);
+}
+
+inline fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    return fastPrototypeMethodValue(rt, value, atom_id, .collection);
 }
 
 fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue) ?core.JSValue {

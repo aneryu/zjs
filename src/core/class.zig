@@ -278,6 +278,17 @@ pub const Record = struct {
     }
 };
 
+/// `Record{}` is all zeros except `inline_payload_align = 1`. Filling a
+/// `[ids.init_count]Record` from that typed default materializes a 6624-byte
+/// `.rodata` template (69 × 96). Zero the bytes, then store the align default
+/// so every field still equals `Record{}`.
+fn fillDefaultRecords(records: []Record) void {
+    @memset(records, std.mem.zeroes(Record));
+    for (records) |*rec| {
+        rec.inline_payload_align = 1;
+    }
+}
+
 /// Mutable lifetime state lives beside the immutable class definition. A
 /// `Record *` is only a transient table view: growing `Table.records` may move
 /// every record, while this state is always reacquired by class id.
@@ -369,14 +380,17 @@ pub const Table = struct {
     /// outside `standard_classes` never register; their entries stay on the
     /// same `standardPayloadKind` fallback `definitionPlan` used for a null
     /// record view.
-    standard_plans: [ids.init_count]DefinitionPlan = standard_plan_fallbacks,
+    standard_plans: [ids.init_count]DefinitionPlan = undefined,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
         var table = Table{
             .memory = account,
             .atoms = atoms,
             .owner_thread_id = std.Thread.getCurrentId(),
+            .records_inline = undefined,
+            .standard_plans = undefined,
         };
+        fillStandardPlanFallbacks(&table.standard_plans);
         errdefer table.deinit();
         try table.ensureCapacity(ids.init_count);
         try table.registerStandardClasses();
@@ -388,10 +402,13 @@ pub const Table = struct {
             .memory = account,
             .atoms = atoms,
             .owner_thread_id = std.Thread.getCurrentId(),
+            .records_inline = undefined,
+            .standard_plans = undefined,
         };
+        fillStandardPlanFallbacks(&self.standard_plans);
         self.records = self.records_inline[0..ids.init_count];
         self.registration_states = self.registration_states_inline[0..ids.init_count];
-        @memset(self.records, .{});
+        fillDefaultRecords(self.records);
         @memset(self.registration_states, .{});
         errdefer self.deinit();
         try self.registerStandardClasses();
@@ -453,7 +470,7 @@ pub const Table = struct {
         }
         for (registration_states) |state| std.debug.assert(!state.isPinned());
         if (using_inline) {
-            @memset(records, .{});
+            fillDefaultRecords(records);
         } else if (records.len != 0) {
             self.memory.free(Record, records);
         }
@@ -765,7 +782,7 @@ pub const Table = struct {
         errdefer self.memory.free(Record, next);
         const next_states = try self.memory.alloc(RegistrationState, new_len);
         errdefer self.memory.free(RegistrationState, next_states);
-        @memset(next, .{});
+        fillDefaultRecords(next);
         @memset(next_states, .{});
         const old_records = self.records;
         const old_states = self.registration_states;
@@ -776,7 +793,7 @@ pub const Table = struct {
         self.records = next;
         self.registration_states = next_states;
         if (old_using_inline) {
-            @memset(old_records, .{});
+            fillDefaultRecords(old_records);
         } else if (old_records.len != 0) {
             self.memory.free(Record, old_records);
         }
@@ -787,13 +804,11 @@ pub const Table = struct {
         }
     }
 
-    const standard_plan_fallbacks: [ids.init_count]DefinitionPlan = blk: {
-        var plans: [ids.init_count]DefinitionPlan = undefined;
-        for (&plans, 0..) |*plan, id| {
+    fn fillStandardPlanFallbacks(plans: *[ids.init_count]DefinitionPlan) void {
+        for (plans, 0..) |*plan, id| {
             plan.* = .{ .payload_kind = standardPayloadKind(@intCast(id)) };
         }
-        break :blk plans;
-    };
+    }
 
     fn definitionPlan(definition_view: ?*const Record, id: ClassId, generation: u64) DefinitionPlan {
         if (definition_view) |registered| {

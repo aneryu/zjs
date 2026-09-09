@@ -195,11 +195,8 @@ pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *co
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
 }
 
-pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
-    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+pub inline fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
+    return builtin_glue.defineStampedNativeDataMethod(rt, global, object, atom_id, length, .async_generator, 0);
 }
 
 pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
@@ -1952,19 +1949,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
 
-pub fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
-    var rooted_payload = payload;
-    var root_frame = core.runtime.rootValues(.{&rooted_payload});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const record = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
-    const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
-    try defineValueProperty(rt, record, core.atom.ids.status, status);
-    try defineValueProperty(rt, record, if (rejected) core.atom.ids.reason else core.atom.ids.value, rooted_payload);
-    return record.value();
-}
+pub const promiseSettlementRecord = call_mod.createPromiseSettlementRecord;
 
 test "promiseSettlementRecord roots direct symbol payload while defining status" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -2088,7 +2073,7 @@ pub noinline fn promiseRejectCapabilityForError(
     output: ?*std.Io.Writer,
     global: *core.Object,
     reject_value: core.JSValue,
-    err: anyerror,
+    err: HostError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
@@ -2106,7 +2091,7 @@ noinline fn rejectCombinatorAndRelease(
     output: ?*std.Io.Writer,
     global: *core.Object,
     capability: *const PromiseCapabilityVm,
-    err: anyerror,
+    err: HostError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {

@@ -15,6 +15,8 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
+const array_list_erased = @import("../core/array_list_erased.zig");
+const sort_erased = @import("../core/sort_erased.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
 const construct_mod = @import("construct.zig");
@@ -231,10 +233,7 @@ pub fn arrayPrototypeNativeRecord(
     const array_mod = method_ids.array;
     const function_object_nonnull = function_object orelse return error.TypeError;
     if (arrayIterationModeFromRecordId(id)) |mode| {
-        return if (arrayIterationModeIsFind(mode))
-            arrayIterationModeCall(true, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode)
-        else
-            arrayIterationModeCall(false, ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
+        return arrayIterationModeCall(ctx, output, global, receiver, function_object_nonnull, args, caller_function, caller_frame, mode);
     }
     return switch (id) {
         @intFromEnum(array_mod.PrototypeMethod.to_string) => arrayToStringCall(ctx, output, global, receiver, function_object_nonnull, caller_function, caller_frame),
@@ -1458,14 +1457,10 @@ pub fn arrayIterationCall(
             return null;
     };
 
-    return if (arrayIterationModeIsFind(mode))
-        arrayIterationModeCall(true, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode)
-    else
-        arrayIterationModeCall(false, ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode);
+    return arrayIterationModeCall(ctx, output, global, receiver, function_object, args, caller_function, caller_frame, mode);
 }
 
-fn arrayIterationModeCall(
-    comptime find_family: bool,
+noinline fn arrayIterationModeCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1476,17 +1471,7 @@ fn arrayIterationModeCall(
     caller_frame: ?*frame_mod.Frame,
     mode: ArrayIterationMode,
 ) !?core.JSValue {
-    if (comptime find_family) {
-        switch (mode) {
-            .find, .find_index, .find_last, .find_last_index => {},
-            else => unreachable,
-        }
-    } else {
-        switch (mode) {
-            .for_each, .map, .filter, .some, .every => {},
-            else => unreachable,
-        }
-    }
+    const find_family = arrayIterationModeIsFind(mode);
     const receiver_object_value = if (objectFromValue(receiver)) |_|
         receiver
     else if (receiver.isNull() or receiver.isUndefined())
@@ -1544,17 +1529,14 @@ fn arrayIterationModeCall(
                 if (index >= current_length) continue;
             }
             break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-        } else if (object.isArray() and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) blk: {
-            if (object.getDenseArrayElementValue(@intCast(index))) |dense_item| break :blk dense_item;
-            const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-            defer key.deinit(ctx.runtime);
-            if (!find_family and
-                !try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null))
-            {
-                continue;
-            }
-            break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
         } else blk: {
+            // Unique dense hit stays separate. Leftover generic present-element
+            // get (propertyAtom + has except find-family + get) is shared: a
+            // dense miss falls through instead of compiling a leftover copy
+            // of the same walk (knife 120 leftover-tail shape).
+            if (object.isArray() and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) {
+                if (object.getDenseArrayElementValue(@intCast(index))) |dense_item| break :blk dense_item;
+            }
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
             if (!find_family and
@@ -1774,65 +1756,42 @@ pub fn arrayReduceCall(
         return try arrayReduceRightSparseLarge(ctx, object, receiver_object_value, &callback_call, args.len >= 2, accumulator, length);
     }
 
-    if (from_right) {
-        var cursor = length;
-        while (cursor > 0) {
-            cursor -= 1;
-            const item = if (is_typed_array) blk: {
-                if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else if (object.isArray() and object.arrayElementStorageMode() == .dense and cursor <= std.math.maxInt(u32)) blk: {
-                // Dense own element: qjs js_array_reduce's fast-array arm
-                // (no HasProperty/Get through the generic property path).
-                if (object.getDenseArrayElementValue(@intCast(cursor))) |dense_item| break :blk dense_item;
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
-            if (!accumulator_set) {
-                accumulator = item;
-                accumulator_set = true;
-                continue;
-            }
-            const index_value = lengthIndexValue(cursor);
-            const next = try callback_call.call4(accumulator, item, index_value, receiver_object_value);
-            accumulator = next;
+    // Leftover reduce / reduceRight per-element walk. candidate117 still
+    // compiles both directions as leftover copies inside `arrayReduceCall`
+    // (6718). The leftover is typed/dense/generic present-element get +
+    // first-present accumulator + call4. Comptime identity is left-to-right
+    // vs right-to-left. Take direction at runtime (same shape as
+    // arrayIterationModeCall find/findLast). Does not fold
+    // arrayReduceRightSparseLarge, arrayCopyPresentIndex, or iteration-mode
+    // callbacks.
+    var step: usize = 0;
+    while (step < length) : (step += 1) {
+        const cursor = if (from_right) length - 1 - step else step;
+        const item = if (is_typed_array) blk: {
+            if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
+            break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
+        } else if (object.isArray() and object.arrayElementStorageMode() == .dense and cursor <= std.math.maxInt(u32)) blk: {
+            // Dense own element: qjs js_array_reduce's fast-array arm
+            // (no HasProperty/Get through the generic property path).
+            if (object.getDenseArrayElementValue(@intCast(cursor))) |dense_item| break :blk dense_item;
+            const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+            defer key.deinit(ctx.runtime);
+            if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+            break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        } else blk: {
+            const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
+            defer key.deinit(ctx.runtime);
+            if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+            break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
+        };
+        if (!accumulator_set) {
+            accumulator = item;
+            accumulator_set = true;
+            continue;
         }
-    } else {
-        var cursor: usize = 0;
-        while (cursor < length) : (cursor += 1) {
-            const item = if (is_typed_array) blk: {
-                if (!is_typed_method and !try core.object.typedArrayIndexValid(ctx.runtime, object, @intCast(cursor))) continue;
-                break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(cursor));
-            } else if (object.isArray() and object.arrayElementStorageMode() == .dense and cursor <= std.math.maxInt(u32)) blk: {
-                // Dense own element: qjs js_array_reduce's fast-array arm
-                // (no HasProperty/Get through the generic property path).
-                if (object.getDenseArrayElementValue(@intCast(cursor))) |dense_item| break :blk dense_item;
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            } else blk: {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, cursor);
-                defer key.deinit(ctx.runtime);
-                if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
-                break :blk try getValueProperty(ctx, output, global, receiver_object_value, key.atom, null, null);
-            };
-            if (!accumulator_set) {
-                accumulator = item;
-                accumulator_set = true;
-                continue;
-            }
-            const index_value = lengthIndexValue(cursor);
-            const next = try callback_call.call4(accumulator, item, index_value, receiver_object_value);
-            accumulator = next;
-        }
+        const index_value = lengthIndexValue(cursor);
+        const next = try callback_call.call4(accumulator, item, index_value, receiver_object_value);
+        accumulator = next;
     }
 
     if (!accumulator_set) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "empty array"));
@@ -1856,9 +1815,9 @@ pub fn arrayReduceRightSparseLarge(
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
         if (index >= length) continue;
-        try indexed.append(ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
+        try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
-    std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
+    sort_erased.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
             return a.index > b.index;
         }
@@ -2181,9 +2140,9 @@ pub fn arrayLastIndexSparseLarge(
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
         if (index >= start_exclusive or index >= length) continue;
-        try indexed.append(ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
+        try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
     }
-    std.sort.heap(SparseIndexKey, indexed.items, {}, struct {
+    sort_erased.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
             return a.index > b.index;
         }
@@ -2323,13 +2282,19 @@ pub fn arraySliceCall(
         from += 1;
         to += 1;
     }) {
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-        defer from_key.deinit(ctx.runtime);
-        if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) continue;
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-        defer to_key.deinit(ctx.runtime);
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, to_key.atom, item, null, null);
+        try arrayCopyPresentIndex(
+            ctx,
+            output,
+            global,
+            receiver_object_value,
+            object,
+            from,
+            out_value,
+            out,
+            to,
+            null,
+            null,
+        );
     }
 
     return out_value;
@@ -2692,14 +2657,19 @@ pub fn arraySpliceCallImpl(
     const removed = try property_ops.expectObject(removed_value);
     var index: usize = 0;
     while (index < actual_delete_count) : (index += 1) {
-        const from = actual_start + index;
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-        defer from_key.deinit(ctx.runtime);
-        if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) continue;
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-        defer to_key.deinit(ctx.runtime);
-        try createDataPropertyOrThrow(ctx, output, global, removed_value, removed, to_key.atom, item, null, null);
+        try arrayCopyPresentIndex(
+            ctx,
+            output,
+            global,
+            receiver_object_value,
+            object,
+            actual_start + index,
+            removed_value,
+            removed,
+            index,
+            null,
+            null,
+        );
     }
     _ = try setValueProperty(ctx, output, global, removed_value, core.atom.ids.length, lengthIndexValue(actual_delete_count), null, null);
 
@@ -2707,16 +2677,7 @@ pub fn arraySpliceCallImpl(
         var from = actual_start + actual_delete_count;
         while (from < length) : (from += 1) {
             const to = from - actual_delete_count + insert_count;
-            const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-            defer from_key.deinit(ctx.runtime);
-            const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-            defer to_key.deinit(ctx.runtime);
-            if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-                const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            } else {
-                try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-            }
+            try arrayMoveIndex(ctx, output, global, receiver_object_value, object, from, to, false);
         }
         var delete_index = length;
         while (delete_index > new_length) {
@@ -2730,16 +2691,7 @@ pub fn arraySpliceCallImpl(
         while (from > actual_start + actual_delete_count) {
             from -= 1;
             const to = from - actual_delete_count + insert_count;
-            const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-            defer from_key.deinit(ctx.runtime);
-            const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-            defer to_key.deinit(ctx.runtime);
-            if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-                const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-            } else {
-                try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-            }
+            try arrayMoveIndex(ctx, output, global, receiver_object_value, object, from, to, false);
         }
     }
 
@@ -2854,16 +2806,7 @@ pub fn arrayCopyWithinCall(
     }
 
     while (count > 0) {
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from);
-        defer from_key.deinit(ctx.runtime);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to);
-        defer to_key.deinit(ctx.runtime);
-        if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-        } else {
-            try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-        }
+        try arrayMoveIndex(ctx, output, global, receiver_object_value, object, from, to, false);
         count -= 1;
         if (count == 0) break;
         if (direction > 0) {
@@ -2946,6 +2889,11 @@ pub fn arrayFillCall(
     // dense extent. A holey array whose fill range begins past `array_count`
     // (e.g. `new Array(5).fill(7,2,4)`) would otherwise no-op the leading
     // appends; route those through the generic setValueProperty loop below.
+    // Leftover generic present-index set: propertyAtom + setValuePropertyOrThrow.
+    // The dense path may stop early; fall through to one generic tail instead of
+    // compiling a leftover copy of the same walk (knife 118/119 leftover-tail
+    // shape). Unique dense define stays separate.
+    var index = start;
     if (object.isArray() and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object) and start <= @as(usize, @intCast(object.fastArrayCount()))) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
@@ -2960,18 +2908,10 @@ pub fn arrayFillCall(
                 if (!try object.defineDenseArrayDataProperty(ctx.runtime, @intCast(dense_index), value)) break;
             }
             if (dense_index == final) return receiver_object_value;
-
-            var index = dense_index;
-            while (index < final) : (index += 1) {
-                const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-                defer key.deinit(ctx.runtime);
-                try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, value, null, null);
-            }
-            return receiver_object_value;
+            index = dense_index;
         }
     }
 
-    var index = start;
     while (index < final) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
@@ -3195,16 +3135,7 @@ pub fn arrayShiftCall(
 
     var index: usize = 1;
     while (index < length) : (index += 1) {
-        const from_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-        defer from_key.deinit(ctx.runtime);
-        const to_key = try propertyAtomFromLengthIndex(ctx.runtime, index - 1);
-        defer to_key.deinit(ctx.runtime);
-        if (try hasValueProperty(ctx, output, global, receiver_object_value, object, from_key.atom, null, null)) {
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, null, null);
-            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, to_key.atom, item, null, null);
-        } else {
-            try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, to_key.atom);
-        }
+        try arrayMoveIndex(ctx, output, global, receiver_object_value, object, index, index - 1, false);
     }
 
     const tail_key = try propertyAtomFromLengthIndex(ctx.runtime, length - 1);
@@ -3241,7 +3172,7 @@ fn fastDenseArrayShift(object: *core.Object) ?core.JSValue {
 /// index to already be in bounds, so its in-place branch never fires for the
 /// growing unshift shift; this routine performs the structurally identical
 /// move after growing capacity. Returns the new length on success, or null to
-/// fall through to the generic per-element unshiftMoveIndex path for anything
+/// fall through to the generic per-element arrayMoveIndex path for anything
 /// not provably an ordinary dense array with no prototype index interactions.
 fn fastDenseArrayUnshift(
     rt: *core.JSRuntime,
@@ -3336,7 +3267,7 @@ pub fn arrayUnshiftCall(
             var k = length;
             while (k > 0) {
                 k -= 1;
-                try unshiftMoveIndex(ctx, output, global, receiver_object_value, object, k, insert_count);
+                try arrayMoveIndex(ctx, output, global, receiver_object_value, object, k, k + insert_count, true);
             }
         } else {
             try arrayUnshiftSparseLarge(ctx, output, global, receiver_object_value, object, length, insert_count);
@@ -3480,7 +3411,7 @@ pub fn arrayUnshiftSparseLarge(
             try candidates.append(ctx.runtime.memory.allocator, index - insert_count);
         }
     }
-    std.sort.heap(usize, candidates.items, {}, struct {
+    sort_erased.heap(usize, candidates.items, {}, struct {
         fn lessThan(_: void, a: usize, b: usize) bool {
             return a > b;
         }
@@ -3489,30 +3420,73 @@ pub fn arrayUnshiftSparseLarge(
     for (candidates.items) |index| {
         if (previous != null and previous.? == index) continue;
         previous = index;
-        try unshiftMoveIndex(ctx, output, global, receiver, object, index, insert_count);
+        try arrayMoveIndex(ctx, output, global, receiver, object, index, index + insert_count, true);
     }
 }
 
-pub fn unshiftMoveIndex(
+/// Leftover in-place array index-move. candidate115 still compiles
+/// `arrayShiftCall` (2839), splice shrink/grow, and `arrayCopyWithinCall`
+/// as leftover copies of `unshiftMoveIndex` (1349, extra 1349, 5.2–5.9%).
+/// The leftover is propertyAtom pair + has + get/set or delete.
+/// Comptime identity is `to = from + insert_count` vs an explicit
+/// destination, plus unshift's `ensureSettable` before set. Take those
+/// at runtime. Helper stays outlined (knives 94/108). Does not fold
+/// skip-missing createDataPropertyOrThrow copies (knife 117) or reverse swap.
+pub noinline fn arrayMoveIndex(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
     object: *core.Object,
     from_index: usize,
-    insert_count: usize,
+    to_index: usize,
+    ensure_settable: bool,
 ) !void {
     const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index);
     defer from_key.deinit(ctx.runtime);
-    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index + insert_count);
+    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to_index);
     defer to_key.deinit(ctx.runtime);
     if (try hasValueProperty(ctx, output, global, receiver, object, from_key.atom, null, null)) {
         const item = try getValueProperty(ctx, output, global, receiver, from_key.atom, null, null);
-        try ensureSettableForArrayBuiltin(ctx, object, to_key.atom);
+        if (ensure_settable) try ensureSettableForArrayBuiltin(ctx, object, to_key.atom);
         try setValuePropertyOrThrow(ctx, output, global, receiver, to_key.atom, item, null, null);
     } else {
         try deleteValuePropertyOrThrow(ctx, output, global, receiver, object, to_key.atom);
     }
+}
+
+/// Leftover skip-missing CreateDataPropertyOrThrow copy onto a new array.
+/// candidate116 still compiles `arraySliceCall` (2954) and splice-removed
+/// as leftover copies of outlined `concatAppendValue` (1967, extra 1967,
+/// 4.2–5.7%). The leftover is propertyAtom pair + has + get +
+/// createDataPropertyOrThrow. Missing source indexes are skipped so holes
+/// stay holes. Dest/source indexes and caller frame are taken at runtime.
+/// Helper stays outlined (knives 94/108). `concatAppendValue` stays a real
+/// caller so its unique spread/single dispatch does not re-expand.
+/// Does not fold flatten (mapper + recursive flatten), arrayByCopy
+/// (no has-check), or in-place `arrayMoveIndex`.
+pub noinline fn arrayCopyPresentIndex(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source_receiver: core.JSValue,
+    source: *core.Object,
+    from_index: usize,
+    dest_value: core.JSValue,
+    dest: *core.Object,
+    to_index: usize,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const from_key = try propertyAtomFromLengthIndex(ctx.runtime, from_index);
+    defer from_key.deinit(ctx.runtime);
+    if (!try hasValueProperty(ctx, output, global, source_receiver, source, from_key.atom, null, null)) {
+        return;
+    }
+    const item = try getValueProperty(ctx, output, global, source_receiver, from_key.atom, caller_function, caller_frame);
+    const to_key = try propertyAtomFromLengthIndex(ctx.runtime, to_index);
+    defer to_key.deinit(ctx.runtime);
+    try createDataPropertyOrThrow(ctx, output, global, dest_value, dest, to_key.atom, item, caller_function, caller_frame);
 }
 
 pub fn ensureSettableForArrayBuiltin(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom) !void {
@@ -4293,7 +4267,7 @@ fn fromAsyncCloseWithError(
     output: ?*std.Io.Writer,
     global: *core.Object,
     state: *core.Object,
-    err: anyerror,
+    err: core.errors.HostError,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
@@ -4404,7 +4378,16 @@ pub fn typedArrayFromIteratorValue(
     );
 }
 
-pub fn typedArrayFromArrayLikeSource(
+const ArrayFromLikeKind = enum { array, typed };
+
+/// Leftover array-from array-like. candidate105 still compiles
+/// `arrayFromArrayLike` (2001) / `typedArrayFromArrayLikeSource`
+/// (1639, extra 1639, 6.2% match). The leftover is mapper CallSite
+/// + index walk + get + optional map + store. Comptime identity is
+/// array construct/length/define vs typed-array create/set. Take
+/// that at runtime. Public names stay `inline` and pass only the
+/// kind — no leftover setup at the wrapper (knives 94/98).
+noinline fn fromArrayLikeSource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -4413,86 +4396,104 @@ pub fn typedArrayFromArrayLikeSource(
     fixed_length: ?usize,
     map_fn: ?core.JSValue,
     this_arg: core.JSValue,
+    kind: ArrayFromLikeKind,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const length = if (fixed_length) |length_value|
-        length_value
-    else blk: {
-        const length_value = try getValueProperty(ctx, output, global, source, core.atom.ids.length, caller_function, caller_frame);
-        break :blk try toLengthIndex(ctx, output, global, length_value);
+    const typed_length: usize = if (kind == .typed) blk: {
+        const length = if (fixed_length) |length_value|
+            length_value
+        else inner: {
+            const length_value = try getValueProperty(ctx, output, global, source, core.atom.ids.length, caller_function, caller_frame);
+            break :inner try toLengthIndex(ctx, output, global, length_value);
+        };
+        if (length > std.math.maxInt(u32)) return error.RangeError;
+        break :blk length;
+    } else 0;
+
+    const out_value = switch (kind) {
+        .typed => try typedArrayCreateWithLength(ctx, output, global, constructor_value, typed_length, caller_function, caller_frame),
+        .array => if (try call_runtime.isConstructorLike(ctx, constructor_value)) blk: {
+            if (fixed_length) |length| {
+                break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame);
+            }
+            break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame);
+        } else (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value(),
     };
-    if (length > std.math.maxInt(u32)) return error.RangeError;
-
-    const out_value = try typedArrayCreateWithLength(ctx, output, global, constructor_value, length, caller_function, caller_frame);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     var mapper_call: ?CallSite = if (map_fn) |mapper|
         CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
     else
         null;
-
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        const key = core.atom.atomFromUInt32(@intCast(index));
-        var item = try getValueProperty(ctx, output, global, source, key, caller_function, caller_frame);
-        if (mapper_call) |*call_site| {
-            const mapped = try call_site.call2(item, lengthIndexValue(index));
-            item = mapped;
-        }
-        try typedArraySetElementValue(ctx, output, global, out, index, item);
-    }
-    return out_value;
-}
-
-pub fn arrayFromArrayLike(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor_value: core.JSValue,
-    source: core.JSValue,
-    fixed_length: ?usize,
-    map_fn: ?core.JSValue,
-    this_arg: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const out_value = if (try call_runtime.isConstructorLike(ctx, constructor_value)) blk: {
+    if (kind == .array) {
         if (fixed_length) |length| {
-            break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{core.JSValue.int32(@intCast(length))}, caller_function, caller_frame);
+            if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
+            if (out.isArray()) out.setArrayLength(@intCast(length));
         }
-        break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{}, caller_function, caller_frame);
-    } else (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value();
-    const out = objectFromValue(out_value) orelse return error.TypeError;
-    var mapper_call: ?CallSite = if (map_fn) |mapper|
-        CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
-    else
-        null;
-    if (fixed_length) |length| {
-        if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-        if (out.isArray()) out.setArrayLength(@intCast(length));
     }
 
     var index: usize = 0;
     while (true) : (index += 1) {
-        const length = if (fixed_length) |length_value|
-            length_value
-        else if (objectFromValue(source)) |source_object|
-            @as(usize, @intCast(source_object.arrayLength()))
-        else
-            0;
+        const length = switch (kind) {
+            .typed => typed_length,
+            .array => if (fixed_length) |length_value|
+                length_value
+            else if (objectFromValue(source)) |source_object|
+                @as(usize, @intCast(source_object.arrayLength()))
+            else
+                0,
+        };
         if (index >= length) break;
-        if (index > std.math.maxInt(u32)) return error.RangeError;
+        if (kind == .array and index > std.math.maxInt(u32)) return error.RangeError;
         const key = core.atom.atomFromUInt32(@intCast(index));
         var item = try getValueProperty(ctx, output, global, source, key, caller_function, caller_frame);
         if (mapper_call) |*call_site| {
-            const mapped = try call_site.call2(item, core.JSValue.int32(@intCast(index)));
+            const mapped = try call_site.call2(item, switch (kind) {
+                .typed => lengthIndexValue(index),
+                .array => core.JSValue.int32(@intCast(index)),
+            });
             item = mapped;
         }
-        try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, item, caller_function, caller_frame);
+        switch (kind) {
+            .typed => try typedArraySetElementValue(ctx, output, global, out, index, item),
+            .array => try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, item, caller_function, caller_frame),
+        }
     }
-    if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
+    if (kind == .array) {
+        if (index > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
+        try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, core.JSValue.int32(@intCast(index)), caller_function, caller_frame);
+    }
     return out_value;
+}
+
+pub inline fn typedArrayFromArrayLikeSource(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    source: core.JSValue,
+    fixed_length: ?usize,
+    map_fn: ?core.JSValue,
+    this_arg: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    return fromArrayLikeSource(ctx, output, global, constructor_value, source, fixed_length, map_fn, this_arg, .typed, caller_function, caller_frame);
+}
+
+pub inline fn arrayFromArrayLike(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    source: core.JSValue,
+    fixed_length: ?usize,
+    map_fn: ?core.JSValue,
+    this_arg: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    return fromArrayLikeSource(ctx, output, global, constructor_value, source, fixed_length, map_fn, this_arg, .array, caller_function, caller_frame);
 }
 
 pub fn arrayFromIteratorLike(
@@ -4895,7 +4896,7 @@ pub fn arraySortCall(
                 undefined_count += 1;
                 continue;
             }
-            try entries_list.append(rt.memory.allocator, .{ .value = value, .order = index });
+            try array_list_erased.append(&entries_list, rt.memory.allocator, .{ .value = value, .order = index });
         }
         entries = entries_list.items;
     }
@@ -4937,22 +4938,28 @@ pub fn arraySortCall(
         std.debug.assert(index == length);
         return receiver_object_value;
     }
-    for (entries, 0..) |entry, sorted_index| {
-        // Faithful to quickjs.c:43476: when the slot's original position equals
-        // its final sorted index the receiver already holds this value at this
-        // index, so skip the write entirely (matching qjs, which also skips the
-        // setter call in that case — observable for accessor/proxy receivers).
-        if (entry.order != sorted_index) {
-            const key = try propertyAtomFromLengthIndex(ctx.runtime, sorted_index);
-            defer key.deinit(ctx.runtime);
-            try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, entry.value, caller_function, caller_frame);
-        }
-        index += 1;
-    }
-    while (index < entries.len + undefined_count) : (index += 1) {
+    // Leftover generic index set: propertyAtom + setValuePropertyOrThrow.
+    // candidate123 still compiled the entries write and the undefined-fill
+    // as leftover copies of the same walk. Unique write-value vs
+    // write-undefined; unique delete-holes and dense fast-array writes stay
+    // separate. Take the write value at runtime (knife 118/120 leftover-tail
+    // shape). Does not fold arrayFillCall, arrayCopyIndex, or
+    // setValuePropertyWithThrow.
+    index = 0;
+    const write_end = entries.len + undefined_count;
+    while (index < write_end) : (index += 1) {
+        const write_value = if (index < entries.len) blk: {
+            // Faithful to quickjs.c:43476: when the slot's original position
+            // equals its final sorted index the receiver already holds this
+            // value at this index, so skip the write entirely (matching qjs,
+            // which also skips the setter call — observable for accessor /
+            // proxy receivers).
+            if (entries[index].order == index) continue;
+            break :blk entries[index].value;
+        } else core.JSValue.undefinedValue();
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer key.deinit(ctx.runtime);
-        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, core.JSValue.undefinedValue(), caller_function, caller_frame);
+        try setValuePropertyOrThrow(ctx, output, global, receiver_object_value, key.atom, write_value, caller_function, caller_frame);
     }
     while (index < length) : (index += 1) {
         const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
@@ -5162,10 +5169,7 @@ pub fn arrayByCopyCall(
         const out = try createArrayByCopyOutput(ctx.runtime, global, length);
         var index: usize = 0;
         while (index < length) : (index += 1) {
-            const from_key = try propertyAtomFromLengthIndex(ctx.runtime, length - index - 1);
-            defer from_key.deinit(ctx.runtime);
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, from_key.atom, caller_function, caller_frame);
-            try defineArrayByCopyElement(ctx.runtime, out, index, item);
+            try arrayCopyIndex(ctx, output, global, receiver_object_value, out, length - index - 1, index, caller_function, caller_frame);
         }
         return out.value();
     }
@@ -5190,7 +5194,7 @@ pub fn arrayByCopyCall(
             if (item.isUndefined()) {
                 undefined_count += 1;
             } else {
-                try entries.append(ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
+                try array_list_erased.append(&entries, ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
             }
         }
         var sort_window: SortEntryRootWindow = .{};
@@ -5220,10 +5224,7 @@ pub fn arrayByCopyCall(
                 try defineArrayByCopyElement(ctx.runtime, out, index, replacement);
                 continue;
             }
-            const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
-            defer key.deinit(ctx.runtime);
-            const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-            try defineArrayByCopyElement(ctx.runtime, out, index, item);
+            try arrayCopyIndex(ctx, output, global, receiver_object_value, out, index, index, caller_function, caller_frame);
         }
         return out.value();
     }
@@ -5249,10 +5250,7 @@ pub fn arrayByCopyCall(
     const out = try createArrayByCopyOutput(ctx.runtime, global, new_length);
     var write_index: usize = 0;
     while (write_index < actual_start) : (write_index += 1) {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, write_index);
-        defer key.deinit(ctx.runtime);
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-        try defineArrayByCopyElement(ctx.runtime, out, write_index, item);
+        try arrayCopyIndex(ctx, output, global, receiver_object_value, out, write_index, write_index, caller_function, caller_frame);
     }
     if (args.len > 2) {
         for (args[2..], 0..) |item, item_index| {
@@ -5265,10 +5263,7 @@ pub fn arrayByCopyCall(
         read_index += 1;
         write_index += 1;
     }) {
-        const key = try propertyAtomFromLengthIndex(ctx.runtime, read_index);
-        defer key.deinit(ctx.runtime);
-        const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
-        try defineArrayByCopyElement(ctx.runtime, out, write_index, item);
+        try arrayCopyIndex(ctx, output, global, receiver_object_value, out, read_index, write_index, caller_function, caller_frame);
     }
     return out.value();
 }
@@ -5311,7 +5306,7 @@ pub fn typedArrayByCopyCall(
         var index: usize = 0;
         while (index < length) : (index += 1) {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-            try entries.append(ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
+            try array_list_erased.append(&entries, ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
         }
         try stableArraySortEntries(ctx, output, global, true, comparator, entries.items, caller_function, caller_frame);
 
@@ -5507,6 +5502,27 @@ pub fn typedArrayByCopyCoerceValue(
 pub fn defineArrayByCopyElement(rt: *core.JSRuntime, out: *core.Object, index: usize, value: core.JSValue) !void {
     const key = core.atom.atomFromUInt32(@intCast(index));
     try out.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+}
+
+/// Leftover Array.toReversed / with / toSpliced get+define (no has-check).
+/// Missing source indexes become `undefined` on the copy. Distinct from
+/// outlined `arrayCopyPresentIndex`, which skips missing indexes via
+/// createDataPropertyOrThrow.
+pub noinline fn arrayCopyIndex(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source_receiver: core.JSValue,
+    dest: *core.Object,
+    from_index: usize,
+    to_index: usize,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const key = try propertyAtomFromLengthIndex(ctx.runtime, from_index);
+    defer key.deinit(ctx.runtime);
+    const item = try getValueProperty(ctx, output, global, source_receiver, key.atom, caller_function, caller_frame);
+    try defineArrayByCopyElement(ctx.runtime, dest, to_index, item);
 }
 
 pub fn toIntegerOrInfinityForArrayByCopy(
@@ -5762,6 +5778,17 @@ pub fn expectUint8ArrayObject(value: core.JSValue) !*core.Object {
     return object;
 }
 
+const base64_alphabet_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "base64", .id = @intFromEnum(Uint8ArrayBase64Alphabet.base64) },
+    .{ .name = "base64url", .id = @intFromEnum(Uint8ArrayBase64Alphabet.base64url) },
+};
+
+const base64_last_chunk_ids = [_]core.host_function.name_id.Entry{
+    .{ .name = "loose", .id = @intFromEnum(Uint8ArrayBase64LastChunkHandling.loose) },
+    .{ .name = "strict", .id = @intFromEnum(Uint8ArrayBase64LastChunkHandling.strict) },
+    .{ .name = "stop-before-partial", .id = @intFromEnum(Uint8ArrayBase64LastChunkHandling.stop_before_partial) },
+};
+
 pub fn uint8ArrayBase64Alphabet(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5770,16 +5797,18 @@ pub fn uint8ArrayBase64Alphabet(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !Uint8ArrayBase64Alphabet {
-    const rt = ctx.runtime;
-    if (!options.isObject()) return .base64;
-    const key = core.atom.ids.alphabet;
-    const value = try getValueProperty(ctx, output, global, options, key, caller_function, caller_frame);
-    if (value.isUndefined()) return .base64;
-    var text = try uint8ArrayStringBytes(rt, value);
-    defer text.deinit(rt.memory.allocator);
-    if (std.mem.eql(u8, text.items, "base64")) return .base64;
-    if (std.mem.eql(u8, text.items, "base64url")) return .base64url;
-    return error.TypeError;
+    const id = try uint8ArrayBase64NamedOption(
+        ctx,
+        output,
+        global,
+        options,
+        caller_function,
+        caller_frame,
+        core.atom.ids.alphabet,
+        @intFromEnum(Uint8ArrayBase64Alphabet.base64),
+        &base64_alphabet_ids,
+    );
+    return @enumFromInt(id);
 }
 
 pub fn uint8ArrayBase64LastChunkHandling(
@@ -5790,17 +5819,40 @@ pub fn uint8ArrayBase64LastChunkHandling(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !Uint8ArrayBase64LastChunkHandling {
-    const rt = ctx.runtime;
-    if (!options.isObject()) return .loose;
-    const key = core.atom.ids.lastChunkHandling;
+    const id = try uint8ArrayBase64NamedOption(
+        ctx,
+        output,
+        global,
+        options,
+        caller_function,
+        caller_frame,
+        core.atom.ids.lastChunkHandling,
+        @intFromEnum(Uint8ArrayBase64LastChunkHandling.loose),
+        &base64_last_chunk_ids,
+    );
+    return @enumFromInt(id);
+}
+
+/// Leftover Uint8Array base64 named-option admission. The two public
+/// names share get-property + stringify + table match; comptime identity
+/// is only the atom, default, and table. Does not fold `omitPadding`.
+noinline fn uint8ArrayBase64NamedOption(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    options: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    key: core.Atom,
+    default_id: u32,
+    table: []const core.host_function.name_id.Entry,
+) !u32 {
+    if (!options.isObject()) return default_id;
     const value = try getValueProperty(ctx, output, global, options, key, caller_function, caller_frame);
-    if (value.isUndefined()) return .loose;
-    var text = try uint8ArrayStringBytes(rt, value);
-    defer text.deinit(rt.memory.allocator);
-    if (std.mem.eql(u8, text.items, "loose")) return .loose;
-    if (std.mem.eql(u8, text.items, "strict")) return .strict;
-    if (std.mem.eql(u8, text.items, "stop-before-partial")) return .stop_before_partial;
-    return error.TypeError;
+    if (value.isUndefined()) return default_id;
+    var text = try uint8ArrayStringBytes(ctx.runtime, value);
+    defer text.deinit(ctx.runtime.memory.allocator);
+    return core.host_function.name_id.lookup(text.items, table) orelse error.TypeError;
 }
 
 pub fn uint8ArrayOmitPadding(
@@ -6712,7 +6764,7 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const out_value = (try objectEnumerableOwnPropertiesCall(ctx, null, global, &args, .values, null, null)) orelse return error.TypeError;
+    const out_value = (try objectEnumerableOwnPropertiesCall(ctx, null, global, &args, .values, .message, null, null)) orelse return error.TypeError;
     const out = try property_ops.expectObject(out_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);

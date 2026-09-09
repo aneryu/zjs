@@ -326,14 +326,14 @@ fn objectCallForNativeRecord(
         @intFromEnum(StaticMethod.get_prototype_of) => (try objectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.has_own) => (try objectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.is_extensible) => (try object_ops.objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.keys) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.keys) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, .message, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.prevent_extensions) => (try objectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.seal) => (try objectSetIntegrityCall(ctx, output, global, args, .sealed, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.is_sealed) => (try objectTestIntegrityCall(ctx, output, global, args, .sealed)) orelse error.TypeError,
         @intFromEnum(StaticMethod.is_frozen) => (try objectTestIntegrityCall(ctx, output, global, args, .frozen)) orelse error.TypeError,
         @intFromEnum(StaticMethod.set_prototype_of) => (try object_ops.objectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.values) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(StaticMethod.entries) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.values) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, .message, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(StaticMethod.entries) => (try object_ops.objectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, .message, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(StaticMethod.is) => {
             const lhs = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const rhs = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -1226,7 +1226,12 @@ pub const OwnPropertyKeyFilter = enum {
     symbol,
 };
 
-pub fn objectOwnPropertyKeysCall(
+/// Leftover Object.getOwnPropertyNames/Symbols own-keys array fill.
+/// candidate114 still compiles this (1438) as a second copy of
+/// `objectEnumerableOwnPropertiesCall` (2672, extra 1438, 6.4% match).
+/// Take unique filter admission here and reuse the already-outlined
+/// enumerable walk. Enumerable stays outlined (knives 94/108).
+pub inline fn objectOwnPropertyKeysCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1235,29 +1240,17 @@ pub fn objectOwnPropertyKeysCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const own_keys = try objectRestOwnKeys(ctx, output, global, object);
-    defer core.Object.freeKeys(ctx.runtime, own_keys);
-
-    const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
-    for (own_keys) |key| {
-        const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
+    return object_ops.objectEnumerableOwnPropertiesCall(
+        ctx,
+        output,
+        global,
+        args,
         switch (filter) {
-            .string => {
-                if (is_symbol) continue;
-                const name_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.arrayLength()), name_value, caller_function, caller_frame);
-            },
-            .symbol => {
-                if (!is_symbol) continue;
-                const symbol_value = try ctx.runtime.symbolValue(key);
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.arrayLength()), symbol_value, caller_function, caller_frame);
-            },
-        }
-    }
-    return out.value();
+            .string => .own_names,
+            .symbol => .own_symbols,
+        },
+        .bare,
+        caller_function,
+        caller_frame,
+    );
 }

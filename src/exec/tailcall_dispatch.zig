@@ -3492,35 +3492,29 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
 /// writes become drop during resolve_variables. The resident success path is
 /// therefore qjs set_value exactly: publish the owned TOS value, release the old
 /// cell value, consume TOS, and continue. TDZ/init forms remain cold and separate.
-pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
-    return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            const idx: u16 = switch (idx_src) {
-                .c0 => 0,
-                .c1 => 1,
-                .c2 => 2,
-                .c3 => 3,
-                .half => readInt(u16, pc + 1),
-            };
-            const advance: usize = switch (idx_src) {
-                .c0, .c1, .c2, .c3 => 1,
-                .half => 3,
-            };
-            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
-            // are finalize-validated, frames carry exactly closure_var_count
-            // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
-            std.debug.assert(idx < vm.frame.var_refs.len);
-            // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
-            std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
-            const cell = vm.var_refs_base[idx];
-            cell.pvalue.* = (sp - 1)[0];
-            // The cell is the owner of this slot, and it long outlives the
-            // frame doing the store; `VarRef.setVarRefValue` takes the same
-            // barrier, but these handlers write `cell.pvalue` directly.
-            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
-            return cont(pc + advance, sp - 1, var_buf, vm);
-        }
-    }.h;
+pub fn opPutVarRef(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const wide = pc[0] == op.put_var_ref;
+    const idx: u16 = if (wide) readInt(u16, pc + 1) else switch (pc[0]) {
+        op.put_var_ref0 => 0,
+        op.put_var_ref1 => 1,
+        op.put_var_ref2 => 2,
+        op.put_var_ref3 => 3,
+        else => unreachable,
+    };
+    const advance: usize = if (wide) 3 else 1;
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+    // are finalize-validated, frames carry exactly closure_var_count
+    // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
+    std.debug.assert(idx < vm.frame.var_refs.len);
+    // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+    std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+    const cell = vm.var_refs_base[idx];
+    cell.pvalue.* = (sp - 1)[0];
+    // The cell is the owner of this slot, and it long outlives the
+    // frame doing the store; `VarRef.setVarRefValue` takes the same
+    // barrier, but these handlers write `cell.pvalue` directly.
+    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
+    return cont(pc + advance, sp - 1, var_buf, vm);
 }
 
 /// TDZ-checked closure var-ref write (qjs OP_put_var_ref_check,
@@ -3564,35 +3558,29 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
 /// copy. Publishing the copy before releasing the displaced value also makes a
 /// refcounted `captured = captured` safe. Generator/eval stop boundaries
 /// retain the cold adapter; bounds are a compile-time contract (M2-刀4).
-pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
-    return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            const idx: u16 = switch (idx_src) {
-                .c0 => 0,
-                .c1 => 1,
-                .c2 => 2,
-                .c3 => 3,
-                .half => readInt(u16, pc + 1),
-            };
-            const advance: usize = switch (idx_src) {
-                .c0, .c1, .c2, .c3 => 1,
-                .half => 3,
-            };
-            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
-            // are finalize-validated, frames carry exactly closure_var_count
-            // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
-            std.debug.assert(idx < vm.frame.var_refs.len);
-            // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
-            std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
-            const cell = vm.var_refs_base[idx];
-            cell.pvalue.* = (sp - 1)[0];
-            // The cell is the owner of this slot, and it long outlives the
-            // frame doing the store; `VarRef.setVarRefValue` takes the same
-            // barrier, but these handlers write `cell.pvalue` directly.
-            vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
-            return cont(pc + advance, sp, var_buf, vm);
-        }
-    }.h;
+pub fn opSetVarRef(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const wide = pc[0] == op.set_var_ref;
+    const idx: u16 = if (wide) readInt(u16, pc + 1) else switch (pc[0]) {
+        op.set_var_ref0 => 0,
+        op.set_var_ref1 => 1,
+        op.set_var_ref2 => 2,
+        op.set_var_ref3 => 3,
+        else => unreachable,
+    };
+    const advance: usize = if (wide) 3 else 1;
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+    // are finalize-validated, frames carry exactly closure_var_count
+    // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
+    std.debug.assert(idx < vm.frame.var_refs.len);
+    // Seam-leak detector (T6-GETVAR-A): live in Debug AND ReleaseSafe.
+    std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
+    const cell = vm.var_refs_base[idx];
+    cell.pvalue.* = (sp - 1)[0];
+    // The cell is the owner of this slot, and it long outlives the
+    // frame doing the store; `VarRef.setVarRefValue` takes the same
+    // barrier, but these handlers write `cell.pvalue` directly.
+    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
+    return cont(pc + advance, sp, var_buf, vm);
 }
 
 // I-cache pin (see op_return): keeps this hot handler's entry alignment
@@ -3629,27 +3617,24 @@ pub fn op_push_const8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: 
 /// The constructor may allocate/collect, so pc and the live pre-result stack
 /// remain authoritative roots, but success continues from the register-resident
 /// pc/sp instead of paying coldStd -> vm_call.closure -> Stack.push -> coldNext.
-pub fn opFclosure(comptime wide_index: bool) Handler {
-    return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            const advance: usize = if (wide_index) 5 else 2;
-            const index: usize = if (wide_index) readInt(u32, pc + 1) else pc[1];
-            vm.syncPc(pc, advance);
-            vm.syncSp(sp);
-            const bytecode_value = vm.function.constantAt(index) orelse return vm.fail(error.InvalidBytecode);
-            const closure_value = object_ops.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
-                return vm.fail(err);
-            // qjs's `*sp++` is safe because JS_CallInternal's operand stack is
-            // alloca'd inside the activation and never moves. zjs's Stack can
-            // relocate (`Stack.reserveAdditional` rewrites `self.values`), and
-            // the constructor above allocates, so the published top is the
-            // authority for the result slot — the same re-derivation every
-            // other allocating resident handler performs.
-            const result_sp = vm.stack.topPtr();
-            result_sp[0] = closure_value;
-            return cont(pc + advance, result_sp + 1, var_buf, vm);
-        }
-    }.h;
+pub fn opFclosure(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    const wide_index = pc[0] == op.fclosure;
+    const advance: usize = if (wide_index) 5 else 2;
+    const index: usize = if (wide_index) readInt(u32, pc + 1) else pc[1];
+    vm.syncPc(pc, advance);
+    vm.syncSp(sp);
+    const bytecode_value = vm.function.constantAt(index) orelse return vm.fail(error.InvalidBytecode);
+    const closure_value = object_ops.createBytecodeFunctionObject(vm.ctx, vm.frame, vm.global, bytecode_value) catch |err|
+        return vm.fail(err);
+    // qjs's `*sp++` is safe because JS_CallInternal's operand stack is
+    // alloca'd inside the activation and never moves. zjs's Stack can
+    // relocate (`Stack.reserveAdditional` rewrites `self.values`), and
+    // the constructor above allocates, so the published top is the
+    // authority for the result slot — the same re-derivation every
+    // other allocating resident handler performs.
+    const result_sp = vm.stack.topPtr();
+    result_sp[0] = closure_value;
+    return cont(pc + advance, result_sp + 1, var_buf, vm);
 }
 
 /// qjs OP_push_atom_value: decode the atom and push its retained string/symbol
@@ -5638,40 +5623,40 @@ inline fn logicOperandInt32(v: JSValue) ?i32 {
 /// Everything else — BigInt, string, object, symbol — plus the generator
 /// parameter/body stop boundary (`local_fast_blocked`) falls to the unchanged
 /// publishing shell, exactly like `op_div_cold`/`op_mod_cold`.
-pub fn opLogicCold(comptime opc: u8) Handler {
-    return struct {
-        fn hnd(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-            if (!vm.local_fast_blocked) {
-                if (logicOperandInt32((sp - 2)[0])) |v1| {
-                    if (logicOperandInt32((sp - 1)[0])) |v2| {
-                        switch (opc) {
-                            // qjs js_shr_slow closes with `JS_NewUint32(ctx, v1 >> (v2 & 0x1f))`
-                            // (quickjs.c:15764-15765): int32 while the u32 fits, else the exact
-                            // double — the same split OP_shr's int leg inlines.
-                            op.shr => {
-                                const r = @as(u32, @bitCast(v1)) >> @intCast(v2 & 31);
-                                if (r <= std.math.maxInt(i32)) {
-                                    (sp - 2)[0] = JSValue.int32(@intCast(r));
-                                } else {
-                                    (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
-                                }
-                            },
-                            op.shl => (sp - 2)[0] = JSValue.int32(v1 << @intCast(v2 & 31)),
-                            op.sar => (sp - 2)[0] = JSValue.int32(v1 >> @intCast(v2 & 31)),
-                            op.@"and" => (sp - 2)[0] = JSValue.int32(v1 & v2),
-                            op.@"or" => (sp - 2)[0] = JSValue.int32(v1 | v2),
-                            op.xor => (sp - 2)[0] = JSValue.int32(v1 ^ v2),
-                            else => unreachable,
+///
+/// One shared handler reads `pc[0]`. The six leftover copies were the same walk
+/// (906–937 B). `compareAt` stays per-opcode: eq vs relational had zero
+/// cross-traffic. The miss path already forwarded `pc[0]` to `binaryVm`.
+pub fn opLogicCold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
+    if (!vm.local_fast_blocked) {
+        if (logicOperandInt32((sp - 2)[0])) |v1| {
+            if (logicOperandInt32((sp - 1)[0])) |v2| {
+                switch (pc[0]) {
+                    // qjs js_shr_slow closes with `JS_NewUint32(ctx, v1 >> (v2 & 0x1f))`
+                    // (quickjs.c:15764-15765): int32 while the u32 fits, else the exact
+                    // double — the same split OP_shr's int leg inlines.
+                    op.shr => {
+                        const r = @as(u32, @bitCast(v1)) >> @intCast(v2 & 31);
+                        if (r <= std.math.maxInt(i32)) {
+                            (sp - 2)[0] = JSValue.int32(@intCast(r));
+                        } else {
+                            (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
                         }
-                        return cont(pc + 1, sp - 1, var_buf, vm);
-                    }
+                    },
+                    op.shl => (sp - 2)[0] = JSValue.int32(v1 << @intCast(v2 & 31)),
+                    op.sar => (sp - 2)[0] = JSValue.int32(v1 >> @intCast(v2 & 31)),
+                    op.@"and" => (sp - 2)[0] = JSValue.int32(v1 & v2),
+                    op.@"or" => (sp - 2)[0] = JSValue.int32(v1 | v2),
+                    op.xor => (sp - 2)[0] = JSValue.int32(v1 ^ v2),
+                    else => unreachable,
                 }
+                return cont(pc + 1, sp - 1, var_buf, vm);
             }
-            vm.publish(pc, sp);
-            _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
-            return coldNext(var_buf, vm);
         }
-    }.hnd;
+    }
+    vm.publish(pc, sp);
+    _ = vm_arith.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+    return coldNext(var_buf, vm);
 }
 
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the

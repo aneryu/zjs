@@ -2986,6 +2986,7 @@ pub const debug = struct {
 };
 
 pub const module = struct {
+    const std = @import("std");
     const atom = @import("core/atom.zig");
     const memory = @import("core/memory.zig");
 
@@ -3141,14 +3142,20 @@ pub const module = struct {
         }
     };
 
-    fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
-        const next = try account.alloc(T, slice.*.len + 1);
-        errdefer account.free(T, next);
-        @memcpy(next[0..slice.*.len], slice.*);
-        next[slice.*.len] = item;
+    inline fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
         const old = slice.*;
+        const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
+        const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);
+        const new_buf = try account.reallocElements(
+            old_ptr,
+            old.len,
+            new_count,
+            @sizeOf(T),
+            comptime std.mem.Alignment.of(T),
+        );
+        const next: []T = @as([*]T, @ptrCast(@alignCast(new_buf.ptr)))[0..new_count];
+        next[old.len] = item;
         slice.* = next;
-        if (old.len != 0) account.free(T, old);
     }
 };
 
@@ -5051,32 +5058,46 @@ pub const function_def = struct {
             return slice.ptr[used..new_used];
         }
 
-        return growSliceBySlow(T, mem, slice, capacity, used, new_used);
+        const elem_size = @sizeOf(T);
+        const old_ptr: [*]u8 = if (capacity.* == 0) undefined else @ptrCast(slice.ptr);
+        const new_ptr = try growSliceBySlowBytes(
+            mem,
+            old_ptr,
+            capacity,
+            used,
+            new_used,
+            elem_size,
+            comptime std.mem.Alignment.of(T),
+        );
+        slice.* = @as([*]T, @ptrCast(@alignCast(new_ptr)))[0..new_used];
+        return slice.*[used..new_used];
     }
 
     /// QuickJS keeps `js_resize_array` inline and enters its no-inline
     /// `js_realloc_array` only when the requested length exceeds capacity.
-    /// Preserve that call shape without changing this backing's growth policy
-    /// or its used-length/owned-capacity contract.
-    noinline fn growSliceBySlow(
-        comptime T: type,
+    /// One type-erased walk: alloc via `allocElements` / `allocSlowErased`,
+    /// not `allocAlignedBytes(trigger=true)` (knife 20 STOP).
+    noinline fn growSliceBySlowBytes(
         mem: *memory.MemoryAccount,
-        slice: *[]T,
+        old_ptr: [*]u8,
         capacity: *usize,
         used: usize,
         new_used: usize,
-    ) ![]T {
+        elem_size: usize,
+        alignment: std.mem.Alignment,
+    ) ![*]u8 {
         std.debug.assert(new_used > capacity.*);
         var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
         if (new_cap < new_used) new_cap = new_used;
-        const new_buf = try mem.alloc(T, new_cap);
-        @memcpy(new_buf[0..used], slice.*);
-        var old_buf: []T = &.{};
-        if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
-        slice.* = new_buf[0..new_used];
+        const new_buf = try mem.allocElements(new_cap, elem_size, alignment);
+        const used_bytes = std.math.mul(usize, used, elem_size) catch return error.OutOfMemory;
+        if (used_bytes != 0) @memcpy(new_buf[0..used_bytes], old_ptr[0..used_bytes]);
+        if (capacity.* != 0) {
+            const old_bytes = std.math.mul(usize, capacity.*, elem_size) catch return error.OutOfMemory;
+            mem.freeAlignedBytes(old_ptr[0..old_bytes], alignment);
+        }
         capacity.* = new_cap;
-        if (old_buf.len != 0) mem.free(T, old_buf);
-        return slice.ptr[used..new_used];
+        return new_buf.ptr;
     }
 
     /// Free the full backing buffer of a growable slice and reset both the
@@ -8878,12 +8899,12 @@ pub const binding_rules = struct {
     /// local/argument path: those operations need fallible calls and a large
     /// spill frame, while QuickJS reaches them only after the same local miss.
     noinline fn resolveBindingTopologyAfterCurrentMiss(
-        comptime trust_final_scope_links: bool,
+        trust_final_scope_links: bool,
         ctx: *JSContext,
         atom_id: atom.Atom,
     ) Error!ScopeVarBinding {
         const fd = ctx.function_def orelse return error.NoFunctionDef;
-        if (comptime trust_final_scope_links) {
+        if (trust_final_scope_links) {
             std.debug.assert(ctx.scope_link_proof != .none);
         }
         // Current-function fallbacks mirror resolve_scope_var exactly: normal
@@ -8909,7 +8930,7 @@ pub const binding_rules = struct {
         if (findResolvedClosureBinding(fd, atom_id)) |binding| return binding;
 
         if (fd.parent != null) {
-            if (comptime trust_final_scope_links) {
+            if (trust_final_scope_links) {
                 try ctx.proveParentScopeLinksForResolution();
             } else {
                 try validateFunctionDefParentChain(fd);
@@ -8919,13 +8940,12 @@ pub const binding_rules = struct {
         var maybe_parent = fd.parent;
         var visible_scope_level = fd.parent_scope_level;
         while (maybe_parent) |parent| {
-            const scoped_source = try discoverParentScopedSource(
-                trust_final_scope_links,
-                fd,
-                parent,
-                atom_id,
-                visible_scope_level,
-            );
+            // Keep `discoverParentScopedSource` specialized; this outlined
+            // miss walk is shared for both proof modes.
+            const scoped_source = if (trust_final_scope_links)
+                try discoverParentScopedSource(true, fd, parent, atom_id, visible_scope_level)
+            else
+                try discoverParentScopedSource(false, fd, parent, atom_id, visible_scope_level);
             const argument_environment_only = scoped_source.argument_environment_only;
             if (scoped_source.local) |local_idx| {
                 return .{ .closure = try threadParentLocalSource(fd, parent, local_idx) };
@@ -10266,6 +10286,7 @@ pub const pipeline_finalize = struct {
 
     const std = @import("std");
     const atom = @import("core/atom.zig");
+    const array_list_erased = @import("core/array_list_erased.zig");
     const bigint_mod = @import("core/bigint.zig");
     const runtime_mod = @import("core/runtime.zig");
     const fb_mod = function_bytecode;
@@ -11155,7 +11176,7 @@ pub const pipeline_finalize = struct {
         var frames: std.ArrayList(Frame) = .empty;
         defer frames.deinit(fd.memory.allocator);
         try prepareCurrentBeforeChildren(fd, root_module_record);
-        try frames.append(fd.memory.allocator, .{ .function_def = fd });
+        try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = fd });
 
         while (frames.items.len != 0) {
             const frame_index = frames.items.len - 1;
@@ -11169,7 +11190,7 @@ pub const pipeline_finalize = struct {
                     return error.InvalidBytecode;
                 }
                 try prepareCurrentBeforeChildren(child, null);
-                try frames.append(fd.memory.allocator, .{ .function_def = child });
+                try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = child });
                 continue;
             }
 

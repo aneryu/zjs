@@ -491,6 +491,17 @@ pub const JSContext = struct {
         return ctx;
     }
 
+    /// `@splat(JSValue.nullValue())` for `class_prototypes_inline` is 69 × 16
+    /// bytes of zeros plus tag 2. Copying that typed default materializes a
+    /// 1104-byte `.rodata` template. Store one `nullValue()` into each slot
+    /// instead so every field still equals `JSValue.nullValue()`.
+    fn fillNullJsValues(values: []JSValue) void {
+        const null_value = JSValue.nullValue();
+        for (values) |*slot| {
+            slot.* = null_value;
+        }
+    }
+
     fn initConstructing(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
         if (options.stack_size) |stack_size| rt.setStackSize(stack_size);
         self.* = .{
@@ -499,7 +510,9 @@ pub const JSContext = struct {
             .track_unhandled_rejections = options.track_unhandled_rejections,
             .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
             .random_state = runtime_mod.newRealmRandomSeed(),
+            .class_prototypes_inline = undefined,
         };
+        fillNullJsValues(&self.class_prototypes_inline);
         self.traceListPreviousPtr().* = null;
         const initial_len = rt.classes.records.len;
         if (initial_len <= self.class_prototypes_inline.len) {

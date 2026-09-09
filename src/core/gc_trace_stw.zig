@@ -22,6 +22,7 @@ const object_mod = @import("object.zig");
 const object_payloads = @import("object_payloads.zig");
 const profile = @import("profile.zig");
 const BlockHeapMod = @import("gc_block_heap.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const runtime_mod = @import("runtime.zig");
 const property = @import("property.zig");
 const shape = @import("shape.zig");
@@ -547,16 +548,22 @@ fn verifyFullCondemnation(rt: *JSRuntime, reachable: *const FullReachable) Colle
         }
         if (reported < 8) {
             reported += 1;
-            std.debug.print("VERIFY-MAJOR condemned-but-reachable source={s} kind={s}\n", .{
-                @tagName(source),
-                @tagName(header.metaConst().flags.kind),
+            gc_audit_print.print(&.{
+                .{ .text = "VERIFY-MAJOR condemned-but-reachable source=" },
+                .{ .text = @tagName(source) },
+                .{ .text = " kind=" },
+                .{ .text = @tagName(header.metaConst().flags.kind) },
+                .{ .text = "\n" },
             });
         }
     }
     if (precise_violations + conservative_violations == 0) return;
-    std.debug.print("VERIFY-MAJOR {d} precise, {d} conservative-only condemned-but-reachable\n", .{
-        precise_violations,
-        conservative_violations,
+    gc_audit_print.print(&.{
+        .{ .text = "VERIFY-MAJOR " },
+        .{ .dec = precise_violations },
+        .{ .text = " precise, " },
+        .{ .dec = conservative_violations },
+        .{ .text = " conservative-only condemned-but-reachable\n" },
     });
     if (precise_violations == 0) return;
     return error.PayloadMarkFailed;
@@ -647,7 +654,13 @@ inline fn censusEnd(started: u64) void {
 
 fn requireInvariant(result: anyerror!void, audit: []const u8, panic_message: []const u8) void {
     result catch |err| {
-        std.debug.print("gc: {s} AUDIT: {s}\n", .{ audit, @errorName(err) });
+        gc_audit_print.print(&.{
+            .{ .text = "gc: " },
+            .{ .text = audit },
+            .{ .text = " AUDIT: " },
+            .{ .text = @errorName(err) },
+            .{ .text = "\n" },
+        });
         @panic(panic_message);
     };
 }
@@ -660,10 +673,13 @@ fn verifyCollectorInvariants(
     const stale = rt.gc.address_registry.auditArenas();
     const missing = auditLiveObjectsResolve(rt);
     if (stale != 0 or missing != 0) {
-        std.debug.print(
-            "gc: ARENA AUDIT: {d} free blocks read live, {d} live objects unresolvable\n",
-            .{ stale, missing },
-        );
+        gc_audit_print.print(&.{
+            .{ .text = "gc: ARENA AUDIT: " },
+            .{ .dec = stale },
+            .{ .text = " free blocks read live, " },
+            .{ .dec = missing },
+            .{ .text = " live objects unresolvable\n" },
+        });
         @panic("arena invariant violated");
     }
     requireInvariant(rt.gc.address_registry.verifyIndex(verify_scan_cache), "ADDRESS INDEX", "address index invariant violated");
@@ -819,7 +835,11 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     defer if (full_reachable) |*reachable| reachable.deinit();
     if (gc.verify_minor) {
         full_reachable = computeFullReachable(rt, scan) catch |err| blk: {
-            std.debug.print("VERIFY-MINOR setup failed: {s}\n", .{@errorName(err)});
+            gc_audit_print.print(&.{
+                .{ .text = "VERIFY-MINOR setup failed: " },
+                .{ .text = @errorName(err) },
+                .{ .text = "\n" },
+            });
             break :blk null;
         };
     }
@@ -1603,10 +1623,15 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
         // whole-heap `AllocCountMismatch`.
         if (gc.invariantChecksEnabled()) {
             BlockHeapMod.Heap.verifyBlockAllocCount(block) catch |err| {
-                std.debug.print(
-                    "gc: DOOMED RECLAIM AUDIT: {s} block=0x{x} allocated_count={d}\n",
-                    .{ @errorName(err), @intFromPtr(block), block.allocated_count },
-                );
+                gc_audit_print.print(&.{
+                    .{ .text = "gc: DOOMED RECLAIM AUDIT: " },
+                    .{ .text = @errorName(err) },
+                    .{ .text = " block=0x" },
+                    .{ .hex = @intFromPtr(block) },
+                    .{ .text = " allocated_count=" },
+                    .{ .dec = block.allocated_count },
+                    .{ .text = "\n" },
+                });
                 @panic("the doomed reclaim left a block's alloc bitmap and count disagreeing");
             };
         }
@@ -1811,10 +1836,13 @@ fn auditLiveObjectsResolve(rt: *JSRuntime) usize {
         missing += 1;
         if (reported < 8) {
             reported += 1;
-            std.debug.print(
-                "gc: ARENA AUDIT live object at 0x{x} (kind {any}) does not resolve\n",
-                .{ @intFromPtr(header), header.metaConst().flags.kind },
-            );
+            gc_audit_print.print(&.{
+                .{ .text = "gc: ARENA AUDIT live object at 0x" },
+                .{ .hex = @intFromPtr(header) },
+                .{ .text = " (kind ." },
+                .{ .text = @tagName(header.metaConst().flags.kind) },
+                .{ .text = ") does not resolve\n" },
+            });
         }
     }
     return missing;
@@ -2568,20 +2596,39 @@ const Collector = struct {
                 const kind = header.metaConst().flags.kind;
                 if (kind == .object) {
                     const o = Object.fromHeader(header);
-                    std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind=object class={d} payload={s}\n", .{ @tagName(reachability), o.class_id, @tagName(o.flags.class_payload_kind) });
+                    gc_audit_print.print(&.{
+                        .{ .text = "VERIFY-MINOR condemned-but-reachable source=" },
+                        .{ .text = @tagName(reachability) },
+                        .{ .text = " kind=object class=" },
+                        .{ .dec = o.class_id },
+                        .{ .text = " payload=" },
+                        .{ .text = @tagName(o.flags.class_payload_kind) },
+                        .{ .text = "\n" },
+                    });
                 } else {
-                    std.debug.print("VERIFY-MINOR condemned-but-reachable source={s} kind={s}\n", .{ @tagName(reachability), @tagName(kind) });
+                    gc_audit_print.print(&.{
+                        .{ .text = "VERIFY-MINOR condemned-but-reachable source=" },
+                        .{ .text = @tagName(reachability) },
+                        .{ .text = " kind=" },
+                        .{ .text = @tagName(kind) },
+                        .{ .text = "\n" },
+                    });
                 }
             }
             if (violations != 0) {
                 defer if (gc.verify_minor_fatal and precise_violations != 0)
                     @panic("VERIFY-MINOR: precisely reachable object condemned by a minor");
                 if (precise_violations != 0 or gc.verify_minor_verbose) {
-                    std.debug.print("VERIFY-MINOR {d} of {d} condemned objects are reachable by a full trace ({d} precise, {d} conservative-only)\n", .{
-                        violations,
-                        doomed.items.len,
-                        precise_violations,
-                        violations - precise_violations,
+                    gc_audit_print.print(&.{
+                        .{ .text = "VERIFY-MINOR " },
+                        .{ .dec = violations },
+                        .{ .text = " of " },
+                        .{ .dec = doomed.items.len },
+                        .{ .text = " condemned objects are reachable by a full trace (" },
+                        .{ .dec = precise_violations },
+                        .{ .text = " precise, " },
+                        .{ .dec = violations - precise_violations },
+                        .{ .text = " conservative-only)\n" },
                     });
                 }
             }
@@ -2796,18 +2843,42 @@ const Collector = struct {
                                 else => {},
                             }
                         }
-                        std.debug.print("MINOR-AUDIT-WHERE owner_class={d} payload={s} where={s} atom={s} nprops={d} owner_marked={}\n", .{ o.class_id, @tagName(o.flags.class_payload_kind), where, a.rt.atoms.name(@intCast(hit_atom)) orelse "?", o.shape_ref.prop_count, a.rt.gc.headerMarked(o.gcHeader()) });
+                        gc_audit_print.print(&.{
+                            .{ .text = "MINOR-AUDIT-WHERE owner_class=" },
+                            .{ .dec = o.class_id },
+                            .{ .text = " payload=" },
+                            .{ .text = @tagName(o.flags.class_payload_kind) },
+                            .{ .text = " where=" },
+                            .{ .text = where },
+                            .{ .text = " atom=" },
+                            .{ .text = a.rt.atoms.name(@intCast(hit_atom)) orelse "?" },
+                            .{ .text = " nprops=" },
+                            .{ .dec = o.shape_ref.prop_count },
+                            .{ .text = " owner_marked=" },
+                            .{ .text = gc_audit_print.boolText(a.rt.gc.headerMarked(o.gcHeader())) },
+                            .{ .text = "\n" },
+                        });
                     }
-                    std.debug.print("MINOR-AUDIT owner={s}/ptr{x} owner_young={} owner_remembered={} -> child kind={s} class={d}/{s} child_young={} child_marked={}\n", .{
-                        @tagName(a.owner_kind),
-                        @intFromPtr(a.owner_ptr),
-                        a.owner_young,
-                        a.owner_remembered,
-                        @tagName(child.metaConst().flags.kind),
-                        if (c) |o| o.class_id else 0,
-                        if (c) |o| @tagName(o.flags.class_payload_kind) else "-",
-                        child.metaConst().flags.young,
-                        a.rt.gc.headerMarked(child),
+                    gc_audit_print.print(&.{
+                        .{ .text = "MINOR-AUDIT owner=" },
+                        .{ .text = @tagName(a.owner_kind) },
+                        .{ .text = "/ptr" },
+                        .{ .hex = @intFromPtr(a.owner_ptr) },
+                        .{ .text = " owner_young=" },
+                        .{ .text = gc_audit_print.boolText(a.owner_young) },
+                        .{ .text = " owner_remembered=" },
+                        .{ .text = gc_audit_print.boolText(a.owner_remembered) },
+                        .{ .text = " -> child kind=" },
+                        .{ .text = @tagName(child.metaConst().flags.kind) },
+                        .{ .text = " class=" },
+                        .{ .dec = if (c) |obj| obj.class_id else 0 },
+                        .{ .text = "/" },
+                        .{ .text = if (c) |obj| @tagName(obj.flags.class_payload_kind) else "-" },
+                        .{ .text = " child_young=" },
+                        .{ .text = gc_audit_print.boolText(child.metaConst().flags.young) },
+                        .{ .text = " child_marked=" },
+                        .{ .text = gc_audit_print.boolText(a.rt.gc.headerMarked(child)) },
+                        .{ .text = "\n" },
                     });
                     if (gc.minor_audit_fatal) @panic("MINOR-AUDIT: live owner holds an unremembered edge into the condemned young set");
                     return;

@@ -16,6 +16,7 @@ const gc_representation = @import("gc_representation_constants.zig");
 const gc = @import("gc.zig");
 const carrier = @import("gc_carrier.zig");
 const space = @import("gc_space.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 
 const block_generation_enabled = carrier.block_generation_enabled;
 const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
@@ -303,6 +304,15 @@ pub const BlockCensus = struct {
 pub fn canAllocCellSize(n: usize) bool {
     if (n == 0 or n >= space.large_min_bytes) return false;
     return space.classIndexForPayload(n) != null;
+}
+
+/// Comptime size-class pair for a cell payload that `canAllocCellSize`.
+/// Callers keep proving `n` at comptime; the outlined pop takes these
+/// values at runtime so leftover `n` copies share one walk.
+pub inline fn cellClassForPayload(comptime n: usize) struct { idx: usize, size: u32 } {
+    comptime std.debug.assert(canAllocCellSize(n));
+    const idx = space.classIndexForPayload(n).?;
+    return .{ .idx = idx, .size = @intCast(space.classes[idx]) };
 }
 
 /// Accounting twin of `allocCell`: map a requested physical cell payload to
@@ -1117,10 +1127,9 @@ pub const Heap = struct {
     /// proves the payload at comptime, so runtime size classification would be
     /// duplicate work on every cell. Keep its entry on an instruction-cache
     /// line: the active-block pop is the allocation front end for every Object.
-    pub noinline fn allocCellFixedPtr(self: *Heap, comptime n: usize) align(64) ?[*]u8 {
-        comptime std.debug.assert(canAllocCellSize(n));
-        const class_idx = comptime space.classIndexForPayload(n).?;
-        const cell_size: u32 = comptime @intCast(space.classes[class_idx]);
+    /// `class_idx` / `cell_size` are the already-proven class, not a second
+    /// `classIndexForPayload` walk (do not fold this through `allocCell`).
+    pub noinline fn allocCellFixedPtr(self: *Heap, class_idx: usize, cell_size: u32) align(64) ?[*]u8 {
         return self.allocSmallCell(class_idx, cell_size) catch return null;
     }
 
@@ -2503,10 +2512,15 @@ pub const Heap = struct {
                 if (!hot_unprepared and !bitmap_canonical and
                     block.free_list >= block.cell_count and block.free_list != free_nil)
                 {
-                    std.debug.print(
-                        "gc: BLOCK HEAP AUDIT free head out of range block=0x{x} head={d} cells={d}\n",
-                        .{ @intFromPtr(block), block.free_list, block.cell_count },
-                    );
+                    gc_audit_print.print(&.{
+                        .{ .text = "gc: BLOCK HEAP AUDIT free head out of range block=0x" },
+                        .{ .hex = @intFromPtr(block) },
+                        .{ .text = " head=" },
+                        .{ .dec = block.free_list },
+                        .{ .text = " cells=" },
+                        .{ .dec = block.cell_count },
+                        .{ .text = "\n" },
+                    });
                     return error.FreeChainCorrupt;
                 }
                 if (hot_unprepared or bitmap_canonical) {
@@ -2573,20 +2587,38 @@ pub const Heap = struct {
                     while (link != free_nil) {
                         if (link >= block.cell_count) return error.FreeChainCorrupt;
                         if (testBitPlain(block.bitmaps().alloc, link)) {
-                            std.debug.print(
-                                "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x{x} link={d} walked={d}\n",
-                                .{ @intFromPtr(block), link, walked },
-                            );
+                            gc_audit_print.print(&.{
+                                .{ .text = "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x" },
+                                .{ .hex = @intFromPtr(block) },
+                                .{ .text = " link=" },
+                                .{ .dec = link },
+                                .{ .text = " walked=" },
+                                .{ .dec = walked },
+                                .{ .text = "\n" },
+                            });
                             return error.FreeChainCorrupt;
                         }
                         walked += 1;
                         if (walked > block.cell_count) return error.FreeChainCorrupt; // cycle
                         const raw = @as(*const u32, @ptrCast(@alignCast(block.cellPtr(link)))).*;
                         if (raw & ~free_link_mask != free_poison) {
-                            std.debug.print(
-                                "gc: BLOCK HEAP AUDIT free poison mismatch block=0x{x} link={d} raw=0x{x} walked={d} head={d} bump={d} allocated={d}\n",
-                                .{ @intFromPtr(block), link, raw, walked, block.free_list, block.bump, block.allocated_count },
-                            );
+                            gc_audit_print.print(&.{
+                                .{ .text = "gc: BLOCK HEAP AUDIT free poison mismatch block=0x" },
+                                .{ .hex = @intFromPtr(block) },
+                                .{ .text = " link=" },
+                                .{ .dec = link },
+                                .{ .text = " raw=0x" },
+                                .{ .hex = raw },
+                                .{ .text = " walked=" },
+                                .{ .dec = walked },
+                                .{ .text = " head=" },
+                                .{ .dec = block.free_list },
+                                .{ .text = " bump=" },
+                                .{ .dec = block.bump },
+                                .{ .text = " allocated=" },
+                                .{ .dec = block.allocated_count },
+                                .{ .text = "\n" },
+                            });
                             return error.FreeCellPoisonMismatch;
                         }
                         link = raw & free_link_mask;
@@ -2594,10 +2626,21 @@ pub const Heap = struct {
                     // Completeness, not just validity: every cell handed out
                     // by the bump pointer and since freed is reachable.
                     if (walked != block.bump - block.allocated_count) {
-                        std.debug.print(
-                            "gc: BLOCK HEAP AUDIT incomplete free chain block=0x{x} walked={d} expected={d} head={d} bump={d} allocated={d}\n",
-                            .{ @intFromPtr(block), walked, block.bump - block.allocated_count, block.free_list, block.bump, block.allocated_count },
-                        );
+                        gc_audit_print.print(&.{
+                            .{ .text = "gc: BLOCK HEAP AUDIT incomplete free chain block=0x" },
+                            .{ .hex = @intFromPtr(block) },
+                            .{ .text = " walked=" },
+                            .{ .dec = walked },
+                            .{ .text = " expected=" },
+                            .{ .dec = block.bump - block.allocated_count },
+                            .{ .text = " head=" },
+                            .{ .dec = block.free_list },
+                            .{ .text = " bump=" },
+                            .{ .dec = block.bump },
+                            .{ .text = " allocated=" },
+                            .{ .dec = block.allocated_count },
+                            .{ .text = "\n" },
+                        });
                         return error.FreeChainCorrupt;
                     }
                 }
@@ -2827,20 +2870,27 @@ pub const Heap = struct {
                     if (require_young_membership and young and
                         !block.cellPendingDoomed(index) and !block.isYoungListed())
                     {
-                        std.debug.print(
-                            "gc: BLOCK CELL AUDIT young cell 0x{x} index {d} in unlisted block 0x{x} (flags=0x{x}, block_flags=0x{x}, marked={any}, doomed=0x{x}, doomed_cursor={d}, doomed_word=0x{x})\n",
-                            .{
-                                cell,
-                                index,
-                                @intFromPtr(block),
-                                flags,
-                                block.flags,
-                                block.isMarked(index, self.mark_epoch),
-                                block.bitmaps().remember[index / 64],
-                                block.doomed_cursor,
-                                block.doomed_word,
-                            },
-                        );
+                        gc_audit_print.print(&.{
+                            .{ .text = "gc: BLOCK CELL AUDIT young cell 0x" },
+                            .{ .hex = cell },
+                            .{ .text = " index " },
+                            .{ .dec = index },
+                            .{ .text = " in unlisted block 0x" },
+                            .{ .hex = @intFromPtr(block) },
+                            .{ .text = " (flags=0x" },
+                            .{ .hex = flags },
+                            .{ .text = ", block_flags=0x" },
+                            .{ .hex = block.flags },
+                            .{ .text = ", marked=" },
+                            .{ .text = gc_audit_print.boolText(block.isMarked(index, self.mark_epoch)) },
+                            .{ .text = ", doomed=0x" },
+                            .{ .hex = block.bitmaps().remember[index / 64] },
+                            .{ .text = ", doomed_cursor=" },
+                            .{ .dec = block.doomed_cursor },
+                            .{ .text = ", doomed_word=0x" },
+                            .{ .hex = block.doomed_word },
+                            .{ .text = ")\n" },
+                        });
                         return error.YoungCellUnlisted;
                     }
                 }

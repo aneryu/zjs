@@ -7,6 +7,7 @@ pub const representation = @import("gc_representation_constants.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const memory = @import("memory.zig");
+const gc_audit_print = @import("gc_audit_print.zig");
 const carrier = @import("gc_carrier.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
@@ -20,6 +21,7 @@ const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const shape = @import("shape.zig");
 const JSValue = @import("value.zig").JSValue;
+const value_format = @import("value_format.zig");
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -186,14 +188,14 @@ fn readStressFromEnv() void {
     }
     if (comptime builtin.is_test) {
         if (std.c.getenv("ZJS_GC_M_CUT_INJECT")) |raw| {
-            m_cut_inject = std.fmt.parseInt(u8, std.mem.span(raw), 10) catch 0;
+            m_cut_inject = value_format.parseAsciiInt(u8, std.mem.span(raw), 10) catch 0;
         }
     }
     const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
     const text = std.mem.span(raw);
     if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
     stress_collect = true;
-    const parsed = std.fmt.parseInt(i32, text, 10) catch return;
+    const parsed = value_format.parseAsciiInt(i32, text, 10) catch return;
     if (parsed > 1) stress_cadence = parsed;
 }
 
@@ -2177,7 +2179,7 @@ pub const Registry = struct {
     /// itself (S4 spec 5 (4)).
     pub fn createStorageCellPublished(
         self: *Registry,
-        comptime kind_tag: u8,
+        kind_tag: u8,
         total_bytes: usize,
     ) ![*]u8 {
         const cell = try self.memory.createStorageCell(kind_tag, total_bytes);
@@ -3456,10 +3458,19 @@ pub const Registry = struct {
             object.Object.fromHeader(owner).class_id
         else
             0;
-        std.debug.print(
-            "UNBARRIERED-STORE site={s} hit={d} owner_kind={s} owner_class={d} child_kind={s}\n",
-            .{ @tagName(site), slot.*, @tagName(owner.metaConst().flags.kind), owner_class, @tagName(target.metaConst().flags.kind) },
-        );
+        gc_audit_print.print(&.{
+            .{ .text = "UNBARRIERED-STORE site=" },
+            .{ .text = @tagName(site) },
+            .{ .text = " hit=" },
+            .{ .dec = slot.* },
+            .{ .text = " owner_kind=" },
+            .{ .text = @tagName(owner.metaConst().flags.kind) },
+            .{ .text = " owner_class=" },
+            .{ .dec = owner_class },
+            .{ .text = " child_kind=" },
+            .{ .text = @tagName(target.metaConst().flags.kind) },
+            .{ .text = "\n" },
+        });
         if (slot.* == 1) std.debug.dumpCurrentStackTrace(.{});
         if (minor_audit_fatal) @panic("UNBARRIERED-STORE: old unremembered owner gained a young child without a barrier");
     }

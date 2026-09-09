@@ -3,6 +3,7 @@
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
 const engine = @import("zjs");
+const sort_erased = engine.sort_erased;
 const simple_token = engine.simple_token;
 const platform_clock = engine.platform_clock;
 /// Message-only panics in ReleaseFast, full traces everywhere else.
@@ -242,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
         .file => |file| source: {
             const read_start = platform_clock.monotonicNanos();
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, file.path, allocator, .limited(max_source_size)) catch |err| {
-                try cli_process.printError(io, "zjs: unable to read {s}: {s}\n", .{ file.path, @errorName(err) });
+                try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", file.path, ": ", @errorName(err), "\n" });
                 std.process.exit(1);
             };
             read_source_ns = platform_clock.elapsedNanosSince(read_start);
@@ -267,12 +268,12 @@ pub fn main(init: std.process.Init) !void {
         .gc_threshold = zjs.default_gc_threshold,
         .stack_size = commandRuntimeOptions(command).stack_size orelse zjs.default_stack_size,
     }) catch |err| {
-        try cli_process.printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "zjs: engine init failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     errdefer rt.destroy();
     const ctx = zjs.JSContext.create(rt) catch |err| {
-        try cli_process.printError(io, "zjs: context init failed: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     errdefer ctx.destroy();
@@ -291,7 +292,7 @@ pub fn main(init: std.process.Init) !void {
     const runtime_options = commandRuntimeOptions(command);
     if (runtime_options.profile_opcodes) {
         if (!zjs.opcode_profile_build_enabled) {
-            try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n", .{});
+            try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n");
             std.process.exit(2);
         }
         runtime.runtime.setOpcodeProfile(&opcode_profile);
@@ -299,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
         _ = zjs.activateOpcodeProfile(&opcode_profile);
     }
     zjs.host.defineScriptArgs(runtime.context, commandScriptArgs(command)) catch |err| {
-        try cli_process.printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
+        try cli_process.printErrorJoin(io, &.{ "zjs: scriptArgs setup failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     runtime.context.setPreserveUncaughtException(true);
@@ -381,7 +382,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.interface.flush();
 
     if (value.isException()) {
-        try cli_process.printError(io, "zjs: uncaught exception\n", .{});
+        try cli_process.printError(io, "zjs: uncaught exception\n");
         std.process.exit(1);
     }
 
@@ -479,7 +480,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n", .{});
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n");
 }
 
 /// Standalone query flag: it takes no script and constructs no runtime, so it
@@ -551,7 +552,7 @@ fn runIncludeFiles(runtime: *Runtime, options: RuntimeOptions, output: *std.Io.W
 
 fn parseLimitKBytes(text: []const u8) !usize {
     if (text.len == 0) return error.InvalidCharacter;
-    const kbytes = try std.fmt.parseInt(usize, text, 10);
+    const kbytes = try engine.core.value_format.parseAsciiInt(usize, text, 10);
     return std.math.mul(usize, kbytes, 1024) catch error.Overflow;
 }
 
@@ -682,7 +683,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
         };
         row_count += 1;
     }
-    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
     try output.print("  \"opcode_profile\": {{\n", .{});
     try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
@@ -840,9 +841,8 @@ fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
         .{ ", other ", census.other_superblocks },
         .{ ", uninitialized slots ", census.uninitialized_blocks },
     }, "\n");
-    try writer.print(
+    try writer.writeAll(
         "gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free\n",
-        .{},
     );
     var total: engine.core.gc_block_heap.BlockCensusRow = .{};
     for (census.rows) |row| {
@@ -923,11 +923,13 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         .{ ", remembered drops ", st.remembered_drops },
         .{ ", suspensions ", st.minor_suspensions },
     }, "\n");
-    try writer.print("gc: major retirement commits {d}, abandons {d}, current state {s}\n", .{
-        st.retirement_commits,
-        st.retirement_abandons,
-        @tagName(registry.generation.major_retirement),
-    });
+    try writeCounterLine(writer, &.{
+        .{ "gc: major retirement commits ", st.retirement_commits },
+        .{ ", abandons ", st.retirement_abandons },
+    }, "");
+    try writer.writeAll(", current state ");
+    try writer.writeAll(@tagName(registry.generation.major_retirement));
+    try writer.writeAll("\n");
     try writeCounterLine(writer, &.{
         .{ "gc: generational barrier calls ", st.barrier_calls },
         .{ ", exit young-owner ", st.barrier_young_owner },
@@ -975,7 +977,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
             .{ " over ", st.minor_collections },
         }, " verified minors\n");
     } else {
-        try writer.print("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n", .{});
+        try writer.writeAll("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n");
     }
     const cs = registry.incremental.stats;
     try writeCounterLine(writer, &.{
@@ -1136,9 +1138,8 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
     // An all-zero panel reads like "nothing was marked", which is a wrong
     // answer rather than a missing one. Say which it is.
     if (!engine.core.gc_trace_stw.mark_footprint_census) {
-        try writer.print(
+        try writer.writeAll(
             "gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n",
-            .{},
         );
         return;
     }
@@ -1267,20 +1268,31 @@ fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
 }
 
 fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
-    const state = engine.core.gc_trace_stw.doomedStateSnapshot(rt);
-    try writer.print(
-        "gc: {s} doomed_pending {s}, doomed_buckets {d}, doomed_headers {d}, doomed_cursor {s}, doomed_blocks {d}, deferred_finalizers {d}, active_finalizer {s}\n",
-        .{
-            layer,
-            if (state.pending) "true" else "false",
-            state.nonempty_buckets,
-            state.bucket_headers,
-            if (state.cursor_present) "true" else "false",
-            state.doomed_blocks,
-            state.deferred_finalizers,
-            if (state.active_finalizer) "true" else "false",
-        },
-    );
+    try writeDoomedStateLine(writer, layer, engine.core.gc_trace_stw.doomedStateSnapshot(rt));
+}
+
+fn writeDoomedStateLine(
+    writer: *std.Io.Writer,
+    layer: []const u8,
+    state: engine.core.gc_trace_stw.DoomedStateSnapshot,
+) !void {
+    try writer.writeAll("gc: ");
+    try writer.writeAll(layer);
+    try writer.writeAll(" doomed_pending ");
+    try writer.writeAll(if (state.pending) "true" else "false");
+    try writeCounterLine(writer, &.{
+        .{ ", doomed_buckets ", state.nonempty_buckets },
+        .{ ", doomed_headers ", state.bucket_headers },
+    }, "");
+    try writer.writeAll(", doomed_cursor ");
+    try writer.writeAll(if (state.cursor_present) "true" else "false");
+    try writeCounterLine(writer, &.{
+        .{ ", doomed_blocks ", state.doomed_blocks },
+        .{ ", deferred_finalizers ", state.deferred_finalizers },
+    }, "");
+    try writer.writeAll(", active_finalizer ");
+    try writer.writeAll(if (state.active_finalizer) "true" else "false");
+    try writer.writeAll("\n");
 }
 
 /// Pause percentiles, or an explicit "no pauses" line. Never print zeros for
@@ -1293,7 +1305,7 @@ fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.J
 /// design target is written against.
 fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) !void {
     const d = distribution orelse {
-        try writer.print("gc: major pauses none\n", .{});
+        try writer.writeAll("gc: major pauses none\n");
         return;
     };
     const retained = @min(d.samples, engine.core.gc.pause_sample_capacity);
@@ -1322,7 +1334,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         row_count += 1;
     }
 
-    std.sort.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
 
     try output.print("\nZJS opcode profile\n", .{});
     try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
@@ -1520,7 +1532,7 @@ fn printTypeErrorNotFunction(io: std.Io, command: Command) !void {
         .file => |file| file.path,
         .eval => "<eval>",
     };
-    try cli_process.printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
+    try cli_process.printErrorJoin(io, &.{ "TypeError: not a function\n    at <anonymous> (", path, ":7:20)\n\n" });
 }
 
 test "zjs args accept eval source" {
@@ -1807,6 +1819,48 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
     try std.testing.expectEqualStrings(expected, writer.buffered());
 }
 
+test "zjs doomed state line preserves mixed bools and counters" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeDoomedStateLine(&writer, "endpoint", .{
+        .pending = true,
+        .nonempty_buckets = 2,
+        .bucket_headers = 7,
+        .cursor_present = false,
+        .doomed_blocks = 11,
+        .deferred_finalizers = 13,
+        .active_finalizer = true,
+    });
+    try std.testing.expectEqualStrings(
+        "gc: endpoint doomed_pending true, doomed_buckets 2, doomed_headers 7, doomed_cursor false, doomed_blocks 11, deferred_finalizers 13, active_finalizer true\n",
+        writer.buffered(),
+    );
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeDoomedStateLine(&writer, "settled", .{
+        .pending = false,
+        .nonempty_buckets = 0,
+        .bucket_headers = 0,
+        .cursor_present = true,
+        .doomed_blocks = 0,
+        .deferred_finalizers = 0,
+        .active_finalizer = false,
+    });
+    try std.testing.expectEqualStrings(
+        "gc: settled doomed_pending false, doomed_buckets 0, doomed_headers 0, doomed_cursor true, doomed_blocks 0, deferred_finalizers 0, active_finalizer false\n",
+        writer.buffered(),
+    );
+    writer = std.Io.Writer.fixed(buffer[0..8]);
+    try std.testing.expectError(error.WriteFailed, writeDoomedStateLine(&writer, "endpoint", .{
+        .pending = true,
+        .nonempty_buckets = 1,
+        .bucket_headers = 1,
+        .cursor_present = true,
+        .doomed_blocks = 1,
+        .deferred_finalizers = 1,
+        .active_finalizer = true,
+    }));
+}
+
 test "zjs counter line handles full unsigned range and writer errors" {
     var buffer: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -1964,9 +2018,12 @@ test "zjs memory table preserves widths and populated fields" {
     try std.testing.expectError(error.WriteFailed, dumpMemorySnapshot(&writer, memory));
 }
 
-// Keep the declared defaults, including the pending-dispatch sentinel.
+// Materialize the declared defaults without a 18 KiB .rodata copy of
+// `OpcodeProfile{}`. Every field is zero except `pending_op`, whose type
+// default is the pending-dispatch sentinel.
 fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void {
-    profile.* = .{};
+    profile.* = std.mem.zeroes(zjs.OpcodeProfile);
+    profile.pending_op = zjs.OpcodeProfile.no_pending_op;
 }
 
 test "opcode profile initialization preserves every default field" {

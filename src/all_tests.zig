@@ -15,6 +15,7 @@ pub const runtime = internal.runtime;
 pub const compiler = internal.compiler;
 pub const config_signature = internal.config_signature;
 pub const printSmallInlineProbe = internal.printSmallInlineProbe;
+pub const sort_erased = internal.sort_erased;
 
 pub const RuntimeError = internal.RuntimeError;
 pub const HostError = internal.HostError;

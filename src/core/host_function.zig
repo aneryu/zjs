@@ -19,6 +19,20 @@ const class = @import("class.zig");
 const errors = @import("errors.zig");
 const ClassId = class.ClassId;
 
+/// Leftover unique name→id if-ladders share one runtime scan. Tables stay
+/// caller-owned; this is not a leftover clone collapse and does not go on
+/// the public embedder API.
+pub const name_id = struct {
+    pub const Entry = struct { name: []const u8, id: u32 };
+
+    pub noinline fn lookup(name: []const u8, table: []const Entry) ?u32 {
+        for (table) |entry| {
+            if (std.mem.eql(u8, name, entry.name)) return entry.id;
+        }
+        return null;
+    }
+};
+
 pub const ids = struct {
     pub const output = 1;
 };
@@ -1005,29 +1019,32 @@ pub const builtin_method_id_lookup = struct {
             };
         }
 
+        const prototype_method_ids = [_]name_id.Entry{
+            .{ .name = "set", .id = @intFromEnum(PrototypeMethod.set) },
+            .{ .name = "get", .id = @intFromEnum(PrototypeMethod.get) },
+            .{ .name = "has", .id = @intFromEnum(PrototypeMethod.has) },
+            .{ .name = "delete", .id = @intFromEnum(PrototypeMethod.delete) },
+            .{ .name = "clear", .id = @intFromEnum(PrototypeMethod.clear) },
+            .{ .name = "add", .id = @intFromEnum(PrototypeMethod.add) },
+            .{ .name = "keys", .id = @intFromEnum(PrototypeMethod.keys) },
+            .{ .name = "values", .id = @intFromEnum(PrototypeMethod.values) },
+            .{ .name = "entries", .id = @intFromEnum(PrototypeMethod.entries) },
+            .{ .name = "forEach", .id = @intFromEnum(PrototypeMethod.for_each) },
+            .{ .name = "getOrInsert", .id = @intFromEnum(PrototypeMethod.get_or_insert) },
+            .{ .name = "getOrInsertComputed", .id = @intFromEnum(PrototypeMethod.get_or_insert_computed) },
+            .{ .name = "next", .id = @intFromEnum(PrototypeMethod.iterator_next) },
+            .{ .name = "get size", .id = @intFromEnum(PrototypeMethod.size_getter) },
+            .{ .name = "difference", .id = @intFromEnum(PrototypeMethod.difference) },
+            .{ .name = "intersection", .id = @intFromEnum(PrototypeMethod.intersection) },
+            .{ .name = "isDisjointFrom", .id = @intFromEnum(PrototypeMethod.is_disjoint_from) },
+            .{ .name = "isSubsetOf", .id = @intFromEnum(PrototypeMethod.is_subset_of) },
+            .{ .name = "isSupersetOf", .id = @intFromEnum(PrototypeMethod.is_superset_of) },
+            .{ .name = "symmetricDifference", .id = @intFromEnum(PrototypeMethod.symmetric_difference) },
+            .{ .name = "union", .id = @intFromEnum(PrototypeMethod.union_) },
+        };
+
         pub fn prototypeMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "set")) return @intFromEnum(PrototypeMethod.set);
-            if (std.mem.eql(u8, name, "get")) return @intFromEnum(PrototypeMethod.get);
-            if (std.mem.eql(u8, name, "has")) return @intFromEnum(PrototypeMethod.has);
-            if (std.mem.eql(u8, name, "delete")) return @intFromEnum(PrototypeMethod.delete);
-            if (std.mem.eql(u8, name, "clear")) return @intFromEnum(PrototypeMethod.clear);
-            if (std.mem.eql(u8, name, "add")) return @intFromEnum(PrototypeMethod.add);
-            if (std.mem.eql(u8, name, "keys")) return @intFromEnum(PrototypeMethod.keys);
-            if (std.mem.eql(u8, name, "values")) return @intFromEnum(PrototypeMethod.values);
-            if (std.mem.eql(u8, name, "entries")) return @intFromEnum(PrototypeMethod.entries);
-            if (std.mem.eql(u8, name, "forEach")) return @intFromEnum(PrototypeMethod.for_each);
-            if (std.mem.eql(u8, name, "getOrInsert")) return @intFromEnum(PrototypeMethod.get_or_insert);
-            if (std.mem.eql(u8, name, "getOrInsertComputed")) return @intFromEnum(PrototypeMethod.get_or_insert_computed);
-            if (std.mem.eql(u8, name, "next")) return @intFromEnum(PrototypeMethod.iterator_next);
-            if (std.mem.eql(u8, name, "get size")) return @intFromEnum(PrototypeMethod.size_getter);
-            if (std.mem.eql(u8, name, "difference")) return @intFromEnum(PrototypeMethod.difference);
-            if (std.mem.eql(u8, name, "intersection")) return @intFromEnum(PrototypeMethod.intersection);
-            if (std.mem.eql(u8, name, "isDisjointFrom")) return @intFromEnum(PrototypeMethod.is_disjoint_from);
-            if (std.mem.eql(u8, name, "isSubsetOf")) return @intFromEnum(PrototypeMethod.is_subset_of);
-            if (std.mem.eql(u8, name, "isSupersetOf")) return @intFromEnum(PrototypeMethod.is_superset_of);
-            if (std.mem.eql(u8, name, "symmetricDifference")) return @intFromEnum(PrototypeMethod.symmetric_difference);
-            if (std.mem.eql(u8, name, "union")) return @intFromEnum(PrototypeMethod.union_);
-            return null;
+            return name_id.lookup(name, &prototype_method_ids);
         }
 
         fn legacyBasePrototypeMethodId(id: u32) ?u32 {
@@ -1197,33 +1214,52 @@ pub const builtin_method_id_lookup = struct {
         const TypedArrayAccessorMethod = builtin_method_ids.buffer.TypedArrayAccessorMethod;
 
         pub fn dataViewGetMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "getInt8")) return @intFromEnum(DataViewGetMethod.int8);
-            if (std.mem.eql(u8, name, "getUint8")) return @intFromEnum(DataViewGetMethod.uint8);
-            if (std.mem.eql(u8, name, "getInt16")) return @intFromEnum(DataViewGetMethod.int16);
-            if (std.mem.eql(u8, name, "getUint16")) return @intFromEnum(DataViewGetMethod.uint16);
-            if (std.mem.eql(u8, name, "getInt32")) return @intFromEnum(DataViewGetMethod.int32);
-            if (std.mem.eql(u8, name, "getUint32")) return @intFromEnum(DataViewGetMethod.uint32);
-            if (std.mem.eql(u8, name, "getFloat16")) return @intFromEnum(DataViewGetMethod.float16);
-            if (std.mem.eql(u8, name, "getFloat32")) return @intFromEnum(DataViewGetMethod.float32);
-            if (std.mem.eql(u8, name, "getFloat64")) return @intFromEnum(DataViewGetMethod.float64);
-            if (std.mem.eql(u8, name, "getBigInt64")) return @intFromEnum(DataViewGetMethod.big_int64);
-            if (std.mem.eql(u8, name, "getBigUint64")) return @intFromEnum(DataViewGetMethod.big_uint64);
-            return null;
+            return dataViewGetOrSetMethodId(name, false);
         }
 
         pub fn dataViewSetMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "setInt8")) return @intFromEnum(DataViewSetMethod.int8);
-            if (std.mem.eql(u8, name, "setUint8")) return @intFromEnum(DataViewSetMethod.uint8);
-            if (std.mem.eql(u8, name, "setInt16")) return @intFromEnum(DataViewSetMethod.int16);
-            if (std.mem.eql(u8, name, "setUint16")) return @intFromEnum(DataViewSetMethod.uint16);
-            if (std.mem.eql(u8, name, "setInt32")) return @intFromEnum(DataViewSetMethod.int32);
-            if (std.mem.eql(u8, name, "setUint32")) return @intFromEnum(DataViewSetMethod.uint32);
-            if (std.mem.eql(u8, name, "setFloat16")) return @intFromEnum(DataViewSetMethod.float16);
-            if (std.mem.eql(u8, name, "setFloat32")) return @intFromEnum(DataViewSetMethod.float32);
-            if (std.mem.eql(u8, name, "setFloat64")) return @intFromEnum(DataViewSetMethod.float64);
-            if (std.mem.eql(u8, name, "setBigInt64")) return @intFromEnum(DataViewSetMethod.big_int64);
-            if (std.mem.eql(u8, name, "setBigUint64")) return @intFromEnum(DataViewSetMethod.big_uint64);
-            return null;
+            return dataViewGetOrSetMethodId(name, true);
+        }
+
+        /// Leftover DataView get/set method-id walk. The two public names
+        /// differ only by the `"get"`/`"set"` prefix and the enum base
+        /// (`301` vs `321`, offset `20`). Suffix match order and ids stay
+        /// load-bearing; this does not fold other accessor lookups.
+        noinline fn dataViewGetOrSetMethodId(name: []const u8, is_set: bool) ?u32 {
+            if (name.len < 3) return null;
+            const prefix = name[0..3];
+            if (is_set) {
+                if (!std.mem.eql(u8, prefix, "set")) return null;
+            } else {
+                if (!std.mem.eql(u8, prefix, "get")) return null;
+            }
+            const suffix = name[3..];
+            const get_id: u32 = if (std.mem.eql(u8, suffix, "Int8"))
+                @intFromEnum(DataViewGetMethod.int8)
+            else if (std.mem.eql(u8, suffix, "Uint8"))
+                @intFromEnum(DataViewGetMethod.uint8)
+            else if (std.mem.eql(u8, suffix, "Int16"))
+                @intFromEnum(DataViewGetMethod.int16)
+            else if (std.mem.eql(u8, suffix, "Uint16"))
+                @intFromEnum(DataViewGetMethod.uint16)
+            else if (std.mem.eql(u8, suffix, "Int32"))
+                @intFromEnum(DataViewGetMethod.int32)
+            else if (std.mem.eql(u8, suffix, "Uint32"))
+                @intFromEnum(DataViewGetMethod.uint32)
+            else if (std.mem.eql(u8, suffix, "Float16"))
+                @intFromEnum(DataViewGetMethod.float16)
+            else if (std.mem.eql(u8, suffix, "Float32"))
+                @intFromEnum(DataViewGetMethod.float32)
+            else if (std.mem.eql(u8, suffix, "Float64"))
+                @intFromEnum(DataViewGetMethod.float64)
+            else if (std.mem.eql(u8, suffix, "BigInt64"))
+                @intFromEnum(DataViewGetMethod.big_int64)
+            else if (std.mem.eql(u8, suffix, "BigUint64"))
+                @intFromEnum(DataViewGetMethod.big_uint64)
+            else
+                return null;
+            const set_off = @intFromEnum(DataViewSetMethod.int8) - @intFromEnum(DataViewGetMethod.int8);
+            return if (is_set) get_id + set_off else get_id;
         }
 
         pub fn arrayBufferAccessorMethodId(name: []const u8) ?u32 {
@@ -1344,18 +1380,21 @@ pub const builtin_method_id_lookup = struct {
         /// re-exports each under its original name. Returned values are
         /// load-bearing (baked into the `.regexp` record table and compiled
         /// bytecode native ids) and must not change here.
+        const accessor_method_ids = [_]name_id.Entry{
+            .{ .name = "source", .id = @intFromEnum(AccessorMethod.source) },
+            .{ .name = "flags", .id = @intFromEnum(AccessorMethod.flags) },
+            .{ .name = "global", .id = @intFromEnum(AccessorMethod.global) },
+            .{ .name = "ignoreCase", .id = @intFromEnum(AccessorMethod.ignore_case) },
+            .{ .name = "multiline", .id = @intFromEnum(AccessorMethod.multiline) },
+            .{ .name = "dotAll", .id = @intFromEnum(AccessorMethod.dot_all) },
+            .{ .name = "unicode", .id = @intFromEnum(AccessorMethod.unicode) },
+            .{ .name = "sticky", .id = @intFromEnum(AccessorMethod.sticky) },
+            .{ .name = "hasIndices", .id = @intFromEnum(AccessorMethod.has_indices) },
+            .{ .name = "unicodeSets", .id = @intFromEnum(AccessorMethod.unicode_sets) },
+        };
+
         pub fn accessorMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "source")) return @intFromEnum(AccessorMethod.source);
-            if (std.mem.eql(u8, name, "flags")) return @intFromEnum(AccessorMethod.flags);
-            if (std.mem.eql(u8, name, "global")) return @intFromEnum(AccessorMethod.global);
-            if (std.mem.eql(u8, name, "ignoreCase")) return @intFromEnum(AccessorMethod.ignore_case);
-            if (std.mem.eql(u8, name, "multiline")) return @intFromEnum(AccessorMethod.multiline);
-            if (std.mem.eql(u8, name, "dotAll")) return @intFromEnum(AccessorMethod.dot_all);
-            if (std.mem.eql(u8, name, "unicode")) return @intFromEnum(AccessorMethod.unicode);
-            if (std.mem.eql(u8, name, "sticky")) return @intFromEnum(AccessorMethod.sticky);
-            if (std.mem.eql(u8, name, "hasIndices")) return @intFromEnum(AccessorMethod.has_indices);
-            if (std.mem.eql(u8, name, "unicodeSets")) return @intFromEnum(AccessorMethod.unicode_sets);
-            return null;
+            return name_id.lookup(name, &accessor_method_ids);
         }
 
         pub fn accessorNameFromId(id: u32) ?[]const u8 {
@@ -1458,19 +1497,35 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, 13), lookup.array.decodePrototypeMethodId(@intFromEnum(builtin_method_ids.array.PrototypeMethod.push)));
     try testing.expectEqual(@as(?u32, null), lookup.array.decodePrototypeMethodId(0));
 
-    // collection: class-keyed fast-path filter.
+    // collection: class-keyed fast-path filter. Table walker keeps load-bearing ids.
     try testing.expectEqual(lookup.collection.prototypeMethodId("get"), lookup.collection.fastPrototypeMethodIdForClass(class.ids.map, "get"));
+    try testing.expectEqual(@as(?u32, 2), lookup.collection.prototypeMethodId("get"));
+    try testing.expectEqual(@as(?u32, 14), lookup.collection.prototypeMethodId("get size"));
+    try testing.expectEqual(@as(?u32, 21), lookup.collection.prototypeMethodId("union"));
+    try testing.expectEqual(@as(?u32, null), lookup.collection.prototypeMethodId("nope"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.set, "get"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.regexp, "get"));
     try testing.expect(lookup.collection.legacyClosureMethodId("set") != null);
+
+    // regexp accessors share the same name-id walker.
+    try testing.expectEqual(@as(?u32, 201), lookup.regexp.accessorMethodId("source"));
+    try testing.expectEqual(@as(?u32, 210), lookup.regexp.accessorMethodId("unicodeSets"));
+    try testing.expectEqual(@as(?u32, null), lookup.regexp.accessorMethodId("nope"));
 
     // date.
     try testing.expectEqual(@as(?u32, null), lookup.date.staticMethodId("nope"));
     try testing.expect(lookup.date.staticMethodId("now") != null);
 
-    // buffer: record-id round trips.
+    // buffer: record-id round trips. Get/set share one leftover walk;
+    // set ids stay get + 20.
     const get_int8 = lookup.buffer.dataViewGetMethodId("getInt8").?;
     try testing.expectEqual(@as(u32, 301), get_int8);
+    try testing.expectEqual(@as(?u32, 321), lookup.buffer.dataViewSetMethodId("setInt8"));
+    try testing.expectEqual(@as(?u32, 311), lookup.buffer.dataViewGetMethodId("getBigUint64"));
+    try testing.expectEqual(@as(?u32, 331), lookup.buffer.dataViewSetMethodId("setBigUint64"));
+    try testing.expectEqual(@as(?u32, null), lookup.buffer.dataViewGetMethodId("setInt8"));
+    try testing.expectEqual(@as(?u32, null), lookup.buffer.dataViewSetMethodId("getInt8"));
+    try testing.expectEqual(@as(?u32, null), lookup.buffer.dataViewGetMethodId("getNope"));
     try testing.expectEqual(@as(?u32, 1), lookup.buffer.dataViewGetKindFromRecordId(get_int8));
     try testing.expectEqualStrings("byteLength", lookup.buffer.arrayBufferAccessorNameFromRecordId(401).?);
     try testing.expectEqual(@as(?u32, 465), lookup.buffer.typedArrayAccessorMethodId("[Symbol.toStringTag]"));
