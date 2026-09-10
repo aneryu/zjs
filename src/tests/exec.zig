@@ -12,7 +12,212 @@ const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
 
+test "Air residual Symbol equality preserves identity and mixed coercion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    _ = try js.eval(
+        \\const eq = (a,b) => a == b;
+        \\const ne = (a,b) => a != b;
+        \\const strict = (a,b) => a === b;
+        \\const strictNe = (a,b) => a !== b;
+        \\const s = Symbol('same'), t = Symbol('same');
+        \\for (const [a,b,same] of [[s,s,true],[s,t,false],[Symbol.for('key'),Symbol.for('key'),true]]) {
+        \\  assert.sameValue(eq(a,b), same);
+        \\  assert.sameValue(ne(a,b), !same);
+        \\  assert.sameValue(strict(a,b), same);
+        \\  assert.sameValue(strictNe(a,b), !same);
+        \\}
+        \\for (const v of [undefined,null,true,false,0,NaN,'same',0n,Object(s)]) {
+        \\  assert.sameValue(strict(s,v), false);
+        \\  assert.sameValue(strict(v,s), false);
+        \\  assert.sameValue(strictNe(s,v), true);
+        \\}
+        \\assert.sameValue(eq(s,Object(s)), true);
+        \\assert.sameValue(eq(Object(s),s), true);
+        \\assert.sameValue(eq(s,Object(t)), false);
+        \\let calls=0;
+        \\const boxed = {[Symbol.toPrimitive](hint) {calls++; assert.sameValue(hint,'default'); $262.gc(); return s;}};
+        \\assert.sameValue(strict(s,boxed), false);
+        \\assert.sameValue(calls, 0);
+        \\assert.sameValue(eq(s,boxed), true);
+        \\assert.sameValue(eq(boxed,s), true);
+        \\assert.sameValue(calls, 2);
+        \\const boom = {};
+        \\const bad = {[Symbol.toPrimitive]() {throw boom;}};
+        \\try {eq(s,bad); throw new Error('missing coercion');} catch(e) {assert.sameValue(e,boom);}
+        \\assert.sameValue(eq(1,'1'), true);
+        \\assert.sameValue(eq(1,1n), true);
+        \\assert.sameValue(strict(NaN,NaN), false);
+    );
+}
+
+test "dense parameter arrays rest keeps contiguous storage and independent values" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const result = try js.evalWithOptions(
+        \\function collect(first, ...rest) { return rest; }
+        \\const marker = { value: 37 };
+        \\const a = collect(0, marker, undefined, 9);
+        \\const b = collect(0, marker, undefined, 9);
+        \\assert.sameValue(a === b, false);
+        \\assert.sameValue(a[0], marker);
+        \\assert.sameValue(1 in a, true);
+        \\assert.sameValue(a.length, 3);
+        \\assert.sameValue(Object.getPrototypeOf(a), Array.prototype);
+        \\assert.sameValue(collect().length, 0);
+        \\assert.sameValue(collect(0).length, 0);
+        \\a;
+    , .{ .filename = "<repl>" });
+    try std.testing.expect(result.isObject());
+    const array = helpers.objectFromValue(result);
+    try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
+    try std.testing.expectEqual(@as(usize, 3), array.arrayElements().len);
+    try std.testing.expectEqual(@as(u32, 0), array.shape_ref.prop_count);
+}
+
+test "dense parameter arrays spread keeps contiguous storage for array and custom iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    for ([_][]const u8{
+        "[0, ...[1, 2, 3], 4]",
+        "[0, ...{ [Symbol.iterator]() { let i=0; return { next() { return {value: ++i, done: i>3}; } }; } }, 4]",
+    }) |source| {
+        const result = try js.evalWithOptions(source, .{ .filename = "<repl>" });
+        try std.testing.expect(result.isObject());
+        const array = helpers.objectFromValue(result);
+        try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
+        try std.testing.expectEqual(@as(usize, 5), array.arrayElements().len);
+        for (array.arrayElements(), 0..) |value, index| {
+            try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
+        }
+    }
+}
+
+test "dense parameter arrays spread retains CreateDataProperty constraints" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    var source = try js.evalWithOptions("[7]", .{ .filename = "<repl>" });
+    var target_value = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &source, &target_value });
+    roots.activate(js.runtime);
+    defer roots.deactivate(js.runtime);
+    for (0..3) |mode| {
+        const target = try core.Object.createArray(js.runtime, null);
+        target_value = target.value();
+        switch (mode) {
+            0 => target.flags.extensible = false,
+            1 => target.flags.length_writable = false,
+            else => try target.defineOwnProperty(js.runtime, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(42), false, true, false)),
+        }
+        try std.testing.expectError(error.TypeError, engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
+        try std.testing.expectEqual(@as(u32, if (mode == 2) 1 else 0), target.arrayLength());
+        if (mode == 2) try std.testing.expectEqual(@as(?i32, 42), (try target.getProperty(core.atom.atomFromUInt32(0))).asInt32());
+    }
+}
+
 const makeFunction = helpers.makeFunction;
+
+test "dense parameter arrays spread reserves one backing cell for a known dense range" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    var source = try js.evalWithOptions("[1,2,3,4,5,6,7,8]", .{ .filename = "<repl>" });
+    var target_value = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &source, &target_value });
+    roots.activate(js.runtime);
+    defer roots.deactivate(js.runtime);
+    const target = try core.Object.createArray(js.runtime, null);
+    target_value = target.value();
+    const before = js.runtime.gc.liveCountKind(.array_storage);
+    try std.testing.expectEqual(@as(i32, 8), try engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
+    try std.testing.expectEqual(before + 1, js.runtime.gc.liveCountKind(.array_storage));
+    for (target.arrayElements(), 1..) |value, index| try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
+}
+
+test "dense parameter arrays spread reserve OOM preserves iterator progress and retries" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    var source = try js.evalWithOptions("Array(1024).fill(37).values()", .{ .filename = "<repl>" });
+    var target_value = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &source, &target_value });
+    roots.activate(js.runtime);
+    defer roots.deactivate(js.runtime);
+    const target = try core.Object.createArray(js.runtime, null);
+    target_value = target.value();
+    js.runtime.suppressLimitCollectionForTest(true);
+    js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes + 1024);
+    {
+        defer js.runtime.setMemoryLimit(null);
+        defer js.runtime.suppressLimitCollectionForTest(false);
+        try std.testing.expectError(error.OutOfMemory, engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
+    }
+    try std.testing.expectEqual(@as(usize, 1), helpers.objectFromValue(source).iteratorIndexSlot().*);
+    try std.testing.expectEqual(@as(u32, 0), target.arrayLength());
+    try std.testing.expectEqual(@as(i32, 1023), try engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
+    for (target.arrayElements()) |value| try std.testing.expectEqual(@as(?i32, 37), value.asInt32());
+    try std.testing.expect(helpers.objectFromValue(source).iteratorTargetSlot().* == null);
+}
+
+test "dense parameter arrays spread observes iterator methods getters and abrupt completion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    _ = try js.eval(
+        \\let reads = 0, calls = 0;
+        \\const it = { get next() {
+        \\  reads++;
+        \\  return function() {
+        \\    assert.sameValue(this, it);
+        \\    const value = ++calls;
+        \\    return {get done() {$262.gc(); return value > 2;}, get value() {$262.gc(); return {value};}};
+        \\  };
+        \\}};
+        \\const out = [...{[Symbol.iterator]() {return it;}}];
+        \\assert.sameValue(reads, 1);
+        \\assert.sameValue(calls, 3);
+        \\assert.sameValue(out[0].value, 1);
+        \\assert.sameValue(out[1].value, 2);
+        \\function* gen() {yield 1;}
+        \\const g = gen();
+        \\g[Symbol.iterator] = function() {return [7,8][Symbol.iterator]();};
+        \\assert.sameValue([...g].join(','), '7,8');
+        \\const proto = Object.create(Array.prototype);
+        \\Object.defineProperty(proto, '0', {get() {return 11;}});
+        \\const holes = new Array(2); holes[1] = 13;
+        \\Object.setPrototypeOf(holes, proto);
+        \\assert.sameValue([...holes].join(','), '11,13');
+        \\const nextProto = Object.getPrototypeOf([][Symbol.iterator]());
+        \\const originalNext = nextProto.next;
+        \\let patchedCalls = 0;
+        \\nextProto.next = function() {patchedCalls++; return originalNext.call(this);};
+        \\try {assert.sameValue([...[3,4]].join(','), '3,4');}
+        \\finally {nextProto.next = originalNext;}
+        \\assert.sameValue(patchedCalls, 3);
+        \\let closes = 0;
+        \\const boom = {};
+        \\const bad = {[Symbol.iterator]() {return {next() {throw boom;}, return() {closes++; return {};}};}};
+        \\try {[...bad]; throw new Error('missing exception');} catch (e) {assert.sameValue(e, boom);}
+        \\assert.sameValue(closes, 0);
+        \\const retainedSource = [1,2];
+        \\const retainedIterator = retainedSource.values();
+        \\assert.sameValue([...{[Symbol.iterator]() {return retainedIterator;}}].join(','), '1,2');
+        \\retainedSource.push(3);
+        \\assert.sameValue(retainedIterator.next().done, true);
+        \\const other = [21,22,23].values();
+        \\other.next();
+        \\const rebound = [99];
+        \\rebound[Symbol.iterator] = () => other;
+        \\assert.sameValue([...rebound].join(','), '22,23');
+        \\assert.sameValue(other.next().done, true);
+        \\const badValue = {[Symbol.iterator]() {return {next() {return {done:false,get value(){throw boom;}};}};}};
+        \\try {[...badValue]; throw new Error('missing value exception');} catch (e) {assert.sameValue(e, boom);}
+        \\let inheritedSets = 0;
+        \\Object.defineProperty(Array.prototype, '0', {set(v) {inheritedSets++;}, configurable:true});
+        \\try {
+        \\  assert.sameValue([...[17]][0], 17);
+        \\  assert.sameValue([...{*[Symbol.iterator]() {yield 19;}}][0], 19);
+        \\  assert.sameValue(inheritedSets, 0);
+        \\} finally {delete Array.prototype[0];}
+    );
+}
 const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;

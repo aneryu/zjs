@@ -5321,7 +5321,7 @@ pub fn opCompare(comptime opc: u8) Handler {
 /// on the int leaf (the same reason `op_compare_cold` is dispatched through
 /// `cold_table` — a direct route once cost the canonical `s=s+i` loop +37
 /// insn/iter). Unresolved shapes fall to the unchanged `cold_table[pc[0]]`, so
-/// string↔number coercion, ToPrimitive on objects, BigInt and Symbol keep the
+/// string↔number coercion, ToPrimitive on objects, BigInt and mixed Symbol/object operands keep the
 /// full `js_eq_slow` protocol.
 ///
 /// Ownership: qjs frees exactly the operands whose tag is refcountable; `free` is a
@@ -5476,6 +5476,14 @@ fn opCompareEqFast(comptime opc: u8) Handler {
                     if (rhs.isNull() or rhs.isUndefined()) break :blk true;
                     if (rhs.isObject()) break :blk core.value_semantics.isHTMLDDA(rhs);
                     break :blk null;
+                }
+                // Same-type Symbols compare by identity without coercion or
+                // allocation (qjs js_strict_eq2's Symbol identity case).
+                // Loose Symbol/object equality still needs ToPrimitive and
+                // its observable callbacks/errors on the existing cold path.
+                if (lhs.isSymbol()) {
+                    if (rhs.isSymbol()) break :blk lhs.same(rhs);
+                    if (comptime strict) break :blk false;
                 }
                 break :blk null;
             };

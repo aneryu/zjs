@@ -201,11 +201,45 @@ pub const Morgue = struct {
     /// Objects destroyed by the slices of the current morgue, for the
     /// completion poll's CollectionResult.
     destroyed: usize = 0,
-    /// Heap bytes the morgue holds: already condemned, not yet returned.
+    /// Condemned body bytes still charged at the finish boundary. Bitmap-only
+    /// cells are debited there already and must not be included again, even
+    /// though their physical storage remains pending reclamation.
     /// The growth threshold subtracts this at finish -- pricing the next
     /// cycle off a heap full of corpses was a compounding feedback loop
     /// (measured: an 841 MB peak on a ~50 MB live set).
     bytes: usize = 0,
+
+    /// Finite budget for advancing destruction beyond requested-byte pacing.
+    /// Seeded by still-charged condemned bodies, then reconciled with actual
+    /// destructor-owned account release. Total issued credit is the larger
+    /// of those two quantities, never their sum; each slice spends it once.
+    assist_credit_bytes: usize = 0,
+    assist_unreconciled_bytes: usize = 0,
+
+    pub fn startAssistCredit(self: *Morgue, estimated_bytes: usize) void {
+        self.assist_credit_bytes = estimated_bytes;
+        self.assist_unreconciled_bytes = estimated_bytes;
+    }
+
+    pub fn recordAssistReclaim(self: *Morgue, before: usize, after: usize) void {
+        const reclaimed = before -| after;
+        const precredited = @min(reclaimed, self.assist_unreconciled_bytes);
+        self.assist_unreconciled_bytes -= precredited;
+        // Native payload/backing allocations are not condemned carriers.
+        // Their release becomes known here without an extra heap walk.
+        self.assist_credit_bytes +|= reclaimed - precredited;
+    }
+
+    pub fn consumeAssistDebt(self: *Morgue, requested_bytes: *usize) void {
+        const paid = @min(requested_bytes.*, gc.incremental_assist_interval_bytes);
+        self.assist_credit_bytes -|= gc.incremental_assist_interval_bytes - paid;
+        requested_bytes.* -|= gc.incremental_assist_interval_bytes;
+    }
+
+    pub fn clearAssistCredit(self: *Morgue) void {
+        self.assist_credit_bytes = 0;
+        self.assist_unreconciled_bytes = 0;
+    }
 
     /// Bind the per-kind cyclic sentinels. Must run before any condemnation,
     /// and is idempotent.

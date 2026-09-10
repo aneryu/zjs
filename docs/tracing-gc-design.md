@@ -1279,6 +1279,35 @@ of corpses; urgent pressure, explicit collection and runtime teardown call the
 synchronous finisher. Idle service is optional and is never the progress
 guarantee.
 
+Allocation-boundary slices retain the 512 KiB requested-byte interval and
+1 ms slice budget. Each actual mark/destruction slice retires one interval
+of requested debt, including slices reached through unpaced scheduler polls;
+marking never borrows destruction credit.
+
+Pending destruction may advance an allocation-boundary slice when both hold:
+
+- the account has grown by one interval since the previous major slice;
+- requested debt plus the morgue's remaining finite assist credit covers one
+  interval.
+
+Credit starts with condemned body bytes still charged to MemoryAccount.
+Bitmap-only corpses are already debited at condemnation, so including them
+again would both understate the settled-live threshold estimate and overfund
+assists. Destructors can also release native payload/backing allocations not
+represented by condemned carriers. Each actual slice reconciles its net
+account release against the initially credited estimate before adding any
+excess. Thus total issued credit in a transaction is
+`max(initial estimate, cumulative observed net release)`, not their sum.
+An account increase issues no credit. Slice payment consumes requested debt
+first, then credit for the remainder; completion clears unused credit and
+reconciliation state. Scheduler slices pay by the same rule.
+
+This is a scheduling budget, not liveness or allocation accounting. No new
+poll is introduced inside a backing allocation, no threshold/time constant
+changes, and the doomed transaction retains its original completion and root
+requirements. Partial-slice regression tests use a runtime-local test-only
+budget override; production layout/code always use the policy budget above.
+
 The physical block lifecycle has two stable states:
 
 ```text

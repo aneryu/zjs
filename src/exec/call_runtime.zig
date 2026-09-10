@@ -2833,33 +2833,33 @@ pub fn appendSpreadValuesEnumerate(
     start_index: i32,
 ) !i32 {
     const rt = ctx.runtime;
-    const source_object = property_ops.expectObject(source_value) catch null;
-
-    // Generators / async-generators ARE iterators (their @@iterator returns
-    // self); the generic helper handles them exactly as qjs's GetIterator does.
-    if (source_object) |so| {
-        if (so.class_id == core.class.ids.generator or so.class_id == core.class.ids.async_generator) {
-            return appendIteratorValues(ctx, output, global, target, source_value, start_index);
-        }
-    }
+    var rooted_source = source_value;
+    var rooted_target = target.value();
+    var iterator_method = core.JSValue.undefinedValue();
+    var iterator_value = core.JSValue.undefinedValue();
+    var next_method = core.JSValue.undefinedValue();
+    var item = core.JSValue.undefinedValue();
+    var roots = core.runtime.rootValues(.{ &rooted_source, &rooted_target, &iterator_method, &iterator_value, &next_method, &item });
+    roots.activate(rt);
+    defer roots.deactivate(rt);
 
     // iterator method = GetProperty(src, @@iterator)  (qjs quickjs.c:16834)
-    const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
+    // Even a generator can override @@iterator; class identity is not a
+    // substitute for the observable GetIterator operation.
+    iterator_method = try getIteratorMethod(ctx, output, global, rooted_source);
     if (!isCallableValue(iterator_method)) {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
         return error.TypeError;
     }
 
     // enumobj = src[@@iterator]()  (qjs GetIterator, quickjs.c:16843)
-    const iterator_value = try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+    iterator_value = try callValueOrBytecodeRoot(ctx, output, global, rooted_source, iterator_method, &.{}, null, null);
     const iterator = property_ops.expectObject(iterator_value) catch return error.TypeError;
 
     // next = GetProperty(enumobj, "next")  (qjs quickjs.c:16846)
-    const next_method = blk: {
-        if (iterator.cachedIteratorNext(rt)) |stored| break :blk stored;
-        const next_key = core.atom.ids.next;
-        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
-    };
+    // GetIterator captures next once per acquisition, even if this iterator
+    // was consumed previously or its next getter changes the property.
+    next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, core.atom.ids.next, null, null);
     if (!isCallableValue(next_method)) return error.TypeError;
 
     var index = start_index;
@@ -2879,23 +2879,46 @@ pub fn appendSpreadValuesEnumerate(
         if (length != elements.len) break :fast; // qjs: len != count32 -> general_case
         const cursor = iterator.iteratorIndexSlot().*;
         if (cursor > elements.len) break :fast;
+        // This builtin iterator has a known, side-effect-free dense range.
+        // Reserve its destination once: each incremental growth otherwise
+        // leaves an obsolete GC storage cell alive until the next sweep.
+        // Keep all unusual descriptor/length targets on the per-item path.
+        if (cursor < elements.len and index >= 0 and target != target_obj and
+            target.isArray() and !target.hasExoticMethods() and
+            target.arrayElementStorageMode() == .dense and
+            target.flags.extensible and target.flags.length_writable and
+            target.shape_ref.prop_count == 0 and target.arrayElements().len == @as(usize, @intCast(index)))
+        {
+            const needed = @as(usize, @intCast(index)) + elements.len - cursor;
+            if (needed <= std.math.maxInt(i32)) {
+                // A failed first definition has already consumed one item.
+                iterator.iteratorIndexSlot().* = cursor + 1;
+                try target.reserveDenseArrayElements(rt, @intCast(needed));
+            }
+        }
         var i: usize = cursor;
         while (i < elements.len) : (i += 1) {
-            const item = elements[i];
-            try property_ops.defineDataProperty(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
+            item = elements[i];
+            iterator.iteratorIndexSlot().* = i + 1;
+            // A contiguous C_W_E definition can stay dense. The shared
+            // CreateDataProperty helper retains descriptor/length fallbacks
+            // and never invokes an inherited indexed setter.
+            try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
             index += 1;
         }
         iterator.iteratorIndexSlot().* = elements.len; // exhaust, matching a full drain
+        iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
         return index;
     }
 
     // General case (qjs quickjs.c:16868): step the constructed iterator.
     while (true) {
-        const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
+        const step = try iterator_ops.iteratorStepWithNext(ctx, output, global, iterator_value, next_method, null, null);
         if (step.done) {
             break;
         }
-        try property_ops.defineDataProperty(rt, target, core.atom.atomFromUInt32(@intCast(index)), step.value);
+        item = step.value;
+        try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
         index += 1;
     }
     return index;

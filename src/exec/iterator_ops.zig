@@ -2388,6 +2388,10 @@ noinline fn iteratorStepFromNextResult(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
+    var rooted_result = next_result;
+    var roots = core.runtime.rootValues(.{&rooted_result});
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const next_object = objectFromValue(next_result) orelse return error.TypeError;
     const done = try object_ops.getValueProperty(
         ctx,
@@ -2411,7 +2415,7 @@ noinline fn iteratorStepFromNextResult(
     return .{ .value = value, .done = false };
 }
 
-inline fn iteratorStepWithNext(
+pub inline fn iteratorStepWithNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,

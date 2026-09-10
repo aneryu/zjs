@@ -158,13 +158,19 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
     var root_slices = [_]runtime.ValueRootSlice{
         .{ .mutable = &values_root },
     };
+    // Keep the newly allocated array alive while allocating its element
+    // storage. The input slice and the output are independent GC roots.
+    var array_value = JSValue.undefinedValue();
+    var root_values = [_]runtime.ValueRootValue{.{ .value = &array_value }};
     var root_frame = runtime.ValueRootFrame{
         .slices = &root_slices,
+        .values = &root_values,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
     const object = try Object.createArray(rt, prototype);
+    array_value = object.value();
     errdefer Object.destroyFromHeader(rt, object.gcHeader());
 
     if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) return object.value();

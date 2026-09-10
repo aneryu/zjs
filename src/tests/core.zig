@@ -7,6 +7,62 @@ const core = zjs.core;
 const helpers = @import("helpers.zig");
 const gc_representation = @import("../gc_representation.zig");
 
+test "dense parameter arrays borrowed construction roots output during storage allocation" {
+    const Probe = struct {
+        rt: *core.JSRuntime,
+        calls: usize = 0,
+        failed: bool = false,
+        fn trigger(raw: ?*anyopaque, size: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (size < 4096) return;
+            self.calls += 1;
+            const saved = self.rt.memory.trigger_gc_fn;
+            self.rt.memory.trigger_gc_fn = null;
+            defer self.rt.memory.trigger_gc_fn = saved;
+            _ = self.rt.forceGC(null) catch {
+                self.failed = true;
+            };
+        }
+    };
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const child = try core.Object.createPlainObject(rt, null);
+    const values: [1024]core.JSValue = @splat(child.value());
+    var probe = Probe{ .rt = rt };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = Probe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    const result = result: {
+        defer rt.memory.trigger_gc_fn = saved_trigger;
+        defer rt.memory.trigger_gc_ctx = saved_context;
+        break :result try core.array.constructLiteralWithPrototype(rt, &values, null);
+    };
+    try std.testing.expect(probe.calls > 0);
+    try std.testing.expect(!probe.failed);
+    const array = helpers.objectFromValue(result);
+    try std.testing.expect(rt.gc.containsHeader(array.gcHeader()));
+    try std.testing.expect(rt.gc.containsHeader(child.gcHeader()));
+    try std.testing.expectEqual(@as(usize, 1024), array.arrayElements().len);
+    for (array.arrayElements()) |value| try std.testing.expectEqual(child, helpers.objectFromValue(value));
+}
+
+test "dense parameter arrays borrowed construction propagates OOM and recovers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const values: [1024]core.JSValue = @splat(core.JSValue.int32(37));
+    // Warm the empty array shape/header path, then deny the large backing store.
+    _ = try core.array.constructLiteralWithPrototype(rt, &.{}, null);
+    rt.suppressLimitCollectionForTest(true);
+    rt.setMemoryLimit(rt.memory.allocated_bytes + 1024);
+    try std.testing.expectError(error.OutOfMemory, core.array.constructLiteralWithPrototype(rt, &values, null));
+    rt.setMemoryLimit(null);
+    rt.suppressLimitCollectionForTest(false);
+    const result = try core.array.constructLiteralWithPrototype(rt, &values, null);
+    try std.testing.expectEqual(@as(usize, 1024), helpers.objectFromValue(result).arrayElements().len);
+}
+
 test "GC representation snapshot matches the committed baseline" {
     const baseline = @embedFile("../gc-representation-trace-snapshot.txt");
     try std.testing.expectEqualStrings(baseline, gc_representation.snapshot_text);
@@ -16938,6 +16994,269 @@ test "incremental marking preserves a frontier beyond both former 65K bounds" {
         try std.testing.expect(rt.gc.headerMarked(header));
     }
     rt.gc.abortIncrementalCycle();
+}
+
+test "incremental settled account excludes storage bytes already debited at condemnation" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    _ = try rt.tryRunObjectCycleRemoval();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    const before = rt.memory.allocated_bytes;
+    for (0..128) |_| _ = try core.Object.createArrayStorageCell(rt, 3);
+    try std.testing.expectEqual(@as(usize, 128), rt.gc.liveCountKind(.array_storage));
+    const with_garbage = rt.memory.allocated_bytes;
+    try std.testing.expect(with_garbage > before);
+
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    var polls: usize = 0;
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) : (polls += 1) {
+        try std.testing.expect(polls < 1000);
+    }
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.morgue.pending);
+    // Condemnation charges the bitmap-only corpses immediately, before the
+    // physical cell sweep. They must not be subtracted again by the pending
+    // destruction threshold estimate.
+    try std.testing.expect(rt.memory.allocated_bytes < with_garbage);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.bytes);
+    try std.testing.expectEqual(rt.memory.allocated_bytes, rt.gc.incremental.last_settled_live_bytes);
+    const after_condemn = rt.memory.allocated_bytes;
+    core.gc_trace_stw.finishPendingDestruction(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+    try std.testing.expectEqual(after_condemn, rt.memory.allocated_bytes);
+}
+
+test "incremental settled account retains finalizer and list corpse charges" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "SettledAccountFinalizer",
+        .payload_finalizer = countPayloadFinalizer,
+    });
+    const keeper = try core.Object.create(rt, class_id, null);
+    try rt.gc.pinHeader(keeper.gcHeader());
+    defer rt.gc.unpinHeader(keeper.gcHeader());
+    _ = try rt.tryRunObjectCycleRemoval();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    payload_finalizer_calls = 0;
+
+    const finalizable = try core.Object.create(rt, class_id, null);
+    const expected_pending = finalizable.allocationSize(rt) + @sizeOf(core.VarRef);
+    try std.testing.expect(rt.gc.block_heap.owns(@ptrCast(finalizable)));
+    _ = try core.VarRef.createClosed(rt, core.JSValue.int32(17));
+    for (0..128) |_| _ = try core.Object.createArrayStorageCell(rt, 3);
+
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    var polls: usize = 0;
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) : (polls += 1) {
+        try std.testing.expect(polls < 1000);
+    }
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.morgue.pending);
+    try std.testing.expectEqual(expected_pending, rt.gc.morgue.bytes);
+    try std.testing.expectEqual(rt.memory.allocated_bytes - expected_pending, rt.gc.incremental.last_settled_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    core.gc_trace_stw.finishPendingDestruction(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.var_ref));
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.array_storage));
+    try std.testing.expect(rt.gc.containsHeader(keeper.gcHeader()));
+}
+
+test "incremental destruction credit reconciles each reclaimed byte once" {
+    var morgue: core.gc.incremental.Morgue = .{};
+    const interval = core.gc.incremental_assist_interval_bytes;
+    morgue.startAssistCredit(100);
+    morgue.recordAssistReclaim(1000, 970);
+    try std.testing.expectEqual(@as(usize, 100), morgue.assist_credit_bytes);
+    try std.testing.expectEqual(@as(usize, 70), morgue.assist_unreconciled_bytes);
+    morgue.recordAssistReclaim(1000, 950);
+    try std.testing.expectEqual(@as(usize, 100), morgue.assist_credit_bytes);
+    morgue.recordAssistReclaim(1000, 960);
+    try std.testing.expectEqual(@as(usize, 120), morgue.assist_credit_bytes);
+    try std.testing.expectEqual(@as(usize, 0), morgue.assist_unreconciled_bytes);
+    var debt = interval - 25;
+    morgue.consumeAssistDebt(&debt);
+    try std.testing.expectEqual(@as(usize, 0), debt);
+    try std.testing.expectEqual(@as(usize, 95), morgue.assist_credit_bytes);
+    // Allocating during a destructor never manufactures reclaim credit.
+    morgue.recordAssistReclaim(50, 100);
+    try std.testing.expectEqual(@as(usize, 95), morgue.assist_credit_bytes);
+    // An unpaced scheduler slice spends credit too, saturating at zero.
+    morgue.consumeAssistDebt(&debt);
+    try std.testing.expectEqual(@as(usize, 0), morgue.assist_credit_bytes);
+    morgue.recordAssistReclaim(1000, 990);
+    try std.testing.expectEqual(@as(usize, 10), morgue.assist_credit_bytes);
+    debt = interval + 33;
+    morgue.consumeAssistDebt(&debt);
+    try std.testing.expectEqual(@as(usize, 33), debt);
+    try std.testing.expectEqual(@as(usize, 10), morgue.assist_credit_bytes);
+    morgue.assist_credit_bytes = std.math.maxInt(usize) - 1;
+    morgue.recordAssistReclaim(1000, 900);
+    try std.testing.expectEqual(std.math.maxInt(usize), morgue.assist_credit_bytes);
+    morgue.clearAssistCredit();
+    try std.testing.expectEqual(@as(usize, 0), morgue.assist_credit_bytes);
+    try std.testing.expectEqual(@as(usize, 0), morgue.assist_unreconciled_bytes);
+}
+
+test "incremental destruction credit funds safe assists from actual native backing release" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(std.math.maxInt(usize));
+    // Zero still runs a real 256-corpse chunk, then deterministically yields.
+    rt.gc_destroy_budget_for_test = 0;
+    const interval = core.gc.incremental_assist_interval_bytes;
+    const keeper = try core.Object.createArray(rt, null);
+    try rt.gc.pinHeader(keeper.gcHeader());
+    defer rt.gc.unpinHeader(keeper.gcHeader());
+    const doomed_map = try core.Object.create(rt, core.class.ids.map, null);
+    const payload = doomed_map.collectionPayloadForCycleGc().?;
+    payload.bucket_heads = try rt.memory.alloc(usize, 2 * interval / @sizeOf(usize));
+    @memset(payload.bucket_heads, std.math.maxInt(usize));
+    for (0..1024) |_| _ = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
+    try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+    var polls: usize = 0;
+    while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) : (polls += 1) {
+        try std.testing.expect(polls < 1000);
+    }
+    _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.morgue.pending);
+    const seed = rt.gc.morgue.bytes;
+    try std.testing.expect(seed < interval);
+    rt.gc_assist_accounted_bytes = rt.memory.allocated_bytes;
+    rt.gc_assist_debt_bytes = 0;
+    const before = rt.memory.allocated_bytes;
+    const destroy_index = @intFromEnum(core.gc.Registry.SliceKind.destroy);
+    const slices = rt.gc.incremental.stats.total_segments_by_kind[destroy_index];
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expectEqual(slices + 1, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+    try std.testing.expect(rt.gc.morgue.pending);
+    // Condemnation already delisted these from the live registry. The
+    // morgue's own bucket, not liveCountKind, proves the partial route.
+    try std.testing.expect(!core.gc.listEmpty(&rt.gc.morgue.by_kind[@intFromEnum(core.gc.GcKind.var_ref)]));
+    const reclaimed = before - rt.memory.allocated_bytes;
+    try std.testing.expect(reclaimed >= 2 * interval);
+    // The native allocation was NOT in the seed. Reconcile it once, then
+    // debit the scheduler slice before a later object can spend the credit.
+    try std.testing.expectEqual(reclaimed - interval, rt.gc.morgue.assist_credit_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.assist_unreconciled_bytes);
+    try keeper.reserveDenseArrayElements(rt, interval / @sizeOf(core.JSValue));
+    try std.testing.expect(try keeper.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(42)));
+    try std.testing.expectEqual(slices + 1, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+    rt.collectBeforeObjectAllocation(1);
+    try std.testing.expectEqual(slices + 2, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+    rt.collectBeforeObjectAllocation(1);
+    try std.testing.expectEqual(slices + 2, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+    helpers.finishGcCycles(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.assist_credit_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.assist_unreconciled_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.var_ref));
+    try std.testing.expectEqual(@as(?i32, 42), keeper.arrayElements()[0].asInt32());
+}
+
+test "incremental destruction credit rejects growth without sufficient deferred charges" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    for ([_]bool{ false, true }) |with_list_charge| {
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        rt.forcePreciseRootScanForTest();
+        rt.setGCThreshold(std.math.maxInt(usize));
+        const keeper = try core.Object.createArray(rt, null);
+        try rt.gc.pinHeader(keeper.gcHeader());
+        defer rt.gc.unpinHeader(keeper.gcHeader());
+        for (0..128) |_| _ = try core.Object.createArrayStorageCell(rt, 3);
+        if (with_list_charge) _ = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
+        try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
+        var polls: usize = 0;
+        while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) : (polls += 1) {
+            try std.testing.expect(polls < 1000);
+        }
+        _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
+        try std.testing.expect(rt.gc.morgue.pending);
+        const expected_credit: usize = if (with_list_charge) @sizeOf(core.VarRef) else 0;
+        try std.testing.expectEqual(expected_credit, rt.gc.morgue.bytes);
+        try std.testing.expectEqual(expected_credit, rt.gc.morgue.assist_credit_bytes);
+        try std.testing.expectEqual(expected_credit, rt.gc.morgue.assist_unreconciled_bytes);
+        rt.gc_assist_accounted_bytes = rt.memory.allocated_bytes;
+        rt.gc_assist_debt_bytes = 0;
+        const account_before = rt.memory.allocated_bytes;
+        const destroy_index = @intFromEnum(core.gc.Registry.SliceKind.destroy);
+        const before = rt.gc.incremental.stats.total_segments_by_kind[destroy_index];
+        try keeper.reserveDenseArrayElements(rt, core.gc.incremental_assist_interval_bytes / @sizeOf(core.JSValue));
+        try std.testing.expect(rt.memory.allocated_bytes - account_before >= core.gc.incremental_assist_interval_bytes);
+        try std.testing.expectEqual(before, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+        try std.testing.expect(try keeper.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(42)));
+        rt.collectBeforeObjectAllocation(1);
+        // Most corpses are already debited bitmap cells. Storage growth alone
+        // must not advance the phase and reprice the next major prematurely.
+        try std.testing.expectEqual(before, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+        try std.testing.expect(rt.gc.morgue.pending);
+        // With no credit this reaches the original requested-byte threshold;
+        // otherwise the exact prepaid remainder advances that same boundary.
+        rt.collectBeforeObjectAllocation(core.gc.incremental_assist_interval_bytes - expected_credit - 1);
+        try std.testing.expectEqual(before + 1, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
+        helpers.finishGcCycles(rt);
+        try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.var_ref));
+        try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
+        try std.testing.expectEqual(@as(?i32, 42), keeper.arrayElements()[0].asInt32());
+    }
+}
+
+test "incremental marking retains requested-byte pacing across storage growth" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.incremental.markingActive());
+
+    const increment_index = @intFromEnum(core.gc.Registry.SliceKind.increment);
+    const increments_before = rt.gc.incremental.stats.total_segments_by_kind[increment_index];
+    const account_before = rt.memory.allocated_bytes;
+    _ = try core.Object.createArrayStorageCell(rt, core.gc.incremental_assist_interval_bytes / @sizeOf(core.JSValue));
+    try std.testing.expect(rt.memory.allocated_bytes - account_before >= core.gc.incremental_assist_interval_bytes);
+    // Storage allocation itself must not poll while its owner is unpublished.
+    try std.testing.expectEqual(increments_before, rt.gc.incremental.stats.total_segments_by_kind[increment_index]);
+    rt.collectBeforeObjectAllocation(1);
+    // Marking traces live state; storage growth must not buy extra marking
+    // slices beyond the original requested-byte interval.
+    try std.testing.expectEqual(increments_before, rt.gc.incremental.stats.total_segments_by_kind[increment_index]);
+    rt.collectBeforeObjectAllocation(core.gc.incremental_assist_interval_bytes - 1);
+    try std.testing.expectEqual(increments_before + 1, rt.gc.incremental.stats.total_segments_by_kind[increment_index]);
+    // The requested-byte slice still records its consumed account checkpoint.
+    try std.testing.expectEqual(rt.memory.allocated_bytes, rt.gc_assist_accounted_bytes);
+    rt.collectBeforeObjectAllocation(1);
+    try std.testing.expectEqual(increments_before + 1, rt.gc.incremental.stats.total_segments_by_kind[increment_index]);
+    helpers.finishGcCycles(rt);
+}
+
+test "incremental scheduler slices consume existing allocation assist debt" {
+    if (comptime core.memory.force_gc_on_allocation_enabled) return;
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    rt.setGCThreshold(rt.memory.allocated_bytes - 1);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expect(rt.gc.incremental.markingActive());
+    const increment_index = @intFromEnum(core.gc.Registry.SliceKind.increment);
+    const before = rt.gc.incremental.stats.total_segments_by_kind[increment_index];
+    rt.collectBeforeObjectAllocation(core.gc.incremental_assist_interval_bytes - 1);
+    try std.testing.expectEqual(before, rt.gc.incremental.stats.total_segments_by_kind[increment_index]);
+    try std.testing.expectEqual(core.gc.incremental_assist_interval_bytes - 1, rt.gc_assist_debt_bytes);
+    _ = try rt.pollGC(null, .safepoint);
+    try std.testing.expectEqual(before + 1, rt.gc.incremental.stats.total_segments_by_kind[increment_index]);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc_assist_debt_bytes);
+    helpers.finishGcCycles(rt);
 }
 
 test "an incremental cycle frees threshold garbage across bounded polls" {

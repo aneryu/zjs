@@ -1194,8 +1194,12 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // from the bitmap. Those cells never reach a per-cell free path.
     rt.memory.debitBlockBytes(snap.bitmap_bytes);
     condemned += snap.count;
-    // Ledger parity: the account carries object sizes, not cell sizes.
-    doomed_bytes +|= snap.bytes -| (snap.count * gc.metadata_prefix_size);
+    // Only bytes still charged to MemoryAccount belong in the pending
+    // destruction estimate. Bitmap-only corpses were debited just above;
+    // subtracting them again would understate settled live bytes (often to
+    // zero). Finalizer-bearing cells keep their charge until destruction.
+    const block_doomed_body_bytes = snap.bytes - snap.count * gc.metadata_prefix_size;
+    doomed_bytes +|= block_doomed_body_bytes - snap.bitmap_bytes;
     // Unmarked string extents are dead at finish and referenced by
     // nothing; free them now (rare, so the pause cost is negligible)
     // rather than teaching the sliced morgue a table-backed kind.
@@ -1215,6 +1219,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     rt.gc.morgue.cursor = null;
     rt.gc.morgue.destroyed = 0;
     rt.gc.morgue.bytes = doomed_bytes;
+    rt.gc.morgue.startAssistCredit(doomed_bytes);
     rt.gc.incremental.stats.doomed_condemned_headers +|= condemned;
     rt.gc.morgue.pending = condemned != 0;
     if (rt.gc.block_heap.doomed_blocks != null) rt.gc.morgue.pending = true;

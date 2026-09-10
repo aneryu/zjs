@@ -1334,6 +1334,13 @@ pub const JSRuntime = struct {
     /// Allocation-debt pacing for object-boundary incremental mark/destruction
     /// assists. Scheduler/callback/idle polls bypass this counter.
     gc_assist_debt_bytes: usize = 0,
+    /// Account immediately after the previous major slice. During destruction,
+    /// net growth catches backing/storage allocations between safe object
+    /// boundaries without polling inside an unpublished backing allocation.
+    gc_assist_accounted_bytes: usize = 0,
+    /// Force a partial destruction slice in route-asserting tests. Absent
+    /// from production layout and code; shipped slices always use GC policy.
+    gc_destroy_budget_for_test: if (builtin.is_test) ?u64 else void = if (builtin.is_test) null else {},
     atoms: atom.AtomTable,
     classes: class.Table,
     shapes: shape.Registry,
@@ -3402,6 +3409,7 @@ pub const JSRuntime = struct {
             self.gc_running = false;
             const ended = profile.nowNanos();
             self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0, .begin);
+            self.gc_assist_accounted_bytes = self.memory.allocated_bytes;
             return .{};
         }
         self.gc.scheduler.beginMajorCycle(reason);
@@ -3420,6 +3428,12 @@ pub const JSRuntime = struct {
         const stw = @import("gc_trace_stw.zig");
         self.gc_running = true;
         defer self.gc_running = false;
+        defer {
+            self.gc_assist_accounted_bytes = self.memory.allocated_bytes;
+            // A scheduler-driven slice pays the same outstanding allocation
+            // debt as an object-boundary slice. Consume only one interval.
+            self.gc_assist_debt_bytes -|= gc.incremental_assist_interval_bytes;
+        }
 
         const forced = self.memory.allocated_bytes >
             std.math.add(usize, self.malloc_gc_threshold, self.malloc_gc_threshold >> 1) catch std.math.maxInt(usize);
@@ -3543,9 +3557,19 @@ pub const JSRuntime = struct {
         const stw = @import("gc_trace_stw.zig");
         self.gc_running = true;
         defer self.gc_running = false;
+        defer {
+            self.gc_assist_accounted_bytes = self.memory.allocated_bytes;
+            self.gc.morgue.consumeAssistDebt(&self.gc_assist_debt_bytes);
+        }
+        const budget = if (comptime builtin.is_test)
+            self.gc_destroy_budget_for_test orelse gc.incremental_mark_budget_ns
+        else
+            gc.incremental_mark_budget_ns;
+        const account_before = self.memory.allocated_bytes;
         const began = profile.nowNanos();
-        _ = stw.destroyDoomedSlice(self, gc.incremental_mark_budget_ns);
+        _ = stw.destroyDoomedSlice(self, budget);
         const ended = profile.nowNanos();
+        self.gc.morgue.recordAssistReclaim(account_before, self.memory.allocated_bytes);
         const slice = if (ended > began) ended - began else 0;
         self.gc.recordMajorSlicePause(slice, .destroy);
         if (!self.gc.morgue.pending) return self.finishDoomedCompletion(slice);
@@ -3562,6 +3586,7 @@ pub const JSRuntime = struct {
             .duration_ns = last_slice_ns,
         };
         self.gc.morgue.destroyed = 0;
+        self.gc.morgue.clearAssistCredit();
         self.gc.recordIncrementalCycleSuccess(result);
         self.resetGCThreshold();
         _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
@@ -3999,8 +4024,17 @@ pub const JSRuntime = struct {
         const cycle_open = self.gc.morgue.pending or self.gc.incremental.markingActive();
         if (cycle_open) {
             self.gc_assist_debt_bytes +|= size;
-            if (self.gc_assist_debt_bytes < gc.incremental_assist_interval_bytes) return;
-            self.gc_assist_debt_bytes -|= gc.incremental_assist_interval_bytes;
+            // Backing growth is observed only at this safe boundary. It may
+            // advance destruction only with finite reclaimed/deferred-byte
+            // credit; bitmap-only corpses were already debited at condemn.
+            // Marking keeps requested-byte pacing over the live graph.
+            const accounted_growth = if (self.gc.morgue.pending)
+                prospective -| self.gc_assist_accounted_bytes
+            else
+                0;
+            if (self.gc_assist_debt_bytes < gc.incremental_assist_interval_bytes and
+                (accounted_growth < gc.incremental_assist_interval_bytes or
+                    self.gc_assist_debt_bytes +| self.gc.morgue.assist_credit_bytes < gc.incremental_assist_interval_bytes)) return;
         } else {
             // A pending threshold request is about to open a fresh cycle. Its
             // first boundary is immediate; later assists start from zero debt.

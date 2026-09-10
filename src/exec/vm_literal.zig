@@ -497,29 +497,16 @@ pub noinline fn rest(
     // 5841-5844), whose shape proto is the realm Array.prototype. Rest arrays
     // must walk that real chain; the deleted class-name Get fallback is gone.
     const prototype = if (ctx.global) |global| array_ops.arrayPrototypeFromGlobal(ctx.runtime, global) else null;
-    const object_value = try core.Object.createArray(ctx.runtime, prototype);
-    var array_value = object_value.value();
-    var element_value = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &array_value, &element_value });
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    errdefer {
-        array_value = core.JSValue.undefinedValue();
-    }
-    var source_index: usize = first_arg_idx;
-    while (source_index < frame.actual_arg_count and source_index < frame.args.len) : (source_index += 1) {
-        const value = frame.args[source_index];
-        element_value = value;
-        var value_owned = true;
-        errdefer if (value_owned) {
-            element_value = core.JSValue.undefinedValue();
-        };
-        try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.arrayLength()), core.Descriptor.data(value, true, true, true));
-        element_value = core.JSValue.undefinedValue();
-        value_owned = false;
-    }
-    try stack.pushOwned(array_value);
+    // Copy the borrowed actual-argument slice into one fresh dense array, as
+    // qjs js_create_array does. Per-index descriptor definitions would turn
+    // it sparse and disable the dense iterator path at the next spread.
+    const end = @min(frame.actual_arg_count, frame.args.len);
+    const start = @min(@as(usize, first_arg_idx), end);
+    // Reserve before construction: no allocation may separate the helper's
+    // rooted result from publication on the operand stack.
+    try stack.reserveAdditional(1);
+    const array_value = try core.array.constructLiteralWithPrototype(ctx.runtime, frame.args[start..end], prototype);
+    stack.pushOwnedAssumeCapacity(array_value);
 }
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
