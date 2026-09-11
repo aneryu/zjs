@@ -14788,6 +14788,64 @@ test "normalized long division covers the operand relations" {
     try expectDivisionIdentity(largest.limbs, true, &divisor, true);
 }
 
+test "normalized long division skips a known-zero leading digit" {
+    const bigint = engine.libs.bigint;
+    const Limb = bigint.Limb;
+    const alloc = std.testing.allocator;
+    const Case = struct {
+        lhs: []const Limb,
+        rhs: []const Limb,
+        digits: usize,
+        lhs_negative: bool = false,
+        rhs_negative: bool = false,
+    };
+
+    // Fixed digit counts from Python `ceil(quotient.bit_length()/64)` on the
+    // same integer values; not recomputed from the production H-vs-D test.
+    const cases = [_]Case{
+        .{ .lhs = &.{ 10, 40, 50 }, .rhs = &.{ 50, 100 }, .digits = 1 },
+        .{ .lhs = &.{ 5, 10, 1 }, .rhs = &.{ 1, 1 << 63 }, .digits = 1 },
+        .{ .lhs = &.{ 10, 40, 200 }, .rhs = &.{ 50, 100 }, .digits = 2 },
+        .{ .lhs = &.{ 10, 40, 500 }, .rhs = &.{ 50, 100 }, .digits = 2 },
+        .{ .lhs = &.{ 10, 40, 50 }, .rhs = &.{ 50, 100 }, .digits = 1, .lhs_negative = true },
+    };
+
+    for (cases) |case| {
+        const lhs = bigint.BigInt{
+            .negative = case.lhs_negative,
+            .limbs = @constCast(case.lhs),
+            .allocator = alloc,
+        };
+        const rhs = bigint.BigInt{
+            .negative = case.rhs_negative,
+            .limbs = @constCast(case.rhs),
+            .allocator = alloc,
+        };
+
+        bigint.test_only.resetDigitIterations();
+        var quotient = try lhs.div(rhs);
+        defer quotient.deinit();
+        try std.testing.expectEqual(case.digits, bigint.test_only.digitIterations());
+
+        bigint.test_only.resetDigitIterations();
+        var remainder = try lhs.rem(rhs);
+        defer remainder.deinit();
+        try std.testing.expectEqual(case.digits, bigint.test_only.digitIterations());
+
+        bigint.test_only.resetDigitIterations();
+        const pair = try bigint.divRemAlloc(alloc, lhs, rhs);
+        var both_q = pair[0];
+        defer both_q.deinit();
+        var both_r = pair[1];
+        defer both_r.deinit();
+        try std.testing.expectEqual(case.digits, bigint.test_only.digitIterations());
+        try std.testing.expectEqual(std.math.Order.eq, both_q.compare(quotient));
+        try std.testing.expectEqual(std.math.Order.eq, both_r.compare(remainder));
+
+        try expectDivisionIdentity(case.lhs, case.lhs_negative, case.rhs, case.rhs_negative);
+    }
+}
+
 test "reciprocal two-by-one division is exactly the wide division" {
     const bigint = engine.libs.bigint;
     const Limb = bigint.Limb;

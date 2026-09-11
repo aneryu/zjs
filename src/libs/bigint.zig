@@ -1,5 +1,6 @@
 //! Allocator-owned sign-magnitude 64-bit-limb arithmetic, capped at QuickJS's `JS_BIGINT_MAX_SIZE`; operations borrow inputs and return deinitialized owned results.
 const std = @import("std");
+const builtin = @import("builtin");
 const limb_bits = 64;
 pub const Limb = u64;
 const DoubleLimb = u128;
@@ -9,6 +10,19 @@ const DoubleLimb = u128;
 /// (quickjs.c:11592-11596, RangeError "BigInt is too large to allocate").
 pub const max_bits: usize = 1024 * 1024;
 pub const max_limbs: usize = max_bits / limb_bits;
+
+const TestDigits = if (builtin.is_test) struct {
+    threadlocal var count: u64 = 0;
+} else struct {};
+
+pub const test_only = if (builtin.is_test) struct {
+    pub fn resetDigitIterations() void {
+        TestDigits.count = 0;
+    }
+    pub fn digitIterations() u64 {
+        return TestDigits.count;
+    }
+} else struct {};
 
 /// Mirror of the js_bigint_new length check (quickjs.c:11592-11596), applied at
 /// the zjs result-allocation choke points.
@@ -678,13 +692,13 @@ noinline fn divRemAbsNormalizedLong(
     defer allocator.free(u);
     const v = try allocator.alloc(Limb, nb);
     defer allocator.free(v);
-    // Empty when the caller only wants the remainder. The digits are still
-    // computed -- the algorithm needs them -- they are simply not stored.
+    // Empty when the caller only wants the remainder. Digits are still computed
+    // into the scratch window; this length only decides whether they are stored.
     const q: []Limb = if (want_quotient) try allocator.alloc(Limb, quotient_len) else &.{};
     errdefer allocator.free(q);
-    // The loop already tested `j < quotient_len` to skip the provably-zero top
-    // digit, so folding "no buffer" into that same bound adds no branch to the
-    // hot path.
+    // After the loop starts at `quotient_len`, `q.len` is only "was a quotient
+    // requested?". Remainder-only calls have an empty `q` and must not use it
+    // as the digit bound.
     const quotient_writes = q.len;
 
     if (shift == 0) {
@@ -706,9 +720,12 @@ noinline fn divRemAbsNormalizedLong(
     // limb. Zero means "not eligible", which the reciprocal itself can never
     // be; qjs uses `b1_inv` the same way.
     const reciprocal: Limb = if (m >= reciprocal_threshold) normalizedReciprocalInit(v1) else 0;
-    var j = m + 1;
+    // `quotient_len` is computed from the unshifted operands. Never `q.len`:
+    // remainder-only calls leave that slice empty.
+    var j = quotient_len;
     while (j > 0) {
         j -= 1;
+        if (comptime builtin.is_test) TestDigits.count += 1;
         const window = u[j .. j + nb + 1];
         const top = window[nb];
         const high = window[nb - 1];
@@ -753,9 +770,9 @@ noinline fn divRemAbsNormalizedLong(
         if (j < quotient_writes) {
             q[j] = qhat;
         } else {
-            // Either the top digit is provably zero, or no quotient was asked
-            // for and there is nowhere to put it.
-            std.debug.assert(!want_quotient or qhat == 0);
+            // Remainder-only: no quotient buffer. The known-zero leading digit
+            // is skipped by starting at `quotient_len`, not by this branch.
+            std.debug.assert(!want_quotient);
         }
     }
     if (want_quotient) std.debug.assert(q[quotient_len - 1] != 0);

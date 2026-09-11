@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **BigInt:** `/` and `%` skip a leading quotient digit that is already known to be zero.
+
 - **Promises:** built-in Promise objects and their state share one allocation; custom class payload ownership is preserved.
 
 - **GC:** initialized dense-array writes shade their exact new targets; buffer adoption and literal fills retain explicit storage/value barriers without rescanning the whole array on each append.
