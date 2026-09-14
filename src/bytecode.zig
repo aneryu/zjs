@@ -5010,6 +5010,14 @@ pub const function_def = struct {
         resolved,
     };
 
+    const ScopeLinkCache = enum { disabled, unproven, proven };
+
+    // Shared with the parser route test; production has no counters or stores.
+    pub const ScopeProofTestCounters = if (@import("builtin").is_test) struct {
+        pub threadlocal var validations: usize = 0;
+        pub threadlocal var cache_hits: usize = 0;
+    } else void;
+
     /// Mirrors `RelocEntry` (`quickjs.c:21374`).
     pub const RelocEntry = struct {
         next: ?*RelocEntry = null,
@@ -5225,6 +5233,10 @@ pub const function_def = struct {
         /// cells imported by this function from its parent).
         var_ref_count: i32 = 0,
         finalization_state: FinalizationState = .unprepared,
+        /// Enabled only while this def is an active finalizer ancestor. A
+        /// structural proof, not finalization_state, advances it to proven.
+        /// Parsing and standalone resolver calls never retain a cached proof.
+        scope_link_cache: ScopeLinkCache = .disabled,
         var_object_idx: i32 = -1,
         arg_var_object_idx: i32 = -1,
         arguments_var_idx: i32 = -1,
@@ -5356,6 +5368,7 @@ pub const function_def = struct {
         /// and inherits the current visible binding head. Returns the index
         /// of the newly added scope (== new `scope_level`).
         pub fn appendScope(self: *FunctionDefImpl, parent: i32) !i32 {
+            self.invalidateScopeLinkCache();
             const tail = try growSliceBy(VarScope, self.memory, &self.scopes, &self.scopes_capacity, 1);
             tail[0] = .{ .parent = parent, .first = self.scope_first };
             self.scope_count += 1;
@@ -5368,6 +5381,7 @@ pub const function_def = struct {
         /// (quickjs.c:36034-36059).  From this point onward `scopes[].first`
         /// and `VarDef.scope_next` are the sole lexical-chain authority.
         pub fn rebuildFinalScopeLinks(self: *FunctionDefImpl) error{InvalidScope}!void {
+            self.invalidateScopeLinkCache();
             if (self.scopes.len == 0 or self.scope_count != @as(i32, @intCast(self.scopes.len))) return error.InvalidScope;
             if (self.scopes[0].parent != -1) return error.InvalidScope;
             if (self.has_parameter_expressions) {
@@ -5424,14 +5438,15 @@ pub const function_def = struct {
         /// Prove the finalized lexical topology without allocating or changing
         /// it.  QuickJS rebuilds these links once in `js_create_function`, then
         /// its resolver consumes them without per-node bounds/cycle checks.  V2
-        /// uses the same boundary: production resolution calls this once after
-        /// descendant-driven mutations are complete, while standalone walkers
-        /// retain their defensive checks.
+        /// always proves the current function at resolution entry. Active
+        /// ancestors may share a proof until the next topology mutation, while
+        /// standalone walkers retain their defensive checks.
         ///
         /// Scope 0 and scope 1 have independent terminal sentinels.  Every
         /// deeper scope either owns an exact-scope prefix or inherits its
         /// already-proven parent head, matching `rebuildFinalScopeLinks` above.
         pub fn validateFinalScopeLinks(self: *const FunctionDefImpl) error{InvalidScope}!void {
+            if (@import("builtin").is_test) ScopeProofTestCounters.validations += 1;
             if (self.scopes.len == 0) {
                 // Synthetic resolve_variables fixtures may contain no lexical
                 // scopes at all.  The retained per-operand scope bound prevents
@@ -5501,6 +5516,19 @@ pub const function_def = struct {
                     return error.InvalidScope;
                 }
             }
+        }
+
+        fn invalidateScopeLinkCache(self: *FunctionDefImpl) void {
+            if (self.scope_link_cache != .disabled) self.scope_link_cache = .unproven;
+        }
+
+        fn proveAncestorScopeLinks(self: *FunctionDefImpl) error{InvalidScope}!void {
+            if (self.scope_link_cache == .proven) {
+                if (@import("builtin").is_test) ScopeProofTestCounters.cache_hits += 1;
+                return;
+            }
+            try self.validateFinalScopeLinks();
+            if (self.scope_link_cache == .unproven) self.scope_link_cache = .proven;
         }
 
         /// Release the parse-only GlobalVar ledger only after its hoist plan
@@ -5674,6 +5702,7 @@ pub const function_def = struct {
         /// is duplicated; the caller keeps ownership of its copy.
         /// Returns the index of the new var.
         pub fn appendVar(self: *FunctionDefImpl, var_def: VarDef) !i32 {
+            self.invalidateScopeLinkCache();
             const tail = try growSliceBy(VarDef, self.memory, &self.vars, &self.vars_capacity, 1);
             tail[0] = var_def;
             tail[0].var_name = var_def.var_name;
@@ -6004,6 +6033,59 @@ pub const function_def = struct {
     };
 
     pub const FunctionDef = FunctionDefImpl;
+
+    test "scope proof cache invalidates variable scope and late arguments mutations" {
+        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const name = try rt.internAtom("scope-cache");
+        var fd = FunctionDefImpl.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        _ = try fd.appendScope(-1);
+        _ = try fd.appendScope(-1);
+        fd.has_parameter_expressions = true;
+        try fd.rebuildFinalScopeLinks();
+
+        // Standalone proof calls never enable persistence themselves.
+        try fd.proveAncestorScopeLinks();
+        try std.testing.expectEqual(ScopeLinkCache.disabled, fd.scope_link_cache);
+        fd.scope_link_cache = .unproven;
+        try fd.proveAncestorScopeLinks();
+        const before = ScopeProofTestCounters.validations;
+        const hits_before = ScopeProofTestCounters.cache_hits;
+        try fd.proveAncestorScopeLinks();
+        try std.testing.expectEqual(before, ScopeProofTestCounters.validations);
+        try std.testing.expectEqual(hits_before + 1, ScopeProofTestCounters.cache_hits);
+
+        const bad = try fd.appendVar(.{ .var_name = name, .scope_level = 99 });
+        try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
+        try std.testing.expectError(error.InvalidScope, fd.proveAncestorScopeLinks());
+        try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
+        fd.vars[@intCast(bad)].scope_level = 0;
+        try fd.proveAncestorScopeLinks();
+
+        _ = try fd.addScopeVar(name, .normal, 1, true, false);
+        try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
+        try fd.proveAncestorScopeLinks();
+        try fd.ensureArgumentsArgumentBinding();
+        try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
+        try fd.proveAncestorScopeLinks();
+
+        const scope = try fd.appendScope(-1);
+        try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
+        try std.testing.expectError(error.InvalidScope, fd.proveAncestorScopeLinks());
+        fd.scopes[@intCast(scope)] = .{ .parent = 1, .first = fd.scopes[1].first };
+        try fd.proveAncestorScopeLinks();
+        try fd.rebuildFinalScopeLinks();
+        try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
+        try fd.proveAncestorScopeLinks();
+
+        // Revoking the traversal lease restores defensive standalone calls,
+        // including callers that directly mutate the public fixture fields.
+        fd.scope_link_cache = .disabled;
+        const alias = @as(usize, @intCast(fd.arguments_arg_idx));
+        fd.vars[alias].scope_next = fd.arguments_arg_idx;
+        try std.testing.expectError(error.InvalidScope, fd.proveAncestorScopeLinks());
+    }
 };
 
 /// Incrementally-maintained parser flow-tail summary backing the O(1)
@@ -6675,8 +6757,8 @@ pub const binding_rules = struct {
         /// Establish the no-allocation topology proof consumed by the V2-only
         /// resolver specialization.  The current FunctionDef is always proven
         /// at `run` entry. Ancestors are proven lazily on the first real parent
-        /// miss, keeping all callers fail closed without charging functions
-        /// whose bindings are entirely local.
+        /// miss; the active finalizer walk shares these proofs across siblings
+        /// until mutation. Standalone calls retain no proof between runs.
         pub fn proveScopeLinksForResolution(self: *JSContext) Error!void {
             self.scope_link_proof = .none;
             const fd = self.function_def orelse return error.NoFunctionDef;
@@ -6691,7 +6773,7 @@ pub const binding_rules = struct {
             try validateFunctionDefParentChain(fd);
             var maybe_parent = fd.parent;
             while (maybe_parent) |parent| {
-                parent.validateFinalScopeLinks() catch return error.InvalidBytecode;
+                parent.proveAncestorScopeLinks() catch return error.InvalidBytecode;
                 maybe_parent = parent.parent;
             }
             self.scope_link_proof = .tree;
@@ -11174,9 +11256,15 @@ pub const pipeline_finalize = struct {
         };
 
         var frames: std.ArrayList(Frame) = .empty;
-        defer frames.deinit(fd.memory.allocator);
+        defer {
+            // Also revoke every outstanding proof on preparation, allocation
+            // or lowering failure. No proof may escape this traversal.
+            for (frames.items) |frame| frame.function_def.scope_link_cache = .disabled;
+            frames.deinit(fd.memory.allocator);
+        }
         try prepareCurrentBeforeChildren(fd, root_module_record);
         try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = fd });
+        fd.scope_link_cache = .unproven;
 
         while (frames.items.len != 0) {
             const frame_index = frames.items.len - 1;
@@ -11191,10 +11279,12 @@ pub const pipeline_finalize = struct {
                 }
                 try prepareCurrentBeforeChildren(child, null);
                 try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = child });
+                child.scope_link_cache = .unproven;
                 continue;
             }
 
             _ = frames.pop();
+            current.scope_link_cache = .disabled;
             if (frames.items.len == 0) break;
 
             const parent = frames.items[frames.items.len - 1].function_def;
@@ -11206,6 +11296,64 @@ pub const pipeline_finalize = struct {
             const old_value = parent.cpool[idx];
             parent.cpool[idx] = value;
             if (!bigint_mod.BigInt.destroyIfReservedValue(rt, old_value)) {}
+        }
+    }
+
+    test "scope proof cache is revoked on successful and failed finalization" {
+        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const realm = try @import("core/context.zig").RealmContext.create(rt);
+        defer realm.destroy();
+        const name = try rt.internAtom("scope-cache-cleanup");
+        const Exit = enum { success, prepare_error, lowering_error };
+        for ([_]Exit{ .success, .prepare_error, .lowering_error }) |exit_kind| {
+            var parent = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
+            defer parent.deinit(rt);
+            _ = try parent.appendScope(-1);
+            _ = try parent.addScopeVar(name, .normal, 0, false, false);
+            const input = try rt.memory.create(compiler.Builder);
+            input.* = compiler.Builder.init(&rt.memory, &rt.atoms);
+            parent.v2_builder = input;
+            try input.emitOp(opcode.op.return_undef);
+
+            const child_count: usize = if (exit_kind == .lowering_error) 2 else 1;
+            for (0..child_count) |child_index| {
+                const child = blk: {
+                    const def = try rt.memory.create(function_def_mod.FunctionDef);
+                    errdefer rt.memory.destroy(function_def_mod.FunctionDef, def);
+                    def.* = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
+                    try parent.addChild(def);
+                    break :blk def;
+                };
+                child.parent_cpool_idx = @intCast(try parent.appendCpoolOwned(JSValue.undefinedValue()));
+                _ = try child.appendScope(-1);
+                if (exit_kind != .prepare_error) {
+                    const body = try rt.memory.create(compiler.Builder);
+                    body.* = compiler.Builder.init(&rt.memory, &rt.atoms);
+                    child.v2_builder = body;
+                    try body.emitAtomOpU16Owned(opcode.op.scope_get_var, name, 0);
+                    try body.emitOp(opcode.op.drop);
+                    try body.emitOp(opcode.op.return_undef);
+                }
+                // The first child establishes a parent proof. A later child
+                // then fails the artifact preflight after its frame is popped.
+                if (child_index == 1) child.arg_count = -1;
+            }
+
+            const before = function_def_mod.ScopeProofTestCounters.validations;
+            if (exit_kind == .success) {
+                try installChildFunctionBytecodes(&parent, null, .{ .realm = realm }, false);
+            } else {
+                try std.testing.expectError(error.InvalidBytecode, installChildFunctionBytecodes(&parent, null, .{ .realm = realm }, false));
+            }
+            if (exit_kind != .prepare_error) {
+                // The child actually reached resolution and proved its parent.
+                try std.testing.expect(function_def_mod.ScopeProofTestCounters.validations >= before + 2);
+            }
+            try std.testing.expectEqual(function_def_mod.ScopeLinkCache.disabled, parent.scope_link_cache);
+            for (parent.child_list) |child| {
+                try std.testing.expectEqual(function_def_mod.ScopeLinkCache.disabled, child.scope_link_cache);
+            }
         }
     }
 

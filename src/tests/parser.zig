@@ -17,6 +17,39 @@ const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.parser.Parser.ParseState;
 const test_entry = zjs.compiler.test_entry;
 
+test "scope proof cache bounds ancestor scans across sibling functions" {
+    const ScopeProofTestCounters = function_def.ScopeProofTestCounters;
+    const rt = try core.runtime.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.context.RealmContext.create(rt);
+    defer realm.destroy();
+
+    const sibling_count = 32;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "function outer(x) { return [");
+    for (0..sibling_count) |_| {
+        try source.appendSlice(std.testing.allocator, "function() { return x; },");
+    }
+    try source.appendSlice(std.testing.allocator, "]; }");
+
+    const before = ScopeProofTestCounters.validations;
+    const hits_before = ScopeProofTestCounters.cache_hits;
+    var parsed = try parser.compile(.{ .realm = realm }, source.items, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    // Each function needs its own entry proof and, at most, one proof as
+    // an ancestor. Siblings must actually reuse that ancestor proof.
+    const function_count = sibling_count + 2;
+    errdefer std.debug.print("scope proofs: {d} validations for {d} functions, {d} cache hits\n", .{
+        ScopeProofTestCounters.validations - before,
+        function_count,
+        ScopeProofTestCounters.cache_hits - hits_before,
+    });
+    try std.testing.expect(ScopeProofTestCounters.validations - before <= 2 * function_count);
+    try std.testing.expect(ScopeProofTestCounters.cache_hits - hits_before >= sibling_count - 1);
+}
+
 // ================== LEXER TESTS ==================
 
 const LexerTestEnv = struct {

@@ -24,6 +24,21 @@ discipline (no consumer may observe half-published state), and the
 Debug/ReleaseSafe fail-loud oracles. Absolute PC exits the core identity
 system; zjs language semantics do not change.
 
+Finalized lexical links (`scopes[].first` / `vars[].scope_next`) have a
+separate structural proof. `resolve_variables.run` validates its current
+FunctionDef at entry and validates the parent chain on the first ancestor
+lookup. `installChildFunctionBytecodes` permits active ancestors to share a
+successful structural proof across descendants. Its frame walk enables the
+cache and revokes it on both normal and error exits; `.prepared` alone never
+authorizes a trusted lookup, and standalone resolver calls retain no cache.
+
+During that traversal, topology writes must use the FunctionDef mutation
+helpers: `appendVar`, `appendScope`, and `rebuildFinalScopeLinks` invalidate
+the proof. The late parameter `arguments` alias still validates before and
+after linking its row. Parser field writes precede this cache lifetime;
+capture flags and closure rows do not change lexical topology. Future
+finalization-time topology mutations must preserve this invalidation boundary.
+
 ## 1. Identity taxonomy
 
 These are the only identities a v2 producer may create. Every later stage
