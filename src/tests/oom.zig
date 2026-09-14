@@ -1149,7 +1149,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         try std.testing.expect(anchor.isLive());
         try std.testing.expectEqual(anchor, rt.firstContext().?);
         try std.testing.expectEqual(@as(usize, 1), rt.root_providers.len);
-        const external_count_before = rt.external_host_functions.len;
+        const native_count_before = rt.native_entries.items.len;
 
         injector.attempts = 0;
         injector.induced = false;
@@ -1172,7 +1172,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
                 try std.testing.expectEqual(anchor, rt.firstContext().?);
                 try std.testing.expect(anchor.runtime_next == null);
                 try std.testing.expectEqual(@as(usize, 1), rt.root_providers.len);
-                try std.testing.expect(rt.external_host_functions.len <= external_count_before + 1);
+                try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
 
                 created = try BindingContext.create(rt);
             },
@@ -1184,9 +1184,9 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         try std.testing.expect(rt.constructing_context_head == null);
         try std.testing.expect(rt.constructing_context_tail == null);
         try std.testing.expectEqual(@as(usize, 2), rt.root_providers.len);
-        // Retrying a partial install must reuse the Runtime-wide output host
-        // record instead of appending a duplicate record on every failure.
-        try std.testing.expectEqual(external_count_before + 1, rt.external_host_functions.len);
+        // print/console share a static NativeEntry. Neither partial bootstrap
+        // nor a retry may append any Runtime-owned native entries.
+        try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
 
         const canary = try created.eval(canary_source, .{ .filename = "<binding-construction-retry>" });
         try expectStringValue(rt, canary, "canary-ok");
@@ -1225,6 +1225,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         fixture_options.var_count,
         fixture_options.closure_var_count,
         fixture_options.byte_code.len,
+        0,
         0,
     );
     // Above the slab ceiling, so the exact
