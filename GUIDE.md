@@ -318,20 +318,12 @@ does not change the compiled test selection or enable DWARF. Changing the
 substring reuses the same binary; source edits still require rebuilding it.
 Use `-Dtest-filter=<substring>` when a separate symbolised diagnostic build
 is needed. Also run the JS fixture or `run-test262 -d` / `-f`
-slice that directly reproduces the changed behavior. The explicit `test-core`,
-`test-parser`, `test-bytecode`, `test-compiler`, `test-exec`, `test-builtins`,
-`test-runtime`, and `test-runner` targets apply compile-time namespace filters
-and fail if the selection becomes empty.
+slice that directly reproduces the changed behavior. Area selection is a
+runtime filter on the unified binary (`test-fast -- 'tests.core.'`); do not
+add a second compile root per subsystem.
 
 Run `mise run quick-gate` for CLI/runtime glue that targeted tests do not
-exercise. `mise run quick-watch` and `mise run watch -- <step>` debounce edits
-and lock each finite build; they release the host lock while idle and reuse
-disk caches. Default inputs are source/build/test/tool directories and build
-configuration; extra trees need `tools/gates/watch.py --path <tree> -- COMMAND`.
-For a private continuous editing window, `mise run watch-exclusive -- test`
-keeps the incremental compiler resident but holds the host lock for the whole
-session, limited to 300 seconds (exit 124 on expiry). Stop it before a gate or
-measurement. `quick-gate` does not compile the separate test262 runner.
+exercise. `quick-gate` does not compile the separate test262 runner.
 
 `zig build test` compiles the unified suite once and runs it as sixteen
 parallel shard processes (`tools/timing_test_runner.zig --shard i/N`,
@@ -343,8 +335,7 @@ is a separately compiled single-process diagnostic selection.
 The full run builds the test binary without debug info (`-Dtest-strip`
 defaults to true; a `-Dtest-filter` run keeps DWARF so a red can be
 diagnosed with a symbolised trace, and `-Dtest-strip=false` forces DWARF on
-the full run). Use `mise run gate-timeline -- <step>` to measure the current
-critical path; cache-hit, changed-source, and cold-cache timings differ.
+the full run). Cache-hit, changed-source, and cold-cache timings differ.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
 stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`
@@ -358,10 +349,9 @@ mise run checkpoint-gate
 ```
 
 This includes the unified Debug suite, its gc-stress rerun, Debug CLI
-smoke, the sema-only public-root check (`check-embedding`), and source-side
-architecture checks; measured 2026-09-06 at 33 s after an engine edit on the
-big-core build pool. It does not compile ReleaseFast `zjs`; the
-compiler-stage `nm` check stays on the merge and production gates. It also
+smoke, and the sema-only public-root check (`check-embedding`); measured
+2026-09-06 at 33 s after an engine edit on the big-core build pool. It does
+not compile ReleaseFast `zjs`. It also
 excludes the long-running stress tier (`zig build test-stress`: stack
 exhaustion and bigint kernel sweeps in `src/tests/stress.zig`, selected out
 of the same unified binary by `--only-prefix tests.stress.`) — that tier
@@ -380,15 +370,10 @@ backstop, not the first line.
 evidence, or CI gates:
 
 ```bash
-mise run batch-gate        # merge-gate: 2 ReleaseFast + 2 Debug engine compiles, test262 + fixed-work smoke in-graph
+mise run batch-gate        # checkpoint-gate + test-stress + test262-check (same set as CI linux-arm64)
 mise run production-gate   # engine-production-gate: adds the ReleaseFast zjs-profile smoke and the full test-embedding run
 zig build test test-stress -Doptimize=ReleaseSafe --summary all
 ```
-
-All mise build tasks pin to the big-core pool `5-8,15-18` (X925); the
-small-core pool `0-4,10-14` (A725) that was the default until 2026-09-06
-compiles about 2x slower and is only for overlapping a build with an
-instruction-count screen (`ZJS_BUILD_CPUS=0-4,10-14`).
 
 **Instrumentation tiers.** `zig build test-oom --summary all` (allocator / OOM
 behavior), `zig build test-leak-census --summary all` (allocation-leak
@@ -400,12 +385,8 @@ is the cheap feedback — but a missed local run is now caught rather than lost.
 `zig build test -Dzjs_force_gc=true` is a diagnostic instrument, not a gate:
 reach for it when GC timing is the thing you are debugging.
 
-For size/source ablations, freeze once with `mise run size-freeze -- --out
-.scratch/<batch>/baseline`, freeze a candidate, and compare with `mise run
-size-screen -- <baseline> <candidate> --objective binary --min-bytes <n>`.
-See [size-screen](docs/perf/size-screen.md) for source categories and explicit
-cross-configuration experiments. Performance validation follows the current
-verification policy and measurement contract; it is never measured in CI.
+There is no remaining size-screen or measurement-contract gate. Local
+`zig build perf-benchmark` and `perf stat` are diagnostics only.
 
 ### B.7 Durable Lessons
 

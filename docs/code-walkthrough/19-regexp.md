@@ -178,14 +178,14 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **签名**：`pub fn captureCount(self: Compiled) usize`。
 - **作用**：方法版。
 - **实现**：`captureCountFromBytecode(self.bytecode)`。
-- **所有权 / 错误 / 调用**：按值接收 `Compiled`，只复制切片头、不取 `bytecode` 的所有权（仍由调用方持有的 `Compiled.deinit` 释放）；只读字节码头部，不分配、无 error。唯一的捕获数入口：调用方 `src/exec/regexp_fastpath.zig:797`、`src/exec/string_ops.zig:1491`、`tools/perf/direct/zjs_direct_bench.zig`（并列的裸切片版 `captureCount` 已删，bench 改用本方法）。
+- **所有权 / 错误 / 调用**：按值接收 `Compiled`，只复制切片头、不取 `bytecode` 的所有权（仍由调用方持有的 `Compiled.deinit` 释放）；只读字节码头部，不分配、无 error。唯一的捕获数入口：调用方 `src/exec/regexp_fastpath.zig:797`、`src/exec/string_ops.zig:1491`（并列的裸切片版 `captureCount` 已删）。
 
 ### `Compiled.allocCount` (`src/libs/regexp.zig:416`)
 
 - **签名**：`pub fn allocCount(self: Compiled) usize`。
 - **作用**：方法版 slot 数。
 - **实现**：转私有。
-- **所有权 / 错误 / 调用**：同 `captureCount`：借用字节码、不分配、无 error。唯一的 slot 数入口：调用方 `src/exec/regexp_fastpath.zig:769`、`src/exec/string_ops.zig:1490`、`tools/perf/direct/zjs_direct_bench.zig`（裸切片版已删）。
+- **所有权 / 错误 / 调用**：同 `captureCount`：借用字节码、不分配、无 error。唯一的 slot 数入口：调用方 `src/exec/regexp_fastpath.zig:769`、`src/exec/string_ops.zig:1490`。
 
 ### `Compiled.groupName` (`src/libs/regexp.zig:420`)
 
@@ -227,7 +227,7 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **签名**：`fn isSupportedUnicodePropertyExpression(name: []const u8) bool`（文件私有）。
 - **作用**：LRE 能否实现该 `\p`。
 - **实现**：转 `regexp_properties.isSupportedUnicodePropertyExpression`。
-- **所有权 / 错误 / 调用**：只有本文件调用，`pub` 已收窄；引擎侧的同名校验走 `core/regexp.zig` → `unicode/regexp_properties.zig`。
+- **所有权 / 错误 / 调用**：只有本文件调用，`pub` 已收窄；引擎侧的同名校验走 `core/regexp.zig` → `unicode.isSupportedUnicodePropertyExpression`。
 
 ### `exec` (`src/libs/regexp.zig:455`)
 

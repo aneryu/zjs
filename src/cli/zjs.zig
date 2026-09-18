@@ -883,8 +883,8 @@ noinline fn writeCounterLine(writer: *std.Io.Writer, parts: []const struct { []c
 /// a large share means the write barrier is firing more than it needs to.
 fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Registry) !void {
     const st = registry.generation.stats;
-    // Row shape frozen: tools/perf/gc_stats_snapshot.py parses it. The S4-f
-    // trigger census gets its own row below rather than a field here.
+    // Row shape is the `--gc-stats` panel contract. The S4-f trigger census
+    // gets its own row below rather than a field here.
     try writeCounterLine(writer, &.{
         .{ "gc: generation current young ", st.young_count },
         .{ ", remembered owners ", registry.generation.remembered.count() },
@@ -1069,8 +1069,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
 
 fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
     const ph = registry.incremental.stats;
-    // Row format is parsed by tools/perf/gc_stats_snapshot.py (Stage 0); the
-    // two finish-side timers added by TGC S0 go on the reconciliation row
+    // Two finish-side timers added by TGC S0 go on the reconciliation row
     // below so this row keeps its eight fields.
     try writeCounterLine(writer, &.{
         .{ "gc: incremental subphase ns totals begin-clear ", ph.phase_begin_clear_ns },

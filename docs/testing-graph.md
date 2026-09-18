@@ -1,8 +1,8 @@
 # Testing Graph
 
-How compile roots, scoped test targets, and validation steps fit together.
-The executable build graph in `build/` is the authority; this document
-describes the conventions that graph encodes.
+How compile roots and validation steps fit together. The executable build
+graph in `build/` is the authority; this document describes the conventions
+that graph encodes.
 
 ## Compile-root chain
 
@@ -24,41 +24,18 @@ The production `zjs` / `run-test262` artifacts compile against
 `test-embedding` is the one artifact that compiles the public `src/root.zig`
 module as `zjs`.
 
-## Two shell classes
+## Remaining test roots
 
-A test artifact's *root source file* decides how it may import the engine.
-Mixing the two styles is a `file exists in two modules` compile error.
+The unified suite (`src/all_tests.zig`) is the only engine-bearing compile
+for Zig unit tests. Focused work uses `test-fast -- '<substring>'` on that
+binary. Do not add a second compile root per subsystem.
 
-### Class A: relative-path roots
+Two artifacts still compile a different root:
 
-The root already spans the engine subtree by relative import
-(`runtime/root.zig`, `compiler/root.zig`). It must **not** `@import("zjs")`.
-Attest with the relative spelling:
-
-```zig
-comptime {
-    @import("config_signature.zig").attest("test-runtime");
-}
-```
-
-Today: `src/runtime_tests.zig`, `src/compiler_tests.zig`.
-
-### Class B: `zjs`-module roots
-
-The root pulls the engine only through the `zjs` module. It must **not**
-relative-import any engine file. Attest with:
-
-```zig
-comptime {
-    @import("zjs").config_signature.attest("test-exec");
-}
-```
-
-Thin shells live under `src/` so relative imports cannot walk out of the
-module root. Today: `src/core_tests.zig`, `src/parser_tests.zig`,
-`src/bytecode_tests.zig`, `src/exec_tests.zig`, `src/builtins_tests.zig`,
-`src/runner_tests.zig`, `src/leak_census_tests.zig`, and
-`src/embedding_tests.zig` (see attest exception below).
+- `test-embedding` / `check-embedding`: public `src/root.zig` as `zjs`,
+  tests in `src/tests/embedding_examples.zig`. Does not attest.
+- `test-oom`: `src/tests/oom.zig` over `internal_root` with the injectable
+  allocator topology.
 
 ### Independent options (rule C)
 
@@ -68,9 +45,9 @@ test binary would attest the wrong `optimize` field.
 
 ### `helpers.zig` (rule D)
 
-`src/tests/helpers.zig` `@import("zjs")` internally. Only Class-B roots may
-consume it. Class-A roots (`compiler/tests.zig`, in-tree runtime tests)
-must never import it.
+`src/tests/helpers.zig` `@import("zjs")` internally. `compiler/tests.zig`
+and in-tree runtime tests must never import it: they are pulled into
+`all_tests` by `refAllDecls` and would then exist in two modules.
 
 ## Attest matrix
 
@@ -78,40 +55,28 @@ must never import it.
 |---|---|---|
 | `zjs` / `zjs-profile` / `zjs-dev` | `src/cli/zjs.zig` → `engine.config_signature.attest("zjs CLI")` | |
 | `run-test262` / `run-test262-dev` | `src/cli/run_test262.zig` attests `"run-test262 / test-runner"` | |
-| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 16) parallel `--shard i/N` run processes with captured stderr, pinned to the run pool (`-Dgate-run-cpus`, default `0-8,10-18`) |
+| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 16) parallel `--shard i/N` run processes with captured stderr; optional `-Dgate-run-cpus` pin |
 | `test-fast -- <substring>` | same unified binary | One runtime-filtered process; missing, empty, unmatched, or list-only selection fails. Changing the substring does not change the compile artifact. |
-| scoped Class-B shells | `@import("zjs").config_signature.attest("test-X")` | Debug-pinned |
-| scoped Class-A shells | `@import("config_signature.zig").attest("test-X")` | Debug-pinned |
-| `test-runner` shell | attests the same string as `run_test262.zig` | Two attestations of one value are harmless |
 | `test-embedding` | **does not attest** | Public module does not export `config_signature`; same choice as the plugin fixtures |
 | `test-oom` | `src/tests/oom.zig` attests `"oom-tests"` | |
-| `test-leak-census` | `src/leak_census_tests.zig` attests `"test-leak-census"` | |
+| `test-leak-census` | same unified binary | Runtime `--repeat 2 --leak-census` plus `--filter tests.exec.` / `tests.builtins.` |
 
 ## Filter naming
 
-Each scoped target is `src/<area>_tests.zig` × a trailing-dot filter:
+Area selection is a runtime filter on the unified binary. Multiple
+`--filter` arguments are OR-matched.
 
-| Target | Root | Filter |
-|---|---|---|
-| `test-core` | `src/core_tests.zig` | `tests.core.` |
-| `test-parser` | `src/parser_tests.zig` | `tests.parser.` |
-| `test-bytecode` | `src/bytecode_tests.zig` | `tests.bytecode.` |
-| `test-exec` | `src/exec_tests.zig` | `tests.exec.` |
-| `test-builtins` | `src/builtins_tests.zig` | `tests.builtins.` |
-| `test-runtime` | `src/runtime_tests.zig` | `runtime.` |
-| `test-runner` | `src/runner_tests.zig` | `cli.run_test262` |
-| `test-compiler` | `src/compiler_tests.zig` | `compiler.` |
-| `test-embedding` | `src/embedding_tests.zig` | `tests.embedding_examples.` |
-| `test-stress` | (unified binary, `--only-prefix tests.stress.`) | `tests.stress.` — the per-change shards pass `--skip-prefix tests.stress.`; no separate root since 2026-09-06 |
-| `check-embedding` | `src/embedding_tests.zig` (sema-only, `-fno-emit-bin`) | checkpoint-gate's embedding dependency; `test-embedding` stays on the production gate |
-| `test-leak-census` | `src/leak_census_tests.zig` | (none — reruns the shared exec + builtins tiers twice with the leak census armed) |
+| Target | How it selects |
+|---|---|
+| `test-fast -- '<substring>'` | `--filter <substring>` |
+| `test-stress` | `--only-prefix tests.stress.` |
+| `test` / `test-gc-stress` shards | `--skip-prefix tests.stress.` |
+| `test-leak-census` | `--filter tests.exec.` `--filter tests.builtins.` plus `--repeat 2 --leak-census` |
+| `test-embedding` / `check-embedding` | public-root compile of `src/tests/embedding_examples.zig`; no name filter |
 
-The trailing dot is the namespace boundary (`test-runner`'s filter omits it
-in `build/tests.zig`; the `cli.run_test262` prefix has no sibling
-namespaces to exclude). `test-embedding` uses an independent Debug `zjs`
-module rooted at `src/root.zig` and hangs on `engine-production-gate`;
-checkpoint-gate and merge-gate take its sema-only twin `check-embedding`
-(the public root assembles, comptime pins hold) because the same test
+`test-embedding` uses an independent Debug `zjs` module rooted at
+`src/root.zig` and hangs on `engine-production-gate`; checkpoint-gate
+takes its sema-only twin `check-embedding` because the same test
 bodies, runtime pins included, already run in the unified suite.
 
 ## Step naming
@@ -119,8 +84,8 @@ bodies, runtime pins included, already run in the unified suite.
 | Suffix | Meaning | Examples |
 |---|---|---|
 | `-gate` | Aggregate validation gate | `quick-gate`, `checkpoint-gate`, `engine-production-gate` |
-| `-check` | Single check | `config-signature-check`, `test262-check`, `check_gc_slots.js` |
-| (none) | Build or run | `zjs`, `test`, `smoke`, `test-core` |
+| `-check` | Single check | `config-signature-check`, `test262-check` |
+| (none) | Build or run | `zjs`, `test`, `smoke`, `test-fast` |
 
 `check` (no suffix, no prefix) is the one exception, and it is deliberate:
 it is the name the Zig ecosystem and editor tooling already look for.
@@ -147,16 +112,13 @@ What it does not prove: anything a machine-code backend decides
 whatsoever. **`check` is not a gate and no gate depends on it.**
 `zig build test` remains the checkpoint dependency.
 
-## Run pool vs compile pool
+## Optional Run-step pinning
 
-`zig build` is launched on the compile pool (mise: `taskset -c
-${ZJS_BUILD_CPUS:-5-8,15-18}`, the eight X925 cores) because every compile
-is one single-threaded LLVM job. The graph's Run steps -- the unified
-shards, gc-stress, the stress tier, test262, the fixed-work smoke -- are
-re-pinned by `build/config.zig gateRunCpus` (`taskset -c`, Linux only) to
-the run pool: `-Dgate-run-cpus`, else `ZJS_GATE_RUN_CPUS`, else
-`ZJS_BUILD_CPUS` when an operator narrowed the compile pool, else every
-core but the measurement cores 9 and 19 (`0-8,10-18`).
+The graph's Run steps -- the unified shards, gc-stress, the stress tier,
+test262 -- are unpinned by default. Linux-only
+`taskset` pinning is opt-in: `-Dgate-run-cpus`, else `ZJS_GATE_RUN_CPUS`,
+else `ZJS_BUILD_CPUS`. An empty string leaves them on whatever `zig build`
+got.
 
 Two build-runner facts decide the shape of a gate (2026-09-06):
 
@@ -164,18 +126,14 @@ Two build-runner facts decide the shape of a gate (2026-09-06):
   past it runs inline on the main thread, which is still dispatching the
   initial steps. Gates therefore go through mise, which passes `-j32`.
 - A Run step with inherited stdio holds the runner's stderr lock for its
-  whole duration. test262 and gate_smoke run in `.check` mode
+  whole duration. test262 runs in `.check` mode
   (`expectStdOutMatch` on their summary line; a red run prints the whole
   log) and the shards capture stderr, so none of them serialise.
 
 The edit loop: `zig build check` (~7 s, sema only) rejects a non-compiling
-edit; `mise run watch -- test` keeps an incremental compiler resident and
-turns an edit into a ~11 s rebuild-and-run (cold `zig build test` ~21 s: the
-difference is sema; the LLVM Debug codegen + link is the floor either way).
-
-`mise run gate-timeline -- merge-gate` draws the per-process Gantt
-(`tools/gates/timeline.py`); it is the headless substitute for
-`--time-report` and also times the Run steps.
+edit; an incremental `zig build test` after an engine edit is ~11 s (cold
+~21 s: the difference is sema; the LLVM Debug codegen + link is the floor
+either way).
 
 ## What CI runs
 

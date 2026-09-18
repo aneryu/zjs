@@ -15,7 +15,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator);
     defer args.deinit();
     _ = args.skip();
-    var filter: ?[]const u8 = null;
+    var filters: [8][]const u8 = undefined;
+    var filter_count: usize = 0;
     var start_index: usize = 0;
     var end_index: usize = test_fns.len;
     var fail_fast = false;
@@ -45,10 +46,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         } else if (std.mem.eql(u8, arg, "--fail-fast")) {
             fail_fast = true;
         } else if (std.mem.eql(u8, arg, "--filter")) {
-            if (filter != null) return error.InvalidArgs;
             const pattern = args.next() orelse return error.InvalidArgs;
-            if (pattern.len == 0) return error.InvalidArgs;
-            filter = pattern;
+            if (pattern.len == 0 or filter_count >= filters.len) return error.InvalidArgs;
+            filters[filter_count] = pattern;
+            filter_count += 1;
         } else if (std.mem.eql(u8, arg, "--repeat")) {
             repeat_count = try std.fmt.parseUnsigned(usize, args.next() orelse return error.InvalidArgs, 10);
             if (repeat_count == 0) return error.InvalidArgs;
@@ -69,8 +70,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const range = try parseRange(range_arg, test_fns.len);
             start_index = range.start;
             end_index = range.end;
-        } else if (filter == null) {
-            filter = arg;
+        } else if (filter_count == 0) {
+            if (arg.len == 0) return error.InvalidArgs;
+            filters[0] = arg;
+            filter_count = 1;
         } else {
             return error.InvalidArgs;
         }
@@ -78,7 +81,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // A required filtered run must execute tests; listing names cannot satisfy
     // its nonempty-selection assertion. Unfiltered enumeration stays available.
-    if (list_only and require_tests and filter != null) return error.InvalidArgs;
+    if (list_only and require_tests and filter_count != 0) return error.InvalidArgs;
     if (list_only) {
         for (test_fns, 0..) |test_fn, index| {
             std.debug.print("{}: {s}\n", .{ index, test_fn.name });
@@ -89,7 +92,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     zjs_test_runner_leak_census = leak_census;
     std.debug.print("Running {} tests with timing", .{test_fns.len});
-    if (filter) |pattern| std.debug.print(" matching \"{s}\"", .{pattern});
+    if (filter_count != 0) {
+        std.debug.print(" matching", .{});
+        for (filters[0..filter_count]) |pattern| std.debug.print(" \"{s}\"", .{pattern});
+    }
     if (start_index != 0 or end_index != test_fns.len) std.debug.print(" in range {}..{}", .{ start_index, end_index });
     if (shard_count != 1) std.debug.print(" on shard {}/{}", .{ shard_index, shard_count });
     if (only_prefix) |prefix| std.debug.print(" only prefix \"{s}\"", .{prefix});
@@ -128,11 +134,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             filtered_count += 1;
             continue;
         }
-        if (filter) |pattern| {
-            if (std.mem.indexOf(u8, test_fn.name, pattern) == null) {
-                filtered_count += 1;
-                continue;
-            }
+        if (filter_count != 0 and !nameMatchesAny(test_fn.name, filters[0..filter_count])) {
+            filtered_count += 1;
+            continue;
         }
         if (only_prefix) |prefix| {
             if (!std.mem.startsWith(u8, test_fn.name, prefix)) {
@@ -256,6 +260,13 @@ const TestRange = struct {
     start: usize,
     end: usize,
 };
+
+fn nameMatchesAny(name: []const u8, patterns: []const []const u8) bool {
+    for (patterns) |pattern| {
+        if (std.mem.indexOf(u8, name, pattern) != null) return true;
+    }
+    return false;
+}
 
 fn parseRange(arg: []const u8, max_len: usize) !TestRange {
     const delimiter = std.mem.indexOfScalar(u8, arg, ':') orelse return error.InvalidArgs;

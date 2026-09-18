@@ -740,7 +740,7 @@
 - **签名**：`pub inline fn call0(self: *CallSite) !JSValue`。
 - **作用**：零参快路径。
 - **实现**：`callFixed(0, &.{})`。
-- **所有权 / 错误 / 调用**：`inline` 转发到 `callFixed(0, &.{})`（`src/binding/context.zig:923`），后者调 `exec.call_site.callFixedInto` 并用 `pinnedLoad` 取回结果。错误是 `HostError`：JS 抛出时返回 `error.JSException` 并把异常留在 realm 的异常槽里；若该异常是 OOM 异常，`restoreUncaughtOutOfMemory`（`src/binding/context.zig:601`）把它换回 `error.OutOfMemory`。返回的 `JSValue` 是借用值，不 retain、不入句柄；宿主栈上的副本靠保守栈扫描保活。调用方：`src/tests/embedding_examples.zig:239`、`:259`，`tools/perf/native_boundary/zjs_boundary_bench.zig:234`。
+- **所有权 / 错误 / 调用**：`inline` 转发到 `callFixed(0, &.{})`（`src/binding/context.zig:923`），后者调 `exec.call_site.callFixedInto` 并用 `pinnedLoad` 取回结果。错误是 `HostError`：JS 抛出时返回 `error.JSException` 并把异常留在 realm 的异常槽里；若该异常是 OOM 异常，`restoreUncaughtOutOfMemory`（`src/binding/context.zig:601`）把它换回 `error.OutOfMemory`。返回的 `JSValue` 是借用值，不 retain、不入句柄；宿主栈上的副本靠保守栈扫描保活。调用方：`src/tests/embedding_examples.zig:239`、`:259`。
 
 ### `CallSite.call1` (`src/binding/context.zig:914`)
 

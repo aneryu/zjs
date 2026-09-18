@@ -2,28 +2,9 @@
 
 本册讲测试**编译根**、共享夹具和中小测试文件。大文件按源码体积拆到 `20-tests-core.md` / `20-tests-parser.md` / `20-tests-exec.md` / `20-tests-builtins.md`。
 
-约定见 [`docs/testing-graph.md`](../testing-graph.md)：Class A 相对导入、Class B `@import("zjs")`、每产物独立 `addOptions`、`helpers.zig` 只能给 Class B。
+约定见 [`docs/testing-graph.md`](../testing-graph.md)：统一套件是唯一 Zig 单测编译根；`helpers.zig` 只给经 `@import("zjs")` 的测试用；每产物独立 `addOptions`。
 
-## 编译根（shell）
-
-这些文件几乎没有业务函数，职责是 attest 配置签名并用 `refAllDecls` 拉进对应测试族。它们**不在** `_inventory.tsv` 里（没有 `fn`），但仍必须讲清楚，否则分片目标对不上。
-
-| Shell | 步骤 | Filter | 类 | 拉入 | 备注 |
-| --- | --- | --- | --- | --- | --- |
-| `src/core_tests.zig` | `test-core` | `tests.core.` | Class B | `src/tests/core.zig` | core 对象/GC/所有权；`JSValue` 表示测试在 `src/core/value.zig`，走统一套件 |
-| `src/parser_tests.zig` | `test-parser` | `tests.parser.` | Class B | `src/tests/parser.zig` | 词法+语法+发射 |
-| `src/bytecode_tests.zig` | `test-bytecode` | `tests.bytecode.` | Class B | `src/tests/bytecode.zig` | 字节码载体与 pipeline |
-| `src/exec_tests.zig` | `test-exec` | `tests.exec.` | Class B | `src/tests/exec.zig` | VM 与执行语义 |
-| `src/builtins_tests.zig` | `test-builtins` | `tests.builtins.` | Class B | `src/tests/builtins.zig` | ECMAScript 内建 |
-| `src/runtime_tests.zig` | `test-runtime` | `runtime.` | Class A | `src/runtime/root.zig` | 宿主事件循环（相对导入，禁止 `@import("zjs")`） |
-| `src/runner_tests.zig` | `test-runner` | `cli.run_test262` | Class B | `src/cli/run_test262.zig` | test262 runner；attest 字符串与可执行根相同 |
-| `src/compiler_tests.zig` | `test-compiler` | `compiler.` | Class A | `src/compiler/root.zig` | 编译器 QCP；`test { _ = @import("compiler/root.zig"); }` |
-| `src/embedding_tests.zig` | `test-embedding / check-embedding` | `tests.embedding_examples.` | Class B（公共 `src/root.zig`） | `src/tests/embedding_examples.zig` | **不 attest**：公共模块不导出 `config_signature` |
-| `src/leak_census_tests.zig` | `test-leak-census` | 无编译期 filter；运行期 `--repeat 2 --leak-census` | Class B | `src/tests/exec.zig` + `src/tests/builtins.zig` | 同一二进制跑两遍共享层，pass 0 预热、pass 1 开泄漏门 |
-
-每个 Class B shell 的形态都是：`comptime { @import("zjs").config_signature.attest("test-X"); }` 再 `test { std.testing.refAllDecls(...); }`。`src/runtime_tests.zig` 改走 `@import("config_signature.zig").attest("test-runtime")`。`src/embedding_tests.zig` 只有 `refAllDecls`，没有 attest。
-
-这些 `test {` 匿名块本身没有函数名，覆盖核对比的是下面真正的 `fn`。
+聚焦选择走 `test-fast -- '<子串>'`，不要再为每个子系统加编译根。`test-embedding` / `check-embedding` 直接以 `src/tests/embedding_examples.zig` 为根、公共 `src/root.zig` 为 `zjs`。`test-leak-census` 复用统一二进制，运行期 `--filter tests.exec.` `--filter tests.builtins.`。
 
 ## `src/all_tests.zig` — 统一套件根
 
@@ -63,9 +44,9 @@
 - **实现**：先 `refAllDeclsRecursive(internal.public_api, .{})` 递归引用公共面，再对各测试族逐个 `std.testing.refAllDecls`：`tests/engine_production.zig`、`tests/oom_cap.zig`、`tests/embedding_examples.zig`、`tests/core.zig`、`tests/bytecode.zig`、`tests/parser.zig`、`tests/exec.zig`、`tests/builtins.zig`、`runtime`；之后是非模块根的相对导入 `tests/gc_stress.zig`、`tests/stress.zig`、`cli/zjs.zig`、`cli/run_test262.zig`。stress 层编进同一二进制、运行期按名字前缀选（`--only-prefix tests.stress.` / `--skip-prefix tests.stress.`），省掉第二次 Debug 引擎编译。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-## `src/tests/helpers.zig` — Class B 共享夹具
+## `src/tests/helpers.zig` — 统一套件共享夹具
 
-所有 Class B 测试的共享 harness。历史上是 `exec.zig` 的 `helpers` 命名空间，所以调用点仍写 `helpers.foo`。内部 `@import("zjs")`，Class A 根禁止导入。`compiler/tests.zig` 与 in-tree runtime 测试禁止再导入本文件，否则 `file exists in two modules`。
+统一套件的共享 harness。历史上是 `exec.zig` 的 `helpers` 命名空间，所以调用点仍写 `helpers.foo`。内部 `@import("zjs")`。`compiler/tests.zig` 与 in-tree runtime 测试禁止再导入本文件，否则 `file exists in two modules`。
 
 ### 类型
 
@@ -470,7 +451,7 @@
 ### `scratchDirForProcess` (`src/tests/helpers.zig:911`)
 
 - **签名**：`pub fn scratchDirForProcess(comptime base: []const u8) []const u8`。
-- **作用**：目录名带 pid，避免 merge-gate 下 Debug 与 gc-stress 分片抢同一 scratch。
+- **作用**：目录名带 pid，避免同一次构建里 Debug 与 gc-stress 分片抢同一 scratch。
 - **实现**：A scratch directory name unique to this test process: the merge gate runs the Debug and gc-stress shards concurrently, and two processes deleting/creating one fixed directory race each other.。关键调用：`std.fmt.bufPrint`、`std.os.linux`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
@@ -542,7 +523,7 @@
 
 ## `src/tests/stress.zig` — 长时 stress 层
 
-不进每改动的 `zig build test` 分片（`--skip-prefix tests.stress.`），由 `test-stress` / merge-gate / production-gate 以 `--only-prefix` 跑。
+不进每改动的 `zig build test` 分片（`--skip-prefix tests.stress.`），由 `test-stress` / production-gate 以 `--only-prefix` 跑。
 
 文件头：Long-running stress tier: deep-recursion stack exhaustion and randomized bigint kernel sweeps. These were the five slowest tests in the tree (~47s of a ~53s unified run, 2026-08-29) and are separated so checkpoint-gate and the per-change `zig build test` close-out (see docs/verification-policy.md) keep fast feedback. Coverage is unchanged at the outer tiers: the engine-production gate, primary-platform CI, and the per-merge-batch gate run this file through `test-stress`; the ReleaseSafe phase close should invoke `zig build test test-stress -Doptimize=ReleaseSafe`.
 

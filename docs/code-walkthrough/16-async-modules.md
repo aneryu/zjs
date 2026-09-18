@@ -29,7 +29,7 @@ exec/module.zig           安装、链接、声明实例化、单步求值、nam
 exec/module_graph.zig     宿主加载、dynamic import job、TLA 续体排水
 exec/using_ops.zig        ext0 字节码：using create/add/dispose + 回收 opcode
 exec/disposable_ops.zig   DisposableStack / AsyncDisposableStack 算法
-runtime/event_loop.zig    宿主循环：定时器 / fd / 再调 drainPendingPromiseJobs
+src/event_loop.zig        宿主循环：定时器 / fd / 再调 drainPendingPromiseJobs
 ```
 
 `core/jobs.zig` **不含 VM 调用**。exec 安装 runner、消费 payload。宿主 `JSContext.runJobs` / `zjs.job.drain` 最终落到 `promise_ops.drainOnePendingJob`。
@@ -63,7 +63,7 @@ ECMA-262 的 Jobs 是「稍后跑一次的抽象任务」。zjs 把它钉成 Run
 | --- | --- |
 | `drainOnePendingJob` | 恰好一条 typed FIFO |
 | `drainPendingPromiseJobs` | FIFO + signal/rw/timer/atomics，直到空 |
-| `runtime/event_loop.zig` | 事件循环一轮后调 `drainPendingPromiseJobs` |
+| `src/event_loop.zig` | 事件循环一轮后调 `drainPendingPromiseJobs` |
 | `module_graph.drainModuleJobLoop` | 一条 TLA 续体 ↔ 一条 FIFO/host 事件 |
 
 ## 3. 模块：加载 → 链接 → 求值

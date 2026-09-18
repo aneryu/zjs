@@ -484,7 +484,7 @@
 
 - **签名**：`inline fn loadValueAsIntPair(slot: *const JSValue) JSValue`。
 - **作用**：按两个 64-bit 字搬运 JSValue（避免 AArch64 `q` 访问不转发）。
-- **实现**：单条转调 `JSValue.loadSlotAsIntPair(slot)`，把 16 字节槽读成两个 64 位整数字，而不是让 LLVM 合成一次 `ldur q0`。注释里最初写的理由（「`ldp` 不从 64 位半字存储转发」）已被 WP5 的 `tools/perf/native_boundary/forwarding_matrix.c` 实测推翻：`ldp` 从 `stp`、从两条独立 `str`、从部分重叠的更老存储都能正常转发（7.0-7.4 cyc）；真正不转发的是 SIMD 存储（`str q`/`str d`，通用寄存器读方要多付 ~4-7 cyc）。所以这里留整数对形式，图的是寄存器**域**和调度，不是转发。
+- **实现**：单条转调 `JSValue.loadSlotAsIntPair(slot)`，把 16 字节槽读成两个 64 位整数字，而不是让 LLVM 合成一次 `ldur q0`。注释里最初写的理由（「`ldp` 不从 64 位半字存储转发」）已被 WP5 forwarding 实测推翻：`ldp` 从 `stp`、从两条独立 `str`、从部分重叠的更老存储都能正常转发（7.0-7.4 cyc）；真正不转发的是 SIMD 存储（`str q`/`str d`，通用寄存器读方要多付 ~4-7 cyc）。所以这里留整数对形式，图的是寄存器**域**和调度，不是转发。
 - **所有权 / 错误 / 调用**：错误：无。所有权：按两个 64 位字读出 `JSValue` 副本，不改源槽、不建根。调用：本文件 39 处，如 `:341`（`takeNativeReturnInto`）、`:1376`、`:2338`。
 
 ### `loadValueAsSplitPair` (`src/exec/tailcall_dispatch.zig:1495`)

@@ -440,7 +440,7 @@
 
 `ModuleEvalStep`：`.completed(JSValue)` 或 `.suspended{continuation, awaited}`。
 
-`ContinuationRoots` / `WaiterRoots`：把原生 ArrayList 里的 JSValue 登记给 tracer（rc 构建擦除）。
+`ContinuationRoots` / `WaiterRoots`：把原生 ArrayList 里的 JSValue 登记给 tracer。
 
 `ModuleContinuation`：realm、path、continuation、awaited、keep_result、completed、settle_waiters、completion_rejected、deferred_start、awaited_normalized、ready。
 

@@ -353,7 +353,7 @@ pub fn recordIncrementalCycleSuccess(self: *Registry, result: CollectionResult) 
 /// mixing them makes the percentile panel report the wrong thing entirely.
 /// A run doing 90% minors printed a p50 of 758us against a true major
 /// median of 16.45ms, and the target it is checked against
-/// (`docs/tracing-gc-design.md` §1.3) is a major target. The minor's own
+/// is a major target. The minor's own
 /// distribution lives in `generation.stats`.
 pub fn recordMinorSuccess(self: *Registry, result: CollectionResult) void {
     self.stats.last_failure = .none;

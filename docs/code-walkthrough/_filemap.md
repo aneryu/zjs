@@ -8,16 +8,13 @@
 | `build/config.zig` | 7 | [20-build.md](20-build.md) |
 | `build/gates.zig` | 2 | [20-build.md](20-build.md) |
 | `build/perf.zig` | 1 | [20-build.md](20-build.md) |
-| `build/profiles.zig` | 0 | [20-build.md](20-build.md) |
 | `build/tests.zig` | 1 | [20-build.md](20-build.md) |
 | `build.zig` | 1 | [20-build.md](20-build.md) |
 | `src/all_tests.zig` | 2 | [20-tests.md](20-tests.md) |
 | `src/binding/context.zig` | 104 | [01-public-api-context.md](01-public-api-context.md) |
 | `src/binding/native.zig` | 63 | [01-public-api-native.md](01-public-api-native.md) |
 | `src/binding/root.zig` | 1 | [01-public-api-binding-facade.md](01-public-api-binding-facade.md) |
-| `src/builtins_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/bytecode.zig` | 507 | [05-bytecode-binding.md](05-bytecode-binding.md), [05-bytecode-function-def.md](05-bytecode-function-def.md), [05-bytecode-function.md](05-bytecode-function.md), [05-bytecode-opcodes.md](05-bytecode-opcodes.md), [05-bytecode-pipeline.md](05-bytecode-pipeline.md), [05-bytecode.md](05-bytecode.md) |
-| `src/bytecode_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/cli/cli_process.zig` | 3 | [18-cli.md](18-cli.md) |
 | `src/cli/panic_policy.zig` | 0 | [18-cli.md](18-cli.md) |
 | `src/cli/run_test262.zig` | 30 | [18-test262.md](18-test262.md) |
@@ -38,12 +35,11 @@
 | `src/compiler/root.zig` | 7 | [04-compiler.md](04-compiler.md) |
 | `src/compiler/test_entry.zig` | 5 | [04-compiler-tests.md](04-compiler-tests.md) |
 | `src/compiler/tests.zig` | 29 | [04-compiler-tests.md](04-compiler-tests.md) |
-| `src/compiler_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/config_signature.zig` | 6 | [01-public-api-companions.md](01-public-api-companions.md) |
 | `src/core/array.zig` | 9 | [08-core-array-class.md](08-core-array-class.md) |
 | `src/core/array_list_erased.zig` | 7 | [10-core-runtime-containers.md](10-core-runtime-containers.md) |
 | `src/core/atom.zig` | 101 | [06-core-value-atom.md](06-core-value-atom.md) |
-| `src/core/bigint.zig` | 27 | [06-core-value-number-bigint.md](06-core-value-number-bigint.md) |
+| `src/core/bigint.zig` | 30 | [06-core-value-number-bigint.md](06-core-value-number-bigint.md) |
 | `src/core/bulk_memory.zig` | 1 | [10-core-runtime-containers.md](10-core-runtime-containers.md) |
 | `src/core/bytes_view.zig` | 30 | [06-core-value-string.md](06-core-value-string.md) |
 | `src/core/class.zig` | 56 | [08-core-array-class.md](08-core-array-class.md) |
@@ -105,9 +101,8 @@
 | `src/core/value_semantics.zig` | 5 | [06-core-value-value.md](06-core-value-value.md) |
 | `src/core/value_string.zig` | 5 | [06-core-value-value.md](06-core-value-value.md) |
 | `src/core/var_ref.zig` | 15 | [08-core-regexp-promise-varref.md](08-core-regexp-promise-varref.md) |
-| `src/core_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/dossier_pad.zig` | 1 | [01-public-api-companions.md](01-public-api-companions.md) |
-| `src/embedding_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
+| `src/event_loop.zig` | 57 | [18-event-loop.md](18-event-loop.md) |
 | `src/exec/active_invocation_trace.zig` | 5 | [11-vm-kernel.md](11-vm-kernel.md) |
 | `src/exec/array_builtin_ops.zig` | 56 | [15-array-builtin.md](15-array-builtin.md) |
 | `src/exec/array_ops.zig` | 231 | [15-array-ops-apply.md](15-array-ops-apply.md), [15-array-ops-dispatch.md](15-array-ops-dispatch.md), [15-array-ops-iterate.md](15-array-ops-iterate.md), [15-array-ops-species.md](15-array-ops-species.md) |
@@ -195,33 +190,21 @@
 | `src/exec/vm_regexp.zig` | 2 | [12-vm-opcodes-regexp.md](12-vm-opcodes-regexp.md) |
 | `src/exec/vm_value.zig` | 52 | [12-vm-opcodes-value.md](12-vm-opcodes-value.md) |
 | `src/exec/zjs_vm.zig` | 16 | [11-vm-kernel.md](11-vm-kernel.md) |
-| `src/exec_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
-| `src/gc_representation.zig` | 13 | [01-public-api-companions.md](01-public-api-companions.md) |
 | `src/internal_root.zig` | 1 | [01-public-api-companions.md](01-public-api-companions.md) |
-| `src/leak_census_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/lexer.zig` | 169 | [02-lexer-typescript.md](02-lexer-typescript.md), [02-lexer.md](02-lexer.md) |
-| `src/libs/bigint.zig` | 65 | [19-bigint.md](19-bigint.md) |
-| `src/libs/number_format.zig` | 57 | [19-number-format.md](19-number-format.md) |
+| `src/libs/bigint.zig` | 79 | [19-bigint.md](19-bigint.md) |
+| `src/libs/number_format.zig` | 64 | [19-number-format.md](19-number-format.md) |
 | `src/libs/regexp.zig` | 217 | [19-regexp.md](19-regexp.md) |
 | `src/libs/root.zig` | 0 | [19-libs.md](19-libs.md) |
-| `src/libs/unicode/data.zig` | 7 | [19-unicode.md](19-unicode.md) |
-| `src/libs/unicode/names.zig` | 15 | [19-unicode.md](19-unicode.md) |
-| `src/libs/unicode/properties.zig` | 2 | [19-unicode.md](19-unicode.md) |
-| `src/libs/unicode/regexp_properties.zig` | 9 | [19-unicode.md](19-unicode.md) |
-| `src/libs/unicode.zig` | 114 | [19-unicode.md](19-unicode.md) |
+| `src/libs/unicode.zig` | 147 | [19-unicode.md](19-unicode.md) |
 | `src/opcode_logical.zig` | 7 | [05-bytecode-opcodes.md](05-bytecode-opcodes.md) |
 | `src/parser.zig` | 622 | [03-parser-emit.md](03-parser-emit.md), [03-parser-scan.md](03-parser-scan.md), [03-parser-scope.md](03-parser-scope.md), [03-parser-syntax-fn.md](03-parser-syntax-fn.md), [03-parser-syntax-stmt.md](03-parser-syntax-stmt.md), [03-parser-syntax.md](03-parser-syntax.md), [03-parser-ts.md](03-parser-ts.md), [03-parser.md](03-parser.md) |
-| `src/parser_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/platform_clock.zig` | 4 | [01-public-api-companions.md](01-public-api-companions.md) |
 | `src/root.zig` | 91 | [01-public-api-root.md](01-public-api-root.md) |
-| `src/runner_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
-| `src/runtime/event_loop.zig` | 57 | [18-event-loop.md](18-event-loop.md) |
-| `src/runtime/root.zig` | 0 | [18-event-loop.md](18-event-loop.md) |
-| `src/runtime_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/simple_token.zig` | 17 | [02-lexer-simple-token.md](02-lexer-simple-token.md) |
 | `src/tests/builtins.zig` | 5 | [20-tests-builtins.md](20-tests-builtins.md) |
 | `src/tests/bytecode.zig` | 6 | [20-tests.md](20-tests.md) |
-| `src/tests/core.zig` | 131 | [20-tests-core.md](20-tests-core.md) |
+| `src/tests/core.zig` | 112 | [20-tests-core.md](20-tests-core.md) |
 | `src/tests/embedding_examples.zig` | 23 | [20-tests.md](20-tests.md) |
 | `src/tests/engine_production.zig` | 6 | [20-tests.md](20-tests.md) |
 | `src/tests/exec.zig` | 60 | [20-tests-exec.md](20-tests-exec.md) |

@@ -18,7 +18,7 @@ object model, and the `gc/tracing` branch and the dual-session split are
 retired. The G2-GC-MERGE statistical protocol was superseded by that
 ruling and never run (no verdict); the merge basis was the Stage 0
 fixed-work screen against the frozen rc baseline plus four green gates
-(`docs/tracing-gc-completion-account.md`). Still owed after the merge:
+(see `docs/gc-invariants.md`). Still owed after the merge:
 VM-CONTRACT-GC (the representation contract is v2, exported from the
 branch before S1–S5) and the conservative-root residue
 R1.
@@ -29,7 +29,7 @@ pinned by the public tag `frozen/gc-tracing-2026-08-26`, and all official
 measurements are governed by `policies/` (preregistered) with evidence
 registered under `reports/evidence/`. Main branch protection:
 `main-no-force-push` (no force-push/deletion, no bypass) +
-`main-required-checks` (roadmap-lint, linux-arm64, linux-x86_64;
+`main-required-checks` (linux-arm64, linux-x86_64;
 repository-admin bypass keeps the owner's direct-push workflow).
 
 ## test262
@@ -49,14 +49,13 @@ source-phase imports, and PTC.
 ## Performance
 
 The authoritative score source is `docs/perf/bench-v8-status.md`; this page
-does not maintain its own copy of the numbers. Since 2026-08-25 the vendored
-suite (`tools/perf/bench_v8/`) is Octane 2.0 (V8 suite version 9). The
+does not maintain its own copy of the numbers. Since 2026-08-25 the recorded
+suite is Octane 2.0 (V8 suite version 9). The
 current five-engine snapshot (2026-09-06, 17 results, zlib scored, zjs
 `10966b12` with the tracing collector) reads zjs/qjs composite **0.9666**
 against the GCC 16.0.1 reference build: 11 of 17 results at or above
-QuickJS; the gap is Splay 0.62 / SplayLatency 0.69 (the structural
-marking account closed in `docs/tracing-gc-completion-account.md` §6b),
-then EarleyBoyer 0.85 and PdfJS 0.89. **Owner ruling 2026-09-06: the
+QuickJS; the gap is Splay 0.62 / SplayLatency 0.69 (a structural
+marking account), then EarleyBoyer 0.85 and PdfJS 0.89. **Owner ruling 2026-09-06: the
 performance line is closed; Octane vs QuickJS is a regression gate at
 ≥ 0.95 from here.** Routine snapshots run zjs + QuickJS only; the other
 three engines are re-run only when the suite contract changes. Per the 2026-08-25 reference-drift adjudication,
@@ -66,33 +65,24 @@ reference binaries. The official yardstick was ruled 2026-08-26 (BASE-G0,
 owner-ratified): the GCC-16 reference build pinned in
 `reports/evidence/BASE-G0/manifest.json`.
 
-The external-checkout zoo runner was retired 2026-08-29: the vendored
-bench-v8 suite covers the same Octane corpus, and fixed-work attribution
-moved to `tools/perf/bench_v8/run_fixed_pmu.py`. The last zoo baseline
-(geomean 1.0304, v7 suite / GCC-13 reference) was removed from the active
-tree with the 2026-08-25 stale-doc cleanup; recover it from git history.
-The superseded version-7 headline records (2026-08-19 composite 1.0464)
-were removed the same way.
+The external-checkout zoo runner was retired 2026-08-29. Stage 0,
+size-screen, field locks, and the mandatory bench-v8 A/B were retired
+2026-09-18 with the measurement and ablation policy. The last zoo baseline
+and the superseded version-7 headline records were removed from the active
+tree with the 2026-08-25 stale-doc cleanup; recover them from git history.
 
-This is a maintainer single-machine measurement; there is no independent
-reproduction yet.
+This is a maintainer single-machine snapshot; there is no independent
+reproduction and no remaining merge-time performance gate.
 
 - Machine: ARM Cortex-X925 (3.9 GHz big cores, pinned), Linux 6.17.
 - QuickJS reference pin: commit `04be246`, upstream Makefile default release
   build. Two reference binaries exist for this same commit (GCC 13.3.0 and
   GCC 16.0.1, aarch64), and the compiler difference alone moves the composite
-  by ~6.6%; record the binary fingerprint with every measurement (see
-  `docs/perf/bench-v8-status.md`).
+  by ~6.6%; see `docs/perf/bench-v8-status.md`.
 - Campaign ledgers and attribution reports were moved out of the active tree;
   recover them from git history at `90eb9385^` (`reports/perf/qjs-align/` —
   the directory was deleted in the release commit itself, so the `v0.1.0`
-  tag does not contain it). Raw sample files were deleted during campaign
-  close; re-measurement must re-run the measurement contract.
-
-Measurement contract: `tools/compare/measurement_contract.js` with
-`tools/compare/measurement_policy.json`; the prose incident register
-(16 clauses) is preserved in git history at
-`90eb9385^:reports/perf/qjs-align/measurement-contracts.md`.
+  tag does not contain it).
 
 ## Gates
 
@@ -102,17 +92,17 @@ push of the tracing-collector main; see the two 2026-09-06 rows).
 
 Wall-clock as of 2026-09-06 (build pool on the big cores, see `mise.toml`):
 `zig build check` 7 s, `zig build test` 21 s, `mise run checkpoint-gate`
-26 s, `mise run batch-gate` (= `zig build merge-gate`) 91 s, full test262 9.8 s standalone.
+26 s, `mise run batch-gate` (then `zig build merge-gate`) 91 s, full test262 9.8 s standalone.
 
 | Gate | What it covers | This lane |
 |------|----------------|-----------|
-| `mise run batch-gate` (= `zig build merge-gate`) | one build graph: unified Debug suite (16 shards), stress tier, gc-stress, Debug CLI smoke, architecture lints, full test262, fixed-work smoke (ordinary + arena-audit runs per workload) | 2026-09-06, `ca537eca` (main): PASS, 91 s. test262 `0/49778 errors, passed 44584`. Re-run the same day on `ef24c0bb` (Q21 fix + the two diagnostics commits): PASS, 70/70 steps, test262 unchanged. |
+| `mise run batch-gate` | now `checkpoint-gate` + `test-stress` + `test262-check` (same set as CI linux-arm64). The 2026-09-06 row used the retired `merge-gate` aggregate, which also ran fixed-work smoke | 2026-09-06, `ca537eca` (main): PASS, 91 s. test262 `0/49778 errors, passed 44584`. Re-run the same day on `ef24c0bb` (Q21 fix + the two diagnostics commits): PASS, 70/70 steps, test262 unchanged. |
 | nightly tiers, run locally | `zig build test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, `test-stress`, `zig build test -Dzjs_ownership_audit=true` | 2026-09-06, `ca537eca` (main, local): all five PASS — ReleaseSafe full suite 24/24 steps, test-oom 22 passed / 0 failed, leak-census 1570 passed / 0 failed, test-stress 9/9 steps, ownership-audit 24/24 steps. |
-| `zig build engine-production-gate --summary all` | unified Debug suite, ReleaseFast CLI smoke, architecture lints (including compiler-stage `nm`), OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-check: `0/49775 errors, passed 44581`. Historical row also named `architecture-check` and `config-drift-gate`; those steps are gone. |
+| `zig build engine-production-gate --summary all` | unified Debug suite, ReleaseFast CLI smoke, OOM-cap, full test262 | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 35/35 steps succeeded. unified-tests: 2266 passed / 1 skipped / 0 failed. test262-check: `0/49775 errors, passed 44581`. Historical row also named `architecture-check` and `config-drift-gate`; those steps are gone. |
 | `zig build test -Doptimize=ReleaseSafe --summary all` | optimized-loop safety | 2026-08-17, branch `lane/prod-v0.1.0`: PASS. 9/9 steps succeeded. 2266 passed / 1 skipped / 0 failed. |
 | `zig build test-oom --summary all` | corpus × allocation-failure injection plus same-runtime recovery canaries | instrumentation tier; runs nightly. 2026-08-19: PASS, 21 passed / 0 failed — after fixing two pre-existing defects this target had been silently failing on (it had not been run in a long time). |
 | `zig build test -Dzjs_ownership_audit=true --summary all` | borrowed-atom use-after-free audit (see `docs/borrowed_atom_audit.md`) | instrumentation tier; runs nightly. 2026-08-19: PASS, 2275 passed / 0 failed. |
-| `mise run checkpoint-gate` | unified Debug suite, Debug CLI smoke, source-side architecture | handoff gate; does not compile ReleaseFast `zjs` |
+| `mise run checkpoint-gate` | unified Debug suite, Debug CLI smoke, check-embedding | handoff gate; does not compile ReleaseFast `zjs` |
 | `zig build test262-check --summary all` | full test262, zero-failure | runs on every PR (linux-arm64) |
 
 Nightly note (2026-09-06): the GitHub `Nightly` workflow was red for

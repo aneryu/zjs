@@ -10,15 +10,13 @@ was enumerated and classified, class C reachability was proven, and only
 class C was fixed. The one-time audit evidence (probe transcripts, per-line
 site tables, fix diffs, measurement tables) has been removed from this
 document; recover it from git history if the original record is needed. What
-remains is everything that current code, the allowlist, and future changes
-still depend on: the failure mechanism (§1.1), the classification bar (§2),
-the open class-B ledger (§3.2, §6), the audit build (§7), and the static rule
-(§8).
+remains is the failure mechanism (§1.1), the classification bar (§2), the
+closed class-B ledger (§3.2, §6), the audit build (`-Dzjs_ownership_audit`,
+§7), and the rooting rule (§8). The former static JS checker and its
+allowlist were removed.
 
-Section numbers are load-bearing: `build.zig`, `build/gates.zig`,
-`src/tests/core.zig`, `tools/architecture/check_borrowed_atoms.js`, and every
-entry in `tools/architecture/borrowed-atoms-allowlist.json` cite them. Do not
-renumber.
+Section numbers are load-bearing: `build.zig` and `src/tests/core.zig` cite
+them. Do not renumber.
 
 ---
 
@@ -190,12 +188,9 @@ outright.
 ## 6. Follow-ups
 
 Class B was promoted in place only when the change was "small and obviously
-correct". The items below were registered as follow-up and are now closed;
-the borrowed-atom allowlist is empty. Each open item had a matching allowlist
-entry whose `exit_milestone` cited the numbering below: finishing an item
-required deleting the matching entry, while a leftover entry went stale and
-turned the checker red. The gate still blocks both "fixed it and forgot to
-close the ledger" and any newly introduced same-shape site (§8).
+correct". The items below were registered as follow-up and are now closed.
+The former allowlist-backed static checker is gone; new same-shape sites are
+caught by review and by `-Dzjs_ownership_audit` (§7).
 
 ### 6.1 B-5: eliminate `last_class_decl_atom`
 
@@ -358,11 +353,18 @@ red → green shape for this bug class: not a black-box regression, but a
 
 ---
 
-## 8. Static rule `check_borrowed_atoms.js` (forbid the "borrow escapes" source shape)
+## 8. Rooting rule (forbid a bare atom id across a safepoint)
+
+The JS source-shape checker that used to live in
+`tools/architecture/check_borrowed_atoms.js` is gone. The rule it encoded
+is still the contract: a bare atom id must not be held across a safepoint
+unless something reports it. Enforcement is `CompileAtomScope` in the front
+end and `-Dzjs_ownership_audit` at runtime. The rest of this section is the
+historical statement of that rule.
 
 > **TGC S3-c update (2026-09-04).** `DynamicAtom.ref_count` and
 > `AtomTable.dup`/`free`/`replace` are gone
-> (`docs/tracing-gc-s3-spec.md` §2.1/§5): an atom id is no longer a
+> an atom id is no longer a
 > reference, and the tracer decides an entry's life once per major. The
 > failure mechanism §1.1 describes is unchanged in kind (a stale id names a
 > recycled slot) but its cause moved: it is no longer "the last count was
@@ -384,22 +386,18 @@ red → green shape for this bug class: not a black-box regression, but a
 > `src/lexer.zig`, `src/bytecode.zig`, `src/compiler/**`) satisfies the rule
 > wholesale: every id it obtains is recorded in the ambient
 > `parser.State.atom_scope` / `compile_entry.compile` scope. That exemption
-> is verified, not asserted — the checker fails if the scope stops being
-> installed in `src/parser.zig`. Section numbering is deliberately
-> unchanged.
+> is a review obligation: the scope must stay installed in `src/parser.zig`.
+> Section numbering is deliberately unchanged.
 
-Landing: `tools/architecture/check_borrowed_atoms.js` +
-`tools/architecture/borrowed-atoms-allowlist.json`, run by
-`mise run checkpoint-gate` and `zig build engine-production-gate` (same
-layer and allowlist shape as `check_deps.js` / `check_oom_panics.js`). Scan
-range `src/**.zig` (excluding `src/tests/`).
+Landing: the rooting rule below, plus `-Dzjs_ownership_audit` (§7). The
+retired static checker and its empty allowlist are in git history.
 
 ### 8.1 Why it is needed — it and §7 each cover half
 
 §5 showed a black-box regression cannot be written. The two remaining tools
 each cover only half:
 
-| | `-Dzjs_ownership_audit` (§7) | `check_borrowed_atoms.js` (this section) |
+| | `-Dzjs_ownership_audit` (§7) | source-shape review (this section) |
 |---|---|---|
 | When it fires | runtime | review / CI static |
 | Criterion | after one-slot quarantine, a stale id reads a wrong value (S3-c: `name()` reports it dead) | source shape: a bare id is held past a safepoint with nothing reporting it |
@@ -424,8 +422,7 @@ Three sources of a **borrowed atom**:
    through them;
 2. the return value of a same-file helper that itself returns a borrowed
    atom — the helper set is computed by fixed-point iteration
-   (`identifierLikeAtom` today; run the checker with `--list` for the current
-   set);
+   (`identifierLikeAtom` today);
 3. a binding (`const` / `var`) or reassignment (`nm = ...`) of either of
    the above; `const` declarations also do one layer of local contagion
    (`const name = private_atom orelse raw_name;`). Contagion only follows
@@ -451,22 +448,17 @@ wins):
 | `borrowed-use-after-release` | read it in the same function after a non-`defer` `advance()` / `freeToken()` |
 | `owned-escape-state-store` | store a local held only by `defer ...free(x)` into a long-lived atom field that this function does not restore (= the B-6 shape) |
 
-"Long-lived atom field" is not a hardcoded list: the checker scans the
-struct scope for every `Atom` / `?Atom` field name (skipping function
-bodies, so multi-line parameter lists are not treated as fields), then
-requires the receiver to be the name bound to `*State` in this function's
-signature. A newly added field of the same kind is covered the same day,
-and a neighboring struct's own `self.<atom field>` is not mis-fired.
+"Long-lived atom field" means a struct-scope `Atom` / `?Atom` field on
+`*State`, not a neighboring struct's own `self.<atom field>`.
 
 **Three legal shapes** (preferred order):
 
 1. Be **covered**: the enclosing function declares a root frame
    (`rootAtoms(` / `rootAtomList(` / `rootAtomSlots(`), pins for a host
    (`pinForHost(`), or opens a `CompileAtomScope`; or the file is one of
-   the front-end sources listed in `compile_scope_sources`, whose every
-   atom is obtained under the ambient compile scope (verified against a
-   witness in `src/parser.zig`, so the exemption cannot outlive the scope
-   it names);
+   the front-end sources (`src/parser.zig`, `src/lexer.zig`,
+   `src/bytecode.zig`, `src/compiler/`), whose every atom is obtained
+   under the ambient compile scope;
 2. Function name ends in `Owned` (existing convention:
    `moduleImportNameAtomOwned`, `exportDefaultFunctionNameOwned`) —
    **exempts only `borrowed-return`**, and only "forwarding someone
@@ -480,30 +472,14 @@ and a neighboring struct's own `self.<atom field>` is not mis-fired.
    line**; rule C also allows it above the borrow line (that is the
    natural place to say "this borrow is deliberate").
 
-**Allowlist**: fields `source` / `pattern` / `reason` / `exit_milestone`,
-plus optional `fn` (containing function) and `contains` (statement
-substring) selectors. Each entry must hit exactly one finding; a miss is
-stale (red), a multi-hit is non-unique (red), two entries grabbing the same
-finding is overlapping (red). Cap 16 entries.
+The former allowlist (`source` / `pattern` / `reason` / `exit_milestone`,
+optional `fn` / `contains`) and the JS checker that consumed it are gone.
+Class B is closed (§6); new same-shape sites are a review defect.
 
-### 8.3 The allowlist is the machine-readable form of this document's class B
+### 8.3 Retired allowlist
 
-Do not maintain a copy of the entries here — it goes stale. Get the current
-findings and the borrowed-helper set from the checker itself:
-
-```bash
-node tools/architecture/check_borrowed_atoms.js --list
-```
-
-Every entry's `reason` names the third-party owner that keeps the site
-alive today, and its `exit_milestone` cites the §6 item that retires it.
-Some entries land on sites the original §3.3 table had filed as class A
-with reasons like "caller dups before advance" — under §2's strict bar
-those were already B (the owner is elsewhere), and re-review confirmed each
-one; they are registered as follow-ups, not violations. No finding lands on
-a genuinely safe class A site (`dupToken` snapshot family, pure compares,
-predefineds, helpers that return owned, the `retained_name` shape, and the
-`*Owned` functions are all zero hits).
+The allowlist was the machine-readable form of class B while the static
+checker existed. It finished empty and was deleted with the checker.
 
 ### 8.4 Precision and strength
 
@@ -520,16 +496,13 @@ Properties established by a synthetic red/green matrix at landing time
 - compare results are not atoms (no false contagion); comments, string
   literals, and non-`State` receivers do not fire.
 
-For current scale (files / functions scanned, reads, borrows, escapes,
-allowlist usage), read the summary line the checker prints on success; two
-runs produce byte-identical output.
+The retired checker printed a scale summary on success; recover that
+output from git history if needed.
 
-### 8.5 How to run it
+### 8.5 How to run the remaining check
 
 ```bash
-mise run checkpoint-gate                                 # the gate (includes this rule)
-node tools/architecture/check_borrowed_atoms.js          # this rule only
-node tools/architecture/check_borrowed_atoms.js --list   # list each finding + the borrowed-helper set
+zig build test -Dzjs_ownership_audit=true
 ```
 
 ### 8.6 What it cannot catch (honest list)

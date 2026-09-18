@@ -10,7 +10,7 @@ CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `J
 
 | 名字 | 含义 |
 | --- | --- |
-| `runtime` | `runtime/root.zig`：宿主事件循环（`EventLoop` / `runUntilIdle`）。 |
+| `runtime` | `event_loop.zig`：宿主事件循环（`EventLoop` / `runUntilIdle`）。 |
 | `JSRuntime` / `JSContext` / `JSValue` / `CallSite` / `PropertySite` | binding 门面。 |
 | `GCStats` / `GCPauseDistribution` / `RuntimeOptions` / `RuntimeMemoryUsage` / `OpcodeProfile` | 统计与选项。 |
 | `default_stack_size` / `default_gc_threshold` | 默认限额。 |

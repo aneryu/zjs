@@ -2039,6 +2039,10 @@ test "string compare uses code-unit ordering for same and mixed width strings" {
     try std.testing.expectEqual(@as(i32, 0), latin_a.compare(latin_a));
     try std.testing.expect(latin_a.compare(latin_b) < 0);
 
+    const latin1 = try String.createUtf8(rt, "é");
+    const utf16_same = try String.createUtf16(rt, &.{0x00e9});
+    try std.testing.expect(latin1.eqlString(utf16_same));
+
     const wide_a = try String.createUtf16(rt, &.{0x0100});
     const wide_b = try String.createUtf16(rt, &.{ 0x00ff, 0x0100 });
     try std.testing.expect(wide_a.compare(wide_b) > 0);
@@ -2088,3 +2092,267 @@ test "string compare short-circuits equal interned atom ids" {
 }
 
 const std = @import("std");
+fn dropGcPtr(ptr: anytype) void {
+    @memset(std.mem.asBytes(ptr), 0);
+}
+
+fn tailBufferText(rt: *JSRuntime, allocator: std.mem.Allocator, value: JSValue) ![]u8 {
+    _ = rt;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var index: usize = 0;
+    const len = stringValueLen(value);
+    while (index < len) : (index += 1) {
+        const unit = stringValueCodeUnitAt(value, index).?;
+        try out.append(allocator, @intCast(unit & 0xff));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+
+test "strings choose QuickJS-style 8-bit or 16-bit storage" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ascii = try String.createUtf8(rt, "abc");
+    try std.testing.expect(!ascii.isWide());
+    try std.testing.expectEqual(@as(usize, 3), ascii.len());
+    try std.testing.expect(ascii.eqlBytes("abc"));
+    // `hash == 0` is the qjs "not yet computed" sentinel.
+    try std.testing.expectEqual(@as(u32, 0), ascii.hash_meta.hash);
+    const computed = ascii.contentHash();
+    try std.testing.expect(computed != 0);
+    // Stable across repeated demands.
+    try std.testing.expectEqual(computed, ascii.contentHash());
+    try std.testing.expect(ascii.hash_meta.hash != 0);
+
+    const latin1 = try String.createUtf8(rt, "é");
+    try std.testing.expect(!latin1.isWide());
+    try std.testing.expectEqual(@as(usize, 1), latin1.len());
+    try std.testing.expectEqual(@as(u16, 0x00e9), latin1.codeUnitAt(0));
+
+    const wide = try String.createUtf8(rt, "Ā");
+    try std.testing.expect(wide.isWide());
+    try std.testing.expectEqual(@as(usize, 1), wide.len());
+    try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
+
+    const face = try String.createUtf8(rt, "😀");
+    try std.testing.expect(face.isWide());
+    try std.testing.expectEqual(@as(usize, 2), face.len());
+    try std.testing.expectEqual(@as(u16, 0xd83d), face.codeUnitAt(0));
+    try std.testing.expectEqual(@as(u16, 0xde00), face.codeUnitAt(1));
+
+    const lone_surrogate = try String.createUtf8(rt, "\xED\xA0\x80");
+    try std.testing.expect(lone_surrogate.isWide());
+    try std.testing.expectEqual(@as(usize, 1), lone_surrogate.len());
+    try std.testing.expectEqual(@as(u16, 0xd800), lone_surrogate.codeUnitAt(0));
+}
+
+test "ASCII suffix concatenation preserves source width with one result allocation" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const narrow_source = try String.createLatin1(rt, "ab");
+    const narrow_allocations = rt.memory.allocation_count;
+    const narrow = try String.createAsciiSuffix(rt, narrow_source.resolveData(), "y");
+    try std.testing.expect(!narrow.isWide());
+    try std.testing.expect(narrow.eqlBytes("aby"));
+    try std.testing.expectEqual(narrow_allocations + 1, rt.memory.allocation_count);
+
+    const wide_source = try String.createUtf16(rt, &.{ 0x0100, 'a' });
+    const wide_allocations = rt.memory.allocation_count;
+    const wide = try String.createAsciiSuffix(rt, wide_source.resolveData(), "y");
+    try std.testing.expect(wide.isWide());
+    try std.testing.expectEqual(@as(usize, 3), wide.len());
+    try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
+    try std.testing.expectEqual(@as(u16, 'a'), wide.codeUnitAt(1));
+    try std.testing.expectEqual(@as(u16, 'y'), wide.codeUnitAt(2));
+    try std.testing.expectEqual(wide_allocations + 1, rt.memory.allocation_count);
+}
+
+test "flat strings store characters inline in a single fixed-size allocation" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // QuickJS `JSString` keeps characters inline (a flexible array member),
+    // so creating a flat string is exactly one allocation and holds no spare
+    // capacity to append into.
+    const fixed_allocations = rt.memory.allocation_count;
+    var fixed = try String.createLatin1(rt, "abc");
+    try std.testing.expectEqual(@as(usize, 3), fixed.len());
+    try std.testing.expect(!fixed.isWide());
+    try std.testing.expect(fixed.eqlBytes("abc"));
+    try std.testing.expectEqual(fixed_allocations + 1, rt.memory.allocation_count);
+    dropGcPtr(&fixed);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(fixed_allocations, rt.memory.allocation_count);
+
+    const growable_allocations = rt.memory.allocation_count;
+    const growable = try String.createLatin1Concat(rt, "ab", "c");
+    try std.testing.expect(growable.eqlBytes("abc"));
+    try std.testing.expectEqual(growable_allocations + 1, rt.memory.allocation_count);
+}
+
+test "rope nodes keep the compact tree-only layout" {
+    // QJS's node is just u32/u8/u8 plus two JSValues. zjs additionally needs
+    // one runtime pointer for its context-free borrowed-string API and, since
+    // TGC S2-i, one tail-buffer pointer (the dependent-view slot that carries
+    // amortized `s = s + x` without a refcount). Ropes must not regress
+    // beyond that into cached-flat/hash or destroy-link state.
+    const compact_limit = 2 * @sizeOf(JSValue) + 2 * @sizeOf(*anyopaque) + 8;
+    try std.testing.expect(@sizeOf(StringRope) <= compact_limit);
+    // The tail slot is the ONLY growth S2-i is allowed: the flags it needs
+    // ride in the padding the node already had.
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(StringRope));
+}
+
+test "S2-i tail buffer views read, compare and hash exactly like the flat string" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try String.createLatin1(rt, "abcdefgh");
+    const right = try String.createLatin1(rt, "IJ");
+    const view = try createTailBufferRope(rt, left, right);
+    try std.testing.expect(view.buffer != null);
+    try std.testing.expect(view.isExtensibleView());
+    try std.testing.expect(!view.isLinearized());
+
+    const flat = try String.createLatin1(rt, "abcdefghIJ");
+    try std.testing.expectEqual(@as(usize, 10), stringValueLen(view.value()));
+    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(view.value(), flat.value(), false));
+    try std.testing.expectEqual(
+        stringValueContentHash(flat.value()).?,
+        stringValueContentHash(view.value()).?,
+    );
+    const text = try tailBufferText(rt, std.testing.allocator, view.value());
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("abcdefghIJ", text);
+
+    // A view materializes by copying its prefix out; the flat body it caches
+    // is a `String` of its own and the buffer edge is dropped.
+    const materialized = try view.flatten();
+    try std.testing.expect(materialized.eqlBytes("abcdefghIJ"));
+    try std.testing.expect(view.buffer == null);
+    try std.testing.expect(!view.isExtensibleView());
+    try std.testing.expect(view.isLinearized());
+    // A second read is idempotent and does not re-allocate.
+    try std.testing.expectEqual(materialized, try view.flatten());
+}
+
+test "S2-i in-place append moves the extensible right and leaves the shorter view intact" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const seed_left = try String.createLatin1(rt, "0123456789");
+    const seed_right = try String.createLatin1(rt, "ab");
+    const s = try createTailBufferRope(rt, seed_left, seed_right);
+    const shared = s.buffer.?;
+
+    const x = try String.createLatin1(rt, "XX");
+    const r1 = try appendTailBufferRope(rt, s, x);
+    // In place: same buffer, right transferred.
+    try std.testing.expectEqual(shared, r1.buffer.?);
+    try std.testing.expect(r1.isExtensibleView());
+    try std.testing.expect(!s.isExtensibleView());
+    try std.testing.expectEqual(@as(usize, 12), s.len_());
+
+    // Second fork off `s`: the right is spent, so this must COPY rather than
+    // overwrite the bytes `r1` still names. This is the case `rc == 1` used
+    // to answer.
+    const y = try String.createLatin1(rt, "YY");
+    const r2 = try appendTailBufferRope(rt, s, y);
+    try std.testing.expect(r2.buffer.? != shared);
+
+    const s_text = try tailBufferText(rt, std.testing.allocator, s.value());
+    defer std.testing.allocator.free(s_text);
+    const r1_text = try tailBufferText(rt, std.testing.allocator, r1.value());
+    defer std.testing.allocator.free(r1_text);
+    const r2_text = try tailBufferText(rt, std.testing.allocator, r2.value());
+    defer std.testing.allocator.free(r2_text);
+    try std.testing.expectEqualStrings("0123456789ab", s_text);
+    try std.testing.expectEqualStrings("0123456789abXX", r1_text);
+    try std.testing.expectEqualStrings("0123456789abYY", r2_text);
+}
+
+test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const seed_left = try String.createLatin1(rt, "ab");
+    const seed_right = try String.createLatin1(rt, "cd");
+    var view = try createTailBufferRope(rt, seed_left, seed_right);
+    const first_capacity = view.buffer.?.capacity;
+    try std.testing.expect(first_capacity >= 4);
+
+    const chunk = try String.createLatin1(rt, "0123456789");
+    var appended: usize = 0;
+    while (view.buffer.?.capacity == first_capacity) : (appended += 1) {
+        view = try appendTailBufferRope(rt, view, chunk);
+        if (appended > 64) return error.TestUnexpectedResult;
+    }
+    // Growth is geometric, not one-unit-at-a-time.
+    try std.testing.expect(view.buffer.?.capacity >= 2 * view.len_());
+    try std.testing.expectEqual(@as(usize, 4 + appended * 10), view.len_());
+    try std.testing.expect(!view.buffer.?.is_wide);
+
+    const wide = try String.createUtf16(rt, &.{0x4e2d});
+    const widened = try appendTailBufferRope(rt, view, wide);
+    try std.testing.expect(widened.buffer.?.is_wide);
+    try std.testing.expect(widened.wide);
+    try std.testing.expectEqual(view.len_() + 1, widened.len_());
+    try std.testing.expectEqual(
+        @as(?u16, 0x4e2d),
+        stringValueCodeUnitAt(widened.value(), widened.len_() - 1),
+    );
+    // The narrow predecessor still reads its own prefix.
+    const narrow_text = try tailBufferText(rt, std.testing.allocator, view.value());
+    defer std.testing.allocator.free(narrow_text);
+    try std.testing.expectEqual(view.len_(), narrow_text.len);
+}
+
+test "rope index compare and hash traverse nested leaves without flattening" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try String.createLatin1(rt, "ab");
+    const right = try String.createUtf16(rt, &.{ 0x0100, 'c' });
+    const inner = try String.createRope(rt, left.value(), right.value());
+    const inner_value = inner.value();
+    const suffix = try String.createLatin1(rt, "!");
+    const outer = try String.createRope(rt, inner_value, suffix.value());
+    const outer_value = outer.value();
+
+    const expected = try String.createUtf16(rt, &.{ 'a', 'b', 0x0100, 'c', '!' });
+
+    try std.testing.expectEqual(@as(?u16, 'a'), stringValueCodeUnitAt(outer_value, 0));
+    try std.testing.expectEqual(@as(?u16, 0x0100), stringValueCodeUnitAt(outer_value, 2));
+    try std.testing.expectEqual(@as(?u16, '!'), stringValueCodeUnitAt(outer_value, 4));
+    try std.testing.expectEqual(@as(?u16, null), stringValueCodeUnitAt(outer_value, 5));
+
+    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(outer_value, expected.value(), false));
+    try std.testing.expectEqual(@as(?i32, 0), compareStringValues(outer_value, expected.value(), true));
+    try std.testing.expectEqual(expected.contentHash(), stringValueContentHash(outer_value).?);
+    try std.testing.expectEqual(expected.contentHash(), outer.contentHash());
+
+    // These QJS-style readers must leave both levels as ropes.
+    try std.testing.expect(!inner.isLinearized());
+    try std.testing.expect(!outer.isLinearized());
+}
+
+test "nested ropes preserve immutable child content" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try String.createLatin1(rt, "abc");
+    const right = try String.createLatin1(rt, "def");
+    const inner = try String.createRope(rt, left.value(), right.value());
+    _ = inner.value();
+    const suffix = try String.createLatin1(rt, "XY");
+    const outer = try String.createRope(rt, inner.value(), suffix.value());
+    _ = outer.value();
+
+    const outer_flat = try outer.flatten();
+    try std.testing.expect(outer_flat.eqlBytes("abcdefXY"));
+    const inner_flat = try inner.flatten();
+    try std.testing.expect(inner_flat.eqlBytes("abcdef"));
+}

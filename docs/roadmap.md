@@ -9,8 +9,7 @@ v2.0 = **tracing GC 合入 main 的事实入册**:owner 2026-09-03 裁决
 2026-09-04→05 落在 main(`e972c4b5`→`f005aee7`),rc 退出对象模型,
 tracing 收集器成为树中唯一收集器;G2-GC-MERGE 的 n=32 统计协议
 **被该裁决取代、未运行、无 verdict**(合入尺 = 对冻结 rc 基线的
-Stage 0 固定功筛 + 四门全绿,见
-`docs/tracing-gc-completion-account.md`);GC-P3/GC-MERGE 转 done,
+Stage 0 固定功筛 + 四门全绿);GC-P3/GC-MERGE 转 done,
 VM-CONTRACT-GC 由「合入前置」倒置为**合入后欠账**(表示契约仍 v2,
 待从 main 导出 v3);gc/tracing 分支与「双会话分工」退役;性能线
 2026-09-06 owner 关门,Octane vs qjs **≥0.95 回归门**。无新增设计。
@@ -19,13 +18,10 @@ v1.9 = BASE-G0 测量冻结完成(官方 qjs 尺裁定、三枚 zjs 冻结二进
 policy 预注册、evidence 登记册落地),无新增设计。v1.8 = 语义闭合 +
 可执行 Registry。
 
-**机器可读 source of truth**:
-[`docs/roadmap/work-items.yaml`](roadmap/work-items.yaml)(schema v2)
-——本文 §1/§5 的 ID 表、DAG 与状态是**生成区段**,由
-[`tools/docs/render_roadmap.py`](../tools/docs/render_roadmap.py)
-渲染;[`tools/docs/roadmap_lint.py`](../tools/docs/roadmap_lint.py)
-在 CI 校验 schema/结构化 activation(verdict 须为 gate 声明的枚举)/
-无环/状态一致/WIP 限额/双向 ID 引用/退役短语/生成区段无 diff。
+**机器可读登记册**:
+[`docs/roadmap/work-items.yaml`](roadmap/work-items.yaml)(schema v2)。
+本文 §1/§5 的 ID 表、DAG 与状态是该登记册的手维护快照,不再由脚本
+生成或在 CI 校验。
 
 ## 0. Authority / Scope / Baseline
 
@@ -43,7 +39,7 @@ policy 预注册、evidence 登记册落地),无新增设计。v1.8 = 语义闭�
 - 本图可以裁决「PERF-P05 现在不做」;不能修改反馈槽的内存模型。
 - 领域文档定义「做时怎么做」;不能自行把 gated 项改成立即执行。
 - 本图作出新裁决时,须**同一 commit** 同步受影响领域文档正文
-  (不是页首覆盖注,是单一现行正文)——由退役短语 lint 兜底。
+  (不是页首覆盖注,是单一现行正文)。
 - 视角:统一路线图(zjs+fun);backlog.md 属地不变。
 
 ### 0.2 测量基线警示
@@ -90,10 +86,11 @@ BASE-G0 完成前,一切吞吐/pause 数字是本地决策输入,非可复现项
     advisory)
 ```
 
-## 1. Canonical DAG(由 Registry 生成;仅硬依赖与 activation,
-交付偏好与测量排队不在此图)
+`roadmap-lint` 已随 `tools/docs` 退役;现行 required checks 见
+[STATUS.md](../STATUS.md)。
 
-<!-- BEGIN GENERATED: DAG -->
+## 1. Canonical DAG(仅硬依赖与 activation,交付偏好与测量排队不在此图)
+
 ```
 # hard dependencies (A + B -> C); gate conditions listed as activation
 GC-GAP -> G1-GC
@@ -147,9 +144,8 @@ GC-GAP: BASE-G0.done
 GC-P3: G1-GC=continue
 PROC-D7: G1-LIGHT-PROCESS-WORKLOAD=exists
 ```
-<!-- END GENERATED: DAG -->
 
-以下为叙述性注释(非权威,权威=上方生成区段与 yaml):
+以下为叙述性注释(非权威,权威=上方 DAG 与 yaml):
 
 - 四 spike 技术独立;串行只是测量队列(§4)。JIT/AOT 是两 backend,
   typed 与反馈对 PERF-JIT 只是可选增强(不入硬依赖)。
@@ -228,8 +224,7 @@ Track B 定性:最大架构风险退休项与表示定型点,非产品交付解�
 > 基线 `main-d944f26d` 的 Stage 0 固定功 insn/cycles 筛(六负载中
 > 仅 splay cycles 1.26 为 STOP,已判结构账)加四门全绿。
 > gc_merge_policy.json 留档为历史协议;G2-GC-MERGE 标 done、无
-> verdict。S4b 并行标记 2026-09-03 曾落 main 默认关
-> (`docs/gc-v2-s4b-parallel-marking-gate.md`),随后在 TGC 合入
+> verdict。S4b 并行标记 2026-09-03 曾落 main 默认关，随后在 TGC 合入
 > (`e972c4b5`)中**撤回删除**(`gc_parallel_mark.zig` 已不存在,
 > `gc_incremental.zig` State 注释记 "parallel marking (S4-b) was
 > withdrawn");GC-PARALLEL-MARK 若重开须按该门控设计重建,不再是
@@ -297,7 +292,7 @@ p99 6.87ms vs rc 42.4ms、splay RSS 3.63x;裁决时欠账=非劣效 margin
 与吞吐三角答案,须在 G2 首个 look 前写入 gc_merge_policy.json)。
 > **停顿列重锚(2026-08-29)**:上面这行的 `6.87ms vs 42.4ms` 是裁决当时的
 > GC-GAP 读数,保留原样作审计基线。**现行值 = splay major p99 1.013ms vs
-> rc 44.73ms**(`docs/pause-baseline-2026-08-29.md`,修正后仪器,706/706 全
+> rc 44.73ms**(修正后仪器,706/706 全
 > 保留)。两者**不是同一个 A/B**:候选臂差了三天收集器工作,rc 参照臂也换
 > 了二进制,只能当先后两个基值读。⚠️ GC-GAP 的停顿列**没有**受 08-29 那个
 > 「普查落在计时窗内」的仪器缺陷影响(缺陷 08-28 才引入,晚于该候选臂三天),
@@ -344,9 +339,8 @@ FN-M2..M6。SER-TRANSFER/GC-MULTIRT-GATE/VM-WEAK-REGISTRY 随 WIP
 contract + BASE-G0 policies;官方读数前必查孤儿+亲和。
 
 欠账入口:[process ledger §20.2/§20.2a](process-model-design.md);
-动工规则:先改文档递增版本,再动代码。CI 运行
-`python3 tools/docs/roadmap_lint.py`;lint 失败=治理缺陷,与测试
-失败同级。
+动工规则:先改文档递增版本,再动代码。WIP 限额由 owner 执行,不再
+走 CI lint。
 
 ## 5. 工作项登记册
 
@@ -354,7 +348,6 @@ contract + BASE-G0 policies;官方读数前必查孤儿+亲和。
 (schema v2:type/state/wip_slot/activation/hard_prerequisites/
 deliverables/acceptance/authority;gate 声明 verdicts)。
 
-<!-- BEGIN GENERATED: ID-LIST -->
 ```
 治理       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0
 gates    G1-GC G1-TYPED G1-FEEDBACK G1-JIT G1-AOT BACKEND-ORDER G2-GC-MERGE G1-LIGHT-PROCESS-WORKLOAD
@@ -364,9 +357,7 @@ GC       GC-GAP GC-P3 VM-CONTRACT-GC GC-MERGE GC-PARALLEL-MARK GC-MULTIRT-GATE
 fun 面    HR-P1 HR-P2A HR-P2B HR-P3 DBG-W2 FN-M0D FN-M0I FN-M0F FN-M1A FN-M1B FN-M1C FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 运行时/进程   RT-LIFECYCLE VM-WEAK-REGISTRY PROC-D3 PROC-D4 PROC-D5A PROC-D5B PROC-D6 PROC-D7
 ```
-<!-- END GENERATED: ID-LIST -->
 
-<!-- BEGIN GENERATED: STATUS -->
 ```
 now        PERF-T-SPIKE PERF-OPCODE-SPACE
 ready      G1-LIGHT-PROCESS-WORKLOAD PERF-DYN-SPIKE PERF-N-SPIKE PERF-VMABI PERF-SIDECAR VM-CONTRACT-GC SER-CORE SER-TRANSFER HR-P1 DBG-W2 RT-LIFECYCLE GC-PARALLEL-MARK GC-MULTIRT-GATE VM-WEAK-REGISTRY PROC-D5A
@@ -376,4 +367,3 @@ later      FN-M2 FN-M3 FN-M4 FN-M5 FN-M6
 incubator  PERF-ASM-1A PERF-ASM-1B
 done       BASE-DOC-NORM BASE-ROADMAP-LINT BASE-G0 G1-GC G2-GC-MERGE GC-GAP GC-P3 GC-MERGE FN-M0D FN-M0I FN-M0F
 ```
-<!-- END GENERATED: STATUS -->

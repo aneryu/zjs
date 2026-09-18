@@ -8,7 +8,7 @@
 | --- | --- |
 | [19-libs.md](19-libs.md)（本文） | `src/libs/root.zig` 再导出图；LRE vs `exec/regexp_ops`；堆 bigint vs short bigint；`/v` 属性查找 |
 | [19-regexp.md](19-regexp.md) | `src/libs/regexp.zig`（编译器 + 回溯执行器） |
-| [19-unicode.md](19-unicode.md) | `unicode.zig` 与 `unicode/{data,names,properties,regexp_properties}.zig` |
+| [19-unicode.md](19-unicode.md) | `unicode.zig` 与 `unicode_tables.bin` |
 | [19-bigint.md](19-bigint.md) | `src/libs/bigint.zig` |
 | [19-number-format.md](19-number-format.md) | `src/libs/number_format.zig`（`dtoa.c` 移植） |
 
@@ -20,13 +20,9 @@
 src/libs/root.zig
   subsystem_name = "libs"
   unicode        → unicode.zig
-                   ├─ unicode/data.zig              表加载（@embedFile tables.bin）
-                   │  unicode/tables.bin            QuickJS RLE 表载体
-                   ├─ unicode/names.zig             属性名 / 别名
-                   ├─ unicode/properties.zig        派生属性表达式
-                   └─ unicode/regexp_properties.zig 零分配 per-code-point 查找
+                   └─ unicode_tables.bin            QuickJS RLE 表载体（@embedFile）
   regexp         → regexp.zig                       LRE 编译 + 执行
-  number_format  → number_format.zig                dtoa / atod
+  number_format  → number_format.zig                dtoa（atod 只做反函数）
   bigint         → bigint.zig                       符号-幅度 64-bit limb 算术
 ```
 
@@ -37,7 +33,7 @@ src/libs/root.zig
 | `subsystem_name` | 架构依赖检查用的子系统名 `"libs"` |
 | `unicode` | Unicode 分类、大小写、规范化、`CharRange`、属性区间 |
 | `regexp` | ECMAScript 正则编译器与 QuickJS `libregexp.c` 风格回溯 VM |
-| `number_format` | binary64 解析与十进制/任意 radix 格式化 |
+| `number_format` | binary64 十进制/任意 radix **格式化**（`jsDtoa`）。十进制 ToNumber 走 `std.fmt.parseFloat`；`jsAtod` 只是 dtoa 反函数 |
 | `bigint` | 分配器拥有的 `BigInt`，上限 `JS_BIGINT_MAX_SIZE`（1M bit） |
 
 本文件没有 `fn`。消费点：`core/bigint.zig`（堆对象借 `libs.bigint.BigInt` 视图）、`exec/regexp_adapter.zig` / `exec/regexp_ops.zig`（编译执行）、`core/number.zig` / `core/value_format.zig`（dtoa）、parser/lexer（标识符与空白）。
@@ -59,7 +55,7 @@ JS `new RegExp` / `RegExp.prototype.exec`
  libs/regexp.zig              LRE：pattern → 字节码 → 回溯匹配
         │  \p{…} / \P{…} / \q{…}
         ▼
- libs/unicode/regexp_properties.zig + unicode.zig CharRange
+ libs/unicode.zig CharRange / isUnicodePropertyMatches
 ```
 
 | | `libs/regexp.zig`（LRE） | `exec/regexp_ops.zig` |
@@ -80,17 +76,17 @@ JS `new RegExp` / `RegExp.prototype.exec`
 
 `/u` 与 `/v` 共用同一套 **QuickJS 格式压缩表**，但查找形态不同：
 
-1. **名字解析**（`unicode/names.zig`）  
+1. **名字解析**（`unicode.zig`）
    `parsePropertyExpression("Script=Greek")` / `"ID_Start"` / `"gc=Lu"`。`Script`/`sc`、`Script_Extensions`/`scx`、`General_Category`/`gc` 是带 `=` 的键；裸名先当 GC 再当 binary property。**裸 script 值（`"Greek"`）被拒绝**——这是 ECMA-262 的 `\p{…}` 语法，不是 UTS#18 宽松别名。
 
-2. **编译期区间**（`unicode.zig` 的 `propertyRangePoints`）  
+2. **编译期区间**（`unicode.zig` 的 `propertyRangePoints`）
    LRE 编译 `\p{…}` 时把属性展开成 `CharRange`（半开区间点对），再发射 `class8` / `range` / `range32`。`/v` 的 `ClassSet` 还要并/交/差、`\q{…}` 字符串、序列属性（`RGI_Emoji` 等）。
 
-3. **运行期单码点**（`unicode/regexp_properties.zig`）  
-   `isUnicodePropertyMatches(cp, name)` 零分配走同一张表，**不**走 LRE 字节码；目前只有 `unicode.zig` 的区间自洽测试在用它（`core/regexp.zig` 的字符类快路径只调 `isSupportedUnicodePropertyExpression`）。
+3. **运行期单码点**（同一文件的 `isUnicodePropertyMatches`）
+   零分配走同一张表，**不**走 LRE 字节码；目前只有区间自洽测试在用它（`core/regexp.zig` 的字符类快路径只调 `isSupportedUnicodePropertyExpression`）。
 
 4. **支持集**  
-   `isSupportedUnicodePropertyExpression`：能解析 **且** 有表或派生表达式。`ID_Compat_Math_Start` / `InCB` 能在 name table 里解析，但 `properties.isSupported` 为 false（没有 QuickJS 区间），编译期当 `InvalidPattern`。
+   `isSupportedUnicodePropertyExpression`：能解析 **且** 有表或派生表达式。`ID_Compat_Math_Start` / `InCB` 能在 name table 里解析，但 `isSupported` 为 false（没有 QuickJS 区间），编译期当 `InvalidPattern`。
 
 `/v` 特有路径在 `REParseState`：
 
@@ -129,7 +125,5 @@ JS `new RegExp` / `RegExp.prototype.exec`
 python3 docs/code-walkthrough/_check_coverage.py \
   --docs 'docs/code-walkthrough/19-*.md' \
   src/libs/root.zig src/libs/bigint.zig src/libs/number_format.zig \
-  src/libs/regexp.zig src/libs/unicode.zig src/libs/unicode/data.zig \
-  src/libs/unicode/names.zig src/libs/unicode/properties.zig \
-  src/libs/unicode/regexp_properties.zig
+  src/libs/regexp.zig src/libs/unicode.zig
 ```

@@ -2,7 +2,7 @@
 
 本分册覆盖 `src/core/jobs.zig` 与 `src/core/module.zig`。前者是 Runtime 拥有的类型化 Promise/模块/Atomics/GC 任务 FIFO；后者是 realm 核心的 `ModuleRecord` 图、live-binding 格与链接状态。**链接、求值、模块图编排**在 `exec/module.zig` / `module_graph.zig`；本文件只提供记录身份与纯索引 resolve。
 
-Job 队列 **不是** 宿主事件循环。定时器、fd、signal 走 `JSContext.host_event_loop`（vtable 接到 `runtime/event_loop.zig`）。本 FIFO 对应 QuickJS `rt->job_list` 与 `JS_EnqueueJob` / `JS_ExecutePendingJob`。Runner 回调拿到的是条目里的 `RealmRef`，不是正在 drain 的宿主 context。
+Job 队列 **不是** 宿主事件循环。定时器、fd、signal 走 `JSContext.host_event_loop`（vtable 接到 `src/event_loop.zig`）。本 FIFO 对应 QuickJS `rt->job_list` 与 `JS_EnqueueJob` / `JS_ExecutePendingJob`。Runner 回调拿到的是条目里的 `RealmRef`，不是正在 drain 的宿主 context。
 
 ---
 

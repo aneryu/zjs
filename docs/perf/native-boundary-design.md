@@ -11,11 +11,9 @@ owner 指令：「继续优化 native boundary，但不应该小修，应该整�
 计划和待裁决项（§10–§14）。落地规格到函数与字段粒度，派发前不再需要
 第二份设计。
 
-前置文档：`native-boundary-eval-2026-09-06.md`（测评 + P1–P4 已落地，
-本稿 §附录 A 引用其 §6.1 读数作为起点）、`fun-native-plugin-design.md`
-（FNABI v0.8，本稿 §11 列出偏离项）、`vm-value-representation-contract.md`
-v3（JSValue 16 B、非搬移、保守扫描为生产设计）、`hermes-parity-plan.md`
-（W1 属性缓存，本稿 §8 依赖它）。
+前置文档：`vm-value-representation-contract.md`
+v3（JSValue 8 B NaN-box、非搬移、保守扫描为生产设计）。属性站点缓存
+(W1) 已落地，本稿 §8 依赖它。测评起点读数见 §0 / 附录 A。
 
 ---
 
@@ -1544,8 +1542,7 @@ store→load 依赖（≈5 cyc）落在命中路径上，而原来的重推（`p
 
 ## 附录 A. 起点读数（eval §6.1，2026-09-06 P1–P4 后）
 
-见 `native-boundary-eval-2026-09-06.md` §6.1；§0 目标表「现」列即该表的
-「后」列。
+§0 目标表「现」列即 2026-09-06 P1–P4 后的起点读数。
 
 ## 附录 B. 指令预算推导示例（K1 `abs(i)`，AArch64）
 

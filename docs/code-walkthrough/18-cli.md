@@ -20,7 +20,7 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 
 ### `PerfJsonTimings` / `OpcodeProfileRow`
 
-冷路径诊断结构。`writeCounterLine`（`noinline`）是 GC 面板共用的整数行格式化，供 `gc_stats_snapshot.py` 解析。
+冷路径诊断结构。`writeCounterLine`（`noinline`）是 GC 面板共用的整数行格式化。
 
 ### `cli_process.zig`
 
@@ -265,14 +265,14 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 ### `writeCounterLine` (`src/cli/zjs.zig:867`)
 
 - **签名**：`noinline fn writeCounterLine(writer: *std.Io.Writer, parts: []const struct { []const u8, u64 }, suffix: []const u8) !void`。
-- **作用**：GC 面板共用的整数行格式化：把 `(label, u64)` 片段串成一行再加后缀，供 `gc_stats_snapshot.py` 解析。
+- **作用**：GC 面板共用的整数行格式化：把 `(label, u64)` 片段串成一行再加后缀。
 - **实现**：对 `parts` 逐段 `writer.print("{s}{d}", .{label, value})`，再 `writeAll(suffix)`。outlined 是为了在冷诊断行之间共享格式化，同时让每条调用点的 label/value/suffix 仍显式写出。
 - **所有权 / 错误 / 调用**：不分配。写失败上抛。`dumpGcBlockCensus` / `dumpGcGenerationStats` / `writeDoomedStateLine` 等。
 
 ### `dumpGcGenerationStats` (`src/cli/zjs.zig:875`)
 
 - **签名**：`fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Registry) !void`。
-- **作用**：分代计数、minor 暂停分位、barrier、增量 major。行形冻结给 `gc_stats_snapshot.py`。
+- **作用**：分代计数、minor 暂停分位、barrier、增量 major。
 - **实现**：多行 `writeCounterLine`。`remembered without young` 是写屏障过火的观察点。`verify_minor` 关则打 unavailable。
 - **所有权 / 错误 / 调用**：`--gc-stats`。单测钉填充快照。
 

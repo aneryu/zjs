@@ -17,7 +17,7 @@ src/root.zig                          门面（导出、包装与部分宿主操
     zjs.value                         ← 立即数构造、句柄别名、String/Bytes
     zjs.object                        ← opaque Object + Buffer 零拷贝借阅
     zjs.context / module / job        ← 调用 / 模块图 / Promise job 排水
-    zjs.runtime                       ← runtime/root.zig（事件循环；18 册）
+    zjs.runtime                       ← event_loop.zig（事件循环；18 册）
     │
     ▼
 src/binding/root.zig                  binding 聚合边界（禁止依赖 CLI）
@@ -58,7 +58,7 @@ _ = result;
 | 文件 | 覆盖 |
 | --- | --- |
 | [01-public-api-root.md](01-public-api-root.md) | `src/root.zig`：value / host / object / Buffer / context / module / job |
-| [01-public-api-companions.md](01-public-api-companions.md) | `internal_root.zig`、`config_signature.zig`、`dossier_pad.zig`、`gc_representation.zig`、`platform_clock.zig` |
+| [01-public-api-companions.md](01-public-api-companions.md) | `internal_root.zig`、`config_signature.zig`、`dossier_pad.zig`、`platform_clock.zig` |
 | [01-public-api-binding-facade.md](01-public-api-binding-facade.md) | `binding/root.zig` |
 | [01-public-api-context.md](01-public-api-context.md) | `binding/context.zig`：`JSContext` |
 | [01-public-api-native.md](01-public-api-native.md) | `binding/native.zig`：`Call` / `managed` |

@@ -26,8 +26,8 @@ const value_format = @import("value_format.zig");
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
-/// R3 roots diagnosis (`-Dzjs_gc_roots_diag=true`, docs/tracing-gc-s0-spec.md
-/// §L4): production links scalar `ValueRootFrame`s, the verify probe records
+/// R3 roots diagnosis (`-Dzjs_gc_roots_diag=true`): production links scalar
+/// `ValueRootFrame`s, the verify probe records
 /// every object only a conservative word kept alive, and the L3 store probe
 /// is armed regardless of optimize mode. Off in every shipped artifact.
 pub const roots_diag_enabled: bool = build_options.zjs_gc_roots_diag;
@@ -88,7 +88,7 @@ pub var minor_audit_fatal: bool = false;
 /// already retired panics on the spot instead of only printing. The default
 /// Debug behaviour is the print plus the `atom_audit_stale_edge` counter, so a
 /// latent site surfaces in the suite output without turning every unrelated
-/// test in the same binary red (`docs/tracing-gc-s3-spec.md` §2.6).
+/// test in the same binary red.
 pub var atom_audit_fatal: bool = false;
 
 /// `ZJS_GC_VERIFY_MINOR=fatal`: a PRECISE condemned-but-reachable violation
@@ -1514,8 +1514,8 @@ pub const Registry = struct {
     /// `std.testing.checkAllAllocationFailures` and to
     /// `OneShotFailingAllocator`, because `page_allocator` is not the
     /// injector. That silently shrank the OOM tier's reach as the migration
-    /// progressed (`docs/tracing-gc-s3-spec.md` §7, "Nightly tier 验证":
-    /// the export-name-lookahead canary's injectable window collapsed from
+    /// progressed (the export-name-lookahead canary's injectable window
+    /// collapsed from
     /// >8 to 6). Going through `backing_allocator` rather than `allocator`
     /// keeps the byte accounting and the memory-limit semantics identical to
     /// the shipped build, so only the injection surface changes. That surface
@@ -3405,7 +3405,7 @@ pub const Registry = struct {
         self.rememberGenerationalOwner(owner);
     }
 
-    /// TGC S0 L3 audit probe (`docs/tracing-gc-s0-spec.md` §L3). Placed after
+    /// TGC S0 L3 audit probe. Placed after
     /// a store that static reading found unbarriered; counts the exact state
     /// the generational barrier exists to prevent: a published, OLD,
     /// UNREMEMBERED owner now holding an edge to a YOUNG child. Only the

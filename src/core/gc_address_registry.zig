@@ -1,5 +1,4 @@
-//! Live address → allocation map for conservative candidate validation
-//! (tracing-gc-design.md §4.2 / §4.3 / §7.2).
+//! Live address → allocation map for conservative candidate validation.
 //!
 //! Block cells resolve by block geometry and slab objects by arena geometry;
 //! the page radix (4 KiB) with per-page occupant lists only holds the

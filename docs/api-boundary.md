@@ -27,13 +27,12 @@ native-function (`native.zig`: `zjs.native.managed`) surfaces. There is no
 landed `src/kernel/` directory; earlier "kernel API" language maps to this
 adapter layer plus `src/root.zig`.
 
-`src/runtime/` owns the host event loop (`event_loop.zig`) and the
-`zjs.runtime` aliases (`root.zig`). Module file graph helpers, Atomics
-waiter cleanup, and ArrayBuffer detach live in `src/exec/` and are not
-re-exported through this namespace. The former dynamic plugin loader
-(`plugin.zig`, the `zjs.ffi` ABI) was deleted 2026-09-06; its successor,
-the FNABI loader, lives in the `fun` repository and is an embedder of
-`zjs.native` like any other.
+`src/event_loop.zig` owns the host event loop and is the `zjs.runtime`
+module. Module file graph helpers, Atomics waiter cleanup, and ArrayBuffer
+detach live in `src/exec/` and are not re-exported through this namespace.
+The former dynamic plugin loader (`plugin.zig`, the `zjs.ffi` ABI) was
+deleted 2026-09-06; its successor, the FNABI loader, lives in the `fun`
+repository and is an embedder of `zjs.native` like any other.
 
 `src/internal_root.zig` is repository-local aggregation for CLI, test262, and
 internal tests. It is not the public embedding contract.
@@ -48,9 +47,6 @@ internal tests. It is not the public embedding contract.
   on runtime features.
 - `zjs` and `run-test262` are runtime users. They do not own core concepts.
 - test262-only names and harness shortcuts must stay out of core.
-
-`tools/architecture/check_deps.js` enforces the dependency boundary. Checkpoint
-and the production gate both run it.
 
 ## Public Shape
 

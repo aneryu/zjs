@@ -3,14 +3,13 @@
 The single priced work queue. Merged 2026-08-25 from the former
 `impl-quality-backlog.md`, `maintainability-backlog.md`, `code-volume.md`,
 and `perf/shared-vm-decomposition.md`; the closed records of all four live in
-their git history (see "Closed record" below). Gate selection follows
-[refactor-policy.md](refactor-policy.md)'s 2026-08-22 tiers; **AB** =
-bench-v8 A/B against a frozen merge-base build, **suite** = test262 +
-unified suite, **identity** = `.text` byte-compare. Try the identity gate
-first: most queue items are moves and renames, and a machine-code-identical
-result is both cheaper and stronger than a statistical one. Historical A/B
-ratios cited in closed records were measured on the retired V8-v7 8-suite
-composite and are not comparable to Octane 2.0 readings.
+their git history (see "Closed record" below). Merge authority is
+[verification-policy.md](verification-policy.md) and
+[refactor-policy.md](refactor-policy.md): `zig build test` plus the merge
+batch. Historical **AB** / **identity** labels in closed records are
+retired measurement protocols. Old A/B ratios were measured on the
+retired V8-v7 8-suite composite and are not comparable to Octane 2.0
+readings.
 
 Evidence line references drift; function names are the anchor. Treat line
 cites as historical unless marked re-verified.
@@ -18,12 +17,12 @@ cites as historical unless marked re-verified.
 ## Hot-zone refactor queue
 
 Hot-path maintainability items deferred from the 2026-08-18 campaign. Each
-lands only item by item under [refactor-policy.md](refactor-policy.md)
-rule 2 (or the cheaper identity gates of rule 4 where noted).
+lands only item by item under [refactor-policy.md](refactor-policy.md).
+There is no remaining pre-registered A/B or identity-set gate.
 
 | # | Item | Evidence | Notes / gate |
 |---|---|---|---|
-| H7 | Bring the orphan section `.text.zjs.nmfd_term` under explicit linker-script management | `vm_call.zig` emits it (at 722-739, re-verified 2026-08-25); `tail_hot_layout_aarch64.ld` never mentions it, so its placement relies on orphan-section defaults | Linker change: always bench-v8 A/B |
+| H7 | Bring the orphan section `.text.zjs.nmfd_term` under explicit linker-script management | `vm_call.zig` emits it (at 722-739, re-verified 2026-08-25); `tail_hot_layout_aarch64.ld` never mentions it, so its placement relies on orphan-section defaults | Linker change: layout-sensitive |
 | H9 | Narrow the public `JSValue` surface (89 leaked internal pub decls, e.g. `freeObjectAssumeObjectDuringActiveBytecode`) via an opaque public value type. **2026-08-20: 88 → 89** (`catchTarget`); the pin caught it only on the production gate, so `checkpoint-gate` now depends on the snapshot test too | Public-api audit A3; `public-api-contract.md` promises the opposite | Design jointly with the fun port |
 | H10 | Separate name from role in `src/parser.zig` (hosts `compile_entry` + ~326 `v2` substring occurrences — re-counted 2026-08-25 after the QCP-1 legacy deletion and H13 renames) and `src/bytecode.zig` (hosts `pipeline_*` namespaces) | Architecture doc admits the mismatch | Large project |
 | H11 | Re-evaluate the four remaining `core/root.zig` implementation-module absences (`bulk_memory`, `bytes_view`, `module_auto_init`, `string_view`) | The `jobs.zig` owner seam was fixed 2026-08-20: callers now use `core.jobs` and the inverted `exec.jobs` re-export is gone | The jobs slice reproduced the same two-image stripped whole-image set on both sources; apply the deletion test before widening the core Interface for the four internal modules |
@@ -32,7 +31,7 @@ rule 2 (or the cheaper identity gates of rule 4 where noted).
 
 From the 2026-08-21 implementation-quality review. As of 2026-08-25 only
 these three threads remain open; everything else (Q1–Q10, Q14–Q20, G1–G6)
-is closed. Q21 and Q22 (filed 2026-09-05) closed 2026-09-06.
+is closed. Q21 and Q22 closed 2026-09-06 (see Closed record).
 
 ### Q11 T3/T4 — `object.zig` split, remaining tranches
 
@@ -92,53 +91,6 @@ Precursors done 2026-08-22: statement-kind bodies extracted to named
 functions (emission byte-identical); the lexer lifted verbatim to
 `src/lexer.zig` (parser.zig 20,769 → 17,408). Remaining work is the
 `parser_core` split itself, under emission-identity.
-
-### Q21 — closed 2026-09-06: the element cell's edge is derived from the arm
-
-The collector's edge to the `.array_storage` cell behind the array arm was
-guarded on `flags.fast_array` (or the mapped-arguments class). The flag is
-the dense-mode semantics bit; every production clear of it goes through
-`freeArrayElementBufferAfterMove` (capacity → 0), so the dangling state
-was unreachable in the current tree, but a semantics transition that left
-the buffer attached would have dropped the collector's only edge to it.
-Fixed by `Object.denseArmNamesStorageCell` — class ∈ {array,
-mapped_arguments, arguments-with-no-class-payload} and `capacity != 0` —
-used by the trace, the footprint recorder and the property-storage audit
-alike. The earlier SIGSEGV on pdfjs is explained: an `arguments` object
-carrying a class payload keeps the payload pointer in the arm's first
-word, so the class id alone does not make the arm readable as
-`DenseArrayStorage`; the `class_payload_kind == .none` term is the guard.
-Deletion probe: "Q21: the element cell is kept alive by the arm, not by
-flags.fast_array" (`src/tests/core.zig`) — a filled array with the flag
-cleared by hand keeps its cell across a major (red on the flag-guarded
-trace, `containsHeader` false). Gates: unified suite + gc-stress green;
-fixed-work PMU screen vs the pre-change ReleaseFast binary:
-insn 0.9976–1.0003 on raytrace / splay / earley-boyer / deltablue / pdfjs (2 samples each, ABBA), neutral at the 0.5% screen line.
-
-### Q22 — closed 2026-09-06: no double debit; invariant test guards it
-
-The suspicion was that a corpse owing no finalizer is charged on both
-routes. It is not: the two routes touch different ledgers.
-`Registry.reclaimDoomedBlock` (`gc.zig:2228`) calls `unpublishStringCell`
-per corpse only to run `recordHeapFreeWithBytes` (`gc.zig:2094`), which
-clears the header's `heap_accounted` bit, records the test-build
-accounting oracle (`HeapAccountingOracle.recordUnpublish`,
-`gc_carrier.zig:296`, itself asserting the entry is still published) and
-the carrier lifecycle -- it never calls `MemoryAccount.debitAlloc`.
-The byte ledger (`MemoryAccount.allocated_bytes`) is debited once per
-condemnation by `debitBlockBytes(snapshot.bitmap_bytes)`
-(`gc_trace_stw.zig:1173`, and the young-snapshot sites at 2546 / 2603 /
-2665), where `bitmap_bytes` already excludes the finalizer-owing corpses
-(`recordDoomedBlock`, `gc_block_heap.zig:2222`); those are taken out of the
-doomed set before the block reclaim and debited by their own destructor
-through `destroyStringCell` (`memory.zig:1835`). `Heap.reclaimDoomedCells`
-(`gc_block_heap.zig:1807`) and `freeSmall` (`3041`) maintain bitmaps and
-free lists only. Guard: "Q22: a bitmap-reclaimed storage cell leaves the
-byte ledger exactly once" (`src/tests/core.zig`) -- an old array owner in
-the remembered map adopts a ladder of element cells, the superseded cells
-and then the owner go through majors, and `allocated_bytes` must return
-to the exact pre-allocation value (a second debit injected into
-`unpublishStringCell` turns it red).
 
 ## `call_runtime.zig` candidate domains
 
@@ -210,9 +162,9 @@ description of the architecture, not as a backlog.
 
 ### Mechanical sweeps: exhausted
 
-`tools/maintainability/dead_decls.py` returns **0 declarations / 0 lines**
-(re-verified 2026-08-25). Two predicate corrections got it
-there and both are load-bearing if the scanner is ever re-run:
+A 2026-08-25 dead-declaration sweep returned **0 declarations / 0 lines**.
+Two predicate corrections got it there and both remain load-bearing if
+that class of scan is ever re-run:
 
 1. **Deletion cascades** — a declaration whose only reference was itself
    deleted becomes dead in turn. Run to a fixed point, not once.
@@ -220,8 +172,8 @@ there and both are load-bearing if the scanner is ever re-run:
    Counting tree-wide hits lets a same-named declaration elsewhere keep a
    dead private one alive.
 
-The scanner cannot see comptime-assembled names (`libs/unicode/data.zig` is
-excluded by hand). Manual grep finds two residues outside its predicate —
+The scanner cannot see comptime-assembled names (`libs/unicode.zig` builds
+`unicode_prop_*_table` via `@field`). Manual grep finds two residues outside its predicate —
 `pub const ReflectConstructResolution` (`src/exec/reflect_ops.zig:580`,
 zero references tree-wide) and the unused private import alias `module_mod`
 in `src/core/object.zig:18`; both are scanner blind spots, noted rather
@@ -237,7 +189,7 @@ About 500–700 lines, all requiring judgement rather than a script.
 |---|---|---|
 | `bigIntParts` / `compareBigIntValues` / `valuesEqual` in three copies (`array_builtin_ops`, `value_ops`, `core.value`) | ~60 → save ~40 | Sink to core. Direct; no known divergence |
 | `appendValueString`, 8 copies in 6 shapes | ~50 | Number formatting has diverged (`std.fmt "{d}"` vs ES `dtoa`); latent, needs per-site rulings |
-| `unicode.zig` vs `unicode/regexp_properties.zig`: the same table format decoded twice (`unicodeGeneralCategory1`, `unicodeProp1`, `unicodeCase1`, `unicodePropOps`) | 335 → save ~150 | One yields a RangeSet, the other does point lookup. Needs a shared traversal iterator and touches the RegExp hot path — bench-v8 A/B |
+| `unicode.zig` range builder vs point lookup: the same table format decoded twice (`unicodeGeneralCategory1` / `matchGeneralCategory`, `unicodeProp1` / `matchPropTable`, `unicodeCase1` / `matchCaseMask`, `unicodePropOps` / `matchPropOps`) | 335 → save ~150 | One yields a RangeSet, the other does point lookup. Needs a shared traversal iterator and touches the RegExp hot path — bench-v8 A/B |
 | `parseArrowFunction` inlines a copy of `parseFunctionParameters` | ~150 | See "Ruled unrecoverable" — code volume only |
 
 ### Ruled unrecoverable
@@ -264,7 +216,7 @@ About 500–700 lines, all requiring judgement rather than a script.
   runs — and the pad lineage ruled it LAYOUT: instructions moved ±0.04%
   while cycles flipped sign across pads. Near-zero instruction delta plus a
   moving cycle delta is placement, not mechanism. Always pair a deletion
-  A/B with `tools/perf/layout_lineage/run_lineage.py`.
+  A/B with pad-lineage / placement evidence, not an instruction ratio alone.
 - **The gates are blind to protocol observability.** Two
   collection-iteration defects have shipped green under test262 0/49778. A
   change that narrows or widens a fast-path guard needs a differential run
@@ -287,4 +239,6 @@ Recover them from the git history of the four predecessor files —
 `docs/impl-quality-backlog.md`, `docs/maintainability-backlog.md`,
 `docs/code-volume.md`, `docs/perf/shared-vm-decomposition.md` — at
 `14b0618d` and earlier (all four files' committed history is fully
-reachable there).
+reachable there). Q21 (array-storage edge from the arm, not
+`flags.fast_array`) and Q22 (single byte-ledger debit on bitmap reclaim)
+closed 2026-09-06; recover the write-ups from this file's history.

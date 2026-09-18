@@ -36,8 +36,7 @@ corpus 0.000%、helper-dense 单体 ~3.5% cyc 等已有冻结二进制 PMU 结�
 全部内联本文,不依赖该目录存续)。
 
 目标:解决当前 tail-call opcode handler 的编译器依赖与布局防御税,并为
-baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 tracing GC
-迁移计划([tracing-gc-design.md](tracing-gc-design.md))互相锁死。
+baseline JIT 与 optimizing JIT 建立统一底座;tracing GC 已是树中唯一收集器([gc-invariants.md](gc-invariants.md))。
 
 关联方案(2026-08-25 注,总纲双向引用):
 
@@ -46,12 +45,9 @@ baseline JIT 与 optimizing JIT 建立统一底座;同时不与进行中的 trac
   (v1.2,DRAFT)——TS 类型驱动的 typed bytecode 与 AOT 路线,与本
   方案的动态轴互补;FNABI 里程碑已拆分(roadmap v1.7):M1A 不依赖
   本计划,M1B←F1,M1C←F2(不再整体挂 S1 全就绪)。
-- **原生插件 ABI**:
-  [fun-native-plugin-design.md](fun-native-plugin-design.md)
-  (FNABI v0.6)——§9.1 的 NativeCallDescriptor 与
-  FNABI 的 `NativeCallPlan` 统一为单一 schema;runtime-plugin-abi.md
-  已 deprecated(2026-08-25)并于 2026-09-06 随 NB2 A3 删除,现行公开面为
-  `zjs.native`(docs/public-api-contract.md)。
+- **原生插件 ABI**:FNABI 草案已撤出树。现行公开面为
+  `zjs.native`([public-api-contract.md](public-api-contract.md));
+  旧 Runtime Plugin ABI 于 2026-09-06 删除。
 
 ---
 
@@ -143,9 +139,9 @@ Phase 5    Trace 或 Region Optimizing JIT(profile 后决定)
 | **热 JS→JS 调用不往返 driver(0.4 勘误)**:warm exact-args / capture-leaf / plain 家族经 `pushWarmExactArgsLeafAndEnter`/`pushAndEnter` 域内进入 callee;`return .tail` → driver 仅存于 generic `execCall` 兜底、`op_apply`、spread 构造器等冷形态 | 同上 opCall 段;冷形态频次先例:padded-leaf 0.0015% 普查删除(在册注释) |
 | 3504B 帧问题已被 tail-call 拆分解决(comptime-delete bisection 证明),不是现役痛点 | 同上头注 |
 | 现役布局防御税:section 钉扎、源码顺序布局约定、"handler 零非尾调用"铁律、retired-slot 复用;合并 handler 需冻结二进制+反汇编+多构建 PMU 证据 | 同上;[architecture.md](architecture.md)(Stack Bytecode VM Status 章)§3 |
-| `JSValue` = 16 字节 extern tagged + 引用计数;VM 存活协议 = refcount-on-push + 确定性 teardown | `src/core/value.zig`、[gc-invariants.md](gc-invariants.md) |
-| tracing GC 迁移是已过评审的并行大工程,分阶段 gate,RC 迁移期间保持权威。**状态注(2026-08-25)**:实现在分支 `gc/tracing`(未合 main);08-25 缺陷批次(major 从不触发,`f10855c6`)作废此前全部吞吐证据,合入前须重新过门 | [tracing-gc-design.md](tracing-gc-design.md) v0.5 |
-| 今天没有任何 IC:`FunctionBytecode` 无 site/slot 表;`property_direct.zig` 为非缓存直通 fast path(probe-first、实测链长 1.0、命中率 100%) | [architecture.md](architecture.md)(Stack Bytecode VM Status 章)§4 |
+| `JSValue` = 8 字节 NaN-box;无引用计数;生产根集 = 保守栈扫描 + 显式 root/pin | `src/core/value.zig`、[gc-invariants.md](gc-invariants.md) |
+| tracing GC 是树中唯一收集器(TGC S0–S5,2026-09-04→05 合入 main);RC 与 `gc/tracing` 分支已退役 | [gc-invariants.md](gc-invariants.md) |
+| 属性站点缓存已落地(W1,`PropSiteCache`);无 call IC;`property_direct.zig` 仍是非缓存直通 fast path | [architecture.md](architecture.md)(Stack Bytecode VM Status 章)§4 |
 | ES2015 PTC 已实现(strict 平调用尾折叠为 `tail_call`,常量栈),文档化分歧 | 同上 §5;`LIMITATIONS.md` |
 | opcode 级 profiling 构建已存在(`zig build zjs-profile`) | 同上 §7 |
 | 中断/停点机制:`active_dispatch_tbl` 换表实现 L0 stop seam | `src/exec/tailcall_dispatch.zig` |
@@ -794,9 +790,8 @@ unwind。
 runtime-plugin-abi.md 已于 2026-09-06(NB2 A3)删除,描述符的落地形态是
 `src/core/native_entry.zig` 的 `NativeEntry`(docs/perf/native-boundary-design.md
 §3.1)。**对齐目标修订(2026-08-25)**:原对齐对象 runtime-plugin-abi.md
-已 deprecated(2026-08-25),改对齐
-[fun-native-plugin-design.md](fun-native-plugin-design.md) §15.2;
-FNABI 裁决(2026-08-25)要求 `NativeCallPlan` 与本描述符统一为
+已 deprecated(2026-08-25),现行公开面是 `zjs.native`;
+历史 FNABI 裁决(2026-08-25)要求 `NativeCallPlan` 与本描述符统一为
 **单一 schema**;FNABI 里程碑已拆分(roadmap v1.7):M1A 不依赖
 本计划,M1B←F1,M1C←F2,本轨与 M1B/M1C 按该拆分关系耦合,不再是
 自由并行轨:

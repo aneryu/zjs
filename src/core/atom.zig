@@ -1029,7 +1029,7 @@ pub const DynamicAtom = struct {
     /// is bound to this id) or free-listed. Liveness is decided once per major
     /// by `sweepDead`, never by a store or a drop.
     occupied: bool,
-    /// TGC S3 (`docs/tracing-gc-s3-spec.md` §2.1). Last major mark epoch that
+    /// TGC S3. Last major mark epoch that
     /// reached this entry through a `visitAtom` edge, a root, the insertion
     /// barrier or black allocation; `Heap.mark_epoch` is even and non-zero, so
     /// `0` reads as "never marked".
@@ -1234,7 +1234,7 @@ pub const AtomTable = struct {
     /// compile is in flight; every intern/dup entry point notes into it so the
     /// front end's plain-`u32` atom fields have an interval root.
     compile_scope: ?*CompileAtomScope = null,
-    /// Audit readings (`--gc-stats`, `docs/tracing-gc-s3-spec.md` §2.6). With
+    /// Audit readings (`--gc-stats`). With
     /// the tracer owning liveness the question the audit asks is the inverse
     /// of the pre-flip one: no holder edge may still name an entry the sweep
     /// already retired.
@@ -1612,7 +1612,7 @@ pub const AtomTable = struct {
         return self.findAtom(entry.bytes, .global_symbol, entry.hash) == atom_id;
     }
 
-    // ---- TGC S3: tracing-owned atom liveness (docs/tracing-gc-s3-spec.md) ----
+    // ---- TGC S3: tracing-owned atom liveness ----
     //
     // Live == reached this major by a `visitAtom` edge, a declared root, the
     // insertion barrier or black allocation; or its string body was marked; or
@@ -1662,8 +1662,8 @@ pub const AtomTable = struct {
             if (mode == .observe) return null;
             // §2.6, post-flip form. Reaching a retired slot through a holder
             // edge means the holder outlived the entry it names -- the exact
-            // stale-id shape `check_borrowed_atoms.js` and the
-            // `-Dzjs_ownership_audit` quarantine exist to catch.
+            // stale-id shape the `-Dzjs_ownership_audit` quarantine exists
+            // to catch.
             if (entry.weakref_count != 0) {
                 self.atom_audit_shell_edge += 1;
             } else {
@@ -2669,3 +2669,182 @@ pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
 /// per-reference count under the tracing collector, so appending an owned atom
 /// and appending a borrowed one were already the same byte-for-byte routine.
 pub const appendOwnedAtom = appendAtom;
+test "atom replace handles self-assignment without releasing dynamic atom" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var slot = try rt.internAtom("dynamic-atom-self-replace");
+    slot = slot;
+
+    try std.testing.expectEqualStrings("dynamic-atom-self-replace", rt.atoms.name(slot).?);
+}
+
+test "predefined atoms preserve QuickJS order and kinds" {
+    try std.testing.expectEqual(Atom.fromRaw(0), null_atom);
+    try std.testing.expectEqual(Atom.fromRaw(1), ids.null_);
+    try std.testing.expectEqual(Atom.fromRaw(2), ids.false_);
+    try std.testing.expectEqual(Atom.fromRaw(3), ids.true_);
+    // The core predefined atom layout keeps QuickJS keyword/symbol ordering.
+    // zjs startup-only names live after the registry/setup bands.
+    try std.testing.expectEqual(Atom.fromRaw(46), last_keyword);
+    try std.testing.expectEqual(Atom.fromRaw(45), last_strict_keyword);
+    try std.testing.expectEqual(Atom.fromRaw(229), ids.Symbol_asyncIterator);
+    try std.testing.expectEqual(Atom.fromRaw(230), ids.Symbol_asyncDispose);
+    try std.testing.expectEqual(Atom.fromRaw(231), ids.Symbol_dispose);
+    try std.testing.expectEqual(Atom.fromRaw(232), ids.zjs_proto_keepalive);
+    try std.testing.expectEqual(Atom.fromRaw(264), ids.zjs_last_internal_marker);
+    try std.testing.expectEqual(Atom.fromRaw(364), ids.zjs_last_registry_name);
+    try std.testing.expectEqual(Atom.fromRaw(381), ids.zjs_last_global_setup_name);
+    try std.testing.expectEqual(Atom.fromRaw(419), ids.zjs_last_global_extra_name);
+    try std.testing.expectEqual(Atom.fromRaw(586), ids.zjs_last_registry_extra_name);
+    try std.testing.expectEqual(Atom.fromRaw(626), ids.scriptArgs);
+    try std.testing.expectEqual(Atom.fromRaw(656), ids.zjs_last_startup_name);
+    try std.testing.expectEqual(Atom.fromRaw(692), ids.zjs_last_predefined_key_name);
+    try std.testing.expectEqual(@as(usize, 692), predefined_count);
+
+    const brand = predefinedById(ids.Private_brand).?;
+    try std.testing.expectEqual(AtomKind.private, brand.kind);
+    const iterator = predefinedById(ids.Symbol_iterator).?;
+    try std.testing.expectEqual(AtomKind.symbol, iterator.kind);
+    try std.testing.expectEqual(predefinedId("caller", .string).?, ids.caller);
+    try std.testing.expectEqual(predefinedId("function", .string).?, ids.type_function);
+    try std.testing.expectEqual(predefinedId("<brand>", .private).?, ids.Private_brand);
+
+    for (predefined_atoms, 0..) |entry, index| {
+        try std.testing.expectEqual(Atom.fromRaw(@intCast(index + 1)), entry.id);
+    }
+}
+
+test "atom table interns predefined dynamic and integer atoms" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expectEqual(ids.length, try rt.internAtom("length"));
+    try std.testing.expectEqual(Atom.taggedInt(123), try rt.internAtom("123"));
+    try std.testing.expectEqual(@as(u32, 123), Atom.taggedInt(123).toUInt32());
+
+    var first = try rt.internAtom("customName");
+    const second = try rt.internAtom("customName");
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqualStrings("customName", rt.atoms.name(first).?);
+
+    // TGC S3-c: an entry lives while a root names it and dies at the first
+    // major that cannot reach it.
+    {
+        var roots = @import("runtime.zig").rootAtoms(.{&first});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.name(second) != null);
+    }
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(second) == null);
+}
+
+test "symbol atoms are unique even with the same description" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const a = try rt.atoms.newSymbol("desc", .symbol);
+    const b = try rt.atoms.newSymbol("desc", .symbol);
+    try std.testing.expect(a != b);
+    try std.testing.expectEqual(AtomKind.symbol, rt.atoms.kind(a).?);
+    try std.testing.expectEqualStrings("desc", rt.atoms.name(a).?);
+}
+
+test "registered symbol index ignores unique symbols and private names" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const registry_name = "Symbol.for:registry-isolation";
+    var unique = try rt.atoms.newSymbol(registry_name, .symbol);
+    var private = try rt.atoms.newSymbol(registry_name, .private);
+    // TGC S3-c: bare ids need a declared root to survive a major.
+    var keep_roots = @import("runtime.zig").rootAtoms(.{ &unique, &private });
+    keep_roots.activate(rt);
+    defer keep_roots.deactivate(rt);
+
+    var registered = try rt.atoms.internSymbol(registry_name);
+    const registered_again = try rt.atoms.internSymbol(registry_name);
+    try std.testing.expect(unique != registered);
+    try std.testing.expect(private != registered);
+    try std.testing.expectEqual(registered, registered_again);
+    try std.testing.expect(!rt.atoms.isRegisteredSymbol(unique));
+    try std.testing.expect(!rt.atoms.isRegisteredSymbol(private));
+    try std.testing.expect(rt.atoms.isRegisteredSymbol(registered));
+
+    {
+        var registry_roots = @import("runtime.zig").rootAtoms(.{&registered});
+        registry_roots.activate(rt);
+        defer registry_roots.deactivate(rt);
+        _ = rt.runObjectCycleRemoval();
+        try std.testing.expect(rt.atoms.isRegisteredSymbol(registered_again));
+    }
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(!rt.atoms.isRegisteredSymbol(registered_again));
+    try std.testing.expect(rt.atoms.name(unique) != null);
+    try std.testing.expect(rt.atoms.name(private) != null);
+}
+
+test "registered value symbols keep a single registry ref" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const registry_name = "Symbol.for:registered-value-ref";
+    const registered = try rt.atoms.internRegisteredValueSymbol(registry_name);
+    const registered_again = try rt.atoms.internRegisteredValueSymbol(registry_name);
+    try std.testing.expectEqual(registered, registered_again);
+
+    const manual = try rt.atoms.internSymbol(registry_name);
+    try std.testing.expectEqual(registered, manual);
+}
+
+test "atom table deinit balances live empty dynamic symbol bytes" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    var atoms = AtomTable.init(&account);
+
+    const freed = try atoms.newSymbol("", .symbol);
+    _ = freed;
+
+    const sym = try atoms.newSymbol("", .symbol);
+    try std.testing.expectEqual(AtomKind.symbol, atoms.kind(sym).?);
+    try std.testing.expectEqualStrings("", atoms.name(sym).?);
+
+    atoms.deinit();
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "atom table retains its cached string until the atom dies" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const predefined = try rt.atoms.toStringValueForPush(rt, ids.name);
+    const predefined_allocations = rt.memory.allocation_count;
+    const predefined_again = try rt.atoms.toStringValueForPush(rt, ids.name);
+    try std.testing.expect(predefined_again.asStringBodyRaw() == predefined.asStringBodyRaw());
+    try std.testing.expectEqual(predefined_allocations, rt.memory.allocation_count);
+
+    var atom_id = try rt.internAtom("ownedAtomName");
+    var atom_roots = @import("runtime.zig").rootAtoms(.{&atom_id});
+    atom_roots.activate(rt);
+    defer atom_roots.deactivate(rt);
+    const atom_string = try @import("string.zig").String.createAtomBacked(rt, atom_id);
+    // The table caches the materialized string; repeat conversions reuse it.
+    const again = try @import("string.zig").String.createAtomBacked(rt, atom_id);
+    try std.testing.expect(again == atom_string);
+    // OP_push_atom_value's QJS-like direct entry path returns the same cached
+    // body and performs no allocation after the first materialization.
+    const allocations = rt.memory.allocation_count;
+    const pushed = try rt.atoms.toStringValueForPush(rt, atom_id);
+    try std.testing.expect(pushed.asStringBodyRaw() == atom_string);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+    // Releasing the string does not release the atom: `atom_id` is a weak
+    // back-pointer, and the table keeps its own string reference.
+    try std.testing.expect(rt.atoms.name(atom_id) != null);
+    // TGC S3-c: the first major that cannot reach the entry retires it
+    // together with its cached string.
+    atom_roots.deactivate(rt);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(atom_id) == null);
+    atom_roots.activate(rt);
+}

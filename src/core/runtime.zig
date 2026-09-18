@@ -1380,7 +1380,7 @@ pub const JSRuntime = struct {
     weak_root_slots_capacity: usize = 0,
     active_value_roots: ?*const ValueRootFrame = null,
     job_queue: job_mod.Queue = undefined,
-    /// WeakRef [[KeptAlive]] (tracing-gc-design.md §9.2). Traced as a root
+    /// WeakRef [[KeptAlive]]. Traced as a root
     /// and cleared at job end.
     weakref_kept_alive: []JSValue = &.{}, // gc-slot: heap
     weakref_kept_alive_capacity: usize = 0,
@@ -3201,7 +3201,7 @@ pub const JSRuntime = struct {
         // 13,642 minors and zero majors, promoted 6.8M objects, and finished
         // holding 435MB where refcounting held 3MB, with every one of those
         // minors paying 1.12ms to trace a heap that large. See
-        // `docs/tracing-gc-design.md` §8.5.
+        // the minor/major threshold crossing.
         //
         // The first repair skipped the minor entirely on a crossing, which
         // reads the crossing as PROOF that the garbage is old. Since S2 that
@@ -4072,7 +4072,7 @@ pub const JSRuntime = struct {
         // heap < 25% of RAM). The factor here was 1.75 while §1.3 capped
         // cycle peak/live at 1.8; the owner renegotiated that cap to 2.0 on
         // 2026-08-29 (ABBA n=16 pricing: splay cycles -7.25%, six-benchmark
-        // geomean 0.9867, peak RSS +10-13%; docs/slab-reuse-2026-08-29.md).
+        // geomean 0.9867, peak RSS +10-13%).
         // Steady-state cycle peak/live equals this factor by construction,
         // so the constant and the §1.3 cap must move together.
         const live_now = self.memory.allocated_bytes;
@@ -4937,6 +4937,197 @@ test "external hard memory pressure requests urgent major gc" {
         try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
     }
     try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "VM stack arena default fill matches VmStackArena{}" {
+    var arena: VmStackArena = undefined;
+    arena.initDefault();
+    try std.testing.expectEqualDeep(VmStackArena{}, arena);
+    try std.testing.expectEqual(@as(usize, 1552), @sizeOf(VmStackArena));
+    const empty: []JSValue = &.{};
+    try std.testing.expectEqual(empty.ptr, arena.chunks[0].ptr);
+    try std.testing.expectEqual(@as(usize, 0), arena.chunks[0].len);
+
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    arena.deinit(&account);
+    try std.testing.expectEqualDeep(VmStackArena{}, arena);
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "VM stack arena allocates and reuses a compact first chunk" {
+    try std.testing.expectEqual(
+        VmStackArena.first_chunk_bytes / @sizeOf(JSValue),
+        VmStackArena.first_chunk_slots,
+    );
+
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    var arena: VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    const initial_mark = arena.mark();
+    const first = arena.carve(&account, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), first.len);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.active);
+    try std.testing.expectEqual(VmStackArena.first_chunk_slots, arena.chunks[0].len);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+
+    arena.restore(initial_mark);
+    const allocations_before_reuse = account.allocation_count;
+    const reused = arena.carve(&account, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@intFromPtr(first.ptr), @intFromPtr(reused.ptr));
+    try std.testing.expectEqual(allocations_before_reuse, account.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
+}
+
+test "VM stack arena active miss is pure before authoritative second chunk carve" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    var arena: VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    _ = arena.carve(&account, VmStackArena.first_chunk_slots) orelse
+        return error.TestUnexpectedResult;
+    const full_mark = arena.mark();
+    const bytes_before_miss = account.allocated_bytes;
+    const allocations_before_miss = account.allocation_count;
+
+    try std.testing.expect(arena.carveActiveMarked(1) == null);
+    try std.testing.expectEqual(full_mark, arena.mark());
+    try std.testing.expectEqual(bytes_before_miss, account.allocated_bytes);
+    try std.testing.expectEqual(allocations_before_miss, account.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+
+    const second = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqual(@as(usize, 2), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.active);
+    try std.testing.expectEqual(VmStackArena.chunk_slots, arena.chunks[1].len);
+    try std.testing.expectEqual(@as(usize, 1), arena.used[1]);
+    try std.testing.expectEqual(
+        VmStackArena.first_chunk_bytes +
+            VmStackArena.chunk_slots * @sizeOf(JSValue),
+        account.allocated_bytes,
+    );
+    try std.testing.expectEqual(allocations_before_miss + 1, account.allocation_count);
+}
+
+test "VM stack arena large first carve retains the maximum chunk size" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    var arena: VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    const requested = VmStackArena.first_chunk_slots + 1;
+    const window = arena.carve(&account, requested) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(requested, window.len);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(VmStackArena.chunk_slots, arena.chunks[0].len);
+    try std.testing.expectEqual(
+        VmStackArena.chunk_slots * @sizeOf(JSValue),
+        account.allocated_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+}
+
+test "VM stack arena oversized carve is rejected without state or accounting changes" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    var arena: VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    const before = arena.mark();
+    try std.testing.expect(arena.carve(&account, VmStackArena.chunk_slots + 1) == null);
+    try std.testing.expectEqual(before, arena.mark());
+    try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+}
+
+test "VM stack arena allocation failure is retryable and keeps accounting balanced" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = memory.MemoryAccount.init(failing_allocator.allocator());
+    var arena: VmStackArena = .{};
+    defer arena.deinit(&account);
+
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+    const before = arena.mark();
+    try std.testing.expect(arena.carve(&account, 1) == null);
+    try std.testing.expectEqual(before, arena.mark());
+    try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    const retry = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), retry.len);
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+
+    _ = arena.carve(&account, VmStackArena.first_chunk_slots - 1) orelse
+        return error.TestUnexpectedResult;
+    const full_first_mark = arena.mark();
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+    try std.testing.expect(arena.carve(&account, 1) == null);
+    try std.testing.expectEqual(full_first_mark, arena.mark());
+    try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), arena.active);
+    try std.testing.expectEqual(@as(usize, 0), arena.chunks[1].len);
+    try std.testing.expectEqual(@as(usize, 0), arena.used[1]);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    const second_retry = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), second_retry.len);
+    try std.testing.expectEqual(@as(usize, 2), arena.chunk_count);
+    try std.testing.expectEqual(@as(usize, 1), arena.active);
+    try std.testing.expectEqual(VmStackArena.chunk_slots, arena.chunks[1].len);
+    try std.testing.expectEqual(@as(usize, 1), arena.used[1]);
+    try std.testing.expectEqual(
+        VmStackArena.first_chunk_bytes +
+            VmStackArena.chunk_slots * @sizeOf(JSValue),
+        account.allocated_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 2), account.allocation_count);
+
+    arena.deinit(&account);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+}
+
+test "runtime allocator facades share memory accounting" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline = rt.memory.allocated_bytes;
+    const current = try rt.memory.allocator.alloc(u8, 2048);
+    var current_live = true;
+    defer if (current_live) rt.memory.allocator.free(current);
+    try std.testing.expectEqual(baseline + current.len, rt.memory.allocated_bytes);
+
+    const persistent = try rt.memory.persistent_allocator.alloc(u8, 4096);
+    var persistent_live = true;
+    defer if (persistent_live) rt.memory.persistent_allocator.free(persistent);
+    try std.testing.expectEqual(baseline + current.len + persistent.len, rt.memory.allocated_bytes);
+
+    rt.memory.persistent_allocator.free(persistent);
+    persistent_live = false;
+    try std.testing.expectEqual(baseline + current.len, rt.memory.allocated_bytes);
+    rt.memory.allocator.free(current);
+    current_live = false;
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
+test "runtime and context init-deinit are leak free" {
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const rt = try JSRuntime.create(std.testing.allocator);
+        const ctx1 = try context_mod.JSContext.create(rt);
+        const ctx2 = try context_mod.JSContext.create(rt);
+        ctx2.destroy();
+        ctx1.destroy();
+        rt.destroy();
+    }
 }
 
 /// Wall-clock microseconds for the Math.random seed (qjs js_random_init,

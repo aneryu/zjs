@@ -1,16 +1,16 @@
 # 20 — core 值 / 对象 / GC / atom / bigint
 
-`src/tests/core.zig` 覆盖 tagged 值、shape/属性、tracing GC、atom 表、字符串、FinalizationRegistry、弱集合、内存账户与 bigint 内核。多数用例直接操 Runtime，而不是 `eval` 一整段脚本。 源文件 `src/tests/core.zig`（19675 行）。
+`src/tests/core.zig` 覆盖 shape/属性、tracing GC、FinalizationRegistry、弱集合与跨模块运行时合同。叶子合同（atom 表、string 布局、MemoryAccount、VmStackArena、array_list_erased、heap/kernel BigInt、Object handle/payload、shape 注册表、Runtime init-deinit）已回到对应生产文件。多数用例直接操 Runtime，而不是 `eval` 一整段脚本。 源文件 `src/tests/core.zig`（16294 行，447 个 `test` 块）。
 
 ## `src/tests/core.zig`
 
-`src/tests/core.zig` 覆盖 tagged 值、shape/属性、tracing GC、atom 表、字符串、FinalizationRegistry、弱集合、内存账户与 bigint 内核。多数用例直接操 Runtime，而不是 `eval` 一整段脚本。
+`src/tests/core.zig` 覆盖 shape/属性、tracing GC、FinalizationRegistry、弱集合与跨模块运行时合同。叶子合同（atom 表、string 布局、MemoryAccount、VmStackArena、array_list_erased、heap/kernel BigInt、Object handle/payload、shape 注册表、Runtime init-deinit）已回到对应生产文件。多数用例直接操 Runtime，而不是 `eval` 一整段脚本。
 
 文件头：Exercises core value, object, GC, memory, and runtime primitives.
 
-类型：本文件的 `fn` 几乎都是嵌在 `test` 里的探针 struct（`Probe.trigger` 在分配路径上强制 GC、`ModuleAutoInitFixture.resolve` 物化 MODULE_NS、各种 `visit*` 给 tracer 计数、OOM 注入 allocator、bigint lockstep 参考实现）。读函数节时按类型前缀对照周围测试块。
+类型：本文件的 `fn` 几乎都是嵌在 `test` 里的探针 struct（`Probe.trigger` 在分配路径上强制 GC、`ModuleAutoInitFixture.resolve` 物化 MODULE_NS、各种 `visit*` 给 tracer 计数、OOM 注入 allocator）。bigint lockstep / 除法参考实现已随合同回到 `src/core/bigint.zig` 与 `src/libs/bigint.zig`。读函数节时按类型前缀对照周围测试块。
 
-### 函数（清单 132）
+### 函数（清单 112）
 
 ### `Probe.trigger` (`src/tests/core.zig:15`)
 
@@ -698,119 +698,119 @@
 - **实现**：用 `rt.memory.alloc(core.Atom, 1)` 分配一格并填入 `core.atom.ids.length`，即这个 exotic 钩子恒报「只有一个 own key：`length`」；切片由调用方按 `rt.memory` 释放。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `![]core.Atom`，由测试 `try`/`expectError` 消费。
 
-### `PoisonAllocator.alloc` (`src/tests/core.zig:13941`)
+### `PoisonAllocator.alloc` (`src/libs/bigint.zig:1259`)
 
 - **签名**：`fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `PoisonAllocator.alloc`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：向 backing 取内存，成功后用 `@memset(ptr[0..len], 0xa5)` 把新分配整块涂成非零模式——basecase 乘法漏写或先读后写的限位会因此改变乘积。关键调用：`self.backing.rawAlloc`、`@memset`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.resize` (`src/tests/core.zig:13947`)
+### `PoisonAllocator.resize` (`src/libs/bigint.zig:1265`)
 
 - **签名**：`fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool`。
 - **作用**：测试夹具/探针 `PoisonAllocator.resize`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：不做涂写，原样转发 `self.backing.rawResize(buf, alignment, new_len, ra)`（原地扩缩不产生新的未初始化字节）。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.remap` (`src/tests/core.zig:13951`)
+### `PoisonAllocator.remap` (`src/libs/bigint.zig:1269`)
 
 - **签名**：`fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `PoisonAllocator.remap`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：原样转发 `self.backing.rawRemap(buf, alignment, new_len, ra)`，不涂写。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.free` (`src/tests/core.zig:13955`)
+### `PoisonAllocator.free` (`src/libs/bigint.zig:1273`)
 
 - **签名**：`fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void`。
 - **作用**：测试夹具/探针 `PoisonAllocator.free`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：原样转发 `self.backing.rawFree(buf, alignment, ra)`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.allocator` (`src/tests/core.zig:13959`)
+### `PoisonAllocator.allocator` (`src/libs/bigint.zig:1277`)
 
 - **签名**：`fn allocator(self: *PoisonAllocator) std.mem.Allocator`。
 - **作用**：测试夹具/探针 `PoisonAllocator.allocator`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `self` 和 alloc/resize/remap/free 四个函数组出 `std.mem.Allocator`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `referenceMul` (`src/tests/core.zig:13968`)
+### `referenceMul` (`src/libs/bigint.zig:1286`)
 
 - **签名**：`fn referenceMul(alloc: std.mem.Allocator, lhs: []const engine.libs.bigint.Limb, rhs: []const engine.libs.bigint.Limb) ![]engine.libs.bigint.Limb`。
 - **作用**：Deliberately zero-initialized schoolbook multiply, kept in the test rather than in the kernel: it is the thing the production path stopped doing, so it has to exist somewhere independent to compare against. Returns unnormalized limbs with trailing zeros stripped, matching what `mulAlloc` returns.。
 - **实现**：故意保留「先 `@memset(out, 0)` 清零再累加」的课本式乘法——生产路径已经不这么做了，所以参照实现必须独立存在于测试里。先 `alloc.alloc(Limb, lhs.len + rhs.len)`（`errdefer alloc.free(out)`）并清零；外层遍历 `lhs`，内层遍历 `rhs`，用 `u128` 的 `Double` 累加 `a * b + out[i + j] + carry`，低 64 位 `@truncate` 回 `out[i + j]`、高位右移 64 成新 carry，内层结束把 carry 写进 `out[i + rhs.len]`。最后从高位起剥掉全零 limb，长度没变就原样返回，否则 `alloc.realloc(out, len)` 缩到规范长度（与 `mulAlloc` 的返回形状一致）。
 - **所有权 / 错误 / 调用**：失败路径靠 `errdefer` 对称释放。返回 `![]engine.libs.bigint.Limb`，由测试 `try`/`expectError` 消费。
 
-### `lockstepLimb` (`src/tests/core.zig:14027`)
+### `lockstepLimb` (`src/core/bigint.zig:419`)
 
 - **签名**：`fn lockstepLimb(pattern: usize, index: usize, offset: usize) engine.libs.bigint.Limb`。
 - **作用**：Deterministic limb patterns for the lockstep test. Index selects a shape family; the offset keeps the two operands from being identical.。
 - **实现**：先算 `i = index + offset`（`offset` 用来让两个操作数不至于完全相同），再按 `pattern` 五选一：`0` 恒 `std.math.maxInt(Limb)`（饱和，进位链最长、最高位进位非零）；`1` 只有 `index == 0` 时给 `1 << 63`、其余为 0（最高进位为零，乘积规范化后比容量少一个 limb）；`2` 稀疏——`i % 3 == 0` 给 1 否则 0；`3` 按 `i` 奇偶交替 `0xAAAA...` / `0x5555...` 条纹；`4` 低熵斜坡 `@as(Limb, @intCast(i)) *% 0x9E37_79B9_7F4A_7C15 +% 1`；其余 `unreachable`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `expectLockstepMul` (`src/tests/core.zig:14113`)
+### `expectLockstepMul` (`src/core/bigint.zig:440`)
 
 - **签名**：`fn expectLockstepMul( rt: *core.JSRuntime, lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, ) !void`。
 - **作用**：Runs one multiply through both kernels and asserts the results agree in sign, length and every limb. Each operand is built once as external storage and once as inline storage, so all four storage combinations are covered.。
 - **实现**：先用裸 limb 切片拼两个 `bigint.BigInt`（`@constCast` 借用调用方内存、allocator 取自 `rt.memory.allocator`），跑参照内核 `bigint.mulAlloc` 得到 `expected`（`defer expected.deinit()`）。随后两层 `inline for (.{ false, true })` 穷举 lhs/rhs 的 inline/外部存储四种组合：每轮 `makeLockstepOperand` 造操作数（各自 `defer releaseForTest(rt)`），断言 `isInline()` 与期望一致、`mulResultCannotCompactToShort(lhs, rhs)` 成立，再走 `core.bigint.BigInt.createMulInline(rt, lhs, rhs)` 得到 `product`（同样 `defer releaseForTest`）。对 product 连查五项：`isInline()`、符号等于 `expected.negative`、`expectEqualSlices` 逐 limb 相等、`capacitySliceMut().len == lhs_limbs.len + rhs_limbs.len`（分配从不缩，销毁必须按满容量走）、且规范化后的 `limbs().len` 与容量相等或恰少 1。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `makeLockstepOperand` (`src/tests/core.zig:14161`)
+### `makeLockstepOperand` (`src/core/bigint.zig:488`)
 
 - **签名**：`fn makeLockstepOperand( rt: *core.JSRuntime, limbs: []const engine.libs.bigint.Limb, negative: bool, comptime want_inline: bool, ) !*core.bigint.BigInt`。
 - **作用**：测试夹具/探针 `makeLockstepOperand`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：按 comptime 的 `want_inline` 走两条路：内联路径 `core.bigint.BigInt.createInlineUninitialized(rt, limbs.len)` 开一个未初始化内联 BigInt，`@memcpy(big.capacitySliceMut(), limbs)` 灌数据后 `big.publishInline(limbs.len, negative)` 发布；外部路径先用 `@constCast(limbs)` 拼一个借用式 `bigint.BigInt`（allocator 取 `rt.memory.allocator`），再交给 `core.bigint.BigInt.createFromBigInt(rt, owned)` 造出外部存储形态。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!*core.bigint.BigInt`，由测试 `try`/`expectError` 消费。
 
-### `DivFailAllocator.allocator` (`src/tests/core.zig:14458`)
+### `DivFailAllocator.allocator` (`src/libs/bigint.zig:1323`)
 
 - **签名**：`fn allocator(self: *DivFailAllocator) std.mem.Allocator`。
 - **作用**：测试夹具/探针 `DivFailAllocator.allocator`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `self` 和 alloc/resize/remap/free 四个函数组出 `std.mem.Allocator`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.alloc` (`src/tests/core.zig:14467`)
+### `DivFailAllocator.alloc` (`src/libs/bigint.zig:1332`)
 
 - **签名**：`fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `DivFailAllocator.alloc`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：两条拒绝路径优先于转发：`refuse_next_alloc` 置位时消费掉该标志、置 `induced` 并返回 null；否则按 `alloc_attempts` 编号，编号等于 `fail_alloc_index` 时同样置 `induced` 返回 null。都不命中才转发 backing，并给 `live` 加一。关键调用：`self.backing.rawAlloc`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.resize` (`src/tests/core.zig:14487`)
+### `DivFailAllocator.resize` (`src/libs/bigint.zig:1352`)
 
 - **签名**：`fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool`。
 - **作用**：测试夹具/探针 `DivFailAllocator.resize`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：`fail_shrink` 且 `new_len < memory.len` 时直接返回 false，其余转发 backing。关键调用：`self.backing.rawResize`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.remap` (`src/tests/core.zig:14493`)
+### `DivFailAllocator.remap` (`src/libs/bigint.zig:1358`)
 
 - **签名**：`fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `DivFailAllocator.remap`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：`fail_shrink` 且 `new_len < memory.len` 时返回 null，并顺手置 `refuse_next_alloc`，让标准分配器的 alloc-and-copy 回退也失败，从而真正走到 `normalize` 的错误路径；其余转发 backing。关键调用：`self.backing.rawRemap`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.free` (`src/tests/core.zig:14504`)
+### `DivFailAllocator.free` (`src/libs/bigint.zig:1369`)
 
 - **签名**：`fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void`。
 - **作用**：测试夹具/探针 `DivFailAllocator.free`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：先给 `live` 减一再转发 backing，`live` 归零即所有权已对称交还。关键调用：`self.backing.rawFree`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `expectDivisionUnderInjection` (`src/tests/core.zig:14511`)
+### `expectDivisionUnderInjection` (`src/libs/bigint.zig:1376`)
 
 - **签名**：`fn expectDivisionUnderInjection( inject: *DivFailAllocator, lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, expected_quotient: engine.libs.bigint.BigInt, expected_remainder: engine.libs.bigint.BigInt, ) !void`。
 - **作用**：测试夹具/探针 `expectDivisionUnderInjection`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `inject.allocator()` 拼两个借用 limb 切片的 `bigint.BigInt`，再 `bigint.divRemAlloc(alloc, lhs, rhs)`：成功臂（`defer` 各自 `deinit`）要求商与余数 `compare` 期望值均为 `.eq`——注入下侥幸成功也必须算对；失败臂只允许 `error.OutOfMemory`。两条路径之后都统一收尾：`inject.live` 必须回到 `0`（无悬挂分配），且 `lhs_limbs` / `rhs_limbs` 与输入逐 limb 相等（输入仍归调用方所有、不得被就地改写）。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `expectDivisionIdentity` (`src/tests/core.zig:14618`)
+### `expectDivisionIdentity` (`src/libs/bigint.zig:1409`)
 
 - **签名**：`fn expectDivisionIdentity( lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, ) !void`。
 - **作用**：Checks `q * b + r == a`, `abs(r) < abs(b)`, the remainder's sign, and that neither result carries a leading zero limb.。
 - **实现**：在 `std.testing.allocator` 上拼两个借用式 `BigInt`，取 `lhs.div(rhs)` 与 `lhs.rem(rhs)`（各 `defer deinit`），再 `mulAlloc(quotient, rhs)` + `addAlloc(product, remainder)` 还原出 `recovered`，断言 `recovered.compare(lhs) == .eq`（即 `q*b + r == a`）。随后另拼两个去符号的 `BigInt` 断言 `|r| < |b|`；余数非零时符号必须跟被除数一致，商非零时符号必须是 `lhs_negative != rhs_negative`；最后要求商与余数的最高 limb 都非零（无前导零 limb）。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `Case.check` (`src/tests/core.zig:14855`)
+### `Case.check` (`src/libs/bigint.zig:1818`)
 
 - **签名**：`fn check(high: Limb, low: Limb, divisor: Limb) !void`。
 - **作用**：测试夹具/探针 `Case.check`，给周围 `test` 块提供可注入行为或断言助手。
@@ -929,7 +929,7 @@
 - **实现**：两个 256 字节栈 buffer：一个用 `std.fmt.bufPrint(&expected_buf, fmt, args)` 产出 `std.fmt` 的参照文本，另一个用 `std.Io.Writer.fixed(&actual_buf)` 接住 `core/gc_audit_print.zig` 的 `write(&writer, parts)` 输出；最后 `std.testing.expectEqualStrings(expected, writer.buffered())` 断言自造的 audit 打印与标准格式化逐字节一致。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### 测试块（546）
+### 测试块（496）
 
 ### `test "dense parameter arrays borrowed construction roots output during storage allocation"` (`src/tests/core.zig:10`)
 
@@ -945,21 +945,7 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.OutOfMemory`。设置 runtime 内存上限以注入 OOM。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "GC representation snapshot matches the committed baseline"` (`src/tests/core.zig:66`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住 GC：representation snapshot matches the committed baseline。
-- **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "gc invariant negative: representation snapshot rejects silent layout drift"` (`src/tests/core.zig:71`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住 GC：invariant negative: representation snapshot rejects silent layout drift。
-- **实现**：断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "M-cut Object handle conversion keeps the head at the handle address"` (`src/tests/core.zig:79`)
+### `test "M-cut Object handle conversion keeps the head at the handle address"` (`src/core/object.zig:11524`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「M-cut Object handle conversion keeps the head at the handle address」。
@@ -982,28 +968,28 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "first named property allocates initial_prop_size slots"` (`src/tests/core.zig:350`)
+### `test "first named property allocates initial_prop_size slots"` (`src/core/object.zig:11541`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「first named property allocates initial_prop_size slots」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "block Object accounting uses physical cell body capacity"` (`src/tests/core.zig:362`)
+### `test "block Object accounting uses physical cell body capacity"` (src/core/object.zig:11553`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「block Object accounting uses physical cell body capacity」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "shape-sized trailing property storage grows externally and compacts in place"` (`src/tests/core.zig:402`)
+### `test "shape-sized trailing property storage grows externally and compacts in place"` (src/core/object.zig:11593`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「shape-sized trailing property storage grows externally and compacts in place」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 19 处 `std.testing.expect*`。约 19 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "slots2 spill OOM rollback restores inline representation"` (`src/tests/core.zig:466`)
+### `test "slots2 spill OOM rollback restores inline representation"` (src/core/object.zig:11657`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住 OOM 契约：slots2 spill OOM rollback restores inline representation。
@@ -1038,35 +1024,35 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap BigInt value uses reserved QuickJS tag"` (`src/tests/core.zig:477`)
+### `test "heap BigInt value uses reserved QuickJS tag"` (`src/core/bigint.zig:509`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap BigInt value uses reserved QuickJS tag」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap BigInt limbs participate in runtime memory limit and accounting"` (`src/tests/core.zig:653`)
+### `test "heap BigInt limbs participate in runtime memory limit and accounting"` (`src/core/bigint.zig:520`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap BigInt limbs participate in runtime memory limit and accounting」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。设置 runtime 内存上限以注入 OOM。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap BigInt external storage reads through the storage accessors"` (`src/tests/core.zig:680`)
+### `test "heap BigInt external storage reads through the storage accessors"` (`src/core/bigint.zig:547`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap BigInt external storage reads through the storage accessors」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 15 处 `std.testing.expect*`。约 15 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap BigInt inline storage destroys by capacity across the slab boundary"` (`src/tests/core.zig:714`)
+### `test "heap BigInt inline storage destroys by capacity across the slab boundary"` (`src/core/bigint.zig:581`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap BigInt inline storage destroys by capacity across the slab boundary」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。用 `expectError` 钉失败路径。断言 21 处 `std.testing.expect*`。约 21 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "runtime and context init-deinit are leak free"` (`src/tests/core.zig:798`)
+### `test "runtime and context init-deinit are leak free"` (`src/core/runtime.zig:5121`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「runtime and context init-deinit are leak free」。
@@ -1234,27 +1220,6 @@
 - **实现**：`rt.init` 后把 `rt.memory.allocator` 临时换成一个 arena，在 arena 生效期间跑一轮 `beginBorrowedWeakCleanup` / `enqueueBorrowedWeakCleanupIdentity(2)` / `endBorrowedWeakCleanup`，再换回原分配器并 `arena.deinit()`；随后再跑一轮空的 begin/end。没有 `expect*`：判据是第二轮不得踩到已释放的 arena 内存——即那份保留下来的 hash 分配必须来自 runtime 的持久分配器。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "atom replace handles self-assignment without releasing dynamic atom"` (`src/tests/core.zig:1682`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「atom replace handles self-assignment without releasing dynamic atom」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "runtime takes typed Promise jobs without allocation"` (`src/tests/core.zig:1692`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「runtime takes typed Promise jobs without allocation」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。设置 runtime 内存上限以注入 OOM。断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "typed job reservations preserve capacity without claiming a FIFO position"` (`src/tests/core.zig:1724`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「typed job reservations preserve capacity without claiming a FIFO position」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
 ### `test "context backtrace can borrow VM frame pc lazily"` (`src/tests/core.zig:1777`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1262,54 +1227,12 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "predefined atoms preserve QuickJS order and kinds"` (`src/tests/core.zig:1807`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「predefined atoms preserve QuickJS order and kinds」。
-- **实现**：断言 22 处 `std.testing.expect*`。约 22 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
 ### `test "private brand property owns exactly one stored symbol value across replacement"` (`src/tests/core.zig:1840`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「private brand property owns exactly one stored symbol value across replacement」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "atom table interns predefined dynamic and integer atoms"` (`src/tests/core.zig:1872`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「atom table interns predefined dynamic and integer atoms」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对对象身份或存活状态。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "symbol atoms are unique even with the same description"` (`src/tests/core.zig:1898`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「symbol atoms are unique even with the same description」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "registered symbol index ignores unique symbols and private names"` (`src/tests/core.zig:1909`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「registered symbol index ignores unique symbols and private names」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对对象身份或存活状态。断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "registered value symbols keep a single registry ref"` (`src/tests/core.zig:1943`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「registered value symbols keep a single registry ref」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "atom table deinit balances live empty dynamic symbol bytes"` (`src/tests/core.zig:1956`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「atom table deinit balances live empty dynamic symbol bytes」。
-- **实现**：断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "ownership audit quarantines every atom slot the last sweep retired"` (`src/tests/core.zig:1971`)
 
@@ -1416,55 +1339,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "strings choose QuickJS-style 8-bit or 16-bit storage"` (`src/tests/core.zig:2387`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「strings choose QuickJS-style 8-bit or 16-bit storage」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 20 处 `std.testing.expect*`。约 20 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "ASCII suffix concatenation preserves source width with one result allocation"` (`src/tests/core.zig:2425`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「ASCII suffix concatenation preserves source width with one result allocation」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 9 处 `std.testing.expect*`。约 9 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "flat strings store characters inline in a single fixed-size allocation"` (`src/tests/core.zig:2447`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「flat strings store characters inline in a single fixed-size allocation」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对对象身份或存活状态。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "rope nodes keep the compact tree-only layout"` (`src/tests/core.zig:2470`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「rope nodes keep the compact tree-only layout」。
-- **实现**：断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "S2-i tail buffer views read, compare and hash exactly like the flat string"` (`src/tests/core.zig:2511`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「S2-i tail buffer views read, compare and hash exactly like the flat string」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 12 处 `std.testing.expect*`。约 12 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "S2-i in-place append moves the extensible right and leaves the shorter view intact"` (`src/tests/core.zig:2544`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「S2-i in-place append moves the extensible right and leaves the shorter view intact」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 8 处 `std.testing.expect*`。约 8 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "S2-i tail buffer doubles on overflow and widens on a utf16 append"` (`src/tests/core.zig:2579`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「S2-i tail buffer doubles on overflow and widens on a utf16 append」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 9 处 `std.testing.expect*`。约 9 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
 ### `test "S2-i append chain survives a forced collection at every allocation"` (`src/tests/core.zig:2615`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1477,34 +1351,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「S2-i the concat operator seeds a tail buffer and keeps forks independent」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "rope index compare and hash traverse nested leaves without flattening"` (`src/tests/core.zig:2700`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「rope index compare and hash traverse nested leaves without flattening」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "nested ropes preserve immutable child content"` (`src/tests/core.zig:2729`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「nested ropes preserve immutable child content」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "strings compare by code unit across storage widths"` (`src/tests/core.zig:2747`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「strings compare by code unit across storage widths」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "atom table retains its cached string until the atom dies"` (`src/tests/core.zig:2761`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「atom table retains its cached string until the atom dies」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对对象身份或存活状态。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "class table registers QuickJS standard classes and dynamic classes"` (`src/tests/core.zig:2796`)
@@ -1773,28 +1619,28 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对对象身份或存活状态。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "plain objects do not allocate class payload storage"` (`src/tests/core.zig:4746`)
+### `test "plain objects do not allocate class payload storage"` (src/core/object.zig:11688`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「plain objects do not allocate class payload storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "iterator classes store iterator state in class payload"` (`src/tests/core.zig:4757`)
+### `test "iterator classes store iterator state in class payload"` (src/core/object.zig:11699`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「iterator classes store iterator state in class payload」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "collection classes store entries in class payload"` (`src/tests/core.zig:4770`)
+### `test "collection classes store entries in class payload"` (src/core/object.zig:11712`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「collection classes store entries in class payload」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "buffer and typed array state use payload storage"` (`src/tests/core.zig:4785`)
+### `test "buffer and typed array state use payload storage"` (src/core/object.zig:11727`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「buffer and typed array state use payload storage」。
@@ -1836,7 +1682,7 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "shared buffer store reports external memory for its owner runtime"` (`src/tests/core.zig:4932`)
+### `test "shared buffer store reports external memory for its owner runtime"` (src/core/object.zig:11753`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「shared buffer store reports external memory for its owner runtime」。
@@ -1871,84 +1717,84 @@
 - **实现**：断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "regexp internals use inline storage and lastIndex uses first shape slot"` (`src/tests/core.zig:5157`)
+### `test "regexp internals use inline storage and lastIndex uses first shape slot"` (src/core/object.zig:11777`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「regexp internals use inline storage and lastIndex uses first shape slot」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "bound function state uses payload storage"` (`src/tests/core.zig:5182`)
+### `test "bound function state uses payload storage"` (src/core/object.zig:11802`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「bound function state uses payload storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "proxy state uses payload storage"` (`src/tests/core.zig:5207`)
+### `test "proxy state uses payload storage"` (src/core/object.zig:11827`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「proxy state uses payload storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "mapped arguments state uses inline var-ref storage"` (`src/tests/core.zig:5223`)
+### `test "mapped arguments state uses inline var-ref storage"` (src/core/object.zig:11843`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「mapped arguments state uses inline var-ref storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "unmapped arguments share a prepared shape and use dense element storage"` (`src/tests/core.zig:5241`)
+### `test "unmapped arguments share a prepared shape and use dense element storage"` (src/core/object.zig:11861`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「unmapped arguments share a prepared shape and use dense element storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 14 处 `std.testing.expect*`。约 14 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "object data state uses payload storage"` (`src/tests/core.zig:5296`)
+### `test "object data state uses payload storage"` (src/core/object.zig:11916`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「object data state uses payload storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "array element state uses inline fast-array storage"` (`src/tests/core.zig:5310`)
+### `test "array element state uses inline fast-array storage"` (src/core/object.zig:11930`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「array element state uses inline fast-array storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 8 处 `std.testing.expect*`。约 8 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "promise state uses payload storage"` (`src/tests/core.zig:5326`)
+### `test "promise state uses payload storage"` (src/core/object.zig:11946`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「promise state uses payload storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "generator state uses payload storage"` (`src/tests/core.zig:5345`)
+### `test "generator state uses payload storage"` (src/core/object.zig:11965`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「generator state uses payload storage」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 15 处 `std.testing.expect*`。约 15 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "generator bound and proxy payloads carry no realm compensation"` (`src/tests/core.zig:5387`)
+### `test "generator bound and proxy payloads carry no realm compensation"` (src/core/object.zig:12007`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「generator bound and proxy payloads carry no realm compensation」。
 - **实现**：断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "leaf noncarrier payloads carry no borrowed realm compensation"` (`src/tests/core.zig:5397`)
+### `test "leaf noncarrier payloads carry no borrowed realm compensation"` (src/core/object.zig:12017`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「leaf noncarrier payloads carry no borrowed realm compensation」。
 - **实现**：断言 17 处 `std.testing.expect*`。约 17 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "object payloads carry no private-name remap side tables"` (`src/tests/core.zig:5417`)
+### `test "object payloads carry no private-name remap side tables"` (src/core/object.zig:12037`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「object payloads carry no private-name remap side tables」。
@@ -2004,56 +1850,56 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.ReadOnly`。断言 12 处 `std.testing.expect*`。约 12 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "shapes keep property atoms addressable after a transition"` (`src/tests/core.zig:5694`)
+### `test "shapes keep property atoms addressable after a transition"` (src/core/shape.zig:1535`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「shapes keep property atoms addressable after a transition」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "shape shared bit and prototype transitions are tracked"` (`src/tests/core.zig:5713`)
+### `test "shape shared bit and prototype transitions are tracked"` (src/core/shape.zig:1554`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「shape shared bit and prototype transitions are tracked」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "restorePropertyLayout rebuilds a baseline layout after FAM relocation"` (`src/tests/core.zig:5735`)
+### `test "restorePropertyLayout rebuilds a baseline layout after FAM relocation"` (src/core/shape.zig:1576`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「restorePropertyLayout rebuilds a baseline layout after FAM relocation」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 9 处 `std.testing.expect*`。约 9 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "shape registry create publishes hashed live shapes"` (`src/tests/core.zig:5771`)
+### `test "shape registry create publishes hashed live shapes"` (src/core/shape.zig:1612`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「shape registry create publishes hashed live shapes」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "shape registry hash grows and reuses object root shapes"` (`src/tests/core.zig:5789`)
+### `test "shape registry hash grows and reuses object root shapes"` (src/core/shape.zig:1630`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「shape registry hash grows and reuses object root shapes」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "createObjectRoot leftover reserved flag shares hashed proto roots"` (`src/tests/core.zig:5806`)
+### `test "createObjectRoot leftover reserved flag shares hashed proto roots"` (src/core/shape.zig:1647`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「createObjectRoot leftover reserved flag shares hashed proto roots」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "reserved object root shapes reuse only an exact property capacity"` (`src/tests/core.zig:5827`)
+### `test "reserved object root shapes reuse only an exact property capacity"` (src/core/shape.zig:1668`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「reserved object root shapes reuse only an exact property capacity」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "ordinary object additions reuse transition shapes"` (`src/tests/core.zig:5846`)
+### `test "ordinary object additions reuse transition shapes"` (src/core/shape.zig:1687`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「ordinary object additions reuse transition shapes」。
@@ -2247,69 +2093,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「reference dup and free retain until final release」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "memory account tracks same-allocator allocation and free"` (`src/tests/core.zig:6822`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「memory account tracks same-allocator allocation and free」。
-- **实现**：断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "memory account treats zero-length allocations as inert"` (`src/tests/core.zig:6830`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「memory account treats zero-length allocations as inert」。
-- **实现**：断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "VM stack arena default fill matches VmStackArena{}"` (`src/tests/core.zig:6844`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「VM stack arena default fill matches VmStackArena{}」。
-- **实现**：断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "VM stack arena allocates and reuses a compact first chunk"` (`src/tests/core.zig:6859`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「VM stack arena allocates and reuses a compact first chunk」。
-- **实现**：断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "VM stack arena active miss is pure before authoritative second chunk carve"` (`src/tests/core.zig:6886`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「VM stack arena active miss is pure before authoritative second chunk carve」。
-- **实现**：断言 12 处 `std.testing.expect*`。约 12 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "VM stack arena large first carve retains the maximum chunk size"` (`src/tests/core.zig:6917`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「VM stack arena large first carve retains the maximum chunk size」。
-- **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "VM stack arena oversized carve is rejected without state or accounting changes"` (`src/tests/core.zig:6934`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「VM stack arena oversized carve is rejected without state or accounting changes」。
-- **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "VM stack arena allocation failure is retryable and keeps accounting balanced"` (`src/tests/core.zig:6947`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「VM stack arena allocation failure is retryable and keeps accounting balanced」。
-- **实现**：断言 26 处 `std.testing.expect*`。约 26 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "runtime allocator facades share memory accounting"` (`src/tests/core.zig:7000`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「runtime allocator facades share memory accounting」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "gc registry tracks live objects and intrusive list state"` (`src/tests/core.zig:7023`)
@@ -3733,13 +3516,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.NotExtensible`。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "array index detection handles QuickJS boundaries"` (`src/tests/core.zig:13701`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「array index detection handles QuickJS boundaries」。
-- **实现**：断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
 ### `test "array length tracks sparse indices and truncation"` (`src/tests/core.zig:13710`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -3768,13 +3544,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 8 处 `std.testing.expect*`。约 8 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "intrusive list supports empty insert and remove"` (`src/tests/core.zig:13834`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「intrusive list supports empty insert and remove」。
-- **实现**：断言 8 处 `std.testing.expect*`。约 8 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
 ### `test "explicit value root preserves and releases a symbol across GC"` (`src/tests/core.zig:13856`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -3789,98 +3558,98 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 9 处 `std.testing.expect*`。约 9 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "basecase multiplication never reads an uninitialized result limb"` (`src/tests/core.zig:13989`)
+### `test "basecase multiplication never reads an uninitialized result limb"` (`src/libs/bigint.zig:1442`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：负向钉：basecase multiplication never reads an uninitialized result limb。
 - **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "inline FAM multiplication matches the external kernel limb for limb"` (`src/tests/core.zig:14046`)
+### `test "inline FAM multiplication matches the external kernel limb for limb"` (`src/core/bigint.zig:665`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「inline FAM multiplication matches the external kernel limb for limb」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap multiplication costs one allocation and one block"` (`src/tests/core.zig:14182`)
+### `test "heap multiplication costs one allocation and one block"` (`src/core/bigint.zig:729`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap multiplication costs one allocation and one block」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap multiplication crosses the slab boundary into standalone blocks"` (`src/tests/core.zig:14216`)
+### `test "heap multiplication crosses the slab boundary into standalone blocks"` (`src/core/bigint.zig:763`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap multiplication crosses the slab boundary into standalone blocks」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap multiplication reports its single allocation failure cleanly"` (`src/tests/core.zig:14263`)
+### `test "heap multiplication reports its single allocation failure cleanly"` (`src/core/bigint.zig:810`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap multiplication reports its single allocation failure cleanly」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。设置 runtime 内存上限以注入 OOM。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "heap multiplication rejects an oversize product before allocating"` (`src/tests/core.zig:14307`)
+### `test "heap multiplication rejects an oversize product before allocating"` (`src/core/bigint.zig:854`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap multiplication rejects an oversize product before allocating」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.BigIntTooLarge`。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "repeated heap multiplication retains nothing as the count grows"` (`src/tests/core.zig:14330`)
+### `test "repeated heap multiplication retains nothing as the count grows"` (`src/core/bigint.zig:877`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「repeated heap multiplication retains nothing as the count grows」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "single-limb division is exact and allocation-bounded"` (`src/tests/core.zig:14367`)
+### `test "single-limb division is exact and allocation-bounded"` (`src/libs/bigint.zig:1477`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「single-limb division is exact and allocation-bounded」。
 - **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "multi-limb division survives a failure at every allocation point"` (`src/tests/core.zig:14543`)
+### `test "multi-limb division survives a failure at every allocation point"` (`src/libs/bigint.zig:1550`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「multi-limb division survives a failure at every allocation point」。
 - **实现**：断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division handles every quotient-estimate correction"` (`src/tests/core.zig:14652`)
+### `test "normalized long division handles every quotient-estimate correction"` (`src/libs/bigint.zig:1622`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division handles every quotient-estimate correction」。
 - **实现**：冻结 8 条 `Vector{ a, b, event }` 语料（`one correction` ×2、`two corrections`、`three corrections`、`add-back` ×3、`clamped estimate`），每条对四种符号组合 `inline for` 调 `expectDivisionIdentity` 校验 `a = q*b + r` 恒等式；失败时先 `std.debug.print` 打出该向量的 event 名再回抛错误。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division covers every normalization shift"` (`src/tests/core.zig:14725`)
+### `test "normalized long division covers every normalization shift"` (`src/libs/bigint.zig:1694`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division covers every normalization shift」。
 - **实现**：用 `std.Random.DefaultPrng.init(0x604C3)` 枚举全部 64 个归一化移位：除数顶 limb 的最高位固定在 `63 - shift`，除数限数 nb ∈ 2..5、被除数限数 na ∈ nb..nb+3，`na == nb` 时把顶 limb 拉到 `maxInt` 以避开提前返回，每组对正负被除数各调一次 `expectDivisionIdentity`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division covers the operand relations"` (`src/tests/core.zig:14754`)
+### `test "normalized long division covers the operand relations"` (`src/libs/bigint.zig:1722`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division covers the operand relations」。
 - **实现**：固定三限除数 `{ 0xDEAD_BEEF_CAFE_BABE, 1, 0x4000_0000_0000_0000 }`，用 6 次 `expectDivisionIdentity` 覆盖操作数关系：lhs < rhs、lhs == rhs、商恰为 1（`cloneWithAllocator` + `addPositiveSmallInPlace(1)`）、整除（`bigint.mulAlloc`）、该商下的最大余数（`bigint.subAlloc` 减一，并再跑一次双负号）。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division skips a known-zero leading digit"` (`src/tests/core.zig:14786`)
+### `test "normalized long division skips a known-zero leading digit"` (`src/libs/bigint.zig:1753`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division skips a known-zero leading digit」。
 - **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "reciprocal two-by-one division is exactly the wide division"` (`src/tests/core.zig:14844`)
+### `test "reciprocal two-by-one division is exactly the wide division"` (`src/libs/bigint.zig:1809`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「reciprocal two-by-one division is exactly the wide division」。
@@ -4636,71 +4405,8 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "array_list_erased append matches std ArrayList growth"` (`src/tests/core.zig:19046`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「array_list_erased append matches std ArrayList growth」。
-- **实现**：用 `expectError` 钉失败路径。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "array_list_erased append matches MemoryAccount allocator ledger"` (`src/tests/core.zig:19081`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「array_list_erased append matches MemoryAccount allocator ledger」。
-- **实现**：断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "array_list_erased toOwnedSlice matches std ArrayList shrink-to-fit"` (`src/tests/core.zig:19113`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「array_list_erased toOwnedSlice matches std ArrayList shrink-to-fit」。
-- **实现**：断言 9 处 `std.testing.expect*`。约 9 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger"` (`src/tests/core.zig:19156`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「array_list_erased toOwnedSlice matches MemoryAccount allocator ledger」。
-- **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "sort_erased heap matches std.sort.heap"` (`src/tests/core.zig:19195`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「sort_erased heap matches std.sort.heap」。
-- **实现**：断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "gc_audit_print leftover formats match debug.print digits"` (`src/tests/core.zig:19244`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「gc_audit_print leftover formats match debug.print digits」。
-- **实现**：21 次 `expectAuditPrintMatchesFmt(fmt, args, parts)`——同一行分别由 `std.fmt.bufPrint` 与 `gc_audit_print.write` 渲染后 `expectEqualStrings` 比对，覆盖 ARENA / DOOMED RECLAIM / BLOCK HEAP / UNBARRIERED-STORE / PROPERTY STORAGE / REPRESENTATION HEADER 等审计行里的 `{d}`、`0x{x}`、`{s}` 与 `hexPad`、`boolText` 输出。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "gc_audit_print hexPad matches zero-padded hex widths"` (`src/tests/core.zig:19580`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「gc_audit_print hexPad matches zero-padded hex widths」。
-- **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "json leftover unicode escapes match hexPad min-width"` (`src/tests/core.zig:19607`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「json leftover unicode escapes match hexPad min-width」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "gc_audit_print handles full unsigned range and writer errors"` (`src/tests/core.zig:19616`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「gc_audit_print handles full unsigned range and writer errors」。
-- **实现**：断言错误 `error.WriteFailed`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
 ## 覆盖核对
 
-- 清单函数数: 132
-- 本文标题覆盖: 678
+- 清单函数数: 112
+- 本文标题覆盖: 627
 - 未覆盖: 无

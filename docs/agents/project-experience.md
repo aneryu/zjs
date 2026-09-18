@@ -89,7 +89,7 @@ output:
 
 - lookup order and observable property operations;
 - coercion and exception timing;
-- refcount transfers and ownership of returned values;
+- ownership of returned values;
 - object/shape/prototype mutation rules;
 - GC edges, weak edges, finalization, and re-entry;
 - frame creation, argument materialization, and callback dispatch;
@@ -116,7 +116,7 @@ any one campaign:
 - `src/core/` does not absorb CLI, test262, plugin, or event-loop policy.
 - Standard globals are engine bootstrap using QuickJS-style native records;
   they are not a generic descriptor-registry layer.
-- VM values are governed by explicit refcount/cycle-GC ownership. Values that
+- VM values are governed by the tracing collector. Values that
   outlive a call cross the public handle boundary.
 - `src/compiler/` (the v2 compiler) is the only compiler and `layout=short` is production. Treat
   `plain` as a diagnostic configuration, not a second product.
@@ -157,8 +157,8 @@ before this accounting closed.
 ## 5. Performance evidence must fail closed
 
 The active workflow is documented in [Performance Workflow](../perf/README.md)
-and the bench-v8 runner contract in
-[the bench-v8 README](../../tools/perf/bench_v8/README.md). Read those files
+and the historical snapshot in
+[bench-v8 status](../perf/bench-v8-status.md). Read those files
 before using a remembered command.
 
 For any decision-relevant result, retain:
@@ -337,7 +337,7 @@ partial evidence is more useful than a polished but unsupported success claim.
 - Source ownership and layering: [architecture.md](../architecture.md)
 - Contribution scope: [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - Performance contracts: [Performance Workflow](../perf/README.md)
-- Current public performance snapshot: [bench-v8 status](../perf/bench-v8-status.md); fixed-work screening instrument: `tools/perf/bench_v8/run_fixed_pmu.py` (`mise run perf-screen`)
+- Current public performance snapshot: [bench-v8 status](../perf/bench-v8-status.md) (historical; no screening instrument)
 - Historical subsystem baseline and evidence vocabulary: the frozen
   2026-07-27 subsystem difference baseline
   (`docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`, removed

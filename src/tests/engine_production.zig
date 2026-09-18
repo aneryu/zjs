@@ -991,7 +991,7 @@ test "production embedding getProperty reports accessor exceptions" {
     try std.testing.expect(thrown.is(.object));
 }
 
-// --- TGC S3-b: host-held property-name atoms (tracing-gc-s3-spec.md §4 B) ---
+// --- TGC S3-b: host-held property-name atoms ---
 //
 // `JSContext.defineDataProperty` interns the embedder's `[]const u8` and then
 // holds the bare id across a define that allocates a shape. See the JSON-parse

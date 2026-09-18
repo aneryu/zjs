@@ -413,3 +413,500 @@ pub const BigInt = struct {
         account.destroy(BigInt, self);
     }
 };
+
+/// Deterministic limb patterns for the lockstep test. Index selects a shape
+/// family; the offset keeps the two operands from being identical.
+fn lockstepLimb(pattern: usize, index: usize, offset: usize) Limb {
+    const i = index + offset;
+    return switch (pattern) {
+        // Saturated: maximal carry propagation, top carry non-zero.
+        0 => std.math.maxInt(Limb),
+        // Single high bit: top carry zero, so the product normalizes one limb
+        // below capacity.
+        1 => if (index == 0) @as(Limb, 1) << 63 else 0,
+        // Sparse.
+        2 => if (i % 3 == 0) 1 else 0,
+        // Alternating bit stripes.
+        3 => if (i % 2 == 0) 0xAAAA_AAAA_AAAA_AAAA else 0x5555_5555_5555_5555,
+        // Low-entropy ramp.
+        4 => @as(Limb, @intCast(i)) *% 0x9E37_79B9_7F4A_7C15 +% 1,
+        else => unreachable,
+    };
+}
+
+/// Runs one multiply through both kernels and asserts the results agree in
+/// sign, length and every limb. Each operand is built once as external storage
+/// and once as inline storage, so all four storage combinations are covered.
+fn expectLockstepMul(
+    rt: *JSRuntime,
+    lhs_limbs: []const libs.bigint.Limb,
+    lhs_negative: bool,
+    rhs_limbs: []const libs.bigint.Limb,
+    rhs_negative: bool,
+) !void {
+    const bigint = libs.bigint;
+    const allocator = rt.memory.allocator;
+
+    const lhs_value = bigint.BigInt{
+        .negative = lhs_negative,
+        .limbs = @constCast(lhs_limbs),
+        .allocator = allocator,
+    };
+    const rhs_value = bigint.BigInt{
+        .negative = rhs_negative,
+        .limbs = @constCast(rhs_limbs),
+        .allocator = allocator,
+    };
+    var expected = try bigint.mulAlloc(allocator, lhs_value, rhs_value);
+    defer expected.deinit();
+
+    inline for (.{ false, true }) |lhs_inline| {
+        inline for (.{ false, true }) |rhs_inline| {
+            const lhs = try makeLockstepOperand(rt, lhs_limbs, lhs_negative, lhs_inline);
+            defer lhs.releaseForTest(rt);
+            const rhs = try makeLockstepOperand(rt, rhs_limbs, rhs_negative, rhs_inline);
+            defer rhs.releaseForTest(rt);
+            try std.testing.expectEqual(lhs_inline, lhs.isInline());
+            try std.testing.expectEqual(rhs_inline, rhs.isInline());
+            try std.testing.expect(BigInt.mulResultCannotCompactToShort(lhs, rhs));
+
+            const product = try BigInt.createMulInline(rt, lhs, rhs);
+            defer product.releaseForTest(rt);
+
+            try std.testing.expect(product.isInline());
+            try std.testing.expectEqual(expected.negative, product.negative());
+            try std.testing.expectEqualSlices(bigint.Limb, expected.limbs, product.limbs());
+            // The allocation is never shrunk, so destruction still has to use
+            // the full capacity even when normalization dropped the top limb.
+            try std.testing.expectEqual(lhs_limbs.len + rhs_limbs.len, product.capacitySliceMut().len);
+            try std.testing.expect(product.limbs().len == product.capacitySliceMut().len or
+                product.limbs().len + 1 == product.capacitySliceMut().len);
+        }
+    }
+}
+
+fn makeLockstepOperand(
+    rt: *JSRuntime,
+    limbs: []const libs.bigint.Limb,
+    negative: bool,
+    comptime want_inline: bool,
+) !*BigInt {
+    const bigint = libs.bigint;
+    if (want_inline) {
+        const big = try BigInt.createInlineUninitialized(rt, limbs.len);
+        @memcpy(big.capacitySliceMut(), limbs);
+        big.publishInline(limbs.len, negative);
+        return big;
+    }
+    const owned = bigint.BigInt{
+        .negative = negative,
+        .limbs = @constCast(limbs),
+        .allocator = rt.memory.allocator,
+    };
+    return BigInt.createFromBigInt(rt, owned);
+}
+
+test "heap BigInt value uses reserved QuickJS tag" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const big = try BigInt.create(rt, @as(i128, 1) << 90);
+    const value = big.valueRef();
+
+    try std.testing.expect(value.isBigInt());
+    try std.testing.expectEqual(gc.RefKind.big_int, value.refHeader().?.meta().flags.kind);
+}
+
+test "heap BigInt limbs participate in runtime memory limit and accounting" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var source = try libs.bigint.pow2(std.testing.allocator, 512 * 1024);
+    defer source.deinit();
+    const limb_bytes = source.limbs.len * @sizeOf(libs.bigint.Limb);
+    const baseline = rt.memory.allocated_bytes;
+
+    // Leave room for the wrapper and a small margin, but not the retained limb
+    // storage. A raw persistent_allocator clone used to bypass this limit.
+    rt.setMemoryLimit(baseline + @sizeOf(BigInt) + 1024);
+    defer rt.setMemoryLimit(null);
+    if (BigInt.createFromBigInt(rt, source)) |unexpected| {
+        unexpected.releaseForTest(rt);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+
+    rt.setMemoryLimit(null);
+    const stored = try BigInt.createFromBigInt(rt, source);
+    try std.testing.expect(rt.memory.allocated_bytes >= baseline + @sizeOf(BigInt) + limb_bytes);
+    stored.releaseForTest(rt);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
+test "heap BigInt external storage reads through the storage accessors" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const baseline = rt.memory.allocated_bytes;
+
+    // Zero owns no limbs in either storage mode, so `limbs_ptr` is null and the
+    // accessors must still hand back an empty slice rather than deref it.
+    const zero = try BigInt.create(rt, 0);
+    try std.testing.expect(zero.isExternal());
+    try std.testing.expect(!zero.isInline());
+    try std.testing.expect(!zero.negative());
+    try std.testing.expectEqual(@as(usize, 0), zero.limbs().len);
+    try std.testing.expectEqual(@as(usize, 0), zero.famBytes());
+    zero.releaseForTest(rt);
+
+    const negative_multi = try BigInt.create(rt, -(@as(i128, 1) << 90));
+    try std.testing.expect(negative_multi.isExternal());
+    try std.testing.expect(negative_multi.negative());
+    try std.testing.expectEqual(@as(usize, 2), negative_multi.limbs().len);
+    try std.testing.expectEqual(@as(libs.bigint.Limb, 0), negative_multi.limbs()[0]);
+    try std.testing.expectEqual(@as(libs.bigint.Limb, 1) << 26, negative_multi.limbs()[1]);
+    // External storage is adopted from an already-normalized library value, so
+    // the whole allocation is live.
+    try std.testing.expectEqual(negative_multi.limbs().len, negative_multi.capacitySliceMut().len);
+    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(libs.bigint.Limb)), negative_multi.famBytes());
+
+    const borrowed = negative_multi.borrowedValue(rt.memory.allocator);
+    try std.testing.expect(borrowed.negative);
+    try std.testing.expectEqualSlices(libs.bigint.Limb, negative_multi.limbs(), borrowed.limbs);
+
+    negative_multi.releaseForTest(rt);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
+test "heap BigInt inline storage destroys by capacity across the slab boundary" {
+    const bigint = libs.bigint;
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const baseline = rt.memory.allocated_bytes;
+
+    const slab = memory.SmallObjectSlab;
+    const wrapper = @sizeOf(BigInt);
+    const limb_bytes = @sizeOf(bigint.Limb);
+    const max_slab_payload = slab.max_size - slab.block_header_bytes;
+    const last_slab_capacity = (max_slab_payload - wrapper) / limb_bytes;
+    comptime std.debug.assert(last_slab_capacity > 4);
+    // Derive the boundary from the active representation: trace and RC keep
+    // different BigInt wrapper sizes, but this test must cross the allocator
+    // boundary in both configurations. Both destroy paths have to release
+    // `capacity` limbs even when the published length is shorter.
+    const capacities = [_]usize{
+        0,
+        1,
+        2,
+        4,
+        last_slab_capacity - 1,
+        last_slab_capacity,
+        last_slab_capacity + 1,
+        last_slab_capacity + 8,
+    };
+    try std.testing.expect(slab.canUse(wrapper + last_slab_capacity * limb_bytes, .@"8"));
+    try std.testing.expect(!slab.canUse(wrapper + (last_slab_capacity + 1) * limb_bytes, .@"8"));
+
+    for (capacities) |capacity| {
+        const big = try BigInt.createInlineUninitialized(rt, capacity);
+        try std.testing.expectEqual(
+            slab.canUse(wrapper + capacity * limb_bytes, .@"8"),
+            capacity <= last_slab_capacity,
+        );
+        try std.testing.expect(big.isInline());
+        try std.testing.expect(!big.isExternal());
+        try std.testing.expectEqual(@as(usize, 0), big.limbs().len);
+        try std.testing.expectEqual(capacity, big.capacitySliceMut().len);
+        try std.testing.expectEqual(capacity * @sizeOf(bigint.Limb), big.famBytes());
+
+        // The FAM tail must start right after the struct and be limb-aligned.
+        if (capacity != 0) {
+            const expected_base = @intFromPtr(big) + @sizeOf(BigInt);
+            try std.testing.expectEqual(expected_base, @intFromPtr(big.capacitySliceMut().ptr));
+            try std.testing.expectEqual(@as(usize, 0), expected_base % @alignOf(bigint.Limb));
+        }
+
+        const window = big.capacitySliceMut();
+        for (window, 0..) |*limb, i| limb.* = @as(bigint.Limb, @intCast(i)) + 1;
+        // Publish one limb short of capacity where possible: that is exactly the
+        // shape an inline product takes when it normalizes away a leading zero,
+        // and the case where destroying by `len` would free the wrong size.
+        const published = if (capacity == 0) 0 else capacity - 1;
+        big.publishInline(published, true);
+        try std.testing.expectEqual(published, big.limbs().len);
+        try std.testing.expectEqual(capacity, big.capacitySliceMut().len);
+        try std.testing.expectEqual(published != 0, big.negative());
+        for (big.limbs(), 0..) |limb, i| {
+            try std.testing.expectEqual(@as(bigint.Limb, @intCast(i)) + 1, limb);
+        }
+        const borrowed = big.borrowedValue(rt.memory.allocator);
+        try std.testing.expectEqualSlices(bigint.Limb, big.limbs(), borrowed.limbs);
+
+        big.releaseForTest(rt);
+        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    }
+
+    // len == capacity is the ordinary published shape.
+    const full = try BigInt.createInlineUninitialized(rt, 3);
+    for (full.capacitySliceMut()) |*limb| limb.* = std.math.maxInt(bigint.Limb);
+    full.publishInline(3, false);
+    try std.testing.expectEqual(@as(usize, 3), full.limbs().len);
+    try std.testing.expect(!full.negative());
+    full.releaseForTest(rt);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+
+    try std.testing.expectError(
+        error.BigIntTooLarge,
+        BigInt.createInlineUninitialized(rt, bigint.max_limbs + 1),
+    );
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
+test "inline FAM multiplication matches the external kernel limb for limb" {
+    const bigint = libs.bigint;
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const baseline = rt.memory.allocated_bytes;
+    const slab = memory.SmallObjectSlab;
+    const max_slab_payload = slab.max_size - slab.block_header_bytes;
+    const last_slab_capacity =
+        (max_slab_payload - @sizeOf(BigInt)) / @sizeOf(bigint.Limb);
+
+    // Ordered shapes: the basecase loop takes the shorter operand as its outer
+    // row, so AxB and BxA exercise different nestings.
+    const shapes = [_][2]usize{
+        .{ 1, 2 },                                                                .{ 2, 1 },                                                                    .{ 2, 2 },                                                                              .{ 1, 8 }, .{ 8, 1 },
+        .{ 3, 5 },                                                                .{ 5, 3 },                                                                    .{ 4, 4 },                                                                              .{ 8, 8 }, .{ 16, 16 },
+        // Pin the allocator boundary for the active RC/trace representation:
+        // one last slab FAM followed by two standalone FAM capacities.
+        .{ last_slab_capacity / 2, last_slab_capacity - last_slab_capacity / 2 }, .{ last_slab_capacity / 2, last_slab_capacity + 1 - last_slab_capacity / 2 }, .{ last_slab_capacity / 2 + 1, last_slab_capacity + 2 - (last_slab_capacity / 2 + 1) },
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x6D03C);
+    const random = prng.random();
+
+    for (shapes) |shape| {
+        for (0..5) |pattern| {
+            inline for (.{ false, true }) |lhs_negative| {
+                inline for (.{ false, true }) |rhs_negative| {
+                    const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[0]);
+                    defer std.testing.allocator.free(lhs_limbs);
+                    const rhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[1]);
+                    defer std.testing.allocator.free(rhs_limbs);
+                    for (lhs_limbs, 0..) |*l, i| l.* = lockstepLimb(pattern, i, 0);
+                    for (rhs_limbs, 0..) |*l, i| l.* = lockstepLimb(pattern, i, 1);
+                    // Both operands must stay normalized and non-zero, which is
+                    // what the heap x heap route guarantees its callee.
+                    lhs_limbs[shape[0] - 1] |= 1;
+                    rhs_limbs[shape[1] - 1] |= 1;
+
+                    try expectLockstepMul(rt, lhs_limbs, lhs_negative, rhs_limbs, rhs_negative);
+                    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+                }
+            }
+        }
+    }
+
+    // Random widths, both signs, so the fixed patterns above are not the only
+    // carry chains covered.
+    for (0..400) |_| {
+        const lhs_len = random.intRangeAtMost(usize, 1, 16);
+        const rhs_len = random.intRangeAtMost(usize, 1, 16);
+        if (lhs_len + rhs_len < 3) continue;
+        const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, lhs_len);
+        defer std.testing.allocator.free(lhs_limbs);
+        const rhs_limbs = try std.testing.allocator.alloc(bigint.Limb, rhs_len);
+        defer std.testing.allocator.free(rhs_limbs);
+        for (lhs_limbs) |*l| l.* = random.int(bigint.Limb);
+        for (rhs_limbs) |*l| l.* = random.int(bigint.Limb);
+        lhs_limbs[lhs_len - 1] |= 1;
+        rhs_limbs[rhs_len - 1] |= 1;
+        try expectLockstepMul(rt, lhs_limbs, random.boolean(), rhs_limbs, random.boolean());
+        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    }
+}
+
+test "heap multiplication costs one allocation and one block" {
+    const bigint = libs.bigint;
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // 2x2 limbs: the shape the JS-level benchmark uses.
+    const operand_limbs = [_]bigint.Limb{ 1, @as(bigint.Limb, 1) << 63 };
+    const lhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
+    defer lhs.releaseForTest(rt);
+    const rhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
+    defer rhs.releaseForTest(rt);
+
+    const count_before = rt.memory.allocation_count;
+    const bytes_before = rt.memory.allocated_bytes;
+    const product = try BigInt.createMulInline(rt, lhs, rhs);
+
+    // One allocation per multiply, matching qjs's single js_bigint_new. The old
+    // topology was two: mulAlloc's limb block plus createFromOwned's wrapper.
+    try std.testing.expectEqual(count_before + 1, rt.memory.allocation_count);
+
+    const payload = @sizeOf(BigInt) + 4 * @sizeOf(bigint.Limb);
+    try std.testing.expectEqual(
+        bytes_before + memory.MemoryAccount.accountedSizeForRequest(payload, .@"8"),
+        rt.memory.allocated_bytes,
+    );
+    // The fused wrapper+limbs payload remains slab-backed in both the RC and
+    // compact trace representations.
+    try std.testing.expect(memory.SmallObjectSlab.canUse(payload, .@"8"));
+
+    product.releaseForTest(rt);
+    try std.testing.expectEqual(count_before, rt.memory.allocation_count);
+    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+}
+
+test "heap multiplication crosses the slab boundary into standalone blocks" {
+    const bigint = libs.bigint;
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const slab = memory.SmallObjectSlab;
+    const max_slab_payload = slab.max_size - slab.block_header_bytes;
+    const last_slab_capacity =
+        (max_slab_payload - @sizeOf(BigInt)) / @sizeOf(bigint.Limb);
+    const half = last_slab_capacity / 2;
+    // Cross the allocator boundary of the active RC/trace representation;
+    // all three products must allocate once and release cleanly.
+    const cases = [_][2]usize{
+        .{ half, last_slab_capacity - half },
+        .{ half, last_slab_capacity + 1 - half },
+        .{ half + 1, last_slab_capacity + 2 - (half + 1) },
+    };
+    for (cases) |shape| {
+        const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[0]);
+        defer std.testing.allocator.free(lhs_limbs);
+        const rhs_limbs = try std.testing.allocator.alloc(bigint.Limb, shape[1]);
+        defer std.testing.allocator.free(rhs_limbs);
+        for (lhs_limbs) |*l| l.* = std.math.maxInt(bigint.Limb);
+        for (rhs_limbs) |*l| l.* = std.math.maxInt(bigint.Limb);
+
+        const lhs = try makeLockstepOperand(rt, lhs_limbs, false, false);
+        defer lhs.releaseForTest(rt);
+        const rhs = try makeLockstepOperand(rt, rhs_limbs, false, false);
+        defer rhs.releaseForTest(rt);
+
+        const count_before = rt.memory.allocation_count;
+        const bytes_before = rt.memory.allocated_bytes;
+        const product = try BigInt.createMulInline(rt, lhs, rhs);
+
+        const payload = @sizeOf(BigInt) + (shape[0] + shape[1]) * @sizeOf(bigint.Limb);
+        try std.testing.expectEqual(count_before + 1, rt.memory.allocation_count);
+        try std.testing.expectEqual(
+            slab.canUse(payload, .@"8"),
+            shape[0] + shape[1] <= last_slab_capacity,
+        );
+
+        product.releaseForTest(rt);
+        try std.testing.expectEqual(count_before, rt.memory.allocation_count);
+        try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+    }
+}
+
+test "heap multiplication reports its single allocation failure cleanly" {
+    const bigint = libs.bigint;
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, 16);
+    defer std.testing.allocator.free(lhs_limbs);
+    const rhs_limbs = try std.testing.allocator.alloc(bigint.Limb, 16);
+    defer std.testing.allocator.free(rhs_limbs);
+    for (lhs_limbs) |*l| l.* = std.math.maxInt(bigint.Limb);
+    for (rhs_limbs) |*l| l.* = std.math.maxInt(bigint.Limb);
+
+    const lhs = try makeLockstepOperand(rt, lhs_limbs, false, false);
+    defer lhs.releaseForTest(rt);
+    const rhs = try makeLockstepOperand(rt, rhs_limbs, true, false);
+    defer rhs.releaseForTest(rt);
+
+    // Fusing the wrapper and the limbs moves the limit check and the GC trigger
+    // from a 56-byte wrapper allocation to the whole 312-byte block. Leave room
+    // for a wrapper but not for the block, so the fused allocation is the one
+    // that has to fail.
+    const count_before = rt.memory.allocation_count;
+    const bytes_before = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(bytes_before + @sizeOf(BigInt) + 16);
+    defer rt.setMemoryLimit(null);
+    if (BigInt.createMulInline(rt, lhs, rhs)) |unexpected| {
+        unexpected.releaseForTest(rt);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    // The multiply has exactly one failure point, so a rejected allocation
+    // leaves nothing behind at all.
+    try std.testing.expectEqual(count_before, rt.memory.allocation_count);
+    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+
+    rt.setMemoryLimit(null);
+    const product = try BigInt.createMulInline(rt, lhs, rhs);
+    try std.testing.expect(product.negative());
+    try std.testing.expectEqual(@as(usize, 32), product.capacitySliceMut().len);
+    product.releaseForTest(rt);
+    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+}
+
+test "heap multiplication rejects an oversize product before allocating" {
+    const bigint = libs.bigint;
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // max_limbs is the js_bigint_new cap (quickjs.c:11592-11596). Two operands
+    // just over half of it produce a product that exceeds it, and the check has
+    // to happen before the FAM allocation.
+    const half = bigint.max_limbs / 2 + 1;
+    const limbs = try std.testing.allocator.alloc(bigint.Limb, half);
+    defer std.testing.allocator.free(limbs);
+    for (limbs) |*l| l.* = std.math.maxInt(bigint.Limb);
+
+    const lhs = try makeLockstepOperand(rt, limbs, false, false);
+    defer lhs.releaseForTest(rt);
+    const rhs = try makeLockstepOperand(rt, limbs, false, false);
+    defer rhs.releaseForTest(rt);
+
+    const bytes_before = rt.memory.allocated_bytes;
+    try std.testing.expectError(error.BigIntTooLarge, BigInt.createMulInline(rt, lhs, rhs));
+    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+}
+
+test "repeated heap multiplication retains nothing as the count grows" {
+    const bigint = libs.bigint;
+    const operand_limbs = [_]bigint.Limb{ 3, @as(bigint.Limb, 1) << 63 };
+
+    // P6-03e: the single-allocation topology has to be flat in the iteration
+    // count. Both the live account and the peak live-allocation count are
+    // checked, because a leak would show in the first and a retained temporary
+    // in the second.
+    var previous_peak: ?usize = null;
+    for ([_]usize{ 0, 1, 10, 1000 }) |n| {
+        const rt = try JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        const lhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
+        defer lhs.releaseForTest(rt);
+        const rhs = try makeLockstepOperand(rt, &operand_limbs, true, false);
+        defer rhs.releaseForTest(rt);
+
+        const bytes_before = rt.memory.allocated_bytes;
+        const count_before = rt.memory.allocation_count;
+        const peak_before = rt.memory.peak_allocation_count;
+
+        for (0..n) |_| {
+            const product = try BigInt.createMulInline(rt, lhs, rhs);
+            product.releaseForTest(rt);
+        }
+
+        try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(count_before, rt.memory.allocation_count);
+        // One live product at a time regardless of n: the peak rises by exactly
+        // one over the pre-loop state on the first iteration and never again.
+        const expected_peak = if (n == 0) peak_before else @max(peak_before, count_before + 1);
+        try std.testing.expectEqual(expected_peak, rt.memory.peak_allocation_count);
+        if (previous_peak) |p| if (n != 0) try std.testing.expectEqual(p, rt.memory.peak_allocation_count);
+        if (n != 0) previous_peak = rt.memory.peak_allocation_count;
+    }
+}

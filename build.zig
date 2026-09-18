@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine the atom slots retired by the last sweep so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
-    // TGC R3 roots diagnosis (docs/tracing-gc-s0-spec.md §L4). Links scalar
+    // TGC R3 roots diagnosis. Links scalar
     // ValueRootFrames in production, attributes every object the conservative
     // scan alone kept alive (`--gc-stats` "conservative-only census"), and
     // arms the L3 unbarriered-store probe in the ReleaseFast binary. Never on

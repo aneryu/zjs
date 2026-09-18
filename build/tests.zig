@@ -41,9 +41,9 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // larger half of `zig build test` and it parallelises where the
     // single-module compile cannot. A filtered run stays a single process so
     // its output reads as one list.
-    // 16 shards over the 18-core run pool (`-Dgate-run-cpus`): the run
-    // phase is bounded by its longest shard, and finer shards balance the
-    // few heavy tests (2026-09-06: 8 shards, longest 7.7 s of a ~8 s phase).
+    // 16 shards: the run phase is bounded by its longest shard, and finer
+    // shards balance the few heavy tests (2026-09-06: 8 shards, longest
+    // 7.7 s of a ~8 s phase).
     const test_shards_option = b.option(usize, "test-shards", "Run the unified suite as this many parallel shard processes (default 16; 1 = unsharded)") orelse 16;
     const test_shards: usize = if (test_filter != null or test_shards_option == 0) 1 else test_shards_option;
     // Debug info is half of the unified compile (measured 2026-09-05: ~60 s
@@ -72,12 +72,11 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
     };
-    // The unified suite follows -Doptimize; the scoped targets below pin
-    // Debug. They therefore cannot share one expectation, and did not have to
-    // share one options object either -- that reuse is exactly how a Debug
-    // artifact would have ended up attesting a ReleaseSafe configuration.
+    // The unified suite follows -Doptimize. Embedding pins Debug on the
+    // public root and therefore has its own options object -- sharing one
+    // with this suite is how a Debug artifact would attest the wrong
+    // `optimize` field.
     const test_options = addEngineOptions(b, engine_option_inputs);
-    const scoped_test_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
@@ -109,7 +108,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const fast_test_step = b.step("test-fast", "Run a required test-name substring from the unified binary without recompiling the selection: test-fast -- <substring>");
     fast_test_step.dependOn(&run_fast_tests.step);
 
-    // TGC S0 safety net (docs/tracing-gc-s0-spec.md §L2): the same suite with
+    // TGC S0 safety net: the same suite with
     // the collector at every safepoint (`ZJS_GC_STRESS=1`, cadence 64), every
     // minor's condemned set re-derived by a fresh full trace
     // (`ZJS_GC_VERIFY_MINOR=fatal`: a precisely reachable corpse panics), and
@@ -207,123 +206,33 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const smoke_dev_step = b.step("smoke-dev", "Run JavaScript smoke fixtures against the Debug zjs");
     smoke_dev_step.dependOn(&run_smoke_dev_tests.step);
 
-    // Explicit changed-area targets avoid compiling and running the entire
-    // unified suite during focused work. Selection stays developer-driven;
-    // checkpoint and production gates continue to use the unified root.
-    const scoped_test_engine_mod = b.createModule(.{
-        .root_source_file = b.path("src/internal_root.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    scoped_test_engine_mod.addOptions("build_options", scoped_test_options);
-
-    // Deterministic representation dump for driver review.  It is a tooling
-    // artifact over the same Debug engine module used by focused core tests;
-    // the shipped CLI does not import it or embed the committed baseline.
-    const gc_representation_mod = b.createModule(.{
-        .root_source_file = b.path("src/gc_representation.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .imports = &.{
-            .{ .name = "zjs", .module = scoped_test_engine_mod },
-        },
-    });
-    const gc_representation_exe = b.addExecutable(.{
-        .name = "gc-representation-snapshot",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/gc/representation_snapshot.zig"),
-            .target = target,
-            .optimize = .Debug,
-            .imports = &.{
-                .{ .name = "gc_representation", .module = gc_representation_mod },
-            },
-        }),
-    });
-    forceLlvmBackendOnDebug(gc_representation_exe);
-    const run_gc_representation = b.addRunArtifact(gc_representation_exe);
-    const gc_representation_step = b.step(
-        "gc-representation-snapshot",
-        "Print the deterministic GC representation snapshot",
-    );
-    gc_representation_step.dependOn(&run_gc_representation.step);
-
-    const ScopedTestConfig = struct {
-        name: []const u8,
-        description: []const u8,
-        root_source_file: []const u8,
-        filter: []const u8,
-    };
-    const scoped_test_configs = [_]ScopedTestConfig{
-        .{ .name = "test-core", .description = "Run focused core value, object, GC, and ownership tests", .root_source_file = "src/core_tests.zig", .filter = "tests.core." },
-        .{ .name = "test-parser", .description = "Run focused lexer and parser tests", .root_source_file = "src/parser_tests.zig", .filter = "tests.parser." },
-        .{ .name = "test-bytecode", .description = "Run focused bytecode and pipeline tests", .root_source_file = "src/bytecode_tests.zig", .filter = "tests.bytecode." },
-        .{ .name = "test-exec", .description = "Run focused execution and VM tests", .root_source_file = "src/exec_tests.zig", .filter = "tests.exec." },
-        .{ .name = "test-builtins", .description = "Run focused ECMAScript built-in tests", .root_source_file = "src/builtins_tests.zig", .filter = "tests.builtins." },
-        .{ .name = "test-runtime", .description = "Run focused host event-loop tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime." },
-        .{ .name = "test-runner", .description = "Run focused test262 runner tests", .root_source_file = "src/runner_tests.zig", .filter = "cli.run_test262" },
-        .{ .name = "test-compiler", .description = "Run focused compiler (QCP) tests", .root_source_file = "src/compiler_tests.zig", .filter = "compiler." },
-    };
-    inline for (scoped_test_configs) |config| {
-        const scoped_root = b.createModule(.{
-            .root_source_file = b.path(config.root_source_file),
-            .target = target,
-            .optimize = .Debug,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zjs", .module = scoped_test_engine_mod },
-            },
-        });
-        scoped_root.addOptions("build_options", scoped_test_options);
-        const scoped_tests = b.addTest(.{
-            .name = config.name,
-            .root_module = scoped_root,
-            .filters = &.{config.filter},
-        });
-        forceLlvmBackendOnDebug(scoped_tests);
-        scoped_tests.test_runner = .{
-            .path = b.path("tools/timing_test_runner.zig"),
-            .mode = .simple,
-        };
-        const run_scoped_tests = b.addRunArtifact(scoped_tests);
-        run_scoped_tests.addArg("--require-tests");
-        if (b.args) |args| run_scoped_tests.addArgs(args);
-        const scoped_step = b.step(config.name, config.description);
-        scoped_step.dependOn(&run_scoped_tests.step);
-    }
-
     // Shared-engine convergence census (`zig build test-leak-census`): run
-    // both shared tiers twice in one process. Pass 0 warms legitimate lazy
-    // state; pass 1 enforces the module-accounted allocation high-water gate.
-    // This is an instrumentation/nightly tier, not a checkpoint dependency.
-    const leak_census_root = b.createModule(.{
-        .root_source_file = b.path("src/leak_census_tests.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zjs", .module = scoped_test_engine_mod },
-        },
+    // the exec and builtins tiers twice from the unified binary. Pass 0
+    // warms legitimate lazy state; pass 1 enforces the module-accounted
+    // allocation high-water gate. Nightly instrumentation, not a checkpoint
+    // dependency. Multiple `--filter` arguments are OR-matched.
+    const run_leak_census_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
+    run_leak_census_tests.addArgs(&.{
+        "--require-tests",
+        "--repeat",
+        "2",
+        "--leak-census",
+        "--skip-prefix",
+        "tests.stress.",
+        "--filter",
+        "tests.exec.",
+        "--filter",
+        "tests.builtins.",
     });
-    leak_census_root.addOptions("build_options", scoped_test_options);
-    const leak_census_tests = b.addTest(.{
-        .name = "leak-census-tests",
-        .root_module = leak_census_root,
-    });
-    forceLlvmBackendOnDebug(leak_census_tests);
-    leak_census_tests.test_runner = .{
-        .path = b.path("tools/timing_test_runner.zig"),
-        .mode = .simple,
-    };
-    const run_leak_census_tests = b.addRunArtifact(leak_census_tests);
-    run_leak_census_tests.addArgs(&.{ "--require-tests", "--repeat", "2", "--leak-census" });
+    run_leak_census_tests.setName("run test unified-tests (leak census)");
+    if (b.args) |args| run_leak_census_tests.addArgs(args);
     const test_leak_census_step = b.step("test-leak-census", "Run the shared exec and builtins tiers twice and reject unaccounted retained growth (instrumentation tier; runs nightly)");
     test_leak_census_step.dependOn(&run_leak_census_tests.step);
 
     // Public-module assembly check. Independent Debug `zjs` module rooted at
-    // `src/root.zig` (not internal_root) and its own options object (rule 丙).
-    // The shell does not attest: the public surface does not export
-    // config_signature. Hangs on engine-production-gate, not checkpoint.
+    // `src/root.zig` (not internal_root) and its own options object (rule C).
+    // The public surface does not export config_signature, so this artifact
+    // does not attest. Hangs on engine-production-gate, not checkpoint.
     const embedding_engine_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
     const embedding_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -338,7 +247,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const embedding_options_mod = embedding_engine_options.createModule();
     embedding_zjs_mod.addImport("build_options", embedding_options_mod);
     const embedding_root = b.createModule(.{
-        .root_source_file = b.path("src/embedding_tests.zig"),
+        .root_source_file = b.path("src/tests/embedding_examples.zig"),
         .target = target,
         .optimize = .Debug,
         .link_libc = true,
@@ -350,7 +259,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const embedding_tests = b.addTest(.{
         .name = "test-embedding",
         .root_module = embedding_root,
-        .filters = &.{"tests.embedding_examples."},
     });
     forceLlvmBackendOnDebug(embedding_tests);
     embedding_tests.test_runner = .{
@@ -366,9 +274,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // uniquely proves is that `src/root.zig` assembles and its comptime pins
     // hold; the same test bodies (and their runtime pins, e.g. the public
     // decl counts) already run inside the unified suite through
-    // `internal_root`. checkpoint-gate takes this ~6 s sema pass instead of
-    // the ~40 s Debug engine compile + link; the production gate keeps the
-    // full run.
+    // `internal_root`. checkpoint-gate takes this sema pass instead of the
+    // Debug engine compile + link; the production gate keeps the full run.
     const check_embedding = b.addTest(.{
         .name = "check-embedding",
         .root_module = embedding_tests.root_module,
@@ -378,7 +285,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
     };
-    const check_embedding_step = b.step("check-embedding", "Semantic-analysis-only compile of the public-root embedding test shell (no codegen, no run)");
+    const check_embedding_step = b.step("check-embedding", "Semantic-analysis-only compile of the public-root embedding tests (no codegen, no run)");
     check_embedding_step.dependOn(&check_embedding.step);
 
     // OOM injection suite (`zig build test-oom`): exhaustive allocation

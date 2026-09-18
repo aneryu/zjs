@@ -1,72 +1,27 @@
 # Performance Workflow
 
-This directory contains performance notes and the checked performance status
-for `zjs`. No `zig build` step gates on performance, and nothing here runs on
-shared CI runners: every run described below is a local diagnostic governed by
-the [measurement contract](measurement-contracts.md).
-
-There is one performance *merge* gate, and it is not a build step:
-[refactor-policy](../refactor-policy.md) rule 2 requires a bench-v8 A/B against
-a frozen merge-base build before any hot-path split, move, or rename lands.
+This directory contains performance notes and a historical status snapshot
+for `zjs`. Nothing here is a merge gate. Local `zig build perf-benchmark`
+and `perf stat` are diagnostics; [verification-policy](../verification-policy.md)
+is the authority.
 
 Current design notes:
 
-- [bench-v8 status](bench-v8-status.md) — the public claim
-- Fixed-work PMU screening: `tools/perf/bench_v8/run_fixed_pmu.py`
-  (`mise run perf-screen`) — the per-candidate instruction/cycle screen;
-  only candidates that pass it spend a full score A/B. It replaced the
-  retired external-checkout zoo runner (`tools/perf/zoo/`, removed
-  2026-08-29; git history)
-- [GC behaviour baseline](gc-baseline.md) — pre-refactor collector counters
+- [bench-v8 status](bench-v8-status.md) — historical snapshot
 - [Object and shape implementation](object-shape-design.md)
 - [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
 - Frozen subsystem baseline (historical):
   `docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md` — removed
   2026-08-25; recover from git history
 
-## Iteration ladder (2026-08-29)
+## bench-v8 (Octane 2.0, v9)
 
-Per-candidate measurement is tiered; do not start at the bottom:
+The recorded suite is full Octane 2.0 (since 2026-08-25; all 17 results
+since 2026-09-05, when zlib's shell `read` shim landed). The in-tree
+runner was removed with `tools/perf`; the snapshot is
+[bench-v8-status.md](bench-v8-status.md).
 
-1. **Screen** — `mise run perf-screen -- --benches <touched>` (fixed-work
-   instructions/cycles vs pinned QuickJS, ~30s per benchmark at
-   `--samples 2`). `ZJS_MEASURE_FIELD=a|b|host` selects the field; B is the
-   compatibility default. A candidate that does not move the screen does not
-   get a score run.
-2. **Targeted score** — `run_benchv8_compare.py --suites <bench>
-   --samples <high>` for single-benchmark iteration (diagnostic subset,
-   never headline-eligible).
-3. **Acceptance** — the full-suite rule-2 A/B (`--baseline`, parallel
-   clusters) or the serial published-metric protocol, paid only for
-   candidates that survived screening.
-
-Instruction counts are a screening instrument, not an acceptance verdict
-(2026-08-13 owner ruling: the score adjudicates; instruction deltas cannot
-price layout or microarchitecture effects).
-
-Acceptance sample count: a same-binary null experiment under the parallel
-rule-2 protocol (2026-08-29, artifact schema in `run_benchv8_compare.py`)
-resolved the headline to roughly ±1% at `--samples 4` and ±0.6% at
-`--samples 8`, with a systematic 1–2% bias between cluster assignments
-that the swap-balanced schedule cancels. Keep `--samples 8` for
-acceptance; reserve 4 for rough intermediate looks.
-
-## bench-v8 (Octane 2.0, v9) — the public-metric tooling
-
-The vendored suite in `tools/perf/bench_v8/suite/` is full Octane 2.0
-(since 2026-08-25; all 17 results since 2026-09-05, when zlib's shell
-`read` shim landed — see
-[tools/perf/bench_v8/README.md](../../tools/perf/bench_v8/README.md) for the
-shim and provenance). The three entry points:
-
-```sh
-zig build perf-bench-v8                                # single-engine local diagnostic
-python3 tools/perf/bench_v8/run_benchv8_compare.py \
-  --zjs <candidate> --baseline <merge-base build> ...  # refactor-policy rule 2 A/B
-python3 tools/perf/bench_v8/run_benchv8_multiengine.py # N-way engine snapshot
-```
-
-Under the v9 suite there is no owner-ruled *published* metric yet, and
+Under the v9 suite there is no owner-ruled *published* metric, and
 ratios are only comparable against the same reference-binary fingerprint
 (hash + compiler) — see the 2026-08-25 reference-drift adjudication in
 [bench-v8-status.md](bench-v8-status.md).
@@ -85,201 +40,17 @@ results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
 release gate.
 
-### Whole-process measurement contract
-
-`tools/compare/run_microbench.js` is governed by
-`tools/compare/measurement_policy.json`, the authoritative policy. Nothing reads
-thresholds from the artifact under test.
-
-`--formal` turns on formal sampling. It fails closed -- non-zero exit,
-`complete=false`, `headline=null`, `pairedGeomean=null` -- when the sampling
-design cannot be balanced (odd sample count, odd warmup, an artifact-declared
-order that does not match the recorded execution, a treatment missing from a
-round), when the collector or a measured child is not pinned to exactly the
-requested CPU, when affinity moves during the run, when the PMU serving the CPU
-cannot be identified, or when required provenance is missing.
-
-```sh
-ZJS_MEASUREMENT_LOCK=/tmp/zjs-host-heavy.lock ZJS_MEASUREMENT_LOCK_MODE=exclusive \
-flock -x /tmp/zjs-host-heavy.lock taskset -c 19 bun tools/compare/run_microbench.js \
-  --formal --cpu 19 --iters 8 --warmup 4 \
-  --zjs path/to/zjs --qjs path/to/qjs --output /tmp/microbench.json
-
-bun tools/compare/validate_measurement_artifact.js --formal /tmp/microbench.json
-```
-
-The validator additionally refuses a snapshot taken from a dirty worktree, a
-case whose recorded source hash disagrees with the suite table, a startup
-baseline from a different measurement generation, and any artifact carrying its
-own policy body.
-
-`startupAdjustedGeometricMean` is permanently `null`: it is diagnostic-only and
-not headline eligible. Per-case adjusted ratios exist only for cases whose
-startup residual clears the startup IQR, the case's own IQR and the minimum time
-resolution; everything else is `unresolved`.
-
-Contract and red-team suites:
-
-```sh
-zig build perf-measurement-contract
-bun tools/compare/test_measurement_redteam.js --zjs path/to/zjs --qjs path/to/qjs --cpu 19
-```
-
-The red-team suite requires a clean worktree: the reference artifact it tampers
-with must record `dirty=false`, otherwise every attack is adjudicated by the
-dirty-worktree rule instead of its own.
-
-### Session mode
-
-`--sessions N` (or `BENCH_SESSIONS`) groups ABBA rounds into independent timing
-sessions, each with its own warmup; `--interleaved` requires it. Session mode is
-**off by default** and session results are never headline eligible: the artifact
-carries a versioned `meta.sessions` block (`schemaVersion: 2`) and session
-samples live in their own pool, never merged into the legacy
-one-process-per-case pool. With `--sessions 1` and no `--interleaved` the legacy
-path is used unchanged.
-
-### Native callback and execution-root suite
-
-`native-callback` is the mechanism-focused suite for synchronous
-native-to-bytecode re-entry. It covers direct, `.call`, `.apply`,
-`Reflect.apply`, and spread calls at argument counts 0/1/2/8/9/16/64; dense,
-holey, generic array-like, and Proxy argument sources; bytecode, native, bound,
-and Proxy targets; Array, Map, JSON, and Promise callbacks; callback-to-helper
-chains; and Promise-job, generator-resume, and async-resume negative controls.
-Every runnable case prints a deterministic checksum before it is timed.
-Cross-Realm construction is listed explicitly as unsupported by the common
-qjs/zjs CLI surface and remains covered by `src/tests/exec.zig`.
-
-Record the full current ReleaseFast diagnostic with:
-
-```sh
-taskset -c 19 zig build perf-native-callback --summary all
-```
-
-The step uses five warmups, 30 timed samples, three independent sessions, and
-ABBA interleaving. It writes
-`.zig-cache/perf/current/native-callback-zjs-releasefast.json`. Pin an isolated
-CPU externally on Linux; the runner deliberately does not choose a machine-
-specific CPU.
-
-For an old/new stage comparison, keep the old binary in the reference column
-of both reports so stdout remains checked and the new report directly
-interleaves old/new:
-
-```sh
-taskset -c 19 bun tools/compare/run_microbench.js \
-  --suite native-callback \
-  --qjs /path/to/old-zjs --zjs /path/to/old-zjs \
-  --interleaved --sessions 3 --warmup 5 --iters 30 \
-  --output /tmp/native-callback-old.json
-
-taskset -c 19 bun tools/compare/run_microbench.js \
-  --suite native-callback \
-  --qjs /path/to/old-zjs --zjs /path/to/new-zjs \
-  --interleaved --sessions 3 --warmup 5 --iters 30 \
-  --output /tmp/native-callback-new.json
-```
-
-Then apply strict stage thresholds, including each named completion target:
-
-```sh
-node tools/perf/diff_report.js \
-  --require-case-improvement apply_argc0:0.60 \
-  --require-case-improvement apply_argc1:0.65 \
-  --require-case-improvement reflect_apply_argc1:0.65 \
-  --require-case-improvement apply_argc64:0.70 \
-  --require-case-improvement array_foreach_bytecode:0.60 \
-  --require-case-improvement map_foreach_bytecode:0.60 \
-  --require-case-improvement array_callback_helper:0.45 \
-  --require-case-improvement map_callback_helper:0.45 \
-  --case-regression-ratio 1.05 \
-  --geomean-regression-ratio 1.02 \
-  /tmp/native-callback-old.json \
-  /tmp/native-callback-new.json
-```
-
-Do not use the full-suite geomean as the callback-cohort acceptance number:
-the full suite intentionally contains direct-call and execution-root controls.
-Capture matching old/new reports with these category selectors:
-
-```sh
---category apply \
---category arg-shape \
---category target-bytecode \
---category callback-bytecode \
---category callback-helper
-```
-
-Apply `--geomean-improvement-ratio 0.70` to those two cohort-only reports.
-Separately capture the control report with:
-
-```sh
---category call-control \
---category target-control \
---category callback-native-control \
---category hotpath-control \
---category root-control
-```
-
-The control diff uses `--case-regression-ratio 1.05` and
-`--geomean-regression-ratio 1.02`, without an improvement requirement. Spread
-has its own category because it enters the VM directly rather than crossing a
-native fence.
-
-Each JSON timing row records samples, standard deviation, CV, and per-session
-statistics. If either engine's CV exceeds 5%, lengthen that case's useful
-workload and rerun; do not accept a noisy ratio. For a pinned QuickJS
-comparison, the normalized re-entry cost for any bytecode/native pair is
-`(bytecode row zjs/qjs) / (native row zjs/qjs)`, which separates callback
-re-entry cost from the surrounding builtin implementation.
-
 ## Checked-In Artifacts
 
 No benchmark result JSON is checked in.
 
 The 2026-06-13 QuickJS-ng `*-vs-quickjs*` snapshots were removed from the
 active tree. Do not recover them as a current Bellard-QuickJS comparison.
-The public claim is [bench-v8-status.md](bench-v8-status.md). The former
-standalone-file zoo runner was retired 2026-08-29 (the vendored bench-v8
-suite covers the same Octane corpus; fixed-work attribution moved to
-`tools/perf/bench_v8/run_fixed_pmu.py`).
-As of 2026-08-25, no v9-suite number has passed an owner ruling to become
-the published metric, and any quoted ratio is only valid against the named
-reference-binary fingerprint.
-
-Runtime-profile source scripts live in `reports/perf/current/scripts/`;
-profile JSON is written locally under `.zig-cache/perf/` and is not checked
-in.
-
-## Report Diffs
-
-Compare two `zjs-microbench` JSON reports:
-
-```sh
-node tools/perf/diff_report.js \
-  OLD-microbench-zjs-releasefast.json \
-  NEW-microbench-zjs-releasefast.json
-```
-
-Both paths are yours to choose; no step writes a canonical location any more.
-
-By default, the diff fails when sample settings differ, compatible case count
-drops, unsupported/skipped count increases, geometric mean regresses by more
-than 5%, or a case regresses by more than 10% and more than 0.05 ms.
-
-Useful options:
-
-```sh
-node tools/perf/diff_report.js --json OLD.json NEW.json
-node tools/perf/diff_report.js --warn-case-regressions OLD.json NEW.json
-node tools/perf/diff_report.js --ignore-geomean-regression OLD.json NEW.json
-node tools/perf/diff_report.js --allow-sample-config-drift OLD.json NEW.json
-```
-
-Use `--allow-sample-config-drift` only for retrospective diagnostics; gate-like
-comparisons should use matching iterations, warmups, sessions, and interleaving
-mode.
+The historical snapshot is [bench-v8-status.md](bench-v8-status.md). The
+former standalone-file zoo runner was retired 2026-08-29. As of 2026-08-25,
+no v9-suite number has passed an owner ruling to become a published metric,
+and any quoted ratio is only valid against the named reference-binary
+fingerprint.
 
 ## Runtime Profiling
 
@@ -302,29 +73,13 @@ zig build zjs-profile --summary all
 The profiling build (`-Dzjs_enable_opcode_profile=true`) counts and
 delta-times every hot-table dispatch through `vm_profile.noteDispatch`. The
 default `zjs` binary does not collect opcode counts and fails closed on
-`--profile-opcodes` (exit 2). The `perf-runtime-profiles` gate requires a
-minimum count, so an all-zero profile cannot pass.
+`--profile-opcodes` (exit 2).
 
 The listing is capped at 40 rows to stay readable. Set `ZJS_PROFILE_ALL=1`
 to print every opcode — required for a census, since the cap silently
 conflates warm-but-not-hot opcodes with cold ones (see
 [`opcode-design.md`](opcode-design.md) appendix B.2 for the reading error
 that produced).
-
-Compare two runtime-profile artifacts:
-
-```sh
-node tools/perf/diff_runtime_profile.js \
-  --require-improvement vm_run_ns:0.95 \
-  OLD-runtime-profile.json \
-  NEW-runtime-profile.json
-```
-
-`diff_runtime_profile.js` compares stage timings, memory counters, and — for
-artifacts recorded by a profiling build — opcode-specific gates such as
-`opcode_count:get_var_ref0`. Use `--warn-regressions` for noisy exploratory
-runs and keep strict thresholds for evidence attached to a
-performance-sensitive change.
 
 ### Linux sampling and PMU counters
 
@@ -385,10 +140,9 @@ for the other PMU correctly read `<not counted>`.
 
 Under tail-call threading the handler-to-handler `musttail` transfer leaves no
 stack record, so every opcode appears flat under `runWithCallEnv` and the
-op-to-op sequence is unrecoverable. `-g` also double-counts;
-`tools/perf/closure_alloc/profile_stages.py` already records flat for this
-reason. Use `-g` when the question is about the call path *into* the VM, not
-about the VM loop itself.
+op-to-op sequence is unrecoverable. `-g` also double-counts, so prefer a
+flat profile for the dispatch loop. Use `-g` when the question is about
+the call path *into* the VM, not about the VM loop itself.
 
 ```sh
 taskset -c 19 perf record -F 4999 -o /tmp/case.data zig-out/bin/zjs /tmp/case.js

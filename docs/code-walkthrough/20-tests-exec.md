@@ -1,10 +1,10 @@
 # 20 — VM / 调用 / 模块 / Promise
 
-`src/tests/exec.zig` 是最大的行为钉：求值、调用约定、尾调用、模块图、Promise job、中断与原生栅栏。576 个 test 里 236 例各自 `helpers.TestEngine.init` 起独立引擎、190 例走共享 `sharedTestEngine`、67 例裸 `JSRuntime.create`，其余 83 例不自建引擎（80 例 `helpers.expectPrints` 比对输出，3 例只断言纯 Zig helper）。 源文件 `src/tests/exec.zig`（23388 行）。
+`src/tests/exec.zig` 是最大的行为钉：求值、调用约定、尾调用、模块图、Promise job、中断与原生栅栏。517 个 test 里 220 例各自 `helpers.TestEngine.init` 起独立引擎、176 例走共享 `sharedTestEngine`、62 例裸 `JSRuntime.create`，其余 59 例不自建引擎（58 例 `helpers.expectPrints` 比对输出，1 例只断言纯 Zig helper）。 源文件 `src/tests/exec.zig`（22343 行）。
 
 ## `src/tests/exec.zig`
 
-`src/tests/exec.zig` 是最大的行为钉：求值、调用约定、尾调用、模块图、Promise job、中断与原生栅栏。576 个 test 里 236 例各自 `helpers.TestEngine.init` 起独立引擎、190 例走共享 `sharedTestEngine`、67 例裸 `JSRuntime.create`，其余 83 例不自建引擎（80 例 `helpers.expectPrints` 比对输出，3 例只断言纯 Zig helper）。
+`src/tests/exec.zig` 是最大的行为钉：求值、调用约定、尾调用、模块图、Promise job、中断与原生栅栏。517 个 test 里 220 例各自 `helpers.TestEngine.init` 起独立引擎、176 例走共享 `sharedTestEngine`、62 例裸 `JSRuntime.create`，其余 59 例不自建引擎（58 例 `helpers.expectPrints` 比对输出，1 例只断言纯 Zig helper）。
 
 文件头：Exercises VM execution, calls, jobs, control flow, and runtime semantics.
 
@@ -152,7 +152,7 @@
 - **实现**：把自身包成 `core.runtime.RootProvider`：`return .{ .context = self, .trace = trace }`，供 runtime 注册根提供者时使用。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
 
-### `expectEvalCycleReclaimed` (`src/tests/exec.zig:10248`)
+### `expectEvalCycleReclaimed` (`src/tests/exec.zig:9543`)
 
 - **签名**：`fn expectEvalCycleReclaimed(js: *helpers.TestEngine, warmup_source: []const u8, cycle_source: []const u8) !void`。
 - **作用**：测试夹具/探针 `expectEvalCycleReclaimed`，给周围 `test` 块提供可注入行为或断言助手。
@@ -433,13 +433,6 @@
 - **所有权 / 错误 / 调用**：返回 `anyerror!core.JSValue`，由测试 `try`/`expectError` 消费。
 
 ### 测试块（576）
-
-### `test "Air residual Symbol equality preserves identity and mixed coercion"` (`src/tests/exec.zig:15`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Air residual Symbol equality preserves identity and mixed coercion」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`const eq = (a,b) => a == b; const ne = (a,b) => a != b; const strict = (a,b) => a === b; const strictNe = (a,b) => a !== b; const s = Symbol`。约 0 个 Zig expect、20 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
 ### `test "dense parameter arrays rest keeps contiguous storage and independent values"` (`src/tests/exec.zig:54`)
 
@@ -896,13 +889,6 @@
 - **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`globalThis.__derivedDirectEval = class DerivedDirectEval extends Object {   constructor() { super(); if (eval("this") !== this) throw new Er`；`this`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
 
-### `test "ordinary calls to the current superclass do not initialize derived this"` (`src/tests/exec.zig:4422`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「ordinary calls to the current superclass do not initialize derived this」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`class OrdinaryCallBase {} class OrdinaryCallDerived extends OrdinaryCallBase {   constructor(spread) {     let caught;     try { if (spread)`。断言全在 JS 内：以普通调用（`OrdinaryCallBase()` 与 spread 形式 `OrdinaryCallBase(...[])`）调父类必须抛 TypeError，否则 `throw new Error("ordinary call became super")`；随后才 `super()`。两次 `new OrdinaryCallDerived(false/true)` 分别覆盖非 spread 与 spread 两条调用路径。Zig 侧不做 expect，脚本抛异常即由 `try js.eval` 冒泡成测试失败。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
 ### `test "class entry and construction use bytecode gates without a class behavior flag"` (`src/tests/exec.zig:4442`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -973,20 +959,6 @@
 - **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function capture(thunk) {   try { thunk(); } catch (error) { return error; }   throw new Error("expected constructor error"); } function exp`。约 0 个 Zig expect、6 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
 
-### `test "derived constructor arrow and direct eval observe the same this value"` (`src/tests/exec.zig:4943`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「derived constructor arrow and direct eval observe the same this value」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`new class extends class {} {   constructor() {     super();     print(this === (() => this)(), this === eval("this"));   } }();`；`this`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "derived constructor direct eval this shortcut preserves TDZ"` (`src/tests/exec.zig:4962`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「derived constructor direct eval this shortcut preserves TDZ」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`new class extends Object {   constructor() {     let shortcut = "no", full = "no";     try { eval("this"); } catch (error) { shortcut = erro`；`this`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
 ### `test "bound function call skips zero-length combined args allocation"` (`src/tests/exec.zig:4984`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1022,13 +994,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "M1.3: returned closure can update and return captured counter"` (`src/tests/exec.zig:5127`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「M1.3: returned closure can update and return captured counter」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
 ### `test "resident set_var_ref preserves assignment results and refcounted self-assignment"` (`src/tests/exec.zig:5146`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1041,13 +1006,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「resident stack permutations preserve assignment values and ownership」。
 - **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`globalThis.__residentInsert2 = function (object, value) {   return object.field = value; }; globalThis.__residentInsert3 = function (object,`。约 4 个 Zig expect、7 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "empty object named field miss is undefined and own hit stores"` (`src/tests/exec.zig:5246`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「empty object named field miss is undefined and own hit stores」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`const o = {}; assert.sameValue(o.missing, undefined); assert.sameValue(o.x = 1, 1); assert.sameValue(o.x, 1); assert.sameValue(({}).y, undef`。约 0 个 Zig expect、4 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
 
 ### `test "mapped arguments named field skips binding alias; computed index stays aliased"` (`src/tests/exec.zig:5260`)
@@ -1106,90 +1064,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "TDZ: closure update and return of captured const throws TypeError"` (`src/tests/exec.zig:5479`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「TDZ: closure update and return of captured const throws TypeError」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.TypeError`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "forward-ref top-level lexical captured through a nested closure resolves after init"` (`src/tests/exec.zig:5492`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「forward-ref top-level lexical captured through a nested closure resolves after init」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "forward-ref lexical captured through nested closure still honors TDZ before init"` (`src/tests/exec.zig:5511`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「forward-ref lexical captured through nested closure still honors TDZ before init」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "global closure get before top-level lexical initialization honors TDZ"` (`src/tests/exec.zig:5532`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「global closure get before top-level lexical initialization honors TDZ」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function f() { return x + 1; } try { f(); print("no"); } catch (e) { print(e.name); } let x;`；`function f() { return y + 1; } try { f(); print("no"); } catch (e) { print(e.name); } const y = 1;`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "global closure set before top-level lexical initialization honors TDZ"` (`src/tests/exec.zig:5558`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「global closure set before top-level lexical initialization honors TDZ」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function f() { x = 1; } try { f(); print("no"); } catch (e) { print(e.name); } let x;`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "global closure update before top-level lexical initialization honors TDZ"` (`src/tests/exec.zig:5574`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「global closure update before top-level lexical initialization honors TDZ」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function f() { x++; } try { f(); print("no"); } catch (e) { print(e.name); } let x;`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "Annex B block function updates existing global function binding"` (`src/tests/exec.zig:5590`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Annex B block function updates existing global function binding」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`{   function f() { return "inner declaration"; } } function f() {   return "outer declaration"; } print(f());`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "block function declarations instantiate at scope entry"` (`src/tests/exec.zig:5611`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「block function declarations instantiate at scope entry」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function strictProbe() {   "use strict";   {     print(typeof strictScoped);     function strictScoped() {}     print(typeof strictScoped); `。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "Annex B eval block function updates global function binding mirrors"` (`src/tests/exec.zig:5639`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Annex B eval block function updates global function binding mirrors」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`{   function f() { return "first declaration"; } } eval('{ function f() { return "second declaration"; } }'); print(f());`；`(0, eval)('{ function g() { return "inner declaration"; } } print(g()); function g() { return "outer declaration"; }');`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "Annex B direct eval global function does not block later script lexical declaration"` (`src/tests/exec.zig:5665`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：负向钉：Annex B direct eval global function does not block later script lexical declaration。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`eval('if (true) { function test262Fn() {} }');`；`let test262Fn = 1;`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "sloppy global assignment creates deletable object property"` (`src/tests/exec.zig:5689`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「sloppy global assignment creates deletable object property」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`x = 1; print(delete this.x); print(Object.prototype.hasOwnProperty.call(this, "x"));`；`y = 1; print(delete globalThis.y); print(Object.prototype.hasOwnProperty.call(globalThis, "y"));`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "forward-ref top-level lexical threads through three closure levels"` (`src/tests/exec.zig:5715`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「forward-ref top-level lexical threads through three closure levels」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
 ### `test "top-level function declarations use wide closure operands past 255 constants"` (`src/tests/exec.zig:5731`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1203,13 +1077,6 @@
 - **作用**：钉住场景「function expressions execute wide closure operands past 255 constants」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "test262 helpers own SameValue assertions"` (`src/tests/exec.zig:5771`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住 test262 runner / harness：test262 helpers own SameValue assertions。
-- **实现**：断言错误 `error.JSException`。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "call subsystem installs and invokes host globals"` (`src/tests/exec.zig:5778`)
 
@@ -1477,20 +1344,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 8 处 `std.testing.expect*`。约 8 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "class extends Number ToPrimitive matches JS_ToNumeric"` (`src/tests/exec.zig:7495`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「class extends Number ToPrimitive matches JS_ToNumeric」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`class MyNum extends Number {} function t(n,f){ try{ print(n+" => "+f()); }catch(e){ print(n+" => THROW "+e.name+": "+e.message); } } t("new `。头注释给出对照：qjs `js_number_constructor`（qjs:44822）走 `JS_ToNumeric`（qjs:13030），所以对象实参要跑 valueOf/toString，子类 super 路径不能因为 `toNumberValue` 缺对象臂而绕过。期望输出九行覆盖 `{valueOf}`/数组/`toString`/`Reflect.construct`/裸 `new Number`/`Date`/`Symbol.toPrimitive`/抛异常的 valueOf（`THROW Error: boom`）/副作用日志 `sideeffect log=[v]`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints` 内部就是 `sharedTestEngine()` + `defer endSharedTest()`（`src/tests/helpers.zig:126-136`），所以本例同样跑在进程级共享 Runtime 上：`endSharedTest`（helpers.zig:615）经 `resetSharedEngineAfterTest`（669-694）清异常与未处理 rejection、排空 job 队列、还原全局 lexical 与 shape；泄漏门只在 `current_pass != 0`（census 第二遍）开火。失败以 `error.Test*` 冒泡。
-
-### `test "Number.prototype.toString saturates out-of-i32 radix before intFromFloat"` (`src/tests/exec.zig:7524`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Number.prototype.toString saturates out-of-i32 radix before intFromFloat」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`try { print((5).toString(Infinity)); } catch(e){ print("Inf:", e.name, e.message); } try { print((5).toString(-Infinity)); } catch(e){ print`。头注释给出对照：qjs `js_get_radix`（qjs:44953）先做 `JS_ToInt32Sat`（qjs:13125）再查 2..36 区间，直接 `@intFromFloat(Infinity)` 在 Debug 下会 panic。期望输出的每一行都是 `RangeError radix must be between 2 and 36`，覆盖 ±Infinity、±1e30、`{valueOf:()=>Infinity}`、2**31、NaN、对象 NaN 等饱和输入。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints` 内部就是 `sharedTestEngine()` + `defer endSharedTest()`（`src/tests/helpers.zig:126-136`），所以本例同样跑在进程级共享 Runtime 上：`endSharedTest`（helpers.zig:615）经 `resetSharedEngineAfterTest`（669-694）清异常与未处理 rejection、排空 job 队列、还原全局 lexical 与 shape；泄漏门只在 `current_pass != 0`（census 第二遍）开火。失败以 `error.Test*` 冒泡。
-
 ### `test "string static native builtin records ignore dispatch names"` (`src/tests/exec.zig:7551`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1617,41 +1470,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "finite number formatting keeps simple decimal fast path semantics"` (`src/tests/exec.zig:8678`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「finite number formatting keeps simple decimal fast path semantics」。
-- **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "qjs alignment C1 for-head lexical self-reference observes TDZ"` (`src/tests/exec.zig:8690`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment C1 for-head lexical self-reference observes TDZ」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`let caught = false; try {   for (let i = i; false; ) {} } catch (error) {   caught = error instanceof ReferenceError; } assert.sameValue(cau`。约 1 个 Zig expect、3 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "qjs alignment C2 string for-of observes patched iterator"` (`src/tests/exec.zig:8721`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment C2 string for-of observes patched iterator」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`const saved = String.prototype[Symbol.iterator]; try {   let calls = 0;   String.prototype[Symbol.iterator] = function() {     calls++;     `。约 1 个 Zig expect、3 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "qjs alignment C3 in operator respects null prototype"` (`src/tests/exec.zig:8755`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment C3 in operator respects null prototype」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`const bare = Object.create(null); assert.sameValue("toString" in bare, false); assert.sameValue("toString" in {}, true); bare.toString = 1; `。约 1 个 Zig expect、3 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "qjs alignment X-02 Array length Set redirects when Receiver differs"` (`src/tests/exec.zig:8770`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment X-02 Array length Set redirects when Receiver differs」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`var arr=[1,2,3], recv={}; print(Reflect.set(arr,"length",2,recv)); print("arr.length="+arr.length+" recv.length="+recv.length+       " hasOw`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
 ### `test "qjs alignment X-08 eval var writable false syncs VARREF is_const"` (`src/tests/exec.zig:8802`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -1665,34 +1483,6 @@
 - **作用**：钉住场景「qjs alignment X-09 VARREF to GETSET detaches the stale cell」。
 - **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`(0,eval)("var ev = 1;"); ev = 7; Object.defineProperty(globalThis, "ev", {get:function(){return 42;}, configurable:true}); print("bare ev = `。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "qjs alignment X-07 integer-key Set breaks on first proto hit"` (`src/tests/exec.zig:8854`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment X-07 integer-key Set breaks on first proto hit」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`"use strict"; function t(mk){   var B = {}; mk(B);   var A = Object.create(B); Object.defineProperty(A, "0", {value:2, writable:true, config`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "qjs alignment X-10 Get miss does not fall back to globalThis constructor prototype"` (`src/tests/exec.zig:8890`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：负向钉：qjs alignment X-10 Get miss does not fall back to globalThis constructor prototype。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function f(){} Object.setPrototypeOf(f, null); print("f.call:", typeof f.call, "| f.bind:", typeof f.bind, "| f.toString:", typeof f.toStrin`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "qjs alignment X-10 tagged template objects keep Array.prototype"` (`src/tests/exec.zig:8930`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment X-10 tagged template objects keep Array.prototype」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`function tag(strings) {   print(typeof strings.map);   print(Object.getPrototypeOf(strings) === Array.prototype); }`，调用形式是标签模板 ``tag`[${1}]` ``（源码里是反引号模板，不是字符串）。期望输出 `"function\ntrue\n"`：标签函数拿到的 strings 数组必须是真正继承 `Array.prototype` 的数组（`map` 可用、原型相等）。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints` 内部就是 `sharedTestEngine()` + `defer endSharedTest()`（`src/tests/helpers.zig:126-136`），所以本例同样跑在进程级共享 Runtime 上：`endSharedTest`（helpers.zig:615）经 `resetSharedEngineAfterTest`（669-694）清异常与未处理 rejection、排空 job 队列、还原全局 lexical 与 shape；泄漏门只在 `current_pass != 0`（census 第二遍）开火。失败以 `error.Test*` 冒泡。
-
-### `test "qjs alignment C4 Array instanceof follows prototype chain"` (`src/tests/exec.zig:8940`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「qjs alignment C4 Array instanceof follows prototype chain」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`Object.defineProperty(Array, Symbol.hasInstance, {   value: undefined,   configurable: true }); try {   const detached = [];   Object.setPro`。约 1 个 Zig expect、2 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
 ### `test "instanceof resident dispatch preserves GetMethod and result coercion semantics"` (`src/tests/exec.zig:8962`)
 
@@ -1727,13 +1517,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「qjs alignment named function self-binding ignores every sloppy write form」。
 - **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`let direct = (function named() {   let original = named;   named += 1;   named++;   ++named;   [named] = [0];   ({ value: named } = { value:`；`named = 0; named += 1; named++; ++named;`。约 1 个 Zig expect、19 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes test262 helpers through generic call paths"` (`src/tests/exec.zig:9329`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住 test262 runner / harness：Engine eval executes test262 helpers through generic call paths。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。断言错误 `error.JSException`。脚本/输入：`assert.sameValue(1 + 1, 2, 'sum');`；`assert.sameValue(1, 2);`。约 3 个 Zig expect、2 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
 ### `test "shared test engine reset rebuilds global shape hash buckets"` (`src/tests/exec.zig:9339`)
@@ -1939,27 +1722,6 @@
 - **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
 
-### `test "Engine strict script top-level this remains the global object"` (`src/tests/exec.zig:10196`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine strict script top-level this remains the global object」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`"use strict"; print(this === globalThis); function strictThis() { return this === undefined; } print(strictThis());`。期望输出 `"true\ntrue\n"`：脚本顶层即使在严格模式下 `this` 仍是全局对象，而严格函数内以 undefined 接收者调用时 `this` 才是 `undefined`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints` 内部就是 `sharedTestEngine()` + `defer endSharedTest()`（`src/tests/helpers.zig:126-136`），所以本例同样跑在进程级共享 Runtime 上：`endSharedTest`（helpers.zig:615）经 `resetSharedEngineAfterTest`（669-694）清异常与未处理 rejection、排空 job 队列、还原全局 lexical 与 shape；泄漏门只在 `current_pass != 0`（census 第二遍）开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine direct eval publishes Annex B block functions"` (`src/tests/exec.zig:10205`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine direct eval publishes Annex B block functions」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`eval("{ function annexBEvalGlobalFn() { return 'global'; } }"); assert.sameValue(annexBEvalGlobalFn(), "global"); delete globalThis.annexBEv`；`{ function annexBEvalGlobalFn() { return 'global'; } }`。约 1 个 Zig expect、6 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine direct eval Annex B block function updates same-name parameter"` (`src/tests/exec.zig:10228`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine direct eval Annex B block function updates same-name parameter」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`var init, after; (function(f) {   eval("init = f; { function f() {} } after = f;"); }(123)); print(init); print(typeof after); print(after()`；`init = f; { function f() {} } after = f;`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
 ### `test "Engine eval exit leaves closed var-ref cycles for explicit collection"` (`src/tests/exec.zig:10267`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -2008,34 +1770,6 @@
 - **作用**：钉住场景「module import-meta and eval-exception cycles are released by runtime cycle removal」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "Engine eval supports Annex B escape and unescape code-unit semantics"` (`src/tests/exec.zig:10396`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval supports Annex B escape and unescape code-unit semantics」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`assert.sameValue(escape('\u0100\u0101\u0102'), '%u0100%u0101%u0102'); assert.sameValue(escape('\ufffd\ufffe\uffff'), '%uFFFD%uFFFE%uFFFF'); `。约 1 个 Zig expect、6 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval supports Annex B Date setYear ordering"` (`src/tests/exec.zig:10411`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval supports Annex B Date setYear ordering」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`var dt = new Date(0); var called = 0; var value = { valueOf: function() { called++; dt.setTime(NaN); return 1; } }; var result = dt.setYear(`。约 1 个 Zig expect、5 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval supports Annex B String HTML wrappers and trim aliases"` (`src/tests/exec.zig:10429`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval supports Annex B String HTML wrappers and trim aliases」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`assert.sameValue("_".big(), "<big>_</big>"); assert.sameValue(String.prototype.big.call(0x2A), "<big>42</big>"); assert.sameValue("x".anchor`。约 1 个 Zig expect、11 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "html wrap leftover optional attribute preserves Annex B wrap and attr"` (`src/tests/exec.zig:10449`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「html wrap leftover optional attribute preserves Annex B wrap and attr」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`assert.sameValue("x".italics(), "<i>x</i>"); assert.sameValue("x".sub(), "<sub>x</sub>"); assert.sameValue("".bold(), "<b></b>"); assert.sam`。约 1 个 Zig expect、7 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
 ### `test "disposable stack extras leftover runtime metadata preserves dispose aliases and disposed"` (`src/tests/exec.zig:10465`)
 
@@ -2373,13 +2107,6 @@
 - **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`var called = false; var recv; var p = new Proxy({}, { set: function (t, k, v, r) { called = true; recv = r; return true; } }); var o = Objec`。
 - **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
 
-### `test "Engine eval executes simple variable assignment and print"` (`src/tests/exec.zig:12173`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes simple variable assignment and print」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
 ### `test "String.prototype.match invokes a custom matcher before coercing the receiver"` (`src/tests/exec.zig:12177`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -2562,54 +2289,12 @@
 - **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`(function () {   let Assigned;   Assigned = class { static { this.observedName = this.name; } };   assert.sameValue(Assigned.name, "Assigned`。约 1 个 Zig expect、12 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
-### `test "Engine eval assigns contextual await bindings in sloppy scripts"` (`src/tests/exec.zig:12752`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval assigns contextual await bindings in sloppy scripts」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`var await = 0; await = 1; print(await);`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval creates non-configurable enumerable global var bindings"` (`src/tests/exec.zig:12760`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval creates non-configurable enumerable global var bindings」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`print(delete __globalVar); var __globalVar = "defined"; print(__globalVar); print(delete __globalVar, delete this["__globalVar"]); var seen `。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes object property assignment through quick parser"` (`src/tests/exec.zig:12774`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes object property assignment through quick parser」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes parenthesized literal postfix through quick parser"` (`src/tests/exec.zig:12778`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes parenthesized literal postfix through quick parser」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
 ### `test "Engine eval balances refcounts for refcounted duplicate-key object literals"` (`src/tests/exec.zig:12789`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「Engine eval balances refcounts for refcounted duplicate-key object literals」。
 - **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`globalThis.__dupLitO1 = { m: 1 }; globalThis.__dupLitO2 = { m: 2 };`；`let __dupLitLast = null; for (let i = 0; i < 16; i++) {   __dupLitLast = { a: __dupLitO1, a: __dupLitO2, keep: __dupLitO1 }; } const __dupLi`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "Engine eval executes compound assignment and update statements through quick parser"` (`src/tests/exec.zig:12819`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes compound assignment and update statements through quick parser」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes console.log with many arguments"` (`src/tests/exec.zig:12823`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes console.log with many arguments」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
 
 ### `test "Engine eval routes host output through global function calls"` (`src/tests/exec.zig:12827`)
 
@@ -2763,34 +2448,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「Engine eval preserves Int32Array indexed read fast path semantics」。
 - **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`let a = new Int32Array(2); a[0] = 7; a[1] = -3; print(a[0], a[1], a[2]); Object.prototype[0] = 9; let b = new Int32Array(0); print(b[0]); de`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes simple template interpolation"` (`src/tests/exec.zig:13311`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes simple template interpolation」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval template interpolation calls object toString"` (`src/tests/exec.zig:13315`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval template interpolation calls object toString」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes simple arrays and map"` (`src/tests/exec.zig:13319`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes simple arrays and map」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval executes simple functions and arrows"` (`src/tests/exec.zig:13323`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval executes simple functions and arrows」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`function add(a, b) { return a + b; } print(add(2, 3)); const double = x => x * 2; print(double(21)); function fact(n) { return n <= 1 ? 1 : `。
 - **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
 
 ### `test "strict plain calls preserve this arguments eval captures and backtraces"` (`src/tests/exec.zig:13338`)
@@ -3269,27 +2926,6 @@
 - **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`function assertForbidden(fn) {   assert.throws(TypeError, function() { return fn.caller; });   assert.throws(TypeError, function() { return `。约 1 个 Zig expect、4 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
-### `test "Engine eval Function.prototype.toString returns source or native text"` (`src/tests/exec.zig:16818`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval Function.prototype.toString returns source or native text」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`function f(x) { return x; } print(f.toString()); function /* a */ g /* b */ ( /* c */ y /* d */ ) /* e */ { /* f */ return y; /* g */ } prin`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval Function.prototype.toString emits syntactic native names"` (`src/tests/exec.zig:16837`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval Function.prototype.toString emits syntactic native names」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`var native = " {\n    [native code]\n}"; var invalid = Object.getOwnPropertyDescriptor(RegExp, "$&").get.toString(); assert.sameValue(invali`。约 1 个 Zig expect、4 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval Function.prototype.toString returns method and class source"` (`src/tests/exec.zig:16855`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval Function.prototype.toString returns method and class source」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`const method = { /* before */ f /* a */ ( /* b */ ) /* c */ { /* d */ } /* after */ }.f; print(method.toString()); const asyncComputed = { a`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
 ### `test "Engine eval releases arrow destructuring iterator closures cleanly"` (`src/tests/exec.zig:16872`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -3330,13 +2966,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「mod cold handler preserves fmod and ToNumeric fallbacks」。
 - **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`const out = []; const show = value => Object.is(value, -0) ? "-0" : String(value); for (const pair of [[5.5, 2], [5, 2.5], [-4, 2], [4, -2],`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval preserves ASCII string integer literal concat semantics"` (`src/tests/exec.zig:17012`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval preserves ASCII string integer literal concat semantics」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`print("a" + 1); print("a" + -1); print("" + 12345);`。
 - **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
 
 ### `test "Engine eval preserves resolve-label peephole semantics"` (`src/tests/exec.zig:17020`)
@@ -3638,13 +3267,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「async generator return awaits its value once before a yielding finalizer」。
 - **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`let awaitCount = 0; const returned = { then(resolve) { awaitCount++; resolve(7); } }; async function* values() {   try { yield 1; }   finall`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "Engine eval preserves simple for-in mutation semantics"` (`src/tests/exec.zig:18946`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Engine eval preserves simple for-in mutation semantics」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`let obj = { a: 1, b: 2, c: 3 }; let keys = ""; for (var k in obj) {   keys += k;   if (k === "a") delete obj.b; } print(keys); let obj2 = { `。
 - **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
 
 ### `test "Engine runJobs preserves pending JS exceptions for callers"` (`src/tests/exec.zig:18968`)
@@ -4018,34 +3640,6 @@
 - **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`(function () {     function run(f) {         var parts = [];         var inputs = [1, 2, 3, 9];         for (var i = 0; i < inputs.length; i`。断言不走 `std.testing.expect*`，而是 `helpers.expectStringValueBytes` 比对求值结果字符串 `ab,b,b,b|b,b,b,b|ab,b,b,b|x,x,x,x|b,b,b,b|abc,bc,c,bc|z,z,z,z|ya,y,y,y|3|qd,qd,q,qd|a,b,,b|rw|e,e,e,e|a,,,|L,L,L,L|na,n,n,n`。
 - **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
-### `test "Annex B if/else function declarations update the shared function binding"` (`src/tests/exec.zig:21296`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Annex B if/else function declarations update the shared function binding」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function f(x) {   if (x) function g() { return "g0"; }   else function g() { return "g1"; }   return typeof g + ":" + (typeof g === "functio`。断言不走 `std.testing.expect*`，而是 `helpers.expectStringValueBytes` 比对求值结果字符串 `function:g0,function:g1`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "sloppy CallExpression assignment targets throw after evaluating only the call"` (`src/tests/exec.zig:21310`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「sloppy CallExpression assignment targets throw after evaluating only the call」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`(function () {     var calls = 0;     var rhs = 0;     var coercions = 0;     function f() {         calls += 1;         return { valueOf: f`。断言不走 `std.testing.expect*`，而是 `helpers.expectStringValueBytes` 比对求值结果字符串 `true,true,true,true,true,true|6,0,0`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "async context-keyword arrow binding identifier is a function"` (`src/tests/exec.zig:21336`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「async context-keyword arrow binding identifier is a function」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`var f = async yield => yield+1; f(41).then(v=>print(v));`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "get/set object shorthand serializes like a named property"` (`src/tests/exec.zig:21343`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「get/set object shorthand serializes like a named property」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`var get=1; print(JSON.stringify({get})); var set=1; print(JSON.stringify({set}));`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
 ### `test "top-level direct eval does not break private-name eval resolution"` (`src/tests/exec.zig:21350`)
 
 - **签名**：无参数测试块，返回 `!void`。
@@ -4058,13 +3652,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「switch fallthrough after while-family tails reaches the next case」。
 - **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`function run(body){   var r=[];   switch(0){     case 0: body();     case 1: r.push("b"); break;     default: r.push("d");   }   return r.jo`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
-
-### `test "long numeric literals parse without a 128-byte cap"` (`src/tests/exec.zig:21407`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「long numeric literals parse without a 128-byte cap」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`print(111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111); pr`。
 - **所有权 / 错误 / 调用**：`helpers.expectPrints`（helpers.zig:126）内部就是 `sharedTestEngine()` + `defer endSharedTest()`，因此本例同样跑在进程级共享 Runtime 上，不是独立引擎。`endSharedTest`（helpers.zig:615）先经 `resetSharedEngineAfterTest`（669）清 context 上的异常与未处理 rejection、排空 job 队列、清 atomics waiter、还原全局 lexical 绑定，再做分配计数对账；泄漏门只在 `zjs_test_runner_current_pass != 0` 且模块表未增长时开火。失败以 `error.Test*` 冒泡。
 
 ### `test "small-function-inlining: sc_Pair constructor is eligible and arguments ctor is not"` (`src/tests/exec.zig:21414`)
@@ -4261,13 +3848,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「C0: final artifacts carry the carrier encoding and no direct to_propkey」。
 - **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`function c0ComputedKey(k){ return { [k]: 1 }; }`。约 3 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "C0: ToPropertyKey semantics across every parser surface (D7 fixtures)"` (`src/tests/exec.zig:22160`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「C0: ToPropertyKey semantics across every parser surface (D7 fixtures)」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`function mk(k){ return { [k]: 1 }; } // primitives and Symbol assert.sameValue(Object.keys(mk("a"))[0], "a"); assert.sameValue(Object.keys(m`。约 1 个 Zig expect、14 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
 
 ### `test "C0: a throw inside key coercion attributes the frame to the carrier's source pc"` (`src/tests/exec.zig:22211`)
@@ -4469,5 +4049,5 @@
 ## 覆盖核对
 
 - 清单函数数: 60
-- 本文标题覆盖: 636
+- 本文标题覆盖: 576
 - 未覆盖: 无

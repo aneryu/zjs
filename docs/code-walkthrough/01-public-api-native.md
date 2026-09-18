@@ -114,14 +114,14 @@ Call 与 argv 是本次调用的借用视图，不能保存到调用结束之后
 - **签名**：`pub fn leaf(comptime f: anytype) Spec`。
 - **作用**：无 state 的 typed leaf（K1）。
 - **实现**：`leafSpec(f, false)`。
-- **所有权 / 错误 / 调用**：纯编译期构造：返回按值的 `Spec`，内含指向编译期生成的 `T.*` thunk 的静态代码指针，没有运行期分配、没有 error set；不支持的签名是 `@compileError`，不会退化成 generic 臂。`Spec` 由 `ctx.defineFunction` 消费（`src/tests/embedding_examples.zig:149`、`tools/perf/native_boundary/zjs_boundary_bench.zig:157`），本文件测试 `src/binding/native.zig:262` 只读 `template`。
+- **所有权 / 错误 / 调用**：纯编译期构造：返回按值的 `Spec`，内含指向编译期生成的 `T.*` thunk 的静态代码指针，没有运行期分配、没有 error set；不支持的签名是 `@compileError`，不会退化成 generic 臂。`Spec` 由 `ctx.defineFunction` 消费（`src/tests/embedding_examples.zig:149`），本文件测试 `src/binding/native.zig:262` 只读 `template`。
 
 ### `leafWithState` (`src/binding/native.zig:179`)
 
 - **签名**：`pub fn leafWithState(comptime f: anytype) Spec`。
 - **作用**：第一参数是 `*State` 的 leaf：`fn (*T, f64) void` / `fn (*T, i32) i32`。
 - **实现**：`leafSpec(f, true)`。state 指针来自 `Options.state`。
-- **所有权 / 错误 / 调用**：同 `leaf`：编译期构造、无分配、无 error set。**差异在所有权**：state 指针不由引擎持有或释放，注册时经 `Options.state` 传入，宿主必须保证它活过所有调用（`src/tests/embedding_examples.zig:152` 用栈上计数器、`tools/perf/native_boundary/zjs_boundary_bench.zig:158` 用 `&tick_state`）；引擎只把裸 `*anyopaque` 作为第一个 C 参数传回，既不 retain 也不扫描。
+- **所有权 / 错误 / 调用**：同 `leaf`：编译期构造、无分配、无 error set。**差异在所有权**：state 指针不由引擎持有或释放，注册时经 `Options.state` 传入，宿主必须保证它活过所有调用（`src/tests/embedding_examples.zig:152` 用栈上计数器）；引擎只把裸 `*anyopaque` 作为第一个 C 参数传回，既不 retain 也不扫描。
 
 ### `leafSpec` (`src/binding/native.zig:183`)
 

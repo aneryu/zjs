@@ -120,9 +120,8 @@ Position: 本文是 [engine-evolution-plan.md](engine-evolution-plan.md) v0.4
 零预热）。两轴共享同一块基建（§4），静态轴的每一项都让动态轴的
 对应项变便宜或变得不必要。
 
-下游消费方（2026-08-26 更新）：FNABI
-（[fun-native-plugin-design.md](fun-native-plugin-design.md) v0.4）
-是 F1/F2/F4 与 T3 schema 的下游消费方。里程碑依赖已拆分:
+下游消费方（2026-08-26 更新）：历史 FNABI 草案曾是
+F1/F2/F4 与 T3 schema 的下游消费方（草案已撤出树）。里程碑依赖已拆分:
 **FN-M1A 不等本计划**(仅需最小 opcode 编码,该编码由独立工作项
 **PERF-OPCODE-SPACE** 承载,§6.1 F4);FN-M1B←F1(PERF-SHAPE-ID);
 FN-M1C←F2(Phase 0.5 交付物,时序见 §6.2)——F1/F2 滑期只阻塞
@@ -805,7 +804,7 @@ zjs 编译器从显式注解**确定性重推**布局）之所以可行，恰因
 
 ## 十一、GC 战役后校准批（v1.3 note，2026-09-06，driver；只读勘察 Opus）
 
-前提：tracing GC 完成计划 S0–S4 + S5 进行中已落地（`docs/tracing-gc-completion-account.md`）：无引用计数、atom 表 tracer 所有、Object 64B / `prop_values`@16 指向 `.property_storage` cell 或 slots2 内联 tail、a 类 payload 与数组元素为 GC cell、header `kind:u4|young|finalizing|needs_finalizer|reserved`、保守栈扫描仍是生产根集（R1 不立项）。本节逐条校准 v1.2 正文，**未改正文**，后续修订时按此表落笔。
+前提：tracing GC 完成计划 S0–S5 已落地（见 [gc-invariants.md](gc-invariants.md)）：无引用计数、atom 表 tracer 所有、Object 64B / `prop_values`@16 指向 `.property_storage` cell 或 slots2 内联 tail、a 类 payload 与数组元素为 GC cell、header `kind:u4|young|finalizing|needs_finalizer|reserved`、保守栈扫描仍是生产根集（R1 不立项）。本节逐条校准 v1.2 正文，**未改正文**，后续修订时按此表落笔。
 
 | # | 修订 | 章节 | 依据 |
 |---|---|---|---|
@@ -821,7 +820,7 @@ zjs 编译器从显式注解**确定性重推**布局）之所以可行，恰因
 | R10 | artifact 只落盘 atom **字符串**（装载重建 id），与 §4.1「永不落盘 identity/指针」合并为「artifact 不得携带 Runtime-local 身份」 | §4.1 / §10.5 | `atom.zig:1232` |
 | R11 | **T-spike 数据作废**：spike 臂含已删的 `value.dup()`/`releaseObjectAssume…`，两臂同掉 rc 常量 ⇒ 百分比赢面缩小（§三杀标是百分比口径）；须在 main 重跑；`tspike_get_slot=254` 与 main `object_slots2=254` 冲突，改用空闲 id | §6.2 S2 | `bytecode.zig:471` |
 | R12 | spike 方法论常设：capture 必须 `noinline`；站点 entry 取 2 的幂步长 | §6.2 | `spike/perf-t` `tspike.zig` |
-| R13 | §一归因整体标「需在 S4-i 后的树上重测」：47 insn own-hit 已无 rc 两臂（`op_get_field` 现内联 `findOwnDataSlotFast`，`tailcall_dispatch.zig:3426`/`object.zig:10601`）、23.3% stall 的 miss 特征因属性值搬到独立 cell 而变、各模块份额分母全变（pdfjs 0.81 / splay 1.17）、`op_get_field +67`/`opCall +66` 说明属性与调用的绝对成本已变、行号全部漂移 | §一 1/2、§1.5 | `tracing-gc-s4-spec.md` §7 |
+| R13 | §一归因整体标「需在 S4-i 后的树上重测」：47 insn own-hit 已无 rc 两臂（`op_get_field` 现内联 `findOwnDataSlotFast`，`tailcall_dispatch.zig:3426`/`object.zig:10601`）、23.3% stall 的 miss 特征因属性值搬到独立 cell 而变、各模块份额分母全变（pdfjs 0.81 / splay 1.17）、`op_get_field +67`/`opCall +66` 说明属性与调用的绝对成本已变、行号全部漂移 | §一 1/2、§1.5 | S4-i |
 | R14 | §7 红线复核：SplayLatency S4-i 后 +2.80%、splay cycles 1.26 是 GC 唯一 STOP，「双第二不丢」的基线值需重钉 | §7 | — |
 | R15 | 解除「typed field unboxing 与 tracing GC 换代排序后再议」的等待条件，列入下一轮表示契约议程 | §三 明确不做 | — |
 | R16 | `op.object_slots2`（parser 证明 1–2 静态属性 ⇒ 预留内联 tail，`tailcall_dispatch.zig:4263`）登记为 **F5 最小先例**；F5 改「有先例，需扩到 typed class N 槽 + 预建 shape 注册表」 | §6.1 F5 | — |

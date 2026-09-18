@@ -1,6 +1,5 @@
 //! The collector: non-moving, generational (sticky mark bit), incrementally
-//! marking, stop-the-world at every step (tracing-gc-design.md, current
-//! state in gc-invariants.md). Majors mark from precise + conservative roots
+//! marking, stop-the-world at every step. Majors mark from precise + conservative roots
 //! into block bitmaps / header epochs and condemn from the bitmaps; minors
 //! trace the young set from roots plus the remembered owners. Strong edges
 //! walk `traceChildEdges*`; WeakMap/WeakSet values are NOT marked during the
@@ -285,8 +284,8 @@ pub const MarkFootprint = struct {
         self.marked_headers +|= 1;
         // TGC S4-a: rope nodes became their own kind. The census keeps
         // reporting one `string` population -- the two shapes are one family
-        // to every consumer of this panel, and folding here keeps
-        // `gc_stats_snapshot.py`'s existing line intact.
+        // to every consumer of this panel, and folding here keeps the
+        // `--gc-stats` `string` line intact.
         self.by_kind[
             @intFromEnum(switch (kind) {
                 // TGC S2-i folds the tail buffer in as well: it is string bytes
@@ -2034,7 +2033,7 @@ const Collector = struct {
                     // The mark above is both this object's survival (an
                     // unmarked shape here was condemned alive -- the first
                     // build of this branch forgot the store and test262 found
-                    // what macro-check missed) and the recursion's
+                    // what the short suite missed) and the recursion's
                     // deduplication, since a re-shade of the same shape now
                     // takes the marked early-return. It is already stored, so
                     // tracing follows directly.

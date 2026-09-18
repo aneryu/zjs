@@ -113,8 +113,8 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     // Profiling CLI: the same ReleaseFast engine with per-opcode dispatch
     // scopes compiled in (the hot table is comptime-wrapped; see
     // exec/vm_profile.zig). A separate artifact so --profile-opcodes users
-    // and the perf-runtime-profiles gate never depend on remembering -D
-    // flags, and the default zjs binary never carries profiling code.
+    // never depend on remembering -D flags, and the default zjs binary
+    // never carries profiling code.
     var profile_engine_inputs = engine_option_inputs.withExpect(expect_config_fast);
     profile_engine_inputs.enable_opcode_profile = true;
     const profile_engine_options = addEngineOptions(b, profile_engine_inputs);

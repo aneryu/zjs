@@ -79,8 +79,8 @@ pub const NonBlockObjectPrepare = *const fn (*anyopaque) std.mem.Allocator.Error
 /// 80.4% of `allocAlignedBytesNoTrigger`'s self cycles and sixty times rc's
 /// L2D refill count.
 ///
-/// Measurements, and the two heavier designs this was chosen over, are in
-/// `docs/slab-reuse-2026-08-29.md`.
+/// Measurements, and the two heavier designs this was chosen over, live
+/// in git history (2026-08-29 slab-reuse account).
 const slab_alloc_prefetch: bool = true;
 
 /// Whether an ordinary allocation consults the GC threshold at all.
@@ -2532,4 +2532,25 @@ test "GC ledger charges slab class usable plus malloc overhead (qjs:2168)" {
     try std.testing.expectEqual(standalone_request, account.allocated_bytes);
     account.free(u8, standalone);
     try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+}
+test "memory account tracks same-allocator allocation and free" {
+    var account = MemoryAccount.init(std.testing.allocator);
+    const buf = try account.alloc(u8, 16);
+    try std.testing.expect(account.hasOutstandingAllocations());
+    account.free(u8, buf);
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "memory account treats zero-length allocations as inert" {
+    var account = MemoryAccount.init(std.testing.allocator);
+    const empty = try account.alloc(u8, 0);
+
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+    try std.testing.expect(!account.hasOutstandingAllocations());
+
+    account.free(u8, empty);
+    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+    try std.testing.expect(!account.hasOutstandingAllocations());
 }

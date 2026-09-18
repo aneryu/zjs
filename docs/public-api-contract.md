@@ -1,7 +1,7 @@
 # Public API Contract
 
 This document is the active public Zig API authority for embedders. Keep it in
-sync with `src/root.zig`, `src/binding/`, and `src/runtime/root.zig`. The
+sync with `src/root.zig`, `src/binding/`, and `src/event_loop.zig`. The
 name lists in `src/tests/embedding_examples.zig` are the executable check:
 adding or removing a public name must update those arrays in the same
 commit. They are not a freeze of the API, and they are not the removed
@@ -282,7 +282,7 @@ Managed calls are visible in `Error().stack` as `at name (native)`
 
 ### Leaf calls
 
-`leaf` / `leafWithState` accept only the FNABI v1 signature shapes
+`leaf` / `leafWithState` accept only the documented leaf signature shapes
 (`fn () void`, `fn (i32) i32`, `fn (i32, i32) i32`, `fn (f64) f64`,
 `fn (f64, f64) f64`, `fn (f64) void`, `fn (bool) bool`,
 `fn (*State, f64) void`, `fn (*State, i32) i32`); any other signature is a
@@ -430,6 +430,4 @@ The current public API contract is covered by:
   (own hit, shape-change re-capture, prototype holder, native getter,
   refused write, polymorphic retirement);
 - public API contract and production failure-path tests in
-  `src/tests/engine_production.zig`;
-- `tools/perf/native_boundary/zjs_boundary_bench.zig`, the boundary
-  microbench written against this surface only.
+  `src/tests/engine_production.zig`.

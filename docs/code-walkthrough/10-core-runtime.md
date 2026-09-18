@@ -62,7 +62,7 @@ NativePin                      gc.pinHeader，native 回调期间防 sweep
 
 两套东西，core 边界故意切开：
 
-| | `core/jobs.Queue` | `HostEventLoop` / `runtime/event_loop.zig` |
+| | `core/jobs.Queue` | `HostEventLoop` / `src/event_loop.zig` |
 | --- | --- | --- |
 | 谁拥有 | `JSRuntime.job_queue` | 宿主，经 `JSContext.setHostEventLoop` 挂上 |
 | 装什么 | Promise reaction/thenable/settlement、async resume、dynamic import、Atomics waiter、FinalizationRegistry、generic `Func` | timer、fd rw、signal、exit code |
@@ -107,7 +107,7 @@ FinalizationRegistry 的 JS 回调走 job FIFO。插件/class payload 析构走 
 
 ## 5. `src/core/root.zig` — core 聚合根（零函数）
 
-清单 0 个函数。文件职责：把 core 身份与嵌入选项类型 re-export 成 exec/runtime/binding 与公共 facade 的合法 import 面。**不增加所有权**；寿命契约留在定义模块。`check_deps` 禁止 core 实现再依赖 parser/exec/runtime/binding/builtins/CLI。QuickJS 没有对应翻译单元，这是 zjs 的层边界。
+清单 0 个函数。文件职责：把 core 身份与嵌入选项类型 re-export 成 exec/runtime/binding 与公共 facade 的合法 import 面。**不增加所有权**；寿命契约留在定义模块。core 实现不得再依赖 parser/exec/runtime/binding/builtins/CLI。QuickJS 没有对应翻译单元，这是 zjs 的层边界。
 
 `pub const subsystem_name = "core_runtime"`。
 

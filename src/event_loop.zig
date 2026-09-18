@@ -1,19 +1,22 @@
-//! Runtime host event loop for timers, fd readiness, signals, and job draining.
+//! Host event loop for timers, fd readiness, signals, and job draining.
 //!
-//! The loop owns duplicated callback JSValues and retained realm references;
-//! handler removal/deinit releases them, while `output` remains borrowed from
-//! the host. JS call/job semantics stay in exec and the public adapter stays in
-//! binding: this module supplies only their runtime scheduling seam. Its host
-//! topology follows QuickJS libc read/write handlers, signals, timers, and poll
-//! loop at quickjs-libc.c:2014-2175 and quickjs-libc.c:2422-2627.
+//! The loop owns callback JSValues and a retained realm reference; handler
+//! removal/deinit releases them, while `output` remains borrowed from the host.
+//! JS call/job semantics stay in exec and the public adapter stays in binding:
+//! this module is only the scheduling seam. Host topology follows QuickJS libc
+//! read/write handlers, signals, timers, and poll loop at
+//! quickjs-libc.c:2014-2175 and quickjs-libc.c:2422-2627.
+//!
+//! This file is the `zjs.runtime` module. It must not grow into an Engine
+//! facade or re-export exec helpers.
 
 const std = @import("std");
-const atomics_ops = @import("../exec/atomics_ops.zig");
 const builtin = @import("builtin");
 
-const core = @import("../core/root.zig");
-const exec = @import("../exec/root.zig");
-const zjs = @import("../binding/root.zig");
+const core = @import("core/root.zig");
+const exec = @import("exec/root.zig");
+const platform_clock = @import("platform_clock.zig");
+const zjs = @import("binding/root.zig");
 
 const libc = if (builtin.os.tag == .windows)
     struct {}
@@ -39,38 +42,91 @@ const windows_api = struct {
 
 extern "c" fn signal(signum: c_int, handler: usize) usize;
 
-pub const Options = struct {
+pub const EventLoopOptions = struct {
     output: ?*std.Io.Writer = null,
 };
 
-pub const RunResult = struct {
+pub const EventLoopRunResult = struct {
     has_pending_exception: bool = false,
     has_unhandled_rejection: bool = false,
 
-    pub fn hasPendingError(self: RunResult) bool {
+    pub fn hasPendingError(self: EventLoopRunResult) bool {
         return self.has_pending_exception or self.has_unhandled_rejection;
     }
 };
+
+/// Growable host-owned callback list. `items.len` is the live count; allocation
+/// is `items.ptr[0..capacity]`. Removal of the last entry frees the buffer.
+fn HostList(comptime T: type) type {
+    return struct {
+        items: []T = &.{},
+        capacity: usize = 0,
+
+        fn deinit(self: *@This(), rt: *core.JSRuntime) void {
+            const items = self.items;
+            const capacity = self.capacity;
+            self.items = &.{};
+            self.capacity = 0;
+            if (capacity != 0) rt.memory.free(T, items.ptr[0..capacity]);
+        }
+
+        fn ensureCapacity(self: *@This(), ctx: *core.JSContext, min_capacity: usize) !void {
+            if (self.capacity >= min_capacity) return;
+            var next_capacity = if (self.capacity == 0) @as(usize, 2) else self.capacity * 2;
+            while (next_capacity < min_capacity) : (next_capacity *= 2) {}
+            const rt = ctx.runtimePtr();
+            const next = try rt.memory.alloc(T, next_capacity);
+            errdefer rt.memory.free(T, next);
+            const old_items = self.items;
+            const old_capacity = self.capacity;
+            @memcpy(next[0..old_items.len], old_items);
+            self.items = next[0..old_items.len];
+            self.capacity = next_capacity;
+            if (old_capacity != 0) {
+                rt.memory.free(T, old_items.ptr[0..old_capacity]);
+            }
+        }
+
+        fn append(self: *@This(), ctx: *core.JSContext, item: T) !void {
+            const index = self.items.len;
+            try self.ensureCapacity(ctx, index + 1);
+            self.items = self.items.ptr[0 .. index + 1];
+            self.items[index] = item;
+        }
+
+        fn removeAt(self: *@This(), ctx: *core.JSContext, index: usize) void {
+            std.debug.assert(index < self.items.len);
+            const old_len = self.items.len;
+            if (index + 1 < old_len) {
+                @memmove(self.items[index .. old_len - 1], self.items[index + 1 .. old_len]);
+            }
+            self.items = self.items.ptr[0 .. old_len - 1];
+            if (self.items.len == 0 and self.capacity != 0) {
+                const old = self.items.ptr[0..self.capacity];
+                self.items = &.{};
+                self.capacity = 0;
+                ctx.runtimePtr().memory.free(T, old);
+            }
+        }
+    };
+}
 
 pub const EventLoop = struct {
     context: *core.JSContext,
     realm: core.RealmRef,
     output: ?*std.Io.Writer = null,
-    timers: []Timer = &.{},
-    timers_capacity: usize = 0,
-    rw_handlers: []RwHandler = &.{},
-    rw_handlers_capacity: usize = 0,
-    signal_handlers: []SignalHandler = &.{},
-    signal_handlers_capacity: usize = 0,
+    timers: HostList(Timer) = .{},
+    rw_handlers: HostList(RwHandler) = .{},
+    signal_handlers: HostList(SignalHandler) = .{},
     next_timer_id: i64 = 1,
     exit_code: ?u8 = null,
     installed: bool = false,
 
-    pub inline fn init(context: *zjs.JSContext, options: Options) EventLoop {
+    pub inline fn init(context: *zjs.JSContext, options: EventLoopOptions) EventLoop {
         return initCore(context.core, options);
     }
 
-    pub inline fn initCore(context: *core.JSContext, options: Options) EventLoop {
+    pub inline fn initCore(context: *core.JSContext, options: EventLoopOptions) EventLoop {
         return .{
             .context = context,
             .realm = core.RealmRef.retain(context),
@@ -92,29 +148,13 @@ pub const EventLoop = struct {
             self.installed = false;
         }
         const rt = self.context.runtimePtr();
-        // `len` counts initialized handlers, but allocation used the full
-        // capacity slice, so free ptr[0..capacity].
-        const timers = self.timers;
-        const timers_capacity = self.timers_capacity;
-        self.timers = &.{};
-        self.timers_capacity = 0;
-        if (timers_capacity != 0) rt.memory.free(Timer, timers.ptr[0..timers_capacity]);
-
-        const rw_handlers = self.rw_handlers;
-        const rw_handlers_capacity = self.rw_handlers_capacity;
-        self.rw_handlers = &.{};
-        self.rw_handlers_capacity = 0;
-        if (rw_handlers_capacity != 0) rt.memory.free(RwHandler, rw_handlers.ptr[0..rw_handlers_capacity]);
-
-        const signal_handlers = self.signal_handlers;
-        const signal_handlers_capacity = self.signal_handlers_capacity;
-        self.signal_handlers = &.{};
-        self.signal_handlers_capacity = 0;
-        if (signal_handlers_capacity != 0) rt.memory.free(SignalHandler, signal_handlers.ptr[0..signal_handlers_capacity]);
+        self.timers.deinit(rt);
+        self.rw_handlers.deinit(rt);
+        self.signal_handlers.deinit(rt);
         self.realm.deinit();
     }
 
-    pub fn runUntilIdle(self: *EventLoop) !RunResult {
+    pub fn runUntilIdle(self: *EventLoop) !EventLoopRunResult {
         const global = try self.context.globalObject();
         exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
             if (!self.context.hasException() and !self.context.hasUnhandledRejection()) return err;
@@ -122,7 +162,7 @@ pub const EventLoop = struct {
         return self.result();
     }
 
-    pub fn result(self: *const EventLoop) RunResult {
+    pub fn result(self: *const EventLoop) EventLoopRunResult {
         return .{
             .has_pending_exception = self.context.hasException(),
             .has_unhandled_rejection = self.context.hasUnhandledRejection(),
@@ -138,13 +178,13 @@ pub const EventLoop = struct {
     }
 
     fn traceRoots(self: *EventLoop, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
-        for (self.timers) |*timer| {
+        for (self.timers.items) |*timer| {
             try timer.traceRoots(visitor);
         }
-        for (self.rw_handlers) |*handler| {
+        for (self.rw_handlers.items) |*handler| {
             try handler.traceRoots(visitor);
         }
-        for (self.signal_handlers) |*handler| {
+        for (self.signal_handlers.items) |*handler| {
             try handler.traceRoots(visitor);
         }
     }
@@ -156,62 +196,25 @@ pub const EventLoop = struct {
         return id;
     }
 
-    fn ensureTimerCapacity(self: *EventLoop, ctx: *core.JSContext, min_capacity: usize) !void {
-        if (self.timers_capacity >= min_capacity) return;
-        var next_capacity = if (self.timers_capacity == 0) @as(usize, 2) else self.timers_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const rt = ctx.runtimePtr();
-        const next = try rt.memory.alloc(Timer, next_capacity);
-        errdefer rt.memory.free(Timer, next);
-        const old_timers = self.timers;
-        const old_capacity = self.timers_capacity;
-        @memcpy(next[0..old_timers.len], old_timers);
-        self.timers = next[0..old_timers.len];
-        self.timers_capacity = next_capacity;
-        if (old_capacity != 0) {
-            rt.memory.free(Timer, old_timers.ptr[0..old_capacity]);
-        }
-    }
-
     pub fn enqueueTimer(self: *EventLoop, ctx: *core.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
-        const index = self.timers.len;
-        try self.ensureTimerCapacity(ctx, index + 1);
-        const timer = Timer.init(id, callback, nowMs() + delay_ms, delay_ms, repeats);
-        self.timers = self.timers.ptr[0 .. index + 1];
-        self.timers[index] = timer;
+        try self.timers.append(ctx, Timer.init(id, callback, nowMs() + delay_ms, delay_ms, repeats));
     }
 
     fn clearTimer(self: *EventLoop, ctx: *core.JSContext, id: i64) void {
         if (id <= 0) return;
-        var index: usize = 0;
-        while (index < self.timers.len) : (index += 1) {
-            if (self.timers[index].id != id) continue;
-            self.removeTimerAt(ctx, index);
+        for (self.timers.items, 0..) |timer, index| {
+            if (timer.id != id) continue;
+            self.timers.removeAt(ctx, index);
             return;
         }
     }
 
-    fn removeTimerAt(self: *EventLoop, ctx: *core.JSContext, index: usize) void {
-        std.debug.assert(index < self.timers.len);
-        const old_len = self.timers.len;
-        if (index + 1 < old_len) {
-            @memmove(self.timers[index .. old_len - 1], self.timers[index + 1 .. old_len]);
-        }
-        self.timers = self.timers.ptr[0 .. old_len - 1];
-        if (self.timers.len == 0 and self.timers_capacity != 0) {
-            const old_timers = self.timers.ptr[0..self.timers_capacity];
-            self.timers = &.{};
-            self.timers_capacity = 0;
-            ctx.runtimePtr().memory.free(Timer, old_timers);
-        }
-    }
-
     fn runNextTimer(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-        if (self.timers.len == 0) return false;
+        if (self.timers.items.len == 0) return false;
         const rt = ctx.runtimePtr();
         const now = nowMs();
         var next_delay: u64 = std.math.maxInt(u64);
-        for (self.timers, 0..) |timer, index| {
+        for (self.timers.items, 0..) |timer, index| {
             if (timer.timeout_ms > now) {
                 next_delay = @min(next_delay, timer.timeout_ms - now);
                 continue;
@@ -230,9 +233,9 @@ pub const EventLoop = struct {
             const repeats = timer.repeats;
             const delay = timer.delay_ms;
             if (repeats) {
-                self.timers[index].timeout_ms = now + delay;
+                self.timers.items[index].timeout_ms = now + delay;
             } else {
-                self.removeTimerAt(ctx, index);
+                self.timers.removeAt(ctx, index);
             }
             if (exec.object_ops.objectFromValue(callback)) |promise| {
                 if (promise.class_id == core.class.ids.promise) {
@@ -262,69 +265,31 @@ pub const EventLoop = struct {
     }
 
     fn timerExists(self: *const EventLoop, id: i64) bool {
-        for (self.timers) |timer| {
+        for (self.timers.items) |timer| {
             if (timer.id == id) return true;
         }
         return false;
     }
 
-    fn ensureRwHandlerCapacity(self: *EventLoop, ctx: *core.JSContext, min_capacity: usize) !void {
-        if (self.rw_handlers_capacity >= min_capacity) return;
-        var next_capacity = if (self.rw_handlers_capacity == 0) @as(usize, 2) else self.rw_handlers_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const rt = ctx.runtimePtr();
-        const next = try rt.memory.alloc(RwHandler, next_capacity);
-        errdefer rt.memory.free(RwHandler, next);
-        const old_handlers = self.rw_handlers;
-        const old_capacity = self.rw_handlers_capacity;
-        @memcpy(next[0..old_handlers.len], old_handlers);
-        self.rw_handlers = next[0..old_handlers.len];
-        self.rw_handlers_capacity = next_capacity;
-        if (old_capacity != 0) {
-            rt.memory.free(RwHandler, old_handlers.ptr[0..old_capacity]);
-        }
-    }
-
     fn setRwHandler(self: *EventLoop, ctx: *core.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
-        for (self.rw_handlers) |*handler| {
+        for (self.rw_handlers.items) |*handler| {
             if (handler.fd != fd) continue;
             handler.setCallback(write_handler, callback);
             return;
         }
-        const index = self.rw_handlers.len;
-        try self.ensureRwHandlerCapacity(ctx, index + 1);
-        var handler = RwHandler{
-            .fd = fd,
-        };
+        var handler = RwHandler{ .fd = fd };
         handler.setCallback(write_handler, callback);
-        self.rw_handlers = self.rw_handlers.ptr[0 .. index + 1];
-        self.rw_handlers[index] = handler;
+        try self.rw_handlers.append(ctx, handler);
     }
 
     fn clearRwHandler(self: *EventLoop, ctx: *core.JSContext, fd: i32, write_handler: bool) void {
-        var index: usize = 0;
-        while (index < self.rw_handlers.len) : (index += 1) {
-            if (self.rw_handlers[index].fd != fd) continue;
-            self.rw_handlers[index].clearCallback(write_handler);
-            if (self.rw_handlers[index].read_callback.is(.null_value) and self.rw_handlers[index].write_callback.is(.null_value)) {
-                self.removeRwHandlerAt(ctx, index);
+        for (self.rw_handlers.items, 0..) |*handler, index| {
+            if (handler.fd != fd) continue;
+            handler.clearCallback(write_handler);
+            if (handler.read_callback.is(.null_value) and handler.write_callback.is(.null_value)) {
+                self.rw_handlers.removeAt(ctx, index);
             }
             return;
-        }
-    }
-
-    fn removeRwHandlerAt(self: *EventLoop, ctx: *core.JSContext, index: usize) void {
-        std.debug.assert(index < self.rw_handlers.len);
-        const old_len = self.rw_handlers.len;
-        if (index + 1 < old_len) {
-            @memmove(self.rw_handlers[index .. old_len - 1], self.rw_handlers[index + 1 .. old_len]);
-        }
-        self.rw_handlers = self.rw_handlers.ptr[0 .. old_len - 1];
-        if (self.rw_handlers.len == 0 and self.rw_handlers_capacity != 0) {
-            const old_handlers = self.rw_handlers.ptr[0..self.rw_handlers_capacity];
-            self.rw_handlers = &.{};
-            self.rw_handlers_capacity = 0;
-            ctx.runtimePtr().memory.free(RwHandler, old_handlers);
         }
     }
 
@@ -339,9 +304,9 @@ pub const EventLoop = struct {
     /// arbitrary CRT descriptors are not waitable HANDLEs. Timers and pending
     /// jobs are handled by the adjacent event-loop arms before this hook.
     fn runNextRwHandlerWindows(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-        if (self.rw_handlers.len == 0) return false;
+        if (self.rw_handlers.items.len == 0) return false;
         var callback = zjs.JSValue.nullValue();
-        for (self.rw_handlers) |handler| {
+        for (self.rw_handlers.items) |handler| {
             if (handler.fd == 0 and !handler.read_callback.is(.null_value)) {
                 callback = handler.read_callback;
                 break;
@@ -354,10 +319,10 @@ pub const EventLoop = struct {
         const has_pending_jobs = rt.job_queue.jobs.len != 0;
         const has_pending_host_completion = exec.atomics_ops.atomicsRuntimeHasPendingAsyncWaiters(rt);
         if (!has_pending_jobs and !has_pending_host_completion) {
-            timeout_ms = if (self.timers.len == 0) windows_api.infinite else blk: {
+            timeout_ms = if (self.timers.items.len == 0) windows_api.infinite else blk: {
                 const now = nowMs();
                 var next_delay: u64 = std.math.maxInt(u64);
-                for (self.timers) |timer| {
+                for (self.timers.items) |timer| {
                     next_delay = @min(next_delay, if (timer.timeout_ms > now) timer.timeout_ms - now else 0);
                 }
                 break :blk @intCast(@min(next_delay, @as(u64, windows_api.infinite - 1)));
@@ -374,12 +339,12 @@ pub const EventLoop = struct {
     }
 
     fn runNextRwHandlerPosix(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-        if (self.rw_handlers.len == 0) return false;
+        if (self.rw_handlers.items.len == 0) return false;
         const rt = ctx.runtimePtr();
-        var pollfds = try rt.memory.alloc(libc.struct_pollfd, self.rw_handlers.len);
+        var pollfds = try rt.memory.alloc(libc.struct_pollfd, self.rw_handlers.items.len);
         defer rt.memory.free(libc.struct_pollfd, pollfds);
         var count: usize = 0;
-        for (self.rw_handlers) |handler| {
+        for (self.rw_handlers.items) |handler| {
             var events: c_short = 0;
             if (!handler.read_callback.is(.null_value)) events |= libc.POLLIN;
             if (!handler.write_callback.is(.null_value)) events |= libc.POLLOUT;
@@ -392,12 +357,12 @@ pub const EventLoop = struct {
         const has_pending_jobs = rt.job_queue.jobs.len != 0;
         const has_pending_host_completion = exec.atomics_ops.atomicsRuntimeHasPendingAsyncWaiters(rt);
         if (!has_pending_jobs and !has_pending_host_completion) {
-            if (self.timers.len == 0) {
+            if (self.timers.items.len == 0) {
                 timeout_ms = -1;
             } else {
                 const now = nowMs();
                 var next_delay: u64 = std.math.maxInt(u64);
-                for (self.timers) |timer| {
+                for (self.timers.items) |timer| {
                     if (timer.timeout_ms > now) {
                         next_delay = @min(next_delay, timer.timeout_ms - now);
                     } else {
@@ -415,10 +380,8 @@ pub const EventLoop = struct {
         if (ready <= 0) return false;
         for (pollfds[0..count]) |pollfd| {
             if (pollfd.revents == 0) continue;
-            var handler_index: usize = 0;
-            while (handler_index < self.rw_handlers.len) : (handler_index += 1) {
-                if (self.rw_handlers[handler_index].fd != pollfd.fd) continue;
-                const handler = self.rw_handlers[handler_index];
+            for (self.rw_handlers.items) |handler| {
+                if (handler.fd != pollfd.fd) continue;
                 if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.is(.null_value)) {
                     const callback = handler.read_callback;
                     _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
@@ -434,43 +397,21 @@ pub const EventLoop = struct {
         return false;
     }
 
-    fn ensureSignalHandlerCapacity(self: *EventLoop, ctx: *core.JSContext, min_capacity: usize) !void {
-        if (self.signal_handlers_capacity >= min_capacity) return;
-        var next_capacity = if (self.signal_handlers_capacity == 0) @as(usize, 2) else self.signal_handlers_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const rt = ctx.runtimePtr();
-        const next = try rt.memory.alloc(SignalHandler, next_capacity);
-        errdefer rt.memory.free(SignalHandler, next);
-        const old_handlers = self.signal_handlers;
-        const old_capacity = self.signal_handlers_capacity;
-        @memcpy(next[0..old_handlers.len], old_handlers);
-        self.signal_handlers = next[0..old_handlers.len];
-        self.signal_handlers_capacity = next_capacity;
-        if (old_capacity != 0) {
-            rt.memory.free(SignalHandler, old_handlers.ptr[0..old_capacity]);
-        }
-    }
-
     fn setSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, callback: zjs.JSValue) !void {
-        for (self.signal_handlers) |*handler| {
+        for (self.signal_handlers.items) |*handler| {
             if (handler.sig != sig) continue;
             handler.setCallback(callback);
             _ = signal(@intCast(sig), @intFromPtr(&osSignalHandler));
             return;
         }
-        const index = self.signal_handlers.len;
-        try self.ensureSignalHandlerCapacity(ctx, index + 1);
-        const handler = SignalHandler.init(sig, callback);
-        self.signal_handlers = self.signal_handlers.ptr[0 .. index + 1];
-        self.signal_handlers[index] = handler;
+        try self.signal_handlers.append(ctx, SignalHandler.init(sig, callback));
         _ = signal(@intCast(sig), @intFromPtr(&osSignalHandler));
     }
 
     fn clearSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, disposition: core.context.SignalDisposition) void {
-        var index: usize = 0;
-        while (index < self.signal_handlers.len) : (index += 1) {
-            if (self.signal_handlers[index].sig != sig) continue;
-            self.removeSignalHandlerAt(ctx, index);
+        for (self.signal_handlers.items, 0..) |handler, index| {
+            if (handler.sig != sig) continue;
+            self.signal_handlers.removeAt(ctx, index);
             break;
         }
         _ = signal(@intCast(sig), switch (disposition) {
@@ -479,25 +420,10 @@ pub const EventLoop = struct {
         });
     }
 
-    fn removeSignalHandlerAt(self: *EventLoop, ctx: *core.JSContext, index: usize) void {
-        std.debug.assert(index < self.signal_handlers.len);
-        const old_len = self.signal_handlers.len;
-        if (index + 1 < old_len) {
-            @memmove(self.signal_handlers[index .. old_len - 1], self.signal_handlers[index + 1 .. old_len]);
-        }
-        self.signal_handlers = self.signal_handlers.ptr[0 .. old_len - 1];
-        if (self.signal_handlers.len == 0 and self.signal_handlers_capacity != 0) {
-            const old_handlers = self.signal_handlers.ptr[0..self.signal_handlers_capacity];
-            self.signal_handlers = &.{};
-            self.signal_handlers_capacity = 0;
-            ctx.runtimePtr().memory.free(SignalHandler, old_handlers);
-        }
-    }
-
     fn runNextSignalHandler(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
         if (os_pending_signals == 0) return false;
         _ = ctx.runtimePtr();
-        for (self.signal_handlers) |handler| {
+        for (self.signal_handlers.items) |handler| {
             const mask = @as(u64, 1) << @intCast(handler.sig);
             if ((os_pending_signals & mask) == 0) continue;
             os_pending_signals &= ~mask;
@@ -509,7 +435,7 @@ pub const EventLoop = struct {
     }
 };
 
-pub fn runUntilIdle(context: *zjs.JSContext, options: Options) !RunResult {
+pub fn runUntilIdle(context: *zjs.JSContext, options: EventLoopOptions) !EventLoopRunResult {
     var loop = EventLoop.init(context, options);
     loop.install();
     defer loop.deinit();
@@ -599,6 +525,12 @@ fn fromOpaque(ptr: *anyopaque) *EventLoop {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn installedLoop(ptr: *anyopaque, core_ctx: *core.context.JSContext) *EventLoop {
+    const loop = fromOpaque(ptr);
+    std.debug.assert(loop.context == core_ctx);
+    return loop;
+}
+
 fn traceRoots(ptr: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
     try fromOpaque(ptr).traceRoots(visitor);
 }
@@ -616,57 +548,39 @@ fn nextTimerId(ptr: *anyopaque) i64 {
 }
 
 fn enqueueTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    try fromOpaque(ptr).enqueueTimer(ctx, id, callback, delay_ms, repeats);
+    try installedLoop(ptr, core_ctx).enqueueTimer(core_ctx, id, callback, delay_ms, repeats);
 }
 
 fn clearTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64) void {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    fromOpaque(ptr).clearTimer(ctx, id);
+    installedLoop(ptr, core_ctx).clearTimer(core_ctx, id);
 }
 
 fn runNextTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    return fromOpaque(ptr).runNextTimer(ctx, output, global);
+    return installedLoop(ptr, core_ctx).runNextTimer(core_ctx, output, global);
 }
 
 fn setRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    try fromOpaque(ptr).setRwHandler(ctx, fd, write_handler, callback);
+    try installedLoop(ptr, core_ctx).setRwHandler(core_ctx, fd, write_handler, callback);
 }
 
 fn clearRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool) void {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    fromOpaque(ptr).clearRwHandler(ctx, fd, write_handler);
+    installedLoop(ptr, core_ctx).clearRwHandler(core_ctx, fd, write_handler);
 }
 
 fn runNextRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    return fromOpaque(ptr).runNextRwHandler(ctx, output, global);
+    return installedLoop(ptr, core_ctx).runNextRwHandler(core_ctx, output, global);
 }
 
 fn setSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, callback: zjs.JSValue) !void {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    try fromOpaque(ptr).setSignalHandler(ctx, sig, callback);
+    try installedLoop(ptr, core_ctx).setSignalHandler(core_ctx, sig, callback);
 }
 
 fn clearSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, disposition: core.context.SignalDisposition) void {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    fromOpaque(ptr).clearSignalHandler(ctx, sig, disposition);
+    installedLoop(ptr, core_ctx).clearSignalHandler(core_ctx, sig, disposition);
 }
 
 fn runNextSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    const ctx = fromOpaque(ptr).context;
-    std.debug.assert(ctx == core_ctx);
-    return fromOpaque(ptr).runNextSignalHandler(ctx, output, global);
+    return installedLoop(ptr, core_ctx).runNextSignalHandler(core_ctx, output, global);
 }
 
 var os_pending_signals: u64 = 0;
@@ -677,15 +591,14 @@ fn osSignalHandler(sig: c_int) callconv(.c) void {
 }
 
 fn nowMs() u64 {
-    const ns = std.Io.Clock.Timestamp.now(hostTimerIo(), .awake).raw.toNanoseconds();
-    return @intCast(@divTrunc(ns, std.time.ns_per_ms));
+    return platform_clock.monotonicNanos() / std.time.ns_per_ms;
 }
 
 fn hostTimerIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-test "EventLoop drains queued JS callbacks" {
+test "runtime.EventLoop drains queued JS callbacks" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -709,7 +622,7 @@ test "EventLoop drains queued JS callbacks" {
     try std.testing.expectEqual(@as(?i32, 7), hit.as(.int));
 }
 
-test "EventLoop removes timers without allocation" {
+test "runtime.EventLoop removes timers without allocation" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt);
@@ -718,16 +631,16 @@ test "EventLoop removes timers without allocation" {
     var loop = EventLoop.init(ctx, .{});
     defer loop.deinit();
 
-    try loop.ensureTimerCapacity(ctx.core, 2);
-    loop.timers = loop.timers.ptr[0..2];
-    loop.timers[0] = .{
+    try loop.timers.ensureCapacity(ctx.core, 2);
+    loop.timers.items = loop.timers.items.ptr[0..2];
+    loop.timers.items[0] = .{
         .id = 10,
         .callback = zjs.JSValue.int32(1),
         .timeout_ms = 100,
         .delay_ms = 0,
         .repeats = false,
     };
-    loop.timers[1] = .{
+    loop.timers.items[1] = .{
         .id = 11,
         .callback = zjs.JSValue.int32(2),
         .timeout_ms = 200,
@@ -738,21 +651,21 @@ test "EventLoop removes timers without allocation" {
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes);
-    loop.removeTimerAt(ctx.core, 0);
+    loop.timers.removeAt(ctx.core, 0);
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 1), loop.timers.len);
-    try std.testing.expectEqual(@as(usize, 2), loop.timers_capacity);
-    try std.testing.expectEqual(@as(i64, 11), loop.timers[0].id);
+    try std.testing.expectEqual(@as(usize, 1), loop.timers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), loop.timers.capacity);
+    try std.testing.expectEqual(@as(i64, 11), loop.timers.items[0].id);
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
 
-    loop.removeTimerAt(ctx.core, 0);
-    try std.testing.expectEqual(@as(usize, 0), loop.timers.len);
-    try std.testing.expectEqual(@as(usize, 0), loop.timers_capacity);
+    loop.timers.removeAt(ctx.core, 0);
+    try std.testing.expectEqual(@as(usize, 0), loop.timers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), loop.timers.capacity);
 }
 
-test "EventLoop removes rw handlers without allocation" {
+test "runtime.EventLoop removes rw handlers without allocation" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt);
@@ -761,14 +674,14 @@ test "EventLoop removes rw handlers without allocation" {
     var loop = EventLoop.init(ctx, .{});
     defer loop.deinit();
 
-    try loop.ensureRwHandlerCapacity(ctx.core, 2);
-    loop.rw_handlers = loop.rw_handlers.ptr[0..2];
-    loop.rw_handlers[0] = .{
+    try loop.rw_handlers.ensureCapacity(ctx.core, 2);
+    loop.rw_handlers.items = loop.rw_handlers.items.ptr[0..2];
+    loop.rw_handlers.items[0] = .{
         .fd = 10,
         .read_callback = zjs.JSValue.int32(1),
         .write_callback = zjs.JSValue.nullValue(),
     };
-    loop.rw_handlers[1] = .{
+    loop.rw_handlers.items[1] = .{
         .fd = 11,
         .read_callback = zjs.JSValue.int32(2),
         .write_callback = zjs.JSValue.nullValue(),
@@ -777,21 +690,21 @@ test "EventLoop removes rw handlers without allocation" {
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes);
-    loop.removeRwHandlerAt(ctx.core, 0);
+    loop.rw_handlers.removeAt(ctx.core, 0);
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 1), loop.rw_handlers.len);
-    try std.testing.expectEqual(@as(usize, 2), loop.rw_handlers_capacity);
-    try std.testing.expectEqual(@as(i32, 11), loop.rw_handlers[0].fd);
+    try std.testing.expectEqual(@as(usize, 1), loop.rw_handlers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), loop.rw_handlers.capacity);
+    try std.testing.expectEqual(@as(i32, 11), loop.rw_handlers.items[0].fd);
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
 
-    loop.removeRwHandlerAt(ctx.core, 0);
-    try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.len);
-    try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers_capacity);
+    loop.rw_handlers.removeAt(ctx.core, 0);
+    try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.capacity);
 }
 
-test "EventLoop removes signal handlers without allocation" {
+test "runtime.EventLoop removes signal handlers without allocation" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt);
@@ -800,13 +713,13 @@ test "EventLoop removes signal handlers without allocation" {
     var loop = EventLoop.init(ctx, .{});
     defer loop.deinit();
 
-    try loop.ensureSignalHandlerCapacity(ctx.core, 2);
-    loop.signal_handlers = loop.signal_handlers.ptr[0..2];
-    loop.signal_handlers[0] = .{
+    try loop.signal_handlers.ensureCapacity(ctx.core, 2);
+    loop.signal_handlers.items = loop.signal_handlers.items.ptr[0..2];
+    loop.signal_handlers.items[0] = .{
         .sig = 1,
         .callback = zjs.JSValue.int32(1),
     };
-    loop.signal_handlers[1] = .{
+    loop.signal_handlers.items[1] = .{
         .sig = 2,
         .callback = zjs.JSValue.int32(2),
     };
@@ -814,21 +727,21 @@ test "EventLoop removes signal handlers without allocation" {
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes);
-    loop.removeSignalHandlerAt(ctx.core, 0);
+    loop.signal_handlers.removeAt(ctx.core, 0);
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 1), loop.signal_handlers.len);
-    try std.testing.expectEqual(@as(usize, 2), loop.signal_handlers_capacity);
-    try std.testing.expectEqual(@as(u32, 2), loop.signal_handlers[0].sig);
+    try std.testing.expectEqual(@as(usize, 1), loop.signal_handlers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), loop.signal_handlers.capacity);
+    try std.testing.expectEqual(@as(u32, 2), loop.signal_handlers.items[0].sig);
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
 
-    loop.removeSignalHandlerAt(ctx.core, 0);
-    try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.len);
-    try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers_capacity);
+    loop.signal_handlers.removeAt(ctx.core, 0);
+    try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.capacity);
 }
 
-test "EventLoop keeps host-held unique symbol atoms until release" {
+test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt);
@@ -849,11 +762,9 @@ test "EventLoop keeps host-held unique symbol atoms until release" {
     const rw_write_value = try rt.takeSymbolValue(rw_write_symbol);
     try loop.setRwHandler(ctx.core, 1, true, rw_write_value);
 
-    try loop.ensureSignalHandlerCapacity(ctx.core, 1);
-    loop.signal_handlers = loop.signal_handlers.ptr[0..1];
     const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
     const signal_value = try rt.takeSymbolValue(signal_symbol);
-    loop.signal_handlers[0] = SignalHandler.init(2, signal_value);
+    try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, signal_value));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(timer_symbol) != null);
@@ -864,7 +775,7 @@ test "EventLoop keeps host-held unique symbol atoms until release" {
     loop.clearTimer(ctx.core, 1);
     loop.clearRwHandler(ctx.core, 1, false);
     loop.clearRwHandler(ctx.core, 1, true);
-    loop.removeSignalHandlerAt(ctx.core, 0);
+    loop.signal_handlers.removeAt(ctx.core, 0);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(timer_symbol) == null);
@@ -873,7 +784,7 @@ test "EventLoop keeps host-held unique symbol atoms until release" {
     try std.testing.expect(rt.atoms.name(signal_symbol) == null);
 }
 
-test "runtime root tracer visits EventLoop host roots" {
+test "runtime.root tracer visits EventLoop host roots" {
     var rt: zjs.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -889,9 +800,7 @@ test "runtime root tracer visits EventLoop host roots" {
     try loop.enqueueTimer(ctx.core, 1, zjs.JSValue.int32(102), 0, false);
     try loop.setRwHandler(ctx.core, 1, false, zjs.JSValue.int32(103));
     try loop.setRwHandler(ctx.core, 1, true, zjs.JSValue.int32(104));
-    try loop.ensureSignalHandlerCapacity(ctx.core, 1);
-    loop.signal_handlers = loop.signal_handlers.ptr[0..1];
-    loop.signal_handlers[0] = SignalHandler.init(2, zjs.JSValue.int32(105));
+    try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, zjs.JSValue.int32(105)));
 
     const Counter = struct {
         count: usize = 0,
@@ -919,8 +828,8 @@ test "runtime root tracer visits EventLoop host roots" {
     try std.testing.expectEqual(@as(usize, 4), counter.count);
 }
 
-test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
-    const bytecode = @import("../bytecode.zig");
+test "runtime.EventLoop roots one-shot function bytecode timer callback after dequeue" {
+    const bytecode = @import("bytecode.zig");
 
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     const ctx = try zjs.JSContext.create(rt);
@@ -957,4 +866,19 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+test "runtime.namespace does not expose internals or kernel primitives" {
+    try std.testing.expect(!@hasDecl(@This(), "event_loop"));
+    try std.testing.expect(!@hasDecl(@This(), "cleanup"));
+    try std.testing.expect(!@hasDecl(@This(), "modules"));
+    try std.testing.expect(!@hasDecl(@This(), "plugin"));
+    try std.testing.expect(!@hasDecl(@This(), "buffer"));
+    try std.testing.expect(!@hasDecl(@This(), "Engine"));
+    try std.testing.expect(!@hasDecl(@This(), "JSRuntime"));
+    try std.testing.expect(!@hasDecl(@This(), "JSContext"));
+    try std.testing.expect(!@hasDecl(@This(), "JSValue"));
+    try std.testing.expect(!@hasDecl(@This(), "Object"));
+    try std.testing.expect(!@hasDecl(@This(), "binding"));
+    try std.testing.expect(!@hasDecl(@This(), "ffi"));
 }

@@ -32,7 +32,7 @@
 | `InvalidAtom` | atom id 不是活条目（符号体/名字查找）。 |
 | `InvalidBytecode` | 字节码 opcode/操作数非法。 |
 | `InvalidBuiltinRegistry` | 内建/realm状态不满足调用条件，例如realm未完成构造、正在finalizing或缓存缺失；不一定是内存损坏。 |
-| `InvalidCharacter` | 底层字符/数值解析失败或字符范围不符，例如number_format.parseNumber未完整消费输入；并非仅词法转义。 |
+| `InvalidCharacter` | 底层字符/数值解析失败或字符范围不符，例如 `std.fmt.parseFloat` 拒收或词法数字非法；并非仅转义。 |
 | `InvalidCharacterError` | 宿主编码路径使用的DOMException名称及对应运输错误，区别于内部InvalidCharacter。 |
 | `InvalidClassId` | class id 越界或未安装。 |
 | `InvalidEscape` | 字符串/模板转义非法。 |

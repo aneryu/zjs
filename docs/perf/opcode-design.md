@@ -239,7 +239,7 @@ E1 出数再漂亮也开不了门：
 早期未来需求账如下；§9.1 只完成了 FNABI 的首发审计，typed 仍是需求方
 自报预算：
 
-- FNABI `CALL_NATIVE_*`：旧稿**约 25 个**（`fun-native-plugin-design.md:213`）
+- FNABI `CALL_NATIVE_*`：旧稿**约 25 个**（已撤 FNABI 草案）
 - typed 特化族 T1–T4：**20–40 个**（`type-directed-optimization-plan.md:527`）
 
 **旧合计 45–65，供给 11。**修订见 §9.1：FNABI 首发改为 2–3，typed
@@ -1207,14 +1207,14 @@ PERF-JIT、PERF-ASM-1A、SER-ARTIFACT。
 
 ### 9.1 需求侧审计：45–65 → 保守容量预算 22–43
 
-**FNABI 的 ~25 个**：出处是 `fun-native-plugin-design.md:213`，形态是签名
+**FNABI 的 ~25 个**：出处是已撤的 FNABI 草案，形态是签名
 矩阵（`CALL_NATIVE_I32_I32_TO_I32` 这类，参数类型 × 返回类型的组合）。
 leaf 调用热路径确实撑得起独立编号——marshalling 占主导，二级派发**不会**
 被吸收，所以 §3.4a「冷用平面、热用真编号」的教训在这里指向「给真编号」。
 **但 25 是组合填充，不是实测需求**，而且有两条自家条款直接反对预留：
 
 - **FNABI 非目标 #11 明文**：「任意签名组合自动生成专用 VM opcode」
-  **不在 v1 范围内**（`fun-native-plugin-design.md:322`）。预留 25 个正是
+  **不在 v1 范围内**（已撤 FNABI 草案非目标 #11）。预留 25 个正是
   为这条被排除的能力买单。
 - **M2 验收门明文**：「新增 `CALL_NATIVE_*` handler 家族通过 dispatch
   布局 / I-cache 外部性 A/B（全 corpus，冻结基线交错测量）——新 handler
@@ -1238,7 +1238,7 @@ leaf 调用热路径确实撑得起独立编号——marshalling 占主导，二
 
 ### 9.2 FNABI 已经是一座三地址孤岛（停议材料）
 
-`fun-native-plugin-design.md` §17.1 的编码草案，逐字如下：
+已撤 FNABI 草案 §17.1 的编码草案，逐字如下：
 
 ```text
 CALL_NATIVE_I32_I32_TO_I32
@@ -2940,14 +2940,11 @@ CV 1.44% 且呈双峰（36k/34.9k 两模式，前已录得同一二进制一分�
 写（前科是 clock_gettime 的栈帧，不是 store）。发布构建编译剔除，
 handler island 逐字节不变。
 
-**raw-access CI gate**（§10.5 四规则的机器可执行形态，
-`tools/lint/raw_access_gate.py`）：**状态扫描不是 diff 扫描**（diff 门
+**raw-access 冻结**（§10.5 四规则）：状态扫描，不是 diff 扫描（diff 门
 会漏掉违规搬进新文件）。六个流消费文件、三类模式（raw emit /
 物理身份比较 / `code[pc+N]` 读），解释器 handler 本体按设计不在
-扫描集（执行 `pc[0]` 是它的本职）。**374 处既有访问冻结进 allowlist，
-每项带原因与移除阶段**（F0c encoder / generated matcher / 合同 4 /
-decoder 永久），增即红、减提示收紧。注入验证：cfg.zig 加一处
-`code[0] == op.goto` 即 23 > 22 红。
+扫描集（执行 `pc[0]` 是它的本职）。战役期用 allowlist 冻结了 374 处
+既有访问；机器扫描器已随顾问 lint 一起撤掉，规则本身仍在本节。
 
 **至此 F0a0 / F0a1 / F0b / F0c（现役范围）/ F0d 全部关账。** C0 的
 F0 前置除 carrier 专属件（registry/fixture/encoder carrier 臂，与
@@ -3397,9 +3394,9 @@ carrier 线一条未迁——没有 alias 或迁移窗口欠账（R0 只在账�
 | 每个 opcode 是独立函数符号（E1 的前提） | `src/exec/tailcall_dispatch.zig:5,314,364`（`callconv(.c)` + `align(16/64)` + `linksection(op_handler_section)`）；冷壳共享体见 `tailcall_dispatch_colds.zig:8-10` |
 | K4 门：字节码架构重估的三条准入条件 | `docs/architecture.md` §8「Stack Bytecode VM Status」末段；保留条款出处 `qjs_alignment_charter_transition.md` K4 |
 | qjs 对齐宪章 R1-R3 退役、K1-K5 保留 | `docs/qjs_alignment_charter_transition.md`（RATIFIED，owner 2026-08-24） |
-| FNABI 三地址编码草案 | `docs/fun-native-plugin-design.md` §17.1 |
-| FNABI 非目标 #11「任意签名组合自动生成专用 VM opcode」 | `docs/fun-native-plugin-design.md:322` |
-| 新 handler 族的 I-cache 外部性硬门 | `docs/fun-native-plugin-design.md:3256`（M2 验收门） |
+| FNABI 三地址编码草案 | 已撤 FNABI 草案 §17.1 |
+| FNABI 非目标 #11「任意签名组合自动生成专用 VM opcode」 | 已撤 FNABI 草案 |
+| 新 handler 族的 I-cache 外部性硬门 | 已撤 FNABI 草案 M2 验收门 |
 | TOS caching 成本模型（16B/档） | `docs/engine-evolution-plan.md` §8.3（原为 baseline JIT v1） |
 | 「first-class Zig project」纪律 | `docs/engine-evolution-plan.md` §3.3 |
 | ~20.7 cyc/iter ≈ 3 cyc/dispatch；asm 省 16% insn 兑现 0.0% | `engine-evolution-plan.md:205-213`（2026-08-24 三骨架实测） |

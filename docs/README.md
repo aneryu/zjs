@@ -1,8 +1,8 @@
 # Documentation
 
-Active project documentation, organized by audience. Completed roadmaps and
-campaign dumps are not kept as current status; recover them from git history
-when needed.
+Active project documentation, organized by audience. Campaign dumps, dated
+accounts, and completed migration specs are not kept as current status;
+recover them from git history when needed.
 
 ## New To The Project? Read In This Order
 
@@ -25,24 +25,6 @@ when needed.
   Host / Rooting Rules sections and the contract's Native Functions chapter;
   the mechanism is the
   [native boundary design](perf/native-boundary-design.md) (§3, §7, §9).
-  The former in-tree Runtime Plugin ABI (`runtime-plugin-abi.md`) was
-  deleted 2026-09-06. The [Fun Native Plugin design](fun-native-plugin-design.md)
-  is a historical FNABI draft; zjs no longer ships that ABI.
-- [Fun Dev Hot Reload design](fun-dev-hot-reload-design.md): the fun/zjs
-  hot-reload and dev-update system — HostCore/Session split, Sequential
-  Session Reload, ESM HMR, and the zjs capability list (v1.5,
-  2026-08-26; stage 2 split into P2A async-safety / P2B state
-  migration; Shadow Swap deferred to its appendix A).
-- [Process Model design](process-model-design.md): Erlang-style multithreading
-  — Runtime-per-process → lightweight processes, turn-boundary scheduling,
-  selective receive, link/monitor/supervision (v0.5 design exploration,
-  2026-08-26; §20 records the six-plan reconciliation verdicts and the
-  per-document debt ledger).
-- [Roadmap](roadmap.md): the unified execution-baseline candidate (v1.8) —
-  authority matrix, canonical hard-dependency DAG, gates, WIP limits; the
-  machine-readable registry is [roadmap/work-items.yaml](roadmap/work-items.yaml),
-  validated on CI by `tools/docs/roadmap_lint.py`. Roadmap verdicts must be
-  synchronized to domain-doc bodies in the same commit.
 - [Limitations — Security Boundary](../LIMITATIONS.md): trusted-code
   assumptions; zjs is not a sandbox for hostile JavaScript.
 
@@ -51,68 +33,61 @@ when needed.
 - [Contributing](../CONTRIBUTING.md): pull requests, QuickJS semantics, test rules.
 - [Guide](../GUIDE.md): Zig engineering rules and the validation command ladder.
 - [Architecture](architecture.md): current source tour, layer map, and the
-  Stack Bytecode VM Status chapter (VM mechanisms, the §8 PMU governance
-  gate); evolution scope lives in the
+  Stack Bytecode VM Status chapter. Evolution scope lives in the
   [Engine Evolution Plan](engine-evolution-plan.md).
 - [源码逐函数讲解](code-walkthrough/README.md): Chinese function-level
   walkthrough of `src/` and the build/test entry points.
-- [Tracing GC Design](tracing-gc-design.md): project-specific target
-  architecture, safety contracts, and staged migration from RC; the legacy
-  collector remains documented in [Cycle Collector Invariants](gc-invariants.md).
-- [Experimental Tracing GC And RC Rollback](tracing-gc-experimental-rollout.md):
-  explicit experimental build entry, release rollback procedure, compatibility
-  boundary, and the Stage 7 production-default preflight table.
+- [GC invariants](gc-invariants.md): rules the production tracing collector
+  holds. There is no reference-counting collector in the tree.
+- [VM value representation contract](vm-value-representation-contract.md):
+  normative `JSValue` / slot / barrier / root protocol.
 - [API Boundary](api-boundary.md): layering rules between public API, core,
   runtime, bindings, and CLI.
 - [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.
+- [Verification Policy](verification-policy.md): per-change and batch gates.
 - [Compiler Contract](compiler-contract.md): normative compiler identity rules.
-- [Borrowed Atom Audit](borrowed_atom_audit.md): atom-ownership contract and
-  the `-Dzjs_ownership_audit` / lint governance protocol.
+- [Borrowed Atom Audit](borrowed_atom_audit.md): atom-rooting contract and
+  the `-Dzjs_ownership_audit` build.
 
 ## Performance
 
-- [bench-v8 status](perf/bench-v8-status.md): the public performance claim
-  (Octane 2.0, V8 suite v9, vendored since 2026-08-25) — the single
-  authoritative score source.
-- Fixed-work PMU screening: `tools/perf/bench_v8/run_fixed_pmu.py`
-  (`mise run perf-screen`). The external-checkout zoo runner it replaced
-  was retired 2026-08-29; its last baseline was removed 2026-08-25 —
-  recover both from git history.
-- [GC baseline](perf/gc-baseline.md): refcounting-collector behavior
-  baseline captured before the GC refactor.
-- [Pause baseline 2026-08-29](pause-baseline-2026-08-29.md): the current
-  major/minor pause account, six benchmarks against the frozen rc arm, taken
-  with the corrected instrument — the authoritative source for any pause
-  number, and the record of which historical pause readings are void.
-- [Performance Workflow](perf/README.md): measurement contract, diagnostic
-  benchmarks, profiling, PMU discipline.
-- [Measurement Fields And Contracts](perf/measurement-contracts.md): current
-  CPU/L3 fields, locks, concurrency matrix, and screen/verdict eligibility.
+- [bench-v8 status](perf/bench-v8-status.md): historical public performance
+  snapshot (Octane 2.0, V8 suite v9).
+- [Performance Workflow](perf/README.md): local diagnostic benches and
+  profiling notes. No merge-time performance gate.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed
-  layouts, invariants, and the no-inline-cache-today status.
-- [Refactor Tax Policy](refactor-policy.md): risk zones and identity gates;
-  hot-path moves need a bench-v8 A/B.
-- [Backlog](backlog.md): the single priced work queue — HOT-zone refactors
-  (H7/H9/H10/H11), implementation-quality open items (Q11 T3/T4, Q12, Q13),
-  `call_runtime.zig` candidate domains, and the code-volume queue with its
-  ruled-unrecoverable record. Merged 2026-08-25 from four former queue
-  documents; their closed records live in git history.
+  layouts and invariants.
+- [Opcode design](perf/opcode-design.md): the single current opcode-space text;
+  engines comparison and the per-opcode table sit beside it.
+- [Refactor Tax Policy](refactor-policy.md): hot-path splits have a layout
+  tax; the merge authority is the ordinary validation ladder.
+- [Backlog](backlog.md): the priced work queue.
 
 ## Status And Release
 
 - [STATUS](../STATUS.md): the single authoritative status snapshot.
 - [Changelog](../CHANGELOG.md): released and development changes.
 - [Release Checklist](release-checklist.md): Production v1 release decision.
+- [Roadmap](roadmap.md): approved execution baseline; machine-readable
+  registry is [roadmap/work-items.yaml](roadmap/work-items.yaml).
 - [Retrieval index](../llms.txt): compact project facts for automated
   retrieval tools.
 
+## Planned Work (authority for gated items)
+
+These documents define how gated roadmap items are done when they start.
+They are not a description of the shipped engine.
+
+- [Engine Evolution Plan](engine-evolution-plan.md)
+- [Type-Directed Optimization Plan](type-directed-optimization-plan.md)
+- [Process Model design](process-model-design.md)
+
 ## Reports (gate snapshots)
 
-These paths are build-graph inputs or local write-outs.
+These paths are build-graph inputs or local write-outs, not under `docs/`.
 
-- `reports/perf/current/scripts/`: source scripts for optional
-  `perf-*-profile` steps. Profile JSON is written under `.zig-cache/perf/`.
 - `reports/test262-latest/`: local test262-check write-out (gitignored).
+- `reports/evidence/`: preregistered measurement evidence.
 
 ## Agent Workflow
 
@@ -125,11 +100,11 @@ These paths are build-graph inputs or local write-outs.
 - [QCP-1 Switch Decision](qcp1_switch_decision.md): close-out record — shipped
   compiler configuration, final verdicts, and the layout-sensitivity rulings
   (§9); full evidence lives in this file's git history.
+- [qjs-alignment charter transition](qjs_alignment_charter_transition.md):
+  the 2026-08-24 succession regime (what retired, what stayed).
 
-All other campaign reports (QCP-1 scorecards, V2 audits, anchor-split
-classification, dated comparisons, the frozen 2026-07-27 zjs/QuickJS
-subsystem difference baseline, and the superseded v7-suite score records)
-were removed from the active tree on 2026-08-18 and 2026-08-25; recover
+Completed GC campaign specs, dated pause/splay accounts, RC-retirement
+ledgers, and raw TGC run dumps were removed from the active tree; recover
 them from git history.
 
 ## Documentation Rules

@@ -1,7 +1,7 @@
 //! Host facade used by the CLI and in-repo tests.
 const std = @import("std");
 const zjs_binding = @import("binding/root.zig");
-pub const runtime = @import("runtime/root.zig");
+pub const runtime = @import("event_loop.zig");
 const zjs_core = @import("core/root.zig");
 const zjs_exec = @import("exec/root.zig");
 const CoreObject = zjs_binding.Object;

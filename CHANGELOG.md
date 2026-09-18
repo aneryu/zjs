@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- **Tools:** removed `gate-smoke` (`tools/gates/`, the `/tmp/gcgap-fixed`
+  corpus convention, and the `merge-gate` aggregate). Local
+  `mise run batch-gate` is now `checkpoint-gate` + `test-stress` +
+  `test262-check`, the same set CI linux-arm64 already runs.
+
+- **Tools:** removed the shared-host watch/timeline helpers
+  (`tools/gates/watch.py`, `timeline.py`, and the hand-run meta-tests).
+  Use `zig build --watch` locally if a resident incremental rebuild is
+  useful. mise no longer wraps `flock` / `taskset`; Run steps stay
+  unpinned unless `-Dgate-run-cpus` (or the matching env) is set.
+
+- **Tools:** removed the roadmap renderer/linter (`tools/docs`) and the
+  `roadmap-lint` CI job. `docs/roadmap/work-items.yaml` stays as a
+  hand-maintained registry; the ID/DAG/status blocks in `docs/roadmap.md`
+  are static snapshots.
+
+- **Tools:** removed `tools/perf` (campaign trees, diagnostic harnesses,
+  and the vendored bench-v8 / Octane suite). `zig build perf-bench-v8`
+  is gone. Local timing stays on `zig build perf-benchmark`
+  (`tests/perf/microbench.js`). The last Octane snapshot remains
+  `docs/perf/bench-v8-status.md`. Also removed `tools/compare`,
+  runtime-profile runners, `macro-check` / `check_completes.py`, and
+  advisory scanners (`tools/lint`, `dead_decls.py`,
+  `lint_anti_goals.sh`, `codex_run.sh`). Remaining instrument after
+  that cut: the test runner.
+
+- **Policy:** retired the measurement and ablation policy (Stage 0,
+  size-screen, `measure_fields` field locks, mandatory PMU ABBA, and
+  refactor-policy rule 2's bench-v8 A/B / identity-set protocol).
+  Correctness stays on `zig build test` and the merge batch. Local
+  `perf-benchmark` / `perf stat` are diagnostic only.
+
+- **Host surface:** removed the leftover `src/runtime/` directory. The host
+  event loop is `src/event_loop.zig`; `zjs.runtime` still exposes
+  `EventLoop` / `runUntilIdle`. Timer, rw, and signal lists share one
+  growable `HostList`.
+
 - **Host surface:** removed embedder-only binding APIs that CLI and
   test262 do not use: `zjs.PropertySite`, `zjs.host.PropName` /
   `PropNameID`, `zjs.host.NativeBinding` (`src/binding/binding.zig`),

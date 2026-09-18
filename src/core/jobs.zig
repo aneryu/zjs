@@ -855,6 +855,71 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
     try std.testing.expectEqual(@as(?i32, 3), third.as(.int));
 }
 
+test "runtime takes typed Promise jobs without allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try rt.job_queue.ensureCapacity(2);
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
+
+    const old_bytes = rt.memory.allocated_bytes;
+    const old_allocations = rt.memory.allocation_count;
+    rt.setMemoryLimit(old_bytes);
+    var first = rt.job_queue.takeFirst().?;
+    rt.setMemoryLimit(null);
+    defer first.deinit();
+
+    try std.testing.expectEqual(@as(?i32, 10), first.payload.promise.value.as(.int));
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
+    try std.testing.expectEqual(@as(?i32, 11), rt.job_queue.jobs[0].payload.promise.value.as(.int));
+    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
+
+    var second = rt.job_queue.takeFirst().?;
+    defer second.deinit();
+    try std.testing.expectEqual(@as(?i32, 11), second.payload.promise.value.as(.int));
+    try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
+    try std.testing.expect(rt.job_queue.takeFirst() == null);
+}
+
+test "typed job reservations preserve capacity without claiming a FIFO position" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(12));
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
+
+    try rt.job_queue.reserveEntries(1);
+
+    // A reentrant ordinary enqueue owns the next FIFO position, but cannot
+    // consume the slot promised to the prepared transaction.
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(20));
+    try std.testing.expectEqual(@as(usize, 8), rt.job_queue.capacity);
+
+    const reserved_value = try core.Object.create(rt, core.class.ids.object, null);
+    rt.job_queue.enqueueOwnedPromiseObjectPrepared(ctx, reserved_value.value());
+
+    const expected = [_]i32{ 10, 11, 12, 20 };
+    for (expected) |value| {
+        var job = rt.job_queue.takeFirst().?;
+        defer job.deinit();
+        try std.testing.expectEqual(@as(?i32, value), job.payload.promise.value.as(.int));
+    }
+    var reserved_job = rt.job_queue.takeFirst().?;
+    defer reserved_job.deinit();
+    try std.testing.expect(reserved_job.payload.promise.value.same(reserved_value.value()));
+    try std.testing.expect(rt.job_queue.takeFirst() == null);
+}
+
 // D1a size pins (2026-07-31): removing the obsolete symbol-root protocol
 // state must not silently regress. The current pins are the `pins` tuple
 // below; the D1a before-values it replaced are history, not live numbers.

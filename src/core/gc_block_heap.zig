@@ -1,4 +1,4 @@
-//! 64 KiB block heap (tracing-gc-design.md §4.2 / §4.3 / §8.1).
+//! 64 KiB block heap.
 //!
 //! Superblocks are 2 MiB mappings split into 64 KiB-aligned blocks. A block
 //! holds one size class. Empty blocks return to the runtime free list; the
@@ -222,10 +222,8 @@ pub const Stats = struct {
     /// parked entry, no header read (`Block.reclaimDoomedIntoBitmap`).
     ///
     /// TGC S4-e retired the Pass-A settlement this counter was born for
-    /// (`passa_settled_cells`); TGC S5-a moved the `--gc-stats` line text and
-    /// the `blockHeap.bitmapReclaimedCells` JSON leaf onto the same name.
-    /// Frozen Stage-0 baselines still carry `passASettledCells`, which
-    /// `gc_stats_snapshot.SCHEMA_REMOVED_LEAVES[9]` accounts for.
+    /// (`passa_settled_cells`); TGC S5-a moved the `--gc-stats` line text onto
+    /// this name.
     bitmap_reclaimed_cells: usize = 0,
     /// Wholly-empty medium superblocks whose mapping was returned to the
     /// backing allocator (TGC S2-f (2)). Deliberately NOT folded into

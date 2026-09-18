@@ -29,9 +29,9 @@ cited domain document; `"proposed"` means it was chosen at freeze time
 (2026-08-26, delegated execution) and is an explicit owner-ratification
 point before that spike starts.
 
-The whole-process measurement contract
-(`tools/compare/measurement_policy.json`,
+The measurement and ablation policy is retired (2026-09-18). Files here
+are historical threshold records, not a live screen. Reference-binary and
+suite fingerprints live in `reports/evidence/BASE-G0/manifest.json`. The
+retired whole-process JS policy (`tools/compare/measurement_policy.json`,
 sha256 `020f2f1830506c1035efafaf9747e43ee6223e40225ac2d0bac19c8d2e11ec68`)
-and `docs/perf/README.md` govern how samples are taken; files here govern
-what the numbers mean and which verdict they force. Reference-binary and
-suite fingerprints live in `reports/evidence/BASE-G0/manifest.json`.
+remains the BASE-G0 fingerprint of that file.

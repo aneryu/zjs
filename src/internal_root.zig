@@ -1,6 +1,6 @@
 //! Internal engine root. Middle of the compile-root chain
 //! `src/root.zig` ⊂ `src/internal_root.zig` ⊂ `src/all_tests.zig`.
-//! CLI, scoped tests, and ReleaseFast artifacts compile against this file.
+//! CLI and ReleaseFast artifacts compile against this file.
 //! The unified suite imports it and adds the public-surface mirrors.
 
 comptime {
@@ -49,7 +49,7 @@ pub const simple_token = @import("simple_token.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
-pub const runtime = @import("runtime/root.zig");
+pub const runtime = @import("event_loop.zig");
 // QCP-1 scratch oracle surface for the CLI.
 pub const compiler = @import("compiler/root.zig");
 /// QCP-1 configuration signature, derived from the declarations the engine

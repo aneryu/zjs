@@ -14,6 +14,9 @@ const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const Object = @import("object.zig").Object;
 const property = @import("property.zig");
+const JSValue = @import("value.zig").JSValue;
+const class = @import("class.zig");
+const descriptor = @import("descriptor.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 
 /// qjs `JS_PROP_INITIAL_SIZE` (quickjs.c:965).
@@ -1528,3 +1531,176 @@ pub fn shapeHash(seed: u32, value: u32) u32 {
 }
 
 const std = @import("std");
+
+test "shapes keep property atoms addressable after a transition" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name_atom = try rt.internAtom("shapeProp");
+    var first = try rt.shapes.create(null);
+    var second = try rt.shapes.create(null);
+    try rt.shapes.addProperty(&first, name_atom, 0b000011);
+    try rt.shapes.addProperty(&second, name_atom, 0b000011);
+
+    try std.testing.expect(first.isHashed());
+    try std.testing.expectEqual(@as(usize, 1), first.prop_count);
+    try std.testing.expect(rt.atoms.name(first.props()[0].atom_id) != null);
+    try std.testing.expectEqual(
+        hashIndex(first.hash, initial_shape_hash_bits),
+        hashIndex(first.hash, rt.shapes.shape_hash_bits),
+    );
+}
+
+test "shape shared bit and prototype transitions are tracked" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name_atom = try rt.internAtom("shapeProtoProp");
+
+    const proto_one = try Object.create(rt, class.ids.object, null);
+    const proto_two = try Object.create(rt, class.ids.object, null);
+    const shape_hash_baseline = rt.shapes.shape_hash_count;
+    var first = try rt.shapes.create(proto_one);
+    var second = try rt.shapes.create(proto_two);
+    try rt.shapes.addProperty(&first, name_atom, 0b000001);
+    try rt.shapes.addProperty(&second, name_atom, 0b000001);
+    try std.testing.expect(first.proto != second.proto);
+
+    try std.testing.expect(!first.isShared());
+    first.markShared();
+    try std.testing.expect(first.isShared());
+    try std.testing.expect(!second.isShared());
+    try std.testing.expectEqual(shape_hash_baseline + 2, rt.shapes.shape_hash_count);
+}
+
+test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const flags: u6 = 0b000111; // data property: writable/enumerable/configurable
+    const names = [_][]const u8{ "p0", "p1", "p2", "p3", "p4", "p5" };
+    var atoms: [6]atom.Atom = undefined;
+    for (names, 0..) |name, i| atoms[i] = try rt.internAtom(name);
+
+    var shape = try rt.shapes.create(null);
+    // Six properties exceed the initial capacity (2), forcing at least one FAM
+    // relocation (the shape pointer moves; addProperty threads &shape back).
+    for (atoms) |a| try rt.shapes.addProperty(&shape, a, flags);
+    try std.testing.expectEqual(@as(u32, 6), shape.prop_count);
+    try std.testing.expect(shape.prop_size >= 6); // grew past the initial capacity of 2
+
+    // Snapshot a two-property baseline (mirrors the shared-test-engine reset
+    // that restores the post-install global layout, dropping user-added props).
+    var baseline = [_]Property{ shape.props()[0], shape.props()[1] };
+    var baseline_hash = initialHash(null);
+    baseline_hash = transitionHash(baseline_hash, atoms[0], flags);
+    baseline_hash = transitionHash(baseline_hash, atoms[1], flags);
+
+    try rt.shapes.restorePropertyLayout(&shape, &baseline, baseline_hash, 0);
+
+    try std.testing.expectEqual(@as(u32, 2), shape.prop_count);
+    try std.testing.expectEqual(atoms[0], shape.props()[0].atom_id);
+    try std.testing.expectEqual(atoms[1], shape.props()[1].atom_id);
+    try std.testing.expectEqual(baseline_hash, shape.hash);
+    // The rebuilt hash table resolves the retained properties (their buckets are
+    // non-empty, so the bucket head is a real index).
+    try std.testing.expect(shape.firstPropertyIndex(atoms[0]) != no_property_index);
+    try std.testing.expect(shape.firstPropertyIndex(atoms[1]) != no_property_index);
+    try std.testing.expect(rt.atoms.name(shape.props()[0].atom_id) != null);
+}
+
+test "shape registry create publishes hashed live shapes" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const hashed_baseline = rt.shapes.shape_hash_count;
+    const live_baseline = rt.gc.liveCountKind(.shape);
+
+    _ = try rt.shapes.create(null);
+    _ = try rt.shapes.create(null);
+    _ = try rt.shapes.create(null);
+
+    // Every created shape is both hashed and live (qjs counts hashed shapes only,
+    // and zjs has no separate registry array — both are intrusive GC-list shapes).
+    // Shapes are tracer-owned: they leave both counts only through a sweep.
+    try std.testing.expectEqual(hashed_baseline + 3, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(live_baseline + 3, rt.gc.liveCountKind(.shape));
+}
+
+test "shape registry hash grows and reuses object root shapes" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var shapes: [70]*Shape = undefined;
+    for (&shapes) |*slot| {
+        slot.* = try rt.shapes.create(null);
+    }
+    try std.testing.expect(rt.shapes.shape_hash_buckets.len >= 128);
+    try std.testing.expect(rt.shapes.shape_hash_bits > initial_shape_hash_bits);
+
+    const first = try rt.shapes.createObjectRoot(null);
+    const second = try rt.shapes.createObjectRoot(null);
+    try std.testing.expectEqual(first, second);
+    try std.testing.expect(first.isShared());
+}
+
+test "createObjectRoot leftover reserved flag shares hashed proto roots" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try rt.shapes.createObjectRoot(null);
+    const reserved_hit = try rt.shapes.createObjectRootReserved(null);
+    try std.testing.expectEqual(first, reserved_hit);
+    try std.testing.expect(first.isShared());
+
+    const proto = try Object.create(rt, class.ids.object, null);
+    const live_before = rt.gc.liveCountKind(.shape);
+    const reserved_miss = try rt.shapes.createObjectRootReserved(proto);
+    try std.testing.expect(!reserved_miss.header.metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(live_before, rt.gc.liveCountKind(.shape));
+    rt.shapes.publish(reserved_miss);
+    try std.testing.expect(reserved_miss.header.metaConst().alloc_info.heap_accounted);
+    try std.testing.expectEqual(live_before + 1, rt.gc.liveCountKind(.shape));
+    const published = try rt.shapes.createObjectRoot(proto);
+    try std.testing.expectEqual(reserved_miss, published);
+}
+
+test "reserved object root shapes reuse only an exact property capacity" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const four = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    const eight = try rt.shapes.createObjectRootWithPropertyCapacity(null, 8);
+    const four_again = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+
+    try std.testing.expectEqual(four, four_again);
+    try std.testing.expect(four != eight);
+    try std.testing.expectEqual(@as(u32, 4), four.prop_size);
+    try std.testing.expectEqual(@as(u32, 8), eight.prop_size);
+
+    const four_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 4);
+    const eight_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 8);
+    try std.testing.expectEqual(@as(u32, 4), four_object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 8), eight_object.shape_ref.prop_size);
+}
+
+test "ordinary object additions reuse transition shapes" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try Object.create(rt, class.ids.object, null);
+    const second = try Object.create(rt, class.ids.object, null);
+
+    const a = try rt.internAtom("shared_a");
+    const b = try rt.internAtom("shared_b");
+
+    try first.defineOwnProperty(rt, a, descriptor.Descriptor.data(JSValue.int32(1), true, true, true));
+    try first.defineOwnProperty(rt, b, descriptor.Descriptor.data(JSValue.int32(2), true, true, true));
+    try second.defineOwnProperty(rt, a, descriptor.Descriptor.data(JSValue.int32(3), true, true, true));
+    try second.defineOwnProperty(rt, b, descriptor.Descriptor.data(JSValue.int32(4), true, true, true));
+
+    try std.testing.expectEqual(first.shape_ref, second.shape_ref);
+    try std.testing.expectEqual(@as(usize, 2), first.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(?i32, 1), (try first.getProperty(a)).as(.int));
+    try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).as(.int));
+}

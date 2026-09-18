@@ -2,13 +2,9 @@
 
 Rules the current collector holds and a change must either preserve or
 consciously replace. Every entry cites where it lives so it can be re-read
-against the code rather than trusted from here. Rewritten 2026-09-03 (the
-previous version described the three-phase trial-deletion cycle collector,
-deleted with the rc build on 2026-08-29) and again 2026-09-06 for the end
-state of the completion plan (S0-S4 + R3). Facts and gate readings:
-[`tracing-gc-completion-account.md`](tracing-gc-completion-account.md);
-per-stage execution records: `tracing-gc-s2/s3/s4-spec.md` §7; remaining
-ablation: [`tracing-gc-s5-spec.md`](tracing-gc-s5-spec.md).
+against the code rather than trusted from here. The previous cycle-collector
+and RC-migration accounts live in git history; this file is the current
+contract.
 
 ## Ownership is all-tracing
 
@@ -68,7 +64,7 @@ only by its owner's edge: `storageCell(prop_values)` at the top of
 `tracePropertyEdgesFallible`, `storageCell(payload)` before the payload
 switch in `Object.traceChildEdgesFallible` (plus `storageCell(aux)` on the
 bytecode arm), and a rope's edge to its tail buffer
-(`tracing-gc-s4-spec.md` §7, S4-b / S4-c). Three rules come with them:
+(S4-b / S4-c). Three rules come with them:
 
 - **Mint and install must be adjacent.** A bare cell in hand is unrooted
   under a precise scan and any allocation in between can collect it. Where
@@ -113,8 +109,7 @@ authority that owns the holder (shape property atoms, FunctionBytecode names
 and var-ref names, module records, and the compile-time `CompileAtomScope`).
 An entry is live iff `mark_epoch == epoch`, or its body is marked, or
 `host_pins != 0`, or it was black-allocated this cycle (`born_epoch ==
-epoch`); anything else is unbound and swept
-(`tracing-gc-s3-spec.md` §2.2/§2.4).
+epoch`); anything else is unbound and swept.
 
 ## Write barriers
 
@@ -158,7 +153,7 @@ attributable windows only the regexp match array was a genuine missing root,
 plus one real bug (a publishing-shape root frame deactivated too early); the
 rest is LLVM stack-slot residue and callee-saved spill in the *caller*, which
 no added root frame fixes. The R3 census therefore cannot be used as an R1
-worklist (`tracing-gc-completion-account.md` §1 and §6 item 6).
+worklist.
 
 `host_pins` on an atom entry is the ABI-side root the tracer cannot see
 (`PropNameID.internStatic`/`release`, reused by `LengthIndexAtom` and
@@ -192,7 +187,7 @@ There are no husks. S4-e deleted `lifetime.trace.flags.husk`,
 finish (`processWeak`), and the weak-id map is then the *whole* liveness
 test -- `liveObjectFromWeakIdentity` resolves an id iff the object is still
 registered. Two rules follow (`runtime.zig` `registerWeakObjectIdentity` /
-`takeWeakObjectIdentity`, `tracing-gc-s4-spec.md` §7, S4-e):
+`takeWeakObjectIdentity`; S4-e):
 
 - the id is handed back inside the same destruction that frees the struct,
   before `unregisterObjectWithBytes`, so the map never names a corpse for
@@ -237,7 +232,7 @@ pulls the young structures out from under it, the next minor's whole-block
 `clearYoungBlockMarksStw` (which does not filter by the young bit) clears its
 mark, and `alloc & ~mark` condemns it while it is alive -- observed as
 `TypeError: not a function` and SIGSEGV in ReleaseFast raytrace
-(`tracing-gc-s4-spec.md` §7, S4-i).
+(S4-i).
 
 `young_trigger_count` (S4-f) is the minor *trigger* population and excludes
 owned storage cells (`kindIsOwnedStorageCell` = kinds 8/9/10/12);
@@ -250,7 +245,7 @@ holds ids (so a retired or unbound entry simply stops reporting),
 two promotion points clear the list. An old shape holds a young body through
 a bare atom id, which no remembered record covers; hanging the list on the
 major root set instead delays a holder-less symbol's death by a full cycle
-(67 tests red) (`tracing-gc-s3-spec.md` §2.4/§7).
+(67 tests red).
 
 A minor ends by publishing hot blocks back to the allocator in bounded
 rounds: `Heap.publishCompletedHotBlocksSlice` after `clearYoungBlocks`, with
@@ -259,7 +254,7 @@ caching `openBlock`'s "no run of >= 64 free cells" verdict. Before S4-f,
 publication happened only at the end of a major's teardown, so holes punched
 by minors never came back: regexp held 187.6 MB committed against ~5 MB live
 (36.9x), and the fix took maxrss 188 -> 23 MB
-(`tracing-gc-s4-spec.md` §7, S4-f).
+(S4-f).
 
 ## Death side
 
@@ -275,7 +270,7 @@ value is never a live epoch (`headerMarked` is false for any corpse of any
 kind), and for block cells and extents that field was dead storage anyway.
 The doomed bitmap is *not* a usable predicate: the drain clears it as it
 goes and the next `snapshotDoomed` overwrites it wholesale
-(`tracing-gc-s4-spec.md` §7, S4-h).
+(S4-h).
 
 Destruction is not per corpse any more. Ordinary object death is a bitmap
 operation: the sweep walks only `doomed & needs_finalizer`
@@ -285,7 +280,7 @@ block-level accounting (`popcount(dead - finalizing) x (cell_size -
 prefix)`). `destroyPlainObjectFast`, the eleven a-class `destroy*Payload`
 arms and `destroyArrayElements` are deleted; the deletion probe reads 0
 plain-object destructor calls over 5.49M reclaimed objects and cells
-(`tracing-gc-s4-spec.md` §7, S4-d/S4-e).
+(S4-d/S4-e).
 
 `needs_finalizer` is set at construction and is lifetime-sticky (D-S4-4). It
 covers the b/c classes only: external buffers, typed-array view chains,
@@ -294,8 +289,7 @@ holding a live collection cursor, generators with open cells, dynamic and
 host/plugin payloads, and anything handed a weak identity. It lives in
 `BlockFlags` and in a **fourth per-block bitmap** (`Block.finalizerBits`,
 alongside alloc / mark / doomed, offset-derived so `Block` stays 112B);
-extents carry a `needs_finalizer` column instead
-(`tracing-gc-s4-spec.md` §2.1/§2.4).
+extents carry a `needs_finalizer` column instead.
 
 There are no two passes. Pass A (resource strip) and Pass B (husk free:
 `drainCycleDeferredFreesBudgeted`, `DeferredFreeStack`, the parked-corpse
@@ -307,7 +301,7 @@ population.
 
 STW and incremental majors still run two structurally identical destruction
 routines (`destroyCondemned` and `destroyDoomedSlice`); collapsing them is
-S5-b, not a semantic difference (`tracing-gc-s5-spec.md` §2).
+S5-b, not a semantic difference.
 
 ## What the gates do and do not cover
 
@@ -326,11 +320,10 @@ S5-b, not a semantic difference (`tracing-gc-s5-spec.md` §2).
 
 ## Representation
 
-Object layout is the M-cut 64-byte cell with no intrusive link
-(`gc-v2-m-cut-object-layout.md`); non-object kinds keep `TraceHeader.next_non_object`.
+Object layout is the M-cut 64-byte cell with no intrusive link;
+non-object kinds keep `TraceHeader.next_non_object`.
 The 8-byte `Metadata` prefix and its bit positions are pinned by `comptime`
-asserts in `gc.zig` and by the representation snapshot
-(`src/gc-representation-trace-snapshot.txt`). The flags byte reached its end
+asserts in `gc.zig` next to the owning structs. The flags byte reached its end
 state in S4-h:
 
 ```

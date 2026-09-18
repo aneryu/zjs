@@ -5,22 +5,20 @@ Date: 2026-09-06
 Status: normative — 本契约是
 [engine-evolution-plan.md](engine-evolution-plan.md)(§3.1 裁决 A 的
 "表示定型"里程碑)、[type-directed-optimization-plan.md](type-directed-optimization-plan.md)
-(§4/§5 的 GC 集成条款)与 [tracing-gc-design.md](tracing-gc-design.md)
+(§4/§5 的 GC 集成条款)与 [gc-invariants.md](gc-invariants.md)
 的共同约束面。**修改本页所述协议 = 先改本契约并递增版本号,再动任一线
 代码。**
 
 来源:v3 全部条款自 **main 实物导出**(`8be2ca7d`,2026-09-06,
 tracing GC 完成计划 S0–S5 合入之后),非设计意向。每条给出代码锚
 (文件:符号;行号仅作历史参考,函数/常量名才是锚)。机器可读的表示
-基线是 `src/gc-representation-trace-snapshot.txt`(`zig build
-gc-representation-snapshot` 生成,`build/tests.zig`),本页与它不一致时
-以快照与代码为准并修订本页。
+基线是各载体 struct 旁的 comptime 断言(`gc.zig`、`object.zig`、
+`gc_representation_constants.zig`),本页与代码不一致时以代码为准并修订本页。
 
 ## v3 changelog(v2 → v3,逐条)
 
 v3 是**事实入册**,不含新设计。变化来源:TGC S0–S5(`e972c4b5` →
-`f005aee7`,`docs/tracing-gc-completion-account.md`)、M 终态 Object 64B
-(`docs/gc-v2-m-cut-object-layout.md`)、S3 atom 弱化。
+`f005aee7`)、M 终态 Object 64B、S3 atom 弱化。
 
 | # | v2 条款 | v3 |
 |---|---|---|
@@ -75,8 +73,8 @@ v2(2026-08-26)= FNABI ABI tuple 过渡 + layout_epoch 定义;v1
   (`layout_epoch`, revision) 已随公开 ABI 撤回；**layout_epoch 现值
   3**(8-byte NaN-box)。
   layout_epoch 只在真实表示变化(布局 / tag 语义 / 地址稳定性 / 所有权
-  语义)时递增,与本文档版号解耦;见
-  [fun-native-plugin-design.md](fun-native-plugin-design.md) §11.3。
+  语义)时递增,与本文档版号解耦。历史 FNABI §11.3 的编号规则已随
+  该草案撤出树。
 - **`property.Slot` 16 字节不变**:`union { data: JSValue, accessor,
   auto_init, var_ref: *VarRef }`(`src/core/property.zig:Slot`)。它现在是
   Zig 裸 `union`(非 `extern`):16B 不变量只在 ReleaseFast/ReleaseSmall
@@ -305,7 +303,7 @@ values, objects, headers, atoms }`;**生产只链接 container/window 帧**
   `construction_pin_count`;header 上**没有** pin 位(S4-e 删除)。
 - atom 表条目的 `host_pins`(`PropNameID.internStatic`/`release`)是
   tracer 看不见的 ABI 侧根;atom 活性 = `visitAtom` 边 ∨ body 已标记 ∨
-  `host_pins != 0` ∨ 本周期黑分配(`tracing-gc-s3-spec.md` §2.2/§2.4)。
+  `host_pins != 0` ∨ 本周期黑分配。
   **每个裸 atom id 的持有者必须由拥有它的权威 trace 报告 `visitAtom`**
   (shape 属性 atom、FunctionBytecode 名与 var-ref 名经
   `atomOperandIterator`、module 记录、`CompileAtomScope`)。
@@ -387,7 +385,7 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
   擦栈 + cold 出口 publish(完成对账 §6 第 6 条)。落地前 §4.2 保守
   扫描是生产设计。
 - **并行标记**:S4-b 已撤回(`gc_incremental.zig`);重新引入须先修订
-  §3(屏障撕裂前提)并过 `docs/gc-v2-s4b-parallel-marking-gate.md`。
+  §3(屏障撕裂前提)并重建 live-size 门。
 - **typed / AOT 六契约**(typed 计划 v1.3 R8):根、窗口、安全点/
   publish、屏障、artifact 不携带 Runtime-local 身份(atom 落盘为字符串)、
   lowering 禁止 `obj+const` 折叠——在 PERF-TYPED-IR 开工前并入本契约
@@ -395,8 +393,7 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
 - 弱引用 / finalizer 与反馈槽失效钩子的统一注册表(Phase 3 dependency
   registry 的 GC 侧对应物)。
 - **本页 v3 为 driver 导出的草案,待 owner 评审**(roadmap v2.0
-  VM-CONTRACT-GC);评审通过前 layout_epoch=2 只在本页与
-  fun-native-plugin-design.md 登记,尚无代码常量承载它。
+  VM-CONTRACT-GC);评审通过前 layout_epoch=2 只在本页登记,尚无代码常量承载它。
 
 **已知的旁注(不属本契约,记录以免误引)**:`docs/gc-invariants.md`
 「Heap BigInt」段仍写 tag −9,代码是 −4(`value.zig:Tag.big_int`);

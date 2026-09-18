@@ -155,7 +155,7 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 - **签名**：`pub fn atomicsRuntimeHasPendingAsyncWaiters(rt: *core.JSRuntime) bool`。
 - **作用**：该 Runtime 是否还有链在全局链表上的 waitAsync 节点——事件循环用它决定能不能去阻塞一个看不到本 Runtime 完成信号的 OS poll。
 - **实现**：跨线程路径只拿 `atomics_waiter_mutex`，不碰 JS 堆。
-- **所有权 / 错误 / 调用**：自己 `lockUncancelable` + `defer unlock` 拿全局 `atomics_waiter_mutex` 遍历跨 Runtime 的 waiter 链表，只读、不分配、无 error set；返回的是纯 host 调度事实，不碰 JS 堆。2 处调用：`src/runtime/event_loop.zig:355`、`:393`（决定是否可以阻塞在 OS poll 上）。
+- **所有权 / 错误 / 调用**：自己 `lockUncancelable` + `defer unlock` 拿全局 `atomics_waiter_mutex` 遍历跨 Runtime 的 waiter 链表，只读、不分配、无 error set；返回的是纯 host 调度事实，不碰 JS 堆。2 处调用：`src/event_loop.zig` 的 Windows / POSIX poll 臂（决定是否可以阻塞在 OS poll 上）。
 
 ### `waitForAtomicsHostSignalUntil` (`src/exec/atomics_ops.zig:516`)
 

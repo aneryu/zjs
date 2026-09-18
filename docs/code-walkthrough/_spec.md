@@ -8,7 +8,7 @@
 
 - `src/` 的非测试实现（含方法、`inline fn`、`noinline fn`、`export fn`、私有函数）；测试块、测试文件及仅供测试的辅助函数不要求补充讲解
 - `build.zig` 与 `build/*.zig`
-- 引擎相关的 `tools/`（architecture 依赖检查、gates、文档/lint 入口）；不逐行讲 `test262/` 子模块、不讲 `.scratch/` 实验树、不讲 `zig-out/`
+- 引擎相关的 `tools/`（gates、文档/lint 入口）；不逐行讲 `test262/` 子模块、不讲 `.scratch/` 实验树、不讲 `zig-out/`
 
 函数清单权威文件：[`_inventory.tsv`](_inventory.tsv)（从当前树扫描，含行号）。分册必须覆盖自己负责的非测试实现在清单里的**每一行**；测试辅助项保留用于历史对账，不属于本轮补写要求。
 

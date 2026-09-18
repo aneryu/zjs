@@ -34,8 +34,7 @@ Hermes / qjs 1.3113, V8 jitless / qjs 1.1491, JSC jitless / qjs 1.0735.
 
 Reading: with the tracing collector (TGC S0–S5) zjs is at or above QuickJS
 on 11 of 17 results; the composite gap is Splay and SplayLatency
-(0.62 / 0.69 — the structural account closed in
-`docs/tracing-gc-completion-account.md` §6b), plus EarleyBoyer 0.85 and
+(0.62 / 0.69 — a structural marking account), plus EarleyBoyer 0.85 and
 PdfJS 0.89. Removing the two Splay results alone would put the composite
 at about 1.01. **Owner ruling 2026-09-06: the performance line is closed;
 Octane vs QuickJS is a regression gate at ≥ 0.95 from here.**
@@ -56,9 +55,8 @@ character (`'read' is not defined`) and so does Hermes; d8, the SpiderMonkey
 shell and jsc define it. The benchmark never calls `read` (its
 input is embedded), so `driver.js` now defines a throwing `read` shim
 when the global is absent, identically for every engine, and no longer
-passes a skip list. `run_benchv8_compare.py` / `run_benchv8_multiengine.py`
-expect 17 numeric results and no `Skipped` line; `run_fixed_pmu.py` and
-`check_completes.py` know `zlib` = `zlib.js` + `zlib-data.js`.
+passes a skip list. A complete v9 run prints 17 numeric results and no
+`Skipped` line; zlib is `zlib.js` + `zlib-data.js`.
 
 Two things hid this for eleven days: zjs reports every `ReferenceError`
 as the bare message `not defined` (QuickJS names the identifier), and
@@ -127,12 +125,12 @@ Consequences:
 
 ## 2026-08-25: suite expanded to Octane 2.0 (version 9)
 
-`tools/perf/bench_v8/suite/` was expanded from the narrower V8 benchmark
+The in-tree Octane tree was expanded from the narrower V8 benchmark
 suite version 7 (8 benchmarks) to the full Octane 2.0 suite vendored from
 `chromium/octane` (version 9, 17 named results across 15 `BenchmarkSuite`
-registrations plus a composite `Score (version 9)`). See
-[the tool's README](../../tools/perf/bench_v8/README.md) for provenance and
-per-file licenses.
+registrations plus a composite `Score (version 9)`). That tree lived at
+`tools/perf/bench_v8/` until it was removed; recover provenance and
+per-file licenses from git history.
 
 This was necessary, not additive: Octane's `base.js` changed the
 `Benchmark()` constructor signature, so the old v7 richards/deltablue/crypto/
@@ -155,8 +153,8 @@ decision 2026-08-25: skip-list zlib (`driver.js` passed `['zlib']` to
 composite. Resolved 2026-09-05: the missing piece was the d8 shell global
 `read`, which every non-d8 engine lacks; driver.js shims it.
 
-Single-engine diagnostic (`zig build perf-bench-v8` / `run_local.py`,
-unpinned, no gate value) on the current head, 2026-08-25, zjs only:
+Single-engine diagnostic (`run_local.py`, then still in-tree;
+unpinned, no gate value) on the then-current head, 2026-08-25, zjs only:
 
 | Benchmark | zjs |
 | --- | ---: |
@@ -183,10 +181,9 @@ Superseded by the pinned five-engine snapshot below, taken the same day.
 
 ## 2026-08-25: Octane v9 five-engine snapshot (zjs, QuickJS, Hermes, V8 jitless, JSC jitless)
 
-Ran with the new N-way tool, `run_benchv8_multiengine.py` (see
-[README](../../tools/perf/bench_v8/README.md)) — the pairwise
-`run_benchv8_compare.py` stays reserved for the published zjs/QuickJS metric
-and refactor-policy A/B.
+Ran with the then-current N-way tool (`run_benchv8_multiengine.py`,
+retired 2026-09-18 with the measurement policy). The local runner was
+removed with `tools/perf`.
 
 | Field | Value |
 | --- | --- |
@@ -196,7 +193,7 @@ and refactor-policy A/B.
 | Hermes | `dac0be3` (Release) |
 | V8 | `999f1b39` (`d8 --jitless`) |
 | JSC | WebKit `0f924849f5` (`jsc --useJIT=false`, `WebKitBuild/JSCOnly/Release`) |
-| Suite | Octane 2.0 (version 9), vendored in `tools/perf/bench_v8/suite/`, zlib skip-listed for all five engines identically |
+| Suite | Octane 2.0 (version 9), then vendored in `tools/perf/bench_v8/suite/`, zlib skip-listed for all five engines identically |
 | Protocol | serial, CPU 19 pinned, exclusive host lock, forward/reverse round-robin across all five engines, 8 samples per engine, medians |
 | Binary identity | every binary's MD5 checked unchanged before and after the run |
 | **Score (v9), zjs / QuickJS** | **0.9611** (zjs 4521 / qjs 4704) |
@@ -233,25 +230,14 @@ yet against this specific suite version; the historical v7 attribution work
 methodology (warmup/deterministic modes, per-iteration `performance.now`)
 alongside adding benchmarks.
 
-Reproduce:
+The N-way runner that produced this table was retired with the
+measurement policy (2026-09-18). The in-tree Octane suite and
+`zig build perf-bench-v8` were removed with `tools/perf`. This page is
+the remaining record.
 
-```sh
-mise exec -- zig build zjs -Doptimize=ReleaseFast --summary all
-flock -x /tmp/zjs-host-heavy.lock taskset -c 19 \
-  python3 tools/perf/bench_v8/run_benchv8_multiengine.py \
-    --zjs zig-out/bin/zjs \
-    --qjs /home/aneryu/quickjs/qjs \
-    --hermes /home/aneryu/hermes/build_release/bin/hermes \
-    --v8 /home/aneryu/v8/out/arm64.release/d8 \
-    --jsc /home/aneryu/WebKit/WebKitBuild/JSCOnly/Release/bin/jsc \
-    --samples 8 --output /tmp/benchv8-multiengine.json
-```
-
-This is a maintainer single-machine measurement (ARM Cortex-X925, Linux
-6.17); there is no independent reproduction yet, and it has not gone
-through an owner ruling to become the *published* metric the way the
-removed v7 zjs/QuickJS snapshot did — treat it as a snapshot, not yet a
-gate.
+This is a maintainer single-machine snapshot (ARM Cortex-X925, Linux
+6.17); there is no independent reproduction and no remaining
+performance merge gate.
 
 ## History (version 7)
 

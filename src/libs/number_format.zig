@@ -20,11 +20,35 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-//! Binary64 parsing and decimal/radix formatting ported from QuickJS `dtoa.c`/`dtoa.h`.
-//! Public operations use caller-provided buffers and fixed temporary arenas rather than a heap allocator.
+//! Binary64 decimal/radix formatting ported from QuickJS `dtoa.c`/`dtoa.h`.
+//!
+//! The engine job of this file is printing: `formatNumber`, `formatRadix`,
+//! `formatDtoaChecked`. Decimal ToNumber, source literals, `parseFloat`, and
+//! JSON parse through `std.fmt.parseFloat` in `value_format` / `lexer` /
+//! `number` / `json_ops`. Those paths do not call this file.
+//!
+//! `parseNumber` / `jsAtod` are the inverse of `jsDtoa` (including radix
+//! 2..36). They are not a second ToNumber kernel. They stay so `toString(radix)`
+//! can be round-tripped and so the dtoa.c port remains complete.
+//!
+//! No heap allocator: callers pass the output buffer; scratch lives in
+//! `JSDTOATempMem` / `JSATODTempMem`. `jsDtoa` / `jsAtod` / `mpb*` keep the
+//! upstream names (GUIDE A.7).
+//!
+//! ```
+//! formatNumber / formatRadix / formatDtoaChecked
+//!   └─ jsDtoa
+//!        ├─ writeNonFinite | integer fast path
+//!        ├─ dtoaShortest | dtoaFrac | dtoaFixed ─► mulPow
+//!        └─ outputDigits / outputHelper
+//!
+//! parseNumber / tests  (dtoa inverse, not ToNumber)
+//!   └─ jsAtod ─► parseAtodExponent ─► atodToBits ─► buildFloat64
+//! ```
 const std = @import("std");
+
 // ============================================================
-// Public types and constants (match dtoa.h)
+// Public types and flags (dtoa.h)
 // ============================================================
 
 pub const JSDTOATempMem = extern struct {
@@ -53,7 +77,82 @@ pub const JS_ATOD_ACCEPT_LEGACY_OCTAL: i32 = 1 << 2;
 pub const JS_ATOD_ACCEPT_UNDERSCORES: i32 = 1 << 3;
 
 // ============================================================
-// Internal constants
+// Engine-facing format API
+// ============================================================
+
+/// Default `Number#toString` decimal (FREE + EXP_AUTO). Caller must size `buf`;
+/// this wrapper does not check capacity. Use `formatDtoaChecked` / `formatRadix`
+/// when the bound is not obvious.
+pub fn formatNumber(buf: []u8, value: f64) ![]const u8 {
+    if (std.math.isNan(value)) return "NaN";
+    if (std.math.isPositiveInf(value)) return "Infinity";
+    if (std.math.isNegativeInf(value)) return "-Infinity";
+
+    var tmp_mem: JSDTOATempMem = undefined;
+    const len = jsDtoa(buf, value, 10, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO, &tmp_mem);
+    return buf[0..len];
+}
+
+pub fn formatInt32(buf: []u8, value: i32) []const u8 {
+    const len = i32toa(buf, value);
+    return buf[0..len];
+}
+
+pub fn formatInt64(buf: []u8, value: i64) []const u8 {
+    const len = i64toa(buf, value);
+    return buf[0..len];
+}
+
+/// Upper bound on the byte length `formatRadix` will write for these
+/// arguments, so a caller can size its buffer instead of guessing. Radix 2
+/// with `EXP_DISABLED` runs past a thousand digits on a denormal, which is why
+/// guessing does not work.
+pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, flags: i32) !usize {
+    const len_max = jsDtoaMaxLen(value, radix, n_digits, flags);
+    if (len_max < 0) return error.InvalidRadix;
+    return @as(usize, @intCast(len_max)) + 1;
+}
+
+/// `Number.prototype.toString(radix)` for any radix in 2..36. Digit generation
+/// is the same `jsDtoa` path radix 10 uses.
+pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, flags: i32) ![]const u8 {
+    if (buf.len < try radixMaxLen(value, radix, n_digits, flags)) return error.NoSpaceLeft;
+    var tmp_mem: JSDTOATempMem = undefined;
+    const len = jsDtoa(buf, value, radix, n_digits, flags, &tmp_mem);
+    if (len >= buf.len) return error.NoSpaceLeft;
+    return buf[0..len];
+}
+
+/// Capacity-checked decimal dtoa for `toFixed` / `toExponential` / `toPrecision`.
+pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]const u8 {
+    const len_max = jsDtoaMaxLen(value, 10, n_digits, flags);
+    if (len_max < 0) return error.NoSpaceLeft;
+    const needed: usize = @as(usize, @intCast(len_max)) + 1;
+    if (needed > buf.len) return error.NoSpaceLeft;
+    var tmp_mem: JSDTOATempMem = undefined;
+    const len = jsDtoa(buf, value, 10, n_digits, flags, &tmp_mem);
+    if (len >= buf.len) return error.NoSpaceLeft;
+    return buf[0..len];
+}
+
+/// Inverse of `jsDtoa` for a whole decimal slice. Not ToNumber: the engine
+/// parses decimals with `std.fmt.parseFloat`. Kept for dtoa round-trip tests.
+fn parseNumber(bytes: []const u8) !f64 {
+    if (std.mem.eql(u8, bytes, "NaN")) return std.math.nan(f64);
+
+    var tmp_mem: JSATODTempMem = undefined;
+    var parsed_end: ?[*]const u8 = null;
+    const value = jsAtod(bytes, &parsed_end, 10, 0, &tmp_mem);
+    const end_ptr = @intFromPtr(bytes.ptr) + bytes.len;
+    if (parsed_end == null or @intFromPtr(parsed_end.?) != end_ptr) {
+        return error.InvalidCharacter;
+    }
+    if (std.math.isNan(value)) return error.InvalidCharacter;
+    return value;
+}
+
+// ============================================================
+// Internal constants and tables
 // ============================================================
 
 const LIMB_BITS = 32;
@@ -69,35 +168,6 @@ const MUL_LOG2_RADIX_BASE_LOG2 = 24;
 const JS_RNDN = 0;
 const JS_RNDNA = 1;
 const JS_RNDZ = 2;
-
-// ============================================================
-// Mpb type (bignum with flexible-array equivalent)
-// ============================================================
-
-fn Mpb(comptime cap: usize) type {
-    return extern struct {
-        len: i32,
-        tab: [cap]limb_t,
-
-        const Self = @This();
-
-        fn tabSlice(self: *Self) []limb_t {
-            const l: usize = @intCast(@max(self.len, 1));
-            return self.tab[0..l];
-        }
-
-        fn tabConstSlice(self: *const Self) []const limb_t {
-            const l: usize = @intCast(@max(self.len, 1));
-            return self.tab[0..l];
-        }
-    };
-}
-
-const MpbMax = Mpb(DBIGNUM_LEN_MAX);
-
-// ============================================================
-// Lookup tables
-// ============================================================
 
 const pow5_table = [17]u32{
     0x00000005, 0x00000019, 0x0000007d, 0x00000271,
@@ -175,8 +245,40 @@ const min_exponent = [JS_RADIX_MAX - 1]i16{
 };
 
 // ============================================================
-// Utility helpers
+// Scratch arena and Mpb
 // ============================================================
+
+fn Mpb(comptime cap: usize) type {
+    return extern struct {
+        len: i32,
+        tab: [cap]limb_t,
+
+        const Self = @This();
+
+        fn tabSlice(self: *Self) []limb_t {
+            const l: usize = @intCast(@max(self.len, 1));
+            return self.tab[0..l];
+        }
+
+        fn tabConstSlice(self: *const Self) []const limb_t {
+            const l: usize = @intCast(@max(self.len, 1));
+            return self.tab[0..l];
+        }
+    };
+}
+
+const MpbMax = Mpb(DBIGNUM_LEN_MAX);
+
+fn dtoaMalloc(comptime T: type, mptr: *[*]u64) *T {
+    const bump = (@sizeOf(T) + 7) / 8;
+    const ptr: *T = @ptrCast(@alignCast(mptr.*));
+    mptr.* += bump;
+    return ptr;
+}
+
+fn writtenLen(buf: []const u8, cursor: []const u8) usize {
+    return @intFromPtr(cursor.ptr) - @intFromPtr(buf.ptr);
+}
 
 fn minInt(a: anytype, b: anytype) @TypeOf(a, b) {
     return if (a < b) a else b;
@@ -207,18 +309,7 @@ inline fn uint64AsFloat64(u: u64) f64 {
 }
 
 // ============================================================
-// Bump-pointer allocator (matches dtoa_malloc/dtoa_free)
-// ============================================================
-
-fn dtoaMalloc(comptime T: type, mptr: *[*]u64) *T {
-    const bump = (@sizeOf(T) + 7) / 8;
-    const ptr: *T = @ptrCast(@alignCast(mptr.*));
-    mptr.* += bump;
-    return ptr;
-}
-
-// ============================================================
-// Bignum operations (internal, operate on slices or Mpb)
+// Limb arithmetic
 // ============================================================
 
 fn mpAddUi(tab: []limb_t, b: limb_t) limb_t {
@@ -296,7 +387,7 @@ fn mpShl(tab_r: []limb_t, tab: []const limb_t, shift: u5, low: limb_t) limb_t {
     return l;
 }
 
-fn mpDiv1normInternal(tabr: []limb_t, taba: []const limb_t, b: limb_t, r_in: limb_t, b_inv: limb_t, shift: i32) limb_t {
+fn mpDiv1norm(tabr: []limb_t, taba: []const limb_t, b: limb_t, r_in: limb_t, b_inv: limb_t, shift: i32) limb_t {
     var r = r_in;
     const n = taba.len;
     if (shift != 0) {
@@ -358,7 +449,6 @@ fn mpbShrRound(r: *MpbMax, shift: i32, rnd_mode: i32) void {
         return;
     }
 
-    // shift > 0: right shift with rounding
     var add_one: i32 = 0;
     switch (rnd_mode) {
         JS_RNDZ => {
@@ -482,7 +572,7 @@ fn mpbMul1Base(r: *MpbMax, radix_base: limb_t, a: limb_t) void {
 }
 
 // ============================================================
-// mul_log2_radix
+// Radix powers and log
 // ============================================================
 
 fn mulLog2Radix(a: i32, radix: i32) i32 {
@@ -495,10 +585,6 @@ fn mulLog2Radix(a: i32, radix: i32) i32 {
     const mult = mul_log2_radix_table[@intCast(radix - 2)];
     return @intCast(@divFloor(@as(i64, a) * @as(i64, mult), @as(i64, 1 << MUL_LOG2_RADIX_BASE_LOG2)));
 }
-
-// ============================================================
-// pow_ui / pow_ui_inv
-// ============================================================
 
 fn powUi(radix: u32, n: u32) u64 {
     if (n == 0) return 1;
@@ -547,7 +633,7 @@ fn powUiInv(pr_inv: *u32, pshift: *i32, a: u32, b: u32) u32 {
 }
 
 // ============================================================
-// Conversion helpers
+// Integer ASCII
 // ============================================================
 
 fn u32toaLen(buf: []u8, n: u32, len: usize) void {
@@ -598,7 +684,7 @@ fn limbToA(buf: []u8, n: limb_t, radix: i32, len: i32) void {
     }
 }
 
-fn u32toaImpl(buf: []u8, n: u32) usize {
+fn u32toa(buf: []u8, n: u32) usize {
     var buf1: [10]u8 = undefined;
     var pos: usize = 10;
     var n2 = n;
@@ -613,17 +699,17 @@ fn u32toaImpl(buf: []u8, n: u32) usize {
     return len;
 }
 
-fn i32toaImpl(buf: []u8, n: i32) usize {
+fn i32toa(buf: []u8, n: i32) usize {
     if (n >= 0) {
-        return u32toaImpl(buf, @intCast(n));
+        return u32toa(buf, @intCast(n));
     }
     buf[0] = '-';
-    return u32toaImpl(buf[1..], @bitCast(-%@as(i32, @bitCast(n)))) + 1;
+    return u32toa(buf[1..], @bitCast(-%@as(i32, @bitCast(n)))) + 1;
 }
 
-fn u64toaImpl(buf: []u8, n: u64) usize {
+fn u64toa(buf: []u8, n: u64) usize {
     if (n < 0x100000000) {
-        return u32toaImpl(buf, @truncate(n));
+        return u32toa(buf, @truncate(n));
     }
 
     var q = buf;
@@ -647,7 +733,7 @@ fn u64toaImpl(buf: []u8, n: u64) usize {
         @memcpy(q[0..9], tmp[0..9]);
         q = q[9..];
     } else {
-        const len = u32toaImpl(q, @truncate(n1));
+        const len = u32toa(q, @truncate(n1));
         q = q[len..];
     }
 
@@ -656,20 +742,20 @@ fn u64toaImpl(buf: []u8, n: u64) usize {
     @memcpy(q[0..9], tmp[0..9]);
     q = q[9..];
 
-    return @intFromPtr(q.ptr) - @intFromPtr(buf.ptr);
+    return writtenLen(buf, q);
 }
 
-fn i64toaImpl(buf: []u8, n: i64) usize {
+fn i64toa(buf: []u8, n: i64) usize {
     if (n >= 0) {
-        return u64toaImpl(buf, @intCast(n));
+        return u64toa(buf, @intCast(n));
     }
     buf[0] = '-';
-    return u64toaImpl(buf[1..], @bitCast(-%@as(i64, @bitCast(n)))) + 1;
+    return u64toa(buf[1..], @bitCast(-%@as(i64, @bitCast(n)))) + 1;
 }
 
-fn u64toaRadixImpl(buf: []u8, n: u64, radix: u32) usize {
+fn u64toaRadix(buf: []u8, n: u64, radix: u32) usize {
     if (radix == 10) {
-        return u64toaImpl(buf, n);
+        return u64toa(buf, n);
     }
     if ((radix & (radix - 1)) == 0) {
         const radix_bits: u5 = @intCast(31 - @clz(radix));
@@ -702,59 +788,7 @@ fn u64toaRadixImpl(buf: []u8, n: u64, radix: u32) usize {
 }
 
 // ============================================================
-// output_digits
-// ============================================================
-
-fn outputDigits(buf: []u8, a: *MpbMax, radix: i32, n_digits1: i32, dot_pos: i32) usize {
-    var n_digits = n_digits1;
-    const radix_bits: i32 = if ((@as(u32, @bitCast(radix)) & (@as(u32, @bitCast(radix)) - 1)) == 0)
-        @as(i32, 31) - clz32(@bitCast(radix))
-    else
-        0;
-    const digits_per_limb = digits_per_limb_table[@intCast(radix - 2)];
-
-    if (radix_bits != 0) {
-        const radix_bits_u5: u5 = @intCast(radix_bits);
-        while (true) {
-            const n: i32 = minInt(n_digits, @as(i32, digits_per_limb));
-            n_digits -= n;
-            const offset: usize = @intCast(n_digits);
-            u64toaBinLen(buf[offset..], a.tab[0], radix_bits_u5, @intCast(n));
-            if (n_digits == 0) break;
-            mpbShrRound(a, @as(i32, digits_per_limb) * radix_bits, JS_RNDZ);
-        }
-    } else {
-        while (n_digits != 0) {
-            const n: i32 = minInt(n_digits, @as(i32, digits_per_limb));
-            n_digits -= n;
-            const rlen: usize = @intCast(a.len);
-            const r = mpDiv1(a.tab[0..rlen], a.tab[0..rlen], radix_base_table[@intCast(radix - 2)], 0);
-            mpbRenorm(a);
-            const offset: usize = @intCast(n_digits);
-            // Straight into the destination, as upstream dtoa.c does. A
-            // `[9]u8` bounce buffer used to sit here, sized for the only radix
-            // that reached this branch: 10, whose `digits_per_limb` is exactly
-            // 9. Every other non-power-of-two radix overflows it — radix 3
-            // writes 20 digits — so the first caller to pass one would have
-            // smashed the stack.
-            limbToA(buf[offset..][0..@intCast(n)], r, radix, n);
-        }
-    }
-
-    var len: usize = @intCast(n_digits1);
-    if (dot_pos != n_digits1) {
-        const dp: usize = @intCast(dot_pos);
-        const n1: usize = @intCast(n_digits1);
-        const move_len = n1 - dp;
-        std.mem.copyBackwards(u8, buf[dp + 1 .. dp + 1 + move_len], buf[dp .. dp + move_len]);
-        buf[dp] = '.';
-        len += 1;
-    }
-    return len;
-}
-
-// ============================================================
-// mul_pow / mul_pow_round / round_to_d
+// Scale and round: mantissa × radix^f → 53-bit
 // ============================================================
 
 fn mulPow(a: *MpbMax, radix1: i32, radix_shift: i32, f: i32, is_int: bool, e: i32) i32 {
@@ -806,7 +840,7 @@ fn mulPow(a: *MpbMax, radix1: i32, radix_shift: i32, f: i32, is_int: bool, e: i3
                     n0 = n;
                 }
                 const rlen: usize = @intCast(a.len);
-                const r = mpDiv1normInternal(a.tab[0..rlen], a.tab[0..rlen], b, 0, b_inv, shift);
+                const r = mpDiv1norm(a.tab[0..rlen], a.tab[0..rlen], b, 0, b_inv, shift);
                 rem |= r;
                 mpbRenorm(a);
                 f2 -= n;
@@ -860,224 +894,55 @@ fn mulPowRoundToD(pe: *i32, a: *MpbMax, radix1: i32, radix_shift: i32, f: i32, r
 }
 
 // ============================================================
-// to_digit
+// Digit emission
 // ============================================================
 
-inline fn toDigit(c: u8) i32 {
-    return switch (c) {
-        '0'...'9' => @as(i32, c) - '0',
-        'A'...'Z' => @as(i32, c) - 'A' + 10,
-        'a'...'z' => @as(i32, c) - 'a' + 10,
-        else => 36,
-    };
-}
+fn outputDigits(buf: []u8, a: *MpbMax, radix: i32, n_digits1: i32, dot_pos: i32) usize {
+    var n_digits = n_digits1;
+    const radix_bits: i32 = if ((@as(u32, @bitCast(radix)) & (@as(u32, @bitCast(radix)) - 1)) == 0)
+        @as(i32, 31) - clz32(@bitCast(radix))
+    else
+        0;
+    const digits_per_limb = digits_per_limb_table[@intCast(radix - 2)];
 
-// ============================================================
-// js_dtoa_max_len
-// ============================================================
-
-fn jsDtoaMaxLenImpl(d: f64, radix: i32, n_digits: i32, flags: i32) i32 {
-    const fmt = flags & JS_DTOA_FORMAT_MASK;
-    var n: i32 = 0;
-
-    if (fmt != JS_DTOA_FORMAT_FRAC) {
-        if (fmt == JS_DTOA_FORMAT_FREE) {
-            n = dtoa_max_digits_table[@intCast(radix - 2)];
-        } else {
-            n = n_digits;
-        }
-        if ((flags & JS_DTOA_EXP_MASK) == JS_DTOA_EXP_DISABLED) {
-            const a = float64AsUint64(d);
-            var e: i32 = @intCast((a >> 52) & 0x7ff);
-            if (e == 0x7ff) {
-                n = 0;
-            } else {
-                e -= 1023;
-                n += 10 + @as(i32, @intCast(@abs(mulLog2Radix(e - 1, radix))));
-            }
-        } else {
-            n += 1 + 1 + 6;
-        }
-    } else {
-        const a = float64AsUint64(d);
-        var e: i32 = @intCast((a >> 52) & 0x7ff);
-        if (e == 0x7ff) {
-            n = 0;
-        } else {
-            e -= 1023;
-            if (e < 0) {
-                n = 1;
-            } else {
-                n = 2 + mulLog2Radix(e - 1, radix);
-            }
-            n += 1 + 1 + 1 + n_digits;
-        }
-    }
-    return maxInt(n, 9);
-}
-
-// ============================================================
-// js_dtoa
-// ============================================================
-
-fn jsDtoaImpl(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *JSDTOATempMem) usize {
-    var mptr: [*]u64 = &tmp_mem.mem;
-    const tmp1 = dtoaMalloc(Mpb(DBIGNUM_LEN_MAX), &mptr);
-    const mant_max_small = dtoaMalloc(Mpb(MANT_LEN_MAX), &mptr);
-    const mant_max: *MpbMax = @ptrCast(mant_max_small);
-
-    const radix_shift = ctz32(@intCast(radix));
-    const radix1: i32 = radix >> @intCast(radix_shift);
-    const a = float64AsUint64(d);
-    const sgn = @as(i32, @intCast(a >> 63));
-    var e: i32 = @intCast((a >> 52) & 0x7ff);
-    var m = a & ((@as(u64, 1) << 52) - 1);
-    var q = buf;
-    var E: i32 = 0;
-    var P: i32 = 0;
-
-    if (e == 0x7ff) {
-        if (m == 0) {
-            if (sgn != 0) {
-                q[0] = '-';
-                q = q[1..];
-            }
-            @memcpy(q[0..8], "Infinity");
-            q = q[8..];
-        } else {
-            @memcpy(q[0..3], "NaN");
-            q = q[3..];
-        }
-        return @intFromPtr(q.ptr) - @intFromPtr(buf.ptr);
-    }
-
-    if (e == 0) {
-        if (m == 0) {
-            tmp1.len = 1;
-            tmp1.tab[0] = 0;
-            E = 1;
-            if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FREE) {
-                P = 1;
-            } else if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FRAC) {
-                P = n_digits + 1;
-            } else {
-                P = n_digits;
-            }
-            if (sgn != 0 and (flags & JS_DTOA_MINUS_ZERO) != 0) {
-                q[0] = '-';
-                q = q[1..];
-            }
-            return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, flags);
-        }
-        // denormal: normalize
-        const l = clz64(m) - 11;
-        e -= l - 1;
-        m <<= @intCast(l);
-    } else {
-        m |= @as(u64, 1) << 52;
-    }
-
-    if (sgn != 0) {
-        q[0] = '-';
-        q = q[1..];
-    }
-
-    e -= 1022;
-
-    // USE_FAST_INT fast path
-    if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FREE and
-        e >= 1 and e <= 53 and
-        (m & ((@as(u64, 1) << @intCast(53 - e)) - 1)) == 0 and
-        (flags & JS_DTOA_EXP_MASK) != JS_DTOA_EXP_ENABLED)
-    {
-        const m_shifted = m >> @intCast(53 - e);
-        const len = u64toaRadixImpl(q, m_shifted, @intCast(radix));
-        q = q[len..];
-        return @intFromPtr(q.ptr) - @intFromPtr(buf.ptr);
-    }
-
-    E = 1 + mulLog2Radix(e - 1, radix);
-    const fmt = flags & JS_DTOA_FORMAT_MASK;
-
-    if (fmt == JS_DTOA_FORMAT_FREE) {
-        const P_max: i32 = dtoa_max_digits_table[@intCast(radix - 2)];
-        const E0 = E;
-        var E_found: i32 = 0;
-        var P_found: i32 = 0;
-        var mant_found: u64 = 0;
-
-        P = P_max;
+    if (radix_bits != 0) {
+        const radix_bits_u5: u5 = @intCast(radix_bits);
         while (true) {
-            _ = powUi(@intCast(radix), @intCast(P));
-            E = E0;
-            while (true) {
-                mulPowRound(tmp1, m, e - 53, radix1, radix_shift, P - E, JS_RNDN);
-                const mant = mpbGetU64(tmp1);
-                const mant_max1 = powUi(@intCast(radix), @intCast(P));
-                if (mant < mant_max1) break;
-                E += 1;
-            }
-            var mant2 = mpbGetU64(tmp1);
-            // remove trailing zeros
-            const r: u32 = @intCast(radix);
-            while (mant2 != 0 and (mant2 % r) == 0) {
-                mant2 /= r;
-                P -= 1;
-            }
-            if (P_found == 0) {
-                P_found = P;
-                E_found = E;
-                mant_found = mant2;
-                if (P == 1) break;
-                P -= 1;
-                continue;
-            }
-            // convert back
-            mpbSetU64(tmp1, mant2);
-            var e1: i32 = 0;
-            const m1 = mulPowRoundToD(&e1, tmp1, radix1, radix_shift, E - P, JS_RNDN);
-            if (m1 == m and e1 == e) {
-                P_found = P;
-                E_found = E;
-                mant_found = mant2;
-                if (P == 1) break;
-                P -= 1;
-            } else {
-                break;
-            }
+            const n: i32 = minInt(n_digits, @as(i32, digits_per_limb));
+            n_digits -= n;
+            const offset: usize = @intCast(n_digits);
+            u64toaBinLen(buf[offset..], a.tab[0], radix_bits_u5, @intCast(n));
+            if (n_digits == 0) break;
+            mpbShrRound(a, @as(i32, digits_per_limb) * radix_bits, JS_RNDZ);
         }
-        P = P_found;
-        E = E_found;
-        mpbSetU64(tmp1, mant_found);
-    } else if (fmt == JS_DTOA_FORMAT_FRAC) {
-        mulPowRound(tmp1, m, e - 53, radix1, radix_shift, n_digits, JS_RNDNA);
-
-        const tot = maxInt(E + 1, @as(i32, 1)) + n_digits;
-        const dot = maxInt(E + 1, @as(i32, 1));
-        const out_len = outputDigits(q, tmp1, radix, tot, dot);
-        if (q[0] == '0' and out_len >= 2 and q[1] != '.') {
-            std.mem.copyForwards(u8, q[0 .. out_len - 1], q[1..out_len]);
-            q = q[out_len - 1 ..];
-        } else {
-            q = q[out_len..];
-        }
-        return @intFromPtr(q.ptr) - @intFromPtr(buf.ptr);
     } else {
-        // FIXED format
-        P = n_digits;
-        mant_max.len = 1;
-        mant_max.tab[0] = 1;
-        const pow_shift = mulPow(mant_max, radix1, radix_shift, P, false, 0);
-        mpbShrRound(mant_max, pow_shift, JS_RNDZ);
-
-        while (true) {
-            mulPowRound(tmp1, m, e - 53, radix1, radix_shift, P - E, JS_RNDNA);
-            if (mpbCmp(tmp1, mant_max) < 0) break;
-            E += 1;
+        while (n_digits != 0) {
+            const n: i32 = minInt(n_digits, @as(i32, digits_per_limb));
+            n_digits -= n;
+            const rlen: usize = @intCast(a.len);
+            const r = mpDiv1(a.tab[0..rlen], a.tab[0..rlen], radix_base_table[@intCast(radix - 2)], 0);
+            mpbRenorm(a);
+            const offset: usize = @intCast(n_digits);
+            // Straight into the destination, as upstream dtoa.c does. A
+            // `[9]u8` bounce buffer used to sit here, sized for the only radix
+            // that reached this branch: 10, whose `digits_per_limb` is exactly
+            // 9. Every other non-power-of-two radix overflows it — radix 3
+            // writes 20 digits — so the first caller to pass one would have
+            // smashed the stack.
+            limbToA(buf[offset..][0..@intCast(n)], r, radix, n);
         }
     }
 
-    return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, flags);
+    var len: usize = @intCast(n_digits1);
+    if (dot_pos != n_digits1) {
+        const dp: usize = @intCast(dot_pos);
+        const n1: usize = @intCast(n_digits1);
+        const move_len = n1 - dp;
+        std.mem.copyBackwards(u8, buf[dp + 1 .. dp + 1 + move_len], buf[dp .. dp + move_len]);
+        buf[dp] = '.';
+        len += 1;
+    }
+    return len;
 }
 
 fn outputHelper(
@@ -1126,7 +991,7 @@ fn outputHelper(
             q[0] = '+';
             q = q[1..];
         }
-        q = q[u32toaImpl(q, @intCast(E2))..];
+        q = q[u32toa(q, @intCast(E2))..];
     } else if (E <= 0) {
         q[0] = '0';
         q[1] = '.';
@@ -1144,22 +1009,363 @@ fn outputHelper(
         }
     }
 
-    return @intFromPtr(q.ptr) - @intFromPtr(buf_start.ptr);
+    return writtenLen(buf_start, q);
 }
 
 // ============================================================
-// js_atod
+// dtoa: f64 → digits
 // ============================================================
 
-/// Faithful port of QuickJS `js_atod`. The only production caller is `parseNumber`
-/// (radix 10, flags 0); the lexer and value formatter run their own parsers. The
-/// `JS_ATOD_ACCEPT_UNDERSCORES` / `ACCEPT_BIN_OCT` / `ACCEPT_LEGACY_OCTAL` /
-/// `INT_ONLY` branches and the non-decimal radix paths are therefore only exercised
-/// by unit tests; they are kept so the port stays line-for-line comparable with
-/// upstream and so embedders can reuse the full parser.
-fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp_mem: *JSATODTempMem) f64 {
+const DtoaScale = struct { P: i32, E: i32 };
+
+fn jsDtoaMaxLen(d: f64, radix: i32, n_digits: i32, flags: i32) i32 {
+    const fmt = flags & JS_DTOA_FORMAT_MASK;
+    var n: i32 = 0;
+
+    if (fmt != JS_DTOA_FORMAT_FRAC) {
+        if (fmt == JS_DTOA_FORMAT_FREE) {
+            n = dtoa_max_digits_table[@intCast(radix - 2)];
+        } else {
+            n = n_digits;
+        }
+        if ((flags & JS_DTOA_EXP_MASK) == JS_DTOA_EXP_DISABLED) {
+            const a = float64AsUint64(d);
+            var e: i32 = @intCast((a >> 52) & 0x7ff);
+            if (e == 0x7ff) {
+                n = 0;
+            } else {
+                e -= 1023;
+                n += 10 + @as(i32, @intCast(@abs(mulLog2Radix(e - 1, radix))));
+            }
+        } else {
+            n += 1 + 1 + 6;
+        }
+    } else {
+        const a = float64AsUint64(d);
+        var e: i32 = @intCast((a >> 52) & 0x7ff);
+        if (e == 0x7ff) {
+            n = 0;
+        } else {
+            e -= 1023;
+            if (e < 0) {
+                n = 1;
+            } else {
+                n = 2 + mulLog2Radix(e - 1, radix);
+            }
+            n += 1 + 1 + 1 + n_digits;
+        }
+    }
+    return maxInt(n, 9);
+}
+
+fn writeNonFinite(buf: []u8, sgn: i32, frac: u64) usize {
+    var q = buf;
+    if (frac == 0) {
+        if (sgn != 0) {
+            q[0] = '-';
+            q = q[1..];
+        }
+        @memcpy(q[0..8], "Infinity");
+        q = q[8..];
+    } else {
+        @memcpy(q[0..3], "NaN");
+        q = q[3..];
+    }
+    return writtenLen(buf, q);
+}
+
+/// FORMAT_FREE: shortest digit string that still round-trips to `(m, e)`.
+fn dtoaShortest(tmp1: *MpbMax, m: u64, e: i32, radix: i32, radix1: i32, radix_shift: i32) DtoaScale {
+    const P_max: i32 = dtoa_max_digits_table[@intCast(radix - 2)];
+    const E0 = 1 + mulLog2Radix(e - 1, radix);
+    var E_found: i32 = 0;
+    var P_found: i32 = 0;
+    var mant_found: u64 = 0;
+    var P = P_max;
+
+    while (true) {
+        var E = E0;
+        while (true) {
+            mulPowRound(tmp1, m, e - 53, radix1, radix_shift, P - E, JS_RNDN);
+            const mant = mpbGetU64(tmp1);
+            const mant_max1 = powUi(@intCast(radix), @intCast(P));
+            if (mant < mant_max1) break;
+            E += 1;
+        }
+        var mant2 = mpbGetU64(tmp1);
+        const r: u32 = @intCast(radix);
+        while (mant2 != 0 and (mant2 % r) == 0) {
+            mant2 /= r;
+            P -= 1;
+        }
+        if (P_found == 0) {
+            P_found = P;
+            E_found = E;
+            mant_found = mant2;
+            if (P == 1) break;
+            P -= 1;
+            continue;
+        }
+        mpbSetU64(tmp1, mant2);
+        var e1: i32 = 0;
+        const m1 = mulPowRoundToD(&e1, tmp1, radix1, radix_shift, E - P, JS_RNDN);
+        if (m1 == m and e1 == e) {
+            P_found = P;
+            E_found = E;
+            mant_found = mant2;
+            if (P == 1) break;
+            P -= 1;
+        } else {
+            break;
+        }
+    }
+    mpbSetU64(tmp1, mant_found);
+    return .{ .P = P_found, .E = E_found };
+}
+
+/// FORMAT_FRAC: `n_digits` digits after the radix point (toFixed).
+fn dtoaFrac(q: []u8, tmp1: *MpbMax, m: u64, e: i32, E: i32, radix: i32, radix1: i32, radix_shift: i32, n_digits: i32) []u8 {
+    mulPowRound(tmp1, m, e - 53, radix1, radix_shift, n_digits, JS_RNDNA);
+    const tot = maxInt(E + 1, @as(i32, 1)) + n_digits;
+    const dot = maxInt(E + 1, @as(i32, 1));
+    const out_len = outputDigits(q, tmp1, radix, tot, dot);
+    if (q[0] == '0' and out_len >= 2 and q[1] != '.') {
+        std.mem.copyForwards(u8, q[0 .. out_len - 1], q[1..out_len]);
+        return q[out_len - 1 ..];
+    }
+    return q[out_len..];
+}
+
+/// FORMAT_FIXED: `P` significant digits. Returns the adjusted exponent E.
+fn dtoaFixed(tmp1: *MpbMax, mant_max: *MpbMax, m: u64, e: i32, E_in: i32, radix1: i32, radix_shift: i32, P: i32) i32 {
+    var E = E_in;
+    mant_max.len = 1;
+    mant_max.tab[0] = 1;
+    const pow_shift = mulPow(mant_max, radix1, radix_shift, P, false, 0);
+    mpbShrRound(mant_max, pow_shift, JS_RNDZ);
+
+    while (true) {
+        mulPowRound(tmp1, m, e - 53, radix1, radix_shift, P - E, JS_RNDNA);
+        if (mpbCmp(tmp1, mant_max) < 0) break;
+        E += 1;
+    }
+    return E;
+}
+
+fn jsDtoa(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *JSDTOATempMem) usize {
     var mptr: [*]u64 = &tmp_mem.mem;
-    const tmp0 = dtoaMalloc(Mpb(DBIGNUM_LEN_MAX), &mptr);
+    const tmp1 = dtoaMalloc(MpbMax, &mptr);
+    const mant_max_small = dtoaMalloc(Mpb(MANT_LEN_MAX), &mptr);
+    const mant_max: *MpbMax = @ptrCast(mant_max_small);
+
+    const radix_shift = ctz32(@intCast(radix));
+    const radix1: i32 = radix >> @intCast(radix_shift);
+    const a = float64AsUint64(d);
+    const sgn = @as(i32, @intCast(a >> 63));
+    var e: i32 = @intCast((a >> 52) & 0x7ff);
+    var m = a & ((@as(u64, 1) << 52) - 1);
+    var q = buf;
+
+    if (e == 0x7ff) return writeNonFinite(buf, sgn, m);
+
+    if (e == 0) {
+        if (m == 0) {
+            tmp1.len = 1;
+            tmp1.tab[0] = 0;
+            const E: i32 = 1;
+            const P: i32 = if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FREE)
+                1
+            else if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FRAC)
+                n_digits + 1
+            else
+                n_digits;
+            if (sgn != 0 and (flags & JS_DTOA_MINUS_ZERO) != 0) {
+                q[0] = '-';
+                q = q[1..];
+            }
+            return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, flags);
+        }
+        const l = clz64(m) - 11;
+        e -= l - 1;
+        m <<= @intCast(l);
+    } else {
+        m |= @as(u64, 1) << 52;
+    }
+
+    if (sgn != 0) {
+        q[0] = '-';
+        q = q[1..];
+    }
+
+    e -= 1022;
+
+    if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FREE and
+        e >= 1 and e <= 53 and
+        (m & ((@as(u64, 1) << @intCast(53 - e)) - 1)) == 0 and
+        (flags & JS_DTOA_EXP_MASK) != JS_DTOA_EXP_ENABLED)
+    {
+        const m_shifted = m >> @intCast(53 - e);
+        const len = u64toaRadix(q, m_shifted, @intCast(radix));
+        q = q[len..];
+        return writtenLen(buf, q);
+    }
+
+    var E = 1 + mulLog2Radix(e - 1, radix);
+    var P: i32 = 0;
+    const fmt = flags & JS_DTOA_FORMAT_MASK;
+
+    if (fmt == JS_DTOA_FORMAT_FREE) {
+        const scale = dtoaShortest(tmp1, m, e, radix, radix1, radix_shift);
+        P = scale.P;
+        E = scale.E;
+    } else if (fmt == JS_DTOA_FORMAT_FRAC) {
+        return writtenLen(buf, dtoaFrac(q, tmp1, m, e, E, radix, radix1, radix_shift, n_digits));
+    } else {
+        P = n_digits;
+        E = dtoaFixed(tmp1, mant_max, m, e, E, radix1, radix_shift, P);
+    }
+
+    return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, flags);
+}
+
+// ============================================================
+// atod: digits → f64
+// ============================================================
+
+inline fn toDigit(c: u8) i32 {
+    return switch (c) {
+        '0'...'9' => @as(i32, c) - '0',
+        'A'...'Z' => @as(i32, c) - 'A' + 10,
+        'a'...'z' => @as(i32, c) - 'a' + 10,
+        else => 36,
+    };
+}
+
+const AtodExp = struct {
+    p: []const u8,
+    expn: i32 = 0,
+    overflow: bool = false,
+    is_bin_exp: bool = false,
+    invalid: bool = false,
+};
+
+fn parseAtodExponent(
+    p: []const u8,
+    p_start: []const u8,
+    radix: i32,
+    radix_bits: i32,
+    flags: i32,
+    sep: i32,
+) AtodExp {
+    if ((flags & JS_ATOD_INT_ONLY) != 0 or p.len == 0 or p.ptr == p_start.ptr) {
+        return .{ .p = p };
+    }
+
+    const c0 = p[0];
+    const has_exp = (radix == 10 and (c0 == 'e' or c0 == 'E')) or
+        (radix != 10 and (c0 == '@' or (radix_bits >= 1 and radix_bits <= 4 and (c0 == 'p' or c0 == 'P'))));
+    if (!has_exp) return .{ .p = p };
+
+    var rest = p[1..];
+    var exp_is_neg = false;
+    if (rest.len > 0 and rest[0] == '+') {
+        rest = rest[1..];
+    } else if (rest.len > 0 and rest[0] == '-') {
+        exp_is_neg = true;
+        rest = rest[1..];
+    }
+    if (rest.len == 0 or toDigit(rest[0]) >= 10) {
+        return .{ .p = rest, .invalid = true };
+    }
+
+    var expn = toDigit(rest[0]);
+    rest = rest[1..];
+    var expn_overflow = false;
+    while (rest.len > 0) {
+        if (@as(i32, rest[0]) == sep and rest.len > 1 and toDigit(rest[1]) < 10)
+            rest = rest[1..];
+        const c1 = toDigit(rest[0]);
+        if (c1 >= 10) break;
+        if (!expn_overflow) {
+            if (expn > (@as(i32, std.math.maxInt(i32)) - 2 - 9) / 10) {
+                expn_overflow = true;
+            } else {
+                expn = expn * 10 + c1;
+            }
+        }
+        rest = rest[1..];
+    }
+    if (exp_is_neg) expn = -expn;
+    return .{
+        .p = rest,
+        .expn = expn,
+        .overflow = expn_overflow,
+        .is_bin_exp = (c0 == 'p' or c0 == 'P'),
+    };
+}
+
+fn atodToBits(
+    tmp0: *MpbMax,
+    radix: i32,
+    radix1: i32,
+    radix_shift: i32,
+    radix_bits: i32,
+    digit_count: i32,
+    expn: i32,
+    expn_offset: i32,
+    expn_overflow: bool,
+    is_bin_exp: bool,
+    is_zero: bool,
+) u64 {
+    if (is_zero) return 0;
+    if (expn_overflow) {
+        return if (expn < 0) 0 else @as(u64, 0x7ff) << 52;
+    }
+
+    if (radix_bits != 0) {
+        var expn_adj = expn;
+        if (!is_bin_exp) expn_adj *= radix_bits;
+        expn_adj -= expn_offset * radix_bits;
+        const expn1 = expn_adj + digit_count * radix_bits;
+        if (expn1 >= 1024 + radix_bits) return @as(u64, 0x7ff) << 52;
+        if (expn1 <= -1075) return 0;
+        var e_val: i32 = 0;
+        const m_val = roundToD(&e_val, tmp0, -expn_adj, JS_RNDN);
+        return buildFloat64(m_val, e_val);
+    }
+
+    const expn_adj = expn - expn_offset;
+    const expn1 = expn_adj + digit_count;
+    if (expn1 >= max_exponent[@intCast(radix - 2)] + 1) return @as(u64, 0x7ff) << 52;
+    if (expn1 <= min_exponent[@intCast(radix - 2)]) return 0;
+    var e_val: i32 = 0;
+    const m_val = mulPowRoundToD(&e_val, tmp0, radix1, radix_shift, expn_adj, JS_RNDN);
+    return buildFloat64(m_val, e_val);
+}
+
+fn buildFloat64(m: u64, e: i32) u64 {
+    if (m == 0) return 0;
+    if (e > 1024) return @as(u64, 0x7ff) << 52;
+    if (e < -1073) return 0;
+    if (e < -1021) {
+        return m >> @intCast(-e - 1021);
+    }
+    return (@as(u64, @intCast(e + 1022)) << 52) | (m & ((@as(u64, 1) << 52) - 1));
+}
+
+fn finishAtod(a: u64, is_neg: i32, p: []const u8, pnext: *?[*]const u8) f64 {
+    var a2 = a;
+    a2 |= @as(u64, @intCast(is_neg)) << 63;
+    pnext.* = p.ptr;
+    return uint64AsFloat64(a2);
+}
+
+/// Inverse of `jsDtoa`. Not a production ToNumber. `parseNumber` uses radix 10
+/// and flags 0; radix / underscore / `0x` arms exist for `formatRadix` round-trip
+/// tests and to keep the dtoa.c port complete.
+fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp_mem: *JSATODTempMem) f64 {
+    var mptr: [*]u64 = &tmp_mem.mem;
+    const tmp0 = dtoaMalloc(MpbMax, &mptr);
 
     var sep: i32 = if ((flags & JS_ATOD_ACCEPT_UNDERSCORES) != 0) @as(i32, '_') else 256;
 
@@ -1240,7 +1446,6 @@ fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32,
     var pos: i32 = 0;
     var dot_pos: i32 = -1;
 
-    // skip leading zeros
     while (p.len > 0) {
         if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and (flags & JS_ATOD_INT_ONLY) == 0) {
             if (dot_pos >= 0) break;
@@ -1298,187 +1503,37 @@ fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32,
         tmp0.tab[0] |= 1;
     }
 
-    // parse exponent
-    var expn: i32 = 0;
-    var expn_overflow = false;
-    var is_bin_exp = false;
-
-    if ((flags & JS_ATOD_INT_ONLY) == 0 and p.len > 0 and p.ptr != p_start.ptr) {
-        const c0 = p[0];
-        const has_exp = (radix == 10 and (c0 == 'e' or c0 == 'E')) or
-            (radix != 10 and (c0 == '@' or (radix_bits >= 1 and radix_bits <= 4 and (c0 == 'p' or c0 == 'P'))));
-
-        if (has_exp) {
-            is_bin_exp = (c0 == 'p' or c0 == 'P');
-            p = p[1..];
-            var exp_is_neg = false;
-            if (p.len > 0 and p[0] == '+') {
-                p = p[1..];
-            } else if (p.len > 0 and p[0] == '-') {
-                exp_is_neg = true;
-                p = p[1..];
-            }
-            if (p.len == 0 or toDigit(p[0]) >= 10) {
-                pnext.* = p_start.ptr;
-                return std.math.nan(f64);
-            }
-            expn = toDigit(p[0]);
-            p = p[1..];
-            while (p.len > 0) {
-                if (@as(i32, p[0]) == sep and p.len > 1 and toDigit(p[1]) < 10)
-                    p = p[1..];
-                const c1 = toDigit(p[0]);
-                if (c1 >= 10) break;
-                if (!expn_overflow) {
-                    if (expn > (@as(i32, std.math.maxInt(i32)) - 2 - 9) / 10) {
-                        expn_overflow = true;
-                    } else {
-                        expn = expn * 10 + c1;
-                    }
-                }
-                p = p[1..];
-            }
-            if (exp_is_neg) expn = -expn;
-        }
+    const exp = parseAtodExponent(p, p_start, radix, radix_bits, flags, sep);
+    if (exp.invalid) {
+        pnext.* = p_start.ptr;
+        return std.math.nan(f64);
     }
+    p = exp.p;
 
     if (p.ptr == p_start.ptr) {
         pnext.* = p_start.ptr;
         return std.math.nan(f64);
     }
 
-    var a_ret: u64 = undefined;
-
-    if (is_zero) {
-        a_ret = 0;
-    } else {
-        if (expn_overflow) {
-            if (expn < 0) {
-                a_ret = 0;
-                return finishAtod(a_ret, is_neg, p, pnext);
-            } else {
-                a_ret = @as(u64, 0x7ff) << 52;
-                return finishAtod(a_ret, is_neg, p, pnext);
-            }
-        }
-
-        if (radix_bits != 0) {
-            if (!is_bin_exp) expn *= radix_bits;
-            expn -= expn_offset * radix_bits;
-            const expn1 = expn + digit_count * radix_bits;
-            if (expn1 >= 1024 + radix_bits) {
-                a_ret = @as(u64, 0x7ff) << 52;
-            } else if (expn1 <= -1075) {
-                a_ret = 0;
-            } else {
-                var e_val: i32 = 0;
-                const m_val = roundToD(&e_val, tmp0, -expn, JS_RNDN);
-                a_ret = buildFloat64(m_val, e_val);
-            }
-        } else {
-            expn -= expn_offset;
-            const expn1 = expn + digit_count;
-            if (expn1 >= max_exponent[@intCast(radix - 2)] + 1) {
-                a_ret = @as(u64, 0x7ff) << 52;
-            } else if (expn1 <= min_exponent[@intCast(radix - 2)]) {
-                a_ret = 0;
-            } else {
-                var e_val: i32 = 0;
-                const m_val = mulPowRoundToD(&e_val, tmp0, radix1, radix_shift, expn, JS_RNDN);
-                a_ret = buildFloat64(m_val, e_val);
-            }
-        }
-    }
-
+    const a_ret = atodToBits(
+        tmp0,
+        radix,
+        radix1,
+        radix_shift,
+        radix_bits,
+        digit_count,
+        exp.expn,
+        expn_offset,
+        exp.overflow,
+        exp.is_bin_exp,
+        is_zero,
+    );
     return finishAtod(a_ret, is_neg, p, pnext);
 }
 
-fn buildFloat64(m: u64, e: i32) u64 {
-    if (m == 0) return 0;
-    if (e > 1024) return @as(u64, 0x7ff) << 52;
-    if (e < -1073) return 0;
-    if (e < -1021) {
-        return m >> @intCast(-e - 1021);
-    }
-    return (@as(u64, @intCast(e + 1022)) << 52) | (m & ((@as(u64, 1) << 52) - 1));
-}
-
-fn finishAtod(a: u64, is_neg: i32, p: []const u8, pnext: *?[*]const u8) f64 {
-    var a2 = a;
-    a2 |= @as(u64, @intCast(is_neg)) << 63;
-    pnext.* = p.ptr;
-    return uint64AsFloat64(a2);
-}
-
 // ============================================================
-// Engine-facing helpers
+// Tests
 // ============================================================
-
-pub fn parseNumber(bytes: []const u8) !f64 {
-    if (std.mem.eql(u8, bytes, "NaN")) return std.math.nan(f64);
-
-    var tmp_mem: JSATODTempMem = undefined;
-    var parsed_end: ?[*]const u8 = null;
-    const value = jsAtodImpl(bytes, &parsed_end, 10, 0, &tmp_mem);
-    const end_ptr = @intFromPtr(bytes.ptr) + bytes.len;
-    if (parsed_end == null or @intFromPtr(parsed_end.?) != end_ptr) {
-        return error.InvalidCharacter;
-    }
-    if (std.math.isNan(value)) return error.InvalidCharacter;
-    return value;
-}
-
-pub fn formatNumber(buf: []u8, value: f64) ![]const u8 {
-    if (std.math.isNan(value)) return "NaN";
-    if (std.math.isPositiveInf(value)) return "Infinity";
-    if (std.math.isNegativeInf(value)) return "-Infinity";
-
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoaImpl(buf, value, 10, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO, &tmp_mem);
-    return buf[0..len];
-}
-
-pub fn formatInt32(buf: []u8, value: i32) []const u8 {
-    const len = i32toaImpl(buf, value);
-    return buf[0..len];
-}
-
-pub fn formatInt64(buf: []u8, value: i64) []const u8 {
-    const len = i64toaImpl(buf, value);
-    return buf[0..len];
-}
-
-/// Upper bound on the byte length `formatRadix` will write for these
-/// arguments, so a caller can size its buffer instead of guessing. Radix 2
-/// with `EXP_DISABLED` runs past a thousand digits on a denormal, which is why
-/// guessing does not work.
-pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, flags: i32) !usize {
-    const len_max = jsDtoaMaxLenImpl(value, radix, n_digits, flags);
-    if (len_max < 0) return error.InvalidRadix;
-    return @as(usize, @intCast(len_max)) + 1;
-}
-
-/// `Number.prototype.toString(radix)` for any radix in 2..36. The digit
-/// generation is the same faithful js_dtoa port radix 10 already used; only
-/// the wrappers had hard-coded 10.
-pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, flags: i32) ![]const u8 {
-    if (buf.len < try radixMaxLen(value, radix, n_digits, flags)) return error.NoSpaceLeft;
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoaImpl(buf, value, radix, n_digits, flags, &tmp_mem);
-    if (len >= buf.len) return error.NoSpaceLeft;
-    return buf[0..len];
-}
-
-pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]const u8 {
-    const len_max = jsDtoaMaxLenImpl(value, 10, n_digits, flags);
-    if (len_max < 0) return error.NoSpaceLeft;
-    const needed: usize = @as(usize, @intCast(len_max)) + 1;
-    if (needed > buf.len) return error.NoSpaceLeft;
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoaImpl(buf, value, 10, n_digits, flags, &tmp_mem);
-    if (len >= buf.len) return error.NoSpaceLeft;
-    return buf[0..len];
-}
 
 test "dtoa functionality" {
     const n = try parseNumber("12.5");
@@ -1493,7 +1548,67 @@ test "atod underscore separator stops at end of input" {
     // out of bounds once JS_ATOD_ACCEPT_UNDERSCORES was enabled.
     var tmp_mem: JSATODTempMem = undefined;
     var parsed_end: ?[*]const u8 = null;
-    const v = jsAtodImpl("1_", &parsed_end, 10, JS_ATOD_ACCEPT_UNDERSCORES, &tmp_mem);
+    const v = jsAtod("1_", &parsed_end, 10, JS_ATOD_ACCEPT_UNDERSCORES, &tmp_mem);
     try std.testing.expectEqual(@as(f64, 1), v);
     try std.testing.expectEqual(@as(usize, 1), @intFromPtr(parsed_end.?) - @intFromPtr("1_".ptr));
+}
+
+test "parseNumber rejects trailing junk and empty input" {
+    try std.testing.expectError(error.InvalidCharacter, parseNumber("12.5x"));
+    try std.testing.expectError(error.InvalidCharacter, parseNumber(""));
+    try std.testing.expectError(error.InvalidCharacter, parseNumber("1_000"));
+    try std.testing.expect(std.math.isNan(try parseNumber("NaN")));
+}
+
+test "formatNumber specials and minus zero" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("NaN", try formatNumber(&buf, std.math.nan(f64)));
+    try std.testing.expectEqualStrings("Infinity", try formatNumber(&buf, std.math.inf(f64)));
+    try std.testing.expectEqualStrings("-Infinity", try formatNumber(&buf, -std.math.inf(f64)));
+    try std.testing.expectEqualStrings("0", try formatNumber(&buf, -0.0));
+}
+
+test "formatInt32 formatInt64" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0", formatInt32(&buf, 0));
+    try std.testing.expectEqualStrings("-2147483648", formatInt32(&buf, std.math.minInt(i32)));
+    try std.testing.expectEqualStrings("9223372036854775807", formatInt64(&buf, std.math.maxInt(i64)));
+    try std.testing.expectEqualStrings("-9223372036854775808", formatInt64(&buf, std.math.minInt(i64)));
+}
+
+test "formatRadix round-trips odd and power-of-two radices" {
+    const values = [_]f64{ 0.1, 829, std.math.pi, 1.0 / 3.0, -255, 1e-10 };
+    const radices = [_]i32{ 2, 3, 5, 7, 8, 11, 16, 36 };
+    const flags = JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_DISABLED;
+    for (values) |value| {
+        for (radices) |radix| {
+            const needed = try radixMaxLen(value, radix, 0, flags);
+            var storage: [2048]u8 = undefined;
+            try std.testing.expect(needed <= storage.len);
+            const text = try formatRadix(storage[0..needed], value, radix, 0, flags);
+            var tmp_mem: JSATODTempMem = undefined;
+            var parsed_end: ?[*]const u8 = null;
+            const back = jsAtod(text, &parsed_end, radix, 0, &tmp_mem);
+            try std.testing.expectEqual(value, back);
+        }
+    }
+}
+
+test "formatDtoaChecked FRAC FIXED and EXP" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("1.3", try formatDtoaChecked(&buf, 1.25, 1, JS_DTOA_FORMAT_FRAC));
+    try std.testing.expectEqualStrings("1.250", try formatDtoaChecked(&buf, 1.25, 3, JS_DTOA_FORMAT_FRAC));
+    try std.testing.expectEqualStrings("1.25e+0", try formatDtoaChecked(&buf, 1.25, 3, JS_DTOA_FORMAT_FIXED | JS_DTOA_EXP_ENABLED));
+    try std.testing.expectError(error.NoSpaceLeft, formatDtoaChecked(buf[0..2], 1.25, 3, JS_DTOA_FORMAT_FRAC));
+}
+
+test "jsAtod accepts 0x 0b 0o when flagged" {
+    var tmp_mem: JSATODTempMem = undefined;
+    var parsed_end: ?[*]const u8 = null;
+    const hex = jsAtod("0x10", &parsed_end, 0, JS_ATOD_ACCEPT_BIN_OCT, &tmp_mem);
+    try std.testing.expectEqual(@as(f64, 16), hex);
+    const bin = jsAtod("0b1010", &parsed_end, 0, JS_ATOD_ACCEPT_BIN_OCT, &tmp_mem);
+    try std.testing.expectEqual(@as(f64, 10), bin);
+    const oct = jsAtod("0o17", &parsed_end, 0, JS_ATOD_ACCEPT_BIN_OCT, &tmp_mem);
+    try std.testing.expectEqual(@as(f64, 15), oct);
 }

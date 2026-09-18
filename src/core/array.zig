@@ -185,3 +185,12 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
 }
 
 const std = @import("std");
+
+test "array index detection handles QuickJS boundaries" {
+    try std.testing.expect(isArrayIndexName("0"));
+    try std.testing.expect(isArrayIndexName("4294967294"));
+    try std.testing.expect(!isArrayIndexName("4294967295"));
+    try std.testing.expect(!isArrayIndexName("01"));
+    try std.testing.expect(!isArrayIndexName("-1"));
+    try std.testing.expect(canonicalNumericIndex("-0") != null);
+}

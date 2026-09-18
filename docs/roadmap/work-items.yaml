@@ -1,7 +1,5 @@
-# Machine-readable work-item registry — the source of truth for roadmap.md's
-# generated sections (ID list, canonical DAG, status view). Validated by
-# tools/docs/roadmap_lint.py; the generated sections are rendered/checked by
-# tools/docs/render_roadmap.py.
+# Machine-readable work-item registry for docs/roadmap.md (ID list, DAG,
+# status). Hand-maintained; no renderer or CI linter.
 #
 # schema v2:
 #   type:  governance | gate | spike | spec | implementation | measurement
@@ -115,7 +113,7 @@ items:
     wip_slot: none
     completion_commit: e972c4b5
     hard_prerequisites: [GC-P3]
-    notes: "SUPERSEDED, no verdict recorded (none of pass/fail/inconclusive applies): the n=8->16->32 non-inferiority protocol of gc_merge_policy.json was never run. Owner ruling chain: 2026-09-03 'finish the tracing GC and adapt the object model completely, performance second' (docs/tracing-gc-completion-plan.md v0.1, D1-D6) -> 2026-09-04 S0-S2 land on main as e972c4b5 -> 2026-09-05 S5 closeout (f005aee7; all stage-end gates green incl. ZJS_GC_STRESS test262 0/49778) -> 2026-09-06 performance line closed (Octane vs qjs >= 0.95 is a regression gate from here). The merge basis that replaced this gate is the Stage 0 fixed-work insn/cycles screen against the frozen rc baseline main-d944f26d (docs/tracing-gc-completion-account.md section 3: only splay cycles 1.26 remains, a structural account) plus the four correctness gates. gc_merge_policy.json stays on file as the historical protocol."
+    notes: "SUPERSEDED, no verdict recorded (none of pass/fail/inconclusive applies): the n=8->16->32 non-inferiority protocol of gc_merge_policy.json was never run. Owner ruling chain: 2026-09-03 'finish the tracing GC and adapt the object model completely, performance second' -> 2026-09-04 S0-S2 land on main as e972c4b5 -> 2026-09-05 S5 closeout (f005aee7; all stage-end gates green incl. ZJS_GC_STRESS test262 0/49778) -> 2026-09-06 performance line closed (Octane vs qjs >= 0.95 is a regression gate from here). The merge basis that replaced this gate is the Stage 0 fixed-work insn/cycles screen against the frozen rc baseline main-d944f26d (only splay cycles 1.26 remains, a structural account) plus the four correctness gates. gc_merge_policy.json stays on file as the historical protocol."
     authority: {file: docs/roadmap.md, section: "2"}
   - id: G1-LIGHT-PROCESS-WORKLOAD
     title: "Lightweight-process value gate: does the many-idle-resident workload exist?"
@@ -282,7 +280,7 @@ items:
     activation: {all: [{item: BASE-G0, state: done}]}
     hard_prerequisites: []
     notes: "protocol + frozen reference set: policies/gc_merge_policy.json (gap_measurement) + reports/evidence/BASE-G0/manifest.json"
-    authority: {file: docs/tracing-gc-design.md, section: "pause plan"}
+    authority: {file: docs/gc-invariants.md, section: "What the gates do and do not cover"}
   - id: GC-P3
     title: Lazy sweep + versioned marks + throughput-tax recovery
     type: implementation
@@ -291,8 +289,8 @@ items:
     completion_commit: f005aee7
     activation: {all: [{item: G1-GC, verdict: continue}]}
     hard_prerequisites: []
-    notes: "Lazy sweep landed on-branch (9ff52b2a: splay major p99 1.007ms); the two GC-GAP attribution debts were settled 2026-08-26 (SplayLatency 0.805 = bimodal sampling artefact; splay RSS = peak footprint). The dedicated-session / gc-tracing-branch lane was retired when the line moved to main: the throughput-tax recovery became the TGC S0-S5 completion campaign (docs/tracing-gc-completion-plan.md, docs/tracing-gc-completion-account.md), closed 2026-09-05 on main at f005aee7. Since then the tracing collector is the only collector in the tree (refcounting left the object model in S1-S4)."
-    authority: {file: docs/tracing-gc-design.md, section: "pause plan 5"}
+    notes: "Lazy sweep landed on-branch (9ff52b2a: splay major p99 1.007ms); the two GC-GAP attribution debts were settled 2026-08-26 (SplayLatency 0.805 = bimodal sampling artefact; splay RSS = peak footprint). The dedicated-session / gc-tracing-branch lane was retired when the line moved to main: the throughput-tax recovery became the TGC S0-S5 completion campaign, closed 2026-09-05 on main at f005aee7. Since then the tracing collector is the only collector in the tree (refcounting left the object model in S1-S4)."
+    authority: {file: docs/gc-invariants.md, section: "Death side"}
   - id: VM-CONTRACT-GC
     title: Representation-contract revision for the tracing switch (versioned, reviewed)
     type: spec
@@ -308,7 +306,7 @@ items:
     wip_slot: none
     completion_commit: f005aee7
     hard_prerequisites: []
-    notes: "Landed on main by the 2026-09-03 owner ruling (see G2-GC-MERGE): first landing e972c4b5 (2026-09-04, S0-S2, 127 commits squashed), S5 closeout f005aee7 (2026-09-05). Gates at closeout: zig build test 2558/0, test-gc-stress 2554/0, test262 0/49778 also under ZJS_GC_STRESS=1, leak-census 1570/0, test-oom 22/0, test-stress 6/0 (docs/tracing-gc-completion-account.md section 2). Pushed to origin 2026-09-06 (ca537eca). Open post-merge items: VM-CONTRACT-GC (contract revision) and the conservative-root residue R1 (completion account section 6.6); backlog Q21 and Q22 closed 2026-09-06."
+    notes: "Landed on main by the 2026-09-03 owner ruling (see G2-GC-MERGE): first landing e972c4b5 (2026-09-04, S0-S2, 127 commits squashed), S5 closeout f005aee7 (2026-09-05). Gates at closeout: zig build test 2558/0, test-gc-stress 2554/0, test262 0/49778 also under ZJS_GC_STRESS=1, leak-census 1570/0, test-oom 22/0, test-stress 6/0. Pushed to origin 2026-09-06 (ca537eca). Open post-merge items: VM-CONTRACT-GC (contract revision) and the conservative-root residue R1; backlog Q21 and Q22 closed 2026-09-06."
     authority: {file: docs/roadmap.md, section: "2"}
 
   # ---- serialization ----
@@ -335,14 +333,14 @@ items:
     wip_slot: implementation
     hard_prerequisites: [SER-CORE, PERF-OPCODE-SPACE]
     acceptance: round-trip property tests + fuzz + hot-reload test rows; feeds Build Cache
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "27.10"}
+    authority: {file: docs/roadmap.md, section: "27.10"}
   - id: SER-SNAPSHOT
     title: State snapshot profile
     type: implementation
     state: blocked
     wip_slot: implementation
     hard_prerequisites: [SER-CORE]
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "27.9 / 15"}
+    authority: {file: docs/roadmap.md, section: "27.9 / 15"}
   - id: SER-MESSAGE
     title: Process message profile (SC values + three zero-copy channels)
     type: implementation
@@ -360,7 +358,7 @@ items:
     estimate_class: L
     hard_prerequisites: []
     notes: "fun-side main effort; zjs increment = Root Handle table + epoch-safe deref/release. Internal slices: P1a Root Handle API, P1b disposable-session CLI loop, P1c HostCore/BindingRouter, P1d watcher + error overlay. Yielded its WIP slot to GC-P3 2026-08-26 (root-handle/GC coupling also argues for waiting out the GC churn); next in the implementation queue"
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "12 / 37"}
+    authority: {file: docs/roadmap.md, section: "12 / 37"}
   - id: HR-P2A
     title: Scope + async safety (CancellationToken, stale callbacks, drain, native-only completion)
     type: implementation
@@ -368,28 +366,28 @@ items:
     wip_slot: implementation
     hard_prerequisites: [HR-P1, RT-LIFECYCLE]
     notes: no serialization dependency; consumes RT-LIFECYCLE primitives; owns SessionScope/EventBarrier/callback ownership
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "10 / 28"}
+    authority: {file: docs/roadmap.md, section: "10 / 28"}
   - id: HR-P2B
     title: Snapshot/restore state migration
     type: implementation
     state: blocked
     wip_slot: implementation
     hard_prerequisites: [HR-P2A, SER-SNAPSHOT]
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "14 / 15"}
+    authority: {file: docs/roadmap.md, section: "14 / 15"}
   - id: HR-P3
     title: ESM HMR + registry multi-versioning
     type: implementation
     state: blocked
     wip_slot: implementation
     hard_prerequisites: [HR-P2A, PERF-SIDECAR]
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "16-21"}
+    authority: {file: docs/roadmap.md, section: "16-21"}
   - id: DBG-W2
     title: Minimal CDP backend
     type: implementation
     state: ready
     wip_slot: implementation
     hard_prerequisites: []
-    authority: {file: docs/fun-dev-hot-reload-design.md, section: "37 W2"}
+    authority: {file: docs/roadmap.md, section: "37 W2"}
 
   # ---- FNABI ----
   - id: FN-M0D
@@ -398,10 +396,10 @@ items:
     state: done
     wip_slot: none
     completion_commit: 895d4dc7
-    evidence: docs/fun-native-plugin-design.md v0.7 (§0 changelog + §0.1 table + §33 M0D)
+    evidence: git history of the retired FNABI draft (v0.7 §0 / §33 M0D)
     hard_prerequisites: []
     notes: "SIX verdicts per doc §33 (registry previously listed five): AsyncToken epoch width/scope; external memory accounting mandatory?; event channel primitive vs pattern; side-by-side manifest fields (process_singleton reservation); class-id/NativeType identity rules; handle scope in v1?. Plus M0D gate: confirm the §0.1 classification table itself. Doc debts found 2026-08-26 (fix with the verdict write, FNABI v0.7): §34 item 33 still says side-by-side hot reload (contradicts §22.7 v0.6); §18.1 lacks the 至多存活到调用结束 clause §0.1 credits it with; class-id ledger ruling (u16 scarcity/ClassIdSlot/triple identity) never internalized into normative text"
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M0D"}
+    authority: {file: docs/roadmap.md, section: "33 M0D"}
   - id: FN-M0I
     title: ABI schema + C/Zig golden layouts + generator source of truth (non-contentious skeleton)
     type: implementation
@@ -411,7 +409,7 @@ items:
     completion_commit: c1523d2b
     evidence: "zjs 745ee8c0/ddeb04cd/dec7cf98 (src/abi + src/binding/native_call_plan.zig + golden tests, unified 2364/0) + fun 018195a8 (src/native packaging schemas)"
     hard_prerequisites: []
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M0I"}
+    authority: {file: docs/roadmap.md, section: "33 M0I"}
   - id: FN-M0F
     title: FNABI v1 freeze (side-by-side semantics excluded, per v0.6)
     type: governance
@@ -420,63 +418,63 @@ items:
     completion_commit: 5a68ea5d
     evidence: "FNABI v0.8 (§0/§33: freeze record + pre-adoption amendment rule) + representation contract v2 (fingerprint -> FNABI tuple, layout_epoch=1); owner ruling 2026-08-26"
     hard_prerequisites: [FN-M0D, FN-M0I]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M0F"}
+    authority: {file: docs/roadmap.md, section: "33 M0F"}
   - id: FN-M1A
     title: Static NativeEntry end-to-end (add / managedCreateObject)
     type: implementation
     state: blocked
     wip_slot: implementation
     hard_prerequisites: [FN-M0F, PERF-OPCODE-SPACE]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M1A"}
+    authority: {file: docs/roadmap.md, section: "33 M1A"}
   - id: FN-M1B
     title: NativeClass method (World.step)
     type: implementation
     state: blocked
     wip_slot: implementation
     hard_prerequisites: [FN-M1A, PERF-SHAPE-ID]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M1B"}
+    authority: {file: docs/roadmap.md, section: "33 M1B"}
   - id: FN-M1C
     title: Dynamic call quickening
     type: implementation
     state: blocked
     wip_slot: implementation
     hard_prerequisites: [FN-M1A, PERF-SIDECAR]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M1C"}
+    authority: {file: docs/roadmap.md, section: "33 M1C"}
   - id: FN-M2
     title: zjs Native Execution Core
     type: implementation
     state: later
     wip_slot: implementation
     hard_prerequisites: [FN-M1A, FN-M1B, FN-M1C]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M2"}
+    authority: {file: docs/roadmap.md, section: "33 M2"}
   - id: FN-M3
     title: Dynamic loader + official SDK
     type: implementation
     state: later
     wip_slot: implementation
     hard_prerequisites: [FN-M2]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M3"}
+    authority: {file: docs/roadmap.md, section: "33 M3"}
   - id: FN-M4
     title: Buffer, Async, full lifecycle (event-channel verdict lands here at latest; PluginInstance cancel/drain adapter over RT-LIFECYCLE)
     type: implementation
     state: later
     wip_slot: implementation
     hard_prerequisites: [FN-M3, RT-LIFECYCLE]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M4"}
+    authority: {file: docs/roadmap.md, section: "33 M4"}
   - id: FN-M5
     title: Build, CAS, prebuilt, mobile platforms
     type: implementation
     state: later
     wip_slot: implementation
     hard_prerequisites: [FN-M4]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M5"}
+    authority: {file: docs/roadmap.md, section: "33 M5"}
   - id: FN-M6
     title: JIT-tier native call optimization
     type: implementation
     state: later
     wip_slot: implementation
     hard_prerequisites: [FN-M5, PERF-JIT]
-    authority: {file: docs/fun-native-plugin-design.md, section: "33 M6"}
+    authority: {file: docs/roadmap.md, section: "33 M6"}
 
   # ---- runtime lifecycle / process model ----
   - id: RT-LIFECYCLE
@@ -493,15 +491,15 @@ items:
     state: ready
     wip_slot: implementation
     hard_prerequisites: []
-    notes: "Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. GC v2 S4b landed a parallel-marking implementation on main 2026-09-03 with the default OFF (docs/gc-v2-s4b-parallel-marking-gate.md) and it was WITHDRAWN in the TGC landing e972c4b5 (gc_parallel_mark.zig deleted; gc_incremental.zig State doc: 'parallel marking (S4-b) was withdrawn' -- the 2026-09-01 calibration read splay cycles +14.6% / EB +7.2% with helpers on Octane-sized live sets). Reopening means rebuilding behind that document's live-size gate; no longer a branch lane."
-    authority: {file: docs/tracing-gc-design.md, section: "9 / pause plan"}
+    notes: "Owner triangle ruling 2026-08-26 Option B (gc_merge_policy v2): promoted to a formal plan item; memory envelope stays growth 1.75x / cycle peak-over-live 1.8. GC v2 S4b landed a parallel-marking implementation on main 2026-09-03 with the default OFF and it was WITHDRAWN in the TGC landing e972c4b5 (gc_parallel_mark.zig deleted; gc_incremental.zig State doc: 'parallel marking (S4-b) was withdrawn' -- the 2026-09-01 calibration read splay cycles +14.6% / EB +7.2% with helpers on Octane-sized live sets). Reopening means rebuilding behind a live-size gate; no longer a branch lane."
+    authority: {file: docs/gc-invariants.md, section: "Write barriers"}
   - id: GC-MULTIRT-GATE
     title: Multi-runtime GC acceptance batch 2 (TSan as gate, concurrent create/destroy, N-runtime concurrent collect)
     type: implementation
     state: ready
     wip_slot: implementation
     hard_prerequisites: []
-    authority: {file: docs/tracing-gc-design.md, section: "13/14"}
+    authority: {file: docs/gc-invariants.md, section: "Roots"}
   - id: VM-WEAK-REGISTRY
     title: Unified weak-ref/finalizer registry (representation-contract section 6 open item; pid intern depends on it)
     type: implementation

@@ -16,15 +16,16 @@ embedder  →  src/root.zig  →  src/binding/  →  src/core/
 CLI/tests →  src/internal_root.zig
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode.zig
 execute   →  src/exec/  (VM, builtins, modules, promises)
-host      →  src/runtime/  (event loop)
+host      →  src/event_loop.zig
 ```
 
 `src/core/` must not depend on CLI policy, test262 glue, plugin loaders, or
-the event loop. `tools/architecture/check_deps.js` enforces that boundary. Checkpoint
-and the production gate both run it.
+the event loop.
 
-Three `src/` companions sit beside those layers:
+`src/` companions sit beside those layers:
 
+- `event_loop.zig`: host timers, fd/signal handlers, and job draining
+  (`zjs.runtime`).
 - `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
   lookahead; used by `parser.zig` and the CLI.
 - `config_signature.zig`: compile-time configuration-signature attestation
@@ -183,21 +184,19 @@ nine `perf-*-profile` steps with exact opcode pins, and
 `src/tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
 `zjs` binary still fail-closes `--profile-opcodes`.
 
-## Host runtime — `src/runtime/`
+## Host event loop — `src/event_loop.zig`
 
-Only host policy that must stay out of core:
-
-- `event_loop.zig`: timers, fd/signal handlers, job draining
-- `root.zig`: `zjs.runtime` aliases (`EventLoop`, `runUntilIdle`)
+The leftover `src/runtime/` directory is gone. Host policy that must stay
+out of core lives in this companion file: timers, fd/signal handlers, and
+job draining. `zjs.runtime` re-exports it (`EventLoop`, `runUntilIdle`).
 
 Atomics waiter cleanup, module file graphs, and ArrayBuffer detach live in
-`src/exec/`. There is no `cleanup.zig`, `modules.zig`, `buffer.zig`,
-`plugin.zig`, or `public.zig` in this directory (the dynamic plugin loader
-and its `zjs.ffi` ABI were deleted 2026-09-06). Host functions register
-through `zjs.native` (`JSContext.defineFunction` / `createFunction`): each
-registration is one immutable `NativeEntry` (`src/core/native_entry.zig`)
-that the VM dispatches exactly like a builtin (`src/exec/vm_native.zig`);
-native -> JS goes through `zjs.CallSite` (`src/exec/call_site.zig`).
+`src/exec/`. The dynamic plugin loader and its `zjs.ffi` ABI were deleted
+2026-09-06. Host functions register through `zjs.native`
+(`JSContext.defineFunction` / `createFunction`): each registration is one
+immutable `NativeEntry` (`src/core/native_entry.zig`) that the VM dispatches
+exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
+`JSContext.callFunction`.
 
 ## Libraries, CLI, tests
 
@@ -381,9 +380,7 @@ Opcode profiling (after the D0 fix):
   wrapping them would double-count.
 - The default build's table is entry-for-entry equal to the unwrapped
   table; `--profile-opcodes` fail-closes on a non-profiling binary (exit
-  2); `--perf-json` emits `opcode_profile_enabled` explicitly. The
-  `perf-runtime-profiles` gate requires a minimum count (not only an
-  upper bound); an all-zero profile cannot pass.
+  2); `--perf-json` emits `opcode_profile_enabled` explicitly.
 
 Not implemented:
 
@@ -401,7 +398,7 @@ Not implemented:
 
 Keep stack bytecode. Prioritize:
 
-- decompose call admission, frame publication, return, and RC fixed tax
+- decompose call admission, frame publication, and return
   (the pinned qjs serves as the K3 correctness oracle and regression
   sentinel for this work, not as the performance target — see the
   [charter transition](qjs_alignment_charter_transition.md) §4);

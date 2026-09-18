@@ -14,7 +14,7 @@ const std = @import("std");
 const array_list_erased = @import("../core/array_list_erased.zig");
 const sort_erased = @import("../core/sort_erased.zig");
 const unicode = @import("unicode.zig");
-const regexp_properties = @import("unicode/regexp_properties.zig");
+const regexp_properties = unicode;
 
 pub const max_captures = 255;
 const register_count_max = 255;

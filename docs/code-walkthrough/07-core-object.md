@@ -2,7 +2,7 @@
 
 本册讲 zjs 的 JS 对象细胞：24字节固定 `Object` 头及可变尾部、flags、class-data 臂、分配/释放、GC header 互转、exotic 钩，以及**住在本文件里**的属性存储入口。payload 结构体定义在 `object_payloads.zig` / `generator_state.zig`，这里 re-export 并提供槽访问器。
 
-权威仍是源码与 ECMA-262。布局数字以 `src/core/object.zig` 的 comptime 断言与 `src/gc-representation-trace-snapshot.txt` 为准；`docs/gc-v2-m-cut-object-layout.md` 是历史规格（`weakref_count` 已退役）。
+权威仍是源码与 ECMA-262。布局数字以 `src/core/object.zig` 的 comptime 断言为准。
 
 ## 子文档
 
@@ -136,7 +136,7 @@ slots2 普通对象（对象字面量 1/2 槽）：
 [32, 32+sizeof(PromisePayload))  状态与对象同生共死
 ```
 
-Debug / ReleaseSafe 构建 `trailing_property_bytes==48`（带安全填充），ReleaseFast/Small 才是 32。**禁止按值传递 `Object`**：拷贝只带走 24B 头，臂留在原 cell（`lint_anti_goals.sh` 的 `Object passed by value` 规则）。
+Debug / ReleaseSafe 构建 `trailing_property_bytes==48`（带安全填充），ReleaseFast/Small 才是 32。**禁止按值传递 `Object`**：拷贝只带走 24B 头，臂留在原 cell。
 
 ### 计账
 

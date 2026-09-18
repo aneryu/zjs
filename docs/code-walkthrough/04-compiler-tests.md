@@ -41,7 +41,7 @@
 - **签名**：`pub fn parseAndCompileV2TestProgram( rt: *core.JSRuntime, testing_allocator: std.mem.Allocator, name: []const u8, source: []const u8, options: Options, ) !Program`。
 - **作用**：intern 名、建 Bytecode/lexer/ParseState、配根、可选 TS、beginProgramEmission、parseProgramStatements。**不**跑 resolve/finalize。
 - **实现**：errdefer 各级 deinit。`emit_phase1_temp` 来自 options。
-- **所有权 / 错误 / 调用**：覆盖语料、需要看 phase-1 流的测试。lexer 用 testing_allocator。
+- **所有权 / 错误 / 调用**：parser 与需要看 phase-1 流的测试。lexer 用 testing_allocator。
 
 ---
 
@@ -196,66 +196,52 @@
 - **实现**：`checkAllAllocationFailures` 驱动。证明失败路径仍可 deinit。
 - **所有权 / 错误 / 调用**：`compiler.tests: allocation failure sweep preserves cleanup`。
 
-### `expectV2ExecutionCompletion` (`src/compiler/tests.zig:2992`)
-
-- **签名**：`fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void`。
-- **作用**：V2Exec 编译运行，完成值必须是给定 i32。
-- **实现**：`compileAndRun` + `asInt32`。
-- **所有权 / 错误 / 调用**：语义烟雾；不数 opcode。
-
-### `countInstalledOpcode` (`src/compiler/tests.zig:3000`)
+### `countInstalledOpcode` (`src/compiler/tests.zig:2992`)
 
 - **签名**：`fn countInstalledOpcode(fb: *const bytecode_mod.FunctionBytecode, want: u8) !usize`。
 - **作用**：已安装码（含 cpool 子 FB）中某物理 id 出现次数。
 - **实现**：sizeOf 走码；递归 function_bytecode 常量。
 - **所有权 / 错误 / 调用**：融合测试与回收 id 清扫。
 
-### `compileRunAndCount` (`src/compiler/tests.zig:3020`)
+### `compileRunAndCount` (`src/compiler/tests.zig:3012`)
 
 - **签名**：`fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void`。
 - **作用**：parse+finalize 后每个 `want` opcode 至少出现一次，再 VM 跑，完成值=expected。
 - **实现**：与 compileAndRun 相同的根调用环境，但不经 hook。
 - **所有权 / 错误 / 调用**：`compiler.fuse:*` 一系列：get_loc0_field、cmp_if_false8、push_this_put_loc0、get_field2_call_method 等。证明融合既发出又执行正确。
 
-### `s3bDrainGc` (`src/compiler/tests.zig:3474`)
+### `s3bDrainGc` (`src/compiler/tests.zig:3390`)
 
 - **签名**：`fn s3bDrainGc(rt: *core.JSRuntime) void`。
 - **作用**：把增量标记与 morgue 排空，最多 100k poll。
 - **实现**：`pollGC(..., .safepoint)`。
 - **所有权 / 错误 / 调用**：强制 major 之后。assert 防死循环。
 
-### `s3bExpectDefTreeMarked` (`src/compiler/tests.zig:3487`)
+### `s3bExpectDefTreeMarked` (`src/compiler/tests.zig:3403`)
 
 - **签名**：`fn s3bExpectDefTreeMarked( rt: *core.JSRuntime, fd: *const bytecode_mod.function_def.FunctionDef, counted: *usize, ) !void`。
 - **作用**：刚跑完的 major 必须标上 def 树里每个 GC 型 cpool 槽。undefined 占位（嵌套函数保留槽，要等 `installChildFunctionBytecodes`）无 header 则跳过。未注册的 parse-time BigInt 不在 tracer 上，也跳过。
 - **实现**：`cycleMarkHeader` + `headerMarked`；递归 child_list。`counted` 让调用方证明走过真实槽。
 - **所有权 / 错误 / 调用**：TGC S3-b。BigInt.register 只在 FB 发布时跑。
 
-### `s3bMajorBeforeFinalize` (`src/compiler/tests.zig:3507`)
+### `s3bMajorBeforeFinalize` (`src/compiler/tests.zig:3423`)
 
 - **签名**：`fn s3bMajorBeforeFinalize(h: *V2Exec) anyerror!void`。
 - **作用**：compileAndRun 钩子：parse 完、未发布。字符串字面量体与模板数组只活在 Zig 堆 `FunctionDef.cpool`，保守栈扫与 tracer 边都到不了，只有 `State.traceCompileValueRoots` 能保住。
 - **实现**：forceMajorGC、drain、`s3bExpectDefTreeMarked` 至少 2（RegExp 模式串+编译字节码串），且 child_list≥2。
 - **所有权 / 错误 / 调用**：`TGC S3-b: a major between parse and finalize keeps cpool constants alive`。
 
-### `s3bExpectTemplateArraysMarked` (`src/compiler/tests.zig:3559`)
+### `s3bExpectTemplateArraysMarked` (`src/compiler/tests.zig:3475`)
 
 - **签名**：`fn s3bExpectTemplateArraysMarked(h: *V2Exec) anyerror!void`。
 - **作用**：钩子：强制 major 后 def 树至少 1 个标上的 GC 槽，且某 cpool（根或 child）有 OBJECT（frozen cooked 数组；raw 挂在其 `raw` 属性上）。窗口在此结束：之后 hook 返回，`compileAndRunWithHook` 把 FB 放进 native 局部，`.declared_only` 看不见。ZJS_GC_STRESS 会在缝里回收 FB，所以恢复默认保守根扫描。
 - **实现**：`restoreDefaultRootScanForTest`。
 - **所有权 / 错误 / 调用**：tagged-template 测试在 hook 前 `forcePreciseRootScanForTest`。
 
-### `expectCoverageSkipSetMatches` (`src/compiler/tests.zig:3795`)
-
-- **签名**：`fn expectCoverageSkipSetMatches( cases: []const CoverageCase, skipped: []const bool, verbose: bool, ) !void`。
-- **作用**：覆盖语料的跳过集合必须与 allowlist **按身份双向**一致：未列出却编不过是失败；列出却编过了是过期 allowlist，也失败。`expect_skip` 不是容忍度，没有比例形式。
-- **实现**：并行 `cases`/`skipped`。verbose 打印源与 skip_reason。
-- **所有权 / 错误 / 调用**：coverage 语料测试。`CoverageCase.skip_reason` 在 listed-but-compiled 时打印。
-
 ---
 
 ## 覆盖核对
 
-- 清单函数数: 34（`src/compiler/test_entry.zig` 5 + `src/compiler/tests.zig` 29）
-- 本文标题覆盖: 34
+- 清单函数数: 32（`src/compiler/test_entry.zig` 5 + `src/compiler/tests.zig` 27）
+- 本文标题覆盖: 32
 - 未覆盖: 无

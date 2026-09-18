@@ -6,8 +6,8 @@ All verification/gating obligations are defined by
 [docs/verification-policy.md](docs/verification-policy.md) — the single
 authority (owner ruling 2026-08-29). Per-change work: `zig build check` for
 iteration, targeted tests, one final `zig build test`. Expensive gates
-(test262 / gate_smoke / arena audit) run once per merge batch, not per
-change. rc-neutrality checks are abolished (the rc collector is retired).
+(test262) run once per merge batch, not per change. rc-neutrality checks
+are abolished (the rc collector is retired).
 
 ## No shortcuts / No cheating
 
@@ -76,9 +76,6 @@ scope.
 
 ## Agent skills
 
-Binary/source ablation and iteration-loop work:
-[zjs-ablation](.agents/skills/zjs-ablation/SKILL.md).
-
 Issues and PRDs live under `.scratch/<feature>/`; conventions and triage
 labels: `docs/agents/project-experience.md` §11.
 Cross-session project lessons, domain-context routing, and evidence rules:
@@ -94,15 +91,15 @@ See `docs/architecture.md`. Short map:
 - `src/compiler/`: the compiler.
 - `src/bytecode.zig`: bytecode carrier and packing.
 - `src/exec/`: VM, builtins, calls, modules, promises.
-- `src/runtime/`: host event loop.
+- `src/event_loop.zig`: host event loop (`zjs.runtime`).
 - `src/binding/`: public adapters and FFI descriptors.
 - `src/libs/`, `src/cli/`, `src/tests/`.
 
 ## Commands
 
 `build.zig` pins the Zig 0.16 build/test seed to `0`; CLI `--seed` is not
-required. The command ladder, focused targets (`test-core`, `test-exec`, …),
-and test262 slices are in `GUIDE.md` Part B.6.
+required. The command ladder, `test-fast`, and test262 slices are in
+`GUIDE.md` Part B.6.
 
 CLI contract: `zjs -e "<script>"` and `zjs <file.js>`. Missing or invalid
 arguments print usage and exit non-zero.

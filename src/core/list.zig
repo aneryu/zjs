@@ -54,3 +54,25 @@ pub const List = struct {
 };
 
 const std = @import("std");
+
+test "intrusive list supports empty insert and remove" {
+    var list = List{};
+    list.init();
+    try std.testing.expect(list.isEmpty());
+
+    var a = Node{};
+    var b = Node{};
+    list.add(&a);
+    list.addTail(&b);
+    try std.testing.expect(!list.isEmpty());
+    try std.testing.expect(a.isLinked());
+    try std.testing.expect(b.isLinked());
+
+    List.remove(&a);
+    try std.testing.expect(!a.isLinked());
+    try std.testing.expect(!list.isEmpty());
+
+    List.remove(&b);
+    try std.testing.expect(!b.isLinked());
+    try std.testing.expect(list.isEmpty());
+}

@@ -1419,14 +1419,12 @@ src/compiler/tests.zig	323	priv		expectRelocIntegrity
 src/compiler/tests.zig	372	priv		expectSourceOrder
 src/compiler/tests.zig	381	priv		expectSourceOffsets
 src/compiler/tests.zig	501	priv		oomScript
-src/compiler/tests.zig	2992	priv		expectV2ExecutionCompletion
-src/compiler/tests.zig	3000	priv		countInstalledOpcode
-src/compiler/tests.zig	3020	priv		compileRunAndCount
-src/compiler/tests.zig	3474	priv		s3bDrainGc
-src/compiler/tests.zig	3487	priv		s3bExpectDefTreeMarked
-src/compiler/tests.zig	3507	priv		s3bMajorBeforeFinalize
-src/compiler/tests.zig	3559	priv		s3bExpectTemplateArraysMarked
-src/compiler/tests.zig	3795	priv		expectCoverageSkipSetMatches
+src/compiler/tests.zig	2992	priv		countInstalledOpcode
+src/compiler/tests.zig	3012	priv		compileRunAndCount
+src/compiler/tests.zig	3390	priv		s3bDrainGc
+src/compiler/tests.zig	3403	priv		s3bExpectDefTreeMarked
+src/compiler/tests.zig	3423	priv		s3bMajorBeforeFinalize
+src/compiler/tests.zig	3475	priv		s3bExpectTemplateArraysMarked
 src/config_signature.zig	162	pub		actualEffectiveConfig
 src/config_signature.zig	181	pub		assertExpectedConfig
 src/config_signature.zig	200	pub		attest
@@ -1577,6 +1575,9 @@ src/core/bigint.zig	319	pub	inline	mulResultCannotCompactToShort
 src/core/bigint.zig	334	pub		createMulInline
 src/core/bigint.zig	398	pub		destroyFromHeader
 src/core/bigint.zig	405	pub		destroyWithAccount
+src/core/bigint.zig	419	priv		lockstepLimb
+src/core/bigint.zig	440	priv		expectLockstepMul
+src/core/bigint.zig	488	priv		makeLockstepOperand
 src/core/bulk_memory.zig	8	pub	noinline	fillByte
 src/core/bytes_view.zig	13	pub		JSBytes
 src/core/bytes_view.zig	30	pub		fromMutable
@@ -4038,228 +4039,228 @@ src/core/runtime.zig	2958	pub		persistentRootCountForTest
 src/core/runtime.zig	2963	pub		symbolValue
 src/core/runtime.zig	2967	pub		takeSymbolValue
 src/core/runtime.zig	2971	pub		newSymbolValue
-src/core/runtime.zig	2979	pub		globalSymbolValue
-src/core/runtime.zig	2984	pub		createValueHandle
-src/core/runtime.zig	2988	pub		takeValueHandle
-src/core/runtime.zig	2992	pub		createPersistentValue
-src/core/runtime.zig	2996	pub		createWeakPersistentValue
-src/core/runtime.zig	3007	pub		allocNativeEntry
-src/core/runtime.zig	3015	pub		registerNativeEntryFinalizer
-src/core/runtime.zig	3021	pub		retireNativeEntry
-src/core/runtime.zig	3032	pub		internalBuiltinRecord
-src/core/runtime.zig	3037	pub		clearExternalHostFunctions
-src/core/runtime.zig	3055	pub		runObjectCycleRemoval
-src/core/runtime.zig	3060	pub		runObjectCycleRemovalWithValueRoots
-src/core/runtime.zig	3070	pub		tryRunObjectCycleRemoval
-src/core/runtime.zig	3074	pub		tryRunObjectCycleRemovalWithValueRoots
-src/core/runtime.zig	3155	pub		pollGC
-src/core/runtime.zig	3422	priv		incrementalMarkPoll
-src/core/runtime.zig	3543	priv		resetGCThresholdExcludingDoomed
-src/core/runtime.zig	3555	priv		destroySlicePoll
-src/core/runtime.zig	3580	priv		finishDoomedCompletion
-src/core/runtime.zig	3598	pub		pollGCChecked
-src/core/runtime.zig	3607	pub		gcSafepoint
-src/core/runtime.zig	3611	pub		afterCallbackBoundaryGC
-src/core/runtime.zig	3618	pub		beforeEventLoopIdleGC
-src/core/runtime.zig	3625	pub		forceGC
-src/core/runtime.zig	3631	pub		forceMajorGC
-src/core/runtime.zig	3635	pub		requestGCForTest
-src/core/runtime.zig	3654	priv		pollScansConservatively
-src/core/runtime.zig	3665	pub		forcePreciseRootScanForTest
-src/core/runtime.zig	3675	pub		restoreDefaultRootScanForTest
-src/core/runtime.zig	3680	pub		gcPendingForTest
-src/core/runtime.zig	3685	pub		gcLastRequestReasonForTest
-src/core/runtime.zig	3690	pub		setGCThreshold
-src/core/runtime.zig	3695	pub		gcThreshold
-src/core/runtime.zig	3699	pub		setMemoryLimit
-src/core/runtime.zig	3714	pub		suppressLimitCollectionForTest
-src/core/runtime.zig	3719	pub		memoryLimit
-src/core/runtime.zig	3723	pub		memoryUsage
-src/core/runtime.zig	3767	pub		reportExternalAlloc
-src/core/runtime.zig	3779	pub		reportExternalAllocUntracked
-src/core/runtime.zig	3783	pub		reportExternalFreeUntracked
-src/core/runtime.zig	3787	pub		externalMemoryBytes
-src/core/runtime.zig	3791	pub		allocationDebtBytes
-src/core/runtime.zig	3802	pub		gcPauseDistribution
-src/core/runtime.zig	3806	pub		gcStats
-src/core/runtime.zig	3821	pub		ownsObject
-src/core/runtime.zig	3839	priv	inline	requestGCForProcessMemoryPressure
-src/core/runtime.zig	3844	priv	noinline	requestGCForProcessMemoryPressureSlow
-src/core/runtime.zig	3852	priv		weakReferenceCount
-src/core/runtime.zig	3868	priv		currentRssBytes
-src/core/runtime.zig	3878	priv		cgroupLimitBytes
-src/core/runtime.zig	3890	priv		readLinuxFile
-src/core/runtime.zig	3900	priv		firstToken
-src/core/runtime.zig	3905	priv		parseUnsignedToken
-src/core/runtime.zig	3910	priv	inline	prospectiveAllocationTotal
-src/core/runtime.zig	3919	priv	inline	requestGCForAllocationTotal
-src/core/runtime.zig	3953	pub	inline	requestGCForAllocation
-src/core/runtime.zig	3962	pub		collectBeforeObjectAllocation
-src/core/runtime.zig	3982	priv	noinline	collectBeforeObjectAllocationAfterDeferredDrain
-src/core/runtime.zig	3990	priv	noinline	pollGCBeforeObjectAllocation
-src/core/runtime.zig	3994	priv	inline	collectBeforeObjectAllocationAfterFinalizerCheck
-src/core/runtime.zig	4039	priv		triggerGCOnAllocation
-src/core/runtime.zig	4051	priv		collectBeforeLimitRejection
-src/core/runtime.zig	4056	priv		resetGCThreshold
-src/core/runtime.zig	4116	pub	inline	singleByteString
-src/core/runtime.zig	4122	priv	noinline	createSingleByteString
-src/core/runtime.zig	4129	pub	inline	cachedSingleByteString
-src/core/runtime.zig	4133	pub		emptyString
-src/core/runtime.zig	4143	pub		recentTwoUnitString
-src/core/runtime.zig	4159	pub		recentAtomString
-src/core/runtime.zig	4181	pub		smallIntString
-src/core/runtime.zig	4192	pub		percentHexString
-src/core/runtime.zig	4204	pub		setStackSize
-src/core/runtime.zig	4209	pub		stackSize
-src/core/runtime.zig	4213	pub		setNativeStackSize
-src/core/runtime.zig	4224	pub		updateNativeStackTop
-src/core/runtime.zig	4246	pub	inline	checkNativeStackOverflow
-src/core/runtime.zig	4251	pub		internAtom
-src/core/runtime.zig	4255	pub		newClassId
-src/core/runtime.zig	4261	pub		setInterruptHandler
-src/core/runtime.zig	4266	pub		getDynamicImportLoader
-src/core/runtime.zig	4270	pub		installDynamicImportLoader
-src/core/runtime.zig	4284	pub		standardGlobalOwnPropertyCapacity
-src/core/runtime.zig	4297	pub		installStandardGlobals
-src/core/runtime.zig	4325	pub		hasInterruptHandler
-src/core/runtime.zig	4329	pub		runInterruptHandler
-src/core/runtime.zig	4334	pub		setCanBlock
-src/core/runtime.zig	4338	pub		canBlock
-src/core/runtime.zig	4342	pub		signalHostCompletion
-src/core/runtime.zig	4346	pub		resetHostCompletionSignal
-src/core/runtime.zig	4350	pub		waitForHostCompletion
-src/core/runtime.zig	4354	pub		waitForHostCompletionUntil
-src/core/runtime.zig	4361	pub		enqueueFinalizationJobForRealm
-src/core/runtime.zig	4368	pub		enqueueFinalizationJobReserved
-src/core/runtime.zig	4378	pub		clearPendingFinalizationJobs
-src/core/runtime.zig	4385	pub		pendingFinalizationJobCountForTest
-src/core/runtime.zig	4390	pub		enqueueDeferredNativeCleanup
-src/core/runtime.zig	4400	pub		enqueueDeferredClassPayloadFinalizer
-src/core/runtime.zig	4418	pub		reserveDeferredClassPayloadFinalizerSlot
-src/core/runtime.zig	4430	pub		releaseDeferredClassPayloadFinalizerSlot
-src/core/runtime.zig	4440	pub		registerReservedDeferredClassPayloadRoot
-src/core/runtime.zig	4451	pub		unregisterDeferredClassPayloadRoot
-src/core/runtime.zig	4466	pub		enqueueReservedDeferredClassPayloadFinalizer
-src/core/runtime.zig	4489	pub		hasDeferredNativeCleanups
-src/core/runtime.zig	4493	pub		hasPendingDeferredClassPayloadFinalizers
-src/core/runtime.zig	4498	pub		isActiveDeferredClassPayloadFinalizerCallback
-src/core/runtime.zig	4503	pub		runDeferredNativeCleanupBudgeted
-src/core/runtime.zig	4525	pub		runDeferredClassPayloadFinalizerBudgeted
-src/core/runtime.zig	4547	pub		drainDeferredNativeCleanups
-src/core/runtime.zig	4552	pub		drainDeferredClassPayloadFinalizers
-src/core/runtime.zig	4562	priv	inline	drainDeferredClassPayloadFinalizersAtSafeBoundary
-src/core/runtime.zig	4569	priv		runDeferredClassPayloadFinalizerJob
-src/core/runtime.zig	4576	pub		pendingDeferredNativeCleanupCountForTest
-src/core/runtime.zig	4581	pub		pendingDeferredClassPayloadFinalizerCountForTest
-src/core/runtime.zig	4586	priv		ensureDeferredNativeCleanupCapacity
-src/core/runtime.zig	4602	priv		releaseEmptyDeferredNativeCleanupBuffer
-src/core/runtime.zig	4614	priv		ensureDeferredClassPayloadFinalizerCapacity
-src/core/runtime.zig	4630	priv		ensureDeferredClassPayloadRootCapacity
-src/core/runtime.zig	4644	priv		releaseEmptyDeferredClassPayloadFinalizerBuffer
-src/core/runtime.zig	4657	priv		releaseEmptyDeferredClassPayloadRootBuffer
-src/core/runtime.zig	4670	pub		beginBorrowedWeakCleanup
-src/core/runtime.zig	4680	pub		endBorrowedWeakCleanup
-src/core/runtime.zig	4689	pub		borrowedWeakCleanupActive
-src/core/runtime.zig	4693	pub		borrowedWeakCleanupIdentityCount
-src/core/runtime.zig	4697	pub		enqueueBorrowedWeakCleanupIdentity
-src/core/runtime.zig	4707	pub		borrowedWeakCleanupIdentityMatches
-src/core/runtime.zig	4720	pub	inline	borrowedWeakCleanupIdentityMatchesSlice
-src/core/runtime.zig	4733	pub		clearBorrowedWeakCleanupIdentities
-src/core/runtime.zig	4742	priv		ensureBorrowedWeakCleanupIdentityCapacity
-src/core/runtime.zig	4765	pub		settlePendingDestructionForGateStats
-src/core/runtime.zig	4782	priv		appendRuntimeObject
-src/core/runtime.zig	4799	priv		appendRuntimeRootSlot
-src/core/runtime.zig	4816	priv		appendRuntimeWeakRootSlot
-src/core/runtime.zig	4943	pub		newRealmRandomSeed
-src/core/shape.zig	31	pub		propertyCapacityForNeeded
-src/core/shape.zig	67	priv		famRegionBytes
-src/core/shape.zig	94	pub	inline	init
-src/core/shape.zig	98	pub	inline	previous
-src/core/shape.zig	104	pub	inline	setPrevious
-src/core/shape.zig	110	pub	inline	isHashed
-src/core/shape.zig	114	pub	inline	setHashed
-src/core/shape.zig	127	priv	inline	initialOwnership
-src/core/shape.zig	131	priv	inline	initialTraceListState
-src/core/shape.zig	135	priv	inline	initialColdState
-src/core/shape.zig	224	priv	inline	famBase
-src/core/shape.zig	229	priv	inline	bucketCount
-src/core/shape.zig	233	pub	inline	hashBuckets
-src/core/shape.zig	240	pub	inline	props
-src/core/shape.zig	252	pub	inline	famByteSize
-src/core/shape.zig	259	pub	inline	allocationSize
-src/core/shape.zig	267	pub	inline	accountedAllocationSize
-src/core/shape.zig	273	pub	inline	markShared
-src/core/shape.zig	277	pub	inline	isShared
-src/core/shape.zig	281	pub	inline	isHashed
-src/core/shape.zig	285	pub	inline	setHashed
-src/core/shape.zig	289	pub	inline	deletedPropCount
-src/core/shape.zig	293	priv	inline	incrementDeletedPropCount
-src/core/shape.zig	299	pub		hasPropertyHash
-src/core/shape.zig	303	pub		firstPropertyIndex
-src/core/shape.zig	308	pub	inline	firstPropertyIndexAssumeHash
-src/core/shape.zig	314	pub	inline	traceChildEdgesFallible
-src/core/shape.zig	317	priv	inline	callVisitObject
-src/core/shape.zig	341	pub	inline	traceChildEdgesNoFail
-src/core/shape.zig	371	pub	inline	adoptionBarrier
-src/core/shape.zig	380	priv	noinline	shadeAdoptedShape
-src/core/shape.zig	391	pub		visitObject
-src/core/shape.zig	396	pub		visitAtom
-src/core/shape.zig	409	pub		init
-src/core/shape.zig	413	pub		deinit
-src/core/shape.zig	425	pub		create
-src/core/shape.zig	431	pub		publish
-src/core/shape.zig	436	pub	inline	createObjectRoot
-src/core/shape.zig	442	pub	inline	createObjectRootReserved
-src/core/shape.zig	448	priv	noinline	createObjectRootMaybeReserved
-src/core/shape.zig	465	pub		createObjectRootWithPropertyCapacity
-src/core/shape.zig	482	pub		createObjectRootWithPropertyCapacityReserved
-src/core/shape.zig	501	pub		createInitialShape
-src/core/shape.zig	511	priv		createShape
-src/core/shape.zig	537	priv		createShapeReserved
-src/core/shape.zig	554	priv		createShapeWithPropertyCapacity
-src/core/shape.zig	580	priv		createShapeWithPropertyCapacityReserved
-src/core/shape.zig	613	pub	inline	tryCachedTransition
-src/core/shape.zig	630	pub		transitionPropertyUncached
-src/core/shape.zig	674	priv	inline	findHashedShapeProperty
-src/core/shape.zig	700	pub		cloneForMutation
-src/core/shape.zig	705	pub		prepareUpdate
-src/core/shape.zig	726	pub		replacePrototypeAssumePrepared
-src/core/shape.zig	764	priv		relocateShape
-src/core/shape.zig	838	pub	inline	addProperty
-src/core/shape.zig	846	pub		markPropertyDeleted
-src/core/shape.zig	886	pub		compactProperties
-src/core/shape.zig	999	pub		updatePropertyFlags
-src/core/shape.zig	1008	pub		restorePropertyLayout
-src/core/shape.zig	1078	pub		reserveProperties
-src/core/shape.zig	1093	priv		reservePropertyAppend
-src/core/shape.zig	1109	pub		reservePropertyHash
-src/core/shape.zig	1116	pub		hasReservedOwnPropertyCapacity
-src/core/shape.zig	1136	pub		dropUnshared
-src/core/shape.zig	1143	pub		destroyFromHeader
-src/core/shape.zig	1148	priv		destroyShape
-src/core/shape.zig	1163	priv		cloneShape
-src/core/shape.zig	1219	priv	inline	appendProperty
-src/core/shape.zig	1247	priv		rebuildPropertyHash
-src/core/shape.zig	1254	priv		linkPropertyHash
-src/core/shape.zig	1267	pub	inline	freshIdentity
-src/core/shape.zig	1273	priv	inline	link
-src/core/shape.zig	1303	priv		unlink
-src/core/shape.zig	1312	priv	noinline	ensureShapeHashCapacity
-src/core/shape.zig	1347	priv		firstShapeWithHash
-src/core/shape.zig	1352	priv		insertShapeHash
-src/core/shape.zig	1360	priv		removeShapeHash
-src/core/shape.zig	1368	priv		rehashShape
-src/core/shape.zig	1406	pub		delistCondemnedShape
-src/core/shape.zig	1433	pub		verifyHashIndex
-src/core/shape.zig	1448	priv		removeShapeHashEverywhere
-src/core/shape.zig	1463	priv		removeShapeHashFromBucket
-src/core/shape.zig	1479	priv		nextPowerOfTwo
-src/core/shape.zig	1492	priv		lockstepBucketCount
-src/core/shape.zig	1498	pub		initialHash
-src/core/shape.zig	1509	pub		transitionHash
-src/core/shape.zig	1513	pub		hashIndex
-src/core/shape.zig	1519	pub	inline	propertyBucketIndex
-src/core/shape.zig	1526	pub		shapeHash
+src/core/runtime.zig	2980	pub		globalSymbolValue
+src/core/runtime.zig	2985	pub		createValueHandle
+src/core/runtime.zig	2989	pub		takeValueHandle
+src/core/runtime.zig	2993	pub		createPersistentValue
+src/core/runtime.zig	2997	pub		createWeakPersistentValue
+src/core/runtime.zig	3008	pub		allocNativeEntry
+src/core/runtime.zig	3016	pub		registerNativeEntryFinalizer
+src/core/runtime.zig	3022	pub		retireNativeEntry
+src/core/runtime.zig	3033	pub		internalBuiltinRecord
+src/core/runtime.zig	3038	pub		clearExternalHostFunctions
+src/core/runtime.zig	3056	pub		runObjectCycleRemoval
+src/core/runtime.zig	3061	pub		runObjectCycleRemovalWithValueRoots
+src/core/runtime.zig	3071	pub		tryRunObjectCycleRemoval
+src/core/runtime.zig	3075	pub		tryRunObjectCycleRemovalWithValueRoots
+src/core/runtime.zig	3156	pub		pollGC
+src/core/runtime.zig	3423	priv		incrementalMarkPoll
+src/core/runtime.zig	3544	priv		resetGCThresholdExcludingDoomed
+src/core/runtime.zig	3556	priv		destroySlicePoll
+src/core/runtime.zig	3581	priv		finishDoomedCompletion
+src/core/runtime.zig	3599	pub		pollGCChecked
+src/core/runtime.zig	3608	pub		gcSafepoint
+src/core/runtime.zig	3612	pub		afterCallbackBoundaryGC
+src/core/runtime.zig	3619	pub		beforeEventLoopIdleGC
+src/core/runtime.zig	3626	pub		forceGC
+src/core/runtime.zig	3632	pub		forceMajorGC
+src/core/runtime.zig	3636	pub		requestGCForTest
+src/core/runtime.zig	3655	priv		pollScansConservatively
+src/core/runtime.zig	3666	pub		forcePreciseRootScanForTest
+src/core/runtime.zig	3676	pub		restoreDefaultRootScanForTest
+src/core/runtime.zig	3681	pub		gcPendingForTest
+src/core/runtime.zig	3686	pub		gcLastRequestReasonForTest
+src/core/runtime.zig	3691	pub		setGCThreshold
+src/core/runtime.zig	3696	pub		gcThreshold
+src/core/runtime.zig	3700	pub		setMemoryLimit
+src/core/runtime.zig	3715	pub		suppressLimitCollectionForTest
+src/core/runtime.zig	3720	pub		memoryLimit
+src/core/runtime.zig	3724	pub		memoryUsage
+src/core/runtime.zig	3768	pub		reportExternalAlloc
+src/core/runtime.zig	3780	pub		reportExternalAllocUntracked
+src/core/runtime.zig	3784	pub		reportExternalFreeUntracked
+src/core/runtime.zig	3788	pub		externalMemoryBytes
+src/core/runtime.zig	3792	pub		allocationDebtBytes
+src/core/runtime.zig	3803	pub		gcPauseDistribution
+src/core/runtime.zig	3807	pub		gcStats
+src/core/runtime.zig	3822	pub		ownsObject
+src/core/runtime.zig	3840	priv	inline	requestGCForProcessMemoryPressure
+src/core/runtime.zig	3845	priv	noinline	requestGCForProcessMemoryPressureSlow
+src/core/runtime.zig	3853	priv		weakReferenceCount
+src/core/runtime.zig	3869	priv		currentRssBytes
+src/core/runtime.zig	3879	priv		cgroupLimitBytes
+src/core/runtime.zig	3891	priv		readLinuxFile
+src/core/runtime.zig	3901	priv		firstToken
+src/core/runtime.zig	3906	priv		parseUnsignedToken
+src/core/runtime.zig	3911	priv	inline	prospectiveAllocationTotal
+src/core/runtime.zig	3920	priv	inline	requestGCForAllocationTotal
+src/core/runtime.zig	3954	pub	inline	requestGCForAllocation
+src/core/runtime.zig	3963	pub		collectBeforeObjectAllocation
+src/core/runtime.zig	3983	priv	noinline	collectBeforeObjectAllocationAfterDeferredDrain
+src/core/runtime.zig	3991	priv	noinline	pollGCBeforeObjectAllocation
+src/core/runtime.zig	3995	priv	inline	collectBeforeObjectAllocationAfterFinalizerCheck
+src/core/runtime.zig	4040	priv		triggerGCOnAllocation
+src/core/runtime.zig	4052	priv		collectBeforeLimitRejection
+src/core/runtime.zig	4057	priv		resetGCThreshold
+src/core/runtime.zig	4117	pub	inline	singleByteString
+src/core/runtime.zig	4123	priv	noinline	createSingleByteString
+src/core/runtime.zig	4130	pub	inline	cachedSingleByteString
+src/core/runtime.zig	4134	pub		emptyString
+src/core/runtime.zig	4144	pub		recentTwoUnitString
+src/core/runtime.zig	4160	pub		recentAtomString
+src/core/runtime.zig	4182	pub		smallIntString
+src/core/runtime.zig	4193	pub		percentHexString
+src/core/runtime.zig	4205	pub		setStackSize
+src/core/runtime.zig	4210	pub		stackSize
+src/core/runtime.zig	4214	pub		setNativeStackSize
+src/core/runtime.zig	4225	pub		updateNativeStackTop
+src/core/runtime.zig	4247	pub	inline	checkNativeStackOverflow
+src/core/runtime.zig	4252	pub		internAtom
+src/core/runtime.zig	4256	pub		newClassId
+src/core/runtime.zig	4262	pub		setInterruptHandler
+src/core/runtime.zig	4267	pub		getDynamicImportLoader
+src/core/runtime.zig	4271	pub		installDynamicImportLoader
+src/core/runtime.zig	4285	pub		standardGlobalOwnPropertyCapacity
+src/core/runtime.zig	4298	pub		installStandardGlobals
+src/core/runtime.zig	4326	pub		hasInterruptHandler
+src/core/runtime.zig	4330	pub		runInterruptHandler
+src/core/runtime.zig	4335	pub		setCanBlock
+src/core/runtime.zig	4339	pub		canBlock
+src/core/runtime.zig	4343	pub		signalHostCompletion
+src/core/runtime.zig	4347	pub		resetHostCompletionSignal
+src/core/runtime.zig	4351	pub		waitForHostCompletion
+src/core/runtime.zig	4355	pub		waitForHostCompletionUntil
+src/core/runtime.zig	4362	pub		enqueueFinalizationJobForRealm
+src/core/runtime.zig	4369	pub		enqueueFinalizationJobReserved
+src/core/runtime.zig	4379	pub		clearPendingFinalizationJobs
+src/core/runtime.zig	4386	pub		pendingFinalizationJobCountForTest
+src/core/runtime.zig	4391	pub		enqueueDeferredNativeCleanup
+src/core/runtime.zig	4401	pub		enqueueDeferredClassPayloadFinalizer
+src/core/runtime.zig	4419	pub		reserveDeferredClassPayloadFinalizerSlot
+src/core/runtime.zig	4431	pub		releaseDeferredClassPayloadFinalizerSlot
+src/core/runtime.zig	4441	pub		registerReservedDeferredClassPayloadRoot
+src/core/runtime.zig	4452	pub		unregisterDeferredClassPayloadRoot
+src/core/runtime.zig	4467	pub		enqueueReservedDeferredClassPayloadFinalizer
+src/core/runtime.zig	4490	pub		hasDeferredNativeCleanups
+src/core/runtime.zig	4494	pub		hasPendingDeferredClassPayloadFinalizers
+src/core/runtime.zig	4499	pub		isActiveDeferredClassPayloadFinalizerCallback
+src/core/runtime.zig	4504	pub		runDeferredNativeCleanupBudgeted
+src/core/runtime.zig	4526	pub		runDeferredClassPayloadFinalizerBudgeted
+src/core/runtime.zig	4548	pub		drainDeferredNativeCleanups
+src/core/runtime.zig	4553	pub		drainDeferredClassPayloadFinalizers
+src/core/runtime.zig	4563	priv	inline	drainDeferredClassPayloadFinalizersAtSafeBoundary
+src/core/runtime.zig	4570	priv		runDeferredClassPayloadFinalizerJob
+src/core/runtime.zig	4577	pub		pendingDeferredNativeCleanupCountForTest
+src/core/runtime.zig	4582	pub		pendingDeferredClassPayloadFinalizerCountForTest
+src/core/runtime.zig	4587	priv		ensureDeferredNativeCleanupCapacity
+src/core/runtime.zig	4603	priv		releaseEmptyDeferredNativeCleanupBuffer
+src/core/runtime.zig	4615	priv		ensureDeferredClassPayloadFinalizerCapacity
+src/core/runtime.zig	4631	priv		ensureDeferredClassPayloadRootCapacity
+src/core/runtime.zig	4645	priv		releaseEmptyDeferredClassPayloadFinalizerBuffer
+src/core/runtime.zig	4658	priv		releaseEmptyDeferredClassPayloadRootBuffer
+src/core/runtime.zig	4671	pub		beginBorrowedWeakCleanup
+src/core/runtime.zig	4681	pub		endBorrowedWeakCleanup
+src/core/runtime.zig	4690	pub		borrowedWeakCleanupActive
+src/core/runtime.zig	4694	pub		borrowedWeakCleanupIdentityCount
+src/core/runtime.zig	4698	pub		enqueueBorrowedWeakCleanupIdentity
+src/core/runtime.zig	4708	pub		borrowedWeakCleanupIdentityMatches
+src/core/runtime.zig	4721	pub	inline	borrowedWeakCleanupIdentityMatchesSlice
+src/core/runtime.zig	4734	pub		clearBorrowedWeakCleanupIdentities
+src/core/runtime.zig	4743	priv		ensureBorrowedWeakCleanupIdentityCapacity
+src/core/runtime.zig	4766	pub		settlePendingDestructionForGateStats
+src/core/runtime.zig	4783	priv		appendRuntimeObject
+src/core/runtime.zig	4800	priv		appendRuntimeRootSlot
+src/core/runtime.zig	4817	priv		appendRuntimeWeakRootSlot
+src/core/runtime.zig	5135	pub		newRealmRandomSeed
+src/core/shape.zig	34	pub		propertyCapacityForNeeded
+src/core/shape.zig	70	priv		famRegionBytes
+src/core/shape.zig	97	pub	inline	init
+src/core/shape.zig	101	pub	inline	previous
+src/core/shape.zig	107	pub	inline	setPrevious
+src/core/shape.zig	113	pub	inline	isHashed
+src/core/shape.zig	117	pub	inline	setHashed
+src/core/shape.zig	130	priv	inline	initialOwnership
+src/core/shape.zig	134	priv	inline	initialTraceListState
+src/core/shape.zig	138	priv	inline	initialColdState
+src/core/shape.zig	227	priv	inline	famBase
+src/core/shape.zig	232	priv	inline	bucketCount
+src/core/shape.zig	236	pub	inline	hashBuckets
+src/core/shape.zig	243	pub	inline	props
+src/core/shape.zig	255	pub	inline	famByteSize
+src/core/shape.zig	262	pub	inline	allocationSize
+src/core/shape.zig	270	pub	inline	accountedAllocationSize
+src/core/shape.zig	276	pub	inline	markShared
+src/core/shape.zig	280	pub	inline	isShared
+src/core/shape.zig	284	pub	inline	isHashed
+src/core/shape.zig	288	pub	inline	setHashed
+src/core/shape.zig	292	pub	inline	deletedPropCount
+src/core/shape.zig	296	priv	inline	incrementDeletedPropCount
+src/core/shape.zig	302	pub		hasPropertyHash
+src/core/shape.zig	306	pub		firstPropertyIndex
+src/core/shape.zig	311	pub	inline	firstPropertyIndexAssumeHash
+src/core/shape.zig	317	pub	inline	traceChildEdgesFallible
+src/core/shape.zig	320	priv	inline	callVisitObject
+src/core/shape.zig	344	pub	inline	traceChildEdgesNoFail
+src/core/shape.zig	374	pub	inline	adoptionBarrier
+src/core/shape.zig	383	priv	noinline	shadeAdoptedShape
+src/core/shape.zig	394	pub		visitObject
+src/core/shape.zig	399	pub		visitAtom
+src/core/shape.zig	412	pub		init
+src/core/shape.zig	416	pub		deinit
+src/core/shape.zig	428	pub		create
+src/core/shape.zig	434	pub		publish
+src/core/shape.zig	439	pub	inline	createObjectRoot
+src/core/shape.zig	445	pub	inline	createObjectRootReserved
+src/core/shape.zig	451	priv	noinline	createObjectRootMaybeReserved
+src/core/shape.zig	468	pub		createObjectRootWithPropertyCapacity
+src/core/shape.zig	485	pub		createObjectRootWithPropertyCapacityReserved
+src/core/shape.zig	504	pub		createInitialShape
+src/core/shape.zig	514	priv		createShape
+src/core/shape.zig	540	priv		createShapeReserved
+src/core/shape.zig	557	priv		createShapeWithPropertyCapacity
+src/core/shape.zig	583	priv		createShapeWithPropertyCapacityReserved
+src/core/shape.zig	616	pub	inline	tryCachedTransition
+src/core/shape.zig	633	pub		transitionPropertyUncached
+src/core/shape.zig	677	priv	inline	findHashedShapeProperty
+src/core/shape.zig	703	pub		cloneForMutation
+src/core/shape.zig	708	pub		prepareUpdate
+src/core/shape.zig	729	pub		replacePrototypeAssumePrepared
+src/core/shape.zig	767	priv		relocateShape
+src/core/shape.zig	841	pub	inline	addProperty
+src/core/shape.zig	849	pub		markPropertyDeleted
+src/core/shape.zig	889	pub		compactProperties
+src/core/shape.zig	1002	pub		updatePropertyFlags
+src/core/shape.zig	1011	pub		restorePropertyLayout
+src/core/shape.zig	1081	pub		reserveProperties
+src/core/shape.zig	1096	priv		reservePropertyAppend
+src/core/shape.zig	1112	pub		reservePropertyHash
+src/core/shape.zig	1119	pub		hasReservedOwnPropertyCapacity
+src/core/shape.zig	1139	pub		dropUnshared
+src/core/shape.zig	1146	pub		destroyFromHeader
+src/core/shape.zig	1151	priv		destroyShape
+src/core/shape.zig	1166	priv		cloneShape
+src/core/shape.zig	1222	priv	inline	appendProperty
+src/core/shape.zig	1250	priv		rebuildPropertyHash
+src/core/shape.zig	1257	priv		linkPropertyHash
+src/core/shape.zig	1270	pub	inline	freshIdentity
+src/core/shape.zig	1276	priv	inline	link
+src/core/shape.zig	1306	priv		unlink
+src/core/shape.zig	1315	priv	noinline	ensureShapeHashCapacity
+src/core/shape.zig	1350	priv		firstShapeWithHash
+src/core/shape.zig	1355	priv		insertShapeHash
+src/core/shape.zig	1363	priv		removeShapeHash
+src/core/shape.zig	1371	priv		rehashShape
+src/core/shape.zig	1409	pub		delistCondemnedShape
+src/core/shape.zig	1436	pub		verifyHashIndex
+src/core/shape.zig	1451	priv		removeShapeHashEverywhere
+src/core/shape.zig	1466	priv		removeShapeHashFromBucket
+src/core/shape.zig	1482	priv		nextPowerOfTwo
+src/core/shape.zig	1495	priv		lockstepBucketCount
+src/core/shape.zig	1501	pub		initialHash
+src/core/shape.zig	1512	pub		transitionHash
+src/core/shape.zig	1516	pub		hashIndex
+src/core/shape.zig	1522	pub	inline	propertyBucketIndex
+src/core/shape.zig	1529	pub		shapeHash
 src/core/sort_erased.zig	16	pub	inline	heap
 src/core/sort_erased.zig	26	priv		lessThan
 src/core/sort_erased.zig	31	priv		swap
@@ -4625,6 +4626,63 @@ src/core/var_ref.zig	170	pub		varRefIsConstSlot
 src/core/var_ref.zig	174	pub		varRefIsFunctionNameSlot
 src/core/var_ref.zig	178	pub		varRefIsDeletableSlot
 src/dossier_pad.zig	35	priv		body
+src/event_loop.zig	50	pub		hasPendingError
+src/event_loop.zig	69	pub	inline	init
+src/event_loop.zig	73	pub	inline	initCore
+src/event_loop.zig	81	pub		install
+src/event_loop.zig	89	pub		deinit
+src/event_loop.zig	117	pub		runUntilIdle
+src/event_loop.zig	125	pub		result
+src/event_loop.zig	132	pub		setExitCode
+src/event_loop.zig	136	pub		exitCode
+src/event_loop.zig	140	priv		traceRoots
+src/event_loop.zig	152	priv		takeNextTimerId
+src/event_loop.zig	159	priv		ensureTimerCapacity
+src/event_loop.zig	176	pub		enqueueTimer
+src/event_loop.zig	184	priv		clearTimer
+src/event_loop.zig	194	priv		removeTimerAt
+src/event_loop.zig	209	priv		runNextTimer
+src/event_loop.zig	264	priv		timerExists
+src/event_loop.zig	271	priv		ensureRwHandlerCapacity
+src/event_loop.zig	288	priv		setRwHandler
+src/event_loop.zig	304	priv		clearRwHandler
+src/event_loop.zig	316	priv		removeRwHandlerAt
+src/event_loop.zig	331	priv		runNextRwHandler
+src/event_loop.zig	341	priv		runNextRwHandlerWindows
+src/event_loop.zig	376	priv		runNextRwHandlerPosix
+src/event_loop.zig	437	priv		ensureSignalHandlerCapacity
+src/event_loop.zig	454	priv		setSignalHandler
+src/event_loop.zig	469	priv		clearSignalHandler
+src/event_loop.zig	482	priv		removeSignalHandlerAt
+src/event_loop.zig	497	priv		runNextSignalHandler
+src/event_loop.zig	512	pub		runUntilIdle
+src/event_loop.zig	526	priv		init
+src/event_loop.zig	536	priv		traceRoots
+src/event_loop.zig	546	priv		setCallback
+src/event_loop.zig	551	priv		clearCallback
+src/event_loop.zig	556	priv		traceRoots
+src/event_loop.zig	566	priv		init
+src/event_loop.zig	573	priv		setCallback
+src/event_loop.zig	577	priv		traceRoots
+src/event_loop.zig	598	priv		fromOpaque
+src/event_loop.zig	602	priv		traceRoots
+src/event_loop.zig	606	priv		setExitCode
+src/event_loop.zig	610	priv		exitCode
+src/event_loop.zig	614	priv		nextTimerId
+src/event_loop.zig	618	priv		enqueueTimer
+src/event_loop.zig	624	priv		clearTimer
+src/event_loop.zig	630	priv		runNextTimer
+src/event_loop.zig	636	priv		setRwHandler
+src/event_loop.zig	642	priv		clearRwHandler
+src/event_loop.zig	648	priv		runNextRwHandler
+src/event_loop.zig	654	priv		setSignalHandler
+src/event_loop.zig	660	priv		clearSignalHandler
+src/event_loop.zig	666	priv		runNextSignalHandler
+src/event_loop.zig	674	priv		osSignalHandler
+src/event_loop.zig	679	priv		nowMs
+src/event_loop.zig	684	priv		hostTimerIo
+src/event_loop.zig	899	priv		visitValue
+src/event_loop.zig	906	priv		visitObject
 src/exec/active_invocation_trace.zig	26	pub		traceRoots
 src/exec/active_invocation_trace.zig	34	priv		traceMachine
 src/exec/active_invocation_trace.zig	64	priv		traceFrame
@@ -8419,19 +8477,6 @@ src/exec/zjs_vm.zig	724	pub	inline	runActiveInvocationUntilNativeBoundary
 src/exec/zjs_vm.zig	740	pub	inline	runPushedEntryUntilNativeBoundary
 src/exec/zjs_vm.zig	763	priv	noinline	runActiveInvocationAfterNativeBoundaryError
 src/exec/zjs_vm.zig	792	priv		reserveEntryFrameCapacity
-src/gc_representation.zig	12	priv		kindContract
-src/gc_representation.zig	24	priv		objectLayout
-src/gc_representation.zig	31	priv		functionBytecodeLayout
-src/gc_representation.zig	38	priv		varRefLayout
-src/gc_representation.zig	45	priv		realmLayout
-src/gc_representation.zig	52	priv		moduleLayout
-src/gc_representation.zig	59	priv		shapeLayout
-src/gc_representation.zig	66	priv		stringLayouts
-src/gc_representation.zig	87	priv		bigIntLayout
-src/gc_representation.zig	94	priv		metadataLayout
-src/gc_representation.zig	108	priv		activeHeaderLayout
-src/gc_representation.zig	115	priv		lifetimeSemantics
-src/gc_representation.zig	178	pub		matchesBaseline
 src/internal_root.zig	65	pub		printSmallInlineProbe
 src/lexer.zig	2	pub		namespace
 src/lexer.zig	73	pub		init
@@ -8667,63 +8712,84 @@ src/libs/bigint.zig	1105	priv		compareAbs
 src/libs/bigint.zig	1109	priv		compareAbsParts
 src/libs/bigint.zig	1124	priv		normalize
 src/libs/bigint.zig	1141	priv		invertOrder
-src/libs/number_format.zig	77	priv		Mpb
-src/libs/number_format.zig	84	priv		tabSlice
-src/libs/number_format.zig	89	priv		tabConstSlice
-src/libs/number_format.zig	181	priv		minInt
-src/libs/number_format.zig	185	priv		maxInt
-src/libs/number_format.zig	189	priv	inline	clz32
-src/libs/number_format.zig	193	priv	inline	clz64
-src/libs/number_format.zig	197	priv	inline	ctz32
-src/libs/number_format.zig	201	priv	inline	float64AsUint64
-src/libs/number_format.zig	205	priv	inline	uint64AsFloat64
-src/libs/number_format.zig	213	priv		dtoaMalloc
-src/libs/number_format.zig	224	priv		mpAddUi
-src/libs/number_format.zig	235	priv		mpMul1
-src/libs/number_format.zig	245	priv		udiv1normInit
-src/libs/number_format.zig	252	priv		udiv1norm
-src/libs/number_format.zig	266	priv		mpDiv1
-src/libs/number_format.zig	278	priv		mpShr
-src/libs/number_format.zig	290	priv		mpShl
-src/libs/number_format.zig	299	priv		mpDiv1normInternal
-src/libs/number_format.zig	317	priv		mpbRenorm
-src/libs/number_format.zig	323	priv		mpbGetBit
-src/libs/number_format.zig	333	priv		mpbShrRound
-src/libs/number_format.zig	428	priv		mpbCmp
-src/libs/number_format.zig	442	priv		mpbSetU64
-src/libs/number_format.zig	452	priv		mpbGetU64
-src/libs/number_format.zig	459	priv		mpbFloorLog2
-src/libs/number_format.zig	465	priv		mpbMul1Base
-src/libs/number_format.zig	488	priv		mulLog2Radix
-src/libs/number_format.zig	503	priv		powUi
-src/libs/number_format.zig	530	priv		powUiInv
-src/libs/number_format.zig	553	priv		u32toaLen
-src/libs/number_format.zig	563	priv		u64toaBinLen
-src/libs/number_format.zig	579	priv		limbToA
-src/libs/number_format.zig	601	priv		u32toaImpl
-src/libs/number_format.zig	616	priv		i32toaImpl
-src/libs/number_format.zig	624	priv		u64toaImpl
-src/libs/number_format.zig	662	priv		i64toaImpl
-src/libs/number_format.zig	670	priv		u64toaRadixImpl
-src/libs/number_format.zig	708	priv		outputDigits
-src/libs/number_format.zig	760	priv		mulPow
-src/libs/number_format.zig	821	priv		mulPowRound
-src/libs/number_format.zig	827	priv		roundToD
-src/libs/number_format.zig	857	priv		mulPowRoundToD
-src/libs/number_format.zig	866	priv	inline	toDigit
-src/libs/number_format.zig	879	priv		jsDtoaMaxLenImpl
-src/libs/number_format.zig	923	priv		jsDtoaImpl
-src/libs/number_format.zig	1083	priv		outputHelper
-src/libs/number_format.zig	1160	priv		jsAtodImpl
-src/libs/number_format.zig	1396	priv		buildFloat64
-src/libs/number_format.zig	1406	priv		finishAtod
-src/libs/number_format.zig	1417	pub		parseNumber
-src/libs/number_format.zig	1431	pub		formatNumber
-src/libs/number_format.zig	1441	pub		formatInt32
-src/libs/number_format.zig	1446	pub		formatInt64
-src/libs/number_format.zig	1455	pub		radixMaxLen
-src/libs/number_format.zig	1464	pub		formatRadix
-src/libs/number_format.zig	1472	pub		formatDtoaChecked
+src/libs/bigint.zig	1259	priv		alloc
+src/libs/bigint.zig	1265	priv		resize
+src/libs/bigint.zig	1269	priv		remap
+src/libs/bigint.zig	1273	priv		free
+src/libs/bigint.zig	1277	priv		allocator
+src/libs/bigint.zig	1286	priv		referenceMul
+src/libs/bigint.zig	1323	priv		allocator
+src/libs/bigint.zig	1332	priv		alloc
+src/libs/bigint.zig	1352	priv		resize
+src/libs/bigint.zig	1358	priv		remap
+src/libs/bigint.zig	1369	priv		free
+src/libs/bigint.zig	1376	priv		expectDivisionUnderInjection
+src/libs/bigint.zig	1409	priv		expectDivisionIdentity
+src/libs/bigint.zig	1818	priv		check
+src/libs/number_format.zig	86	pub		formatNumber
+src/libs/number_format.zig	96	pub		formatInt32
+src/libs/number_format.zig	101	pub		formatInt64
+src/libs/number_format.zig	110	pub		radixMaxLen
+src/libs/number_format.zig	118	pub		formatRadix
+src/libs/number_format.zig	127	pub		formatDtoaChecked
+src/libs/number_format.zig	140	priv		parseNumber
+src/libs/number_format.zig	251	priv		Mpb
+src/libs/number_format.zig	258	priv		tabSlice
+src/libs/number_format.zig	263	priv		tabConstSlice
+src/libs/number_format.zig	272	priv		dtoaMalloc
+src/libs/number_format.zig	279	priv		writtenLen
+src/libs/number_format.zig	283	priv		minInt
+src/libs/number_format.zig	287	priv		maxInt
+src/libs/number_format.zig	291	priv	inline	clz32
+src/libs/number_format.zig	295	priv	inline	clz64
+src/libs/number_format.zig	299	priv	inline	ctz32
+src/libs/number_format.zig	303	priv	inline	float64AsUint64
+src/libs/number_format.zig	307	priv	inline	uint64AsFloat64
+src/libs/number_format.zig	315	priv		mpAddUi
+src/libs/number_format.zig	326	priv		mpMul1
+src/libs/number_format.zig	336	priv		udiv1normInit
+src/libs/number_format.zig	343	priv		udiv1norm
+src/libs/number_format.zig	357	priv		mpDiv1
+src/libs/number_format.zig	369	priv		mpShr
+src/libs/number_format.zig	381	priv		mpShl
+src/libs/number_format.zig	390	priv		mpDiv1norm
+src/libs/number_format.zig	408	priv		mpbRenorm
+src/libs/number_format.zig	414	priv		mpbGetBit
+src/libs/number_format.zig	424	priv		mpbShrRound
+src/libs/number_format.zig	518	priv		mpbCmp
+src/libs/number_format.zig	532	priv		mpbSetU64
+src/libs/number_format.zig	542	priv		mpbGetU64
+src/libs/number_format.zig	549	priv		mpbFloorLog2
+src/libs/number_format.zig	555	priv		mpbMul1Base
+src/libs/number_format.zig	578	priv		mulLog2Radix
+src/libs/number_format.zig	589	priv		powUi
+src/libs/number_format.zig	616	priv		powUiInv
+src/libs/number_format.zig	639	priv		u32toaLen
+src/libs/number_format.zig	649	priv		u64toaBinLen
+src/libs/number_format.zig	665	priv		limbToA
+src/libs/number_format.zig	687	priv		u32toa
+src/libs/number_format.zig	702	priv		i32toa
+src/libs/number_format.zig	710	priv		u64toa
+src/libs/number_format.zig	748	priv		i64toa
+src/libs/number_format.zig	756	priv		u64toaRadix
+src/libs/number_format.zig	794	priv		mulPow
+src/libs/number_format.zig	855	priv		mulPowRound
+src/libs/number_format.zig	861	priv		roundToD
+src/libs/number_format.zig	891	priv		mulPowRoundToD
+src/libs/number_format.zig	900	priv		outputDigits
+src/libs/number_format.zig	948	priv		outputHelper
+src/libs/number_format.zig	1021	priv		jsDtoaMaxLen
+src/libs/number_format.zig	1061	priv		writeNonFinite
+src/libs/number_format.zig	1078	priv		dtoaShortest
+src/libs/number_format.zig	1127	priv		dtoaFrac
+src/libs/number_format.zig	1140	priv		dtoaFixed
+src/libs/number_format.zig	1155	priv		jsDtoa
+src/libs/number_format.zig	1235	priv	inline	toDigit
+src/libs/number_format.zig	1252	priv		parseAtodExponent
+src/libs/number_format.zig	1307	priv		atodToBits
+src/libs/number_format.zig	1346	priv		buildFloat64
+src/libs/number_format.zig	1356	priv		finishAtod
+src/libs/number_format.zig	1366	priv		jsAtod
 src/libs/regexp.zig	71	priv		len
 src/libs/regexp.zig	101	priv		initDefault
 src/libs/regexp.zig	108	priv		init
@@ -8941,153 +9007,153 @@ src/libs/regexp.zig	4040	priv		isUnicodeSetsReservedDoublePunctuator
 src/libs/regexp.zig	4050	priv	inline	fromHex
 src/libs/regexp.zig	4057	priv	inline	isDigit
 src/libs/regexp.zig	4061	priv	inline	lreIsWordByte
-src/libs/unicode.zig	19	pub		asciiCategory
-src/libs/unicode.zig	73	pub		isIdentifierStart
-src/libs/unicode.zig	81	pub		isIdentifierContinue
-src/libs/unicode.zig	90	pub		caseConvert
-src/libs/unicode.zig	97	pub		regexpCanonicalize
-src/libs/unicode.zig	113	pub		isCased
-src/libs/unicode.zig	118	pub		isCaseIgnorable
-src/libs/unicode.zig	122	pub		isEcmaLineTerminatorCodePoint
-src/libs/unicode.zig	126	pub		isEcmaLineTerminatorUnit
-src/libs/unicode.zig	130	pub		isEcmaWhitespaceOrLineTerminatorCodePoint
-src/libs/unicode.zig	137	pub		isEcmaWhitespaceOrLineTerminatorUnit
-src/libs/unicode.zig	141	pub		isAsciiWhitespaceByte
-src/libs/unicode.zig	145	pub		isAsciiDigitUnit
-src/libs/unicode.zig	149	pub		isAsciiWordUnit
-src/libs/unicode.zig	153	pub		isAsciiIdentifierStartByte
-src/libs/unicode.zig	157	pub		isAsciiIdentifierPartByte
-src/libs/unicode.zig	161	pub		asciiRadixDigitValueByte
-src/libs/unicode.zig	170	pub		isAsciiBinaryDigitByte
-src/libs/unicode.zig	174	pub		isAsciiOctalDigitByte
-src/libs/unicode.zig	178	pub		isAsciiDigitByte
-src/libs/unicode.zig	182	pub		isAsciiUpperByte
-src/libs/unicode.zig	186	pub		isAsciiLowerByte
-src/libs/unicode.zig	190	pub		isAsciiAlphaByte
-src/libs/unicode.zig	194	pub		isAsciiAlphanumericByte
-src/libs/unicode.zig	198	pub		isAsciiWordByte
-src/libs/unicode.zig	202	pub		asciiHexDigitValueByte
-src/libs/unicode.zig	208	pub		asciiUpperHexDigitValueByte
-src/libs/unicode.zig	214	pub		asciiLowerHexDigitChar
-src/libs/unicode.zig	219	pub		asciiUpperHexDigitChar
-src/libs/unicode.zig	224	pub		isAsciiHexDigitByte
-src/libs/unicode.zig	228	pub		asciiHexDigitValueUnit
-src/libs/unicode.zig	233	pub		isAsciiHexDigitUnit
-src/libs/unicode.zig	237	pub		isAsciiDigitCodePoint
-src/libs/unicode.zig	241	pub		isAsciiUpperCodePoint
-src/libs/unicode.zig	245	pub		isAsciiLowerCodePoint
-src/libs/unicode.zig	249	pub		isAsciiAlphaCodePoint
-src/libs/unicode.zig	253	pub		isAsciiAlphanumericCodePoint
-src/libs/unicode.zig	257	pub		isAsciiWordCodePoint
-src/libs/unicode.zig	261	pub		isHighSurrogateUnit
-src/libs/unicode.zig	265	pub		isLowSurrogateUnit
-src/libs/unicode.zig	269	pub		isHighSurrogateCodePoint
-src/libs/unicode.zig	273	pub		isLowSurrogateCodePoint
-src/libs/unicode.zig	277	pub		isSurrogateCodePoint
-src/libs/unicode.zig	281	pub		codePointFromSurrogatePair
-src/libs/unicode.zig	285	pub		surrogatePairFromCodePoint
-src/libs/unicode.zig	293	pub		appendUtf16CodePoint
-src/libs/unicode.zig	303	pub		appendUtf8CodePoint
-src/libs/unicode.zig	321	pub		appendUtf16UnitsAsUtf8
-src/libs/unicode.zig	338	pub		normalizeAlloc
-src/libs/unicode.zig	396	pub		propertyRangePoints
-src/libs/unicode.zig	409	priv		propertyRangeSet
-src/libs/unicode.zig	429	pub		toUpperAscii
-src/libs/unicode.zig	434	pub		toLowerAscii
-src/libs/unicode.zig	439	pub		equalsIgnoreAsciiCase
-src/libs/unicode.zig	472	priv		caseConv1
-src/libs/unicode.zig	476	priv		caseConv
-src/libs/unicode.zig	490	priv		caseConvEntry
-src/libs/unicode.zig	568	priv		caseFoldingEntry
-src/libs/unicode.zig	590	priv		findCaseEntry
-src/libs/unicode.zig	609	priv		getLe24
-src/libs/unicode.zig	618	priv		getIndexPosition
-src/libs/unicode.zig	647	priv		isInTable
-src/libs/unicode.zig	713	priv		shortCode
-src/libs/unicode.zig	725	priv		lowerSimple
-src/libs/unicode.zig	735	priv		get16
-src/libs/unicode.zig	739	priv		decompEntry
-src/libs/unicode.zig	825	priv		decompTypeI
-src/libs/unicode.zig	834	priv		decompTypeB
-src/libs/unicode.zig	849	priv		decompChar
-src/libs/unicode.zig	871	priv		unicodeComposePair
-src/libs/unicode.zig	899	priv		combiningClass
-src/libs/unicode.zig	932	priv		sortCanonicalCombiningClass
-src/libs/unicode.zig	957	priv		toNfdRec
-src/libs/unicode.zig	978	priv		composePair
-src/libs/unicode.zig	997	pub		init
-src/libs/unicode.zig	1001	pub		deinit
-src/libs/unicode.zig	1005	pub		items
-src/libs/unicode.zig	1009	pub		addInterval
-src/libs/unicode.zig	1016	pub		appendPoints
-src/libs/unicode.zig	1020	pub		addSet
-src/libs/unicode.zig	1024	pub		normalize
-src/libs/unicode.zig	1028	pub		compress
-src/libs/unicode.zig	1032	priv		compressAdjacent
-src/libs/unicode.zig	1053	pub		sortAndRemoveOverlap
-src/libs/unicode.zig	1058	priv		compressOverlapping
-src/libs/unicode.zig	1081	pub		unionWith
-src/libs/unicode.zig	1085	pub		intersectWith
-src/libs/unicode.zig	1089	pub		xorWith
-src/libs/unicode.zig	1093	pub		subWith
-src/libs/unicode.zig	1104	priv		opWith
-src/libs/unicode.zig	1111	priv		makeOp
-src/libs/unicode.zig	1163	pub		invert
-src/libs/unicode.zig	1172	pub		regexpCanonicalize
-src/libs/unicode.zig	1230	pub		rangeCount
-src/libs/unicode.zig	1234	pub		rangeAt
-src/libs/unicode.zig	1242	pub		isEmpty
-src/libs/unicode.zig	1246	pub		lastHi
-src/libs/unicode.zig	1253	priv		insertionSortPointPairs
-src/libs/unicode.zig	1268	priv		generalCategory
-src/libs/unicode.zig	1273	priv		unicodeGeneralCategory1
-src/libs/unicode.zig	1317	priv		unicodeProp1
-src/libs/unicode.zig	1351	priv		unicodeCase1
-src/libs/unicode.zig	1396	priv		unicodePropOps
-src/libs/unicode.zig	1450	priv		unicodeProp
-src/libs/unicode.zig	1474	priv		scriptRanges
-src/libs/unicode.zig	1553	pub		addSequenceProperty
-src/libs/unicode.zig	1565	pub		isSequencePropertyName
-src/libs/unicode.zig	1571	priv		sequenceProp1
-src/libs/unicode.zig	1654	priv		emitPropertySequences
-src/libs/unicode.zig	1679	priv		emitZwjSequences
-src/libs/unicode.zig	2127	priv		rangesContain
-src/libs/unicode.zig	2134	priv		pointsContain
-src/libs/unicode.zig	2142	priv		expectRegexpShortcutMatchesRangeBuilder
-src/libs/unicode.zig	2162	priv		expectRegexpShortcutPointMatchesRanges
-src/libs/unicode/data.zig	14	priv		blobU32
-src/libs/unicode/data.zig	18	priv		tableBytes
-src/libs/unicode/data.zig	42	priv		tableInts
-src/libs/unicode/data.zig	174	pub		count
-src/libs/unicode/data.zig	357	pub		count
-src/libs/unicode/data.zig	454	pub		count
-src/libs/unicode/data.zig	473	pub		propTable
-src/libs/unicode/names.zig	6	priv		parseNameTableComptime
-src/libs/unicode/names.zig	35	priv		countNameGroupsComptime
-src/libs/unicode/names.zig	50	priv		validateNameTable
-src/libs/unicode/names.zig	68	priv		firstAliasMatchesEnumField
-src/libs/unicode/names.zig	89	priv		findName
-src/libs/unicode/names.zig	107	pub		isScriptPropertyName
-src/libs/unicode/names.zig	111	pub		isScriptExtensionsPropertyName
-src/libs/unicode/names.zig	115	pub		isGeneralCategoryPropertyName
-src/libs/unicode/names.zig	119	pub		scriptIndex
-src/libs/unicode/names.zig	124	pub		gcIndex
-src/libs/unicode/names.zig	129	pub		propIndex
-src/libs/unicode/names.zig	134	pub		sequencePropIndex
-src/libs/unicode/names.zig	139	pub		gcBit
-src/libs/unicode/names.zig	154	pub		gcMaskByIndex
-src/libs/unicode/names.zig	171	pub		parsePropertyExpression
-src/libs/unicode/properties.zig	142	pub		derived
-src/libs/unicode/properties.zig	167	pub		isSupported
-src/libs/unicode/regexp_properties.zig	28	priv		unicodeGeneralCategory1
-src/libs/unicode/regexp_properties.zig	81	priv		unicodeProp1
-src/libs/unicode/regexp_properties.zig	111	priv		unicodeCase1
-src/libs/unicode/regexp_properties.zig	156	priv		unicodePropOps
-src/libs/unicode/regexp_properties.zig	194	priv		unicodeProp
-src/libs/unicode/regexp_properties.zig	206	priv		isSupportedProperty
-src/libs/unicode/regexp_properties.zig	210	priv		unicodeScript
-src/libs/unicode/regexp_properties.zig	317	pub		isSupportedUnicodePropertyExpression
-src/libs/unicode/regexp_properties.zig	324	pub		isUnicodePropertyMatches
+src/libs/unicode.zig	11	priv		blobU32
+src/libs/unicode.zig	15	priv		tableBytes
+src/libs/unicode.zig	39	priv		tableInts
+src/libs/unicode.zig	171	pub		count
+src/libs/unicode.zig	354	pub		count
+src/libs/unicode.zig	451	pub		count
+src/libs/unicode.zig	470	pub		propTable
+src/libs/unicode.zig	490	priv		parseNameTableComptime
+src/libs/unicode.zig	519	priv		countNameGroupsComptime
+src/libs/unicode.zig	534	priv		validateNameTable
+src/libs/unicode.zig	552	priv		firstAliasMatchesEnumField
+src/libs/unicode.zig	573	priv		findName
+src/libs/unicode.zig	591	pub		isScriptPropertyName
+src/libs/unicode.zig	595	pub		isScriptExtensionsPropertyName
+src/libs/unicode.zig	599	pub		isGeneralCategoryPropertyName
+src/libs/unicode.zig	603	pub		scriptIndex
+src/libs/unicode.zig	608	pub		gcIndex
+src/libs/unicode.zig	613	pub		propIndex
+src/libs/unicode.zig	618	pub		sequencePropIndex
+src/libs/unicode.zig	623	pub		gcBit
+src/libs/unicode.zig	638	pub		gcMaskByIndex
+src/libs/unicode.zig	655	pub		parsePropertyExpression
+src/libs/unicode.zig	873	pub		derived
+src/libs/unicode.zig	898	pub		isSupported
+src/libs/unicode.zig	905	priv		matchGeneralCategory
+src/libs/unicode.zig	958	priv		matchPropTable
+src/libs/unicode.zig	988	priv		matchCaseMask
+src/libs/unicode.zig	1033	priv		matchPropOps
+src/libs/unicode.zig	1071	priv		matchProp
+src/libs/unicode.zig	1083	priv		isSupportedProperty
+src/libs/unicode.zig	1087	priv		matchScript
+src/libs/unicode.zig	1192	pub		isSupportedUnicodePropertyExpression
+src/libs/unicode.zig	1199	pub		isUnicodePropertyMatches
+src/libs/unicode.zig	1270	pub		asciiCategory
+src/libs/unicode.zig	1324	pub		isIdentifierStart
+src/libs/unicode.zig	1332	pub		isIdentifierContinue
+src/libs/unicode.zig	1341	pub		caseConvert
+src/libs/unicode.zig	1348	pub		regexpCanonicalize
+src/libs/unicode.zig	1364	pub		isCased
+src/libs/unicode.zig	1369	pub		isCaseIgnorable
+src/libs/unicode.zig	1373	pub		isEcmaLineTerminatorCodePoint
+src/libs/unicode.zig	1377	pub		isEcmaLineTerminatorUnit
+src/libs/unicode.zig	1381	pub		isEcmaWhitespaceOrLineTerminatorCodePoint
+src/libs/unicode.zig	1388	pub		isEcmaWhitespaceOrLineTerminatorUnit
+src/libs/unicode.zig	1392	pub		isAsciiWhitespaceByte
+src/libs/unicode.zig	1396	pub		isAsciiDigitUnit
+src/libs/unicode.zig	1400	pub		isAsciiWordUnit
+src/libs/unicode.zig	1404	pub		isAsciiIdentifierStartByte
+src/libs/unicode.zig	1408	pub		isAsciiIdentifierPartByte
+src/libs/unicode.zig	1412	pub		asciiRadixDigitValueByte
+src/libs/unicode.zig	1421	pub		isAsciiBinaryDigitByte
+src/libs/unicode.zig	1425	pub		isAsciiOctalDigitByte
+src/libs/unicode.zig	1429	pub		isAsciiDigitByte
+src/libs/unicode.zig	1433	pub		isAsciiUpperByte
+src/libs/unicode.zig	1437	pub		isAsciiLowerByte
+src/libs/unicode.zig	1441	pub		isAsciiAlphaByte
+src/libs/unicode.zig	1445	pub		isAsciiAlphanumericByte
+src/libs/unicode.zig	1449	pub		isAsciiWordByte
+src/libs/unicode.zig	1453	pub		asciiHexDigitValueByte
+src/libs/unicode.zig	1459	pub		asciiUpperHexDigitValueByte
+src/libs/unicode.zig	1465	pub		asciiLowerHexDigitChar
+src/libs/unicode.zig	1470	pub		asciiUpperHexDigitChar
+src/libs/unicode.zig	1475	pub		isAsciiHexDigitByte
+src/libs/unicode.zig	1479	pub		asciiHexDigitValueUnit
+src/libs/unicode.zig	1484	pub		isAsciiHexDigitUnit
+src/libs/unicode.zig	1488	pub		isAsciiDigitCodePoint
+src/libs/unicode.zig	1492	pub		isAsciiUpperCodePoint
+src/libs/unicode.zig	1496	pub		isAsciiLowerCodePoint
+src/libs/unicode.zig	1500	pub		isAsciiAlphaCodePoint
+src/libs/unicode.zig	1504	pub		isAsciiAlphanumericCodePoint
+src/libs/unicode.zig	1508	pub		isAsciiWordCodePoint
+src/libs/unicode.zig	1512	pub		isHighSurrogateUnit
+src/libs/unicode.zig	1516	pub		isLowSurrogateUnit
+src/libs/unicode.zig	1520	pub		isHighSurrogateCodePoint
+src/libs/unicode.zig	1524	pub		isLowSurrogateCodePoint
+src/libs/unicode.zig	1528	pub		isSurrogateCodePoint
+src/libs/unicode.zig	1532	pub		codePointFromSurrogatePair
+src/libs/unicode.zig	1536	pub		surrogatePairFromCodePoint
+src/libs/unicode.zig	1544	pub		appendUtf16CodePoint
+src/libs/unicode.zig	1554	pub		appendUtf8CodePoint
+src/libs/unicode.zig	1572	pub		appendUtf16UnitsAsUtf8
+src/libs/unicode.zig	1589	pub		normalizeAlloc
+src/libs/unicode.zig	1647	pub		propertyRangePoints
+src/libs/unicode.zig	1660	priv		propertyRangeSet
+src/libs/unicode.zig	1680	pub		toUpperAscii
+src/libs/unicode.zig	1685	pub		toLowerAscii
+src/libs/unicode.zig	1690	pub		equalsIgnoreAsciiCase
+src/libs/unicode.zig	1723	priv		caseConv1
+src/libs/unicode.zig	1727	priv		caseConv
+src/libs/unicode.zig	1741	priv		caseConvEntry
+src/libs/unicode.zig	1819	priv		caseFoldingEntry
+src/libs/unicode.zig	1841	priv		findCaseEntry
+src/libs/unicode.zig	1860	priv		getLe24
+src/libs/unicode.zig	1869	priv		getIndexPosition
+src/libs/unicode.zig	1898	priv		isInTable
+src/libs/unicode.zig	1964	priv		shortCode
+src/libs/unicode.zig	1976	priv		lowerSimple
+src/libs/unicode.zig	1986	priv		get16
+src/libs/unicode.zig	1990	priv		decompEntry
+src/libs/unicode.zig	2076	priv		decompTypeI
+src/libs/unicode.zig	2085	priv		decompTypeB
+src/libs/unicode.zig	2100	priv		decompChar
+src/libs/unicode.zig	2122	priv		unicodeComposePair
+src/libs/unicode.zig	2150	priv		combiningClass
+src/libs/unicode.zig	2183	priv		sortCanonicalCombiningClass
+src/libs/unicode.zig	2208	priv		toNfdRec
+src/libs/unicode.zig	2229	priv		composePair
+src/libs/unicode.zig	2248	pub		init
+src/libs/unicode.zig	2252	pub		deinit
+src/libs/unicode.zig	2256	pub		items
+src/libs/unicode.zig	2260	pub		addInterval
+src/libs/unicode.zig	2267	pub		appendPoints
+src/libs/unicode.zig	2271	pub		addSet
+src/libs/unicode.zig	2275	pub		normalize
+src/libs/unicode.zig	2279	pub		compress
+src/libs/unicode.zig	2283	priv		compressAdjacent
+src/libs/unicode.zig	2304	pub		sortAndRemoveOverlap
+src/libs/unicode.zig	2309	priv		compressOverlapping
+src/libs/unicode.zig	2332	pub		unionWith
+src/libs/unicode.zig	2336	pub		intersectWith
+src/libs/unicode.zig	2340	pub		xorWith
+src/libs/unicode.zig	2344	pub		subWith
+src/libs/unicode.zig	2355	priv		opWith
+src/libs/unicode.zig	2362	priv		makeOp
+src/libs/unicode.zig	2414	pub		invert
+src/libs/unicode.zig	2423	pub		regexpCanonicalize
+src/libs/unicode.zig	2481	pub		rangeCount
+src/libs/unicode.zig	2485	pub		rangeAt
+src/libs/unicode.zig	2493	pub		isEmpty
+src/libs/unicode.zig	2497	pub		lastHi
+src/libs/unicode.zig	2504	priv		insertionSortPointPairs
+src/libs/unicode.zig	2519	priv		generalCategory
+src/libs/unicode.zig	2524	priv		unicodeGeneralCategory1
+src/libs/unicode.zig	2568	priv		unicodeProp1
+src/libs/unicode.zig	2602	priv		unicodeCase1
+src/libs/unicode.zig	2647	priv		unicodePropOps
+src/libs/unicode.zig	2701	priv		unicodeProp
+src/libs/unicode.zig	2725	priv		scriptRanges
+src/libs/unicode.zig	2804	pub		addSequenceProperty
+src/libs/unicode.zig	2816	pub		isSequencePropertyName
+src/libs/unicode.zig	2822	priv		sequenceProp1
+src/libs/unicode.zig	2905	priv		emitPropertySequences
+src/libs/unicode.zig	2930	priv		emitZwjSequences
+src/libs/unicode.zig	3378	priv		rangesContain
+src/libs/unicode.zig	3385	priv		pointsContain
+src/libs/unicode.zig	3393	priv		expectRegexpShortcutMatchesRangeBuilder
+src/libs/unicode.zig	3413	priv		expectRegexpShortcutPointMatchesRanges
 src/opcode_logical.zig	390	pub		planeOf
 src/opcode_logical.zig	609	pub		familyOf
 src/opcode_logical.zig	1016	pub		operandTemplate
@@ -9812,63 +9878,6 @@ src/root.zig	1089	priv		append
 src/root.zig	1129	priv		fail
 src/root.zig	1133	priv		succeed
 src/root.zig	1163	priv		run
-src/runtime/event_loop.zig	50	pub		hasPendingError
-src/runtime/event_loop.zig	69	pub	inline	init
-src/runtime/event_loop.zig	73	pub	inline	initCore
-src/runtime/event_loop.zig	81	pub		install
-src/runtime/event_loop.zig	89	pub		deinit
-src/runtime/event_loop.zig	117	pub		runUntilIdle
-src/runtime/event_loop.zig	125	pub		result
-src/runtime/event_loop.zig	132	pub		setExitCode
-src/runtime/event_loop.zig	136	pub		exitCode
-src/runtime/event_loop.zig	140	priv		traceRoots
-src/runtime/event_loop.zig	152	priv		takeNextTimerId
-src/runtime/event_loop.zig	159	priv		ensureTimerCapacity
-src/runtime/event_loop.zig	176	pub		enqueueTimer
-src/runtime/event_loop.zig	184	priv		clearTimer
-src/runtime/event_loop.zig	194	priv		removeTimerAt
-src/runtime/event_loop.zig	209	priv		runNextTimer
-src/runtime/event_loop.zig	264	priv		timerExists
-src/runtime/event_loop.zig	271	priv		ensureRwHandlerCapacity
-src/runtime/event_loop.zig	288	priv		setRwHandler
-src/runtime/event_loop.zig	304	priv		clearRwHandler
-src/runtime/event_loop.zig	316	priv		removeRwHandlerAt
-src/runtime/event_loop.zig	331	priv		runNextRwHandler
-src/runtime/event_loop.zig	341	priv		runNextRwHandlerWindows
-src/runtime/event_loop.zig	376	priv		runNextRwHandlerPosix
-src/runtime/event_loop.zig	437	priv		ensureSignalHandlerCapacity
-src/runtime/event_loop.zig	454	priv		setSignalHandler
-src/runtime/event_loop.zig	469	priv		clearSignalHandler
-src/runtime/event_loop.zig	482	priv		removeSignalHandlerAt
-src/runtime/event_loop.zig	497	priv		runNextSignalHandler
-src/runtime/event_loop.zig	512	pub		runUntilIdle
-src/runtime/event_loop.zig	526	priv		init
-src/runtime/event_loop.zig	536	priv		traceRoots
-src/runtime/event_loop.zig	546	priv		setCallback
-src/runtime/event_loop.zig	551	priv		clearCallback
-src/runtime/event_loop.zig	556	priv		traceRoots
-src/runtime/event_loop.zig	566	priv		init
-src/runtime/event_loop.zig	573	priv		setCallback
-src/runtime/event_loop.zig	577	priv		traceRoots
-src/runtime/event_loop.zig	598	priv		fromOpaque
-src/runtime/event_loop.zig	602	priv		traceRoots
-src/runtime/event_loop.zig	606	priv		setExitCode
-src/runtime/event_loop.zig	610	priv		exitCode
-src/runtime/event_loop.zig	614	priv		nextTimerId
-src/runtime/event_loop.zig	618	priv		enqueueTimer
-src/runtime/event_loop.zig	624	priv		clearTimer
-src/runtime/event_loop.zig	630	priv		runNextTimer
-src/runtime/event_loop.zig	636	priv		setRwHandler
-src/runtime/event_loop.zig	642	priv		clearRwHandler
-src/runtime/event_loop.zig	648	priv		runNextRwHandler
-src/runtime/event_loop.zig	654	priv		setSignalHandler
-src/runtime/event_loop.zig	660	priv		clearSignalHandler
-src/runtime/event_loop.zig	666	priv		runNextSignalHandler
-src/runtime/event_loop.zig	674	priv		osSignalHandler
-src/runtime/event_loop.zig	679	priv		nowMs
-src/runtime/event_loop.zig	684	priv		hostTimerIo
-src/runtime/event_loop.zig	899	priv		visitValue
-src/runtime/event_loop.zig	906	priv		visitObject
 src/simple_token.zig	30	pub	inline	next
 src/simple_token.zig	145	pub		balancedAfterOpen
 src/simple_token.zig	303	pub		parenArrowAfterOpen
@@ -9897,137 +9906,117 @@ src/tests/bytecode.zig	343	priv		createTestFunctionBytecode
 src/tests/bytecode.zig	989	priv		finalizeMutableWithTestRealm
 src/tests/bytecode.zig	2834	priv		populateFunctionDefForFinalizeFailure
 src/tests/bytecode.zig	2864	priv		runFunctionBytecodeFinalizeOomLifecycle
-src/tests/core.zig	15	priv		trigger
-src/tests/core.zig	155	priv		resolve
-src/tests/core.zig	184	priv		publishFreshModule
-src/tests/core.zig	194	priv		publishEmptyModule
-src/tests/core.zig	283	priv		get
-src/tests/core.zig	855	priv		visitValue
-src/tests/core.zig	860	priv		visitObject
-src/tests/core.zig	1228	priv		run
-src/tests/core.zig	1318	priv		run
-src/tests/core.zig	1394	priv		run
-src/tests/core.zig	1551	priv		liveRealmCount
-src/tests/core.zig	1757	priv		testBacktraceLocationResolver
-src/tests/core.zig	1763	priv		appendFinalizationRegistryCell
-src/tests/core.zig	1773	priv		borrowedHolderInitialAllocationBytes
-src/tests/core.zig	2490	priv		trigger
-src/tests/core.zig	2498	priv		tailBufferText
-src/tests/core.zig	2904	priv		countFinalizer
-src/tests/core.zig	2908	priv		countNativeCleanup
-src/tests/core.zig	2913	priv		countPayloadFinalizer
-src/tests/core.zig	2918	priv		countPayloadMark
-src/tests/core.zig	2928	priv		countVisitedValue
-src/tests/core.zig	2946	priv		trigger
-src/tests/core.zig	2962	priv		trigger
-src/tests/core.zig	2974	priv		accountedPlainObjectBytes
-src/tests/core.zig	2982	priv		emptyRootShapeAllocationBytes
-src/tests/core.zig	2997	priv		trigger
-src/tests/core.zig	3031	priv		reset
-src/tests/core.zig	3046	priv		finalize
-src/tests/core.zig	3078	priv		reset
-src/tests/core.zig	3089	priv		finalize
-src/tests/core.zig	3108	priv		reset
-src/tests/core.zig	3114	priv		finalize
-src/tests/core.zig	3128	priv		registerStandaloneInlineObjectTestClass
-src/tests/core.zig	3148	priv		expectPublishedStandaloneInlineObject
-src/tests/core.zig	3181	priv		countYoungHeader
-src/tests/core.zig	3204	priv		reset
-src/tests/core.zig	3213	priv		finalize
-src/tests/core.zig	3242	priv		reset
-src/tests/core.zig	3251	priv		finalize
-src/tests/core.zig	3268	priv		createExternalObjectLifecycleProbe
-src/tests/core.zig	3280	priv		finalizeTestExternalPayload
-src/tests/core.zig	3289	priv		finalizeTestExternalObjectPayload
-src/tests/core.zig	3298	priv		reentrantCollectionClearFinalizer
-src/tests/core.zig	3308	priv		reentrantArrayDeleteFinalizer
-src/tests/core.zig	3318	priv		reentrantPropertyDeleteFinalizer
-src/tests/core.zig	3328	priv		reentrantRegExpLastIndexFinalizer
-src/tests/core.zig	3338	priv		reentrantMappedArgumentsFinalizer
-src/tests/core.zig	3352	priv		reentrantCachedIteratorNextFinalizer
-src/tests/core.zig	3362	priv		reentrantExceptionSlotFinalizer
-src/tests/core.zig	3372	priv		reentrantArrayIteratorFinalizer
-src/tests/core.zig	3382	priv		markTestExternalPayload
-src/tests/core.zig	3394	priv		markTestExternalObjectPayload
-src/tests/core.zig	3770	priv		registryResolveOne
-src/tests/core.zig	3773	priv		visit
-src/tests/core.zig	3840	priv		visit
-src/tests/core.zig	5037	priv		run
-src/tests/core.zig	5047	priv		visitValue
-src/tests/core.zig	5054	priv		visitObject
-src/tests/core.zig	5089	priv		visitValue
-src/tests/core.zig	5096	priv		visitObject
-src/tests/core.zig	5132	priv		visitValue
-src/tests/core.zig	5139	priv		visitObject
-src/tests/core.zig	6458	priv		trigger
-src/tests/core.zig	7462	pub		visitValue
-src/tests/core.zig	7475	pub		visitObject
-src/tests/core.zig	7936	priv		storeYoungChild
-src/tests/core.zig	8345	priv		visitArena
-src/tests/core.zig	8349	priv		visitBlock
-src/tests/core.zig	8482	pub		visitValue
-src/tests/core.zig	8514	pub		visitValue
-src/tests/core.zig	8552	pub		visitValue
-src/tests/core.zig	8580	priv		createDeepOwnedPropertyChain
-src/tests/core.zig	8652	priv		externalPropertyStorageBytes
-src/tests/core.zig	8659	priv		expectNoLiveGc
-src/tests/core.zig	8664	priv		expectCycleReclaimedIncludingShapes
-src/tests/core.zig	8674	priv		expectAllLiveGcReclaimed
-src/tests/core.zig	8682	priv		dropGcPtr
-src/tests/core.zig	8686	priv		expectClosedPropertyCycleReclaimed
-src/tests/core.zig	8735	priv		recordHeader
-src/tests/core.zig	8742	pub		visitValue
-src/tests/core.zig	8746	pub		visitObject
-src/tests/core.zig	8753	pub		visitShape
-src/tests/core.zig	8757	pub		visitRealm
-src/tests/core.zig	8761	pub		visitModule
-src/tests/core.zig	8765	pub		storageCell
-src/tests/core.zig	8769	pub		visitWeakCollectionEntry
-src/tests/core.zig	8771	pub		visitFinalizationCell
-src/tests/core.zig	8776	priv		collect
-src/tests/core.zig	8827	priv		expectContains
-src/tests/core.zig	9438	priv		shade
-src/tests/core.zig	9468	priv		visit
-src/tests/core.zig	10399	priv		weakPersistentCounterCallback
-src/tests/core.zig	11422	priv		trigger
-src/tests/core.zig	13509	priv		interruptOnce
-src/tests/core.zig	13766	priv		exoticGet
-src/tests/core.zig	13770	priv		exoticDefine
-src/tests/core.zig	13775	priv		exoticDelete
-src/tests/core.zig	13780	priv		exoticOwnKeys
-src/tests/core.zig	13941	priv		alloc
-src/tests/core.zig	13947	priv		resize
-src/tests/core.zig	13951	priv		remap
-src/tests/core.zig	13955	priv		free
-src/tests/core.zig	13959	priv		allocator
-src/tests/core.zig	13968	priv		referenceMul
-src/tests/core.zig	14027	priv		lockstepLimb
-src/tests/core.zig	14113	priv		expectLockstepMul
-src/tests/core.zig	14161	priv		makeLockstepOperand
-src/tests/core.zig	14458	priv		allocator
-src/tests/core.zig	14467	priv		alloc
-src/tests/core.zig	14487	priv		resize
-src/tests/core.zig	14493	priv		remap
-src/tests/core.zig	14504	priv		free
-src/tests/core.zig	14511	priv		expectDivisionUnderInjection
-src/tests/core.zig	14618	priv		expectDivisionIdentity
-src/tests/core.zig	14855	priv		check
-src/tests/core.zig	15883	priv		countExtentStringHeaders
-src/tests/core.zig	15933	priv		visit
-src/tests/core.zig	15984	priv		visit
-src/tests/core.zig	16145	priv		atomMarkEpochForTest
-src/tests/core.zig	17404	priv		driveOneIncrementalMajorForCensusTest
-src/tests/core.zig	17907	priv		s3AtomEntry
-src/tests/core.zig	17911	priv		s3MarkEpoch
-src/tests/core.zig	17915	priv		s3RunMajor
-src/tests/core.zig	18076	priv		s3OccupiedEntryCount
-src/tests/core.zig	18399	priv		defineS4bNamedProperties
-src/tests/core.zig	18414	priv		expectS4bNamedProperties
-src/tests/core.zig	18426	priv		fillS4bDenseArray
-src/tests/core.zig	18473	priv		installMintedStringBufferBody
-src/tests/core.zig	18716	priv		registerS4cPayloadClass
-src/tests/core.zig	19222	priv		lessThan
-src/tests/core.zig	19231	priv		expectAuditPrintMatchesFmt
+src/tests/core.zig	14	priv		trigger
+src/tests/core.zig	124	priv		resolve
+src/tests/core.zig	153	priv		publishFreshModule
+src/tests/core.zig	163	priv		publishEmptyModule
+src/tests/core.zig	344	priv		visitValue
+src/tests/core.zig	349	priv		visitObject
+src/tests/core.zig	717	priv		run
+src/tests/core.zig	807	priv		run
+src/tests/core.zig	883	priv		run
+src/tests/core.zig	1040	priv		liveRealmCount
+src/tests/core.zig	1171	priv		testBacktraceLocationResolver
+src/tests/core.zig	1177	priv		appendFinalizationRegistryCell
+src/tests/core.zig	1187	priv		borrowedHolderInitialAllocationBytes
+src/tests/core.zig	1676	priv		trigger
+src/tests/core.zig	1684	priv		tailBufferText
+src/tests/core.zig	1890	priv		countFinalizer
+src/tests/core.zig	1894	priv		countNativeCleanup
+src/tests/core.zig	1899	priv		countPayloadFinalizer
+src/tests/core.zig	1904	priv		countPayloadMark
+src/tests/core.zig	1914	priv		countVisitedValue
+src/tests/core.zig	1932	priv		trigger
+src/tests/core.zig	1948	priv		trigger
+src/tests/core.zig	1960	priv		accountedPlainObjectBytes
+src/tests/core.zig	1968	priv		emptyRootShapeAllocationBytes
+src/tests/core.zig	1983	priv		trigger
+src/tests/core.zig	2017	priv		reset
+src/tests/core.zig	2032	priv		finalize
+src/tests/core.zig	2064	priv		reset
+src/tests/core.zig	2075	priv		finalize
+src/tests/core.zig	2094	priv		reset
+src/tests/core.zig	2100	priv		finalize
+src/tests/core.zig	2114	priv		registerStandaloneInlineObjectTestClass
+src/tests/core.zig	2134	priv		expectPublishedStandaloneInlineObject
+src/tests/core.zig	2167	priv		countYoungHeader
+src/tests/core.zig	2190	priv		reset
+src/tests/core.zig	2199	priv		finalize
+src/tests/core.zig	2228	priv		reset
+src/tests/core.zig	2237	priv		finalize
+src/tests/core.zig	2254	priv		createExternalObjectLifecycleProbe
+src/tests/core.zig	2266	priv		finalizeTestExternalPayload
+src/tests/core.zig	2275	priv		finalizeTestExternalObjectPayload
+src/tests/core.zig	2284	priv		reentrantCollectionClearFinalizer
+src/tests/core.zig	2294	priv		reentrantArrayDeleteFinalizer
+src/tests/core.zig	2304	priv		reentrantPropertyDeleteFinalizer
+src/tests/core.zig	2314	priv		reentrantRegExpLastIndexFinalizer
+src/tests/core.zig	2324	priv		reentrantMappedArgumentsFinalizer
+src/tests/core.zig	2338	priv		reentrantCachedIteratorNextFinalizer
+src/tests/core.zig	2348	priv		reentrantExceptionSlotFinalizer
+src/tests/core.zig	2358	priv		reentrantArrayIteratorFinalizer
+src/tests/core.zig	2368	priv		markTestExternalPayload
+src/tests/core.zig	2380	priv		markTestExternalObjectPayload
+src/tests/core.zig	2756	priv		registryResolveOne
+src/tests/core.zig	2759	priv		visit
+src/tests/core.zig	2826	priv		visit
+src/tests/core.zig	3934	priv		run
+src/tests/core.zig	3944	priv		visitValue
+src/tests/core.zig	3951	priv		visitObject
+src/tests/core.zig	3986	priv		visitValue
+src/tests/core.zig	3993	priv		visitObject
+src/tests/core.zig	4029	priv		visitValue
+src/tests/core.zig	4036	priv		visitObject
+src/tests/core.zig	4914	priv		trigger
+src/tests/core.zig	5717	pub		visitValue
+src/tests/core.zig	5730	pub		visitObject
+src/tests/core.zig	6191	priv		storeYoungChild
+src/tests/core.zig	6600	priv		visitArena
+src/tests/core.zig	6604	priv		visitBlock
+src/tests/core.zig	6737	pub		visitValue
+src/tests/core.zig	6769	pub		visitValue
+src/tests/core.zig	6807	pub		visitValue
+src/tests/core.zig	6835	priv		createDeepOwnedPropertyChain
+src/tests/core.zig	6907	priv		externalPropertyStorageBytes
+src/tests/core.zig	6914	priv		expectNoLiveGc
+src/tests/core.zig	6919	priv		expectCycleReclaimedIncludingShapes
+src/tests/core.zig	6929	priv		expectAllLiveGcReclaimed
+src/tests/core.zig	6937	priv		dropGcPtr
+src/tests/core.zig	6941	priv		expectClosedPropertyCycleReclaimed
+src/tests/core.zig	6990	priv		recordHeader
+src/tests/core.zig	6997	pub		visitValue
+src/tests/core.zig	7001	pub		visitObject
+src/tests/core.zig	7008	pub		visitShape
+src/tests/core.zig	7012	pub		visitRealm
+src/tests/core.zig	7016	pub		visitModule
+src/tests/core.zig	7020	pub		storageCell
+src/tests/core.zig	7024	pub		visitWeakCollectionEntry
+src/tests/core.zig	7026	pub		visitFinalizationCell
+src/tests/core.zig	7031	priv		collect
+src/tests/core.zig	7082	priv		expectContains
+src/tests/core.zig	7693	priv		shade
+src/tests/core.zig	7723	priv		visit
+src/tests/core.zig	8654	priv		weakPersistentCounterCallback
+src/tests/core.zig	9677	priv		trigger
+src/tests/core.zig	11764	priv		interruptOnce
+src/tests/core.zig	12012	priv		exoticGet
+src/tests/core.zig	12016	priv		exoticDefine
+src/tests/core.zig	12021	priv		exoticDelete
+src/tests/core.zig	12026	priv		exoticOwnKeys
+src/tests/core.zig	13133	priv		countExtentStringHeaders
+src/tests/core.zig	13183	priv		visit
+src/tests/core.zig	13234	priv		visit
+src/tests/core.zig	13395	priv		atomMarkEpochForTest
+src/tests/core.zig	14654	priv		driveOneIncrementalMajorForCensusTest
+src/tests/core.zig	15157	priv		s3AtomEntry
+src/tests/core.zig	15161	priv		s3MarkEpoch
+src/tests/core.zig	15165	priv		s3RunMajor
+src/tests/core.zig	15326	priv		s3OccupiedEntryCount
+src/tests/core.zig	15649	priv		defineS4bNamedProperties
+src/tests/core.zig	15664	priv		expectS4bNamedProperties
+src/tests/core.zig	15676	priv		fillS4bDenseArray
+src/tests/core.zig	15723	priv		installMintedStringBufferBody
+src/tests/core.zig	15966	priv		registerS4cPayloadClass
 src/tests/embedding_examples.zig	8	priv		call
 src/tests/embedding_examples.zig	17	priv		deinit
 src/tests/embedding_examples.zig	27	priv		stop
@@ -10077,7 +10066,7 @@ src/tests/exec.zig	3350	priv		hasTailEvalReturn
 src/tests/exec.zig	3368	priv		expectSingleDerivedThisClosureCapture
 src/tests/exec.zig	6049	priv		trace
 src/tests/exec.zig	6054	priv		provider
-src/tests/exec.zig	10248	priv		expectEvalCycleReclaimed
+src/tests/exec.zig	9543	priv		expectEvalCycleReclaimed
 src/tests/exec.zig	11737	priv		run
 src/tests/exec.zig	11789	priv		run
 src/tests/exec.zig	11835	priv		load

@@ -1,5 +1,4 @@
-//! Size classes and publication histogram for the 64 KiB block heap
-//! (tracing-gc-design.md §4.2 / §4.3).
+//! Size classes and publication histogram for the 64 KiB block heap.
 
 const gc_representation = @import("gc_representation_constants.zig");
 

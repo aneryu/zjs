@@ -94,7 +94,7 @@ NB2：内建、宿主、插件、native accessor 都解析成同一份 **48 字�
 | --- | --- | --- |
 | 对象状态 | `core/promise.zig` + `PromisePayload` | 造 Promise 对象、fulfilled/rejected 快照、`withResolvers`、resolving function、把 reaction job 丢进 `core/jobs` |
 | 抽象操作 | `exec/promise_ops.zig` | `PerformPromiseThen`、reaction 跑起来、species、静态 `Promise.*` 语义、与 VM/内建的衔接 |
-| 任务队列 | `core/jobs.zig` | 原语；事件循环在 `runtime/event_loop.zig` 排空 |
+| 任务队列 | `core/jobs.zig` | 原语；事件循环在 `src/event_loop.zig` 排空 |
 
 `PromisePayload` 持有 `result`、`is_rejected`、subscriber 列表（`reactions` + capacity）、可选 reaction callback/arg、`atomics_wait_async`。core 构造路径不跑 thenable 吸收：`fulfilledWithPrototype` / `rejectedWithPrototype` 只写 result 标志。无共享 prototype 时在实例上 `defineNativeMethod` 装 `then`/`catch`（C_FUNCTION_DATA，调用方 realm）。
 

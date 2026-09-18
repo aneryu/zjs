@@ -30,11 +30,15 @@ QCP-1 closed as **two** separately adjudicated verdicts:
 | **QCP-1A** (2026-08-04) | make V2 the production compiler | **ACCEPT** |
 | **QCP-1B** (2026-08-04, amended 2026-08-06 — see §9) | physically remove the legacy pipelines | initially **NO-GO, deferred**; amended to **ACCEPT** |
 
-**Production configuration, shipped:**
+**Production configuration at QCP-1 close-out (historical, not current):**
 
 ```
 zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
 ```
+
+Current attested default is `zjs-config-v3` with `repr=nan_boxed` and
+`gc_layout=obj64_m` (`AGENTS.md`, `src/config_signature.zig`). The live
+rulings that still constrain compiler work are §0.1.6 and §9.
 
 Every engine-bearing artifact attests this configuration signature at compile
 time, and `zig build config-signature-check` compares the shipped binary's

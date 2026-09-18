@@ -1243,3 +1243,624 @@ test "bigint toU64 and toI64 range edges" {
     try t.expectEqual(@as(?u64, null), beyond.toU64());
     try t.expectEqual(@as(?i64, null), beyond.toI64());
 }
+
+const bigint = @This();
+
+/// Basecase multiplication writes every result limb before reading it, so it
+/// must not depend on the allocator handing back zeroed memory. Run it against
+/// an allocator that poisons fresh allocations with a non-zero pattern: any
+/// limb the kernel forgets to write, or reads before writing, changes the
+/// product. Zeroed memory would hide all three failures, which is why the
+/// production path deliberately no longer pre-zeroes and this test does not
+/// re-add the guarantee for it.
+const PoisonAllocator = struct {
+    backing: std.mem.Allocator,
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        @memset(ptr[0..len], 0xa5);
+        return ptr;
+    }
+    fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(buf, alignment, new_len, ra);
+    }
+    fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(buf, alignment, new_len, ra);
+    }
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(buf, alignment, ra);
+    }
+    fn allocator(self: *PoisonAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+};
+
+/// Deliberately zero-initialized schoolbook multiply, kept in the test rather
+/// than in the kernel: it is the thing the production path stopped doing, so it
+/// has to exist somewhere independent to compare against. Returns unnormalized
+/// limbs with trailing zeros stripped, matching what `mulAlloc` returns.
+fn referenceMul(alloc: std.mem.Allocator, lhs: []const Limb, rhs: []const Limb) ![]Limb {
+    const Double = u128;
+    const out = try alloc.alloc(Limb, lhs.len + rhs.len);
+    errdefer alloc.free(out);
+    @memset(out, 0);
+    for (lhs, 0..) |a, i| {
+        var carry: Double = 0;
+        for (rhs, 0..) |b, j| {
+            const current: Double = @as(Double, a) * b + out[i + j] + carry;
+            out[i + j] = @truncate(current);
+            carry = current >> 64;
+        }
+        out[i + rhs.len] = @intCast(carry);
+    }
+    var len = out.len;
+    while (len > 0 and out[len - 1] == 0) : (len -= 1) {}
+    if (len == out.len) return out;
+    return try alloc.realloc(out, len);
+}
+
+/// Fail-index injector for the BigInt division allocation contract.
+///
+/// Two independent modes. `fail_alloc_index` refuses one numbered allocation,
+/// which sweeps the division's allocation points. `fail_shrink` refuses every
+/// shrinking realloc -- both the remap attempt and the alloc-and-copy fallback
+/// the standard allocator falls back to -- which is the only way to reach
+/// `normalize`'s error path, and that path is where ownership has to have been
+/// transferred exactly once.
+const DivFailAllocator = struct {
+    backing: std.mem.Allocator,
+    fail_alloc_index: ?usize = null,
+    fail_shrink: bool = false,
+    alloc_attempts: usize = 0,
+    induced: bool = false,
+    refuse_next_alloc: bool = false,
+    live: isize = 0,
+
+    fn allocator(self: *DivFailAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        if (self.refuse_next_alloc) {
+            self.refuse_next_alloc = false;
+            self.induced = true;
+            return null;
+        }
+        const index = self.alloc_attempts;
+        self.alloc_attempts += 1;
+        if (self.fail_alloc_index) |target| {
+            if (index == target) {
+                self.induced = true;
+                return null;
+            }
+        }
+        const result = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.live += 1;
+        return result;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        if (self.fail_shrink and new_len < memory.len) return false;
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        if (self.fail_shrink and new_len < memory.len) {
+            // Make the alloc-and-copy fallback fail too, so the realloc really
+            // fails instead of quietly succeeding down the slow path.
+            self.refuse_next_alloc = true;
+            return null;
+        }
+        return self.backing.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *DivFailAllocator = @ptrCast(@alignCast(ctx));
+        self.live -= 1;
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+fn expectDivisionUnderInjection(
+    inject: *DivFailAllocator,
+    lhs_limbs: []const bigint.Limb,
+    lhs_negative: bool,
+    rhs_limbs: []const bigint.Limb,
+    rhs_negative: bool,
+    expected_quotient: bigint.BigInt,
+    expected_remainder: bigint.BigInt,
+) !void {
+    const alloc = inject.allocator();
+    const lhs = bigint.BigInt{ .negative = lhs_negative, .limbs = @constCast(lhs_limbs), .allocator = alloc };
+    const rhs = bigint.BigInt{ .negative = rhs_negative, .limbs = @constCast(rhs_limbs), .allocator = alloc };
+
+    if (bigint.divRemAlloc(alloc, lhs, rhs)) |pair| {
+        var quotient = pair[0];
+        defer quotient.deinit();
+        var remainder = pair[1];
+        defer remainder.deinit();
+        // Succeeding under injection is fine; the result must still be right.
+        try std.testing.expectEqual(std.math.Order.eq, quotient.compare(expected_quotient));
+        try std.testing.expectEqual(std.math.Order.eq, remainder.compare(expected_remainder));
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+    // Whatever happened, nothing may be left outstanding and the inputs must be
+    // untouched -- the caller still owns them.
+    try std.testing.expectEqual(@as(isize, 0), inject.live);
+    try std.testing.expectEqualSlices(bigint.Limb, lhs_limbs, lhs.limbs);
+    try std.testing.expectEqualSlices(bigint.Limb, rhs_limbs, rhs.limbs);
+}
+
+/// Checks `q * b + r == a`, `abs(r) < abs(b)`, the remainder's sign, and that
+/// neither result carries a leading zero limb.
+fn expectDivisionIdentity(
+    lhs_limbs: []const bigint.Limb,
+    lhs_negative: bool,
+    rhs_limbs: []const bigint.Limb,
+    rhs_negative: bool,
+) !void {
+    const alloc = std.testing.allocator;
+    const lhs = bigint.BigInt{ .negative = lhs_negative, .limbs = @constCast(lhs_limbs), .allocator = alloc };
+    const rhs = bigint.BigInt{ .negative = rhs_negative, .limbs = @constCast(rhs_limbs), .allocator = alloc };
+
+    var quotient = try lhs.div(rhs);
+    defer quotient.deinit();
+    var remainder = try lhs.rem(rhs);
+    defer remainder.deinit();
+
+    var product = try bigint.mulAlloc(alloc, quotient, rhs);
+    defer product.deinit();
+    var recovered = try bigint.addAlloc(alloc, product, remainder);
+    defer recovered.deinit();
+    try std.testing.expectEqual(std.math.Order.eq, recovered.compare(lhs));
+
+    const abs_remainder = bigint.BigInt{ .limbs = remainder.limbs, .allocator = alloc };
+    const abs_rhs = bigint.BigInt{ .limbs = @constCast(rhs_limbs), .allocator = alloc };
+    try std.testing.expectEqual(std.math.Order.lt, abs_remainder.compare(abs_rhs));
+    try std.testing.expect(remainder.isZero() or remainder.negative == lhs_negative);
+    try std.testing.expect(quotient.isZero() or
+        quotient.negative == (lhs_negative != rhs_negative));
+    if (quotient.limbs.len != 0)
+        try std.testing.expect(quotient.limbs[quotient.limbs.len - 1] != 0);
+    if (remainder.limbs.len != 0)
+        try std.testing.expect(remainder.limbs[remainder.limbs.len - 1] != 0);
+}
+
+test "basecase multiplication never reads an uninitialized result limb" {
+    var poison = PoisonAllocator{ .backing = std.testing.allocator };
+    const alloc = poison.allocator();
+
+    const shapes = [_][2]usize{
+        .{ 1, 1 }, .{ 1, 2 }, .{ 2, 1 }, .{ 2, 2 }, .{ 2, 4 },
+        .{ 4, 2 }, .{ 3, 5 }, .{ 4, 4 }, .{ 1, 8 }, .{ 8, 1 },
+        .{ 8, 8 },
+    };
+    // Both the all-ones pattern (maximal carry propagation, top carry non-zero)
+    // and a single high bit (top carry zero) are exercised per shape.
+    for (shapes) |shape| {
+        inline for (.{ true, false }) |saturated| {
+            const lhs_limbs = try alloc.alloc(bigint.Limb, shape[0]);
+            defer alloc.free(lhs_limbs);
+            const rhs_limbs = try alloc.alloc(bigint.Limb, shape[1]);
+            defer alloc.free(rhs_limbs);
+            for (lhs_limbs) |*l| l.* = if (saturated) std.math.maxInt(bigint.Limb) else 0;
+            for (rhs_limbs) |*l| l.* = if (saturated) std.math.maxInt(bigint.Limb) else 0;
+            if (!saturated) {
+                lhs_limbs[shape[0] - 1] = @as(bigint.Limb, 1) << 63;
+                rhs_limbs[shape[1] - 1] = 1;
+            }
+            const lhs = bigint.BigInt{ .limbs = lhs_limbs, .allocator = alloc };
+            const rhs = bigint.BigInt{ .limbs = rhs_limbs, .allocator = alloc };
+
+            var product = try bigint.mulAlloc(alloc, lhs, rhs);
+            defer product.deinit();
+            const expected = try referenceMul(alloc, lhs_limbs, rhs_limbs);
+            defer alloc.free(expected);
+            try std.testing.expectEqualSlices(bigint.Limb, expected, product.limbs);
+        }
+    }
+}
+
+test "single-limb division is exact and allocation-bounded" {
+    const allocator = std.testing.allocator;
+
+    // P6-04b: the single-limb divisor path allocates the quotient at its exact
+    // final length instead of walking the numerator bit by bit, so the sizing
+    // rule -- the quotient has one fewer limb exactly when the numerator's top
+    // limb is below the divisor -- has to hold for every shape.
+    const divisors = [_]bigint.Limb{
+        1,                               2,                         3,                            7,                                255, 65537,
+        (@as(bigint.Limb, 1) << 63) - 1, @as(bigint.Limb, 1) << 63, std.math.maxInt(bigint.Limb), std.math.maxInt(bigint.Limb) - 1,
+    };
+    var prng = std.Random.DefaultPrng.init(0x604B);
+    const random = prng.random();
+
+    for (1..17) |numerator_len| {
+        for (divisors) |divisor| {
+            for (0..6) |pattern| {
+                const limbs = try allocator.alloc(bigint.Limb, numerator_len);
+                defer allocator.free(limbs);
+                for (limbs, 0..) |*l, i| l.* = switch (pattern) {
+                    0 => std.math.maxInt(bigint.Limb),
+                    1 => if (i == numerator_len - 1) @as(bigint.Limb, 1) else 0,
+                    2 => if (i % 2 == 0) 0xAAAA_AAAA_AAAA_AAAA else 0x5555_5555_5555_5555,
+                    3 => if (i == numerator_len - 1) divisor else 0,
+                    4 => if (i == numerator_len - 1) divisor -| 1 else std.math.maxInt(bigint.Limb),
+                    else => random.int(bigint.Limb),
+                };
+                if (limbs[numerator_len - 1] == 0) limbs[numerator_len - 1] = 1;
+
+                const divisor_limbs = try allocator.alloc(bigint.Limb, 1);
+                defer allocator.free(divisor_limbs);
+                divisor_limbs[0] = divisor;
+
+                inline for (.{ false, true }) |numerator_negative| {
+                    inline for (.{ false, true }) |divisor_negative| {
+                        const numerator = bigint.BigInt{
+                            .negative = numerator_negative,
+                            .limbs = limbs,
+                            .allocator = allocator,
+                        };
+                        const denominator = bigint.BigInt{
+                            .negative = divisor_negative,
+                            .limbs = divisor_limbs,
+                            .allocator = allocator,
+                        };
+                        var quotient = try numerator.div(denominator);
+                        defer quotient.deinit();
+                        var remainder = try numerator.rem(denominator);
+                        defer remainder.deinit();
+
+                        // q * b + r == a, and the remainder takes the
+                        // dividend's sign with a magnitude below the divisor's.
+                        var product = try bigint.mulAlloc(allocator, quotient, denominator);
+                        defer product.deinit();
+                        var recovered = try bigint.addAlloc(allocator, product, remainder);
+                        defer recovered.deinit();
+                        try std.testing.expectEqual(std.math.Order.eq, recovered.compare(numerator));
+                        try std.testing.expect(remainder.isZero() or remainder.negative == numerator_negative);
+                        const abs_remainder = bigint.BigInt{ .limbs = remainder.limbs, .allocator = allocator };
+                        const abs_divisor = bigint.BigInt{ .limbs = divisor_limbs, .allocator = allocator };
+                        try std.testing.expectEqual(std.math.Order.lt, abs_remainder.compare(abs_divisor));
+                        // Every result stays normalized: no leading zero limb.
+                        if (quotient.limbs.len != 0)
+                            try std.testing.expect(quotient.limbs[quotient.limbs.len - 1] != 0);
+                        if (remainder.limbs.len != 0)
+                            try std.testing.expect(remainder.limbs[remainder.limbs.len - 1] != 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "multi-limb division survives a failure at every allocation point" {
+    // 6 limbs by 3, chosen so the numerator is strictly larger and the division
+    // is a real multi-limb one rather than the early return or the single-limb
+    // path. The multi-limb path allocates a normalized numerator scratch, a
+    // normalized divisor scratch, the quotient and, when non-zero, the
+    // remainder; the sweep fails each in turn.
+    const lhs_limbs = [_]bigint.Limb{
+        0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210, 0xAAAA_AAAA_AAAA_AAAB,
+        0x0000_0000_0000_0007, 0xFFFF_FFFF_FFFF_FFFF, 0x8000_0000_0000_0001,
+    };
+    const rhs_limbs = [_]bigint.Limb{
+        0xDEAD_BEEF_CAFE_BABE, 0x0000_0000_0000_0001, 0x4000_0000_0000_0000,
+    };
+
+    // Reference results, computed with a plain allocator.
+    const reference_lhs = bigint.BigInt{ .limbs = @constCast(lhs_limbs[0..]), .allocator = std.testing.allocator };
+    const reference_rhs = bigint.BigInt{ .limbs = @constCast(rhs_limbs[0..]), .allocator = std.testing.allocator };
+    var expected_quotient = try reference_lhs.div(reference_rhs);
+    defer expected_quotient.deinit();
+    var expected_remainder = try reference_lhs.rem(reference_rhs);
+    defer expected_remainder.deinit();
+
+    // How many allocations a clean division makes, so the sweep covers all of
+    // them and stops once the index is past the end.
+    var counter = DivFailAllocator{ .backing = std.testing.allocator };
+    {
+        const pair = try bigint.divRemAlloc(counter.allocator(), reference_lhs, reference_rhs);
+        var q = pair[0];
+        q.deinit();
+        var r = pair[1];
+        r.deinit();
+    }
+    try std.testing.expectEqual(@as(isize, 0), counter.live);
+    try std.testing.expect(counter.alloc_attempts > 3);
+
+    for (0..counter.alloc_attempts) |fail_index| {
+        inline for (.{ false, true }) |lhs_negative| {
+            inline for (.{ false, true }) |rhs_negative| {
+                var inject = DivFailAllocator{ .backing = std.testing.allocator, .fail_alloc_index = fail_index };
+                try expectDivisionUnderInjection(
+                    &inject,
+                    &lhs_limbs,
+                    lhs_negative,
+                    &rhs_limbs,
+                    rhs_negative,
+                    expected_quotient,
+                    expected_remainder,
+                );
+            }
+        }
+    }
+
+    // The shrinking-realloc path specifically: `normalize` frees what it is
+    // given when this fails, so a caller that kept an aliasing errdefer would
+    // free twice here. std.testing.allocator turns that into a failure.
+    var shrink = DivFailAllocator{ .backing = std.testing.allocator, .fail_shrink = true };
+    try expectDivisionUnderInjection(
+        &shrink,
+        &lhs_limbs,
+        false,
+        &rhs_limbs,
+        false,
+        expected_quotient,
+        expected_remainder,
+    );
+
+    // And the runtime keeps working afterwards.
+    var again = try reference_lhs.div(reference_rhs);
+    defer again.deinit();
+    try std.testing.expectEqual(std.math.Order.eq, again.compare(expected_quotient));
+}
+
+test "normalized long division handles every quotient-estimate correction" {
+    // Frozen vectors. Each was found by instrumenting the estimate loop with
+    // event counters, searching for inputs that trip it, and then freezing the
+    // input; the counters are not in the shipped code. Random differentials
+    // will not reach the last two on their own -- an add-back happens for
+    // roughly two in 2^64 random digits, and the clamp needs the running
+    // window's top limb to equal the divisor's -- so they have to be pinned.
+    const Vector = struct { a: []const Limb, b: []const Limb, event: []const u8 };
+    const vectors = [_]Vector{
+        // qhat overshoots by one; the two-limb correction walks it down once.
+        .{ .event = "one correction", .a = &.{
+            18446744071130631000, 18446744070582471246, 18446744073293857249,
+            18446744072649403833, 18446744073376993945,
+        }, .b = &.{ 18292791604476754667, 1966659979700317977 } },
+        .{ .event = "one correction", .a = &.{
+            12082522041592792640, 15748636029607535374, 15181851967732580813,
+        }, .b = &.{ 7374570672812560177, 9114781625496212255 } },
+        // Two and three consecutive corrections in a single digit.
+        .{ .event = "two corrections", .a = &.{ 6760, 15609, 46248, 25141, 4658, 56091 }, .b = &.{
+            13111450017376601947, 15741773727843677049,
+        } },
+        .{ .event = "three corrections", .a = &.{
+            2922364011524419948, 15199577267042544661, 8869955383828204815,
+            6086884528135068723, 17470225258706509392, 5989704710919718645,
+        }, .b = &.{ 7737569840773542854, 10212381028821443357 } },
+        // Multiply-subtract underflow followed by an add-back. Reachable only
+        // with three or more divisor limbs, where the two-limb correction can
+        // still leave qhat one too large.
+        .{ .event = "add-back", .a = &.{
+            13465684955894917774, 8558819152265836238, 6820847440565444368,
+            18276390249259064961, 7278821098085739655, 6374605922739522640,
+            7032115460613293848,
+        }, .b = &.{
+            12263064420428875817, 15085240911834220974, 12499075520100409598,
+            1862140883670459562,  9223372036854776206,
+        } },
+        .{ .event = "add-back", .a = &.{
+            10902867065322963979, 8154025842177743286, 892225491405445580,
+            6852634366156024265,  6260784258398759999,
+        }, .b = &.{
+            15187370619739732000, 16811601731636216368, 9924715777611263663,
+            9223372036854775836,
+        } },
+        .{ .event = "add-back", .a = &.{
+            7261502557649319965,  9419382559357885929, 17598245110249695978,
+            15137239819430460520, 3808798334777379262, 8297164559207748804,
+        }, .b = &.{
+            1751729836318627440, 17751592689439995320, 7534591674257631123,
+            9223372036863636856,
+        } },
+        // Window top limb equal to the divisor's, where the estimate would be
+        // the base itself and has to be clamped to maxInt before correction.
+        // Constructed: the numerator's top two limbs are below the divisor but
+        // share its top limb, so the first digit is zero and leaves them in
+        // place for the next step to see.
+        .{ .event = "clamped estimate", .a = &.{ 0xDEAD_BEEF, 0x1234, 0x8000_0000_0000_0001 }, .b = &.{
+            0xFFFF_FFFF_FFFF_FFFF, 0x8000_0000_0000_0001,
+        } },
+    };
+
+    for (vectors) |vector| {
+        inline for (.{ false, true }) |lhs_negative| {
+            inline for (.{ false, true }) |rhs_negative| {
+                expectDivisionIdentity(vector.a, lhs_negative, vector.b, rhs_negative) catch |err| {
+                    std.debug.print("vector failed: {s}\n", .{vector.event});
+                    return err;
+                };
+            }
+        }
+    }
+}
+
+test "normalized long division covers every normalization shift" {
+    var prng = std.Random.DefaultPrng.init(0x604C3);
+    const random = prng.random();
+
+    // The divisor's top limb decides the shift, so place its most significant
+    // bit at 63 - shift for all 64 values rather than sampling a few.
+    for (0..64) |shift| {
+        const top_bit: u6 = @intCast(63 - shift);
+        for (2..6) |nb| {
+            for (nb..nb + 4) |na| {
+                var b = try std.testing.allocator.alloc(bigint.Limb, nb);
+                defer std.testing.allocator.free(b);
+                var a = try std.testing.allocator.alloc(bigint.Limb, na);
+                defer std.testing.allocator.free(a);
+                for (b) |*l| l.* = random.int(bigint.Limb);
+                b[nb - 1] = (random.int(bigint.Limb) >> @as(u6, @intCast(63 - @as(u7, top_bit)))) |
+                    (@as(bigint.Limb, 1) << top_bit);
+                for (a) |*l| l.* = random.int(bigint.Limb);
+                a[na - 1] |= 1;
+                // Guarantee a real division rather than the early return.
+                if (na == nb) a[na - 1] = std.math.maxInt(bigint.Limb);
+                try expectDivisionIdentity(a, false, b, false);
+                try expectDivisionIdentity(a, true, b, false);
+            }
+        }
+    }
+}
+
+test "normalized long division covers the operand relations" {
+    const alloc = std.testing.allocator;
+    const divisor = [_]bigint.Limb{
+        0xDEAD_BEEF_CAFE_BABE, 0x0000_0000_0000_0001, 0x4000_0000_0000_0000,
+    };
+    const v = bigint.BigInt{ .limbs = @constCast(divisor[0..]), .allocator = alloc };
+
+    // lhs < rhs, lhs == rhs, quotient exactly 1, exact division, and the
+    // largest possible non-zero remainder.
+    try expectDivisionIdentity(&.{ 1, 2 }, false, &divisor, false);
+    try expectDivisionIdentity(&divisor, false, &divisor, false);
+    var plus_one = try v.cloneWithAllocator(alloc);
+    defer plus_one.deinit();
+    try plus_one.addPositiveSmallInPlace(1);
+    try expectDivisionIdentity(plus_one.limbs, false, &divisor, false);
+
+    const multiplier = [_]bigint.Limb{ 0x1234_5678_9ABC_DEF0, 0xFFFF_FFFF_FFFF_FFFF };
+    const mv = bigint.BigInt{ .limbs = @constCast(multiplier[0..]), .allocator = alloc };
+    var exact = try bigint.mulAlloc(alloc, v, mv);
+    defer exact.deinit();
+    try expectDivisionIdentity(exact.limbs, false, &divisor, false);
+
+    // exact product minus one: the largest remainder for that quotient.
+    const one_limbs = [_]bigint.Limb{1};
+    const one = bigint.BigInt{ .limbs = @constCast(one_limbs[0..]), .allocator = alloc };
+    var largest = try bigint.subAlloc(alloc, exact, one);
+    defer largest.deinit();
+    try expectDivisionIdentity(largest.limbs, false, &divisor, false);
+    try expectDivisionIdentity(largest.limbs, true, &divisor, true);
+}
+
+test "normalized long division skips a known-zero leading digit" {
+    const alloc = std.testing.allocator;
+    const Case = struct {
+        lhs: []const Limb,
+        rhs: []const Limb,
+        digits: usize,
+        lhs_negative: bool = false,
+        rhs_negative: bool = false,
+    };
+
+    // Fixed digit counts from Python `ceil(quotient.bit_length()/64)` on the
+    // same integer values; not recomputed from the production H-vs-D test.
+    const cases = [_]Case{
+        .{ .lhs = &.{ 10, 40, 50 }, .rhs = &.{ 50, 100 }, .digits = 1 },
+        .{ .lhs = &.{ 5, 10, 1 }, .rhs = &.{ 1, 1 << 63 }, .digits = 1 },
+        .{ .lhs = &.{ 10, 40, 200 }, .rhs = &.{ 50, 100 }, .digits = 2 },
+        .{ .lhs = &.{ 10, 40, 500 }, .rhs = &.{ 50, 100 }, .digits = 2 },
+        .{ .lhs = &.{ 10, 40, 50 }, .rhs = &.{ 50, 100 }, .digits = 1, .lhs_negative = true },
+    };
+
+    for (cases) |case| {
+        const lhs = bigint.BigInt{
+            .negative = case.lhs_negative,
+            .limbs = @constCast(case.lhs),
+            .allocator = alloc,
+        };
+        const rhs = bigint.BigInt{
+            .negative = case.rhs_negative,
+            .limbs = @constCast(case.rhs),
+            .allocator = alloc,
+        };
+
+        bigint.test_only.resetDigitIterations();
+        var quotient = try lhs.div(rhs);
+        defer quotient.deinit();
+        try std.testing.expectEqual(case.digits, bigint.test_only.digitIterations());
+
+        bigint.test_only.resetDigitIterations();
+        var remainder = try lhs.rem(rhs);
+        defer remainder.deinit();
+        try std.testing.expectEqual(case.digits, bigint.test_only.digitIterations());
+
+        bigint.test_only.resetDigitIterations();
+        const pair = try bigint.divRemAlloc(alloc, lhs, rhs);
+        var both_q = pair[0];
+        defer both_q.deinit();
+        var both_r = pair[1];
+        defer both_r.deinit();
+        try std.testing.expectEqual(case.digits, bigint.test_only.digitIterations());
+        try std.testing.expectEqual(std.math.Order.eq, both_q.compare(quotient));
+        try std.testing.expectEqual(std.math.Order.eq, both_r.compare(remainder));
+
+        try expectDivisionIdentity(case.lhs, case.lhs_negative, case.rhs, case.rhs_negative);
+    }
+}
+
+test "reciprocal two-by-one division is exactly the wide division" {
+    const Double = u128;
+
+    // Not an approximation: for every input the reciprocal helper must return
+    // the same quotient and remainder the direct u128 / u64 would. If it ever
+    // differed, the second-limb correction and add-back counts downstream would
+    // move, which would be an implementation defect rather than a performance
+    // difference.
+    const Case = struct {
+        fn check(high: Limb, low: Limb, divisor: Limb) !void {
+            const reciprocal = bigint.normalizedReciprocalInit(divisor);
+            const got = bigint.divTwoByOneReciprocal(high, low, divisor, reciprocal);
+            const numerator = (@as(Double, high) << 64) | low;
+            try std.testing.expectEqual(@as(Limb, @intCast(numerator / divisor)), got.quotient);
+            try std.testing.expectEqual(@as(Limb, @intCast(numerator % divisor)), got.remainder);
+        }
+    };
+
+    const divisors = [_]Limb{
+        @as(Limb, 1) << 63,
+        (@as(Limb, 1) << 63) + 1,
+        (@as(Limb, 1) << 63) | 0x5555_5555_5555_5555,
+        std.math.maxInt(Limb) - 1,
+        std.math.maxInt(Limb),
+        0xFFFF_FFFF_0000_0000,
+        0x8000_0000_0000_0001,
+        0xC000_0000_0000_0000,
+    };
+    const lows = [_]Limb{
+        0,                  1,                        std.math.maxInt(Limb), std.math.maxInt(Limb) - 1,
+        @as(Limb, 1) << 63, (@as(Limb, 1) << 63) - 1, 0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555,
+    };
+    for (divisors) |divisor| {
+        // high must stay below divisor, which the division loop guarantees by
+        // routing `top == v1` to the clamped branch.
+        const highs = [_]Limb{ 0, 1, divisor - 1, divisor - 2, divisor >> 1, (divisor >> 1) + 1 };
+        for (highs) |high| {
+            for (lows) |low| try Case.check(high, low, divisor);
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x604D1);
+    const random = prng.random();
+    for (0..1_000_000) |_| {
+        const divisor = random.int(Limb) | (@as(Limb, 1) << 63);
+        const high = random.uintLessThan(Limb, divisor);
+        const low = random.int(Limb);
+        try Case.check(high, low, divisor);
+    }
+    // Extra weight on the boundary divisors, where the reciprocal is at its
+    // smallest and its largest.
+    for (0..200_000) |_| {
+        const divisor = if (random.boolean()) @as(Limb, 1) << 63 else std.math.maxInt(Limb);
+        const high = random.uintLessThan(Limb, divisor);
+        const low = random.int(Limb);
+        try Case.check(high, low, divisor);
+    }
+}

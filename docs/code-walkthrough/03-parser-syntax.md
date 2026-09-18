@@ -235,7 +235,7 @@ LHS 的 `.` / `[]` / 调用 / 模板标签 / `?.` 循环。`?.` 发 `optional_ch
 - **作用**：把 ident/关键字/字符串/数字收成属性名 atom。
 - **实现**：
 ident / 可用的 `await` / 关键字 / 字符串 / 数字（bigint 先 format）。返回 atom、是否 `__proto__`、能否简写、是否转义。无法构成名字返回 null（调用方处理计算名）。
-- **所有权 / 错误 / 调用**：返回的 `ObjectPropertyName.atom` 分两种来源，但如今**所有权义务相同**：ident 臂直接借 `s.token.payload.ident.atom`，关键字臂取预定义 id，字符串/数字臂则 `atoms.internString` 新建——三者都只是 id，由 `CompileAtomScope` 在整场编译内作根，调用方不需要也不应该 release。结构体原来还有一个 `retained` 字段（记 atom 是不是本函数新 intern 的），**全树无人读取**，是旧引用计数协议的残留，已连同三处写入一并删除。真正的生命周期约束是借用语义而非计数：ident 臂的 id 在 `s.advance()` 之后仍然有效（`advance` 释放的是 token payload，不是 atom），这正是 `tools/architecture/check_borrowed_atoms.js` 那三条规则在管的事。分配只有 bigint 属性名的 `formatBigIntPropertyName` 临时缓冲，由 `defer ... free(text)` 就地释放。错误：`internString` 的 `OutOfMemory`、`advance` 的 lexer 错误族；不认识的 token 返回 `null`（由调用方决定是不是语法错误）。7 处调用方：`parseObjectProperty`（`:6766`/`:6797`/`:6827`）、`parseObjectAccessorProperty`（`:6897`）、`parseObjectPatternBody`（`:13041`）、`parseClassElement`（`:13788`/`:13879`）。
+- **所有权 / 错误 / 调用**：返回的 `ObjectPropertyName.atom` 分两种来源，但如今**所有权义务相同**：ident 臂直接借 `s.token.payload.ident.atom`，关键字臂取预定义 id，字符串/数字臂则 `atoms.internString` 新建——三者都只是 id，由 `CompileAtomScope` 在整场编译内作根，调用方不需要也不应该 release。结构体原来还有一个 `retained` 字段（记 atom 是不是本函数新 intern 的），**全树无人读取**，是旧引用计数协议的残留，已连同三处写入一并删除。真正的生命周期约束是借用语义而非计数：ident 臂的 id 在 `s.advance()` 之后仍然有效（`advance` 释放的是 token payload，不是 atom），由整场编译的 `CompileAtomScope` 作根。分配只有 bigint 属性名的 `formatBigIntPropertyName` 临时缓冲，由 `defer ... free(text)` 就地释放。错误：`internString` 的 `OutOfMemory`、`advance` 的 lexer 错误族；不认识的 token 返回 `null`（由调用方决定是不是语法错误）。7 处调用方：`parseObjectProperty`（`:6766`/`:6797`/`:6827`）、`parseObjectAccessorProperty`（`:6897`）、`parseObjectPatternBody`（`:13041`）、`parseClassElement`（`:13788`/`:13879`）。
 
 ### `escapedIdentifierIsReservedWordForBinding` (`src/parser.zig:6748`)
 
@@ -250,7 +250,7 @@ ident / 可用的 `await` / 关键字 / 字符串 / 数字（bigint 先 format�
 - **作用**：比较一个 atom 的名字文本是否等于给定字符串。
 - **实现**：
 `atoms.name(atom_id)` 取名字后 `std.mem.eql`；atom 查不到名字（如已释放/非法 id）返回 false。
-- **所有权 / 错误 / 调用**：无：`atoms.name(atom_id)` 返回的是 AtomTable 内部的**借用**字节切片，当场比较完即弃，不复制、不释放；atom id 本身也只是读。不分配、无 error set，未知 id 返回 `false`。全树 50 处调用（分布在 41 行，全部在 `src/parser.zig` 内），是 parser 里最常用的「名字是不是 eval/arguments/await/of」判定：`defineVar`（`src/parser.zig:1816`）、`isReservedLabelIdentifier`（`:2343`-`:2347`）、`peekNextIsOfToken`（`:2485`）、`getLValue`（`:4359`）等。`tools/architecture/check_borrowed_atoms.js:40` 专门把它作为「在 token 生命周期内消费、不算借用外泄」的范例。
+- **所有权 / 错误 / 调用**：无：`atoms.name(atom_id)` 返回的是 AtomTable 内部的**借用**字节切片，当场比较完即弃，不复制、不释放；atom id 本身也只是读。不分配、无 error set，未知 id 返回 `false`。全树 50 处调用（分布在 41 行，全部在 `src/parser.zig` 内），是 parser 里最常用的「名字是不是 eval/arguments/await/of」判定：`defineVar`（`src/parser.zig:1816`）、`isReservedLabelIdentifier`（`:2343`-`:2347`）、`peekNextIsOfToken`（`:2485`）、`getLValue`（`:4359`）等。这是「在 token 生命周期内消费、不算借用外泄」的典型形状。
 
 ### `atomsNameEqual` (`src/parser.zig:6980`)
 

@@ -1,6 +1,6 @@
 # 18 — 事件循环、CLI、test262 runner
 
-本册覆盖引擎边界上的宿主代码：`src/runtime/` 的事件循环、`src/cli/` 的 `zjs` 与 `run-test262`。它们都不进 `core`：`tools/architecture/check_deps.js` 的 core 规则把 `src/runtime/`（事件循环所在）、`src/cli/` 连同 `binding`/`builtins`/`exec`/`parser` 一起列为禁止依赖。
+本册覆盖引擎边界上的宿主代码：`src/event_loop.zig` 的事件循环、`src/cli/` 的 `zjs` 与 `run-test262`。它们都不进 `core`：`src/core/` 不得依赖 `src/event_loop.zig`、`src/cli/`，也不得依赖 `binding`/`builtins`/`exec`/`parser`。
 
 语义权威仍是 ECMA-262；QuickJS libc / `qjs.c` / `run-test262.c` 是对照实现。动态插件加载器已于 2026-09-06 删除（owner D8），公开宿主函数只走 `zjs.native`。叶签名是引擎私有 `LeafSig`，在 08 / 13 册。
 
@@ -16,7 +16,7 @@ zjs / zjs-dev / zjs-profile          run-test262 / test-runner
         │                                      │
         └──────────────┬───────────────────────┘
                        ▼
-              src/runtime/event_loop.zig
+              src/event_loop.zig
                 EventLoop.install → JSContext.host_event_loop
                        │
                        ▼
@@ -29,13 +29,13 @@ zjs / zjs-dev / zjs-profile          run-test262 / test-runner
                 再回到 1，直到四条宿主臂都空
 ```
 
-`src/runtime/root.zig` 是嵌入方看见的门面（`zjs.runtime`：事件循环）。模块图、Atomics wake/cleanup、ArrayBuffer detach 由 CLI / test262 直接调 `src/exec/`。`src/cli/panic_policy.zig` 给两个二进制钉 ReleaseFast 的无符号表 panic。
+`src/event_loop.zig` 就是嵌入方看见的门面（`zjs.runtime`：事件循环）。模块图、Atomics wake/cleanup、ArrayBuffer detach 由 CLI / test262 直接调 `src/exec/`。`src/cli/panic_policy.zig` 给两个二进制钉 ReleaseFast 的无符号表 panic。
 
 ## 分册目录
 
 | 文件 | 覆盖 |
 | --- | --- |
-| [18-event-loop.md](18-event-loop.md) | `src/runtime/event_loop.zig`、`root.zig` |
+| [18-event-loop.md](18-event-loop.md) | `src/event_loop.zig` |
 | [18-cli.md](18-cli.md) | `src/cli/zjs.zig`、`cli_process.zig`、`panic_policy.zig` |
 | [18-test262.md](18-test262.md) | `run_test262*.zig`：选项、配置、名字、元数据、已知失败、源、host `$262.agent`、reporter、编排 |
 
@@ -106,7 +106,7 @@ owner 2026-09-06 D8（设计稿 0.9）：**硬切**。下列路径已从树中�
 - `tests/fixtures/*plugin*`
 - 公共名 `zjs.host.*` 旧 FFI、`zjs.ffi`、`zjs.runtime.Plugin`
 
-`src/runtime/root.zig` 的测试钉死：`plugin` / `ffi` / `cleanup` 等内部名不得出现在嵌入门面。
+`src/event_loop.zig` 的测试钉死：`plugin` / `ffi` / `cleanup` 等内部名不得出现在嵌入门面。
 
 **留下的公开面**只有：
 
@@ -122,7 +122,7 @@ owner 2026-09-06 D8（设计稿 0.9）：**硬切**。下列路径已从树中�
 
 ## 覆盖核对
 
-- 清单函数数: 306（`src/runtime/*` 57 + `src/cli/*` 249）
-- 零函数文件: `src/runtime/root.zig`、`src/cli/panic_policy.zig`（正文有文件级讲解）
+- 清单函数数: 见当前 `src/event_loop.zig` + `src/cli/*`
+- 零函数文件: `src/cli/panic_policy.zig`（正文有文件级讲解）
 - 本文标题覆盖: 见各分册合计；以 `_check_coverage.py` 为准
 - 未覆盖: 无

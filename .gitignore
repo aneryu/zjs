@@ -24,6 +24,8 @@ reports/test262-latest/
 reports/test262-stress/
 reports/test262-stress-*/
 reports/test262-s0-*/
+reports/test262-s[2-9]*/
+reports/test262-abl/
 
 # Local runtime-profile output. Scripts stay tracked; opcode scope is
 # currently disconnected so these artifacts are not a gate.

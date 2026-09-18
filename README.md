@@ -33,14 +33,16 @@ for untrusted code, the QuickJS C ABI, or complete TypeScript language support.
 
 ## Performance: bench-v8
 
-The public comparison uses **bench-v8**, vendored in this repository
-(`tools/perf/bench_v8/`). Since 2026-08-25 the vendored suite is **Octane
-2.0 (V8 suite version 9)**; the current cross-engine snapshot (zjs/QuickJS
-composite ratio 0.9611 against a GCC 16.0.1 reference build) is recorded in
-[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md). Scores are the
-suite's self-reported numbers (higher is better). Suite scores are not
-comparable across suite versions or reference binaries, and which build is
-the official yardstick is an open owner decision; the superseded version-7
+The public comparison is the **bench-v8** (Octane 2.0, V8 suite version 9)
+snapshot in
+[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md). The current
+cross-engine reading is zjs/QuickJS composite **0.9666** against the GCC
+16.0.1 yardstick. Scores are the suite's self-reported numbers (higher is
+better). Suite scores are not comparable across suite versions or
+reference binaries. The official yardstick was ruled 2026-08-26 (BASE-G0):
+the GCC-16 reference build pinned in
+`reports/evidence/BASE-G0/manifest.json`. The suite itself is no longer
+vendored in-tree; the snapshot is the record. The superseded version-7
 records were removed on 2026-08-25 and live in git history.
 
 This is a single-machine snapshot, not a portable ranking. The detailed

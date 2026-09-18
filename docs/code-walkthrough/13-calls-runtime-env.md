@@ -426,7 +426,7 @@
 - **签名**：`pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !void`。
 - **作用**：`queueMicrotask`。
 - **实现**：`enqueuePendingPromiseJob`。
-- **所有权 / 错误 / 调用**：`call.zig` 的 `globalQueueMicrotask` 与 `runtime/event_loop.zig`。
+- **所有权 / 错误 / 调用**：`call.zig` 的 `globalQueueMicrotask` 与 `src/event_loop.zig`。
 
 ### `throwTypeErrorIntrinsicForGlobal` (`src/exec/call_runtime.zig:4445`)
 
