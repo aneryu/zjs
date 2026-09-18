@@ -861,7 +861,7 @@ fn hostVerifyPropertyFlag(ctx: *zjs.JSContext, values: []const zjs.JSValue, flag
     return zjs.JSValue.undefinedValue();
 }
 
-fn verifyDescriptorObject(ctx: *zjs.JSContext, actual: zjs.PropertyDescriptor, expected: zjs.JSValue) !void {
+fn verifyDescriptorObject(ctx: *zjs.JSContext, actual: zjs.core.PropertyDescriptor, expected: zjs.JSValue) !void {
     if (try expectedHas(ctx, expected, "value")) {
         const expected_value = try expectedValue(ctx, expected, "value");
         if (!actual.value.sameValue(expected_value)) return error.JSException;
