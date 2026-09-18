@@ -86,9 +86,9 @@ test "no-suspend async overflow allocation failure leaves published roots intact
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(@as(u32, 1), store.count);
     try std.testing.expect(store.chunks == null);
-    try std.testing.expectEqual(@as(?i32, 7), store.at(first).callee.asInt32());
-    try std.testing.expectEqual(@as(?i32, 11), store.at(first).promise.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), store.at(first).callee.as(.int));
+    try std.testing.expectEqual(@as(?i32, 11), store.at(first).promise.as(.int));
     store.release(first);
     try std.testing.expectEqual(@as(u32, 0), store.count);
-    try std.testing.expect(store.first.promise.isUndefined() and store.first.callee.isUndefined());
+    try std.testing.expect(store.first.promise.is(.undefined_value) and store.first.callee.is(.undefined_value));
 }

@@ -24,7 +24,7 @@ fn privateFieldAtom(
         object_ops.objectRealmGlobal(function_object) orelse global
     else
         global;
-    if (!receiver.isObject()) {
+    if (!receiver.is(.object)) {
         _ = try exception_ops.throwTypeErrorMessage(ctx, error_global, "not an object");
         unreachable;
     }

@@ -29,7 +29,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 
 | 偏移感 | 字段 | 说明 |
 | --- | --- | --- |
-| header | `GCObjectHeader` | 8 B |
+| header | `gc.Header` | 8 B |
 | +0 | `js_mode` | bit0 = strict |
 | +1 | `flag_byte17` | prototype / simple params / derived / home / func_kind / new.target / super() |
 | +2 | `flag_byte18` | super / arguments / has_debug / rom(恒 0) / eval / has_extension / runtime_strict |

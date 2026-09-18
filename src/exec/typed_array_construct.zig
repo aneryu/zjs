@@ -36,11 +36,11 @@ noinline fn bufferConstructArgs(
 ) !core.JSValue {
     const byte_length = if (args.len >= 1) try typed_array_core.toIndexUsize(rt, args[0]) else @as(usize, 0);
     var max_byte_length: ?usize = null;
-    if (args.len >= 2 and !args[1].isUndefined() and args[1].isObject()) {
+    if (args.len >= 2 and !args[1].is(.undefined_value) and args[1].is(.object)) {
         const options = try typed_array_core.expectObject(args[1]);
         const key = core.atom.ids.maxByteLength;
         const max_value = try options.getProperty(key);
-        if (!max_value.isUndefined()) {
+        if (!max_value.is(.undefined_value)) {
             const max = try typed_array_core.toIndexUsize(rt, max_value);
             if (max < byte_length) return error.RangeError;
             max_byte_length = max;

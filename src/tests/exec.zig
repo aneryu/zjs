@@ -68,7 +68,7 @@ test "dense parameter arrays rest keeps contiguous storage and independent value
         \\assert.sameValue(collect(0).length, 0);
         \\a;
     , .{ .filename = "<repl>" });
-    try std.testing.expect(result.isObject());
+    try std.testing.expect(result.is(.object));
     const array = helpers.objectFromValue(result);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
     try std.testing.expectEqual(@as(usize, 3), array.arrayElements().len);
@@ -83,12 +83,12 @@ test "dense parameter arrays spread keeps contiguous storage for array and custo
         "[0, ...{ [Symbol.iterator]() { let i=0; return { next() { return {value: ++i, done: i>3}; } }; } }, 4]",
     }) |source| {
         const result = try js.evalWithOptions(source, .{ .filename = "<repl>" });
-        try std.testing.expect(result.isObject());
+        try std.testing.expect(result.is(.object));
         const array = helpers.objectFromValue(result);
         try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
         try std.testing.expectEqual(@as(usize, 5), array.arrayElements().len);
         for (array.arrayElements(), 0..) |value, index| {
-            try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
+            try std.testing.expectEqual(@as(?i32, @intCast(index)), value.as(.int));
         }
     }
 }
@@ -111,7 +111,7 @@ test "dense parameter arrays spread retains CreateDataProperty constraints" {
         }
         try std.testing.expectError(error.TypeError, engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
         try std.testing.expectEqual(@as(u32, if (mode == 2) 1 else 0), target.arrayLength());
-        if (mode == 2) try std.testing.expectEqual(@as(?i32, 42), (try target.getProperty(core.atom.atomFromUInt32(0))).asInt32());
+        if (mode == 2) try std.testing.expectEqual(@as(?i32, 42), (try target.getProperty(core.atom.atomFromUInt32(0))).as(.int));
     }
 }
 
@@ -130,7 +130,7 @@ test "dense parameter arrays spread reserves one backing cell for a known dense 
     const before = js.runtime.gc.liveCountKind(.array_storage);
     try std.testing.expectEqual(@as(i32, 8), try engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
     try std.testing.expectEqual(before + 1, js.runtime.gc.liveCountKind(.array_storage));
-    for (target.arrayElements(), 1..) |value, index| try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
+    for (target.arrayElements(), 1..) |value, index| try std.testing.expectEqual(@as(?i32, @intCast(index)), value.as(.int));
 }
 
 test "dense parameter arrays spread reserve OOM preserves iterator progress and retries" {
@@ -153,7 +153,7 @@ test "dense parameter arrays spread reserve OOM preserves iterator progress and 
     try std.testing.expectEqual(@as(usize, 1), helpers.objectFromValue(source).iteratorIndexSlot().*);
     try std.testing.expectEqual(@as(u32, 0), target.arrayLength());
     try std.testing.expectEqual(@as(i32, 1023), try engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
-    for (target.arrayElements()) |value| try std.testing.expectEqual(@as(?i32, 37), value.asInt32());
+    for (target.arrayElements()) |value| try std.testing.expectEqual(@as(?i32, 37), value.as(.int));
     try std.testing.expect(helpers.objectFromValue(source).iteratorTargetSlot().* == null);
 }
 
@@ -365,7 +365,7 @@ test "object_slots2 literal allocation preserves data and accessor semantics" {
         \\pair.c = 5;
         \\if (accessor.x + pair.c !== 12) throw new Error("object_slots2");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "fused cmp_if_false8 interrupt poll stays uncatchable in a for loop" {
@@ -453,7 +453,7 @@ test "interrupt budget survives Machine replacement and bypasses catch markers" 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const state_key = try js.runtime.internAtom("__w2_interrupt_state");
     const observed = try global.getProperty(state_key);
-    try std.testing.expectEqual(@as(?i32, 0), observed.asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), observed.as(.int));
 
     var exception = try js.takeExceptionInfo();
     defer exception.deinit();
@@ -531,7 +531,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     try std.testing.expect(preallocated.sameValue(exception));
 
     const caught = try global.getProperty(caught_key);
-    try std.testing.expectEqual(false, caught.asBool().?);
+    try std.testing.expectEqual(false, caught.as(.boolean).?);
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
@@ -548,7 +548,7 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), recovered.as(.int));
     try std.testing.expectEqual(@as(usize, 2), arm.calls);
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
@@ -615,8 +615,8 @@ test "uncatchable interrupt skips outer inline for-of close and catch" {
 
     const closed = try global.getProperty(closed_key);
     const caught = try global.getProperty(caught_key);
-    try std.testing.expectEqual(false, closed.asBool().?);
-    try std.testing.expectEqual(false, caught.asBool().?);
+    try std.testing.expectEqual(false, closed.as(.boolean).?);
+    try std.testing.expectEqual(false, caught.as(.boolean).?);
 
     _ = js.context.takeException();
     try std.testing.expect(!js.context.exceptionIsUncatchable());
@@ -756,7 +756,7 @@ test "synchronous native reentry crosses Entry chunk boundaries exactly" {
             null,
             null,
         );
-        try std.testing.expectEqual(@as(?i32, @intCast(depth)), result.asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(depth)), result.as(.int));
 
         const metrics = inline_calls.machineTestMetrics();
         try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -841,7 +841,7 @@ test "synchronous native fence restores every budget after interrupt" {
     try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
     try std.testing.expect(js.context.exceptionIsUncatchable());
     const caught = try global.getProperty(caught_key);
-    try std.testing.expectEqual(false, caught.asBool().?);
+    try std.testing.expectEqual(false, caught.as(.boolean).?);
     try std.testing.expect(js.runtime.active_invocation == null);
     try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
@@ -890,7 +890,7 @@ test "Function and Reflect apply opt into the active Machine explicitly" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 18), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 18), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -936,7 +936,7 @@ test "synchronous apply fallbacks restore the outer active invocation" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
@@ -994,7 +994,7 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
@@ -1028,7 +1028,7 @@ test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallback
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const result_key = try js.runtime.internAtom("__ctor_gate_result");
     const result = try global.getProperty(result_key);
-    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), result.as(.int));
 }
 
 test "constructor allocation profile reserves capacity without skipping the body" {
@@ -1072,7 +1072,7 @@ test "constructor allocation profile reserves capacity without skipping the body
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const result_key = try js.runtime.internAtom("__alloc_profile");
     const result = try global.getProperty(result_key);
-    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), result.as(.int));
 }
 
 test "constructor return fusion and abrupt teardown each release the fallback exactly once" {
@@ -1110,7 +1110,7 @@ test "constructor return fusion and abrupt teardown each release the fallback ex
     const total_key = try js.runtime.internAtom("__ctor_fusion_total");
     const total = try global.getProperty(total_key);
     // Keep: 0+1+2 = 3, Override: 1+2+3 = 6, Abrupt catch: 3, Derived: 3.
-    try std.testing.expectEqual(@as(?i32, 15), total.asInt32());
+    try std.testing.expectEqual(@as(?i32, 15), total.as(.int));
 }
 
 test "constructor spread preserves new target on the current Machine" {
@@ -1191,7 +1191,7 @@ test "constructor spread preserves new target on the current Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 20), ordinary_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 20), ordinary_result.as(.int));
     try std.testing.expectEqual(@as(usize, 1), inline_calls.machineTestMetrics().machine_inits);
 
     const derived_outer_key = try js.runtime.internAtom("__spreadDerivedConstructorOuter");
@@ -1208,7 +1208,7 @@ test "constructor spread preserves new target on the current Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 21), derived_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 21), derived_result.as(.int));
     const derived_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), derived_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), derived_metrics.entry_chunk_allocations);
@@ -1229,7 +1229,7 @@ test "constructor spread preserves new target on the current Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.as(.int));
     try std.testing.expectEqual(@as(usize, 2), inline_calls.machineTestMetrics().machine_inits);
 }
 
@@ -1340,7 +1340,7 @@ test "Array and TypedArray synchronous callback cohort stays on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -1495,7 +1495,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -1546,7 +1546,7 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), recovered.as(.int));
 }
 
 test "accessors Proxy traps and primitive coercion stay on the active Machine" {
@@ -1815,7 +1815,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -1841,7 +1841,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.as(.int));
     const foreign_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     // The local plain accessor is already emitted as a direct VM
@@ -1888,7 +1888,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), recovered.as(.int));
 }
 
 test "JSON synchronous callback cohort stays on one Machine" {
@@ -2015,7 +2015,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -2041,7 +2041,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 20), foreign_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 20), foreign_result.as(.int));
     const foreign_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
@@ -2086,7 +2086,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), recovered.as(.int));
 }
 
 test "string regexp iterator helpers and DisposableStack stay on one Machine" {
@@ -2271,7 +2271,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
@@ -2497,7 +2497,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 
     const executor_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 1), executor_metrics.machine_inits);
@@ -2519,7 +2519,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
 
     const reaction_value_key = try js.runtime.internAtom("__promiseExecutorReactionValue");
     const reaction_value = try global.getProperty(reaction_value_key);
-    try std.testing.expectEqual(@as(?i32, 42), reaction_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), reaction_value.as(.int));
     const order_key = try js.runtime.internAtom("__promiseExecutorJobOrder");
     const order = try global.getProperty(order_key);
     try helpers.expectStringValueBytes(order, "throw,outer,success-job,reject-job");
@@ -2537,7 +2537,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), foreign_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), foreign_result.as(.int));
     const foreign_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
@@ -2560,7 +2560,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), interrupted_executor_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), interrupted_executor_result.as(.int));
     try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
@@ -2589,7 +2589,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), recovered.as(.int));
 }
 
 test "nested calls and generator resumes share one Realm interrupt cadence" {
@@ -2650,7 +2650,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 7), nested_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), nested_result.as(.int));
     try std.testing.expectEqual(@as(usize, 1), state.hits);
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
 
@@ -2667,7 +2667,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 11), branch_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), branch_result.as(.int));
     try std.testing.expectEqual(@as(usize, 2), state.hits);
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
 
@@ -2701,7 +2701,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         null,
         null,
     );
-    try std.testing.expectEqual(@as(?i32, 13), forwarded_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 13), forwarded_result.as(.int));
     try std.testing.expectEqual(@as(usize, 3), state.hits);
     try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
 
@@ -2885,7 +2885,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
     try std.testing.expectEqual(@as(i32, 100), child.interrupt_counter);
     const before_body = try child_global.getProperty(body_key);
-    try std.testing.expectEqual(false, before_body.asBool().?);
+    try std.testing.expectEqual(false, before_body.as(.boolean).?);
 
     const caller_exception = js.context.takeException();
     const caller_error = try core.Object.expect(caller_exception);
@@ -2912,7 +2912,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     try std.testing.expectEqual(@as(i32, 99), js.context.interrupt_counter);
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, child.interrupt_counter);
     const after_body = try child_global.getProperty(body_key);
-    try std.testing.expectEqual(true, after_body.asBool().?);
+    try std.testing.expectEqual(true, after_body.as(.boolean).?);
 
     const callee_exception = child.takeException();
     const callee_error = try core.Object.expect(callee_exception);
@@ -2939,7 +2939,7 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
         ),
     );
     const stack_body_before = try child_global.getProperty(stack_body_key);
-    try std.testing.expectEqual(false, stack_body_before.asBool().?);
+    try std.testing.expectEqual(false, stack_body_before.as(.boolean).?);
     const stack_exception = js.context.takeException();
     const stack_error = try core.Object.expect(stack_exception);
     try std.testing.expectEqual(caller_internal_error, stack_error.getPrototype().?);
@@ -3050,7 +3050,7 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
         \\print("bounded:" + __w2Down(__w2Down, 100));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "small-1:InternalError:stack overflow\n" ++
             "small-2:InternalError:stack overflow\n" ++
@@ -3422,7 +3422,7 @@ test "js_function_set_properties publishes configurable length then name" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const key = try js.runtime.internAtom("__r11_name_ok");
     const result = try global.getProperty(key);
-    try std.testing.expect(result.asInt32() == @as(?i32, 1) or result.asNumber() == @as(?f64, 1.0));
+    try std.testing.expect(result.as(.int) == @as(?i32, 1) or result.asNumber() == @as(?f64, 1.0));
 }
 
 test "get_var_ref reuses the open cell on a second capture of the same local" {
@@ -3484,7 +3484,7 @@ test "js_closure2 attach roots captures through the function object" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const out_key = try js.runtime.internAtom("__r11_out");
     const total = try global.getProperty(out_key);
-    try std.testing.expect(total.asInt32() == @as(?i32, 33) or total.asNumber() == @as(?f64, 33.0));
+    try std.testing.expect(total.as(.int) == @as(?i32, 33) or total.asNumber() == @as(?f64, 33.0));
 }
 
 test "var-ref growth promotes borrowed captures to owned cells" {
@@ -3605,7 +3605,7 @@ test "ordinary global closure selector preserves QuickJS cell waterfall and owne
     try global.defineOwnProperty(rt, data_name, core.Descriptor.data(core.JSValue.int32(41), true, true, true));
     const parked_first = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, data_name);
     const parked_cell = core.VarRef.fromValue(parked_first) orelse return error.TestExpectedEqual;
-    try std.testing.expect(parked_cell.varRefValue().isUninitialized());
+    try std.testing.expect(parked_cell.varRefValue().is(.uninitialized));
     parked_cell.is_lexical = true;
     parked_cell.varRefIsConstSlot().* = true;
     parked_cell.varRefIsFunctionNameSlot().* = true;
@@ -3851,7 +3851,7 @@ test "W1 property sites stay correct across every shape mutation that invalidate
         \\assert.sameValue(readA(px), 1, "proxy value");
         \\assert.sameValue(trapped, 1, "proxy trap ran");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "W1 native-getter sites re-resolve the accessor out of the guarded slot" {
@@ -3884,7 +3884,7 @@ test "W1 native-getter sites re-resolve the accessor out of the guarded slot" {
         \\Object.defineProperty(K.prototype, "g", { get: function () { return 2; }, configurable: true });
         \\assert.sameValue(readG(k), 2, "js getter replaced");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "runtime-strict script still constructs its global function declaration" {
@@ -3898,7 +3898,7 @@ test "runtime-strict script still constructs its global function declaration" {
         \\print(Object.prototype.hasOwnProperty.call(globalThis, "__qjsRuntimeStrictGlobalFunction"));
     , &output, .script, "runtime-strict-global-function.js", true);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n", output.buffered());
 }
 
@@ -3988,7 +3988,7 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
         rejected = true;
     }
     try std.testing.expect(rejected);
-    try std.testing.expectEqual(@as(?i32, 41), args[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), args[0].as(.int));
     try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
 
     var occupied_value = core.JSValue.int32(7);
@@ -4001,7 +4001,7 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
         rejected = true;
     }
     try std.testing.expect(rejected);
-    try std.testing.expectEqual(@as(?i32, 41), args[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), args[0].as(.int));
     try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
     try std.testing.expectEqual(occupied_ref, full_open_refs[0].?);
 
@@ -4044,7 +4044,7 @@ test "local growth rejects moving storage after an open binding is published" {
     try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, 1, core.JSValue.int32(8)));
     rt.setMemoryLimit(null);
     try exec_frame.setLocal(&rt.memory, 0, core.JSValue.int32(9));
-    try std.testing.expectEqual(@as(?i32, 9), open_ref.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 9), open_ref.varRefValue().as(.int));
 }
 
 test "call-binding OOM leaves input references with the caller" {
@@ -4119,7 +4119,7 @@ test "strict generator resident frame supports qjs argument counts beyond u16 st
         \\}
         \\assert.sameValue(manyArgs.apply(null, Array(40000)).next().value, 40000);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 pub const helpers = @import("helpers.zig");
@@ -4180,7 +4180,7 @@ test "vm executes push constants arithmetic comparisons and return" {
     defer function.deinit(rt);
 
     const result = try runFunction(rt, ctx, &function);
-    try std.testing.expectEqual(true, result.asBool().?);
+    try std.testing.expectEqual(true, result.as(.boolean).?);
 }
 
 test "Engine executes both paths of a threaded with atom-label destructuring probe" {
@@ -4197,7 +4197,7 @@ test "Engine executes both paths of a threaded with atom-label destructuring pro
         \\assert.sameValue(threadedTotal, 42);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
@@ -4215,7 +4215,7 @@ test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
         \\assert.sameValue(-(1), -1);
         \\assert.sameValue(Object.is(-(0), -0), true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "heap bigint multiplication still compacts a short-representable product" {
@@ -4244,7 +4244,7 @@ test "heap bigint multiplication still compacts a short-representable product" {
         \\assert.sameValue(4000000000n * 4000000000n, 16000000000000000000n);
         \\assert.sameValue(String(4000000000n * 4000000000n), "16000000000000000000");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "numeric discarded immediates preserve comma control and completion semantics" {
@@ -4272,13 +4272,13 @@ test "numeric discarded immediates preserve comma control and completion semanti
         \\assert.sameValue(eval("+1"), 1);
         \\assert.sameValue(eval("-2147483648"), -2147483648);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const repl = try js.evalWithOptions("1", .{ .filename = "<repl>" });
-    try std.testing.expectEqual(@as(?i32, 1), repl.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), repl.as(.int));
 
     const module = try js.evalModule("1; export const numericDiscardModule = 1;");
-    try std.testing.expect(module.isUndefined());
+    try std.testing.expect(module.is(.undefined_value));
 }
 
 test "vm executes stack constants source locations and return_undef" {
@@ -4293,8 +4293,8 @@ test "vm executes stack constants source locations and return_undef" {
     defer function.deinit(rt);
 
     const result = try runFunction(rt, ctx, &function);
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "frame setLocal handles self-assignment without dropping object" {
@@ -4503,7 +4503,7 @@ test "class entry and construction use bytecode gates without a class behavior f
         \\assert.sameValue(computedNewTarget, Replacement);
         \\assert.sameValue(Object.getPrototypeOf(computed), Replacement.prototype);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "ordinary constructor Machine completion preserves bindings eval recursion and abrupt teardown" {
@@ -4563,7 +4563,7 @@ test "ordinary constructor Machine completion preserves bindings eval recursion 
         \\const gcValue = new GcConstructor(11);
         \\assert.sameValue(gcValue.value, 11);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -4645,7 +4645,7 @@ test "derived constructor Machine completion preserves inherited new target and 
         \\assert.sameValue(count, 25);
         \\$262.gc();
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -4677,7 +4677,7 @@ test "Reflect.construct keeps a fresh prototype getter result alive through inst
         \\assert.sameValue(prototypeGets, 256);
         \\assert.sameValue(receiverIsNewTarget, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Proxy wrapping a class named Array never enters the native Array construct record" {
@@ -4705,7 +4705,7 @@ test "Proxy wrapping a class named Array never enters the native Array construct
         \\assert.sameValue(array[0], 1);
         \\assert.sameValue(array[1], 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Proxy native constructor forwarding resolves new target prototype before coercion" {
@@ -4738,7 +4738,7 @@ test "Proxy native constructor forwarding resolves new target prototype before c
         \\assert.sameValue(Object.getPrototypeOf(error), forwardedPrototype);
         \\assert.sameValue(error.message, "message");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "default derived constructor follows the live constructor prototype" {
@@ -4774,7 +4774,7 @@ test "default derived constructor follows the live constructor prototype" {
         \\assert.sameValue(nullSuperError.constructor, TypeError);
         \\assert.sameValue(nullSuperError.message, "not a function");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "class constructor opcode errors preserve QuickJS messages and realms" {
@@ -4811,7 +4811,7 @@ test "class constructor opcode errors preserve QuickJS messages and realms" {
         \\assert.sameValue(other.capturedThisError.constructor, other.ReferenceError);
         \\assert.sameValue(other.capturedThisError.message, "this is not initialized");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "direct spread and arrow super follow the live derived constructor prototype" {
@@ -4955,7 +4955,7 @@ test "derived constructor arrow and direct eval observe the same this value" {
         \\}();
     , &output);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true true\n", output.buffered());
 }
 
@@ -4977,7 +4977,7 @@ test "derived constructor direct eval this shortcut preserves TDZ" {
         \\}();
     , &output);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("ReferenceError ReferenceError\n", output.buffered());
 }
 
@@ -4996,7 +4996,7 @@ test "bound function call skips zero-length combined args allocation" {
     const base_allocations = rt.memory.allocation_count;
 
     const result = try engine.exec.call.callValue(ctx, null, bound.value(), &.{});
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
 }
@@ -5028,18 +5028,18 @@ test "property ops use shared object semantics" {
     try engine.exec.property_ops.defineDataProperty(rt, obj, key, core.JSValue.int32(9));
     try engine.exec.property_ops.setProperty(rt, obj, key, core.JSValue.int32(10));
     const value = try engine.exec.property_ops.getProperty(rt, obj, key);
-    try std.testing.expectEqual(@as(?i32, 10), value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 10), value.as(.int));
 
     const direct_value = try engine.exec.property_ops.getPropertyValue(rt, obj.value(), key);
-    try std.testing.expectEqual(@as(?i32, 10), direct_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 10), direct_value.as(.int));
 
     const key_string_obj = try core.string.String.createUtf8(rt, "x");
     const key_string = key_string_obj.value();
     const in_result = try engine.exec.property_ops.propertyIn(rt, obj.value(), key_string);
-    try std.testing.expectEqual(true, in_result.asBool().?);
+    try std.testing.expectEqual(true, in_result.as(.boolean).?);
 
     const optional_result = try engine.exec.property_ops.optionalGetPropertyValue(rt, core.JSValue.nullValue(), key);
-    try std.testing.expect(optional_result.isUndefined());
+    try std.testing.expect(optional_result.is(.undefined_value));
 
     try std.testing.expect(engine.exec.property_ops.deleteProperty(rt, obj, key));
 }
@@ -5051,7 +5051,7 @@ test "value ops own primitive VM semantics" {
     defer ctx.destroy();
 
     const sum = try engine.exec.value_ops.binary(rt, op.add, core.JSValue.int32(2), core.JSValue.int32(3));
-    try std.testing.expectEqual(@as(?i32, 5), sum.asInt32());
+    try std.testing.expectEqual(@as(?i32, 5), sum.as(.int));
 
     const suffix_obj = try core.string.String.createUtf8(rt, "px");
     const suffix = suffix_obj.value();
@@ -5107,7 +5107,7 @@ test "value ops own primitive VM semantics" {
         op.eq,         op.@"return",
     });
     const eq_result = try runFunction(rt, ctx, &function);
-    try std.testing.expectEqual(true, eq_result.asBool().?);
+    try std.testing.expectEqual(true, eq_result.as(.boolean).?);
 
     try std.testing.expect(!engine.exec.value_ops.isTruthy(core.JSValue.int32(0)));
 }
@@ -5120,8 +5120,8 @@ test "closure helper stores closure state outside the VM" {
     const first = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
     const second = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
 
-    try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
-    try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
+    try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
 }
 
 test "M1.3: returned closure can update and return captured counter" {
@@ -5140,7 +5140,7 @@ test "M1.3: returned closure can update and return captured counter" {
         \\  return next() * 100 + next() * 10 + next();
         \\})()
     );
-    try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 123), result.as(.int).?);
 }
 
 test "resident set_var_ref preserves assignment results and refcounted self-assignment" {
@@ -5179,7 +5179,7 @@ test "resident set_var_ref preserves assignment results and refcounted self-assi
         \\assert.sameValue(__residentSetVarRefGeneric(genericObject), genericObject);
         \\assert.sameValue(__residentSetVarRefGeneric(43), 43);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const short = try globalFunctionBytecode(&js, "__residentSetVarRefShort");
     const short_set = try finalSetVarRefStats(short.byteCode());
@@ -5233,7 +5233,7 @@ test "resident stack permutations preserve assignment values and ownership" {
         \\assert.sameValue(target.count, 12345678901234567891n);
         \\assert.sameValue(marker.alive, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const insert2 = try globalFunctionBytecode(&js, "__residentInsert2");
     try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(insert2.byteCode(), op.insert2));
@@ -5439,7 +5439,7 @@ test "typed array int32 store fast arm preserves conversion and assignment seman
         \\assert.sameValue(u8[0], 2);
         \\assert.sameValue(coercions, 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const store = try globalFunctionBytecode(&js, "__typedIntStore");
     try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(store.byteCode(), op.put_array_el));
@@ -5461,7 +5461,7 @@ test "checked local replacement preserves int fast moves and refcounted fallback
         \\  return value;
         \\})()
     );
-    try std.testing.expectEqual(@as(?i32, 3), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 3), result.as(.int));
 }
 
 test "an expression helper emits an explicit return after a bytecode call" {
@@ -5473,7 +5473,7 @@ test "an expression helper emits an explicit return after a bytecode call" {
     const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
         \\(function identity(value) { return value; })(42)
     );
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 }
 
 test "TDZ: closure update and return of captured const throws TypeError" {
@@ -5505,7 +5505,7 @@ test "forward-ref top-level lexical captured through a nested closure resolves a
         \\const G = 42;
         \\mk()();
     );
-    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 42), result.as(.int).?);
 }
 
 test "forward-ref lexical captured through nested closure still honors TDZ before init" {
@@ -5526,7 +5526,7 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
         \\const G = 42;
         \\code;
     );
-    try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 2), result.as(.int).?);
 }
 
 test "global closure get before top-level lexical initialization honors TDZ" {
@@ -5541,7 +5541,7 @@ test "global closure get before top-level lexical initialization honors TDZ" {
         \\try { f(); print("no"); } catch (e) { print(e.name); }
         \\let x;
     , &let_output);
-    try std.testing.expect(let_result.isUndefined());
+    try std.testing.expect(let_result.is(.undefined_value));
     try std.testing.expectEqualStrings("ReferenceError\n", let_output.buffered());
 
     var const_output_buffer: [64]u8 = undefined;
@@ -5551,7 +5551,7 @@ test "global closure get before top-level lexical initialization honors TDZ" {
         \\try { f(); print("no"); } catch (e) { print(e.name); }
         \\const y = 1;
     , &const_output);
-    try std.testing.expect(const_result.isUndefined());
+    try std.testing.expect(const_result.is(.undefined_value));
     try std.testing.expectEqualStrings("ReferenceError\n", const_output.buffered());
 }
 
@@ -5567,7 +5567,7 @@ test "global closure set before top-level lexical initialization honors TDZ" {
         \\try { f(); print("no"); } catch (e) { print(e.name); }
         \\let x;
     , &output);
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
 }
 
@@ -5583,7 +5583,7 @@ test "global closure update before top-level lexical initialization honors TDZ" 
         \\try { f(); print("no"); } catch (e) { print(e.name); }
         \\let x;
     , &output);
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
 }
 
@@ -5604,7 +5604,7 @@ test "Annex B block function updates existing global function binding" {
         \\print(f());
     , &output);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("inner declaration\n", output.buffered());
 }
 
@@ -5632,7 +5632,7 @@ test "block function declarations instantiate at scope entry" {
         \\print(typeof annexScoped);
     , &output);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("function\nfunction\nfunction\nfunction\n", output.buffered());
 }
 
@@ -5650,7 +5650,7 @@ test "Annex B eval block function updates global function binding mirrors" {
         \\eval('{ function f() { return "second declaration"; } }');
         \\print(f());
     , &direct_output);
-    try std.testing.expect(direct_result.isUndefined());
+    try std.testing.expect(direct_result.is(.undefined_value));
     try std.testing.expectEqualStrings("second declaration\n", direct_output.buffered());
 
     var indirect_output_buffer: [64]u8 = undefined;
@@ -5658,7 +5658,7 @@ test "Annex B eval block function updates global function binding mirrors" {
     const indirect_result = try js.evalWithOutput(
         \\(0, eval)('{ function g() { return "inner declaration"; } } print(g()); function g() { return "outer declaration"; }');
     , &indirect_output);
-    try std.testing.expect(indirect_result.isUndefined());
+    try std.testing.expect(indirect_result.is(.undefined_value));
     try std.testing.expectEqualStrings("inner declaration\n", indirect_output.buffered());
 }
 
@@ -5670,19 +5670,19 @@ test "Annex B direct eval global function does not block later script lexical de
     const eval_result = try js.eval(
         \\eval('if (true) { function test262Fn() {} }');
     );
-    try std.testing.expect(eval_result.isUndefined());
+    try std.testing.expect(eval_result.is(.undefined_value));
 
     const lexical_result = try js.eval(
         \\let test262Fn = 1;
     );
-    try std.testing.expect(lexical_result.isUndefined());
+    try std.testing.expect(lexical_result.is(.undefined_value));
 
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const read_result = try js.evalWithOutput(
         \\print(test262Fn);
     , &output);
-    try std.testing.expect(read_result.isUndefined());
+    try std.testing.expect(read_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1\n", output.buffered());
 }
 
@@ -5698,7 +5698,7 @@ test "sloppy global assignment creates deletable object property" {
         \\print(delete this.x);
         \\print(Object.prototype.hasOwnProperty.call(this, "x"));
     , &this_output);
-    try std.testing.expect(this_result.isUndefined());
+    try std.testing.expect(this_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\nfalse\n", this_output.buffered());
 
     var global_output_buffer: [64]u8 = undefined;
@@ -5708,7 +5708,7 @@ test "sloppy global assignment creates deletable object property" {
         \\print(delete globalThis.y);
         \\print(Object.prototype.hasOwnProperty.call(globalThis, "y"));
     , &global_output);
-    try std.testing.expect(global_result.isUndefined());
+    try std.testing.expect(global_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\nfalse\n", global_output.buffered());
 }
 
@@ -5725,7 +5725,7 @@ test "forward-ref top-level lexical threads through three closure levels" {
         \\const G = 7;
         \\a()()();
     );
-    try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 7), result.as(.int).?);
 }
 
 test "top-level function declarations use wide closure operands past 255 constants" {
@@ -5744,7 +5744,7 @@ test "top-level function declarations use wide closure operands past 255 constan
     try source.appendSlice(std.testing.allocator, "f259();");
 
     const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx, source.items);
-    try std.testing.expectEqual(@as(i32, 259), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 259), result.as(.int).?);
 }
 
 test "function expressions execute wide closure operands past 255 constants" {
@@ -5765,13 +5765,13 @@ test "function expressions execute wide closure operands past 255 constants" {
     try source.appendSlice(std.testing.allocator, "]; functions[256]();");
 
     const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx, source.items);
-    try std.testing.expectEqual(@as(i32, 256), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 256), result.as(.int).?);
 }
 
 test "test262 helpers own SameValue assertions" {
     const run_test262 = @import("../cli/run_test262.zig");
     const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
-    try std.testing.expect(same_nan.isUndefined());
+    try std.testing.expect(same_nan.is(.undefined_value));
     try std.testing.expectError(error.JSException, run_test262.assertSameValue(core.JSValue.int32(1), core.JSValue.int32(2)));
 }
 
@@ -5800,7 +5800,7 @@ test "call subsystem installs and invokes host globals" {
     const args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.boolean(true) };
     const result = try engine.exec.call.callValue(ctx, &stream, print, &args);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("1 true\n", stream.buffered());
 
     const console_key = try rt.internAtom("console");
@@ -5814,7 +5814,7 @@ test "call subsystem installs and invokes host globals" {
 
     const log_args = [_]core.JSValue{ core.JSValue.int32(2), core.JSValue.boolean(false) };
     const log_result = try engine.exec.call.callValue(ctx, &stream, log, &log_args);
-    try std.testing.expect(log_result.isUndefined());
+    try std.testing.expect(log_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1 true\n2 false\n", stream.buffered());
 
     const assert_key = try rt.internAtom("assert");
@@ -5826,14 +5826,14 @@ test "call subsystem installs and invokes host globals" {
 
     const same_args = [_]core.JSValue{ core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)) };
     const same_result = try engine.exec.call.callValue(ctx, null, same_value, &same_args);
-    try std.testing.expect(same_result.isUndefined());
+    try std.testing.expect(same_result.is(.undefined_value));
     const mismatch_args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.int32(2) };
     try std.testing.expectError(error.JSException, engine.exec.call.callValue(ctx, null, same_value, &mismatch_args));
 
     const test262_key = try rt.internAtom("Test262Error");
     const test262_ctor = try global.getProperty(test262_key);
     const test262_error = try engine.exec.call.callValue(ctx, null, test262_ctor, &.{});
-    try std.testing.expect(test262_error.isObject());
+    try std.testing.expect(test262_error.is(.object));
 
     const map_value = try engine.exec.collection_ops.construct(ctx, 1);
     const map_object = core.Object.fromHeader(map_value.refHeader().?);
@@ -5917,7 +5917,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
 
@@ -5931,7 +5931,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
         \\}
         \\undefined;
     );
-    try std.testing.expect(definition.isUndefined());
+    try std.testing.expect(definition.is(.undefined_value));
 
     const global = js.context.global.?;
     const name = try js.runtime.internAtom("directFunctionBytecode");
@@ -5953,7 +5953,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
         function_value,
         &first_args,
     );
-    try std.testing.expectEqual(@as(?i32, 2), first.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), first.as(.int));
 
     const second_args = [_]core.JSValue{core.JSValue.int32(2)};
     const second = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
@@ -5965,7 +5965,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
         function_value,
         &second_args,
     );
-    try std.testing.expectEqual(@as(?i32, 3), second.asInt32());
+    try std.testing.expectEqual(@as(?i32, 3), second.as(.int));
 
     const rerun = try js.eval(
         \\assert.sameValue(directFunctionBytecode(3), 4);
@@ -5979,7 +5979,7 @@ test "bytecode calls execute directly from the shared function bytecode" {
         \\    });
         \\undefined;
     );
-    try std.testing.expect(rerun.isUndefined());
+    try std.testing.expect(rerun.is(.undefined_value));
 }
 
 test "Math cproto dispatch preserves observable ToNumber semantics" {
@@ -6025,7 +6025,7 @@ test "local add_loc retains string snapshots after accumulator tail removal" {
         \\if (verifySnapshot() !== 4096) throw new Error("snapshot mutated");
         \\globalThis.__rope_tail_probe = build();
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const global = js.context.global orelse return error.TypeError;
     const probe_atom = try js.runtime.internAtom("__rope_tail_probe");
@@ -6174,7 +6174,7 @@ test "checked lexical string accumulation keeps rope depth bounded" {
         \\}
         \\globalThis.__checked_lexical_rope_probe = build();
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const global = js.context.global orelse return error.TypeError;
     const probe_atom = try js.runtime.internAtom("__checked_lexical_rope_probe");
@@ -6239,7 +6239,7 @@ test "computed reads with cached string atoms preserve exotic and prototype sema
         \\assert.sameValue(recyclingProxy[recycledKey], 456);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "native dispatch metadata is internal and ignores user properties" {
@@ -6264,7 +6264,7 @@ test "native dispatch metadata is internal and ignores user properties" {
         \\print(a.length);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\ntrue\n1\ntrue\n2\n2\n", stream.buffered());
 }
 
@@ -6283,7 +6283,7 @@ test "scope resolver skips popped lexical shadow for destructured parameter" {
         \\}
         \\assert.sameValue(f({ comment: "ok", items: [1] }), "ok");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "__zjs-prefixed user properties are ordinary own properties" {
@@ -6304,7 +6304,7 @@ test "__zjs-prefixed user properties are ordinary own properties" {
         \\print("__zjs_user" in o);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("__zjs_user|__zjs_non_enum\n1\n2\n__zjs_user|__zjs_non_enum\n__zjs_user\ntrue\n", stream.buffered());
 }
 
@@ -6330,7 +6330,7 @@ test "array species fast path markers are internal" {
         \\print([3].filter(function() { return true; }).join(","));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\nfalse\ntrue\ntrue\n2,3\ntrue\ntrue\n3\n", stream.buffered());
 }
 
@@ -6421,7 +6421,7 @@ test "auto-init builtin markers are internal and ignore user properties" {
         \\});
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "false\ntrue\n1\ntrue\n1\n" ++
             "false\ntrue\n1\ntrue\n1\n" ++
@@ -6464,7 +6464,7 @@ test "immutable prototype marker is internal" {
         \\print(Reflect.setPrototypeOf(Object.prototype, null));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\nfalse\nTypeError\ntrue\ntrue\n", stream.buffered());
 }
 
@@ -6499,7 +6499,7 @@ test "builtin dispatch function markers are internal" {
         \\});
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "false\ntrue\nstring\ntrue\nstring\n" ++
             "false\ntrue\nE: m\ntrue\nE: m\n" ++
@@ -6546,7 +6546,7 @@ test "proxy revocation target is internal" {
         \\print("done");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ndone\n", stream.buffered());
 }
 
@@ -6580,7 +6580,7 @@ test "regexp accessor realm TypeError constructor is internal" {
         \\}
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\nfalse\ntrue\ntrue\ntrue\n", stream.buffered());
 }
 
@@ -6620,7 +6620,7 @@ test "throw type error intrinsic marker is internal" {
         \\print(threw);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\nfalse\nfunction\nfalse\ntrue\nTypeError\nfalse\ntrue\ntrue\n", stream.buffered());
 
     _ = try js.eval("globalThis.__thrower_probe = Object.getOwnPropertyDescriptor(Function.prototype, \"arguments\").get;");
@@ -6654,7 +6654,7 @@ test "async generator prototype method marker is internal" {
         \\print("__zjs_async_generator_method" in next);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\nfalse\n", stream.buffered());
 }
 
@@ -6712,7 +6712,7 @@ test "generator instances inherit shared prototype methods" {
         \\print(Object.getPrototypeOf(asyncGenerator()) === AsyncGeneratorPrototype);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "0\ntrue\ntrue\ntrue\ntrue\n1\nundefined\n2:1\ntrue\ntrue\ntrue\n0\ntrue\ntrue\ntrue\ntrue\n1\nundefined\ntrue\ntrue\n",
         stream.buffered(),
@@ -6770,7 +6770,7 @@ test "generator object uses the prototype selected after parameter initializatio
         \\async function* asyncGenerator(value = (asyncGenerator.prototype = asyncPrototype)) {}
         \\if (Object.getPrototypeOf(asyncGenerator()) !== asyncPrototype) throw new Error("async prototype order");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "closure-env var_ref hitting rc zero during remove_cycles stays a batch no-op" {
@@ -6883,7 +6883,7 @@ test "cycle drain frees leftover-rc rings under repeated forceGC" {
     var round: usize = 0;
     while (round < 8) : (round += 1) {
         const result = try js.evalWithOptions(body, .{ .filename = "<repl>" });
-        try std.testing.expectEqual(@as(?i32, 32), result.asInt32());
+        try std.testing.expectEqual(@as(?i32, 32), result.as(.int));
         _ = try js.runtime.forceGC(null);
         try std.testing.expectEqual(cell_steady, js.runtime.gc.liveCountKind(.var_ref));
         try std.testing.expectEqual(object_steady, js.runtime.gc.liveCountKind(.object));
@@ -6899,7 +6899,7 @@ test "major tracing keeps a heap BigInt reachable through an object" {
         \\$262.gc();
         \\assert.sameValue(live.x === 0x10000000000000000n, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "generator continuation keeps its FunctionBytecode alive after every source binding is dropped" {
@@ -6920,7 +6920,7 @@ test "generator continuation keeps its FunctionBytecode alive after every source
         \\var second = it.next().value;
         \\first * 100 + second;
     , .{ .filename = "<repl>" });
-    try std.testing.expectEqual(@as(?i32, 1011), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1011), result.as(.int));
 
     // The async frame was also suspended across the forced collection after
     // its only source-level function binding was cleared. Drain through the
@@ -6929,7 +6929,7 @@ test "generator continuation keeps its FunctionBytecode alive after every source
     const async_check = try js.eval(
         \\assert.sameValue(escapeAuditAsyncResult, 105);
     );
-    try std.testing.expect(async_check.isUndefined());
+    try std.testing.expect(async_check.is(.undefined_value));
 }
 
 test "initial_yield keeps sync generators in suspended-start after parameter initialization" {
@@ -6962,7 +6962,7 @@ test "initial_yield keeps sync generators in suspended-start after parameter ini
         \\assert.sameValue(initialYieldEvents.join(","), "param,body,param,param");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "initial_yield keeps async generators in suspended-start" {
@@ -7015,7 +7015,7 @@ test "initial_yield executes exported generator bytecode in module mode" {
         \\assert.sameValue(moduleInitialYieldEvents.join(","), "param,body");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "generator completion resumes keep the original function home object" {
@@ -7062,7 +7062,7 @@ test "generator completion resumes keep the original function home object" {
         \\assert.sameValue(step.done, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "resident generator resumes preserve nested catch and finally targets" {
@@ -7128,7 +7128,7 @@ test "resident generator resumes preserve nested catch and finally targets" {
         \\assert.sameValue(iterator.next().done, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "surviving var references keep resident local slots bare" {
@@ -7159,7 +7159,7 @@ test "surviving var references keep resident local slots bare" {
     try std.testing.expect(function.openVarRefCount() > 0);
     try std.testing.expect(function.varDefs()[target_idx].isCaptured());
     try std.testing.expect(!function.varDefs()[target_idx].isLexical());
-    try std.testing.expectEqual(@as(?i32, 41), state.storage.frame.locals[target_idx].asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), state.storage.frame.locals[target_idx].as(.int));
     try std.testing.expect(core.VarRef.fromValue(state.storage.frame.locals[target_idx]) == null);
     var found_open_alias = false;
     for (state.storage.frame.open_var_refs) |maybe_ref| {
@@ -7173,7 +7173,7 @@ test "surviving var references keep resident local slots bare" {
         \\assert.sameValue(step.value, 42);
         \\assert.sameValue(step.done, true);
     );
-    try std.testing.expect(completion.isUndefined());
+    try std.testing.expect(completion.is(.undefined_value));
 }
 
 test "direct eval captures only bindings visible at its call scope" {
@@ -7229,7 +7229,7 @@ test "suspended generators retain one resident execution owner across resumes" {
         \\assert.sameValue(second.value.argument, true);
         \\assert.sameValue(second.done, false);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const key = try js.runtime.internAtom("__residentGenerator");
@@ -7256,7 +7256,7 @@ test "suspended generators retain one resident execution owner across resumes" {
         \\assert.sameValue(finalStep.value, undefined);
         \\assert.sameValue(finalStep.done, true);
     );
-    try std.testing.expect(completion.isUndefined());
+    try std.testing.expect(completion.is(.undefined_value));
     try std.testing.expect(generator.generatorDone());
     try std.testing.expect(!generator.generatorExecutionState().has_frame);
     try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
@@ -7352,7 +7352,7 @@ test "iterator helper method marker is internal" {
         \\});
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "map\n[object Iterator Helper]\nown:\nproto:next,return\nfalse\nfunction\ntrue\n" ++
             "concat\n[object Iterator Concat]\nown:\nproto:next,return\nfalse\nfunction\ntrue\n" ++
@@ -7417,7 +7417,7 @@ test "Iterator.from follows QuickJS wrapper selection" {
         \\}
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     // The first four values changed on 2026-08-21. They used to read
     // "true, 0, undefined" — the source returned unwrapped, its `next` getter
     // never read, and no iterator helpers on the result — and this test pinned
@@ -7456,7 +7456,7 @@ test "number native builtin records cover static and prototype dispatch" {
     try std.testing.expectEqualStrings("notNumberIsInteger", static_dispatch_name);
     const static_args = [_]core.JSValue{core.JSValue.float64(3.5)};
     const static_result = try engine.exec.call.callValue(ctx, null, fake_static, &static_args);
-    try std.testing.expectEqual(false, static_result.asBool().?);
+    try std.testing.expectEqual(false, static_result.as(.boolean).?);
 
     const prototype_value = try number_object.getProperty(prototype_key);
     const prototype_object = core.Object.fromHeader(prototype_value.refHeader().?);
@@ -7488,7 +7488,7 @@ test "number native builtin records cover static and prototype dispatch" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
 }
 
@@ -7587,7 +7587,7 @@ test "string static native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("B\n", output.buffered());
 }
 
@@ -7620,7 +7620,7 @@ test "string prototype native builtin records ignore dispatch names" {
     const receiver_string = try core.string.String.createUtf8(rt, "banana");
     const direct_args = [_]core.JSValue{ needle_string.value(), core.JSValue.int32(3) };
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver_string.value(), fake, &direct_args);
-    try std.testing.expectEqual(@as(i32, 4), direct_result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 4), direct_result.as(.int).?);
 
     const fake_key = try rt.internAtom("fakeStringIndexOf");
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
@@ -7633,7 +7633,7 @@ test "string prototype native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("4\n", output.buffered());
 }
 
@@ -7670,7 +7670,7 @@ test "String case conversion records preserve coercion and Unicode semantics" {
     const pure_result = try engine.exec.string_ops.callStringBody(js.context, pure_source.value(), 3, &.{});
     try std.testing.expect((pure_result.asStringBody() orelse return error.TestUnexpectedResult).eqlBytes("abc"));
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "date static native builtin records ignore dispatch names" {
@@ -7711,7 +7711,7 @@ test "date static native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
 }
 
@@ -7767,7 +7767,7 @@ test "date constructor native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
 }
 
@@ -7851,7 +7851,7 @@ test "date prototype native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
 }
 
@@ -7885,7 +7885,7 @@ test "array static native builtin records ignore dispatch names" {
     const direct_array = try engine.exec.array_builtin_ops.construct(rt, &.{core.JSValue.int32(1)});
     const direct_is_array_args = [_]core.JSValue{direct_array};
     const is_array_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake_is_array, &direct_is_array_args);
-    try std.testing.expectEqual(true, is_array_result.asBool().?);
+    try std.testing.expectEqual(true, is_array_result.as(.boolean).?);
 
     const fake_from = try engine.core.function.nativeFunction(ctx, "notArrayFrom", 1);
     const fake_from_object = core.Object.fromHeader(fake_from.refHeader().?);
@@ -7912,7 +7912,7 @@ test "array static native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
 }
 
@@ -7992,7 +7992,7 @@ test "array prototype native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
 }
 
@@ -8051,7 +8051,7 @@ test "collection native builtin records ignore dispatch names" {
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_map, fake_map_set, &direct_args);
     try std.testing.expect(direct_result.same(direct_map));
     const direct_get_result = try engine.exec.collection_ops.methodCall(rt, direct_map, 2, &.{direct_key});
-    try std.testing.expectEqual(@as(?i32, 7), direct_get_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), direct_get_result.as(.int));
 
     const fake_group_by = try engine.core.function.nativeFunction(ctx, "notMapGroupBy", 2);
     const fake_group_by_object = core.Object.fromHeader(fake_group_by.refHeader().?);
@@ -8085,7 +8085,7 @@ test "collection native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
 }
 
@@ -8174,7 +8174,7 @@ test "buffer native builtin records ignore dispatch names" {
     const direct_slice_object = core.Object.fromHeader(direct_slice_result.refHeader().?);
     try std.testing.expectEqual(@as(usize, 3), direct_slice_object.byteStorage().len);
     const direct_length_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_byte_length, &.{});
-    try std.testing.expectEqual(@as(?i32, 6), direct_length_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 6), direct_length_result.as(.int));
 
     const fake_is_view_key = try rt.internAtom("fakeArrayBufferIsView");
     try global.defineOwnProperty(rt, fake_is_view_key, core.Descriptor.data(fake_is_view, true, false, true));
@@ -8210,7 +8210,7 @@ test "buffer native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
 }
 
@@ -8259,9 +8259,9 @@ test "typed array accessor native builtin records ignore dispatch names" {
     const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
     const direct_typed_array = try engine.exec.buffer_ops.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
     const direct_byte_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_byte_length, &.{});
-    try std.testing.expectEqual(@as(?i32, 8), direct_byte_length.asInt32());
+    try std.testing.expectEqual(@as(?i32, 8), direct_byte_length.as(.int));
     const direct_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_length, &.{});
-    try std.testing.expectEqual(@as(?i32, 8), direct_length.asInt32());
+    try std.testing.expectEqual(@as(?i32, 8), direct_length.as(.int));
 
     const fake_byte_length_key = try rt.internAtom("fakeTypedArrayByteLength");
     try global.defineOwnProperty(rt, fake_byte_length_key, core.Descriptor.data(fake_byte_length, true, false, true));
@@ -8284,7 +8284,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
 }
 
@@ -8329,7 +8329,7 @@ test "regexp static native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
 }
 
@@ -8394,10 +8394,10 @@ test "regexp prototype native builtin records ignore dispatch names" {
     try std.testing.expect(first_match_string.eqlBytes("a"));
     const index_key = try rt.internAtom("index");
     const index_value = try exec_array.getProperty(index_key);
-    try std.testing.expectEqual(@as(i32, 1), index_value.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 1), index_value.as(.int).?);
 
     const test_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_test, &direct_args);
-    try std.testing.expectEqual(true, test_result.asBool().?);
+    try std.testing.expectEqual(true, test_result.as(.boolean).?);
 
     const to_string_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_to_string, &.{});
     try std.testing.expect(to_string_result.isString());
@@ -8419,7 +8419,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
 }
 
@@ -8481,7 +8481,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const one_arg = [_]core.JSValue{input_string.value()};
     const search_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_search, &one_arg);
-    try std.testing.expectEqual(@as(i32, 1), search_result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 1), search_result.as(.int).?);
 
     const match_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match, &one_arg);
     const match_array = core.Object.fromHeader(match_result.refHeader().?);
@@ -8531,7 +8531,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
 }
 
@@ -8579,7 +8579,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     try std.testing.expect(source_string.eqlBytes("a\\/b"));
 
     const global_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_global, &.{});
-    try std.testing.expectEqual(true, global_result.asBool().?);
+    try std.testing.expectEqual(true, global_result.as(.boolean).?);
 
     const fake_source_key = try rt.internAtom("fakeRegExpSourceGetter");
     try global.defineOwnProperty(rt, fake_source_key, core.Descriptor.data(fake_source, true, false, true));
@@ -8598,7 +8598,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
-    try std.testing.expect(vm_result.isUndefined());
+    try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
 }
 
@@ -8715,7 +8715,7 @@ test "qjs alignment C1 for-head lexical self-reference observes TDZ" {
         \\assert.sameValue(closureCaught, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "qjs alignment C2 string for-of observes patched iterator" {
@@ -8749,7 +8749,7 @@ test "qjs alignment C2 string for-of observes patched iterator" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "qjs alignment C3 in operator respects null prototype" {
@@ -8764,7 +8764,7 @@ test "qjs alignment C3 in operator respects null prototype" {
         \\assert.sameValue("toString" in bare, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "qjs alignment X-02 Array length Set redirects when Receiver differs" {
@@ -8956,7 +8956,7 @@ test "qjs alignment C4 Array instanceof follows prototype chain" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "instanceof resident dispatch preserves GetMethod and result coercion semantics" {
@@ -9072,7 +9072,7 @@ test "instanceof resident dispatch preserves GetMethod and result coercion seman
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "default Function hasInstance uses Ordinary; other native records still Call" {
@@ -9111,7 +9111,7 @@ test "default Function hasInstance uses Ordinary; other native records still Cal
         \\assert.sameValue(instance instanceof C, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "local reference-tail lowering preserves binding semantics" {
@@ -9155,7 +9155,7 @@ test "local reference-tail lowering preserves binding semantics" {
         \\assert.sameValue(directEval(), 2);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "qjs alignment const local writes throw from resolved bytecode" {
@@ -9199,7 +9199,7 @@ test "qjs alignment const local writes throw from resolved bytecode" {
         \\assert.sameValue(strictNameCaught, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "qjs alignment named function self-binding ignores every sloppy write form" {
@@ -9323,7 +9323,7 @@ test "qjs alignment named function self-binding ignores every sloppy write form"
         \\assert.sameValue(generatorDefault().next().value, generatorDefault);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval executes test262 helpers through generic call paths" {
@@ -9331,7 +9331,7 @@ test "Engine eval executes test262 helpers through generic call paths" {
     defer helpers.endSharedTest();
 
     const result = try js.eval("assert.sameValue(1 + 1, 2, 'sum');");
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectError(error.JSException, js.eval("assert.sameValue(1, 2);"));
     try std.testing.expectError(error.JSException, js.eval("throw new Test262Error('boom');"));
 }
@@ -9353,7 +9353,7 @@ test "shared test engine reset rebuilds global shape hash buckets" {
         \\print(this === globalThis);
     , &stream);
 
-    try std.testing.expect(clean_result.isUndefined());
+    try std.testing.expect(clean_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n", stream.buffered());
 }
 
@@ -9368,7 +9368,7 @@ test "Engine eval strips TypeScript source kind before execution" {
         \\function add(input: number): number { return input + 1; }
         \\assert.sameValue(add(value), 42 as number);
     , .{ .source_kind = .typescript });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval strips TypeScript method annotations" {
@@ -9381,7 +9381,7 @@ test "Engine eval strips TypeScript method annotations" {
         \\assert.sameValue(new C().m(41), 41);
         \\assert.sameValue(object.m(41), 42);
     , .{ .source_kind = .typescript });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval preserves as and satisfies runtime property names in TypeScript files" {
@@ -9392,7 +9392,7 @@ test "Engine eval preserves as and satisfies runtime property names in TypeScrip
         \\const obj = { as: 1, satisfies: 2 };
         \\assert.sameValue(obj.as + obj.satisfies, 3);
     , .{ .source_kind = .typescript });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval supports TypeScript parameter properties" {
@@ -9406,7 +9406,7 @@ test "Engine eval supports TypeScript parameter properties" {
         \\const b = new Box(42);
         \\b.value === 42 ? 42 : 0
     , .{ .source_kind = .typescript, .mode = .eval_indirect });
-    try std.testing.expectEqual(@as(i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(i32, 42), result.as(.int));
 }
 
 test "Engine eval strips TypeScript automatically for ts filenames" {
@@ -9417,7 +9417,7 @@ test "Engine eval strips TypeScript automatically for ts filenames" {
         \\const value: number = 42;
         \\assert.sameValue(value, 42);
     , .{ .filename = "sample.ts" });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "CallSite metadata is internal" {
@@ -9456,7 +9456,7 @@ test "CallSite metadata is internal" {
         \\assert.sameValue(inner(), "ok");
         \\Error.prepareStackTrace = undefined;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "pc2line stack locations match QuickJS return and throw matrix" {
@@ -9476,7 +9476,7 @@ test "pc2line stack locations match QuickJS return and throw matrix" {
         \\assert.sameValue(captured.indexOf("at outer (pc2line.js:2:3)") >= 0, true);
         \\assert.sameValue(captured.indexOf("at <eval> (pc2line.js:8:12)") >= 0, true);
     , .{ .filename = "pc2line.js" });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "X-89 sloppy and method tails keep the caller like QuickJS; strict tail_call reuses" {
@@ -9501,7 +9501,7 @@ test "X-89 sloppy and method tails keep the caller like QuickJS; strict tail_cal
         \\assert.sameValue(captured.indexOf("at m") >= 0, true);
         \\assert.sameValue(captured.indexOf("at methOuter") >= 0, true);
     , .{ .filename = "x89-stack.js" });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "strict plain tail_call recursion stays in constant stack" {
@@ -9517,7 +9517,7 @@ test "strict plain tail_call recursion stays in constant stack" {
         \\assert.sameValue(even(20000), "foo");
         \\assert.sameValue(even(20001), "bar");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "X-89 frame disasm: return call and method emit tail opcodes" {
@@ -9615,7 +9615,7 @@ test "Error stack uses object method runtime names" {
         \\assert.sameValue(stack.indexOf("at return") >= 0, true);
         \\assert.sameValue(stack.indexOf("    at return"), 0);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "native builtin errors capture a native callsite" {
@@ -9761,7 +9761,7 @@ test "native builtin errors capture a native callsite" {
         \\}
         \\Error.prepareStackTrace = undefined;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "external host errors capture the native host callsite" {
@@ -9842,7 +9842,7 @@ test "native record calls preflight the native stack and recover" {
 
     NativeRecordStackProbe.recurse = false;
     const recovery = try js.eval("assert.sameValue(nativeEntryRecurse(), 7);");
-    try std.testing.expect(recovery.isUndefined());
+    try std.testing.expect(recovery.is(.undefined_value));
 }
 
 test "external C function preflight uses caller realm and callback errors use callee realm" {
@@ -9948,7 +9948,7 @@ test "Error stack preserves construction frames across delayed access" {
         \\assert.sameValue(stack.indexOf("at makeError") >= 0, true);
         \\assert.sameValue(stack.indexOf("at readStack") < 0, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "eval SyntaxError carries construction stack" {
@@ -9971,7 +9971,7 @@ test "eval SyntaxError carries construction stack" {
         \\assert.sameValue(evalStack.length > 0, true);
         \\assert.sameValue(evalStack.indexOf("at evalThrower") >= 0, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "TypeError thrown via message helper carries stack exactly once" {
@@ -9995,7 +9995,7 @@ test "TypeError thrown via message helper carries stack exactly once" {
         \\assert.sameValue(typeStack.indexOf("at typeThrower") >= 0, true);
         \\assert.sameValue(typeStack.indexOf("at typeThrower"), typeStack.lastIndexOf("at typeThrower"));
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error prepareStackTrace formats captured frames lazily" {
@@ -10025,7 +10025,7 @@ test "Error prepareStackTrace formats captured frames lazily" {
         \\assert.sameValue(calls, 1);
         \\Error.prepareStackTrace = undefined;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error stack setter rejects non-string stack values" {
@@ -10043,7 +10043,7 @@ test "Error stack setter rejects non-string stack values" {
         \\assert.sameValue(Object.prototype.hasOwnProperty.call(err, "stack"), false);
         \\assert.sameValue(typeof err.stack, "string");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error stack copied accessor setter writes without recursion" {
@@ -10062,7 +10062,7 @@ test "Error stack copied accessor setter writes without recursion" {
         \\assert.sameValue(desc.writable, true);
         \\assert.sameValue(err.stack, "updated");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error stack copied accessor setter writes through proxy without recursion" {
@@ -10078,7 +10078,7 @@ test "Error stack copied accessor setter writes through proxy without recursion"
         \\assert.sameValue(desc.writable, true);
         \\assert.sameValue(proxy.stack, "updated");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error stack reentrant formatting is capped to captured frames" {
@@ -10104,7 +10104,7 @@ test "Error stack reentrant formatting is capped to captured frames" {
         \\assert.sameValue(calls, 1);
         \\assert.sameValue(frames.length, 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Array fill respects proxy prototypes" {
@@ -10124,7 +10124,7 @@ test "Array fill respects proxy prototypes" {
         \\assert.sameValue(calls.join(","), "0:7,1:7,2:7");
         \\assert.sameValue(array.join(","), "7,7,7");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error.prepareStackTrace exceptions produce null stack" {
@@ -10138,7 +10138,7 @@ test "Error.prepareStackTrace exceptions produce null stack" {
         \\assert.sameValue(new Error("x").stack, null);
         \\Error.prepareStackTrace = undefined;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
@@ -10167,7 +10167,7 @@ test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
         \\try { print(capture()); } catch (e) { print(e instanceof ReferenceError); }
     , &stream, .script, "runtime-strict-file.js", true);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\ntrue\ntrue\ncliLocalFunction\ntrue\ntrue\n5\ntrue\ntrue\n", stream.buffered());
 }
 
@@ -10189,7 +10189,7 @@ test "runtime-strict eval overrides parse-time mapped arguments subtype" {
         \\forcedArguments(5);
     , &output, .script, "runtime-strict-arguments.js", true);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("5 7 9 TypeError\n", output.buffered());
 }
 
@@ -10222,7 +10222,7 @@ test "Engine direct eval publishes Annex B block functions" {
         \\assert.sameValue(functionAfter, "local");
         \\assert.throws(ReferenceError, function() { annexBEvalLocalFn; });
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine direct eval Annex B block function updates same-name parameter" {
@@ -10241,7 +10241,7 @@ test "Engine direct eval Annex B block function updates same-name parameter" {
         \\print(after());
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("123\nfunction\nundefined\n", stream.buffered());
 }
 
@@ -10405,7 +10405,7 @@ test "Engine eval supports Annex B escape and unescape code-unit semantics" {
         \\assert.sameValue(unescape('%0%FE00'), '%0\xfe00');
         \\assert.sameValue(escape(unescape('%u0100')), '%u0100');
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval supports Annex B Date setYear ordering" {
@@ -10423,7 +10423,7 @@ test "Engine eval supports Annex B Date setYear ordering" {
         \\assert.sameValue(dt.getYear(), 1);
         \\assert.throws(TypeError, function() { dt.setYear(Symbol("x")); });
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
@@ -10443,7 +10443,7 @@ test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
         \\assert.sameValue(isFinite(Infinity), false);
         \\assert.sameValue(Math.trunc(-1.9), -1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
@@ -10459,7 +10459,7 @@ test "html wrap leftover optional attribute preserves Annex B wrap and attr" {
         \\assert.sameValue("x".link('a"b'), '<a href="a&quot;b">x</a>');
         \\assert.sameValue("x".anchor("a", "b"), '<a name="a">x</a>');
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "disposable stack extras leftover runtime metadata preserves dispose aliases and disposed" {
@@ -10490,7 +10490,7 @@ test "disposable stack extras leftover runtime metadata preserves dispose aliase
         \\assert.sameValue(called, 1);
         \\assert.sameValue(moved.disposed, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "buffer constructor extras leftover runtime tables preserve ArrayBuffer SharedArrayBuffer and DataView" {
@@ -10527,7 +10527,7 @@ test "buffer constructor extras leftover runtime tables preserve ArrayBuffer Sha
         \\assert.sameValue(dv.byteOffset, 1);
         \\assert.sameValue(dv.buffer.byteLength, 4);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "iterator step leftover post-next decode preserves for-of and helper results" {
@@ -10577,7 +10577,7 @@ test "iterator step leftover post-next decode preserves for-of and helper result
         \\var bad = { [Symbol.iterator]() { return this; }, next() { return 1; } };
         \\assert.throws(TypeError, function() { for (var x of bad) {} });
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "class field initializer leftover runtime static preserves instance static private and computed fields" {
@@ -10620,7 +10620,7 @@ test "class field initializer leftover runtime static preserves instance static 
         \\assert.sameValue((new D()).nameField.seen, "nameField");
         \\assert.sameValue(D.staticName.seen, "staticName");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover instance-computed public field initializer through shared emit" {
@@ -10654,7 +10654,7 @@ test "leftover instance-computed public field initializer through shared emit" {
         \\assert.sameValue(e.x, 1);
         \\assert.sameValue(e.y, undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover do while parse through one runtime flag" {
@@ -10689,7 +10689,7 @@ test "leftover do while parse through one runtime flag" {
         \\assert.sameValue(i, 3);
         \\assert.sameValue(continued, 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover error stack at-line format through one runtime kind" {
@@ -10744,7 +10744,7 @@ test "leftover error stack at-line format through one runtime kind" {
         \\assert.sameValue(typeof reentered, "string");
         \\assert.sameValue(reentered.indexOf("    at ") >= 0, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover array-from array-like through one runtime destination" {
@@ -10769,7 +10769,7 @@ test "leftover array-from array-like through one runtime destination" {
         \\assert.sameValue(custom[1], "b");
         \\assert.sameValue(custom.length, 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover proxy set trap through one runtime kind" {
@@ -10798,7 +10798,7 @@ test "leftover proxy set trap through one runtime kind" {
         \\stackProxy.stack = "updated";
         \\assert.sameValue(stackProxy.stack, "updated");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover proxy extensible trap through one runtime kind" {
@@ -10848,7 +10848,7 @@ test "leftover proxy extensible trap through one runtime kind" {
         \\Object.preventExtensions(plain);
         \\assert.sameValue(Object.isExtensible(plain), false);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover proxy has trap through one outlined walk" {
@@ -10885,7 +10885,7 @@ test "leftover proxy has trap through one outlined walk" {
         \\assert.sameValue("x" in plain, true);
         \\assert.sameValue("y" in plain, false);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover proxy getPrototypeOf through one outlined walk" {
@@ -10923,7 +10923,7 @@ test "leftover proxy getPrototypeOf through one outlined walk" {
         \\assert.sameValue(Object.getPrototypeOf(plain), Object.prototype);
         \\assert.sameValue(Object.getPrototypeOf(Object.prototype), null);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Object.isExtensible builtin through outlined extensible op" {
@@ -10956,7 +10956,7 @@ test "leftover Object.isExtensible builtin through outlined extensible op" {
         \\Object.preventExtensions(plain);
         \\assert.sameValue(Object.isExtensible(plain), false);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Object.getOwnPropertyNames through outlined enumerable own properties" {
@@ -10989,7 +10989,7 @@ test "leftover Object.getOwnPropertyNames through outlined enumerable own proper
         \\assert.sameValue(seen + "", "keys,keys");
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.shift index-move through outlined arrayMoveIndex" {
@@ -11025,7 +11025,7 @@ test "leftover Array.shift index-move through outlined arrayMoveIndex" {
         \\assert.sameValue(overlap.copyWithin(1, 0, 3) + "", "1,1,2,3");
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.slice present-index through outlined arrayCopyPresentIndex" {
@@ -11056,7 +11056,7 @@ test "leftover Array.slice present-index through outlined arrayCopyPresentIndex"
         \\assert.sameValue([1].concat(o) + "", "1,[object Object]");
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover integer binary through live bitwise and number arms" {
@@ -11084,7 +11084,7 @@ test "leftover integer binary through live bitwise and number arms" {
         \\assert.sameValue(1 + "2", "12");
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.map generic get through one runtime tail" {
@@ -11108,7 +11108,7 @@ test "leftover Array.map generic get through one runtime tail" {
         \\assert.sameValue(Array.prototype.map.call(o, function(v) { return v + 1; }) + "", "8,,10");
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.toReversed get-define through outlined arrayCopyIndex" {
@@ -11133,7 +11133,7 @@ test "leftover Array.toReversed get-define through outlined arrayCopyIndex" {
         \\assert.sameValue(Array.prototype.toReversed.call(o) + "", "9,,7");
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.sort generic set through one runtime tail" {
@@ -11164,7 +11164,7 @@ test "leftover Array.sort generic set through one runtime tail" {
         \\assert.sameValue(proxy_sets >= 2, true);
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.fill generic set through one runtime tail" {
@@ -11190,7 +11190,7 @@ test "leftover Array.fill generic set through one runtime tail" {
         \\assert.sameValue(ta[3], 4);
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.indexOf direction through one runtime walk" {
@@ -11218,7 +11218,7 @@ test "leftover Array.indexOf direction through one runtime walk" {
         \\assert.sameValue(Array.prototype.includes.call(o, undefined), true);
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover Array.reduce direction through one runtime walk" {
@@ -11245,7 +11245,7 @@ test "leftover Array.reduce direction through one runtime walk" {
         \\assert.sameValue(threw_r, true);
         \\assert.sameValue(Array.from([1, 2, 3]) + "", "1,2,3");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "leftover iterator wrap next return through one runtime kind" {
@@ -11273,7 +11273,7 @@ test "leftover iterator wrap next return through one runtime kind" {
         \\try { bad.next(); } catch (e) { threw = e instanceof TypeError; }
         \\assert.sameValue(threw, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "stamped native data-method leftover runtime stamp preserves async generator and iterator helpers" {
@@ -11306,7 +11306,7 @@ test "stamped native data-method leftover runtime stamp preserves async generato
         \\assert.sameValue(concat.next().value, 7);
         \\assert.sameValue(concat.return().done, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "fast prototype method leftover runtime domain preserves regexp and collection lookups" {
@@ -11358,7 +11358,7 @@ test "fast prototype method leftover runtime domain preserves regexp and collect
         \\assert.sameValue(set.get, undefined);
         \\assert.sameValue(({}).test, undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "data view extras leftover optional species preserves accessors and omits species" {
@@ -11386,7 +11386,7 @@ test "data view extras leftover optional species preserves accessors and omits s
         \\    Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength").get.call({});
         \\});
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "defineNativeDataMethod leftover optional native id preserves iterator methods" {
@@ -11408,7 +11408,7 @@ test "defineNativeDataMethod leftover optional native id preserves iterator meth
         \\assert.sameValue(wrap.next().value, 9);
         \\assert.sameValue(wrap.return().done, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "createStringValue leftover noinline preserves empty flags and ascii strings" {
@@ -11421,7 +11421,7 @@ test "createStringValue leftover noinline preserves empty flags and ascii string
         \\assert.sameValue("".bold(), "<b></b>");
         \\assert.sameValue("é".big(), "<big>é</big>");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
@@ -11485,7 +11485,7 @@ test "vm call handler accepts allocator-backed argument lists" {
     }
     try expected.append(std.testing.allocator, '\n');
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(expected.items, stream.buffered());
 }
 
@@ -11497,7 +11497,7 @@ test "Engine API eval and job queue are wired" {
     if (js.context.hasException()) js.context.clearException();
 
     const result = try js.eval("1; 2");
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     helpers.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
@@ -11586,14 +11586,14 @@ test "prepared Promise reactions reserve storage without claiming FIFO order" {
     var first = js.runtime.job_queue.takeFirst().?;
     defer first.deinit();
     switch (first.payload) {
-        .promise => |payload| try std.testing.expectEqual(@as(?i32, 99), payload.value.asInt32()),
+        .promise => |payload| try std.testing.expectEqual(@as(?i32, 99), payload.value.as(.int)),
         else => return error.TypeError,
     }
 
     var second = js.runtime.job_queue.takeFirst().?;
     defer second.deinit();
     switch (second.payload) {
-        .promise_reaction => |payload| try std.testing.expectEqual(@as(?i32, 42), payload.value.asInt32()),
+        .promise_reaction => |payload| try std.testing.expectEqual(@as(?i32, 42), payload.value.as(.int)),
         else => return error.TypeError,
     }
 }
@@ -11676,7 +11676,7 @@ test "public property key coercion accepts a Symbol.toPrimitive key" {
     // What remains is the half that never depended on it: the coercion runs,
     // and a missing key resolves to undefined rather than trapping.
     const result = try ctx.getPropertyKey(target, property_key, .{});
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
@@ -11984,7 +11984,7 @@ test "published Promise resolution survives resolver collection through typed FI
 
     js.runtime.setMemoryLimit(null);
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
-    try std.testing.expectEqual(@as(?i32, 41), promise.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), promise.promiseResult().?.as(.int));
     try std.testing.expect(!promise.promiseIsRejected());
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
@@ -12119,7 +12119,7 @@ test "ordinary script entry points do not run full-heap cycle collection on exit
         "globalThis.__hostEvalExitProbe = 7; __hostEvalExitProbe",
         .{ .filename = "no-exit-cycle-host-eval-script.js" },
     );
-    try std.testing.expectEqual(@as(?i32, 7), host_eval_script.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), host_eval_script.as(.int));
     try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
 
     _ = try js.eval(
@@ -12142,7 +12142,7 @@ test "ordinary script entry points do not run full-heap cycle collection on exit
     var stack = engine.exec.stack.Stack.init(&js.runtime.memory, js.context.stackLimit());
     defer stack.deinit(js.runtime);
     const canonical = try engine.exec.zjs_vm.runWithOutput(js.context, &stack, function, null);
-    try std.testing.expectEqual(@as(?i32, 3), canonical.asInt32());
+    try std.testing.expectEqual(@as(?i32, 3), canonical.as(.int));
     try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
 }
 
@@ -12373,7 +12373,7 @@ test "Engine nested functions retain ancestor with environments during finalizat
         \\assert.sameValue(environment.outer, "updated");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval preserves selected with references during updates" {
@@ -12470,7 +12470,7 @@ test "Engine with destructuring assignment reaches const fallback at runtime" {
         \\assert.sameValue(values[1], 3);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval assignments capture the target before dynamic var insertion" {
@@ -12708,7 +12708,7 @@ test "Engine heritage closures retain the initialized inner class-name binding" 
         \\assert.sameValue(declarationProbe(), declarationClass);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine inferred class names precede static initialization across named-evaluation sites" {
@@ -12746,7 +12746,7 @@ test "Engine inferred class names precede static initialization across named-eva
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
@@ -12809,7 +12809,7 @@ test "Engine eval balances refcounts for refcounted duplicate-key object literal
         \\__dupLitLast = null;
         \\__dupLitOk ? 1 : 0
     , .{ .filename = "<repl>" });
-    try std.testing.expectEqual(@as(?i32, 1), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), result.as(.int));
 
     // Every literal died (last = null): both source objects must be back at
     // their pre-loop refcounts — no per-iteration leak from the duplicate-key
@@ -12861,7 +12861,7 @@ test "using early exit before await using keeps sync disposal synchronous" {
         \\sameTurn = false;
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("dispose true\n", stream.buffered());
 
     const plain = try globalFunctionBytecode(js, "plainBlockForUsingOpcodeCheck");
@@ -12902,7 +12902,7 @@ test "get_array_el2 dense indexed call keeps the receiver" {
         \\assert.sameValue(seen, a);
         \\assert.sameValue(a[0](8), 9);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "get_array_el dense direct arm preserves hits and indexed fallback" {
@@ -12918,7 +12918,7 @@ test "get_array_el dense direct arm preserves hits and indexed fallback" {
         \\assert.sameValue(read(a, 5), 13);
         \\delete Array.prototype[5];
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "int32 add sub mul overflow stays a number on the generic binary" {
@@ -12935,7 +12935,7 @@ test "int32 add sub mul overflow stays a number on the generic binary" {
         \\assert.sameValue(1 / mul1(-1, 0), -Infinity);
         \\assert.sameValue(add1(1, 2), 3);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval preserves collection read host output semantics" {
@@ -12985,7 +12985,7 @@ test "runtime teardown preserves closure capture metadata until objects are dest
         \\var map = new WeakMap([]);
         \\assert(map instanceof WeakMap);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "cycle teardown preserves restored strong counts for weakly referenced keys" {
@@ -13007,7 +13007,7 @@ test "cycle teardown preserves restored strong counts for weakly referenced keys
         \\};
         \\var map = new WeakMap([[first, 42], [second, 43]]);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval preserves regexp UTF-16 test host output semantics" {
@@ -13056,7 +13056,7 @@ test "Engine eval prepared RegExp call observes same-site property changes" {
         \\print(hit("aaab"));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\npatched:aaab:true\nown:aaab\npatched:aaab:true\n", stream.buffered());
 }
 
@@ -13166,7 +13166,7 @@ test "empty native array pop fast arm preserves observable length writes" {
         \\assert.sameValue(subclass.length, 0);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "array pop length write removes elements added by the last-element getter" {
@@ -13189,7 +13189,7 @@ test "array pop length write removes elements added by the last-element getter" 
         \\assert.sameValue(5 in array, false);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "array pop reports read-only length after deleting a configurable last element" {
@@ -13207,7 +13207,7 @@ test "array pop reports read-only length after deleting a configurable last elem
         \\assert.sameValue(0 in array, false);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval preserves simple closure call host output semantics" {
@@ -13374,7 +13374,7 @@ test "strict plain calls preserve this arguments eval captures and backtraces" {
         \\function strictStack() { "use strict"; return new Error("x").stack; }
         \\assert.sameValue(strictStack().indexOf("    at strictStack"), 0);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "strict arguments preserve qjs intrinsic metadata and dense element semantics" {
@@ -13439,7 +13439,7 @@ test "strict arguments preserve qjs intrinsic metadata and dense element semanti
         \\    Array.prototype.values = savedValues;
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "mapped arguments use var-ref indexed storage and detach on descriptor changes" {
@@ -13524,7 +13524,7 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
         \\}
         \\frozen(1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 // qjs:41171 resolves length through ordinary [[Get]] before qjs:41182-41197
@@ -13571,7 +13571,7 @@ test "apply resolves arguments length and preserves observable fallback" {
         \\    delete Object.prototype[0];
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "resident generators preserve mapped arguments parameter aliases" {
@@ -13595,7 +13595,7 @@ test "resident generators preserve mapped arguments parameter aliases" {
         \\assert.sameValue(iterator.next().value, undefined);
         \\assert.sameValue(iterator.next().done, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "implicit arguments resolution preserves mapped aliases" {
@@ -13639,7 +13639,7 @@ test "implicit arguments resolution preserves mapped aliases" {
         \\print("after");
     , &output);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("42\n5\n7\n5:7\n9\n43\nafter\n", output.buffered());
 }
 
@@ -13679,7 +13679,7 @@ test "resident mapped arguments share one open bare arg slot" {
     try std.testing.expectEqual(@as(usize, 1), argument_refs.len);
     const cell = argument_refs[0] orelse return error.TypeError;
 
-    try std.testing.expectEqual(@as(?i32, 41), arg_slot.asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), arg_slot.as(.int));
     try std.testing.expect(core.VarRef.fromValue(arg_slot.*) == null);
     try std.testing.expect(cell.is_open);
     try std.testing.expect(cell.pvalue == arg_slot);
@@ -13696,7 +13696,7 @@ test "resident mapped arguments share one open bare arg slot" {
     );
     try std.testing.expect(arg_slot == &generator.generatorExecutionState().storage.frame.args[0]);
     try std.testing.expect(cell.pvalue == arg_slot);
-    try std.testing.expectEqual(@as(?i32, 42), arg_slot.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), arg_slot.as(.int));
 }
 
 test "generic arg opcodes preserve mapped aliases in a bare resident slot" {
@@ -13724,7 +13724,7 @@ test "generic arg opcodes preserve mapped aliases in a bare resident slot" {
     const generator_value = try global.getProperty(generator_key);
     const generator = try property_ops.expectObject(generator_value);
     const fifth_slot = &generator.generatorExecutionState().storage.frame.args[4];
-    try std.testing.expectEqual(@as(?i32, 50), fifth_slot.asInt32());
+    try std.testing.expectEqual(@as(?i32, 50), fifth_slot.as(.int));
     try std.testing.expect(core.VarRef.fromValue(fifth_slot.*) == null);
 
     const completion = try js.eval(
@@ -13738,7 +13738,7 @@ test "generic arg opcodes preserve mapped aliases in a bare resident slot" {
         \\assert.sameValue(step.value, 52);
         \\assert.sameValue(step.done, true);
     );
-    try std.testing.expect(completion.isUndefined());
+    try std.testing.expect(completion.is(.undefined_value));
 }
 
 test "generator mapped arguments closures and direct eval share one alias across resumes" {
@@ -13774,7 +13774,7 @@ test "generator mapped arguments closures and direct eval share one alias across
         \\step = __aliasedGenerator.next();
         \\assert.sameValue(step.done, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "async mapped arguments and closures retain one alias across await" {
@@ -13799,7 +13799,7 @@ test "async mapped arguments and closures retain one alias across await" {
     , &stream);
     try js.runJobs();
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "before 55\nafter 55 55 55\nresolved 55\n",
         stream.buffered(),
@@ -13832,7 +13832,7 @@ test "escaped generator arg aliases retain resident backing across cycle collect
     try std.testing.expectEqual(@as(usize, 1), refs.len);
     const cell = refs[0] orelse return error.TypeError;
     try std.testing.expect(cell.is_open);
-    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().as(.int));
 
     _ = try js.eval("__argCycleHolder = null;");
     _ = js.runtime.runObjectCycleRemoval();
@@ -13840,9 +13840,9 @@ test "escaped generator arg aliases retain resident backing across cycle collect
     // escaped arguments object and closures therefore keep this generator
     // frame resident even after its direct global reference is gone.
     try std.testing.expect(cell.is_open);
-    try std.testing.expect(cell.value.isObject());
+    try std.testing.expect(cell.value.is(.object));
     try std.testing.expectEqual(core.class.ids.generator, (try property_ops.expectObject(cell.value)).class_id);
-    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().as(.int));
 
     const escaped = try js.eval(
         \\assert.sameValue(__argCycleRead(), 41);
@@ -13851,7 +13851,7 @@ test "escaped generator arg aliases retain resident backing across cycle collect
         \\__argCycleWrite(63);
         \\assert.sameValue(__argCycleArguments[0], 63);
     );
-    try std.testing.expect(escaped.isUndefined());
+    try std.testing.expect(escaped.is(.undefined_value));
 }
 
 test "generator completion closes escaped arg aliases before releasing resident backing" {
@@ -13892,7 +13892,7 @@ test "generator completion closes escaped arg aliases before releasing resident 
         \\__completedArgArguments[0] = 52;
         \\assert.sameValue(__completedArgRead(), 52);
     );
-    try std.testing.expect(escaped.isUndefined());
+    try std.testing.expect(escaped.is(.undefined_value));
 }
 
 test "get_length preserves qjs own-property-before-exotic ordering and actions" {
@@ -14054,7 +14054,7 @@ test "get_length preserves qjs own-property-before-exotic ordering and actions" 
         \\}
         \\assert.sameValue(mappedAccessor(1), 11);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "missing-argument plain calls preserve parameter and arguments ownership" {
@@ -14123,7 +14123,7 @@ test "missing-argument plain calls preserve parameter and arguments ownership" {
         \\    assert.sameValue(thrown, marker);
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "inline calls release lazily materialized arguments state" {
@@ -14619,7 +14619,7 @@ test "capture leaf shares live cells with its closure across calls" {
         \\counterPair.bump() * 1000000 + counterPair.read() * 10000 + read() * 100 + owner.value;
     , .{ .filename = "<repl>" });
     // bump()=3, read()=3, arrow read()=42, owner.value=42.
-    try std.testing.expectEqual(@as(?i32, 3034242), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 3034242), result.as(.int));
 }
 
 test "inline empty leaf warm constructor preserves miss fallback and ownership" {
@@ -14662,7 +14662,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[0].is(.undefined_value));
 
     const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
@@ -14716,7 +14716,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expect(region_start[0].is(.undefined_value));
     try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
     oversized_alive = false;
@@ -14750,7 +14750,7 @@ test "forwarded leaf call semantics keep exclusions on the authoritative path" {
         \\}
         \\total;
     , .{ .filename = "<repl>" });
-    try std.testing.expectEqual(@as(?i32, 256 * (1 + 1 + 1 + 1 + 10 + 100 + 1000)), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 256 * (1 + 1 + 1 + 1 + 10 + 100 + 1000)), result.as(.int));
 }
 
 test "forwarded leaf abrupt completion balances and keeps the native frame" {
@@ -14926,15 +14926,15 @@ test "method empty leaf warm constructor moves receiver ownership" {
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expect(!region_start[0].isUndefined());
-    try std.testing.expect(!region_start[1].isUndefined());
+    try std.testing.expect(!region_start[0].is(.undefined_value));
+    try std.testing.expect(!region_start[1].is(.undefined_value));
 
     // Authoritative constructor: receiver moves into the frame's raw `this`
     // and the retired operand slot is cleared.
     const first = try machine.pushEmptyLeafCall(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.same(receiver));
-    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expect(region_start[0].is(.undefined_value));
     machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
@@ -14974,8 +14974,8 @@ test "method empty leaf warm constructor moves receiver ownership" {
     rt.suppressLimitCollectionForTest(false);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
-    try std.testing.expect(region_start[0].isUndefined());
-    try std.testing.expect(region_start[1].isUndefined());
+    try std.testing.expect(region_start[0].is(.undefined_value));
+    try std.testing.expect(region_start[1].is(.undefined_value));
     try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
     oversized_alive = false;
@@ -15104,7 +15104,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     l0_stack.setTopPtr(region_start);
     const first = try machine.pushEmptyLeafCall(.raw_undefined, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
-    try std.testing.expect(first.frame.this_value.isUndefined());
+    try std.testing.expect(first.frame.this_value.is(.undefined_value));
     machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
@@ -15119,7 +15119,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
-    try std.testing.expect(warm.frame.this_value.isUndefined());
+    try std.testing.expect(warm.frame.this_value.is(.undefined_value));
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
     machine.popReturnedEmptyLeaf(ctx.runtime);
@@ -15215,8 +15215,8 @@ test "inline operand Stack keeps limit and ownership flags in one word" {
     // Frame and Entry are layout-sensitive (see the Entry pin in
     // inline_calls.zig and the QCP-1B note in docs/refactor-policy.md), so pin
     // both sizes here rather than leaving them to a benchmark to notice.
-    try std.testing.expectEqual(@as(usize, 152), @sizeOf(engine.exec.frame.Frame));
-    try std.testing.expectEqual(@as(usize, 256), @sizeOf(inline_calls.Entry));
+    try std.testing.expectEqual(@as(usize, 136), @sizeOf(engine.exec.frame.Frame));
+    try std.testing.expectEqual(@as(usize, 240), @sizeOf(inline_calls.Entry));
 }
 
 test "ordinary root bytecode call carves one operand window" {
@@ -15346,7 +15346,7 @@ test "method calls preserve receiver arguments eval captures and abrupt ownershi
         \\assert.sameValue(sloppyViaCall.call(null), globalThis);
         \\assert.sameValue(sloppyViaCall.call(undefined), globalThis);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "primitive prototype lookup preserves raw receiver and exotic prototype semantics" {
@@ -15456,7 +15456,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
         \\    delete String.prototype[0];
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "computed named reads preserve prototype accessors proxies and operand ownership" {
@@ -15524,7 +15524,7 @@ test "computed named reads preserve prototype accessors proxies and operand owne
         \\assert.sameValue(object[dataKey], dataKey);
         \\assert.sameValue(Object.create(null)[dataKey], undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "computed integer write misses preserve generic set semantics" {
@@ -15594,7 +15594,7 @@ test "computed integer write misses preserve generic set semantics" {
         \\assert.sameValue(rejected, true);
         \\assert.sameValue(frozen[0], 10);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "dense write leaf consumes reserved appends only inside the qjs capacity window" {
@@ -15751,7 +15751,7 @@ test "static named getter and proxy fast paths preserve receivers throws and inv
         \\}
         \\assert.sameValue(mutationRejected, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "proxy bytecode get continuation does not require spare operand capacity" {
@@ -15768,7 +15768,7 @@ test "proxy bytecode get continuation does not require spare operand capacity" {
         \\assert.sameValue(readX(proxy), 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "for-of bytecode next continuation preserves result and abrupt semantics" {
@@ -15897,7 +15897,7 @@ test "for-of bytecode next continuation preserves result and abrupt semantics" {
         \\assert.sameValue(sawTypeError, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "IteratorNext bound proxy and native throws do not close the iterator" {
@@ -15922,7 +15922,7 @@ test "IteratorNext bound proxy and native throws do not close the iterator" {
         \\}
         \\assert.sameValue(closeCalls, 0);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "destructuring abrupt completion closes every live outer iterator" {
@@ -15950,7 +15950,7 @@ test "destructuring abrupt completion closes every live outer iterator" {
         \\    try { let [{ value }] = iterator; } catch (error) { events.push(error.name); }
         \\}), "next,return,TypeError");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "array destructuring rest roots direct symbol values while creating its result" {
@@ -15969,7 +15969,7 @@ test "array destructuring rest roots direct symbol values while creating its res
         \\assert.sameValue(rest[0], symbol);
         \\assert.sameValue(rest[0].description, "gc-destructuring-rest-symbol");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "computed object-rest keys perform observable ToPropertyKey once" {
@@ -15992,7 +15992,7 @@ test "computed object-rest keys perform observable ToPropertyKey once" {
         \\assert.sameValue(rest.kept, undefined);
         \\assert.sameValue(rest.copied, 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "object destructuring does not turn its source into a with environment" {
@@ -16008,7 +16008,7 @@ test "object destructuring does not turn its source into a with environment" {
         \\assert.sameValue(globalThis.__destructuringFollowup.length, 1);
         \\delete globalThis.__destructuringFollowup;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "object destructuring ToObject uses the current realm primitive prototypes" {
@@ -16027,7 +16027,7 @@ test "object destructuring ToObject uses the current realm primitive prototypes"
         \\assert.sameValue(symbolPrototype, Symbol.prototype);
         \\assert.sameValue(bigintPrototype, BigInt.prototype);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "for-in-of generic lvalues use QuickJS bottom-stack evaluation order" {
@@ -16076,7 +16076,7 @@ test "for-in-of generic lvalues use QuickJS bottom-stack evaluation order" {
         \\assert.sameValue(new Derived().assign(), 11);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
@@ -16302,7 +16302,7 @@ test "computed proxy bytecode trap continuations preserve nested calls throws an
         \\}
         \\assert.sameValue(descriptorCount, 3);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "native tail calls preserve iterator and proxy continuation success and throws" {
@@ -16371,7 +16371,7 @@ test "native tail calls preserve iterator and proxy continuation success and thr
         \\}
         \\assert.sameValue(proxyThrew, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "return conditional followed by newline comma keeps the comma expression" {
@@ -16386,7 +16386,7 @@ test "return conditional followed by newline comma keeps the comma expression" {
         \\assert.sameValue(choose(true), 42);
         \\assert.sameValue(choose(false), 42);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
@@ -16426,7 +16426,7 @@ test "arrow direct eval reads captured this and new.target" {
         \\assert.sameValue(observed[0], true);
         \\assert.sameValue(observed[1], Replacement);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "direct eval inherits QuickJS entry capabilities and var environment" {
@@ -16450,7 +16450,7 @@ test "direct eval inherits QuickJS entry capabilities and var environment" {
         \\assert.sameValue(localEval(), 4);
         \\assert.sameValue(typeof nestedLocal, "undefined");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     // An ordinary nested function does not inherit a method's Super grammar
     // capability. QuickJS rejects the complete source during parsing; the
@@ -16476,7 +16476,7 @@ test "class field direct eval keeps QuickJS field initializer capabilities" {
         \\catch (error) { argumentsSyntaxError = error instanceof SyntaxError; }
         \\assert.sameValue(argumentsSyntaxError, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "public instance fields initialize once in constructor order on every path" {
@@ -16594,7 +16594,7 @@ test "public instance fields initialize once in constructor order on every path"
         \\    "nested:inner:first,nested:inner:second,nested:inner:first,nested:inner:second"
         \\);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "arrow super property call keeps the enclosing method receiver" {
@@ -16626,7 +16626,7 @@ test "arrow super property call keeps the enclosing method receiver" {
         \\assert.sameValue(callSuper(), 84);
         \\assert.sameValue(callSuper.call({ ignored: true }), 84);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "super property assignment respects strictness when inherited descriptors reject writes" {
@@ -16670,7 +16670,7 @@ test "super property assignment respects strictness when inherited descriptors r
         \\    false
         \\);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "bytecode constructability follows canonical function shape" {
@@ -16698,7 +16698,7 @@ test "bytecode constructability follows canonical function shape" {
         \\assert.sameValue(ordinary[0], 1);
         \\assert.sameValue(ordinary[1], 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "forwarded call releases ignored arrow thisArg" {
@@ -16788,7 +16788,7 @@ test "function inherited data lookup preserves own and exotic semantics" {
         \\assert.throws(TypeError, function() { return strictFunction.caller; });
         \\assert.throws(TypeError, function() { return strictFunction.arguments; });
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "function caller and arguments restrictions follow immutable function shape" {
@@ -16812,7 +16812,7 @@ test "function caller and arguments restrictions follow immutable function shape
         \\assertForbidden(async function*() {});
         \\assertForbidden(({ method() {} }).method);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval Function.prototype.toString returns source or native text" {
@@ -16849,7 +16849,7 @@ test "Engine eval Function.prototype.toString emits syntactic native names" {
         \\assert.sameValue(computed, "function get [Symbol.species]()" + native);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval Function.prototype.toString returns method and class source" {
@@ -16888,7 +16888,7 @@ test "Engine eval releases arrow destructuring iterator closures cleanly" {
         \\f(iter);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("1\n", stream.buffered());
 }
 
@@ -17050,7 +17050,7 @@ test "resident is_null preserves qjs true and refcounted false legs" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine generator return keeps finally rethrow control marker" {
@@ -17071,7 +17071,7 @@ test "Engine generator return keeps finally rethrow control marker" {
         \\assert.sameValue(resumed.done, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "generator return runs nested finally before closing its for-of iterator" {
@@ -17105,7 +17105,7 @@ test "generator return runs nested finally before closing its for-of iterator" {
         \\assert.sameValue(returned.done, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "return cleanup restores outer catch targets before finally and IteratorClose throws" {
@@ -17164,7 +17164,7 @@ test "return cleanup restores outer catch targets before finally and IteratorClo
         \\assert.sameValue(innerFinallyEntered, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "generator return crosses catch markers before closing its for-of iterator" {
@@ -17204,7 +17204,7 @@ test "generator return crosses catch markers before closing its for-of iterator"
         \\assert.sameValue(events.join(","), "return");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "generator return closes an inner for-of iterator before its enclosing finally" {
@@ -17253,7 +17253,7 @@ test "generator return closes an inner for-of iterator before its enclosing fina
         \\assert.sameValue(patternReturned.done, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "destructuring rest parameter defaults use the parameter environment" {
@@ -17274,7 +17274,7 @@ test "destructuring rest parameter defaults use the parameter environment" {
         \\assert.sameValue(objectValue(), "outer");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "caught destructuring error preserves IteratorClose output" {
@@ -17338,7 +17338,7 @@ test "generator default argument stores release refcounted stack values" {
         \\f(undefined, undefined, 'third', 'fourth').next();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "spread super brands derived instances before class field initializers" {
@@ -17362,7 +17362,7 @@ test "spread super brands derived instances before class field initializers" {
         .{ .filename = "<repl>" },
     );
 
-    try std.testing.expectEqual(@as(?i32, 10), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 10), result.as(.int));
 }
 
 test "computed class keys close over runtime private field identity" {
@@ -17380,7 +17380,7 @@ test "computed class keys close over runtime private field identity" {
         \\assert.sameValue(probe({}), false, "computed-key closure rejects an unrelated object");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "nested same-name private fields isolate repeated class evaluations" {
@@ -17424,7 +17424,7 @@ test "nested same-name private fields isolate repeated class evaluations" {
         \\assert.sameValue(second.innerProbe(second.inner), true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "private fields isolate class evaluations and preserve lexical call and eval semantics" {
@@ -17882,7 +17882,7 @@ test "started generator resumes preserve unmapped arguments from parked locals" 
         \\lateIterator.next();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "array named proto field uses ordinary lookup; length and index stay exotic" {
@@ -17903,7 +17903,7 @@ test "array named proto field uses ordinary lookup; length and index stay exotic
         \\assert.sameValue(b.pop, Array.prototype.pop);
         \\assert.sameValue(b.length, 0);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "iterator results use ordinary transitions without a sixth realm shape" {
@@ -17926,8 +17926,8 @@ test "iterator results use ordinary transitions without a sixth realm shape" {
     try std.testing.expectEqual(alloc_calls, js.runtime.memory.alloc_calls);
     try std.testing.expectEqual(create_calls + 2, js.runtime.memory.create_calls);
     const object = try core.Object.expect(result);
-    try std.testing.expectEqual(@as(?i32, 2), object.asDataAt(0).?.asInt32());
-    try std.testing.expect(object.asDataAt(1).?.asBool().?);
+    try std.testing.expectEqual(@as(?i32, 2), object.asDataAt(0).?.as(.int));
+    try std.testing.expect(object.asDataAt(1).?.as(.boolean).?);
 }
 
 test "bytecode closures reuse the final function-prototype shape" {
@@ -18163,7 +18163,7 @@ test "fulfilled await queues a direct resume and retains suspended values" {
         try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
         try std.testing.expect(!promise.promiseIsRejected());
         try std.testing.expect(promise.promiseResult().?.sameValue(expected));
-        try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(try js.runtime.internAtom("resumeCount"))).asInt32());
+        try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(try js.runtime.internAtom("resumeCount"))).as(.int));
     }
 }
 
@@ -18187,13 +18187,13 @@ test "fulfilled await checks state after the constructor getter settles its inpu
     var roots = core.runtime.rootValues(.{&output});
     roots.activate(js.runtime);
     defer roots.deactivate(js.runtime);
-    try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(try js.runtime.internAtom("getterReads"))).asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(try js.runtime.internAtom("getterReads"))).as(.int));
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     const job = &js.runtime.job_queue.jobs[0];
     try std.testing.expectEqual(core.jobs.Kind.async_resume, std.meta.activeTag(job.payload));
-    try std.testing.expectEqual(@as(?i32, 42), job.payload.async_resume.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), job.payload.async_resume.value.as(.int));
     try js.runJobs();
-    try std.testing.expectEqual(@as(?i32, 42), (try core.Object.expect(output)).promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), (try core.Object.expect(output)).promiseResult().?.as(.int));
 }
 
 test "fulfilled await roots its continuation through constructor getter GC" {
@@ -18293,7 +18293,7 @@ test "pending and rejected await retain both callbacks and execute rejection rec
             try js.runJobs();
             const result = try core.Object.expect(output);
             try std.testing.expect(!result.promiseIsRejected());
-            try std.testing.expectEqual(@as(?i32, if (rejected) 42 else 41), result.promiseResult().?.asInt32());
+            try std.testing.expectEqual(@as(?i32, if (rejected) 42 else 41), result.promiseResult().?.as(.int));
         }
     }
 }
@@ -18487,7 +18487,7 @@ test "generator async and wrapper noncarriers derive cross-realm state across GC
         \\assert.sameValue(__w1b3eAsyncGeneratorStep.value, __w1b3eOther);
         \\assert.sameValue(Object.getPrototypeOf(__w1b3eAsyncGeneratorStep), __w1b3eOther.Object.prototype);
     );
-    try std.testing.expect(verify_async.isUndefined());
+    try std.testing.expect(verify_async.is(.undefined_value));
 }
 
 test "FinalizationRegistry cleanup job keeps registry realm before invoking callback realm" {
@@ -18552,7 +18552,7 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
         .finalization => |payload| payload,
         else => return error.TestUnexpectedResult,
     };
-    try std.testing.expectEqual(@as(?i32, 73), queued_payload.held_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 73), queued_payload.held_value.as(.int));
 
     // The job starts with the registry construction realm, but the final call
     // still follows the callback C_FUNCTION's independent RealmRef.
@@ -18625,9 +18625,9 @@ test "event-loop caller reaches external C function with one callee realm view" 
     const callee_mutation = try callee_global.getProperty(mutation_key);
     const caller_mutation = try caller_global.getProperty(mutation_key);
     const loop_mutation = try loop_global.getProperty(mutation_key);
-    try std.testing.expectEqual(@as(?i32, 1), callee_mutation.asInt32());
-    try std.testing.expect(caller_mutation.isUndefined());
-    try std.testing.expect(loop_mutation.isUndefined());
+    try std.testing.expectEqual(@as(?i32, 1), callee_mutation.as(.int));
+    try std.testing.expect(caller_mutation.is(.undefined_value));
+    try std.testing.expect(loop_mutation.is(.undefined_value));
 
     const error_key = try js.runtime.internAtom("__callee_error");
     const caught_error = try caller_global.getProperty(error_key);
@@ -18640,7 +18640,7 @@ test "event-loop caller reaches external C function with one callee realm view" 
 
     const body_ran_key = try js.runtime.internAtom("__caller_body_ran");
     const body_ran = try caller_global.getProperty(body_ran_key);
-    try std.testing.expectEqual(true, body_ran.asBool().?);
+    try std.testing.expectEqual(true, body_ran.as(.boolean).?);
 }
 
 test "true C function without its RealmRef fails the final-arm invariant" {
@@ -18707,7 +18707,7 @@ test "native host error sentinel always has a pending named JS exception" {
             error.WriteFailed,
         ),
     );
-    try std.testing.expect(result.isException());
+    try std.testing.expect(result.is(.exception));
     try std.testing.expect(js.context.hasException());
     var exception = try js.takeExceptionInfo();
     defer exception.deinit();
@@ -19198,7 +19198,7 @@ test "host commonjs wrapper passes directory dirname" {
         hooks,
         std.testing.allocator,
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("", stream.buffered());
 }
 
@@ -19224,7 +19224,7 @@ test "module graph evaluates block var declarations as module bindings" {
         2048,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("object\ntrue\n", output.buffered());
 }
 
@@ -19324,7 +19324,7 @@ test "module cycles initialize wide function declaration closures before evaluat
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("function,function\n", output.buffered());
 }
 
@@ -19371,7 +19371,7 @@ test "module cycles do not hoist a body-leading named function expression" {
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
 }
 
@@ -19439,7 +19439,7 @@ test "W1e: module namespace exposes sorted immutable live export properties" {
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("", output.buffered());
 }
 
@@ -19495,7 +19495,7 @@ test "module namespace has and super set preserve uninitialized export semantics
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("", output.buffered());
 }
 
@@ -19552,7 +19552,7 @@ test "W1e: named aliases and namespace reexports share live canonical bindings" 
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("", output.buffered());
 }
 
@@ -19659,7 +19659,7 @@ test "W1e: one host source load spans declaration body TLA resume and dynamic im
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expect(resolve_calls > 0);
     // Resolution may be repeated for normalization, but handing source to the
     // compiler is a one-shot host operation for one canonical module record.
@@ -19742,8 +19742,8 @@ test "same module specifier keeps record cells namespace import meta and error s
     const global_b = try engine.exec.zjs_vm.contextGlobal(realm_b);
     const runs_a = try global_a.getProperty(runs_name);
     const runs_b = try global_b.getProperty(runs_name);
-    try std.testing.expectEqual(@as(?i32, 1), runs_a.asInt32());
-    try std.testing.expectEqual(@as(?i32, 1), runs_b.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), runs_a.as(.int));
+    try std.testing.expectEqual(@as(?i32, 1), runs_b.as(.int));
 }
 
 test "context module eval does not rerun evaluated or errored records" {
@@ -19756,18 +19756,18 @@ test "context module eval does not rerun evaluated or errored records" {
         \\  (globalThis.__contextEvaluatedRuns || 0) + 1;
         \\export const value = 1;
     , .{ .mode = .module, .filename = evaluated_filename });
-    try std.testing.expect(first.isUndefined());
+    try std.testing.expect(first.is(.undefined_value));
 
     const second = try js.evalWithOptions(
         \\globalThis.__contextEvaluatedRuns += 100;
         \\export const value = 2;
     , .{ .mode = .module, .filename = evaluated_filename });
-    try std.testing.expect(second.isUndefined());
+    try std.testing.expect(second.is(.undefined_value));
 
     const evaluated_name = try js.runtime.internAtom("__contextEvaluatedRuns");
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const evaluated_runs = try global.getProperty(evaluated_name);
-    try std.testing.expectEqual(@as(?i32, 1), evaluated_runs.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), evaluated_runs.as(.int));
 
     const errored_filename = "context-eval-errored-once.mjs";
     try std.testing.expectError(
@@ -19798,7 +19798,7 @@ test "context module eval does not rerun evaluated or errored records" {
 
     const errored_runs_name = try js.runtime.internAtom("__contextErroredRuns");
     const errored_runs = try global.getProperty(errored_runs_name);
-    try std.testing.expectEqual(@as(?i32, 1), errored_runs.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), errored_runs.as(.int));
 }
 
 test "context module eval resumes TLA from its reaction FIFO position" {
@@ -19920,8 +19920,8 @@ test "Runtime loader keeps same-path TLA continuations and waiters in parent and
     const runs_name = try js.runtime.internAtom("__w1eTlaRuns");
     const parent_runs = try parent_global.getProperty(runs_name);
     const child_runs = try child_global.getProperty(runs_name);
-    try std.testing.expectEqual(@as(?i32, 11), parent_runs.asInt32());
-    try std.testing.expectEqual(@as(?i32, 11), child_runs.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), parent_runs.as(.int));
+    try std.testing.expectEqual(@as(?i32, 11), child_runs.as(.int));
 
     const resolved_path = try std.fs.path.resolve(std.testing.allocator, &.{module_path});
     defer std.testing.allocator.free(resolved_path);
@@ -20123,18 +20123,18 @@ test "module TLA continuation OOM retains FIFO node for retry" {
     try std.testing.expect(std.mem.endsWith(u8, state.owned_continuations.items[0].path, "/a.mjs"));
     try std.testing.expect(std.mem.endsWith(u8, state.owned_continuations.items[1].path, "/b.mjs"));
     const a_after_oom = try global.getProperty(a_counter_atom);
-    try std.testing.expectEqual(@as(?i32, 11), a_after_oom.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), a_after_oom.as(.int));
     const b_after_oom = try global.getProperty(b_counter_atom);
-    try std.testing.expectEqual(@as(?i32, 1), b_after_oom.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), b_after_oom.as(.int));
 
     injector.disarm();
     try state.runJobs(js.context);
     try std.testing.expectEqual(@as(usize, 0), state.owned_continuations.items.len);
 
     const a_counter = try global.getProperty(a_counter_atom);
-    try std.testing.expectEqual(@as(?i32, 111), a_counter.asInt32());
+    try std.testing.expectEqual(@as(?i32, 111), a_counter.as(.int));
     const b_counter = try global.getProperty(b_counter_atom);
-    try std.testing.expectEqual(@as(?i32, 111), b_counter.asInt32());
+    try std.testing.expectEqual(@as(?i32, 111), b_counter.as(.int));
 
     inline for (.{ "__paRetry", "__pbRetry" }) |name| {
         const promise_atom = try js.runtime.internAtom(name);
@@ -20357,7 +20357,7 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
 
     const value = try engine.exec.eval_entry.eval(ctx, "print(1);", .{ .output = &output });
 
-    try std.testing.expect(value.isUndefined());
+    try std.testing.expect(value.is(.undefined_value));
     try std.testing.expectEqualStrings("1\n", output.buffered());
 }
 
@@ -20488,7 +20488,7 @@ test "short conditional branches preserve immediate and full ToBoolean semantics
         \\assert.sameValue(andValue(0), 0);
         \\assert.sameValue(andValue(4), 9);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
@@ -20502,7 +20502,7 @@ test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
         \\try { fallOffIfThrow(true); } catch (e) { threw = (e === 1); }
         \\assert.sameValue(threw, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "if-return fall-off form returns undefined on the fall-through leg" {
@@ -20514,7 +20514,7 @@ test "if-return fall-off form returns undefined on the fall-through leg" {
         \\assert.sameValue(fallOffIfReturn(true), 1);
         \\assert.sameValue(fallOffIfReturn(false), undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "else-return goto-to-end form returns undefined on the taken if leg" {
@@ -20526,7 +20526,7 @@ test "else-return goto-to-end form returns undefined on the taken if leg" {
         \\assert.sameValue(fallOffElseReturn(true), undefined);
         \\assert.sameValue(fallOffElseReturn(false), 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "nested-block branch-to-end survives trailing scope cleanup lowering" {
@@ -20543,7 +20543,7 @@ test "nested-block branch-to-end survives trailing scope cleanup lowering" {
         \\function fallOffCaptured(c) { { let x = 1; if (c) throw 2; var probe = function () { return x; }; } return probe(); }
         \\assert.sameValue(fallOffCaptured(false), 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "arrow block body branch-to-end returns undefined" {
@@ -20557,7 +20557,7 @@ test "arrow block body branch-to-end returns undefined" {
         \\assert.sameValue(fallOffArrowReturn(true), 4);
         \\assert.sameValue(fallOffArrowReturn(false), undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "generator branch-to-end completes with undefined value" {
@@ -20576,7 +20576,7 @@ test "generator branch-to-end completes with undefined value" {
         \\assert.sameValue(r2.done, true);
         \\assert.sameValue(r2.value, undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "eval and script completion end in an explicit value return" {
@@ -20589,15 +20589,15 @@ test "eval and script completion end in an explicit value return" {
         \\assert.sameValue(eval("1 + 2"), 3);
         \\assert.sameValue(eval("{ let x; if (false) throw 6; }"), undefined);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     // Script completion (<repl> return_completion form) uses the same explicit
     // value-return epilogue at the top level.
     const repl_undef = try js.evalWithOptions("if (false) throw 7;", .{ .filename = "<repl>" });
-    try std.testing.expect(repl_undef.isUndefined());
+    try std.testing.expect(repl_undef.is(.undefined_value));
 
     const repl_value = try js.evalWithOptions("40 + 2", .{ .filename = "<repl>" });
-    try std.testing.expectEqual(@as(?i32, 42), repl_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), repl_value.as(.int));
 }
 
 test "eval preserves completion through nested shared finalizers" {
@@ -20609,7 +20609,7 @@ test "eval preserves completion through nested shared finalizers" {
         \\assert.sameValue(eval("1; try { try { 2; } finally { 3; } } finally { 4; }"), 2);
         \\assert.sameValue(eval("1; try { throw 5; } catch (error) { error + 1; } finally { 7; }"), 6);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "module top-level branch-to-end gets a terminator (no fall-off)" {
@@ -20700,7 +20700,7 @@ test "call consumers derive receiver and direct-eval provenance from the final o
         \\  assert.sameValue((0, commaReceiver.tag)`x`, undefined);
         \\})();
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     // Pinned QuickJS currently rejects this exact optional-with reference
     // during stack verification (`InternalError: inconsistent stack size`).
@@ -20734,7 +20734,7 @@ test "optional chains use one unbounded shared label and preserve closed-chain c
     try source.appendSlice(std.testing.allocator, "?.method)(), true);\n");
 
     const result = try js.eval(source.items);
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "direct eval inside a module function forwards module live bindings" {
@@ -20855,7 +20855,7 @@ test "dynamic global put keeps cell and global-object legs semantically separate
         var output = std.Io.Writer.fixed(&output_buffer);
         const result = try js.evalWithOutput(case.source, &output);
 
-        try std.testing.expect(result.isUndefined());
+        try std.testing.expect(result.is(.undefined_value));
         try std.testing.expectEqualStrings(case.expected, output.buffered());
     }
 }
@@ -20924,7 +20924,7 @@ test "get_var uninitialized-cell inline global-object leg preserves the cold wat
     const q1_name = try rt.internAtom("__q1");
     const verdict = try global.getProperty(q1_name);
     // 11 probes, all green.
-    try std.testing.expectEqual(@as(?i32, 1101), verdict.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1101), verdict.as(.int));
 }
 
 test "named function expression self-binding materializes lazily with pinned QuickJS semantics" {
@@ -21004,7 +21004,7 @@ test "named function expression self-binding materializes lazily with pinned Qui
     const q2_name = try rt.internAtom("__q2");
     const verdict = try global.getProperty(q2_name);
     // 22 probes, all green.
-    try std.testing.expectEqual(@as(?i32, 22001), verdict.asInt32());
+    try std.testing.expectEqual(@as(?i32, 22001), verdict.as(.int));
 }
 
 test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and carve misses" {
@@ -21051,7 +21051,7 @@ test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and 
     const key = try js.runtime.internAtom("__k2_deep");
     const deep_value = try global.getProperty(key);
     // n=0 level: locals sum 1+2+...+12 = 78, plus one per recursion level.
-    try std.testing.expectEqual(@as(?i32, 78 + 2400), deep_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 78 + 2400), deep_value.as(.int));
 
     // The arena must actually have crossed into a second chunk — otherwise
     // this test lost its carve-miss coverage (e.g. geometry drift).
@@ -21206,7 +21206,7 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
         \\    return Math.max.toString() === "function ém() {\n    [native code]\n}";
         \\})()
     , .{ .filename = "<repl>" });
-    try std.testing.expectEqual(true, result.asBool().?);
+    try std.testing.expectEqual(true, result.as(.boolean).?);
 }
 
 test "switch dispatch trampoline shapes keep their identity and semantics" {
@@ -21475,7 +21475,7 @@ test "small-function-inlining: redefinition takes the new function" {
         \\o.m = m2;
         \\assert.sameValue(outer(o), 2);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining: new C field write is visible" {
@@ -21488,7 +21488,7 @@ test "small-function-inlining: new C field write is visible" {
         \\for (i = 0; i < 16; i++) o = outer();
         \\assert.sameValue(o.x, 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining: polymorphic site is not specialized" {
@@ -21505,7 +21505,7 @@ test "small-function-inlining: polymorphic site is not specialized" {
         \\assert.sameValue(outer(B, 10).v, 11);
         \\globalThis.__outer = outer;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     const global = try js.context.globalObject();
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
@@ -21539,7 +21539,7 @@ test "small-function-inlining: R-2 getter on callee is invoked once per new" {
         \\assert.sameValue(outer(7).x, 7);
         \\assert.sameValue(n, 17);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining: inner throw stack and caller catch" {
@@ -21572,7 +21572,7 @@ test "small-function-inlining: primitive ctor return keeps instance" {
         \\assert.sameValue(typeof o, "object");
         \\assert.sameValue(o.x, 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining: Reflect.construct with foreign NewTarget is not expanded" {
@@ -21588,7 +21588,7 @@ test "small-function-inlining: Reflect.construct with foreign NewTarget is not e
         \\assert.sameValue(o.x, 15);
         \\assert.sameValue(o.mark, 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining: derived class constructor is not eligible" {
@@ -21619,7 +21619,7 @@ test "small-function-inlining: next-entry specialize is installed on the caller"
         \\assert.sameValue(batch(16), 16);
         \\assert.sameValue(batch(16), 16);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const batch_fn = try global.getProperty(try js.runtime.internAtom("__batch"));
     const batch_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(batch_fn).?;
@@ -21642,7 +21642,7 @@ test "small-function-inlining: spec copy keeps simple_inline bits after extra TA
         \\assert.sameValue(last.x, 15);
         \\assert.sameValue(outer(7).x, 7);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
@@ -21680,7 +21680,7 @@ test "small-function-inlining: sibling constructor sites both specialize" {
         \\assert.sameValue(last, 3);
         \\assert.sameValue(both(4, 5), 9);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const both_fn = try global.getProperty(try js.runtime.internAtom("__both"));
     const both_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(both_fn).?;
@@ -21707,7 +21707,7 @@ test "small-function-inlining: proto replacement after specialize is observed" {
         \\assert.sameValue(o.x, 7);
         \\assert.sameValue(o.mark, 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining: call_constructor callers keep published frame geometry" {
@@ -21718,7 +21718,7 @@ test "small-function-inlining: call_constructor callers keep published frame geo
         \\function outer(v) { return new C(v); }
         \\globalThis.__outer = outer;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
@@ -21764,7 +21764,7 @@ test "small-function-inlining: leftover ctor is not specialized and does not ove
         \\globalThis.__C = C;
         \\globalThis.__outer = outer;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const c_fn = try global.getProperty(try js.runtime.internAtom("__C"));
     try std.testing.expect(!zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(c_fn).?.bytecodeArm().*.function_bytecode.?.smallInlineEligible());
@@ -21789,7 +21789,7 @@ test "small-function-inlining: extra ctor args do not overwrite callee fields" {
         \\assert.sameValue(last.leak, undefined);
         \\globalThis.__outer = outer;
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
@@ -21810,7 +21810,7 @@ test "small-function-inlining: monomorphic method is expanded" {
         \\for (i = 0; i < 16; i++) last = outer(box);
         \\assert.sameValue(last, 4);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining L1: apply-arguments ctor specializes" {
@@ -21827,7 +21827,7 @@ test "small-function-inlining L1: apply-arguments ctor specializes" {
         \\assert.sameValue(o.b, 2);
         \\assert.sameValue(outer(7, 8).a, 7);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     const global = try js.context.globalObject();
     const outer_fn = try global.getProperty(try js.runtime.internAtom("__outer"));
     const outer_obj = zjs.exec.object_ops.plainBytecodeFunctionObjectFromValue(outer_fn).?;
@@ -21853,7 +21853,7 @@ test "small-function-inlining L1: next-entry take does not leak initialize retur
         \\assert.sameValue(batch(16), 16);
         \\assert.sameValue(batch(64), 64);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining L1: forwarded argc is the site argc" {
@@ -21868,7 +21868,7 @@ test "small-function-inlining L1: forwarded argc is the site argc" {
         \\assert.sameValue(o.n, 3);
         \\assert.sameValue(outer().n, 3);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining L1: Error.stack is initialize, apply native, ctor" {
@@ -21910,7 +21910,7 @@ test "small-function-inlining L1: own apply misses take" {
         \\assert.sameValue(outer(99).via, "own");
         \\assert.sameValue(outer(99).a, 99);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "small-function-inlining L1: replaced Function.prototype.apply misses take" {
@@ -21935,7 +21935,7 @@ test "small-function-inlining L1: replaced Function.prototype.apply misses take"
         \\  Function.prototype.apply = saved;
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "flat string strict-eq matches content across distinct objects" {
@@ -21963,7 +21963,7 @@ test "flat string strict-eq matches content across distinct objects" {
         \\}
         \\check(acc === 1);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 const ActiveInvocationRootProbe = struct {
@@ -22205,7 +22205,7 @@ test "C0: ToPropertyKey semantics across every parser surface (D7 fixtures)" {
         \\function guarded(){ try { mk(boom); return "no"; } catch (e) { return e.message; } }
         \\assert.sameValue(guarded(), "boom");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "C0: a throw inside key coercion attributes the frame to the carrier's source pc" {
@@ -22222,7 +22222,7 @@ test "C0: a throw inside key coercion attributes the frame to the carrier's sour
         \\assert.sameValue(captured.indexOf("at maker (c0tpk.js:2:") >= 0, true, captured);
         \\assert.sameValue(captured.indexOf("at <eval> (c0tpk.js:") >= 0, true, captured);
     , .{ .filename = "c0tpk.js" });
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "C0 closed: the carrier encoding executes and the quarantined direct id is rejected" {
@@ -22239,7 +22239,7 @@ test "C0 closed: the carrier encoding executes and the quarantined direct id is 
     });
     defer carrier.deinit(rt);
     const carrier_result = try runFunction(rt, ctx, &carrier);
-    try std.testing.expect(carrier_result.isUndefined());
+    try std.testing.expect(carrier_result.is(.undefined_value));
 
     // 11.0 end state: the reclaimed direct byte must not survive final
     // validation -- the stack pass rejects it at decode.
@@ -22285,7 +22285,7 @@ test "C1-1: computed-name function naming rides the carrier encoding" {
         \\assert.sameValue(Object.getOwnPropertySymbols(mk(s)).length, 1);
         \\assert.sameValue(mk(s)[s].name, "[sy]");
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 
     // Artifact shape: the carrier pair once, the direct id never.
     const fb = try globalFunctionBytecode(js, "mk");
@@ -22459,7 +22459,7 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
         var warmup = try helpers.makeFunction(rt, &.{ op.push_i32, 1, 0, 0, 0, op.@"return" });
         defer warmup.deinit(rt);
         const warmed = try helpers.runFunction(rt, ctx, &warmup);
-        try std.testing.expectEqual(@as(i32, 1), warmed.asInt32().?);
+        try std.testing.expectEqual(@as(i32, 1), warmed.as(.int).?);
     }
 
     const Probe = struct {
@@ -22564,7 +22564,7 @@ fn runUnderPublishProbe(
         var warmup = try makeFunction(rt, &.{ op.push_i32, 1, 0, 0, 0, op.@"return" });
         defer warmup.deinit(rt);
         const warmed = try helpers.runFunction(rt, ctx, &warmup);
-        try std.testing.expectEqual(@as(i32, 1), warmed.asInt32().?);
+        try std.testing.expectEqual(@as(i32, 1), warmed.as(.int).?);
     }
 
     const saved_fn = rt.memory.trigger_gc_fn;
@@ -22946,8 +22946,8 @@ test "no-suspend async completion roots survive declared-only GC before and afte
             const store = &active.machine.async_completions;
             try std.testing.expect(store.count != 0);
             const slot = store.at(store.count - 1);
-            try std.testing.expect(slot.promise.isObject());
-            if (slot.value.isUndefined()) self.running += 1 else self.completing += 1;
+            try std.testing.expect(slot.promise.is(.object));
+            if (slot.value.is(.undefined_value)) self.running += 1 else self.completing += 1;
             const old_major = rt.gc.stats.cycle_gc_count;
             _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
             try std.testing.expect(rt.gc.stats.cycle_gc_count > old_major);
@@ -23016,7 +23016,7 @@ test "no-suspend async transfers post-body OOM to FIFO without replay" {
             const store = &active.machine.async_completions;
             try std.testing.expectEqual(@as(u32, 1), store.count);
             const slot = store.at(0);
-            try std.testing.expect(slot.value.isObject()); // Callee already popped.
+            try std.testing.expect(slot.value.is(.object)); // Callee already popped.
             const promise = try core.Object.expect(slot.promise);
             const ops = engine.exec.promise_ops;
             const undefined_value = core.JSValue.undefinedValue();
@@ -23279,7 +23279,7 @@ test "P-Cap retries reserved reaction phase before then getter without replaying
     try std.testing.expectEqual(queued, js.runtime.job_queue.jobs.len);
     try std.testing.expectEqual(core.jobs.PromiseReactionPhase.resolve, js.runtime.job_queue.jobs[0].payload.promise_reaction.phase);
     const getter_key = try js.runtime.internAtom("pcapReserveGetter");
-    try std.testing.expectEqual(@as(?i32, 0), (try global.getProperty(getter_key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), (try global.getProperty(getter_key)).as(.int));
     js.runtime.setMemoryLimit(null);
     js.runtime.suppressLimitCollectionForTest(false);
     _ = try js.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
@@ -23422,5 +23422,5 @@ test "all-cold fused pushes keep their leftover opcode" {
         .current_function_value = function_value,
         .stop_before_pc = function.byteCode().len + 1,
     });
-    try std.testing.expectEqual(@as(?i32, 11), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), result.as(.int));
 }

@@ -275,7 +275,7 @@ pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []con
 /// one-time FunctionBytecode -> function-object ownership transition.
 pub fn moduleFunctionValue(record: *const core.module.ModuleRecord) !core.JSValue {
     const value = record.funcObjectValue();
-    if (!value.isObject()) return error.InvalidBytecode;
+    if (!value.is(.object)) return error.InvalidBytecode;
     return value;
 }
 
@@ -362,7 +362,7 @@ fn ensureModuleFunction(
     record: *core.module.ModuleRecord,
 ) !?*core.Object {
     if (record.synthetic_kind != .none) {
-        if (!record.funcObjectValue().isUndefined()) return error.InvalidBytecode;
+        if (!record.funcObjectValue().is(.undefined_value)) return error.InvalidBytecode;
         try ensureSyntheticDefaultCell(ctx, record);
         return null;
     }
@@ -374,7 +374,7 @@ fn ensureModuleFunction(
     }
 
     const initial_value = record.funcObjectValue();
-    if (!initial_value.isFunctionBytecode()) return error.InvalidBytecode;
+    if (!initial_value.is(.function_bytecode)) return error.InvalidBytecode;
     const function = call_runtime.functionBytecodeFromValue(initial_value) orelse
         return error.InvalidBytecode;
     if (!function.isModule() or function.realmContext() != ctx) return error.InvalidBytecode;
@@ -806,7 +806,7 @@ fn moduleNamespaceValueForRecord(
     if (record.registry != &ctx.modules) return error.ModuleNotFound;
     if (!record.requestsResolved()) return error.ModuleNotFound;
     const cached = record.moduleNamespaceValue();
-    if (!cached.isUndefined()) return cached;
+    if (!cached.is(.undefined_value)) return cached;
 
     const object = try core.Object.create(ctx.runtime, core.class.ids.module_ns, null);
     try initializeCanonicalModuleNamespace(ctx, record, object);
@@ -1285,7 +1285,7 @@ fn moduleBindingInitialized(record: *const core.module.ModuleRecord, name: core.
         const retained = record.retainedExportCellValue(@intCast(index)) orelse
             return false;
         const cell = core.VarRef.fromValue(retained) orelse return false;
-        return !cell.varRefValue().isUninitialized();
+        return !cell.varRefValue().is(.uninitialized);
     }
     return false;
 }

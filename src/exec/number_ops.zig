@@ -214,7 +214,7 @@ pub fn toFixed(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.J
 
 pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
-    const fraction_arg_undefined = args.len == 0 or args[0].isUndefined();
+    const fraction_arg_undefined = args.len == 0 or args[0].is(.undefined_value);
     var fraction_digits = try integerDigitsArgument(rt, args, 0);
     if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
     const flags = if (fraction_arg_undefined) flags: {
@@ -230,7 +230,7 @@ pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const 
 
 pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
-    if (args.len == 0 or args[0].isUndefined()) return numberStringValue(rt, number);
+    if (args.len == 0 or args[0].is(.undefined_value)) return numberStringValue(rt, number);
     const precision = try integerDigitsArgument(rt, args, 0);
     if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
     if (precision < 1 or precision > 100) return error.RangeError;
@@ -285,8 +285,8 @@ fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, flags: i32) 
 }
 
 fn integerDigitsArgument(rt: *core.JSRuntime, args: []const core.JSValue, default: i32) !i32 {
-    if (args.len == 0 or args[0].isUndefined()) return default;
-    if (args[0].isSymbol() or args[0].isBigInt()) return error.TypeError;
+    if (args.len == 0 or args[0].is(.undefined_value)) return default;
+    if (args[0].is(.symbol) or args[0].isBigInt()) return error.TypeError;
     const number = try core.number.toNumber(rt, args[0]);
     if (std.math.isNan(number) or number == 0) return 0;
     if (!std.math.isFinite(number)) return if (number < 0) std.math.minInt(i32) else std.math.maxInt(i32);

@@ -1009,14 +1009,14 @@
 
 - **签名**：`pub noinline fn pushConstructorCall( self: *Machine, global: *core.Object, caller_stack: *stack_mod.Stack, target: *const InlineTarget, region_start: [*]core.JSValue, argc: u16, owned_new_target: ?core.JSValue, ) align(16) HostError!*Entry`。
 - **作用**：在本 Machine 进入普通构造器。调用方已把区域改写成 `[instance, callable, args...]`；setup 后 fallback 实例所有权从 `Frame.this_value` 挪到 `Entry.native_caller`，this 只借活实例。
-- **实现**：断言 `topPtr()==region_start` 且 `this_value.isObject()`。`initStack(..., has_receiver=true)`。`enterInlineCallDepthBytes` 失败则 `cleanupStackSource`。`acquireSlot` 同样。`return_action=.constructor`。`methodSimpleInlineMode` 命中则 `setupSimpleConstructorEntryDispatch`（moved 变体 unreachable，source 来自 initStack）；否则 `setupInlineEntry`。`errdefer entry.deinit`。setup 之后才设 `native_caller = this_value`、`teardown.constructor_completion=true`（setup 会整字节覆盖 teardown）。`ownership.new_target=.aliases_function`；若 `owned_new_target` 则 `takeConstructorNewTarget`。链 prev、depth++。对齐 `JS_CallConstructorInternal` → 共享 alloca 序言（quickjs.c:20845 / 17828-17871）；`JS_CALL_FLAG_CONSTRUCTOR` 不被那条字节码序言消费。
+- **实现**：断言 `topPtr()==region_start` 且 `this_value.is(.object)`。`initStack(..., has_receiver=true)`。`enterInlineCallDepthBytes` 失败则 `cleanupStackSource`。`acquireSlot` 同样。`return_action=.constructor`。`methodSimpleInlineMode` 命中则 `setupSimpleConstructorEntryDispatch`（moved 变体 unreachable，source 来自 initStack）；否则 `setupInlineEntry`。`errdefer entry.deinit`。setup 之后才设 `native_caller = this_value`、`teardown.constructor_completion=true`（setup 会整字节覆盖 teardown）。`ownership.new_target=.aliases_function`；若 `owned_new_target` 则 `takeConstructorNewTarget`。链 prev、depth++。对齐 `JS_CallConstructorInternal` → 共享 alloca 序言（quickjs.c:20845 / 17828-17871）；`JS_CALL_FLAG_CONSTRUCTOR` 不被那条字节码序言消费。
 - **所有权 / 错误 / 调用**：fallback 实例由 `native_caller` 单所有；this `.borrowed`。spread 的 `owned_new_target` 成功才接管，失败仍归调用方。错误：`HostError`。调用：`enterSameMachineSpreadConstructor` / `op_call_constructor` 的普通构造臂。
 
 ### `pushDerivedConstructorCall` (`src/exec/inline_calls.zig:3617`)
 
 - **签名**：`pub noinline fn pushDerivedConstructorCall( self: *Machine, global: *core.Object, caller_stack: *stack_mod.Stack, target: *const InlineTarget, region_start: [*]core.JSValue, argc: u16, owned_new_target: ?core.JSValue, ) HostError!*Entry`。
 - **作用**：`pushConstructorCall` 的 derived 孪生：无 eager 实例，this 保持 uninitialized，直到 super()/return 字节码解析；`native_caller=undefined` 作无 fallback 哨兵。
-- **实现**：断言 `this_value.isUninitialized()`。深度/槽/cleanup 同普通构造。只走 `setupInlineEntry`（不走 simple constructor dispatch）。`ownership.new_target=.aliases_function`，可选 `takeConstructorNewTarget`。断言 this 仍 uninitialized。`native_caller=undefinedValue()`，`constructor_completion=true`。链 prev、depth++。
+- **实现**：断言 `this_value.is(.uninitialized)`。深度/槽/cleanup 同普通构造。只走 `setupInlineEntry`（不走 simple constructor dispatch）。`ownership.new_target=.aliases_function`，可选 `takeConstructorNewTarget`。断言 this 仍 uninitialized。`native_caller=undefinedValue()`，`constructor_completion=true`。链 prev、depth++。
 - **所有权 / 错误 / 调用**：无 fallback 实例；完成时 `popConstructorReturn` 见 undefined 则转发结果。错误：`HostError`。调用：`pushDerivedConstructorEntry` / `pushSpreadDerivedConstructorEntry`。
 
 ### `Machine.pushCall` (`src/exec/inline_calls.zig:3666`)
@@ -1275,7 +1275,7 @@
 
 - **签名**：`pub noinline fn popConstructorReturn(self: *Machine, result: core.JSValue) align(16) core.JSValue`。
 - **作用**：构造器返回完成，对齐 qjs 两分支：共享 `done:` 序言后（quickjs.c:20699-20709）`JS_CallConstructorInternal` 只做 tag 测试加一次 free（quickjs.c:20846-20856）。基类 Entry 拥有 fallback：对象结果替换它，原语丢弃改用实例。derived 的 undefined 哨兵则转发已检查的结果。
-- **实现**：断言 `constructor_completion`、无 native_caller、无 tail_chain、`return_action==.constructor`、payload==0（静态证明 constructor_completion∧tail_chain 不可满足）。读 `native_caller` 为 fallback；非 undefined 则 `noteConstructorAllocation`。`deinitConstructorReturned`（不走会 `releaseConstructorFallback` 的共享 deinit——flag 在此路径已死）。`leaveInlineCallDepthBytes`，unlink `top=prev`。fallback undefined → 返回 result；`result.isObject()` → result；否则 fallback。 abrupt 完成仍走 `Entry.deinit` 且 flag 仍 SET，经 `releaseConstructorFallback` 释放一次。
+- **实现**：断言 `constructor_completion`、无 native_caller、无 tail_chain、`return_action==.constructor`、payload==0（静态证明 constructor_completion∧tail_chain 不可满足）。读 `native_caller` 为 fallback；非 undefined 则 `noteConstructorAllocation`。`deinitConstructorReturned`（不走会 `releaseConstructorFallback` 的共享 deinit——flag 在此路径已死）。`leaveInlineCallDepthBytes`，unlink `top=prev`。fallback undefined → 返回 result；`result.is(.object)` → result；否则 fallback。 abrupt 完成仍走 `Entry.deinit` 且 flag 仍 SET，经 `releaseConstructorFallback` 释放一次。
 - **所有权 / 错误 / 调用**：接管 `result`；返回值给 `popReturn` `pushOwnedAssumeCapacity`。错误：无。调用：`Machine.popReturn` 在 `completesConstructor()` 时；outline 是为了 return handler 只付一次 bl。
 
 ### `Machine.discardToDepth` (`src/exec/inline_calls.zig:5160`)

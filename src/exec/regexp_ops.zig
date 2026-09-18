@@ -299,7 +299,7 @@ fn regexpFlagsAccessorCall(
     const realm = try builtin_dispatch.callableRealm(host_call);
     std.debug.assert(realm.realm == native_ctx);
     const active_global = realm.global;
-    if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
+    if (!native_this.is(.object)) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
     // js_regexp_get_flags (quickjs.c:47943): generic receiver; observe the
     // eight flag properties through ordinary [[Get]] in canonical order.
@@ -343,7 +343,7 @@ fn regexpSourceAccessorCall(
     std.debug.assert(realm.realm == native_ctx);
     const active_global = realm.global;
     const function_object = host_call.func_obj orelse return error.TypeError;
-    if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
+    if (!native_this.is(.object)) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
     const header = native_this.refHeader() orelse return error.TypeError;
     const receiver = core.Object.fromHeader(header);
@@ -372,7 +372,7 @@ fn regexpFlagAccessorCall(
     std.debug.assert(realm.realm == native_ctx);
     const active_global = realm.global;
     const function_object = host_call.func_obj orelse return error.TypeError;
-    if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
+    if (!native_this.is(.object)) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
     const header = native_this.refHeader() orelse return error.TypeError;
     const receiver = core.Object.fromHeader(header);
@@ -456,7 +456,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags:
 }
 
 fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Object, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    if (flags.isUndefined()) {
+    if (flags.is(.undefined_value)) {
         if (regexpObjectFromValue(pattern)) |regexp_object| {
             const source_val = try getInternalSource(regexp_object);
             const bytecode = regexp_object.regexpCompiledBytecode();
@@ -474,14 +474,14 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
     const pattern_object = regexpObjectFromValue(pattern);
     source_val = if (pattern_object) |regexp_object|
         try getInternalSource(regexp_object)
-    else if (pattern.isUndefined())
+    else if (pattern.is(.undefined_value))
         try createStringValue(rt, "")
     else
         try regExpStringValue(rt, pattern);
 
-    flags_val = if (flags.isUndefined() and pattern_object != null)
+    flags_val = if (flags.is(.undefined_value) and pattern_object != null)
         try getInternalFlags(rt, pattern_object.?)
-    else if (flags.isUndefined())
+    else if (flags.is(.undefined_value))
         try createStringValue(rt, "")
     else
         try regExpStringValue(rt, flags);
@@ -624,7 +624,7 @@ pub const classMatchesUtf16Unit = core.regexp.classMatchesUtf16Unit;
 
 fn regexpObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const object = core.Object.fromHeader(header);
     return if (object.class_id == core.class.ids.regexp) object else null;
 }
@@ -769,7 +769,7 @@ fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), f
 
 fn expectRegExpObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.regexp) return error.TypeError;
     return object;

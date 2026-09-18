@@ -141,7 +141,7 @@ python3 docs/code-walkthrough/_check_coverage.py --docs 'docs/code-walkthrough/2
   src/all_tests.zig src/builtins_tests.zig src/bytecode_tests.zig src/compiler_tests.zig \
   src/core_tests.zig src/embedding_tests.zig src/exec_tests.zig src/leak_census_tests.zig \
   src/parser_tests.zig src/runner_tests.zig src/runtime_tests.zig \
-  src/tests/abi_layout.zig src/tests/builtins.zig src/tests/bytecode.zig src/tests/core.zig \
+  src/tests/builtins.zig src/tests/bytecode.zig src/tests/core.zig \
   src/tests/embedding_examples.zig src/tests/engine_production.zig src/tests/exec.zig \
   src/tests/gc_stress.zig src/tests/helpers.zig src/tests/oom.zig src/tests/oom_cap.zig \
   src/tests/parser.zig src/tests/smoke_test.zig src/tests/stress.zig

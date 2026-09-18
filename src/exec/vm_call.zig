@@ -865,7 +865,7 @@ fn throwCtorTypeError(ctx: *core.JSContext, global: *core.Object, message: []con
 }
 
 pub fn checkCtor(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame) !void {
-    if (frame.newTargetValue().isUndefined()) {
+    if (frame.newTargetValue().is(.undefined_value)) {
         return throwCtorTypeError(ctx, global, "class constructors must be invoked with 'new'");
     }
 }
@@ -888,9 +888,9 @@ pub noinline fn checkCtorVm(
 pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
-    if (value.isObject()) {
+    if (value.is(.object)) {
         try stack.pushOwned(core.JSValue.boolean(false));
-    } else if (value.isUndefined()) {
+    } else if (value.is(.undefined_value)) {
         try stack.pushOwned(core.JSValue.boolean(true));
     } else {
         // qjs constructs this error in JS_CallInternal's caller_ctx, not the
@@ -923,7 +923,7 @@ pub fn initCtor(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (frame.newTargetValue().isUndefined()) {
+    if (frame.newTargetValue().is(.undefined_value)) {
         return throwCtorTypeError(ctx, global, "class constructors must be invoked with 'new'");
     }
     const function_object = try property_ops.expectObject(frame.current_function);

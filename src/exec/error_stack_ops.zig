@@ -186,7 +186,7 @@ pub fn errorStackTraceLimit(_: *core.JSRuntime, global: *core.Object) usize {
     const error_object = global.getOwnDataObjectBorrowed(error_key) orelse return 10;
     const limit_key = core.atom.ids.stackTraceLimit;
     const limit_value = error_object.getOwnDataPropertyValue(limit_key) orelse return 10;
-    if (limit_value.isUndefined() or limit_value.isNull()) return 0;
+    if (limit_value.is(.undefined_value) or limit_value.is(.null_value)) return 0;
     const number = value_ops.numberValue(limit_value) orelse return 10;
     if (!std.math.isFinite(number) or number <= 0) return 0;
     const truncated = @floor(number);
@@ -307,7 +307,7 @@ pub fn errorStackSetter(
 
     switch (own_desc.kind) {
         .accessor => {
-            if (own_desc.setter.isUndefined()) return error.TypeError;
+            if (own_desc.setter.is(.undefined_value)) return error.TypeError;
             _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
             return core.JSValue.undefinedValue();
         },
@@ -331,7 +331,7 @@ pub fn errorCaptureStackTrace(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    if (args.len < 1 or !args[0].isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
+    if (args.len < 1 or !args[0].is(.object)) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
     const target = try property_ops.expectObject(args[0]);
     const skip_name = if (args.len >= 2 and isCallableValue(args[1]))
         try exception_ops.functionNameBytes(ctx.runtime, args[1])

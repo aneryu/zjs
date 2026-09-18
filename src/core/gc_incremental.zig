@@ -193,7 +193,7 @@ pub const Morgue = struct {
     /// Resume point within the current kind pass. Sound to hold across slices
     /// because nothing touches the list between them: collections are gated
     /// and the mutator has no path to a condemned object.
-    cursor: ?*gc.GCObjectHeader = null,
+    cursor: ?*gc.Header = null,
     pending: bool = false,
     /// Objects destroyed by the slices of the current morgue, for the
     /// completion poll's CollectionResult.

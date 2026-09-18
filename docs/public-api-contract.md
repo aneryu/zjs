@@ -1,7 +1,7 @@
 # Public API Contract
 
 This document is the active public Zig API authority for embedders. Keep it in
-sync with `src/root.zig`, `src/binding/`, and `src/runtime/public.zig`. The
+sync with `src/root.zig`, `src/binding/`, and `src/runtime/root.zig`. The
 name lists in `src/tests/embedding_examples.zig` are the executable check:
 adding or removing a public name must update those arrays in the same
 commit. They are not a freeze of the API, and they are not the removed
@@ -15,24 +15,26 @@ Embedders import the root module:
 const zjs = @import("zjs");
 ```
 
-The stable public groups are:
+The remaining host groups are:
 
 - `zjs.JSRuntime`, `zjs.JSContext`, `zjs.JSValue`;
-- `zjs.native` for native (host) functions callable from JavaScript:
-  `managed`, `leaf`, `leafWithState`, `Call`, `Spec`, `Options`;
-- `zjs.CallSite` for repeated native -> JS calls to one function;
-- `zjs.PropertySite` for repeated host reads/writes of one property name;
+- `zjs.native` for host functions callable from JavaScript:
+  `managed`, `Call`, `Spec`, `Options`;
 - `zjs.value` for value constructors, handle aliases, string views, and byte
   views;
 - `zjs.object` for low-level object helpers;
-- `zjs.host` for native object bindings (`NativeBinding`, `NativeObject`),
-  property names (`PropName`), and the CLI-shaped global helpers
+- `zjs.host` for the CLI-shaped global helpers
   (`defineScriptArgs`, `defineArgvGlobals`, `evalGlobalScriptSource` /
   `evalGlobalScriptValue`);
 - `zjs.context`, `zjs.module`, and `zjs.job` for explicit helper
   families;
-- `zjs.runtime` for runtime policy helpers (event loop, module file graph,
-  SharedArrayBuffer wake/cleanup, ArrayBuffer detach).
+- `zjs.runtime` for the host event loop (`EventLoop`, `runUntilIdle`).
+
+Removed (no longer compiled): `zjs.CallSite`, `zjs.PropertySite`,
+`zjs.native.leaf` / `leafWithState` / `Class`, `zjs.host.NativeBinding`,
+`zjs.host.PropName` / `PropNameID`, and `src/binding/binding.zig`.
+Repeated native → JS calls use `JSContext.callFunction`; property IC lives
+only in the VM `PropSiteCache`.
 
 The intended groups above are the contract. The embedding snapshot test
 lists every current public declaration on those groups. Update the list when
@@ -43,9 +45,7 @@ callback family `zjs.host.Call` / `Function` / `Finalizer` /
 `FunctionOptions`, `JSContext.defineGlobalFunction` /
 `createExternalFunction`, the `zjs.ffi` plugin ABI, and
 `zjs.runtime.Plugin` / `PluginInstallOptions` together with the
-`src/runtime/plugin.zig` loader. The replacement is `zjs.native` below; the
-dynamic-plugin successor is the FNABI (`docs/fun-native-plugin-design.md`),
-which is built on `zjs.native` and lives in the `fun` repository.
+`src/runtime/plugin.zig` loader. The replacement is `zjs.native` below.
 
 ## Compatibility Rules
 
@@ -59,8 +59,7 @@ which is built on `zjs.native` and lives in the `fun` repository.
 
 Current public spellings matter. For example, the public string/bytes spellings
 are `zjs.value.String` and `zjs.value.Bytes`, with nested aliases on
-`zjs.JSValue`. The public property-name token is `zjs.host.PropName`. Root
-spellings such as `zjs.JSBytes` or `zjs.PropNameID` are intentionally not part
+`zjs.JSValue`. Root spellings such as `zjs.JSBytes` are intentionally not part
 of the current contract.
 
 ## Known surface deviations
@@ -85,7 +84,7 @@ decoders such as `catchTarget` and `isTracerOwned`). That leak is known debt
 expansion is visible. Cookbook and embedding examples must not call those
 internal names.
 
-`JSRuntime` currently publishes 162 public declarations. Its count is pinned
+`JSRuntime` currently publishes 161 public declarations. Its count is pinned
 beside the `JSValue` count in the embedding surface test, so any addition or
 removal requires an explicit public-contract update.
 
@@ -162,10 +161,6 @@ Host state that keeps JavaScript values across callbacks, ticks, or object
 lifetimes must use one of the documented handle types:
 
 ```zig
-zjs.JSValue.Scope
-zjs.JSValue.Local
-zjs.JSValue.Persistent
-zjs.JSValue.Weak
 zjs.value.Scope
 zjs.value.Local
 zjs.value.Persistent
@@ -194,17 +189,16 @@ The rooting rules of the native boundary (design contract C2) are:
 Public lifetime methods use three verbs:
 
 - `deinit` destroys the receiver. Use it for handle scopes, persistent
-  handles, weak handles, native pins, `CallSite`, and `PropertySite`.
-- `take` transfers ownership out of the receiver. `JSValue.Persistent.take`
+  handles, weak handles, and native pins.
+- `take` transfers ownership out of the receiver. `zjs.value.Persistent.take`
   removes the persistent root and returns the rooted `JSValue`.
 - `release` decrements a reference count or drops a borrowed pin. Keep this
-  spelling on `zjs.value.Bytes.Store`, `zjs.object.Buffer.BorrowGuard`, and
-  `zjs.host.PropName`.
+  spelling on `zjs.value.Bytes.Store` and `zjs.object.Buffer.BorrowGuard`.
 
 `HandleScope.deinit` is idempotent: an early `scope.deinit()` before a
 `defer scope.deinit()` is the supported way to close a scope early.
 
-`JSValue.Persistent.destroy(rt)` is a by-value compatibility wrapper. It
+`zjs.value.Persistent.destroy(rt)` is a by-value compatibility wrapper. It
 asserts that `rt` matches the handle's runtime, then drops the root. Prefer
 `deinit` on a mutable handle. It is not a transfer (`take`) and is not
 equivalent to `deinit` as a method signature.
@@ -224,9 +218,6 @@ backing memory. `zjs.value.Bytes.Store` supports owned and shared stores with
 explicit deinit/release semantics. Borrowed byte slices are callback-local; keep
 a JS value rooted and reacquire the view, or copy the bytes, when data must
 survive across callbacks or ticks.
-
-`zjs.host.PropName` is the public long-lived/static property-name token.
-Embedding code should use it instead of exposing atom internals.
 
 ## Native Functions (`zjs.native`)
 
@@ -415,17 +406,17 @@ must use explicit hook policy.
 
 ## Runtime Namespace
 
-`zjs.runtime` exposes runtime policy helpers only:
+`zjs.runtime` exposes the host event loop only:
 
-- event-loop helpers;
-- module file graph helpers;
-- SharedArrayBuffer wake/cleanup helpers;
-- ArrayBuffer detach helper.
+- `EventLoop`, `EventLoopOptions`, `EventLoopRunResult`;
+- `runUntilIdle`.
 
-It must not become an `Engine` facade and must not re-export internal runtime
-modules as public contract. There is no in-tree dynamic plugin loader: the
-FNABI loader (`docs/fun-native-plugin-design.md`) lives in the `fun`
-repository and registers its functions through `zjs.native`.
+Module file graphs (`zjs.module` / `src/exec/module_graph.zig`), Atomics
+waiter wake/cleanup (`src/exec/atomics_ops.zig`), and ArrayBuffer detach
+(`src/exec/buffer_ops.zig`, `zjs.object.Buffer.detachBackingBuffer`) are not
+part of this namespace. It must not become an `Engine` facade and must not
+re-export internal runtime modules as public contract. There is no in-tree
+dynamic plugin loader; host functions register through `zjs.native`.
 
 ## Evidence
 

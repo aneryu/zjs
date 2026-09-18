@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
         .timing = &eval_timing,
     }) catch |err| engineFatal(context, allocator, "compile/top-level execution", err);
     const engine_cold_to_first_result_ns = elapsedNanosSince(engine_cold_start);
-    if (eval_result.isException()) {
+    if (eval_result.is(.exception)) {
         engineFatal(context, allocator, "compile/top-level execution", error.JSException);
     }
     top_level_executions += 1;
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             .output = null,
             .realm_global = global_object,
         }) catch |err| engineFatal(context, allocator, "warmup invocation", err);
-        if (result.isException()) {
+        if (result.is(.exception)) {
             engineFatal(context, allocator, "warmup invocation", error.JSException);
         }
     }
@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
             .realm_global = global_object,
         }) catch |err| engineFatal(context, allocator, "steady invocation", err);
         sample.* = elapsedNanosSince(execute_start);
-        if (result.isException()) {
+        if (result.is(.exception)) {
             engineFatal(context, allocator, "steady invocation", error.JSException);
         }
         if (index + 1 == samples.len) {

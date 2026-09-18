@@ -117,22 +117,22 @@ pub fn isGeneralCategoryPropertyName(name: []const u8) bool {
 }
 
 pub fn scriptIndex(script_name: []const u8) ?data.Script {
-    const found = findName(&data.unicode_script_name_table, script_name) orelse return null;
+    const found = findName(data.unicode_script_name_table, script_name) orelse return null;
     return @enumFromInt(found);
 }
 
 pub fn gcIndex(gc_name: []const u8) ?data.GC {
-    const found = findName(&data.unicode_gc_name_table, gc_name) orelse return null;
+    const found = findName(data.unicode_gc_name_table, gc_name) orelse return null;
     return @enumFromInt(found);
 }
 
 pub fn propIndex(prop_name: []const u8) ?data.Prop {
-    const found = findName(&data.unicode_prop_name_table, prop_name) orelse return null;
+    const found = findName(data.unicode_prop_name_table, prop_name) orelse return null;
     return @enumFromInt(found + @intFromEnum(data.prop_public_first));
 }
 
 pub fn sequencePropIndex(prop_name: []const u8) ?data.SequenceProp {
-    const found = findName(&data.unicode_sequence_prop_name_table, prop_name) orelse return null;
+    const found = findName(data.unicode_sequence_prop_name_table, prop_name) orelse return null;
     return @enumFromInt(found);
 }
 
@@ -198,34 +198,34 @@ pub fn parsePropertyExpression(property_expr: []const u8) ?PropertyExpression {
 comptime {
     const prop_public_count = @intFromEnum(data.prop_public_last) - @intFromEnum(data.prop_public_first) + 1;
 
-    if (countNameGroupsComptime(&data.unicode_gc_name_table) != data.GC.count()) {
+    if (countNameGroupsComptime(data.unicode_gc_name_table) != data.GC.count()) {
         @compileError("unicode_gc_name_table must cover every GC value");
     }
-    if (countNameGroupsComptime(&data.unicode_script_name_table) != data.Script.count()) {
+    if (countNameGroupsComptime(data.unicode_script_name_table) != data.Script.count()) {
         @compileError("unicode_script_name_table must cover every Script value");
     }
-    if (countNameGroupsComptime(&data.unicode_prop_name_table) != prop_public_count) {
+    if (countNameGroupsComptime(data.unicode_prop_name_table) != prop_public_count) {
         @compileError("unicode_prop_name_table must cover the public named property range");
     }
-    if (countNameGroupsComptime(&data.unicode_sequence_prop_name_table) != data.SequenceProp.count()) {
+    if (countNameGroupsComptime(data.unicode_sequence_prop_name_table) != data.SequenceProp.count()) {
         @compileError("unicode_sequence_prop_name_table must cover every SequenceProp value");
     }
 
-    validateNameTable("general category", &data.unicode_gc_name_table, data.GC.count());
-    validateNameTable("script", &data.unicode_script_name_table, data.Script.count());
-    validateNameTable("property", &data.unicode_prop_name_table, prop_public_count);
-    validateNameTable("sequence property", &data.unicode_sequence_prop_name_table, data.SequenceProp.count());
+    validateNameTable("general category", data.unicode_gc_name_table, data.GC.count());
+    validateNameTable("script", data.unicode_script_name_table, data.Script.count());
+    validateNameTable("property", data.unicode_prop_name_table, prop_public_count);
+    validateNameTable("sequence property", data.unicode_sequence_prop_name_table, data.SequenceProp.count());
 
-    if (!firstAliasMatchesEnumField(&data.unicode_gc_name_table, data.GC, 0)) {
+    if (!firstAliasMatchesEnumField(data.unicode_gc_name_table, data.GC, 0)) {
         @compileError("unicode_gc_name_table order must match GC tags");
     }
-    if (!firstAliasMatchesEnumField(&data.unicode_script_name_table, data.Script, 0)) {
+    if (!firstAliasMatchesEnumField(data.unicode_script_name_table, data.Script, 0)) {
         @compileError("unicode_script_name_table order must match Script tags");
     }
-    if (!firstAliasMatchesEnumField(&data.unicode_prop_name_table, data.Prop, @intFromEnum(data.prop_public_first))) {
+    if (!firstAliasMatchesEnumField(data.unicode_prop_name_table, data.Prop, @intFromEnum(data.prop_public_first))) {
         @compileError("unicode_prop_name_table order must match public Prop tags");
     }
-    if (!firstAliasMatchesEnumField(&data.unicode_sequence_prop_name_table, data.SequenceProp, 0)) {
+    if (!firstAliasMatchesEnumField(data.unicode_sequence_prop_name_table, data.SequenceProp, 0)) {
         @compileError("unicode_sequence_prop_name_table order must match SequenceProp tags");
     }
 }

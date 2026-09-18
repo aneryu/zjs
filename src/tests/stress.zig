@@ -72,7 +72,7 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         \\print("recovered:" + (20 + 22));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "plain:InternalError:stack overflow\n" ++
             "method:InternalError:stack overflow\n" ++
@@ -96,7 +96,7 @@ test "sloppy tail recursion still overflows like QuickJS" {
         \\}
         \\assert.sameValue(threw, true);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "missing-argument abrupt teardown releases supplied args and pads exactly once" {

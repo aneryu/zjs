@@ -1,4 +1,4 @@
-//! Focused test root for runtime integration and plugins.
+//! Focused test root for the host event loop.
 const std = @import("std");
 const runtime = @import("runtime/root.zig");
 // Class-A root: see docs/testing-graph.md. Attest via relative import;

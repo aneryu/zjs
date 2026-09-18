@@ -34,13 +34,9 @@
 
 Windows 路径用 `GetStdHandle` / `WaitForSingleObject`；POSIX `@cImport` `poll.h`/`signal.h`，并关掉 `_FORTIFY_SOURCE` 以免 translate-c 撞 glibc 包装。
 
-### `src/runtime/public.zig`（零函数）
+### `src/runtime/root.zig`（零函数）
 
-嵌入门面。只 re-export：`EventLoop`、`EventLoopOptions`、`EventLoopRunResult`、`runUntilIdle`、`cleanupAtomicsWaitersForContext`、`wakeAtomicsWaitersForRuntimes`、`detachArrayBuffer`、`evalFileModuleGraphWithOutput`、`resolveModuleSpecifier`。测试钉死不暴露 `event_loop`、`plugin`、`ffi`、`JSRuntime` 等内部名——这是 D8 删除 runtime plugin ABI 后的公开面合同。
-
-### `src/runtime/root.zig` 类型
-
-内部聚合：`pub const event_loop` 模块、类型别名、以及几条 CLI/test262 需要的薄包装。`public.zig` 不 re-export `event_loop` 模块本身。
+`zjs.runtime` 门面。只 re-export：`EventLoop`、`EventLoopOptions`、`EventLoopRunResult`、`runUntilIdle`。测试钉死不暴露 `event_loop`、`plugin`、`ffi`、`JSRuntime` 等内部名。模块图、Atomics wake/cleanup、ArrayBuffer detach 在 `src/exec/`，不经过本文件。
 
 ---
 
@@ -189,7 +185,7 @@ Windows 路径用 `GetStdHandle` / `WaitForSingleObject`；POSIX `@cImport` `pol
 
 - **签名**：`fn clearRwHandler(self: *EventLoop, ctx: *core.JSContext, fd: i32, write_handler: bool) void`。
 - **作用**：清读或写槽；两槽都 null 则删整行。
-- **实现**：`clearCallback` 后若 `read` 与 `write` 皆 `isNull()`，`removeRwHandlerAt`。
+- **实现**：`clearCallback` 后若 `read` 与 `write` 皆 `is(.null_value)`，`removeRwHandlerAt`。
 - **所有权 / 错误 / 调用**：无分配。vtable。
 
 ### `EventLoop.removeRwHandlerAt` (`src/runtime/event_loop.zig:316`)
@@ -264,7 +260,7 @@ Windows 路径用 `GetStdHandle` / `WaitForSingleObject`；POSIX `@cImport` `pol
 - **签名**：`pub fn runUntilIdle(context: *zjs.JSContext, options: Options) !RunResult`。
 - **作用**：给嵌入方一次性「装循环、排空、拆掉」。
 - **实现**：栈上 `EventLoop.init` + `install`，`defer deinit`，调方法 `runUntilIdle`。
-- **所有权 / 错误 / 调用**：`public.zig` re-export。CLI 自己持有长寿命 `EventLoop`，不走这条。
+- **所有权 / 错误 / 调用**：`root.zig` re-export。CLI 自己持有长寿命 `EventLoop`，不走这条。
 
 ### `Timer.init` (`src/runtime/event_loop.zig:526`)
 
@@ -463,54 +459,8 @@ Windows 路径用 `GetStdHandle` / `WaitForSingleObject`；POSIX `@cImport` `pol
 
 ---
 
-## `src/runtime/root.zig`
-
-### `cleanupAtomicsWaitersForContext` (`src/runtime/root.zig:15`)
-
-- **签名**：`pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void`。
-- **作用**：context 销毁前拆掉挂在该 realm 上的 `Atomics.wait` waiter。
-- **实现**：转 `exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx.core)`。
-- **所有权 / 错误 / 调用**：test262 每测 `defer`、agent 线程 `defer`。跨线程 waiter 的完成标量仍由 mutex 保护。
-
-### `wakeAtomicsWaitersForRuntimes` (`src/runtime/root.zig:19`)
-
-- **签名**：`pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *zjs.JSRuntime) void`。
-- **作用**：主测线程要拆掉时，叫醒 primary 以及 related（agent runtime）上仍 `.waiting` 的 waiter。
-- **实现**：锁 `atomics_waiter_mutex`，扫链表；`RealmRef.borrow()` 得到 ctx 后，若 runtime 是 primary 或在 related 里，且 `completion == .waiting`，则写成 `.notified` 并 `cond.broadcast`。注释钉死：可被外线程调用，只动 mutex 保护的标量，禁止碰 Promise / RealmRef / JS 堆。
-- **所有权 / 错误 / 调用**：`cleanupTest262Agents`。
-
-### `runtimeListContains` (`src/runtime/root.zig:43`)
-
-- **签名**：`fn runtimeListContains(list: []const *zjs.JSRuntime, runtime: *zjs.JSRuntime) bool`。
-- **作用**：指针相等成员测试。
-- **实现**：线性扫。
-- **所有权 / 错误 / 调用**：`wakeAtomicsWaitersForRuntimes`。
-
-### `detachArrayBuffer` (`src/runtime/root.zig:50`)
-
-- **签名**：`pub fn detachArrayBuffer(ctx: *core.JSContext, value: core.JSValue) !core.JSValue`。
-- **作用**：`$262.detachArrayBuffer` 与嵌入方分离 ArrayBuffer。
-- **实现**：`exec.buffer_ops.detachArrayBuffer(ctx.runtimePtr(), value)`。
-- **所有权 / 错误 / 调用**：错误由 buffer_ops 定义（类型 / 已分离等）。test262 host。
-
-### `evalFileModuleGraphWithOutput` (`src/runtime/root.zig:54`)
-
-- **签名**：`pub fn evalFileModuleGraphWithOutput( ctx: *zjs.JSContext, source_text: []const u8, output: *std.Io.Writer, filename: []const u8, io: std.Io, allocator: std.mem.Allocator, max_source_size: usize, ) !zjs.JSValue`。
-- **作用**：按文件模块图加载、链接、求值（`zjs -m` / `.mjs` / test262 module 旗标）。
-- **实现**：转 `exec.module_graph.evalFileModuleGraphWithOutput`，传入 `ctx.runtimePtr()` 与 `ctx.core`。
-- **所有权 / 错误 / 调用**：allocator 拥有解析出的路径；模块记录在 runtime。CLI `runFileModule`、test262 `runEmbeddedEngine`。
-
-### `resolveModuleSpecifier` (`src/runtime/root.zig:66`)
-
-- **签名**：`pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8`。
-- **作用**：相对 specifier 按 referrer 目录解析；bare specifier 失败。
-- **实现**：`exec.module.resolveModuleSpecifier`。
-- **所有权 / 错误 / 调用**：返回切片由 allocator 拥有。`error.ModuleNotFound`。CLI 单测。
-
----
-
 ## 覆盖核对
 
-- 清单函数数: 63（`src/runtime/event_loop.zig` 57 + `src/runtime/root.zig` 6）
-- 本文标题覆盖: 63
+- 清单函数数: 57（`src/runtime/event_loop.zig` 57；`src/runtime/root.zig` 零函数）
+- 本文标题覆盖: 57
 - 未覆盖: 无

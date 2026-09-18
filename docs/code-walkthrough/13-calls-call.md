@@ -731,7 +731,7 @@
 
 - **签名**：`fn optionalBoolProperty(object: *core.Object, key: core.Atom) !?bool`。
 - **作用**：缺席 null；非 bool 当 false。
-- **实现**：`object.hasProperty(key)` 为假返回 null，否则 `object.getProperty(key)` 后 `asBool() orelse false`。
+- **实现**：`object.hasProperty(key)` 为假返回 null，否则 `object.getProperty(key)` 后 `as(.boolean) orelse false`。
 - **所有权 / 错误 / 调用**：不分配；缺属性返回 `null`（区别于 `false`），非 boolean 值一律当 `false`——描述符三态语义就落在这里。错误来自两次属性访问。调用方 `descriptorFromObjectBare` 的 `enumerable`/`configurable`/`writable` 三处（`call.zig:2297`、`2298`、`2316`）。
 
 ### `definePropertiesFromObject` (`src/exec/call.zig:2384`)

@@ -1,11 +1,6 @@
-//! Public Zig embedding facade and stable aliases for core/binding APIs.
-//!
-//! Re-exports preserve the underlying JSRuntime, JSContext, JSValue, handle,
-//! string, byte, option, and plugin lifetimes; this root adds no wrapper
-//! ownership of its own. Embedders should enter through this module rather than
-//! internal core/exec files. It is the binding layer's aggregation boundary,
-//! permitted to expose core and binding declarations but forbidden to depend
-//! on CLI.
+//! Binding-layer aggregation: aliases for core/context types used by CLI,
+//! test262, and in-repo tests. This root adds no wrapper ownership of its
+//! own and must not depend on CLI.
 
 const core = @import("../core/root.zig");
 
@@ -17,8 +12,6 @@ pub const GCPauseDistribution = core.GCPauseDistribution;
 pub const context_mod = @import("context.zig");
 pub const native = @import("native.zig");
 pub const JSContext = context_mod.JSContext;
-/// Resolved-once native -> JS call target (see `context_mod.CallSite`).
-pub const CallSite = context_mod.CallSite;
 pub const JSValue = core.JSValue;
 pub const Object = core.Object;
 
@@ -44,13 +37,6 @@ pub const OpcodeProfile = core.OpcodeProfile;
 pub const default_stack_size = core.runtime.default_stack_size;
 pub const default_gc_threshold = core.runtime.default_gc_threshold;
 
-pub const prop_name = @import("prop_name.zig");
-pub const property_site = @import("property_site.zig");
-/// Resolved-once host-side property access (see `property_site.PropertySite`).
-pub const PropertySite = property_site.PropertySite;
-pub const binding = @import("binding.zig");
-
-pub const PropNameID = prop_name.PropNameID;
 pub const JSString = core.JSValue.String;
 pub const JSBytes = core.JSValue.Bytes;
 
@@ -68,13 +54,9 @@ pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
 }
 
 test {
-    _ = PropNameID;
-    _ = property_site;
-    _ = PropertySite;
     _ = JSString;
     _ = JSBytes;
     _ = Object;
-    _ = binding;
     _ = RuntimeOptions;
     _ = RuntimeMemoryUsage;
     _ = ContextOptions;
@@ -93,16 +75,11 @@ test {
 
 test "JSValue lifetime names are aliases, not wrappers" {
     const std = @import("std");
-    try std.testing.expect(JSValue.Scope == HandleScope);
-    try std.testing.expect(JSValue.Local == LocalHandle);
-    try std.testing.expect(JSValue.Persistent == JSValueHandle);
-    try std.testing.expect(JSValue.Weak == WeakPersistentValue);
+    try std.testing.expect(!@hasDecl(JSValue, "Scope"));
+    try std.testing.expect(!@hasDecl(JSValue, "Local"));
+    try std.testing.expect(!@hasDecl(JSValue, "Persistent"));
+    try std.testing.expect(!@hasDecl(JSValue, "Weak"));
     try std.testing.expectEqual(@sizeOf(core.JSValue), @sizeOf(JSValue));
-    try std.testing.expect(switch (@typeInfo(PropNameID)) {
-        .@"struct" => true,
-        else => false,
-    });
-    try std.testing.expectEqual(@as(usize, 4), @sizeOf(PropNameID));
     try std.testing.expect(!@hasDecl(@This(), "NativePin"));
     try std.testing.expect(!@hasDecl(@This(), "Atom"));
     try std.testing.expect(!@hasDecl(JSRuntime, "pinValueForNative"));

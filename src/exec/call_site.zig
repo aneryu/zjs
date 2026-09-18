@@ -257,37 +257,32 @@ pub const CallSite = struct {
     }
 };
 
-/// Pinned integer-pair load of a JSValue slot (`ldp` of two general
-/// registers on AArch64). See `Vm.takeNativeReturnInto` for why the width
-/// discipline matters at the boundary.
+/// Pinned 8-byte load of a JSValue slot (`ldr` on AArch64). See
+/// `Vm.takeNativeReturnInto` for why the width discipline matters at the
+/// boundary.
 pub inline fn pinnedLoad(slot: *const JSValue) JSValue {
     if (comptime builtin.cpu.arch == .aarch64) {
-        var lo: u64 = undefined;
-        var hi: u64 = undefined;
-        asm volatile ("ldp %[lo], %[hi], [%[p]]"
-            : [lo] "=r" (lo),
-              [hi] "=r" (hi),
+        var bits: u64 = undefined;
+        asm volatile ("ldr %[bits], [%[p]]"
+            : [bits] "=r" (bits),
             : [p] "r" (slot),
             : .{ .memory = true });
-        return @bitCast([2]u64{ lo, hi });
+        return .{ .bits = bits };
     }
-    return JSValue.loadSlotAsIntPair(slot);
+    return slot.*;
 }
 
-/// Pinned integer-pair store of a JSValue slot (`stp` of two general
-/// registers on AArch64); `pinnedLoad`'s twin.
+/// Pinned 8-byte store of a JSValue slot (`str` on AArch64); `pinnedLoad`'s twin.
 pub inline fn pinnedStore(slot: *JSValue, value: JSValue) void {
     if (comptime builtin.cpu.arch == .aarch64) {
-        const words: [2]u64 = @bitCast(value);
-        asm volatile ("stp %[lo], %[hi], [%[p]]"
+        asm volatile ("str %[bits], [%[p]]"
             :
-            : [lo] "r" (words[0]),
-              [hi] "r" (words[1]),
+            : [bits] "r" (value.bits),
               [p] "r" (slot),
             : .{ .memory = true });
         return;
     }
-    JSValue.storeSlotAsIntPair(slot, value);
+    slot.* = value;
 }
 
 /// One-shot form of `CallSite.initInternal` + `callInto` for callers that

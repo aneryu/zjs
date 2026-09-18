@@ -472,7 +472,7 @@ fn stringInputValue(input: core.JSValue) !?core.JSValue {
     if (input.isString()) {
         return input;
     }
-    if (input.isObject()) {
+    if (input.is(.object)) {
         const header = input.refHeader() orelse return null;
         const object_value = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.string) {
@@ -720,9 +720,9 @@ fn isSurrogate(codepoint: u21) bool {
 }
 
 fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) AppendStringError!void {
-    if (value.isSymbol()) return error.TypeError;
+    if (value.is(.symbol)) return error.TypeError;
     if (value.isString()) return appendStringCodeUnits(rt, out, value);
-    if (value.isObject()) {
+    if (value.is(.object)) {
         const header = value.refHeader() orelse return;
         const object_value = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.string) {

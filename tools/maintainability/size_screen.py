@@ -17,7 +17,7 @@ import time
 SCHEMA = 1
 SOURCE_SUFFIXES = {'.zig', '.c', '.h', '.cpp', '.hpp', '.py', '.js', '.ts', '.sh'}
 CATEGORIES = ('engine', 'generated', 'tests', 'build', 'tools', 'other_source')
-GENERATED = {'src/libs/unicode/data.zig', 'src/abi/fun_native_abi.h'}
+GENERATED = {'src/libs/unicode/data.zig'}
 
 
 def run(argv, cwd=None, timeout=1200):

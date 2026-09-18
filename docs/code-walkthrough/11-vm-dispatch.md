@@ -793,7 +793,7 @@
 - **签名**：`fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome`。
 - **作用**：`opLocCheck` 展开出的实际 Handler 体（get/put/set_loc_check 各一份），挂进 256 槽分发表。
 - **实现**：以 `@call(.always_tail, …)` 保持 Handler 四寄存器 ABI，本帧不再普通 `bl`。 关键调用：`cont`。 栈效应：随 `kind` 而定——get +1、put -1、set 0；pc 前进 3 字节。 下一跳：热成功：`cont` / `next` 尾分发到 `dispatch_table[npc[0]]`；未命中：`@call(.always_tail, cold_table[pc[0]], …)` 进全冷表。
-- **所有权 / 错误 / 调用**：错误：本体不产生错误；guard 未命中原样把 `pc`/`sp` 交给 `@call(.always_tail, cold_table[pc[0]])`，由那份冷壳 publish + helper + `vm.fail` 负责抛。 这里的 guard 是 TDZ：`var_buf[idx].isUninitialized()` 时整条交给冷壳抛 ReferenceError。所有权：`put`/`set` 臂优先走 `trySetInt32FromSlot`（保住目的槽的 tag、只搬 payload），未命中才整值覆盖；都在帧内，无屏障。调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:855-857`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
+- **所有权 / 错误 / 调用**：错误：本体不产生错误；guard 未命中原样把 `pc`/`sp` 交给 `@call(.always_tail, cold_table[pc[0]])`，由那份冷壳 publish + helper + `vm.fail` 负责抛。 这里的 guard 是 TDZ：`var_buf[idx].is(.uninitialized)` 时整条交给冷壳抛 ReferenceError。所有权：`put`/`set` 臂优先走 `trySetInt32FromSlot`（保住目的槽的 tag、只搬 payload），未命中才整值覆盖；都在帧内，无屏障。调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:855-857`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
 
 ### `op_set_loc_uninitialized` (`src/exec/tailcall_dispatch.zig:3409`)
 
@@ -820,8 +820,8 @@
 
 - **签名**：`fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome`。
 - **作用**：`opGetVarRef` 展开出的实际 Handler 体，挂进 256 槽分发表。
-- **实现**：读链是 `vm.var_refs_base[idx]` 取 cell、再 `cell.pvalue.*` 取值（槽类型已是 `[]*core.VarRef`，所以没有「这个槽是不是 cell」的头部判定；嵌套 cell 检查也已退休——direct eval 的 const 视图改成 pvalue 别名而不是嵌套）。`.half` 实例在取值后加一条 `isUninitialized()` 的 TDZ 探测，命中就整条尾跳 `cold_table[pc[0]]`。随后 `sp[0] = v` 并 `cont(pc + advance, sp + 1, …)`。 Debug/Safe 下有两条断言（越界契约 + seam 泄漏探测）。 栈效应：寄存器 `sp` 净效应 +1。 下一跳：热成功：`cont` → `dispatch_table[npc[0]]`；TDZ 未命中：`cold_table[pc[0]]`。
-- **所有权 / 错误 / 调用**：错误：本体不产生错误；guard 未命中原样把 `pc`/`sp` 交给 `@call(.always_tail, cold_table[pc[0]])`，由那份冷壳 publish + helper + `vm.fail` 负责抛。 只有 `.half` 实例保留 `isUninitialized()` 的 TDZ 探测（它同时服务 `get_var_ref_check`）；c0-c3 四个短形态按 qjs OP_get_var_ref0..3 完全无 TDZ 检查。所有权：从 `vm.var_refs_base[idx]` 这条 cell 读出 `cell.pvalue.*` 压栈，是借用副本，不 retain。越界不检查——finalize 的 `validateVarRefOperandBounds` 与建帧时的 `captureSlice` 保证 `idx < var_refs.len`，只在 Debug/ReleaseSafe 留断言（另有一条 `var_refs_base == frame.var_refs.ptr` 的 seam 泄漏探测断言）。调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:988-993`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
+- **实现**：读链是 `vm.var_refs_base[idx]` 取 cell、再 `cell.pvalue.*` 取值（槽类型已是 `[]*core.VarRef`，所以没有「这个槽是不是 cell」的头部判定；嵌套 cell 检查也已退休——direct eval 的 const 视图改成 pvalue 别名而不是嵌套）。`.half` 实例在取值后加一条 `is(.uninitialized)` 的 TDZ 探测，命中就整条尾跳 `cold_table[pc[0]]`。随后 `sp[0] = v` 并 `cont(pc + advance, sp + 1, …)`。 Debug/Safe 下有两条断言（越界契约 + seam 泄漏探测）。 栈效应：寄存器 `sp` 净效应 +1。 下一跳：热成功：`cont` → `dispatch_table[npc[0]]`；TDZ 未命中：`cold_table[pc[0]]`。
+- **所有权 / 错误 / 调用**：错误：本体不产生错误；guard 未命中原样把 `pc`/`sp` 交给 `@call(.always_tail, cold_table[pc[0]])`，由那份冷壳 publish + helper + `vm.fail` 负责抛。 只有 `.half` 实例保留 `is(.uninitialized)` 的 TDZ 探测（它同时服务 `get_var_ref_check`）；c0-c3 四个短形态按 qjs OP_get_var_ref0..3 完全无 TDZ 检查。所有权：从 `vm.var_refs_base[idx]` 这条 cell 读出 `cell.pvalue.*` 压栈，是借用副本，不 retain。越界不检查——finalize 的 `validateVarRefOperandBounds` 与建帧时的 `captureSlice` 保证 `idx < var_refs.len`，只在 Debug/ReleaseSafe 留断言（另有一条 `var_refs_base == frame.var_refs.ptr` 的 seam 泄漏探测断言）。调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:988-993`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
 
 ### `opPutVarRef` (`src/exec/tailcall_dispatch.zig:3492`)
 
@@ -835,7 +835,7 @@
 - **签名**：`pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome`。
 - **作用**：OP_put_var_ref_check 的尾分发 handler：在寄存器 `pc/sp/var_buf` 上执行该 opcode，并以尾调用进入下一条。
 - **实现**：Debug/Safe 下有不变量断言。 以 `@call(.always_tail, …)` 保持 Handler 四寄存器 ABI，本帧不再普通 `bl`。 关键调用：`VarRef.pvalue` 直写、`gc.generationalBarrier`、`cont`。 栈效应：寄存器 `sp` 净效应 -1，pc 前进 3 字节。 下一跳：热成功：`cont` / `next` 尾分发到 `dispatch_table[npc[0]]`；未命中：`@call(.always_tail, cold_table[pc[0]], …)` 进全冷表。
-- **所有权 / 错误 / 调用**：错误：本体不产生错误；guard 未命中原样把 `pc`/`sp` 交给 `@call(.always_tail, cold_table[pc[0]])`，由那份冷壳 publish + helper + `vm.fail` 负责抛。 guard 是 TDZ 探测 `cell.pvalue.*.isUninitialized()`；TDZ 抛错、合成边界与 generator 停机形态都落冷壳 `h_varref`（`execPutVarRef`）。 所有权：与 `opPutVarRef` 相同——直写 `cell.pvalue` 并自带 `generationalBarrier`。调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:1002`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
+- **所有权 / 错误 / 调用**：错误：本体不产生错误；guard 未命中原样把 `pc`/`sp` 交给 `@call(.always_tail, cold_table[pc[0]])`，由那份冷壳 publish + helper + `vm.fail` 负责抛。 guard 是 TDZ 探测 `cell.pvalue.*.is(.uninitialized)`；TDZ 抛错、合成边界与 generator 停机形态都落冷壳 `h_varref`（`execPutVarRef`）。 所有权：与 `opPutVarRef` 相同——直写 `cell.pvalue` 并自带 `generationalBarrier`。调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:1002`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
 
 ### `opSetVarRef` (`src/exec/tailcall_dispatch.zig:3558`)
 
@@ -1681,7 +1681,7 @@
 
 - **签名**：`pub fn op_is_null(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome`。
 - **作用**：OP_is_null 的尾分发 handler：在寄存器 `pc/sp/var_buf` 上执行该 opcode，并以尾调用进入下一条。
-- **实现**：`value = (sp-1)[0]`，`isNull()` 真假两臂都只是把 `sp[-1]` 原地覆盖成布尔再 `cont(pc+1, sp, …)`——写成两条分支而不是一次 `JSValue.boolean(v.isNull())`，是为了让拥有值那条路上「先覆盖（值随即不再是根）→ 在不变的 sp 上钉活跃窗口 → 释放」的次序显式成立。无中断轮询（qjs 的 CASE 没有，原来的冷 helper 也没有）。 栈效应：0，pc 前进 1 字节。 下一跳：`cont`。
+- **实现**：`value = (sp-1)[0]`，`is(.null_value)` 真假两臂都只是把 `sp[-1]` 原地覆盖成布尔再 `cont(pc+1, sp, …)`——写成两条分支而不是一次 `JSValue.boolean(v.is(.null_value))`，是为了让拥有值那条路上「先覆盖（值随即不再是根）→ 在不变的 sp 上钉活跃窗口 → 释放」的次序显式成立。无中断轮询（qjs 的 CASE 没有，原来的冷 helper 也没有）。 栈效应：0，pc 前进 1 字节。 下一跳：`cont`。
 - **所有权 / 错误 / 调用**：错误：本体没有失败路径，不写 `vm.pending_error` 也不返回 `.threw`。 所有权：把 `sp[-1]` 原地覆盖成布尔——非拥有值只需一次覆盖；拥有值也是先覆盖（它随即不再是根），再在不变的 `sp` 上做活跃窗口钉定，与 `op_lnot` 的对象臂同一套根窗口次序。无中断轮询（qjs 的 CASE 也没有）。 调用：只装在 `dispatch_table`（`tailcall_dispatch_colds.zig:944`，在 `if (!fast) return`（:818）之后），经 `cont`/`next` 的表载尾调用进入；L0 `stop_before_pc` 期间 `active_dispatch_tbl` 是 `cold_table`，本 handler 不会被选中。
 
 ### `op_lnot` (`src/exec/tailcall_dispatch.zig:6519`)
@@ -1863,14 +1863,14 @@
 
 - **签名**：`pub fn op_using_is_undefined(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome`。
 - **作用**：OP_ext0 `is_undefined` 子码的尾叶（由 `op_using` 尾跳进入）：改写栈顶布尔后 `cont`。
-- **实现**：`value = (sp-1)[0]`，`isUndefined()` 真假两臂各自把 `sp[-1]` 覆盖成布尔再 `cont(pc + 2, sp, …)`（`ext0` 是两字节：opcode + sub）。 栈效应：0，pc 前进 2 字节。 下一跳：`cont`。
+- **实现**：`value = (sp-1)[0]`，`is(.undefined_value)` 真假两臂各自把 `sp[-1]` 覆盖成布尔再 `cont(pc + 2, sp, …)`（`ext0` 是两字节：opcode + sub）。 栈效应：0，pc 前进 2 字节。 下一跳：`cont`。
 - **所有权 / 错误 / 调用**：错误：不抛 Zig error，写 `vm.pending_error` 并返回 `.threw`，由 `runDispatchLoop` raise。 调用：`op_using` 按 ext0 子码 `@call(.always_tail)` 进入。
 
 ### `op_using_typeof_is_undefined` (`src/exec/tailcall_dispatch.zig:7271`)
 
 - **签名**：`pub fn op_using_typeof_is_undefined(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome`。
 - **作用**：OP_ext0 `typeof_is_undefined` 子码的尾叶（由 `op_using` 尾跳进入）。
-- **实现**：`yes = value.isUndefined() or value_ops.isHTMLDDA(value)`——`typeof x === "undefined"` 必须把 document.all 这类 HTMLDDA 也算进去；把结果覆盖 `sp[-1]` 后 `cont(pc + 2, sp, …)`。 栈效应：0，pc 前进 2 字节。 下一跳：`cont`。
+- **实现**：`yes = value.is(.undefined_value) or value_ops.isHTMLDDA(value)`——`typeof x === "undefined"` 必须把 document.all 这类 HTMLDDA 也算进去；把结果覆盖 `sp[-1]` 后 `cont(pc + 2, sp, …)`。 栈效应：0，pc 前进 2 字节。 下一跳：`cont`。
 - **所有权 / 错误 / 调用**：错误：不抛 Zig error，写 `vm.pending_error` 并返回 `.threw`，由 `runDispatchLoop` raise。 调用：`op_using` 按 ext0 子码 `@call(.always_tail)` 进入。
 
 ### `op_using_typeof_is_function` (`src/exec/tailcall_dispatch.zig:7278`)

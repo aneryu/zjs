@@ -607,7 +607,7 @@ Realm 生命周期：`createConstructing*` → 填 intrinsics → `finishConstru
 
 - **签名**：`pub fn hasException(self: JSContext) bool`。
 - **作用**：判断runtime异常槽是否已设置。
-- **实现**：返回!current_exception.isUninitialized()。
+- **实现**：返回!current_exception.is(.uninitialized)。
 - **所有权 / 错误 / 调用**：使用内部uninitialized哨兵而非undefined；throw undefined仍算有异常。状态跨同runtime的realm共享。
 
 ### `JSContext.takeException` (`src/core/context.zig:1070`)

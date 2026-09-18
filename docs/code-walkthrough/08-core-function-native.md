@@ -9,10 +9,11 @@
 | 字段 / 类型 | 布局与用途 |
 | --- | --- |
 | target / fallback / state | 偏移 0/8/16；target 必填 CodePtr，fallback 默认 null 的 ManagedFn，state 默认 null 的 opaque 指针。fallback 用于外围分发的叶子失败回退，state 的寿命由注册方管理。 |
-| kind / flags / sig | 偏移 24/25/26；kind 必填，Flags 为 packed u8，needs_env/forwards_call/pad_args 默认 false，其余五位为 0；sig(u16) 默认 0，选择 typed ABI。标志只声明要求，不自行建立环境或补参数。 |
+| kind / flags / sig | 偏移 24/25/26；kind 必填，Flags 为 packed u8，needs_env/forwards_call/pad_args 默认 false，其余五位为 0；sig 为 `LeafSig`（`enum(u16)`）默认 `.none`，选择 typed leaf 臂。标志只声明要求，不自行建立环境或补参数。 |
 | arity / effect / class_id | 偏移 28/29/30；arity(u8)=0，供 JS length 与参数补齐使用；Effect 为 packed u8，默认五个布尔字段 may_throw/may_alloc/may_reenter_js/reads_heap/writes_heap 均 true，其余三位 0；Effect.leaf 全 false，Effect.managed 为默认值。class_id(u16)=0，供需解包接收者的臂使用。 |
 | magic / builtin_id / name / owner | 偏移 32/34/36/40；前两者 u16 默认 0，name 为 Atom 默认 null_atom，owner 为默认 null 的 opaque 来源指针。该结构不追踪指针或自行保持 atom 存活。 |
 | Kind | enum(u8)：managed=0、constructor=1、constructor_or_func=2、getter=3、setter=4、leaf=5、method_leaf=6、method_managed=7、retired=255。8/9 未复用；call/apply 转发通过 Flags 与目标身份识别，不是独立 kind。 |
+| LeafSig | enum(u16)：`.none=0` 表示 managed；其余变体选择 leaf C 原型与拆箱臂。私有判别值，不是公开 ABI。 |
 | ManagedFn / CtorFn | 均为 C 调用约定，接收 ctx、JSValue、argv 裸指针、u32 argc、entry、可空 func_obj，返回 JSValue；第二参数分别表示 this 和 new_target。只有声明类型相同的机器形状不足以证明二者语义可互换。 |
 | GetterFn / SetterFn | C 调用约定，接收 ctx/this/entry；setter 在 entry 前追加 new_value，返回 JSValue。 |
 | MethodManagedFn / CodePtr | 前者接收 ctx/opaque self/this/argv/argc/entry 并返回 JSValue；后者擦除为无参、返回 void 的 C 函数指针。必须按真实协议还原后调用，不能直接用 CodePtr 调用任意 target。 |
@@ -257,7 +258,7 @@
 | `NativeGetterFn`、`NativeSetterFn`、对应 MagicFn | getter 接收 ctx/this，setter 再接 value；magic 版本最后追加 i32。均返回 HostError!JSValue。 |
 | `NativeF64Fn`、`NativeF64F64Fn` | 分别为一个或两个 f64 参数，返回 f64；没有 ctx 或错误联合体。 |
 | `InternalEntry` | 声明记录：必填 name、u8 length、u32 域内 id；magic(u16)=0、forwards_call=false、cproto=generic，native_function/fallback_function/managed/prim_leaf 默认 null。这里没有内建校验函数保证 cproto 与 native_function 实际标签相同。 |
-| `InternalEntry.PrimLeaf` | 借用 FNABI 签名名 sig 与擦除后的 CodePtr target；供编译记录时选择 primitive receiver 叶子臂。managed 是直接 K0 实现声明，prim_leaf 的 tag miss 可使用 managed/cproto 生成的 fallback；此结构自身不执行选择。 |
+| `InternalEntry.PrimLeaf` | `LeafSig` 与擦除后的 CodePtr target；供编译记录时选择 primitive receiver 叶子臂。managed 是直接 K0 实现声明，prim_leaf 的 tag miss 可使用 managed/cproto 生成的 fallback；此结构自身不执行选择。 |
 
 `builtin_method_ids` 的各组均为显式 u32 域内编号，不能跨域直接比较。以下列出本文件定义的编号块；块内有空洞时不能按范围推断枚举成员存在。
 

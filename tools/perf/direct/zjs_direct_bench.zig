@@ -367,7 +367,7 @@ fn propertyLookupLoop(
             (checksum ^ @as(u64, @intCast(i))) & 3,
         );
         const value = try object.getProperty(atoms[index]);
-        const int_value = value.asInt32() orelse {
+        const int_value = value.as(.int) orelse {
             return error.UnexpectedPropertyValue;
         };
         checksum = mixU64(checksum, @as(u32, @bitCast(int_value)));
@@ -442,7 +442,7 @@ fn typedArrayLoop(
             (checksum ^ @as(u64, @intCast(i))) & 1023,
         );
         const value = try core.typed_array.typedArrayGetIndex(rt, view, index);
-        const int_value = value.asInt32() orelse {
+        const int_value = value.as(.int) orelse {
             return error.UnexpectedTypedArrayValue;
         };
         checksum = mixU64(checksum, @as(u32, @bitCast(int_value)));

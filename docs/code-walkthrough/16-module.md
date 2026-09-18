@@ -44,7 +44,7 @@
 
 - **签名**：`fn pendingDefinitionFromArtifact( ctx: *core.JSContext, artifact: parser.ModuleArtifact, referrer_path: ?[]const u8, resolved_request_names: ?[]const core.Atom, ) !core.module.PendingDefinition`。
 - **作用**：校验模块 bytecode 与 parser 元数据一致，填 PendingDefinition。
-- **实现**：函数必须 `isModule()` 且 realm==ctx。imports/exports 的 var_idx、closure 名、closureType（namespace→`module_decl`，普通 import→`module_import`）必须对齐。star export 名必须是 `"*"`。逐请求：宿主名或 `resolvedRequestAtomForParsed`。再 addImport/Export/Indirect/Star/Attribute。`has_top_level_await` 拷过来。
+- **实现**：函数必须 `is(.module)` 且 realm==ctx。imports/exports 的 var_idx、closure 名、closureType（namespace→`module_decl`，普通 import→`module_import`）必须对齐。star export 名必须是 `"*"`。逐请求：宿主名或 `resolvedRequestAtomForParsed`。再 addImport/Export/Indirect/Star/Attribute。`has_top_level_await` 拷过来。
 - **所有权 / 错误 / 调用**：`parsed.deinit`；pending `errdefer deinit`。元数据错误经 `pendingMetadataError`。
 
 ### `pendingMetadataError` (`src/exec/module.zig:205`)
@@ -92,8 +92,8 @@
 ### `moduleFunctionBytecode` (`src/exec/module.zig:287`)
 
 - **签名**：`pub fn moduleFunctionBytecode(record: *const core.module.ModuleRecord) !*const bytecode.FunctionBytecode`。
-- **作用**：模块函数上的 bytecode，且必须 `isModule()`。
-- **实现**：`moduleFunctionObject` → `object.functionBytecode()` → `call_runtime.functionBytecodeFromValue`；任一步为空或最终 `!isModule()` 都是 `InvalidBytecode`。
+- **作用**：模块函数上的 bytecode，且必须 `is(.module)`。
+- **实现**：`moduleFunctionObject` → `object.functionBytecode()` → `call_runtime.functionBytecodeFromValue`；任一步为空或最终 `!is(.module)` 都是 `InvalidBytecode`。
 - **所有权 / 错误 / 调用**：声明实例化与求值。
 
 ### `createModuleDeclarationCell` (`src/exec/module.zig:295`)

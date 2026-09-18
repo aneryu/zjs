@@ -265,7 +265,7 @@ fn expectFunctionDefInertAfterEscape(
     for (fd.args) |arg| try std.testing.expectEqual(core.atom.null_atom, arg.var_name);
     for (fd.vars) |local| try std.testing.expectEqual(core.atom.null_atom, local.var_name);
     for (fd.closure_var) |closure| try std.testing.expectEqual(core.atom.null_atom, closure.var_name);
-    for (fd.cpool) |value| try std.testing.expect(value.isUndefined());
+    for (fd.cpool) |value| try std.testing.expect(value.is(.undefined_value));
     try std.testing.expectEqual(@as(i32, 0), fd.cpool_count);
 
     for (fd.child_list) |child| try expectFunctionDefInertAfterEscape(child);
@@ -307,8 +307,8 @@ fn expectPublishedFunctionBytecodeOwnersResolve(
         try std.testing.expect(rt.atoms.name(closure.var_name) != null);
     }
     for (fb.cpoolSlice()) |value| {
-        if (!value.isFunctionBytecode()) continue;
-        const header = value.objectHeader() orelse return error.TestUnexpectedResult;
+        if (!value.is(.function_bytecode)) continue;
+        const header = value.functionBytecodeHeader() orelse return error.TestUnexpectedResult;
         const child: *const bytecode_mod.FunctionBytecode = @fieldParentPtr("header", header);
         owners.child_functions += 1;
         try expectPublishedFunctionBytecodeOwnersResolve(rt, child, owners);
@@ -2994,7 +2994,7 @@ fn expectV2ExecutionCompletion(src: []const u8, expected: i32) !void {
     try h.init(src);
     defer h.deinit();
     const result = try compileAndRun(&h);
-    try std.testing.expectEqual(expected, result.asInt32().?);
+    try std.testing.expectEqual(expected, result.as(.int).?);
 }
 
 fn countInstalledOpcode(fb: *const bytecode_mod.FunctionBytecode, want: u8) !usize {
@@ -3009,8 +3009,8 @@ fn countInstalledOpcode(fb: *const bytecode_mod.FunctionBytecode, want: u8) !usi
         pc += size;
     }
     for (fb.cpoolSlice()) |constant| {
-        if (!constant.isFunctionBytecode()) continue;
-        const header = constant.objectHeader() orelse continue;
+        if (!constant.is(.function_bytecode)) continue;
+        const header = constant.functionBytecodeHeader() orelse continue;
         const child: *const bytecode_mod.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
         n += try countInstalledOpcode(child, want);
     }
@@ -3067,7 +3067,7 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
         .direct_eval_vars_reach_global = true,
         .global_declarations_prevalidated = true,
     });
-    try std.testing.expectEqual(expected, result.asInt32().?);
+    try std.testing.expectEqual(expected, result.as(.int).?);
 }
 
 test "compiler.fuse: get_loc0_field is emitted and executes" {
@@ -3395,7 +3395,7 @@ test "compiler.s4: installed for loop matches the configured default layout" {
     try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
     defer h.deinit();
     const result = try compileAndRun(&h);
-    try std.testing.expectEqual(@as(i32, 10), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 10), result.as(.int).?);
     // The production path lowers with `resolve_labels.default_layout`
     // (`-Dzjs_compiler_layout`), so assert against that declaration rather than
     // against a hardcoded mode. This test previously pinned `.plain` and was
@@ -3553,7 +3553,7 @@ test "TGC S3-b: a major between parse and finalize keeps cpool constants alive" 
     };
     h.rt.setGCThreshold(saved_threshold);
     try std.testing.expect(h.rt.gc.stats.collections > collections_before);
-    try std.testing.expectEqual(@as(i32, 15), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 15), result.as(.int).?);
 }
 
 fn s3bExpectTemplateArraysMarked(h: *V2Exec) anyerror!void {
@@ -3567,11 +3567,11 @@ fn s3bExpectTemplateArraysMarked(h: *V2Exec) anyerror!void {
     var objects: usize = 0;
     for (h.state.function_def.child_list) |child| {
         for (child.cpool) |value| {
-            if (value.isObject()) objects += 1;
+            if (value.is(.object)) objects += 1;
         }
     }
     for (h.state.function_def.cpool) |value| {
-        if (value.isObject()) objects += 1;
+        if (value.is(.object)) objects += 1;
     }
     try std.testing.expect(objects >= 1);
 
@@ -3639,7 +3639,7 @@ test "TGC S3-b: a collection inside the tagged-template window keeps cooked and 
 
     // Keep the test honest: if no collection landed, it proves nothing.
     try std.testing.expect(h.rt.gc.stats.collections > collections_before);
-    try std.testing.expectEqual(@as(i32, 15), result.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 15), result.as(.int).?);
 }
 
 test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {

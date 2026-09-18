@@ -358,7 +358,7 @@ comptime断言JSValue为16字节，还钉了 Generic=96、Promise=16、Reaction=
 
 - **签名**：`fn runGenericOneForTest(queue: *Queue) RunOneStatus`。
 - **作用**：测试辅助：取出一条 generic、跑、deinit，报告 empty/success/exception。
-- **实现**：`takeFirst`，断言 generic，`job.run()`，看 `isException()`。
+- **实现**：`takeFirst`，断言 generic，`job.run()`，看 `is(.exception)`。
 - **所有权 / 错误 / 调用**：仅本文件 tests。FIFO 在异常后保留尾部。
 
 ### `TestJob.fail` (`src/core/jobs.zig:759`)

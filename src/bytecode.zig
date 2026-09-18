@@ -3592,7 +3592,7 @@ pub const function_bytecode = struct {
         pub const byte18_runtime_strict_mask: u8 = 1 << 6;
 
         // quickjs.c JSFunctionBytecode, exact offsets on the pinned 64-bit ABI.
-        header: gc.GCObjectHeader, // 0x00
+        header: gc.Header, // 0x00
         js_mode: u8, // 0x10
         flag_byte17: u8, // 0x11
         flag_byte18: u8, // 0x12
@@ -3627,7 +3627,7 @@ pub const function_bytecode = struct {
             std.debug.assert(@sizeOf(@This()) == 88);
             std.debug.assert(@alignOf(@This()) == 8);
             std.debug.assert(@offsetOf(@This(), "header") == 0x00);
-            const header_bytes = @sizeOf(gc.GCObjectHeader);
+            const header_bytes = @sizeOf(gc.Header);
             std.debug.assert(@offsetOf(@This(), "js_mode") == header_bytes);
             std.debug.assert(@offsetOf(@This(), "flag_byte17") == header_bytes + 1);
             std.debug.assert(@offsetOf(@This(), "flag_byte18") == header_bytes + 2);

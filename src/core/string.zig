@@ -72,16 +72,16 @@ pub const StringRope = struct {
     reserved: u8 = 0,
 
     comptime {
-        std.debug.assert(@sizeOf(StringRope) == 56);
+        std.debug.assert(@sizeOf(StringRope) == 40);
         std.debug.assert(@alignOf(StringRope) == 8);
         std.debug.assert(@offsetOf(StringRope, "left") == 0);
-        std.debug.assert(@offsetOf(StringRope, "right") == 16);
-        std.debug.assert(@offsetOf(StringRope, "rt") == 32);
-        std.debug.assert(@offsetOf(StringRope, "buffer") == 40);
-        std.debug.assert(@offsetOf(StringRope, "len") == 48);
-        std.debug.assert(@offsetOf(StringRope, "depth") == 52);
-        std.debug.assert(@offsetOf(StringRope, "wide") == 53);
-        std.debug.assert(@offsetOf(StringRope, "extensible") == 54);
+        std.debug.assert(@offsetOf(StringRope, "right") == 8);
+        std.debug.assert(@offsetOf(StringRope, "rt") == 16);
+        std.debug.assert(@offsetOf(StringRope, "buffer") == 24);
+        std.debug.assert(@offsetOf(StringRope, "len") == 32);
+        std.debug.assert(@offsetOf(StringRope, "depth") == 36);
+        std.debug.assert(@offsetOf(StringRope, "wide") == 37);
+        std.debug.assert(@offsetOf(StringRope, "extensible") == 38);
     }
 
     /// Size of the collector metadata prefix ahead of a rope node.
@@ -89,11 +89,11 @@ pub const StringRope = struct {
 
     /// Unified collector handle. String-family handles are their body pointer;
     /// the metadata is immediately before the body.
-    pub inline fn header(self: *const StringRope) *gc.GCObjectHeader {
+    pub inline fn header(self: *const StringRope) *gc.Header {
         return @ptrCast(@alignCast(@constCast(self)));
     }
 
-    pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *StringRope {
+    pub inline fn fromHeader(hdr: *gc.Header) *StringRope {
         return @ptrCast(@alignCast(hdr));
     }
 
@@ -248,11 +248,11 @@ pub const StringBuffer = struct {
         std.debug.assert(units_offset % @alignOf(u16) == 0);
     }
 
-    pub inline fn header(self: *const StringBuffer) *gc.GCObjectHeader {
+    pub inline fn header(self: *const StringBuffer) *gc.Header {
         return @ptrCast(@alignCast(@constCast(self)));
     }
 
-    pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *StringBuffer {
+    pub inline fn fromHeader(hdr: *gc.Header) *StringBuffer {
         return @ptrCast(@alignCast(hdr));
     }
 
@@ -319,7 +319,7 @@ pub fn createStringBuffer(rt: *JSRuntime, is_wide: bool, capacity: usize) !*Stri
 
 /// Sweep-time return of a condemned `.string_buffer` BLOCK CELL. Pure memory:
 /// a buffer owns no edges, no atom entry and no external resource.
-pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
+pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.Header) void {
     std.debug.assert(gc.Registry.isBlockCellHeader(header));
     const buf: *StringBuffer = @ptrCast(@alignCast(header));
     const total = stringBufferAllocSize(buf.is_wide, buf.capacity).?;
@@ -329,7 +329,7 @@ pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.GCObjectHeader) void 
 
 /// Registry-side size query for a `.string_buffer` carrier, the twin of
 /// `accountedAllocationSizeFromHeader`.
-pub fn accountedStorageSizeFromHeader(header: *const gc.GCObjectHeader) usize {
+pub fn accountedStorageSizeFromHeader(header: *const gc.Header) usize {
     const buf: *const StringBuffer = @ptrCast(@alignCast(header));
     const total = stringBufferAllocSize(buf.is_wide, buf.capacity).?;
     if (gc.Registry.isBlockCellHeader(header)) {
@@ -382,11 +382,11 @@ pub const String = struct {
     atom_id: u32 = no_atom_id,
 
     /// Unified collector handle. String-family handles are their body pointer.
-    pub inline fn header(self: *const String) *gc.GCObjectHeader {
+    pub inline fn header(self: *const String) *gc.Header {
         return @ptrCast(@alignCast(@constCast(self)));
     }
 
-    pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *String {
+    pub inline fn fromHeader(hdr: *gc.Header) *String {
         return @ptrCast(@alignCast(hdr));
     }
 
@@ -1632,7 +1632,7 @@ pub inline fn metaIsRope(meta: *const gc.Metadata) bool {
 /// Registry-side size query for a string-family carrier (TGC S2). `header`
 /// is the body pointer the JSValue payload names (String or StringRope);
 /// the prefix sits eight bytes before it.
-pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize {
+pub fn accountedAllocationSizeFromHeader(header: *const gc.Header) usize {
     const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
     const total = if (metaIsRope(meta)) blk: {
         break :blk rope_node_alloc_size;
@@ -1657,7 +1657,7 @@ pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize
 /// `JSValue.free`: a rope's `left`/`right` are traced values the sweep
 /// reclaims on their own, and only an atom-table entry needs an explicit
 /// hand-off before a flat symbol body's cell goes back.
-pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
+pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
     std.debug.assert(gc.Registry.isBlockCellHeader(header));
     const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
     if (meta.flags.kind == .string_buffer) {
@@ -1705,7 +1705,7 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
 /// extent is dead by definition. Cells are collected first so freeing does
 /// not disturb the bitmap walk.
 pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
-    var cells = std.ArrayList(*gc.GCObjectHeader).empty;
+    var cells = std.ArrayList(*gc.Header).empty;
     defer cells.deinit(std.heap.page_allocator);
     // One reservation for the whole live string population is the common
     // path; the walk below then appends into reserved memory and never
@@ -1720,7 +1720,7 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
         rt.gc.liveCountKind(.payload)) catch {};
     while (true) {
         cells.clearRetainingCapacity();
-        var overflow: ?*gc.GCObjectHeader = null;
+        var overflow: ?*gc.Header = null;
         var it = rt.gc.objectIterator(.all);
         while (it.next()) |header| {
             if (!gc.kindIsPrefixCarrier(header.metaConst().flags.kind)) continue;
@@ -1770,7 +1770,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
     // anything?". Only a string body bound to a DYNAMIC atom ever sets it, so
     // an unstamped extent skips the kind dispatch and the atom probe outright.
     if (!needs_finalizer) {
-        const plain: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+        const plain: *gc.Header = @ptrFromInt(base + gc.string_prefix_size);
         rt.gc.unpublishStringExtent(plain, user_bytes - gc.string_prefix_size);
         rt.memory.destroyStringExtent(plain, user_bytes);
         return;
@@ -1793,13 +1793,13 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
         // carrier has. (An a-class payload STRUCT always fits a block cell;
         // the extent route is reachable through the subordinate slices --
         // a bound-argument array or reaction list past the 3760B ceiling.)
-        const body: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+        const body: *gc.Header = @ptrFromInt(base + gc.string_prefix_size);
         rt.gc.unpublishStringExtent(body, user_bytes - gc.string_prefix_size);
         rt.memory.destroyStringExtent(body, user_bytes);
         return;
     }
     std.debug.assert(meta.flags.kind == .string);
-    const header: *gc.GCObjectHeader = @ptrFromInt(base + gc.string_prefix_size);
+    const header: *gc.Header = @ptrFromInt(base + gc.string_prefix_size);
     const body: *String = @ptrCast(@alignCast(header));
     std.debug.assert(accountedAllocationSizeFromHeader(header) == user_bytes - gc.string_prefix_size);
     // Symbol-body handshake: a dynamic atom whose body just died must drop
@@ -1816,7 +1816,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
 /// Child edges of a rope node: `left`/`right`. Flat bodies are leaves and
 /// never reach here -- `traceHeaderEdges` dispatches on the `.rope` kind
 /// (TGC S4-a) instead of re-reading the prefix discriminator.
-pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.GCObjectHeader) !void {
+pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) !void {
     _ = rt;
     std.debug.assert(metaIsRope(@ptrFromInt(@intFromPtr(header) - gc.string_prefix_size)));
     const node: *StringRope = @ptrCast(@alignCast(header));
@@ -1835,7 +1835,7 @@ pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.GCObjectHead
 /// Visitor shim for the storage-cell edge (TGC S4 spec 2.2). Visitors that
 /// do not declare `storageCell` -- the root adaptors, which never enumerate
 /// heap edges -- compile this away entirely.
-inline fn callVisitStorageCell(vis: anytype, header: *gc.GCObjectHeader) !void {
+inline fn callVisitStorageCell(vis: anytype, header: *gc.Header) !void {
     const VisType = @TypeOf(vis);
     const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
     if (comptime !@hasDecl(CleanType, "storageCell")) return;

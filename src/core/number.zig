@@ -174,16 +174,16 @@ fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
 }
 
 pub fn numberValue(value: core.JSValue) ?f64 {
-    if (value.asInt32()) |v| return @floatFromInt(v);
-    if (value.asFloat64()) |v| return v;
+    if (value.as(.int)) |v| return @floatFromInt(v);
+    if (value.as(.float64)) |v| return v;
     return null;
 }
 
 pub fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);

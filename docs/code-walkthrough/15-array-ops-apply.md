@@ -13,7 +13,7 @@
 
 - **签名**：`fn uint8ArrayCheckOptionsObject(options: core.JSValue) !void`。
 - **作用**：Uint8Array 的 hex/base64 选项解析或编解码。
-- **实现**：两行——`options.isUndefined()` 直接放行，否则 `!options.isObject()` 就 `error.TypeError`。对应 qjs 的 GetOptionsObject（quickjs.c:59376）：只做「是 undefined 或对象」这一道闸，不读任何属性、不建默认选项对象。
+- **实现**：两行——`options.is(.undefined_value)` 直接放行，否则 `!options.is(.object)` 就 `error.TypeError`。对应 qjs 的 GetOptionsObject（quickjs.c:59376）：只做「是 undefined 或对象」这一道闸，不读任何属性、不建默认选项对象。
 - **所有权 / 错误 / 调用**：无分配、无调用方之外的副作用；`options` 借用。error set 只有 `error.TypeError`（options 既不是 undefined 也不是对象），消息由上层记录边界补。它对应 qjs 的 GetOptionsObject 步骤，**位置本身是契约**：必须在 receiver/字符串检查之后、任何 option 的 Get 之前。调用方 `uint8ArrayCodecCall` 三处（`:5707` fromBase64、`:5726` toBase64、`:5752` setFromBase64）；hex 系不带 options，不调它。
 
 ### `expectUint8ArrayObject` (`src/exec/array_ops.zig:5772`)

@@ -1069,8 +1069,8 @@ fn expectAtomName(env: *TestEnv, atom_id: engine.core.Atom, expected: []const u8
 }
 
 fn functionBytecodeFromValue(value: engine.core.JSValue) ?*const engine.bytecode.FunctionBytecode {
-    if (!value.isFunctionBytecode()) return null;
-    const header = value.objectHeader() orelse return null;
+    if (!value.is(.function_bytecode)) return null;
+    const header = value.functionBytecodeHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
@@ -1774,7 +1774,7 @@ test "F4: number literal with non-integer value lowers to push_const" {
     try std.testing.expectEqual(op.push_const8, fn_bc.code[0]);
     const idx = readConstIndexAtOpcode(fn_bc.code, 0);
     const value = fn_bc.constants.get(idx).?;
-    try std.testing.expectApproxEqAbs(@as(f64, 3.5), value.asFloat64().?, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.5), value.as(.float64).?, 0.0001);
 }
 
 test "F4: large bigint literal lowers to constant pool value" {
@@ -1960,7 +1960,7 @@ test "F4: regexp pattern constant decodes UTF-8 before the following constant" {
     }
     try std.testing.expect(following_constant_pc != null);
     try std.testing.expectEqual(@as(u32, 2), readConstIndexAtOpcode(code, following_constant_pc.?));
-    try std.testing.expectApproxEqAbs(@as(f64, 1.5), constants[2].asFloat64().?, 0.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), constants[2].as(.float64).?, 0.0);
 }
 
 test "F4: invalid regexp releases its published pattern constant" {
@@ -4424,7 +4424,7 @@ test "W5: tagged-int numeric strings use cpool without changing other string pro
 
     const numeric_string_value = numeric_constants[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(numeric_string_value.eqlBytes("123"));
-    try std.testing.expectApproxEqAbs(@as(f64, 1.5), numeric_constants[1].asFloat64().?, 0.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), numeric_constants[1].as(.float64).?, 0.0);
 
     const string_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
         numeric_string.pc2lineBuf(),
@@ -4473,7 +4473,7 @@ test "W5: tagged-int numeric strings use cpool without changing other string pro
 
     const tagged_template = findFunctionConstantNamed(&parsed, env.rt, "taggedTemplate") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), tagged_template.cpoolSlice().len);
-    try std.testing.expect(tagged_template.cpoolSlice()[0].isObject());
+    try std.testing.expect(tagged_template.cpoolSlice()[0].is(.object));
 }
 
 test "W5: string discard follows QuickJS atom and completion boundaries" {
@@ -10403,7 +10403,7 @@ test "ordinary script compile publishes one canonical function bytecode root" {
     try std.testing.expect(parsed.moduleArtifact() == null);
     try std.testing.expectEqual(op.return_undef, root.byteCode()[root.byteCode().len - 1]);
     try std.testing.expect(root.cpoolSlice().len > 0);
-    try std.testing.expect(root.cpoolSlice()[0].isFunctionBytecode());
+    try std.testing.expect(root.cpoolSlice()[0].is(.function_bytecode));
 }
 
 test "canonical root ownership moves out of parser Result exactly once" {
@@ -10421,8 +10421,8 @@ test "canonical root ownership moves out of parser Result exactly once" {
 
     const owned = parsed.takeFunctionBytecodeValue() orelse return error.TestExpectedEqual;
     var owned_alive = true;
-    try std.testing.expect(owned.isFunctionBytecode());
-    try std.testing.expectEqual(borrowed_header, owned.objectHeader().?);
+    try std.testing.expect(owned.is(.function_bytecode));
+    try std.testing.expectEqual(borrowed_header, owned.functionBytecodeHeader().?);
     try std.testing.expect(parsed.functionBytecode() == null);
 
     parsed.deinit();

@@ -66,7 +66,7 @@ fn getVarFromGlobalObject(
     const value = value: {
         if (function.runtimeStrictMode()) {
             if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
-                if (!lexical_value.isUninitialized()) break :value lexical_value;
+                if (!lexical_value.is(.uninitialized)) break :value lexical_value;
             }
         }
         if (global.getOwnDataPropertyValue(atom_id)) |global_data_value| {
@@ -111,7 +111,7 @@ pub noinline fn getVar(
             // Slot is a cell by type (phase D); the non-cell arm is gone.
             const cell = slot_ops.varRefSlotCell(frame, ref_idx);
             const value = cell.pvalue.*;
-            if (!value.isUninitialized()) {
+            if (!value.is(.uninitialized)) {
                 // The bound cell is authoritative: a global lexical shadowing
                 // this name would have performed definition-time cell surgery /
                 // parked-cell reuse (qjs js_closure_define_global_var,
@@ -157,7 +157,7 @@ pub noinline fn getVar(
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame)) {
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
-            if (lex_value.isUninitialized()) {
+            if (lex_value.is(.uninitialized)) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
@@ -172,7 +172,7 @@ pub noinline fn getVar(
     const value = value: {
         if (atom_id == core.atom.ids.undefined_) break :value core.JSValue.undefinedValue();
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
-            if (lex_value.isUninitialized()) {
+            if (lex_value.is(.uninitialized)) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
@@ -232,9 +232,9 @@ pub noinline fn putVar(
             // The write-through arm needs no per-write lexical check: a
             // shadowing global lexical performed definition-time cell
             // surgery, so the bound cell IS the lexical binding.
-            if (current.isUninitialized() or cell.varRefIsConstSlot().*) {
+            if (current.is(.uninitialized) or cell.varRefIsConstSlot().*) {
                 if (cell.is_lexical and core.VarRef.fromValue(current) == null) {
-                    if (current.isUninitialized()) {
+                    if (current.is(.uninitialized)) {
                         return try throwGlobalTdzReferenceError(ctx, output, global, stack, frame, catch_target);
                     }
                     // qjs JS_ThrowTypeErrorReadOnly (18507); zjs reports
@@ -361,7 +361,7 @@ fn evalFunctionDeclaresGlobalVar(rt: *core.JSRuntime, function: *const bytecode.
 
 fn globalOwnAccessorWithoutSetter(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) !bool {
     const desc = (try global.getOwnProperty(rt, atom_id)) orelse return false;
-    return desc.kind == .accessor and desc.setter.isUndefined();
+    return desc.kind == .accessor and desc.setter.is(.undefined_value);
 }
 
 fn globalDeclIsFunction(cv: core.function_bytecode.BytecodeClosureVar) bool {

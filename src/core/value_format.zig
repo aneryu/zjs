@@ -30,7 +30,7 @@ pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8 {
 /// of this existed; `exec.value_ops.cloneBigIntValue` keeps the exec-facing
 /// name and forwards here, because `core` cannot import `exec`.
 pub fn cloneBigIntValue(allocator: std.mem.Allocator, value: JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |short| return bignum.BigInt.fromIntAlloc(allocator, short);
+    if (value.as(.short_big_int)) |short| return bignum.BigInt.fromIntAlloc(allocator, short);
     if (value.isBigInt()) {
         if (value.refHeader()) |header| {
             const big: *BigIntObject = @alignCast(@fieldParentPtr("header", header));
@@ -41,7 +41,7 @@ pub fn cloneBigIntValue(allocator: std.mem.Allocator, value: JSValue) !bignum.Bi
 }
 
 pub fn appendBigIntBase10(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), value: JSValue) !void {
-    if (value.asShortBigInt()) |bigint_value| {
+    if (value.as(.short_big_int)) |bigint_value| {
         var bigint_buf: [32]u8 = undefined;
         const printed = dtoa.formatInt64(&bigint_buf, bigint_value);
         return buffer.appendSlice(allocator, printed);

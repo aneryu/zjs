@@ -44,8 +44,8 @@ fn varRefLayout() []const u8 {
 
 fn realmLayout() []const u8 {
     return std.fmt.comptimePrint(
-        "realm_context size={d} align={d} header={d} runtime={d} publication_state={d} modules={d} global={d} trace_rc=2164 list_prev=2168\n",
-        .{ @sizeOf(core.JSContext), @alignOf(core.JSContext), @offsetOf(core.JSContext, "header"), @offsetOf(core.JSContext, "runtime"), @offsetOf(core.JSContext, "publication_state"), @offsetOf(core.JSContext, "modules"), @offsetOf(core.JSContext, "global") },
+        "realm_context size={d} align={d} header={d} runtime={d} publication_state={d} modules={d} global={d} list_prev={d}\n",
+        .{ @sizeOf(core.JSContext), @alignOf(core.JSContext), @offsetOf(core.JSContext, "header"), @offsetOf(core.JSContext, "runtime"), @offsetOf(core.JSContext, "publication_state"), @offsetOf(core.JSContext, "modules"), @offsetOf(core.JSContext, "global"), core.JSContext.trace_list_previous_offset },
     );
 }
 

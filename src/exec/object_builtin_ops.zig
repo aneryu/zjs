@@ -251,7 +251,7 @@ fn objectConstructorCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (host_call.args.len != 0 and host_call.args[0].isObject()) return host_call.args[0];
+    if (host_call.args.len != 0 and host_call.args[0].is(.object)) return host_call.args[0];
     const constructor = host_call.func_obj orelse return error.TypeError;
     return construct_mod.objectConstructorValue(host_call.ctx, host_call.args, constructor);
 }
@@ -448,8 +448,8 @@ pub fn objectIsPrototypeOf(
 }
 
 pub fn objectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    if (this_value.isObject()) return this_value;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    if (this_value.is(.object)) return this_value;
     return primitiveObjectForAccess(rt, global, this_value);
 }
 
@@ -462,13 +462,13 @@ pub fn objectCreateCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const prototype: ?*core.Object = if (args[0].isNull())
+    const prototype: ?*core.Object = if (args[0].is(.null_value))
         null
     else
         objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a prototype"));
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
-    if (args.len >= 2 and !args[1].isUndefined()) {
+    if (args.len >= 2 and !args[1].is(.undefined_value)) {
         try definePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
     }
     return object.value();
@@ -483,12 +483,12 @@ pub fn objectAssignCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
     const target_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     _ = objectFromValue(target_value) orelse return error.TypeError;
 
     for (args[1..]) |source_arg| {
-        if (source_arg.isNull() or source_arg.isUndefined()) continue;
+        if (source_arg.is(.null_value) or source_arg.is(.undefined_value)) continue;
         const source_value = if (objectFromValue(source_arg)) |_| source_arg else try primitiveObjectForAccess(ctx.runtime, global, source_arg);
         const source = objectFromValue(source_value) orelse return error.TypeError;
         const own_keys = try objectRestOwnKeys(ctx, output, global, source);
@@ -605,7 +605,7 @@ pub fn objectHasOwnCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -710,7 +710,7 @@ pub fn objectPrototypeOwnPropertyCall(
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
 
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = property_ops.expectObject(object_value) catch return error.TypeError;
     // `hasOwnProperty` is the desc==NULL existence mode of
@@ -736,7 +736,7 @@ pub fn objectPrototypeDefineAccessorCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const accessor_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -785,7 +785,7 @@ pub fn objectPrototypeLookupAccessorCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     var object = objectFromValue(object_value) orelse return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -1016,7 +1016,7 @@ pub fn objectIsExtensibleForIntegrity(
     const handler_value = object.proxyHandler() orelse return error.TypeError;
     const trap_key = core.atom.ids.isExtensible;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, null, null);
-    if (trap.isUndefined() or trap.isNull()) return target.isExtensible();
+    if (trap.is(.undefined_value) or trap.is(.null_value)) return target.isExtensible();
     if (!isCallableValue(trap)) return error.TypeError;
     const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
     const extensible = valueTruthy(result);
@@ -1036,7 +1036,7 @@ pub fn appendObjectGroupByValue(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !void {
     var group_value = getValueProperty(ctx, output, global, out_value, key, caller_function, caller_frame) catch core.JSValue.undefinedValue();
-    if (group_value.isUndefined()) {
+    if (group_value.is(.undefined_value)) {
         const group = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
         group_value = group.value();
         try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, group_value, caller_function, caller_frame);
@@ -1104,7 +1104,7 @@ pub fn getOwnPropertyDescriptorCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -1124,7 +1124,7 @@ pub fn objectGetPrototypeOfCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
     const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     if (try objectPrototypeMethodFunctionPrototype(ctx, global, object)) |prototype| return prototype.value();
@@ -1155,7 +1155,7 @@ pub fn getOwnPropertyDescriptorsCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
+    if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     const object = objectFromValue(object_value) orelse return error.TypeError;
     const own_keys = try objectRestOwnKeys(ctx, output, global, object);

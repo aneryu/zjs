@@ -283,7 +283,7 @@ fn arrayConstructorEntry(comptime name: []const u8, comptime length: u8, comptim
 /// with the engine default prototype.
 fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     const stored = global.cachedRealmValue(rt, .array_prototype) orelse return null;
-    if (!stored.isObject()) return null;
+    if (!stored.is(.object)) return null;
     const header = stored.refHeader() orelse return null;
     return core.Object.fromHeader(header);
 }
@@ -572,10 +572,10 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
 // re-exported here because the only caller was that exec opcode handler.
 
 fn arrayLengthFromNumber(value: core.JSValue) ?u32 {
-    const number: f64 = if (value.asInt32()) |int_value|
+    const number: f64 = if (value.as(.int)) |int_value|
         @floatFromInt(int_value)
     else
-        value.asFloat64() orelse return null;
+        value.as(.float64) orelse return null;
     if (!std.math.isFinite(number)) return null;
     if (std.math.isNan(number)) return null;
     if (number < 0 or number > @as(f64, @floatFromInt(core_array.max_array_length))) return null;
@@ -685,7 +685,7 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
     const prototype_slot: usize = core.class.ids.array_iterator;
     if (prototype_slot >= realm.class_prototypes.len) return error.InvalidBuiltinRegistry;
     const prototype_value = realm.class_prototypes[prototype_slot];
-    if (!prototype_value.isObject()) return error.InvalidBuiltinRegistry;
+    if (!prototype_value.is(.object)) return error.InvalidBuiltinRegistry;
     const prototype = try expectObject(prototype_value);
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, prototype);
     errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
@@ -914,7 +914,7 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        if (item.asInt32()) |n| {
+        if (item.as(.int)) |n| {
             if (@mod(n, 2) == 0) {
                 try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
                 out_index += 1;
@@ -930,7 +930,7 @@ fn reduceSum(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        sum += item.asInt32() orelse 0;
+        sum += item.as(.int) orelse 0;
     }
     return core.JSValue.int32(sum);
 }
@@ -941,7 +941,7 @@ fn someEven(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        if (item.asInt32()) |n| found = found or @mod(n, 2) == 0;
+        if (item.as(.int)) |n| found = found or @mod(n, 2) == 0;
     }
     return core.JSValue.boolean(found);
 }
@@ -952,7 +952,7 @@ fn everyPositive(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        if ((item.asInt32() orelse 0) <= 0) ok = false;
+        if ((item.as(.int) orelse 0) <= 0) ok = false;
     }
     return core.JSValue.boolean(ok);
 }
@@ -998,7 +998,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
             if (mode != .last) break;
         }
     }
-    if (needle.isUndefined() and mode != .includes) found_index = @as(i32, @intCast(array.arrayLength())) - 1;
+    if (needle.is(.undefined_value) and mode != .includes) found_index = @as(i32, @intCast(array.arrayLength())) - 1;
     return switch (mode) {
         .includes => core.JSValue.boolean(found_index >= 0),
         else => core.JSValue.int32(found_index),
@@ -1021,7 +1021,7 @@ fn stringSearchValue(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSVa
 
 fn at(_: *core.JSRuntime, array_value: core.JSValue, index_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
-    var index = index_value.asInt32() orelse 0;
+    var index = index_value.as(.int) orelse 0;
     if (index < 0) index = @as(i32, @intCast(array.arrayLength())) + index;
     if (index < 0 or index >= array.arrayLength()) return core.JSValue.undefinedValue();
     return try array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
@@ -1029,7 +1029,7 @@ fn at(_: *core.JSRuntime, array_value: core.JSValue, index_value: core.JSValue) 
 
 fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
-    var start = start_value.asInt32() orelse 0;
+    var start = start_value.as(.int) orelse 0;
     if (start < 0) start = @as(i32, @intCast(array.arrayLength())) + start;
     if (start < 0) start = 0;
     const out = try core.Object.createArray(rt, null);
@@ -1046,8 +1046,8 @@ fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSVal
 
 fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
-    const start: u32 = @intCast(args[0].asInt32() orelse 0);
-    const delete_count: u32 = @intCast(args[1].asInt32() orelse 0);
+    const start: u32 = @intCast(args[0].as(.int) orelse 0);
+    const delete_count: u32 = @intCast(args[1].as(.int) orelse 0);
     var insert_a = args[2];
     var insert_b = args[3];
     var root_frame = core.runtime.rootValues(.{ &insert_a, &insert_b });
@@ -1064,7 +1064,7 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     const tail = try array.getProperty(core.atom.atomFromUInt32(start + delete_count));
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start), core.Descriptor.data(insert_a, true, true, true));
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 1), core.Descriptor.data(insert_b, true, true, true));
-    if (!tail.isUndefined()) try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 2), core.Descriptor.data(tail, true, true, true));
+    if (!tail.is(.undefined_value)) try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 2), core.Descriptor.data(tail, true, true, true));
     return removed.value();
 }
 
@@ -1097,10 +1097,10 @@ fn rewriteReversedPair(
 ) !void {
     _ = array.deleteProperty(rt, lower_key);
     _ = array.deleteProperty(rt, upper_key);
-    if (!upper_value.isUndefined()) {
+    if (!upper_value.is(.undefined_value)) {
         try array.defineOwnProperty(rt, lower_key, core.Descriptor.data(upper_value, true, true, true));
     }
-    if (!lower_value.isUndefined()) {
+    if (!lower_value.is(.undefined_value)) {
         try array.defineOwnProperty(rt, upper_key, core.Descriptor.data(lower_value, true, true, true));
     }
 }
@@ -1147,7 +1147,7 @@ const SortEntry = struct {
 /// (`quickjs.c:43017-43144`) for ordinary arrays. Custom comparators remain
 /// outside this narrow transitional path.
 fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    if (args.len >= 1 and !args[0].isUndefined()) return error.TypeError;
+    if (args.len >= 1 and !args[0].is(.undefined_value)) return error.TypeError;
     const array = try expectArray(array_value);
 
     var entries = std.ArrayList(SortEntry).empty;
@@ -1161,7 +1161,7 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         const value = try array.getProperty(core.atom.atomFromUInt32(index));
-        if (value.isUndefined()) {
+        if (value.is(.undefined_value)) {
             continue;
         }
 
@@ -1254,14 +1254,14 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
 }
 
 fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value: core.JSValue) !void {
-    if (value.isObject()) {
+    if (value.is(.object)) {
         const header = value.refHeader() orelse unreachable;
         const object = core.Object.fromHeader(header);
         if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {
                 const item = try object.getProperty(core.atom.atomFromUInt32(index));
-                if (!item.isUndefined()) {
+                if (!item.is(.undefined_value)) {
                     try out.defineOwnProperty(rt, core.atom.atomFromUInt32(next_index.*), core.Descriptor.data(item, true, true, true));
                 }
                 next_index.* += 1;
@@ -1291,20 +1291,20 @@ fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) !u32 {
     if (object.isArray()) return object.arrayLength();
     if (buffer_ops.isTypedArrayObject(object)) return buffer_ops.typedArrayLength(rt, object) catch 0;
     const length = try object.getProperty(core.atom.ids.length);
-    return @intCast(length.asInt32() orelse 0);
+    return @intCast(length.as(.int) orelse 0);
 }
 
 fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     if (a.isBigInt() and b.isBigInt()) {
         return (compareBigIntValues(a, b) orelse return false) == .eq;
     }
-    if (a.asInt32()) |ai| {
-        if (b.asInt32()) |bi| return ai == bi;
+    if (a.as(.int)) |ai| {
+        if (b.as(.int)) |bi| return ai == bi;
     }
-    if (a.asBool()) |ab| {
-        if (b.asBool()) |bb| return ab == bb;
+    if (a.as(.boolean)) |ab| {
+        if (b.as(.boolean)) |bb| return ab == bb;
     }
-    if (a.isNull() or a.isUndefined()) return a.same(b);
+    if (a.is(.null_value) or a.is(.undefined_value)) return a.same(b);
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;
         return (compareStringValues(a, b) orelse 1) == 0;
@@ -1326,7 +1326,7 @@ const BigIntParts = struct {
 };
 
 fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
-    if (value.asShortBigInt()) |short| {
+    if (value.as(.short_big_int)) |short| {
         const signed: i128 = short;
         var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
         var len: usize = 0;

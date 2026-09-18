@@ -100,9 +100,12 @@ pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack,
     const template_atom = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const name = ctx.runtime.atoms.name(template_atom) orelse return error.InvalidAtom;
+    const empty_before = stack.capacity == 0;
     try stack.reserveAdditional(1);
+    errdefer if (empty_before) stack.discardEmptyHeapBacking();
     const value = value: {
         const fresh_atom = try ctx.runtime.atoms.newSymbol(name, .private);
+        errdefer ctx.runtime.atoms.abandonUnpublishedSymbol(fresh_atom);
         break :value try ctx.runtime.takeSymbolValue(fresh_atom);
     };
     stack.pushOwnedAssumeCapacity(value);
@@ -115,7 +118,7 @@ pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !
 
 pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
     const value = adapterValueBorrow(this_value);
-    if (value.isUninitialized()) return error.ReferenceError;
+    if (value.is(.uninitialized)) return error.ReferenceError;
     stack.pushAssumeCapacity(value);
 }
 
@@ -145,7 +148,7 @@ pub noinline fn pushThisVm(
 
 pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    const object_value = if (value.isObject())
+    const object_value = if (value.is(.object))
         value
     else
         try object_ops.primitiveObjectForAccess(ctx.runtime, global, value);
@@ -176,11 +179,11 @@ pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     // `JS_AtomToString` of it — a refcount dup of the interned atom string, not
     // a fresh allocation. The `typeof` result strings are all predefined string
     // atoms here too, so resolve to the atom and dup its cached interned string.
-    const atom_id: core.Atom = if (value.isUndefined() or value_ops.isHTMLDDA(value))
+    const atom_id: core.Atom = if (value.is(.undefined_value) or value_ops.isHTMLDDA(value))
         core.atom.ids.undefined_
-    else if (value.isNull())
+    else if (value.is(.null_value))
         core.atom.ids.type_object
-    else if (value.isBool())
+    else if (value.is(.boolean))
         core.atom.ids.type_boolean
     else if (value.isBigInt())
         core.atom.ids.type_bigint
@@ -188,9 +191,9 @@ pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
         core.atom.ids.type_number
     else if (value.isString())
         core.atom.ids.type_string
-    else if (value.isSymbol())
+    else if (value.is(.symbol))
         core.atom.ids.type_symbol
-    else if (value.isFunctionBytecode() or functionObjectFromValue(value) != null or callableObjectFromValue(value) != null or proxyTargetIsCallable(value))
+    else if (value.is(.function_bytecode) or functionObjectFromValue(value) != null or callableObjectFromValue(value) != null or proxyTargetIsCallable(value))
         core.atom.ids.type_function
     else
         core.atom.ids.type_object;
@@ -200,7 +203,7 @@ pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
 
 pub noinline fn typeOfIsUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined() or value_ops.isHTMLDDA(value)));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value) or value_ops.isHTMLDDA(value)));
 }
 
 pub noinline fn typeOfIsFunction(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
@@ -209,7 +212,7 @@ pub noinline fn typeOfIsFunction(_: *core.JSRuntime, stack: *stack_mod.Stack) !v
     // c_functions, external host functions, and callable proxies all report
     // "function", not only bytecode function objects.
     const is_func = !value_ops.isHTMLDDA(value) and
-        (value.isFunctionBytecode() or
+        (value.is(.function_bytecode) or
             functionObjectFromValue(value) != null or
             callableObjectFromValue(value) != null or
             proxyTargetIsCallable(value));
@@ -226,8 +229,8 @@ pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     if (forof_ops.isIteratorCatchMarker(value)) {
         return .value;
     }
-    if (value.isCatchOffset()) {
-        if ((value.asCatchOffset() orelse -1) == 0) {
+    if (value.is(.catch_offset)) {
+        if ((value.as(.catch_offset) orelse -1) == 0) {
             return .value;
         }
         const target = value.catchTarget();
@@ -241,9 +244,9 @@ pub noinline fn nipCatch(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResul
 
     while (stack.len() != 0) {
         const value = try stack.pop();
-        if (value.isCatchOffset()) {
+        if (value.is(.catch_offset)) {
             const result: DropResult = if (forof_ops.isIteratorCatchMarker(value) or
-                (value.asCatchOffset() orelse -1) == 0)
+                (value.as(.catch_offset) orelse -1) == 0)
                 .value
             else
                 .{ .catch_target = value.catchTarget() };
@@ -455,17 +458,17 @@ pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
 
 pub noinline fn isUndefinedOrNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined() or value.isNull()));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value) or value.is(.null_value)));
 }
 
 pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isUndefined()));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value)));
 }
 
 pub noinline fn isNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isNull()));
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.null_value)));
 }
 
 fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
@@ -484,7 +487,7 @@ fn requireStackLen(stack: *const stack_mod.Stack, required: usize) !void {
 fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void {
     try std.testing.expectEqual(expected.len, stack.len());
     for (expected, 0..) |value, index| {
-        try std.testing.expectEqual(@as(?i32, value), stack.values[index].asInt32());
+        try std.testing.expectEqual(@as(?i32, value), stack.values[index].as(.int));
     }
 }
 
@@ -493,7 +496,7 @@ fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
 }
 
 fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeader() orelse return null;
     const object = core.Object.fromHeader(header);
     if (!core.class.isBytecodeFunctionClass(object.class_id)) return null;
@@ -503,7 +506,7 @@ fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
 const objectFromValue = core.value_semantics.objectFromValue;
 
 fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeader() orelse return null;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
@@ -517,7 +520,7 @@ fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
 fn proxyTargetIsCallable(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     const target = object.proxyTarget() orelse return false;
-    return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
+    return target.is(.function_bytecode) or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

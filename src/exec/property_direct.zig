@@ -510,12 +510,12 @@ test "global own data slot helpers reject readonly and accessor writes" {
 
     try global.defineOwnProperty(rt, readonly_key, core.Descriptor.data(core.JSValue.int32(1), false, true, true));
     const readonly_lookup = globalOwnDataPropertyBorrowedLookup(global, readonly_key).?;
-    try std.testing.expectEqual(@as(?i32, 1), readonly_lookup.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), readonly_lookup.value.as(.int));
     try std.testing.expect(globalOwnWritableDataPropertyLookup(global, readonly_key) == null);
     try std.testing.expect(globalWritableDataPropertyLookupAt(global, readonly_lookup.index, readonly_key) == null);
     try std.testing.expect(!setGlobalDataPropertyLookup(rt, global, readonly_lookup, readonly_key, core.JSValue.int32(2)));
     try std.testing.expect(!setGlobalOwnWritableDataPropertyAtOwned(rt, global, readonly_lookup.index, readonly_key, core.JSValue.int32(2)));
-    try std.testing.expectEqual(@as(?i32, 1), globalOwnDataPropertyBorrowedAt(global, readonly_lookup.index, readonly_key).?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), globalOwnDataPropertyBorrowedAt(global, readonly_lookup.index, readonly_key).?.as(.int));
 
     // Accessor get/set are stored as object headers (qjs `JSObject*`); use
     // object values (the old loose JSValue accessor cell that allowed string

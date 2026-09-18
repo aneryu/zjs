@@ -19,7 +19,7 @@ pub const AppendStringError = core.value_string.AppendStringError;
 
 pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.add and (a.isString() or b.isString())) return stringAdd(rt, a, b);
-    if (a.isSymbol() or b.isSymbol()) return error.TypeError;
+    if (a.is(.symbol) or b.is(.symbol)) return error.TypeError;
     if (a.isBigInt() or b.isBigInt()) {
         if (!a.isBigInt() or !b.isBigInt()) return error.TypeError;
         return binaryBigInt(rt, op, a, b);
@@ -107,20 +107,20 @@ fn compareBigIntToNonBigInt(rt: *core.JSRuntime, bigint_value: core.JSValue, oth
         return lhs.compare(parsed);
     }
     if (numberValue(other)) |number| return try compareBigIntToNumber(rt, bigint_value, number);
-    if (other.asBool()) |bool_value| {
+    if (other.as(.boolean)) |bool_value| {
         var rhs = try bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
         defer rhs.deinit();
         var lhs = try cloneBigIntValue(rt, bigint_value);
         defer lhs.deinit();
         return lhs.compare(rhs);
     }
-    if (other.isNull()) {
+    if (other.is(.null_value)) {
         const zero = bignum.BigInt{ .allocator = rt.memory.allocator };
         var lhs = try cloneBigIntValue(rt, bigint_value);
         defer lhs.deinit();
         return lhs.compare(zero);
     }
-    if (other.isUndefined()) return null;
+    if (other.is(.undefined_value)) return null;
     return error.TypeError;
 }
 
@@ -212,7 +212,7 @@ pub fn length(value: core.JSValue) !core.JSValue {
         if (string_len <= std.math.maxInt(i32)) return core.JSValue.int32(@intCast(string_len));
         return core.JSValue.float64(@floatFromInt(string_len));
     }
-    if (value.isObject()) {
+    if (value.is(.object)) {
         const header = value.refHeader() orelse return error.TypeError;
         const object_value = core.Object.fromHeader(header);
         if (object_value.isArray()) {
@@ -222,10 +222,10 @@ pub fn length(value: core.JSValue) !core.JSValue {
             return core.JSValue.float64(@floatFromInt(object_value.arrayLength()));
         }
         const length_value = try object_value.getProperty(core.atom.ids.length);
-        if (!length_value.isUndefined()) return length_value;
+        if (!length_value.is(.undefined_value)) return length_value;
         return core.JSValue.undefinedValue();
     }
-    if (value.isNull() or value.isUndefined()) return error.TypeError;
+    if (value.is(.null_value) or value.is(.undefined_value)) return error.TypeError;
     return core.JSValue.undefinedValue();
 }
 
@@ -233,7 +233,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.not and !value.isBigInt()) {
         return core.JSValue.int32(~try toInt32(rt, value));
     }
-    if (value.asFloat64()) |float_value| {
+    if (value.as(.float64)) |float_value| {
         const out = switch (op) {
             bytecode.opcode.op.neg => -float_value,
             bytecode.opcode.op.to_number => float_value,
@@ -245,7 +245,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     }
     if (value.isBigInt()) {
         if (op == bytecode.opcode.op.to_number) return error.TypeError;
-        if (value.asShortBigInt()) |short| {
+        if (value.as(.short_big_int)) |short| {
             if (shortBigIntUnary(op, short)) |out| return out;
         }
         var out = try cloneBigIntValue(rt, value);
@@ -312,7 +312,7 @@ pub fn toStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 
 fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.JSValue {
     if (value.isString()) return value;
-    if (value.asInt32()) |int_value| {
+    if (value.as(.int)) |int_value| {
         if (int_value >= 0 and int_value < 256) {
             const cached = try rt.smallIntString(@intCast(int_value));
             return cached.value();
@@ -320,7 +320,7 @@ fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.J
         var int_buf: [32]u8 = undefined;
         return try createAsciiStringValue(rt, dtoa.formatInt32(&int_buf, int_value));
     }
-    if (value.asFloat64()) |float_value| {
+    if (value.as(.float64)) |float_value| {
         if (std.math.isNan(float_value)) return try createAsciiStringValue(rt, "NaN");
         if (std.math.isPositiveInf(float_value)) return try createAsciiStringValue(rt, "Infinity");
         if (std.math.isNegativeInf(float_value)) return try createAsciiStringValue(rt, "-Infinity");
@@ -328,15 +328,15 @@ fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.J
         var float_buf: [64]u8 = undefined;
         return try createAsciiStringValue(rt, formatFiniteNumberAssumeCapacity(&float_buf, float_value));
     }
-    if (value.asShortBigInt()) |bigint_value| {
+    if (value.as(.short_big_int)) |bigint_value| {
         var bigint_buf: [32]u8 = undefined;
         return try createAsciiStringValue(rt, dtoa.formatInt64(&bigint_buf, bigint_value));
     }
-    if (value.asBool()) |bool_value| {
+    if (value.as(.boolean)) |bool_value| {
         return try createAsciiStringValue(rt, if (bool_value) "true" else "false");
     }
-    if (value.isUndefined()) return try createAsciiStringValue(rt, "undefined");
-    if (value.isNull()) return try createAsciiStringValue(rt, "null");
+    if (value.is(.undefined_value)) return try createAsciiStringValue(rt, "undefined");
+    if (value.is(.null_value)) return try createAsciiStringValue(rt, "null");
     return null;
 }
 
@@ -352,15 +352,15 @@ fn fastStringToInt32(bytes: []const u8) ?i32 {
 }
 
 pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    if (value.isSymbol()) return error.TypeError;
+    if (value.is(.symbol)) return error.TypeError;
     // qjs JS_ToNumberHintFree (quickjs.c:12955-12959): the BIG_INT/SHORT_BIG_INT
     // arm throws TypeError "cannot convert bigint to number" under the plain
     // ToNumber hint; only ToNumeric passes bigints through. Callers that need
     // ToNumeric semantics convert via bigIntToNumber before calling.
     if (value.isBigInt()) return error.TypeError;
     if (numberValue(value)) |number| return numberToValue(number);
-    if (value.asBool()) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
-    if (value.isNull()) return core.JSValue.int32(0);
+    if (value.as(.boolean)) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
+    if (value.is(.null_value)) return core.JSValue.int32(0);
     if (value.isString()) {
         const str = stringObject(value).?;
         switch (str.resolveData()) {
@@ -381,7 +381,7 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 }
 
 pub fn asN(rt: *core.JSRuntime, bits_value: core.JSValue, bigint_value: core.JSValue, unsigned: bool) !core.JSValue {
-    if (bits_value.isBigInt() or bits_value.isSymbol()) return error.TypeError;
+    if (bits_value.isBigInt() or bits_value.is(.symbol)) return error.TypeError;
     const bits_number = try toIntegerOrInfinity(rt, bits_value);
     if (!std.math.isFinite(bits_number)) return error.RangeError;
     const truncated = @trunc(bits_number);
@@ -510,9 +510,9 @@ pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
     // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
     if (value.isBigInt()) return error.TypeError;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
@@ -533,11 +533,11 @@ pub fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize {
 pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.isBigInt()) return cloneBigIntValue(rt, value);
     if (value.isNumber()) return error.TypeError;
-    if (value.asBool()) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
+    if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
-    if (value.isString() or value.isObject()) {
+    if (value.isString() or value.is(.object)) {
         try appendValueString(rt, &buffer, value);
         // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
         const trimmed = core.value_format.trimJsWhitespace(buffer.items);
@@ -560,7 +560,7 @@ inline fn heapBigInt(value: core.JSValue) ?*core.bigint.BigInt {
 }
 
 pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
+    if (value.as(.short_big_int)) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
@@ -575,7 +575,7 @@ pub fn isTruthy(value: core.JSValue) bool {
 
 pub fn isFunctionObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const object = core.Object.fromHeader(header);
     if (object.proxyTarget() != null) return proxyTargetIsFunction(value);
     return object.class_id == core.class.ids.c_function or
@@ -588,10 +588,10 @@ pub fn isFunctionObject(value: core.JSValue) bool {
 
 fn proxyTargetIsFunction(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const object = core.Object.fromHeader(header);
     const target = object.proxyTarget() orelse return false;
-    return target.isFunctionBytecode() or isFunctionObject(target);
+    return target.is(.function_bytecode) or isFunctionObject(target);
 }
 
 test "function predicate recognizes every bytecode function class" {
@@ -636,19 +636,19 @@ pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8 {
 }
 
 fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    if (a.asShortBigInt()) |lhs| {
-        if (b.asShortBigInt()) |rhs| {
+    if (a.as(.short_big_int)) |lhs| {
+        if (b.as(.short_big_int)) |rhs| {
             if (shortBigIntBinary(op, lhs, rhs)) |out| return out;
         }
     }
 
     if (op == bytecode.opcode.op.add) {
-        if (b.asShortBigInt()) |rhs| {
+        if (b.as(.short_big_int)) |rhs| {
             if (rhs > 0) {
                 if (try addPositiveShortToBigInt(rt, a, @intCast(rhs))) |out| return out;
             }
         }
-        if (a.asShortBigInt()) |lhs| {
+        if (a.as(.short_big_int)) |lhs| {
             if (lhs > 0) {
                 if (try addPositiveShortToBigInt(rt, b, @intCast(lhs))) |out| return out;
             }
@@ -677,14 +677,14 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     }
 
     const lhs = try bigIntFromValueBorrowed(rt, a);
-    const lhs_is_owned = a.asShortBigInt() != null;
+    const lhs_is_owned = a.as(.short_big_int) != null;
     defer if (lhs_is_owned) {
         var owned = lhs;
         owned.deinit();
     };
 
     const rhs = try bigIntFromValueBorrowed(rt, b);
-    const rhs_is_owned = b.asShortBigInt() != null;
+    const rhs_is_owned = b.as(.short_big_int) != null;
     defer if (rhs_is_owned) {
         var owned = rhs;
         owned.deinit();
@@ -790,7 +790,7 @@ fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     // int32 path (normalized result, overflow→float); any float operand goes
     // ToFloat64 + bare __JS_NewFloat64 with NO int32 renormalization. Mirror that
     // so a float-involving result is not silently re-tagged int32.
-    if (a.isInt() and b.isInt()) return numberToValue(out);
+    if (a.is(.int) and b.is(.int)) return numberToValue(out);
     return core.JSValue.float64(out);
 }
 
@@ -803,12 +803,12 @@ fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
 }
 
 fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    if (a.isSymbol() or b.isSymbol()) return error.TypeError;
-    if (a.isString() and b.isInt()) {
-        if (try stringAddStringInt(rt, a, b.asInt32().?, .suffix)) |out| return out;
+    if (a.is(.symbol) or b.is(.symbol)) return error.TypeError;
+    if (a.isString() and b.is(.int)) {
+        if (try stringAddStringInt(rt, a, b.as(.int).?, .suffix)) |out| return out;
     }
-    if (a.isInt() and b.isString()) {
-        if (try stringAddStringInt(rt, b, a.asInt32().?, .prefix)) |out| return out;
+    if (a.is(.int) and b.isString()) {
+        if (try stringAddStringInt(rt, b, a.as(.int).?, .prefix)) |out| return out;
     }
     if (a.isString() and b.isString()) return stringAddStringsOwned(rt, a, b);
     var buffer = std.ArrayList(u8).empty;
@@ -1087,13 +1087,13 @@ fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
         if (std.math.isNan(av) or std.math.isNan(bv)) return false;
         return av == bv;
     }
-    if (a.asInt32()) |ai| {
-        if (b.asInt32()) |bi| return ai == bi;
+    if (a.as(.int)) |ai| {
+        if (b.as(.int)) |bi| return ai == bi;
     }
-    if (a.asBool()) |ab| {
-        if (b.asBool()) |bb| return ab == bb;
+    if (a.as(.boolean)) |ab| {
+        if (b.as(.boolean)) |bb| return ab == bb;
     }
-    if (a.isNull() or a.isUndefined()) return a.same(b);
+    if (a.is(.null_value) or a.is(.undefined_value)) return a.same(b);
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;
         return (compareStringValues(a, b, true) orelse 1) == 0;
@@ -1115,7 +1115,7 @@ const BigIntParts = struct {
 };
 
 fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
-    if (value.asShortBigInt()) |short| {
+    if (value.as(.short_big_int)) |short| {
         const signed: i128 = short;
         var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
         var len: usize = 0;
@@ -1159,10 +1159,10 @@ pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
         if (std.math.isNan(av) or std.math.isNan(bv)) return false;
         return av == bv;
     }
-    if (a.asBool()) |ab| {
-        if (b.asBool()) |bb| return ab == bb;
+    if (a.as(.boolean)) |ab| {
+        if (b.as(.boolean)) |bb| return ab == bb;
     }
-    if (a.isNull() or a.isUndefined()) return a.same(b);
+    if (a.is(.null_value) or a.is(.undefined_value)) return a.same(b);
     if (a.isBigInt() and b.isBigInt()) return a.sameValue(b);
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;

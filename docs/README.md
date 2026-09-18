@@ -26,9 +26,8 @@ when needed.
   the mechanism is the
   [native boundary design](perf/native-boundary-design.md) (§3, §7, §9).
   The former in-tree Runtime Plugin ABI (`runtime-plugin-abi.md`) was
-  deleted 2026-09-06; dynamic plugins are the
-  [Fun Native Plugin design](fun-native-plugin-design.md) (FNABI, built on
-  `zjs.native`, loader in the `fun` repository).
+  deleted 2026-09-06. The [Fun Native Plugin design](fun-native-plugin-design.md)
+  is a historical FNABI draft; zjs no longer ships that ABI.
 - [Fun Dev Hot Reload design](fun-dev-hot-reload-design.md): the fun/zjs
   hot-reload and dev-update system — HostCore/Session split, Sequential
   Session Reload, ESM HMR, and the zjs capability list (v1.5,

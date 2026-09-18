@@ -112,7 +112,7 @@ pub noinline fn checkedLocVm(
             frame.locals[idx] = core.JSValue.uninitialized();
         },
         op.get_loc_check => {
-            if (frame.locals[idx].isUninitialized()) {
+            if (frame.locals[idx].is(.uninitialized)) {
                 const is_derived_this = function.isDerivedClassConstructor() and
                     idx < function.varDefs().len and
                     function.varDefs()[idx].var_name == core.atom.ids.this_;
@@ -126,7 +126,7 @@ pub noinline fn checkedLocVm(
             try stack.push(frame.locals[idx]);
         },
         op.get_loc_checkthis => {
-            if (frame.locals[idx].isUninitialized()) {
+            if (frame.locals[idx].is(.uninitialized)) {
                 // This opcode is the compiler-generated implicit return after
                 // derived-constructor return unwinding. QuickJS constructs its
                 // ReferenceError in caller_ctx, so leave it as a distinct
@@ -136,7 +136,7 @@ pub noinline fn checkedLocVm(
             try stack.push(frame.locals[idx]);
         },
         op.put_loc_check => {
-            if (frame.locals[idx].isUninitialized()) {
+            if (frame.locals[idx].is(.uninitialized)) {
                 const err = exception_ops.throwTdzReferenceError(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -149,7 +149,7 @@ pub noinline fn checkedLocVm(
             frame.locals[idx] = value;
         },
         op.set_loc_check => {
-            if (frame.locals[idx].isUninitialized()) {
+            if (frame.locals[idx].is(.uninitialized)) {
                 const err = exception_ops.throwTdzReferenceError(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -166,7 +166,7 @@ pub noinline fn checkedLocVm(
             const is_derived_this = function.isDerivedClassConstructor() and
                 idx < function.varDefs().len and
                 function.varDefs()[idx].var_name == core.atom.ids.this_;
-            if (is_derived_this and !frame.locals[idx].isUninitialized()) {
+            if (is_derived_this and !frame.locals[idx].is(.uninitialized)) {
                 _ = exception_ops.throwReferenceErrorMessage(ctx, global, "'this' can be initialized only once") catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;

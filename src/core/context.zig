@@ -365,22 +365,20 @@ pub const JSContext = struct {
 
     comptime {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        std.debug.assert(@sizeOf(@This()) == 2176);
+        std.debug.assert(@sizeOf(@This()) == 1328);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "runtime") == 1472);
-        std.debug.assert(@offsetOf(@This(), "modules") == 1424);
-        std.debug.assert(@offsetOf(@This(), "publication_state") == 2160);
-        std.debug.assert(@offsetOf(@This(), "global") == 288);
-        // Lifetime state occupies the compact layout's existing 15-byte tail
-        // hole; no declared field may perturb it.
-        std.debug.assert(trace_list_previous_offset == 2168);
+        std.debug.assert(@offsetOf(@This(), "runtime") == 832);
+        std.debug.assert(@offsetOf(@This(), "modules") == 784);
+        std.debug.assert(@offsetOf(@This(), "publication_state") == 1312);
+        std.debug.assert(@offsetOf(@This(), "global") == 200);
+        std.debug.assert(trace_list_previous_offset == 1320);
         std.debug.assert(trace_list_previous_offset + @sizeOf(?*gc.Header) == @sizeOf(@This()));
     }
 
     /// QuickJS `JSContext.header`: realm identity is itself a refcounted cycle
     /// collector node. Keep this first; `MemoryAccount` places the common
     /// lifetime metadata immediately before it.
-    header: gc.GCObjectHeader align(16) = .{},
+    header: gc.Header align(16) = .{},
     runtime: *JSRuntime,
     /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
     /// header links above are reserved exclusively for the collector.
@@ -446,10 +444,9 @@ pub const JSContext = struct {
     eval_function: JSValue = JSValue.nullValue(),
     host_event_loop: ?HostEventLoop = null,
 
-    const trace_list_previous_offset: usize = 2168;
+    pub const trace_list_previous_offset: usize = 1320;
 
-    /// O(1) list predecessor stored in the compact layout's tail hole (the
-    /// 4 bytes at 2164 that held the trace-build Realm refcount are free).
+    /// O(1) list predecessor stored in the compact layout's tail hole.
     pub inline fn traceListPreviousPtr(self: *JSContext) *?*gc.Header {
         return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
     }
@@ -719,7 +716,7 @@ pub const JSContext = struct {
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return null;
         const value = self.class_prototypes[index];
-        if (!value.isObject()) return null;
+        if (!value.is(.object)) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
         return Object.fromHeader(header);
@@ -736,7 +733,7 @@ pub const JSContext = struct {
     pub fn nativeErrorPrototypeObject(self: *JSContext, kind: NativeErrorKind) ?*Object {
         if (kind == .count) return null;
         const value = self.native_error_prototypes[@intFromEnum(kind)];
-        if (!value.isObject()) return null;
+        if (!value.is(.object)) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
         return Object.fromHeader(header);
@@ -1064,7 +1061,7 @@ pub const JSContext = struct {
     }
 
     pub fn hasException(self: JSContext) bool {
-        return !self.runtime.current_exception.isUninitialized();
+        return !self.runtime.current_exception.is(.uninitialized);
     }
 
     pub fn takeException(self: *JSContext) JSValue {
@@ -1263,7 +1260,7 @@ pub const JSContext = struct {
             .pc = frame.currentPc(),
             .location_data = frame.location_data,
             .location_resolver = frame.location_resolver,
-            .function_value = if (frame.function_value.isObject()) frame.function_value else JSValue.undefinedValue(),
+            .function_value = if (frame.function_value.is(.object)) frame.function_value else JSValue.undefinedValue(),
             .is_native = frame.is_native,
         };
     }
@@ -1277,7 +1274,7 @@ pub const JSContext = struct {
             .pc = snapshot.pc,
             .location_data = snapshot.location_data,
             .location_resolver = snapshot.location_resolver,
-            .function_value = if (snapshot.function_value.isObject()) snapshot.function_value else JSValue.undefinedValue(),
+            .function_value = if (snapshot.function_value.is(.object)) snapshot.function_value else JSValue.undefinedValue(),
             .is_native = snapshot.is_native,
         };
     }
@@ -1306,7 +1303,7 @@ pub const JSContext = struct {
             self.runtime.backtrace_capacity = next_capacity;
             if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
         }
-        const stored_function_value = if (function_value.isObject()) function_value else JSValue.undefinedValue();
+        const stored_function_value = if (function_value.is(.object)) function_value else JSValue.undefinedValue();
         self.runtime.backtrace_frames.ptr[self.runtime.backtrace_frames.len] = .{
             .function_name = self.runtime.atoms.noteHolderStore(function_name),
             .filename = self.runtime.atoms.noteHolderStore(filename),

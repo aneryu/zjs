@@ -1048,7 +1048,7 @@ pub const DynamicAtom = struct {
     /// an open marking window cannot have been reached by the trace that
     /// started before it existed, so it is live for that cycle by construction.
     born_epoch: u64 = 0,
-    /// P-class explicit host pins (`PropNameID.internStatic` / `release`).
+    /// P-class explicit host pins (`pinForHost` / `unpinForHost`).
     /// The only remaining count in the table, and the only one an embedder can
     /// move (§2.5).
     host_pins: u32 = 0,
@@ -1768,7 +1768,7 @@ pub const AtomTable = struct {
         }
     }
 
-    /// §2.5 host pin (`PropNameID.internStatic` / `release`): the only count
+    /// §2.5 host pin (`pinForHost` / `unpinForHost`): the only count
     /// left in the table, and the only liveness an embedder can assert.
     pub fn pinForHost(self: *AtomTable, id: Atom) void {
         if (isConst(id) or isTaggedInt(id)) return;
@@ -2088,6 +2088,19 @@ pub const AtomTable = struct {
         return JSValue.symbol(body.header());
     }
 
+    /// Retire a symbol interned in this call that never became a JSValue.
+    /// No-op if the entry was already swept, has a body, or still has pins.
+    pub fn abandonUnpublishedSymbol(self: *AtomTable, atom_id: Atom) void {
+        if (isConst(atom_id) or isTaggedInt(atom_id)) return;
+        const idx = dynamicEntryIndex(atom_id) orelse return;
+        if (idx >= self.entries.len) return;
+        const entry = &self.entries[idx];
+        if (!entry.occupied or !isValueSymbolKind(entry.kind)) return;
+        if (entry.str != null) return;
+        if (entry.host_pins != 0 or entry.weakref_count != 0) return;
+        self.finalizeDeadEntry(@intCast(idx));
+    }
+
     pub fn symbolValueIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) JSValue {
         const body = self.symbolBodyIfLive(rt, atom_id) orelse return JSValue.undefinedValue();
         return JSValue.symbol(body.header());
@@ -2125,7 +2138,7 @@ pub const AtomTable = struct {
     /// GC weak-key liveness query. The atom id is only an identity; under
     /// tracing the symbol body's mark, not table membership, decides whether
     /// a WeakRef/WeakMap key survived the current trace.
-    pub fn symbolBodyHeaderIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*gc.GCObjectHeader {
+    pub fn symbolBodyHeaderIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*gc.Header {
         const body = self.symbolBodyIfLive(rt, atom_id) orelse return null;
         return @ptrCast(@alignCast(body));
     }

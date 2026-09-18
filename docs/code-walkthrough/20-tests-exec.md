@@ -394,14 +394,14 @@
 
 - **签名**：`fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue`。
 - **作用**：测试夹具/探针 `Probe.call`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：在宿主函数里观测 async 完成记录：`inline_calls.activeInvocation(rt)` 取不到即 `error.TestUnexpectedResult`；取 `active.machine.async_completions`，断言 `store.count != 0`，取最后一格 `store.at(store.count - 1)` 并断言 `slot.promise.isObject()`。按 `slot.value.isUndefined()` 分流计数：仍在运行记 `self.running`，已完成记 `self.completing`。随后记下 `rt.gc.stats.cycle_gc_count`，`try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only)` 跑一轮**只认声明根**（不保守扫原生栈）的回收，并断言计数确实涨了（这轮 major 真跑了），最后返回 undefined。
+- **实现**：在宿主函数里观测 async 完成记录：`inline_calls.activeInvocation(rt)` 取不到即 `error.TestUnexpectedResult`；取 `active.machine.async_completions`，断言 `store.count != 0`，取最后一格 `store.at(store.count - 1)` 并断言 `slot.promise.is(.object)`。按 `slot.value.is(.undefined_value)` 分流计数：仍在运行记 `self.running`，已完成记 `self.completing`。随后记下 `rt.gc.stats.cycle_gc_count`，`try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only)` 跑一轮**只认声明根**（不保守扫原生栈）的回收，并断言计数确实涨了（这轮 major 真跑了），最后返回 undefined。
 - **所有权 / 错误 / 调用**：返回 `anyerror!core.JSValue`，由测试 `try`/`expectError` 消费。
 
 ### `Probe.call` (`src/tests/exec.zig:23011`)
 
 - **签名**：`fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue`。
 - **作用**：测试夹具/探针 `Probe.call`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：`self.calls += 1` 后取 `inline_calls.activeInvocation(rt)`（取不到 → `error.TestUnexpectedResult`），断言 `active.machine.async_completions.count == 1`，且第 0 格的 `slot.value.isObject()`——源码注释点明此时被调者帧已经弹出。接着 `core.Object.expect(slot.promise)` 取出 promise，用 `engine.exec.promise_ops.promiseReactionRecord` 造一条全 undefined 的反应记录并 `appendPromiseReaction` 挂上去。最后 `rt.suppressLimitCollectionForTest(true)` + `rt.setMemoryLimit(0)` 武装 OOM：注释说明 getter 帧拆除会把已记账字节还回来，所以上限取 0 才能保证紧随其后的结算分配仍然失败。返回 undefined。
+- **实现**：`self.calls += 1` 后取 `inline_calls.activeInvocation(rt)`（取不到 → `error.TestUnexpectedResult`），断言 `active.machine.async_completions.count == 1`，且第 0 格的 `slot.value.is(.object)`——源码注释点明此时被调者帧已经弹出。接着 `core.Object.expect(slot.promise)` 取出 promise，用 `engine.exec.promise_ops.promiseReactionRecord` 造一条全 undefined 的反应记录并 `appendPromiseReaction` 挂上去。最后 `rt.suppressLimitCollectionForTest(true)` + `rt.setMemoryLimit(0)` 武装 OOM：注释说明 getter 帧拆除会把已记账字节还回来，所以上限取 0 才能保证紧随其后的结算分配仍然失败。返回 undefined。
 - **所有权 / 错误 / 调用**：返回 `anyerror!core.JSValue`，由测试 `try`/`expectError` 消费。
 
 ### `Probe.call` (`src/tests/exec.zig:23188`)

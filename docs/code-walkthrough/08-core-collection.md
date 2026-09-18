@@ -39,7 +39,7 @@
 
 - **签名**：`pub fn strongEntryHash(value: core.JSValue) u64`。
 - **作用**：为集合键选择对应哈希机制。
-- **实现**：int先扩f64与float共用hashNumber；bool/null/undefined用常量；BigInt按值部件，字符串/rope按内容，Symbol按atom ID，object/module用refHeader地址，function_bytecode用objectHeader地址，其他tag只混tag位。
+- **实现**：int先扩f64与float共用hashNumber；bool/null/undefined用常量；BigInt按值部件，字符串/rope按内容，Symbol按atom ID，object/module用refHeader地址，function_bytecode 用 functionBytecodeHeader 地址，其他tag只混tag位。
 - **所有权 / 错误 / 调用**：哈希不是唯一身份，碰撞仍需SameValueZero比较。数字int/float同值、所有NaN和正负零使用一致哈希；内部无效值不具备完整类型校验。
 
 ### `hashNumber` (`src/core/collection.zig:99`)
@@ -101,7 +101,7 @@
 ### `hashObjectPointer` (`src/core/collection.zig:176`)
 
 - **签名**：`fn hashObjectPointer(value: core.JSValue) u64`。
-- **作用**：按objectHeader接口给出的地址计算hash。
+- **作用**：按 functionBytecodeHeader 给出的地址计算 hash。
 - **实现**：有header则mix64其地址，没有则混tag位。
 - **所有权 / 错误 / 调用**：用于function_bytecode分支；区别在取header的接口，并非总额外加入类型盐。无分配或对象有效性检查。
 

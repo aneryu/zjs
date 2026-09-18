@@ -299,14 +299,14 @@
 
 - **签名**：`pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：`=== undefined`（不含 null/HTMLDDA）。
-- **实现**：`value.isUndefined()`。
+- **实现**：`value.is(.undefined_value)`。
 - **所有权 / 错误 / 调用**：原一字节 id 240 已回收，现以 `op.ext0` + `ext0_sub.is_undefined` 发射与分发。
 
 ### `isNull` (`src/exec/vm_value.zig:466`)
 
 - **签名**：`pub noinline fn isNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.is_null`。
-- **实现**：`isNull()`。
+- **实现**：`is(.null_value)`。
 - **所有权 / 错误 / 调用**：`op.is_null` 仍是一字节 id 241，由冷表直接分发。
 
 ### `adapterValueBorrow` (`src/exec/vm_value.zig:471`)

@@ -10,12 +10,12 @@
 
 | Shell | 步骤 | Filter | 类 | 拉入 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `src/core_tests.zig` | `test-core` | `tests.core.` | Class B | `src/tests/core.zig` | core 值/对象/GC/所有权 |
+| `src/core_tests.zig` | `test-core` | `tests.core.` | Class B | `src/tests/core.zig` | core 对象/GC/所有权；`JSValue` 表示测试在 `src/core/value.zig`，走统一套件 |
 | `src/parser_tests.zig` | `test-parser` | `tests.parser.` | Class B | `src/tests/parser.zig` | 词法+语法+发射 |
 | `src/bytecode_tests.zig` | `test-bytecode` | `tests.bytecode.` | Class B | `src/tests/bytecode.zig` | 字节码载体与 pipeline |
 | `src/exec_tests.zig` | `test-exec` | `tests.exec.` | Class B | `src/tests/exec.zig` | VM 与执行语义 |
 | `src/builtins_tests.zig` | `test-builtins` | `tests.builtins.` | Class B | `src/tests/builtins.zig` | ECMAScript 内建 |
-| `src/runtime_tests.zig` | `test-runtime` | `runtime.` | Class A | `src/runtime/root.zig` | 事件循环与宿主运行时（相对导入，禁止 `@import("zjs")`） |
+| `src/runtime_tests.zig` | `test-runtime` | `runtime.` | Class A | `src/runtime/root.zig` | 宿主事件循环（相对导入，禁止 `@import("zjs")`） |
 | `src/runner_tests.zig` | `test-runner` | `cli.run_test262` | Class B | `src/cli/run_test262.zig` | test262 runner；attest 字符串与可执行根相同 |
 | `src/compiler_tests.zig` | `test-compiler` | `compiler.` | Class A | `src/compiler/root.zig` | 编译器 QCP；`test { _ = @import("compiler/root.zig"); }` |
 | `src/embedding_tests.zig` | `test-embedding / check-embedding` | `tests.embedding_examples.` | Class B（公共 `src/root.zig`） | `src/tests/embedding_examples.zig` | **不 attest**：公共模块不导出 `config_signature` |
@@ -60,7 +60,7 @@
 
 - **签名**：无参数测试块，返回 `!void`（匿名 `test { ... }`，靠 `refAllDecls` 拉入）。
 - **作用**：把统一二进制要包含的全部测试族与子系统拉进来编译。
-- **实现**：先 `refAllDeclsRecursive(internal.public_api, .{})` 递归引用公共面，再对各测试族逐个 `std.testing.refAllDecls`：`tests/engine_production.zig`、`tests/oom_cap.zig`、`tests/embedding_examples.zig`、`tests/core.zig`、`tests/bytecode.zig`、`tests/parser.zig`、`tests/exec.zig`、`tests/builtins.zig`、`runtime`；之后是非模块根的相对导入 `tests/abi_layout.zig`、`binding/native_call_plan.zig`、`abi/sdk.zig`、`tests/gc_stress.zig`、`tests/stress.zig`、`cli/zjs.zig`、`cli/run_test262.zig`。stress 层编进同一二进制、运行期按名字前缀选（`--only-prefix tests.stress.` / `--skip-prefix tests.stress.`），省掉第二次 Debug 引擎编译。
+- **实现**：先 `refAllDeclsRecursive(internal.public_api, .{})` 递归引用公共面，再对各测试族逐个 `std.testing.refAllDecls`：`tests/engine_production.zig`、`tests/oom_cap.zig`、`tests/embedding_examples.zig`、`tests/core.zig`、`tests/bytecode.zig`、`tests/parser.zig`、`tests/exec.zig`、`tests/builtins.zig`、`runtime`；之后是非模块根的相对导入 `tests/gc_stress.zig`、`tests/stress.zig`、`cli/zjs.zig`、`cli/run_test262.zig`。stress 层编进同一二进制、运行期按名字前缀选（`--only-prefix tests.stress.` / `--skip-prefix tests.stress.`），省掉第二次 Debug 引擎编译。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ## `src/tests/helpers.zig` — Class B 共享夹具
@@ -473,86 +473,6 @@
 - **作用**：目录名带 pid，避免 merge-gate 下 Debug 与 gc-stress 分片抢同一 scratch。
 - **实现**：A scratch directory name unique to this test process: the merge gate runs the Debug and gc-stress shards concurrently, and two processes deleting/creating one fixed directory race each other.。关键调用：`std.fmt.bufPrint`、`std.os.linux`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
-
-## `src/tests/abi_layout.zig` — FNABI 布局金钉
-
-四条保证：golden size/offset、无隐式 padding、checked-in C header 与 schema 字节相同、`@cImport` 往返。另外把 ABI 侧 `JSValue` 钉在 `src/core/value.zig` 的 16 字节 tagged 现实。
-
-文件头：FNABI golden layout tests (FN-M0I acceptance, design §33).  Four guarantees, each mechanized:   1. Golden numbers — every public ABI struct's size and per-field offsets      are pinned to explicit constants; any layout drift fails here first.   2. No implicit padding — fields are provably contiguous through the tail      (design §11.4: compiler-inserted padding positions must be explicit      reservedN fields).   3. Header freshness — the checked-in src/abi/fun_native_abi.h is      byte-identical to what the schema renders.   4. C/Zig round-trip — the generated header is compiled back via @cImport      and every struct's size/alignment/field offsets must match the Zig      schema, so a wrong C spelling cannot survive CI. Plus the Value ABI binding: the ABI-side JSValue mirror is pinned to src/core/value.zig reality (16-byte extern tagged, abi_encoding_revision).
-
-### 函数（清单 3）
-
-### `expectNoImplicitPadding` (`src/tests/abi_layout.zig:22`)
-
-- **签名**：`fn expectNoImplicitPadding(comptime T: type) !void`。
-- **作用**：逐字段断言 `@offsetOf` 等于前面字段 `@sizeOf` 的累加值，最后断言累加值等于 `@sizeOf(T)`——即结构体从头到尾没有编译器插入的隐式 padding（design §11.4 要求 padding 必须写成显式 reservedN 字段）。
-- **实现**：含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`@typeInfo`、`std.testing.expectEqual`、`@offsetOf`。
-- **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
-
-### `expectGolden` (`src/tests/abi_layout.zig:31`)
-
-- **签名**：`fn expectGolden(comptime T: type, comptime size: usize, comptime offsets: []const usize) !void`。
-- **作用**：golden 断言：`@sizeOf(T)` 等于给定 size，且每个字段的 `@offsetOf` 等于 offsets 表对应项；字段数与偏移表长度不等时 comptime `std.debug.assert` 直接失败。
-- **实现**：含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`std.testing.expectEqual`、`@typeInfo`、`std.debug.assert`、`@offsetOf`。
-- **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
-
-### `expectSameLayoutAsC` (`src/tests/abi_layout.zig:40`)
-
-- **签名**：`fn expectSameLayoutAsC(comptime Z: type, comptime C: type) !void`。
-- **作用**：C/Zig 往返断言：Zig 侧类型 Z 与 `@cImport` 生成头得到的 C 类型 C，size、align 以及每个同名字段的 `@offsetOf` 必须全等。
-- **实现**：含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`expectSameLayoutAsC`、`std.testing.expectEqual`、`@alignOf`、`@typeInfo`、`@offsetOf`。
-- **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
-
-### 测试块（7）
-
-### `test "FNABI golden layouts (sizes and field offsets)"` (`src/tests/abi_layout.zig:48`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「FNABI golden layouts (sizes and field offsets)」。
-- **实现**：六次 `expectGolden` 钉死 `ZjsJSValue`(16, {0,8})、`FunUtf8RefV1`(16)、`FunFunctionDescriptorV1`(24)、`FunExportDescriptorV1`(48)、`FunPluginDescriptorV1`(120)、`FunPluginInitContextV1`(40) 的 size 与全部字段偏移。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "FNABI structs contain no implicit padding (design §11.4)"` (`src/tests/abi_layout.zig:57`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「FNABI structs contain no implicit padding (design §11.4)」。
-- **实现**：`inline for (abi.public_structs)` 逐个过 `expectNoImplicitPadding`，任何隐式 padding 都会在这里红。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "checked-in C header matches the schema (regenerate: zig run src/abi/gen_header.zig)"` (`src/tests/abi_layout.zig:63`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「checked-in C header matches the schema (regenerate: zig run src/abi/gen_header.zig)」。
-- **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "C/Zig layout round-trip through the generated header"` (`src/tests/abi_layout.zig:67`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「C/Zig layout round-trip through the generated header」。
-- **实现**：对六个公共 ABI 结构各调一次 `expectSameLayoutAsC`，把 Zig schema 与 `@cImport("abi/fun_native_abi.h")` 得到的 C 声明对齐，C 端拼写写错活不过 CI。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "C header constants match the schema tables"` (`src/tests/abi_layout.zig:76`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「C header constants match the schema tables」。
-- **实现**：断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "signature ids are dense, unique, and start at 1 (0 reserved)"` (`src/tests/abi_layout.zig:89`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「signature ids are dense, unique, and start at 1 (0 reserved)」。
-- **实现**：断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "Value ABI: the ABI mirror is pinned to src/core/value.zig reality (design §11.3)"` (`src/tests/abi_layout.zig:98`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「Value ABI: the ABI mirror is pinned to src/core/value.zig reality (design §11.3)」。
-- **实现**：断言 12 处 `std.testing.expect*`。约 12 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ## `src/tests/smoke_test.zig` — CLI smoke
 

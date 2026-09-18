@@ -131,8 +131,6 @@ class SizeScreenTests(unittest.TestCase):
 
     def test_source_categories_exclude_test_and_generated(self):
         self.assertEqual(screen.category('src/libs/unicode/data.zig'), 'generated')
-        self.assertEqual(screen.category('src/abi/fun_native_abi.h'), 'generated')
-        self.assertEqual(screen.category('src/abi/fun_native_abi.zig'), 'engine')
         self.assertEqual(screen.category('src/exec_tests.zig'), 'tests')
         self.assertEqual(screen.category('src/compiler/test_entry.zig'), 'tests')
         self.assertEqual(screen.category('src/exec/call.zig'), 'engine')

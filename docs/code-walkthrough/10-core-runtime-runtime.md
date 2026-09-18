@@ -573,7 +573,7 @@ core 不得 import exec/parser/binding；标准全局安装、builtin 表、acti
 
 - **签名**：`pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin`。
 - **作用**：对有GC header的值创建native pin。
-- **实现**：依次尝试refHeader、objectHeader，均无则返回null；有则pinHeaderForNative。
+- **实现**：依次尝试 refHeader、functionBytecodeHeader，均无则返回 null；有则 pinHeaderForNative。
 - **所有权 / 错误 / 调用**：null表示无可pin的header，不是OOM；pin分配错误传播，不复制值或创建Persistent根槽。
 
 ### `pinHeaderForNative` (`src/core/runtime.zig:1118`)

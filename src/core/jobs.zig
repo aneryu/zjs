@@ -179,7 +179,7 @@ pub const Job = struct {
     /// queue storage has already been reserved. Ownership of `value` moves into
     /// the returned entry.
     pub fn initOwnedPromiseObject(context: *core.JSContext, value: core.JSValue) Job {
-        std.debug.assert(value.isObject());
+        std.debug.assert(value.is(.object));
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
@@ -210,7 +210,7 @@ pub const Job = struct {
 
     /// Internal fulfilled-Await entry for an already reserved FIFO slot.
     pub fn initAsyncResume(context: *core.JSContext, continuation: core.JSValue, value: core.JSValue) Job {
-        std.debug.assert(continuation.isObject());
+        std.debug.assert(continuation.is(.object));
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
@@ -247,7 +247,7 @@ pub const Job = struct {
         completion: core.JSValue,
         rejected: bool,
     ) Job {
-        std.debug.assert(target.isObject());
+        std.debug.assert(target.is(.object));
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
@@ -289,7 +289,7 @@ pub const Job = struct {
         runner: AtomicsWaiterPayload.Runner,
         destroyer: AtomicsWaiterPayload.Destroyer,
     ) Job {
-        std.debug.assert(promise.isObject());
+        std.debug.assert(promise.is(.object));
         return .{
             .runtime = context.runtime,
             .realm = core.RealmRef.retain(context),
@@ -744,7 +744,7 @@ fn runGenericOneForTest(queue: *Queue) RunOneStatus {
     var job = queue.takeFirst() orelse return .empty;
     std.debug.assert(std.meta.activeTag(job.payload) == .generic);
     const result = job.run();
-    const status: RunOneStatus = if (result.isException()) .exception else .success;
+    const status: RunOneStatus = if (result.is(.exception)) .exception else .success;
     job.deinit();
     return status;
 }
@@ -773,7 +773,7 @@ test "Queue runOne reports three states and preserves FIFO after exception" {
     try std.testing.expectEqual(@as(usize, 1), runtime.job_queue.jobs.len);
     try std.testing.expect(context.hasException());
     const exception = context.takeException();
-    try std.testing.expectEqual(@as(?i32, 91), exception.asInt32());
+    try std.testing.expectEqual(@as(?i32, 91), exception.as(.int));
 
     try std.testing.expectEqual(RunOneStatus.success, runGenericOneForTest(&runtime.job_queue));
     try std.testing.expectEqual(RunOneStatus.empty, runGenericOneForTest(&runtime.job_queue));
@@ -829,7 +829,7 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 
         fn appendAndEnqueue(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
             const result = append(ctx, &.{ args[0], core.JSValue.int32(1) });
-            if (result.isException()) return result;
+            if (result.is(.exception)) return result;
             ctx.runtime.job_queue.enqueueFunc(ctx, append, &.{ args[0], core.JSValue.int32(3) }) catch {
                 return ctx.throwValue(core.JSValue.int32(-4));
             };
@@ -850,17 +850,17 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
     const first = try observed.getProperty(core.atom.atomFromUInt32(0));
     const second = try observed.getProperty(core.atom.atomFromUInt32(1));
     const third = try observed.getProperty(core.atom.atomFromUInt32(2));
-    try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
-    try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
-    try std.testing.expectEqual(@as(?i32, 3), third.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
+    try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
+    try std.testing.expectEqual(@as(?i32, 3), third.as(.int));
 }
 
 // D1a size pins (2026-07-31): removing the obsolete symbol-root protocol
 // state must not silently regress. The current pins are the `pins` tuple
 // below; the D1a before-values it replaced are history, not live numbers.
 comptime {
-    std.debug.assert(@sizeOf(core.JSValue) == 16);
-    const pins = .{ 128, 96, 16, 40, 104, 88, 32 };
+    std.debug.assert(@sizeOf(core.JSValue) == 8);
+    const pins = .{ 80, 56, 8, 24, 56, 48, 16 };
     if (@sizeOf(Job) != pins[0]) @compileError("Job size drifted from the D1a pin");
     if (@sizeOf(GenericPayload) != pins[1]) @compileError("GenericPayload size drifted from the D1a pin");
     if (@sizeOf(PromisePayload) != pins[2]) @compileError("PromisePayload size drifted from the D1a pin");

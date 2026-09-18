@@ -30,7 +30,7 @@ pub fn registryKey(atoms: *atom.AtomTable, symbol: atom.Atom) ?[]const u8 {
 /// CanBeHeldWeakly predicate: objects and non-registered (unique) symbols may be
 /// held weakly; registered (`Symbol.for`) symbols and primitives may not.
 pub fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.isObject()) return true;
+    if (value.is(.object)) return true;
     if (value.asSymbolAtom()) |atom_id| {
         return rt.atoms.kind(atom_id) == .symbol;
     }

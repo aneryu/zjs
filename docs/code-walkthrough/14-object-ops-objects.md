@@ -66,7 +66,7 @@
 
 - **签名**：`pub fn createGeneratorObject( ctx: *core.JSContext, func: core.JSValue, current_function_value: core.JSValue, this_value: core.JSValue, input_args: []const core.JSValue, input_var_refs: []const *core.VarRef, output: ?*std.Io.Writer, global: *core.Object, is_async: bool, call_depth_precharged: bool, call_entry_ctx: *core.JSContext, call_entry_global: *core.Object, ) !core.JSValue`。
 - **作用**：造 generator/async generator 实例：执行状态、参数序言、最终原型。
-- **实现**：root 住 func/current/this/boxed_this 与 args/var_refs 切片。argc > 65534 RangeError。`detached_shell = current.isObject()`：正常 JS 调用先 `createGeneratorShell`（避免短命 null-prototype Shape），内部字节码路径直接 create。shell 路径按 FB 尺寸 `initGeneratorExecutionWithStorage` 并 `PreparedEntryFrame`。保存 current function（realm 出处）。宽松 this：nullish→global，原始值装箱。`runGeneratorParameterInit`。`generatorObjectPrototype`；shell 则 `finishGeneratorShell`，否则 `setFreshObjectPrototype`。对照 `js_generator_function_call`。
+- **实现**：root 住 func/current/this/boxed_this 与 args/var_refs 切片。argc > 65534 RangeError。`detached_shell = current.is(.object)`：正常 JS 调用先 `createGeneratorShell`（避免短命 null-prototype Shape），内部字节码路径直接 create。shell 路径按 FB 尺寸 `initGeneratorExecutionWithStorage` 并 `PreparedEntryFrame`。保存 current function（realm 出处）。宽松 this：nullish→global，原始值装箱。`runGeneratorParameterInit`。`generatorObjectPrototype`；shell 则 `finishGeneratorShell`，否则 `setFreshObjectPrototype`。对照 `js_generator_function_call`。
 - **所有权 / 错误 / 调用**：errdefer 区分 registered destroy 与 `destroyGeneratorShell`。
 
 ### `generatorObjectPrototype` (`src/exec/object_ops.zig:2125`)

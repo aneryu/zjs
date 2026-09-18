@@ -35,6 +35,7 @@ pub const symbol = @import("symbol.zig");
 pub const host_function = @import("host_function.zig");
 pub const native_entry = @import("native_entry.zig");
 pub const NativeEntry = native_entry.NativeEntry;
+pub const LeafSig = native_entry.LeafSig;
 pub const native_object = @import("native_object.zig");
 pub const NativeType = native_object.NativeType;
 pub const descriptor = @import("descriptor.zig");

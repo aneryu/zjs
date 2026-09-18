@@ -19,8 +19,8 @@ const std = @import("std");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 
-const GCObjectHeader = gc.GCObjectHeader;
 const ExternalTokenEntry = gc.ExternalTokenEntry;
+const Header = gc.Header;
 
 pub const Tokens = struct {
     entries: []ExternalTokenEntry = &.{},
@@ -135,11 +135,11 @@ pub const Tokens = struct {
 /// collection is the only mutator, and none of the consumers assign semantic
 /// meaning to allocation order.
 pub const NonBlockObjectAuthority = struct {
-    items: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
+    items: std.ArrayListUnmanaged(*Header) = .empty,
     /// Header-external condemnation lane. Object's body remains entirely
     /// semantic until its destructor strips resources, so neither live scalar
     /// nor Shape words may be borrowed by the morgue.
-    doomed: std.ArrayListUnmanaged(*GCObjectHeader) = .empty,
+    doomed: std.ArrayListUnmanaged(*Header) = .empty,
 
     pub fn prepare(self: *NonBlockObjectAuthority, allocator: std.mem.Allocator) !void {
         try self.items.ensureUnusedCapacity(allocator, 1);
@@ -147,26 +147,26 @@ pub const NonBlockObjectAuthority = struct {
         try self.doomed.ensureTotalCapacity(allocator, total_population);
     }
 
-    pub fn publish(self: *NonBlockObjectAuthority, header: *GCObjectHeader) void {
+    pub fn publish(self: *NonBlockObjectAuthority, header: *Header) void {
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!gc.Registry.isBlockCellHeader(header));
         self.items.appendAssumeCapacity(header);
     }
 
-    fn indexOf(self: *const NonBlockObjectAuthority, header: *const GCObjectHeader) ?usize {
+    fn indexOf(self: *const NonBlockObjectAuthority, header: *const Header) ?usize {
         for (self.items.items, 0..) |candidate, index| {
             if (candidate == header) return index;
         }
         return null;
     }
 
-    pub fn remove(self: *NonBlockObjectAuthority, header: *const GCObjectHeader) bool {
+    pub fn remove(self: *NonBlockObjectAuthority, header: *const Header) bool {
         const index = self.indexOf(header) orelse return false;
         _ = self.items.swapRemove(index);
         return true;
     }
 
-    pub fn condemn(self: *NonBlockObjectAuthority, header: *GCObjectHeader) void {
+    pub fn condemn(self: *NonBlockObjectAuthority, header: *Header) void {
         const index = self.indexOf(header) orelse unreachable;
         _ = self.items.swapRemove(index);
         self.doomed.appendAssumeCapacity(header);

@@ -87,7 +87,7 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 
 - **签名**：`fn runFileModule( ctx: *zjs.JSContext, source_text: []const u8, output: *std.Io.Writer, path: []const u8, io: std.Io, allocator: std.mem.Allocator, max_size: usize, ) !zjs.JSValue`。
 - **作用**：文件模块图求值入口。
-- **实现**：`runtime_layer.evalFileModuleGraphWithOutput`。
+- **实现**：`engine.exec.module_graph.evalFileModuleGraphWithOutput`。
 - **所有权 / 错误 / 调用**：`main` 在 detect 为 module 时、`runIncludeFiles` 对 `.mjs`/首 token export/import。
 
 ### `main` (`src/cli/zjs.zig:218`)

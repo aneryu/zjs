@@ -157,7 +157,7 @@ pub const Shape = extern struct {
         // spike/perf-t-main tspike.zig header rule R12).
         std.debug.assert(@sizeOf(@This()) == 64);
         std.debug.assert(@alignOf(@This()) == 8);
-        const header_bytes = @sizeOf(gc.GCObjectHeader);
+        const header_bytes = @sizeOf(gc.Header);
         const list_previous_bytes = @sizeOf(?*gc.Header);
         std.debug.assert(@offsetOf(@This(), "trace_list_previous") == header_bytes);
         std.debug.assert(@offsetOf(@This(), "ownership") == header_bytes + list_previous_bytes);
@@ -181,7 +181,7 @@ pub const Shape = extern struct {
             std.debug.assert(@offsetOf(ShapeColdState, "deleted_prop_count") == 0);
         }
     }
-    header: gc.GCObjectHeader = .{},
+    header: gc.Header = .{},
     /// Compact trace replaces the common backlink with this Shape-owned slot;
     /// its free low bit carries the cold hash-membership flag. RC builds use
     /// the header backlink and pay zero bytes here.

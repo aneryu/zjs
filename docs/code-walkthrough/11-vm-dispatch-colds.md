@@ -533,7 +533,7 @@
 
 - **签名**：`fn b(vm: *Vm) HostError!void`。
 - **作用**：OP_is_undefined_or_null 的尾分发 handler：在寄存器 `pc/sp/var_buf` 上执行该 opcode，并以尾调用进入下一条。
-- **实现**：关键调用：`vm_value.isUndefinedOrNull`。 栈效应：0——弹出栈顶，压回 `value.isUndefined() or value.isNull()` 的布尔。 下一跳：本函数是 `coldStd`/`h()` 的 body，不自己尾分发；外壳成功则 `coldNext`（`maybeStop` 后 `active_dispatch_tbl[npc[0]]`），失败 `vm.fail` → `.threw`。
+- **实现**：关键调用：`vm_value.isUndefinedOrNull`。 栈效应：0——弹出栈顶，压回 `value.is(.undefined_value) or value.is(.null_value)` 的布尔。 下一跳：本函数是 `coldStd`/`h()` 的 body，不自己尾分发；外壳成功则 `coldNext`（`maybeStop` 后 `active_dispatch_tbl[npc[0]]`），失败 `vm.fail` → `.threw`。
 - **所有权 / 错误 / 调用**：所有权：无新所有权——值由 GC 追踪、VM 栈槽本身就是根，去 rc 后 `push`/`pushOwned` 已同义（stack.zig:214-236），body 不 retain/release。 错误：body 的 `HostError` 由外壳 `catch |e| return vm.fail(e)`（tailcall_dispatch.zig:600-608）写进 `vm.pending_error` 并返回 `.threw`，驱动循环 `runDispatchLoopPublished`（:7133）再把它抛回 `runTC`。 调用：外壳是 `h()`（本文件 :129-136，把不看 pc 的 body 包给 `coldStd`），同一份装进 `dispatch_table` 与 `cold_table` 的 `op.is_undefined_or_null` 槽（:557，fast 段未覆盖），由 `next`/`cont` 的表尾调用进入；两表（tailcall_dispatch.zig:6918/7013）是它仅有的引用者，无 dispatch 之外的调用方。
 
 ### `keep[2].b` (`src/exec/tailcall_dispatch_colds.zig:549`)

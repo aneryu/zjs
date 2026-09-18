@@ -103,11 +103,11 @@ pub fn disposableStackUse(
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (value.isNull() or value.isUndefined()) return value;
-    if (!value.isObject()) return error.TypeError;
+    if (value.is(.null_value) or value.is(.undefined_value)) return value;
+    if (!value.is(.object)) return error.TypeError;
 
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, caller_function, caller_frame);
-    if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
+    if (dispose_method.is(.null_value) or dispose_method.is(.undefined_value) or !isCallableValue(dispose_method)) return error.TypeError;
     try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .sync, .direct);
     return value;
 }
@@ -210,11 +210,11 @@ pub fn usingAddSyncResource(
     const stack = try parserDisposableStackReceiver(args[0]);
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const value = args[1];
-    if (value.isNull() or value.isUndefined()) return core.JSValue.undefinedValue();
-    if (!value.isObject()) return error.TypeError;
+    if (value.is(.null_value) or value.is(.undefined_value)) return core.JSValue.undefinedValue();
+    if (!value.is(.object)) return error.TypeError;
 
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, null, null);
-    if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
+    if (dispose_method.is(.null_value) or dispose_method.is(.undefined_value) or !isCallableValue(dispose_method)) return error.TypeError;
     try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .sync, .direct);
     return core.JSValue.undefinedValue();
 }
@@ -418,21 +418,21 @@ pub fn asyncDisposableStackUse(
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (value.isNull() or value.isUndefined()) {
+    if (value.is(.null_value) or value.is(.undefined_value)) {
         try stack.appendDisposableResource(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), .use, .async, .direct);
         return value;
     }
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
 
     const async_dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_asyncDispose, caller_function, caller_frame);
-    if (!async_dispose_method.isNull() and !async_dispose_method.isUndefined()) {
+    if (!async_dispose_method.is(.null_value) and !async_dispose_method.is(.undefined_value)) {
         if (!isCallableValue(async_dispose_method)) return error.TypeError;
         try stack.appendDisposableResource(ctx.runtime, value, async_dispose_method, .use, .async, .direct);
         return value;
     }
 
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, caller_function, caller_frame);
-    if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
+    if (dispose_method.is(.null_value) or dispose_method.is(.undefined_value) or !isCallableValue(dispose_method)) return error.TypeError;
     try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .async, .async_from_sync);
     return value;
 }
@@ -618,7 +618,7 @@ pub fn asyncDisposeResource(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (resource.method.isUndefined()) return core.JSValue.undefinedValue();
+    if (resource.method.is(.undefined_value)) return core.JSValue.undefinedValue();
     const result = switch (resource.kind) {
         .use => try callValueOrBytecodeRoot(ctx, output, global, resource.value, resource.method, &.{}, caller_function, caller_frame),
         .adopt => try callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), resource.method, &.{resource.value}, caller_function, caller_frame),
@@ -711,7 +711,7 @@ pub fn asyncIteratorAsyncDispose(
     const return_method = getValueProperty(ctx, output, global, receiver, return_key, caller_function, caller_frame) catch |err| {
         return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    if (return_method.isUndefined() or return_method.isNull()) {
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
         return try core.promise.fulfilledWithPrototype(ctx, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) {

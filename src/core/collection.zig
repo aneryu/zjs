@@ -82,9 +82,9 @@ pub fn strongSize(object: *core.Object) usize {
 
 pub fn strongEntryHash(value: core.JSValue) u64 {
     return switch (value.tagOf()) {
-        core.Tag.int => hashNumber(@floatFromInt(value.asInt32().?)),
-        core.Tag.float64 => hashNumber(value.asFloat64().?),
-        core.Tag.boolean => mix64(if (value.asBool().?) 0x8d53_0d8d_f34a_2d55 else 0x2eac_9a17_54d3_1c11),
+        core.Tag.int => hashNumber(@floatFromInt(value.as(.int).?)),
+        core.Tag.float64 => hashNumber(value.as(.float64).?),
+        core.Tag.boolean => mix64(if (value.as(.boolean).?) 0x8d53_0d8d_f34a_2d55 else 0x2eac_9a17_54d3_1c11),
         core.Tag.null_value => mix64(0x6c8e_9cf5_7093_c241),
         core.Tag.undefined_value => mix64(0x3c6e_f372_fe94_f82b),
         core.Tag.short_big_int, core.Tag.big_int => hashBigIntValue(value),
@@ -143,7 +143,7 @@ const BigIntHashParts = struct {
 };
 
 fn bigIntHashParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntHashParts {
-    if (value.asShortBigInt()) |short| {
+    if (value.as(.short_big_int)) |short| {
         const signed: i128 = short;
         var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
         var len: usize = 0;
@@ -174,7 +174,7 @@ fn hashRefPointer(value: core.JSValue) u64 {
 }
 
 fn hashObjectPointer(value: core.JSValue) u64 {
-    const header = value.objectHeader() orelse return mix64(tagHashBits(value.tagOf()));
+    const header = value.functionBytecodeHeader() orelse return mix64(tagHashBits(value.tagOf()));
     return mix64(@as(u64, @intCast(@intFromPtr(header))));
 }
 

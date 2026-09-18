@@ -12,7 +12,7 @@ pub const ExceptionSlot = struct {
     value: JSValue = JSValue.uninitialized(),
 
     pub fn hasException(self: ExceptionSlot) bool {
-        return !self.value.isUninitialized();
+        return !self.value.is(.uninitialized);
     }
 
     pub fn set(self: *ExceptionSlot, rt: anytype, value: JSValue) void {

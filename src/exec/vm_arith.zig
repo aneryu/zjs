@@ -36,23 +36,23 @@ pub fn binary(
     // result straight to sp[-2] with no capacity check (quickjs.c:15098,
     // 14905). The coercing tail below keeps the checked push: toPrimitive
     // re-enters user code.
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
+    if (lhs.as(.int)) |lhs_int| {
+        if (rhs.as(.int)) |rhs_int| {
             if (fastBinaryInt32(binop, lhs_int, rhs_int)) |fast| {
                 stack.pushOwnedAssumeCapacity(fast);
                 return;
             }
         }
     }
-    if (lhs.asShortBigInt()) |lhs_bigint| {
-        if (rhs.asShortBigInt()) |rhs_bigint| {
+    if (lhs.as(.short_big_int)) |lhs_bigint| {
+        if (rhs.as(.short_big_int)) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(binop, lhs_bigint, rhs_bigint)) |fast| {
                 stack.pushOwnedAssumeCapacity(fast);
                 return;
             }
         }
     }
-    if (binop == op.add and ((lhs.isString() and !rhs.isObject()) or (rhs.isString() and !lhs.isObject()))) {
+    if (binop == op.add and ((lhs.isString() and !rhs.is(.object)) or (rhs.isString() and !lhs.is(.object)))) {
         const result = try value_ops.binary(ctx.runtime, binop, lhs, rhs);
         stack.pushOwnedAssumeCapacity(result);
         return;
@@ -63,9 +63,9 @@ pub fn binary(
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else if (isBitwiseBinaryOp(binop) or isNumericBinaryOp(binop)) blk: {
         const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-        if (lhs_primitive.isSymbol()) return error.TypeError;
+        if (lhs_primitive.is(.symbol)) return error.TypeError;
         const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-        if (rhs_primitive.isSymbol()) return error.TypeError;
+        if (rhs_primitive.is(.symbol)) return error.TypeError;
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else try value_ops.binary(ctx.runtime, binop, lhs, rhs);
     try stack.pushOwned(result);
@@ -96,8 +96,8 @@ pub fn compare(
 ) !void {
     const rhs = try stack.pop();
     const lhs = try stack.pop();
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
+    if (lhs.as(.int)) |lhs_int| {
+        if (rhs.as(.int)) |rhs_int| {
             const result = switch (cmp) {
                 op.lt => lhs_int < rhs_int,
                 op.lte => lhs_int <= rhs_int,
@@ -113,8 +113,8 @@ pub fn compare(
             }
         }
     }
-    if (lhs.asShortBigInt()) |lhs_bigint| {
-        if (rhs.asShortBigInt()) |rhs_bigint| {
+    if (lhs.as(.short_big_int)) |lhs_bigint| {
+        if (rhs.as(.short_big_int)) |rhs_bigint| {
             if (fastCompareShortBigInt(cmp, lhs_bigint, rhs_bigint)) |out| {
                 try stack.pushOwned(core.JSValue.boolean(out));
                 return;
@@ -129,9 +129,9 @@ pub fn compare(
         op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
         else => blk: {
             const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-            if (lhs_primitive.isSymbol()) return error.TypeError;
+            if (lhs_primitive.is(.symbol)) return error.TypeError;
             const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-            if (rhs_primitive.isSymbol()) return error.TypeError;
+            if (rhs_primitive.is(.symbol)) return error.TypeError;
             break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
         },
     };
@@ -199,8 +199,8 @@ pub fn compareAt(
         },
         else => {},
     }
-    if (lhs.asShortBigInt()) |lhs_bigint| {
-        if (rhs.asShortBigInt()) |rhs_bigint| {
+    if (lhs.as(.short_big_int)) |lhs_bigint| {
+        if (rhs.as(.short_big_int)) |rhs_bigint| {
             if (fastCompareShortBigInt(cmp, lhs_bigint, rhs_bigint)) |out| {
                 return core.JSValue.boolean(out);
             }
@@ -220,14 +220,14 @@ pub fn compareAt(
             // ToPrimitive is identity, so skip it and pass the already-owned
             // operands directly to compare. Objects still need the full
             // ToPrimitive path (valueOf/toString can run user code).
-            if (lhs.isObject() or rhs.isObject()) {
+            if (lhs.is(.object) or rhs.is(.object)) {
                 const lhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, lhs);
-                if (lhs_primitive.isSymbol()) return error.TypeError;
+                if (lhs_primitive.is(.symbol)) return error.TypeError;
                 const rhs_primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rhs);
-                if (rhs_primitive.isSymbol()) return error.TypeError;
+                if (rhs_primitive.is(.symbol)) return error.TypeError;
                 break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
             }
-            if (lhs.isSymbol() or rhs.isSymbol()) return error.TypeError;
+            if (lhs.is(.symbol) or rhs.is(.symbol)) return error.TypeError;
             break :blk try value_ops.compare(ctx.runtime, cmp, lhs, rhs);
         },
     };
@@ -243,7 +243,7 @@ pub fn unary(
     const value = try stack.pop();
 
     const result: core.JSValue = blk: {
-        if (value.asInt32()) |int_value| {
+        if (value.as(.int)) |int_value| {
             switch (opcode_id) {
                 op.to_number => break :blk value,
                 op.neg => break :blk value_ops.numberToValue(-@as(f64, @floatFromInt(int_value))),
@@ -252,12 +252,12 @@ pub fn unary(
                 else => {},
             }
         }
-        if (value.asShortBigInt()) |bigint_value| {
+        if (value.as(.short_big_int)) |bigint_value| {
             if (value_ops.shortBigIntUnary(opcode_id, bigint_value)) |fast| break :blk fast;
         }
         if (opcode_id == op.neg or opcode_id == op.to_number or opcode_id == op.inc or opcode_id == op.dec) {
             const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-            if (primitive.isSymbol()) return error.TypeError;
+            if (primitive.is(.symbol)) return error.TypeError;
             break :blk try value_ops.unary(ctx.runtime, opcode_id, primitive);
         }
         break :blk try value_ops.unary(ctx.runtime, opcode_id, value);
@@ -316,7 +316,7 @@ pub fn postUpdate(
     global: *core.Object,
 ) !void {
     const old = try stack.pop();
-    if (old.asInt32()) |old_int| {
+    if (old.as(.int)) |old_int| {
         const updated = switch (opcode_id) {
             op.post_inc => fastInt32Add(old_int, 1),
             op.post_dec => fastInt32Sub(old_int, 1),
@@ -326,7 +326,7 @@ pub fn postUpdate(
         try stack.push(updated);
         return;
     }
-    if (old.asShortBigInt()) |old_bigint| {
+    if (old.as(.short_big_int)) |old_bigint| {
         if (value_ops.shortBigIntUnary(opcode_id, old_bigint)) |updated| {
             try stack.push(old);
             try stack.push(updated);
@@ -334,7 +334,7 @@ pub fn postUpdate(
         }
     }
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, old);
-    if (primitive.isSymbol()) return error.TypeError;
+    if (primitive.is(.symbol)) return error.TypeError;
     const numeric_old = if (primitive.isBigInt()) primitive else try value_ops.toNumberValue(ctx.runtime, primitive);
     const updated = try value_ops.unary(ctx.runtime, opcode_id, numeric_old);
     try stack.push(numeric_old);
@@ -371,7 +371,7 @@ pub fn updateLocal(
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
     const value = frame.locals[idx];
-    if (value.asInt32()) |int_value| {
+    if (value.as(.int)) |int_value| {
         const updated = switch (opcode_id) {
             op.inc_loc => fastInt32Add(int_value, 1),
             op.dec_loc => fastInt32Sub(int_value, 1),
@@ -380,7 +380,7 @@ pub fn updateLocal(
         frame.locals[idx] = updated;
         return;
     }
-    if (value.asShortBigInt()) |bigint_value| {
+    if (value.as(.short_big_int)) |bigint_value| {
         const op_id = switch (opcode_id) {
             op.inc_loc => op.inc,
             op.dec_loc => op.dec,
@@ -392,7 +392,7 @@ pub fn updateLocal(
         }
     }
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.isSymbol()) return error.TypeError;
+    if (primitive.is(.symbol)) return error.TypeError;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
         op.dec_loc => op.dec,
@@ -437,7 +437,7 @@ pub fn updateLocalAt(
     // without a dup and replace it with store-before-free ownership ordering;
     // qjs likewise reads sp[-1] directly and JS_DupValue on a number is a no-op.
     const cur = slot.*;
-    if (cur.asInt32()) |int_value| {
+    if (cur.as(.int)) |int_value| {
         const updated = switch (opcode_id) {
             op.inc_loc => fastInt32Add(int_value, 1),
             op.dec_loc => fastInt32Sub(int_value, 1),
@@ -449,7 +449,7 @@ pub fn updateLocalAt(
     // Float64 fast path — qjs js_unary_arith_slow's `if (FLOAT64) goto handle_float64`
     // (d ± 1 → bare __JS_NewFloat64, no int32 renormalization). Skips the generic
     // toPrimitiveForNumber + value_ops.unary dispatch on every float-counter `x++`.
-    if (cur.asFloat64()) |d| {
+    if (cur.as(.float64)) |d| {
         const updated = switch (opcode_id) {
             op.inc_loc => d + 1,
             op.dec_loc => d - 1,
@@ -458,7 +458,7 @@ pub fn updateLocalAt(
         slot.* = core.JSValue.float64(updated);
         return;
     }
-    if (cur.asShortBigInt()) |bigint_value| {
+    if (cur.as(.short_big_int)) |bigint_value| {
         const op_id = switch (opcode_id) {
             op.inc_loc => op.inc,
             op.dec_loc => op.dec,
@@ -474,7 +474,7 @@ pub fn updateLocalAt(
     // `op1 = JS_DupValue(op1)`).
     const value = slot.*;
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.isSymbol()) return error.TypeError;
+    if (primitive.is(.symbol)) return error.TypeError;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
         op.dec_loc => op.dec,
@@ -516,15 +516,15 @@ pub fn addLocal(
     // Dup the local so user coercion (Symbol.toPrimitive/valueOf) cannot free it
     // underneath us. lhs is owned and is CONSUMED by the slow path below.
     const lhs = frame.locals[idx];
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
+    if (lhs.as(.int)) |lhs_int| {
+        if (rhs.as(.int)) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
             frame.locals[idx] = updated;
             return; // both int32 — non-refcounted, nothing to free
         }
     }
-    if (lhs.asShortBigInt()) |lhs_bigint| {
-        if (rhs.asShortBigInt()) |rhs_bigint| {
+    if (lhs.as(.short_big_int)) |lhs_bigint| {
+        if (rhs.as(.short_big_int)) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
                 frame.locals[idx] = updated;
                 return; // both short big ints — non-refcounted, nothing to free
@@ -553,7 +553,7 @@ pub fn addLocal(
             // value: LLVM materializes the 16-byte select/phi in a stack temp and
             // then copies temp→slot, a SIMD round-trip every iteration. Two direct
             // stores keep the result in registers to the slot.
-            if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
+            if (lhs_primitive.is(.int) and rhs_primitive.is(.int)) {
                 frame.locals[idx] = value_ops.numberToValue(sum);
             } else {
                 frame.locals[idx] = core.JSValue.float64(sum);
@@ -638,14 +638,14 @@ pub fn addLocalAt(
     }
 
     const lhs = slot.*;
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| {
+    if (lhs.as(.int)) |lhs_int| {
+        if (rhs.as(.int)) |rhs_int| {
             slot.* = fastInt32Add(lhs_int, rhs_int);
             return; // both int32 — non-refcounted, nothing to free
         }
     }
-    if (lhs.asShortBigInt()) |lhs_bigint| {
-        if (rhs.asShortBigInt()) |rhs_bigint| {
+    if (lhs.as(.short_big_int)) |lhs_bigint| {
+        if (rhs.as(.short_big_int)) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
                 slot.* = updated;
                 return; // both short big ints — non-refcounted, nothing to free
@@ -661,7 +661,7 @@ pub fn addLocalAt(
     if (value_ops.numberValue(lhs_primitive)) |d1| {
         if (value_ops.numberValue(rhs_primitive)) |d2| {
             const sum = d1 + d2;
-            if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
+            if (lhs_primitive.is(.int) and rhs_primitive.is(.int)) {
                 slot.* = value_ops.numberToValue(sum);
             } else {
                 slot.* = core.JSValue.float64(sum);
@@ -776,11 +776,11 @@ fn looseEqualOp(
     depth: u8,
 ) !bool {
     if (depth > 8) return error.TypeError;
-    if (sameLooseEqualityType(lhs, rhs)) return value_ops.strictEqual(lhs, rhs).asBool().?;
-    if ((lhs.isNull() and rhs.isUndefined()) or (lhs.isUndefined() and rhs.isNull())) return true;
-    if ((value_ops.isHTMLDDA(lhs) and (rhs.isNull() or rhs.isUndefined())) or
-        ((lhs.isNull() or lhs.isUndefined()) and value_ops.isHTMLDDA(rhs))) return true;
-    if (lhs.isNull() or lhs.isUndefined() or rhs.isNull() or rhs.isUndefined()) return false;
+    if (sameLooseEqualityType(lhs, rhs)) return value_ops.strictEqual(lhs, rhs).as(.boolean).?;
+    if ((lhs.is(.null_value) and rhs.is(.undefined_value)) or (lhs.is(.undefined_value) and rhs.is(.null_value))) return true;
+    if ((value_ops.isHTMLDDA(lhs) and (rhs.is(.null_value) or rhs.is(.undefined_value))) or
+        ((lhs.is(.null_value) or lhs.is(.undefined_value)) and value_ops.isHTMLDDA(rhs))) return true;
+    if (lhs.is(.null_value) or lhs.is(.undefined_value) or rhs.is(.null_value) or rhs.is(.undefined_value)) return false;
 
     if (lhs.isNumber() and rhs.isString()) {
         const number_rhs = try value_ops.toNumberValue(ctx.runtime, rhs);
@@ -794,20 +794,20 @@ fn looseEqualOp(
         var rhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, rhs) catch return false;
         defer rhs_bigint.deinit();
         const rhs_value = try value_ops.createBigIntValue(ctx.runtime, rhs_bigint);
-        return value_ops.strictEqual(lhs, rhs_value).asBool().?;
+        return value_ops.strictEqual(lhs, rhs_value).as(.boolean).?;
     }
     if (lhs.isString() and rhs.isBigInt()) {
         var lhs_bigint = value_ops.parseStringToBigInt(ctx.runtime, lhs) catch return false;
         defer lhs_bigint.deinit();
         const lhs_value = try value_ops.createBigIntValue(ctx.runtime, lhs_bigint);
-        return value_ops.strictEqual(lhs_value, rhs).asBool().?;
+        return value_ops.strictEqual(lhs_value, rhs).as(.boolean).?;
     }
-    if (lhs.isBool()) {
-        const number_lhs = core.JSValue.int32(if (lhs.asBool().?) 1 else 0);
+    if (lhs.is(.boolean)) {
+        const number_lhs = core.JSValue.int32(if (lhs.as(.boolean).?) 1 else 0);
         return looseEqualOp(ctx, output, global, number_lhs, rhs, depth + 1);
     }
-    if (rhs.isBool()) {
-        const number_rhs = core.JSValue.int32(if (rhs.asBool().?) 1 else 0);
+    if (rhs.is(.boolean)) {
+        const number_rhs = core.JSValue.int32(if (rhs.as(.boolean).?) 1 else 0);
         return looseEqualOp(ctx, output, global, lhs, number_rhs, depth + 1);
     }
     if (lhs.isBigInt() and rhs.isNumber()) {
@@ -818,11 +818,11 @@ fn looseEqualOp(
         const number_lhs = value_ops.numberValue(lhs) orelse return false;
         return value_ops.bigIntEqualsNumber(ctx.runtime, rhs, number_lhs);
     }
-    if (isLoosePrimitiveForObject(lhs) and rhs.isObject()) {
+    if (isLoosePrimitiveForObject(lhs) and rhs.is(.object)) {
         const primitive_rhs = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
         return looseEqualOp(ctx, output, global, lhs, primitive_rhs, depth + 1);
     }
-    if (lhs.isObject() and isLoosePrimitiveForObject(rhs)) {
+    if (lhs.is(.object) and isLoosePrimitiveForObject(rhs)) {
         const primitive_lhs = try coercion_ops.toPrimitiveForAddition(ctx, output, global, lhs);
         return looseEqualOp(ctx, output, global, primitive_lhs, rhs, depth + 1);
     }
@@ -832,16 +832,16 @@ fn looseEqualOp(
 fn sameLooseEqualityType(lhs: core.JSValue, rhs: core.JSValue) bool {
     if (lhs.isNumber() and rhs.isNumber()) return true;
     if (lhs.isString() and rhs.isString()) return true;
-    if (lhs.isBool() and rhs.isBool()) return true;
+    if (lhs.is(.boolean) and rhs.is(.boolean)) return true;
     if (lhs.isBigInt() and rhs.isBigInt()) return true;
-    if (lhs.isSymbol() and rhs.isSymbol()) return true;
-    if (lhs.isObject() and rhs.isObject()) return true;
-    if (lhs.isFunctionBytecode() and rhs.isFunctionBytecode()) return true;
+    if (lhs.is(.symbol) and rhs.is(.symbol)) return true;
+    if (lhs.is(.object) and rhs.is(.object)) return true;
+    if (lhs.is(.function_bytecode) and rhs.is(.function_bytecode)) return true;
     return lhs.tagOf() == rhs.tagOf();
 }
 
 fn isLoosePrimitiveForObject(value: core.JSValue) bool {
-    return value.isNumber() or value.isString() or value.isBigInt() or value.isSymbol();
+    return value.isNumber() or value.isString() or value.isBigInt() or value.is(.symbol);
 }
 
 fn looseEqualSameNumberTypes(lhs: core.JSValue, rhs: core.JSValue) bool {

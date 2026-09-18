@@ -142,7 +142,7 @@ pub fn execGetVarRefMaybeTdz(
         const is_global_decl_ref = function.varRefIsGlobalDeclAt(idx);
         if (is_global_decl_ref) {
             if (globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
-                if (lexical_value.isUninitialized()) {
+                if (lexical_value.is(.uninitialized)) {
                     const err = throwTdzReferenceError(ctx);
                     if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                         return true;
@@ -163,7 +163,7 @@ pub fn execGetVarRefMaybeTdz(
     // the pre-typed raw-slot arm is gone with the type flip.
     const cell = varRefSlotCell(frame, idx);
     const value = cell.varRefValue();
-    if (value.isUninitialized()) {
+    if (value.is(.uninitialized)) {
         // A deletable cell parked at UNINITIALIZED is a deleted
         // eval-created binding (qjs remove_global_object_property):
         // plain ReferenceError, not the TDZ message.
@@ -209,14 +209,14 @@ pub fn execPutVarRef(
     const cell = varRefSlotCell(frame, idx);
     if (opc == op.put_var_ref_check_init) {
         const current = cell.varRefValue();
-        if (!current.isUninitialized()) {
+        if (!current.is(.uninitialized)) {
             _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| return err;
             unreachable;
         }
     }
     if (opc == op.put_var_ref_check) {
         const current = cell.varRefValue();
-        if (current.isUninitialized()) {
+        if (current.is(.uninitialized)) {
             return throwTdzReferenceError(ctx);
         }
     }
@@ -282,7 +282,7 @@ pub fn adapterValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
 }
 
 pub fn adapterValueIsUninitialized(slot: core.JSValue) bool {
-    return adapterValueBorrow(slot).isUninitialized();
+    return adapterValueBorrow(slot).is(.uninitialized);
 }
 
 /// A deleted eval-created binding: its deletable cell was parked at
@@ -292,14 +292,14 @@ pub fn adapterValueIsUninitialized(slot: core.JSValue) bool {
 pub fn adapterIsDeletedEvalBinding(slot: core.JSValue) bool {
     const cell = varRefCellFromValue(slot) orelse return false;
     if (!cell.varRefIsDeletableSlot().*) return false;
-    return cell.varRefValue().isUninitialized();
+    return cell.varRefValue().is(.uninitialized);
 }
 
 /// Replace an owned JSValue Adapter slot. This cold boundary accepts a VarRef
 /// handle on either side and preserves its
 /// write-through semantics. It must not be used for frame locals or arguments.
 pub inline fn replaceAdapterOwned(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
-    if (!slot.requiresRefCount() and !value.requiresRefCount()) {
+    if (!slot.isTracerOwned() and !value.isTracerOwned()) {
         slot.* = value;
         return;
     }

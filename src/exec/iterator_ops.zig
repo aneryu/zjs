@@ -51,7 +51,7 @@ pub fn forOfStart(
     if (is_async) {
         const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
         const async_method = try object_ops.getValueProperty(ctx, output, global, iterable, async_iterator_atom, function, frame);
-        if (!async_method.isUndefined() and !async_method.isNull()) {
+        if (!async_method.is(.undefined_value) and !async_method.is(.null_value)) {
             if (!call_runtime.isCallableValue(async_method)) return error.TypeError;
             const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterable, async_method, &.{}, function, frame);
             _ = try property_ops.expectObject(iterator_value);
@@ -199,7 +199,7 @@ fn testAsyncFromSyncGetValueProperty(
 }
 
 fn testAsyncFromSyncIsCallable(value: core.JSValue) bool {
-    return value.isFunctionBytecode() or objectFromValue(value) != null;
+    return value.is(.function_bytecode) or objectFromValue(value) != null;
 }
 
 test "createAsyncFromSyncIterator roots direct function bytecode next method while creating wrapper" {
@@ -336,7 +336,7 @@ pub noinline fn iteratorNextVm(
 pub fn iteratorCheckObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
 }
 
 pub noinline fn iteratorCheckObjectVm(
@@ -452,7 +452,7 @@ pub fn iteratorCall(
     const atom_name: []const u8 = if ((flags & 1) != 0) "throw" else "return";
     const atom_id = try ctx.runtime.internAtom(atom_name);
     const method = try object_ops.getValueProperty(ctx, output, global, iterator_value, atom_id, function, frame);
-    if (method.isUndefined() or method.isNull()) {
+    if (method.is(.undefined_value) or method.is(.null_value)) {
         try stack.pushOwned(core.JSValue.boolean(true));
         return;
     }
@@ -495,7 +495,7 @@ pub fn forOfIteratorIndex(stack: *const stack_mod.Stack, depth: u8) !usize {
     const iterator = stack.values[iterator_index];
     const catch_marker = stack.values[iterator_index + 2];
     if (!forof_ops.isIteratorCatchMarker(catch_marker)) return error.InvalidBytecode;
-    if (!iterator.isUndefined() and !iterator.isObject()) return error.InvalidBytecode;
+    if (!iterator.is(.undefined_value) and !iterator.is(.object)) return error.InvalidBytecode;
     return iterator_index;
 }
 
@@ -518,7 +518,7 @@ pub fn forOfNext(
     const iterator_value = stack.values[iterator_index];
     var value: core.JSValue = undefined;
     var done: bool = undefined;
-    if (iterator_value.isUndefined()) {
+    if (iterator_value.is(.undefined_value)) {
         value = core.JSValue.undefinedValue();
         done = true;
     } else {
@@ -864,7 +864,7 @@ pub noinline fn forInNext(
             }
             // it->obj = JS_GetPrototypeFree(ctx, it->obj) (quickjs.c:16438).
             const proto_value = try object_ops.objectGetPrototypeOfValue(ctx, output, global, obj, null, null);
-            if (proto_value.isNull()) {
+            if (proto_value.is(.null_value)) {
                 iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
                 return pushForInDone(stack); // no more prototype (quickjs.c:16441)
             }
@@ -943,7 +943,7 @@ fn forInPrepareProtoChainEnum(
     defer value_root_frame.deactivate(rt);
 
     var has_enumerable = false;
-    while (!obj1_val.isNull()) {
+    while (!obj1_val.is(.null_value)) {
         const obj1 = try property_ops.expectObject(obj1_val);
         if (try forof_ops.forInHasEnumerableStringKey(ctx, output, global, obj1)) {
             has_enumerable = true;
@@ -1006,11 +1006,11 @@ pub fn iteratorClose(
     // a record from the iterator/next value shapes: proxies and host callables
     // make those shapes neither unique nor stable.
     const marker = try stack.pop();
-    if (!forof_ops.isIteratorCatchMarker(marker) and !marker.isUndefined()) return error.InvalidBytecode;
+    if (!forof_ops.isIteratorCatchMarker(marker) and !marker.is(.undefined_value)) return error.InvalidBytecode;
     const is_for_await_record = forof_ops.isAsyncIteratorCatchMarker(marker);
     _ = try stack.pop();
     const it = try stack.pop();
-    if (it.isUndefined()) return;
+    if (it.is(.undefined_value)) return;
     if (is_for_await_record) {
         try promise_ops.closeForAwaitIteratorFromVm(ctx, output, global, it);
     } else {
@@ -1040,7 +1040,7 @@ pub fn arrayIteratorPrototypeFromContext(
     const slot: usize = core.class.ids.array_iterator;
     if (slot < ctx.class_prototypes.len) {
         const stored = ctx.class_prototypes[slot];
-        if (stored.isObject()) return property_ops.expectObject(stored) catch return error.TypeError;
+        if (stored.is(.object)) return property_ops.expectObject(stored) catch return error.TypeError;
     }
 
     const object = try iteratorPrototype(ctx.runtime, global, "Array Iterator");
@@ -1083,8 +1083,8 @@ pub fn arrayIteratorMethod(
 ) !?core.JSValue {
     const kind = function_object.arrayIteratorKind();
     if (kind < 1 or kind > 3) return null;
-    if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
-    var rooted_object = if (receiver.isObject()) receiver else try object_ops.primitiveObjectForAccess(ctx.runtime, global, receiver);
+    if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
+    var rooted_object = if (receiver.is(.object)) receiver else try object_ops.primitiveObjectForAccess(ctx.runtime, global, receiver);
 
     var root_frame = core.runtime.rootValues(.{&rooted_object});
     root_frame.activate(ctx.runtime);
@@ -1309,7 +1309,7 @@ pub fn iteratorPrototypeAccessorSet(
 ) !core.JSValue {
     const object = property_ops.expectObject(receiver) catch return error.TypeError;
     if (atom_id == core.atom.ids.constructor) {
-        if (!value.isObject()) return error.TypeError;
+        if (!value.is(.object)) return error.TypeError;
         try object.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, false, true));
         return core.JSValue.undefinedValue();
     }
@@ -1340,7 +1340,7 @@ pub fn iteratorFromCall(
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
     const source = args[0];
-    if (source.isNull() or source.isUndefined()) return error.TypeError;
+    if (source.is(.null_value) or source.is(.undefined_value)) return error.TypeError;
     if (!source.isString() and (property_ops.expectObject(source) catch null) == null) return error.TypeError;
 
     const result = try iteratorFromSourceForIteratorFrom(ctx, output, global, source, caller_function, caller_frame);
@@ -1418,7 +1418,7 @@ pub fn iteratorConcatCall(
 
         _ = property_ops.expectObject(rooted_item) catch return error.TypeError;
         rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
-        if (rooted_iterator_method.isUndefined() or rooted_iterator_method.isNull() or !isCallableValue(rooted_iterator_method)) return error.TypeError;
+        if (rooted_iterator_method.is(.undefined_value) or rooted_iterator_method.is(.null_value) or !isCallableValue(rooted_iterator_method)) return error.TypeError;
         try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2)), rooted_item);
         try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2 + 1)), rooted_iterator_method);
     }
@@ -1536,7 +1536,7 @@ pub const IteratorZipCompletion = struct {
     }
 
     pub fn capture(self: *IteratorZipCompletion, ctx: *core.JSContext, err: anytype) void {
-        if (!self.exception.isUninitialized()) {
+        if (!self.exception.is(.uninitialized)) {
             self.exception = core.JSValue.uninitialized();
         }
         self.err = @errorCast(err);
@@ -1545,11 +1545,11 @@ pub const IteratorZipCompletion = struct {
 
     pub fn restore(self: *const IteratorZipCompletion, ctx: *core.JSContext) void {
         if (ctx.hasException()) ctx.clearException();
-        if (!self.exception.isUninitialized()) _ = ctx.throwValue(self.exception);
+        if (!self.exception.is(.uninitialized)) _ = ctx.throwValue(self.exception);
     }
 
     pub fn deinit(self: *IteratorZipCompletion, _: *core.JSRuntime) void {
-        if (!self.exception.isUninitialized()) {
+        if (!self.exception.is(.uninitialized)) {
             self.exception = core.JSValue.uninitialized();
         }
         self.err = null;
@@ -1606,10 +1606,10 @@ pub fn iteratorZipCall(
 
     const options = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
     const mode = try iteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
-    if (mode == .longest and rooted_args.len >= 2 and !options.isUndefined()) {
+    if (mode == .longest and rooted_args.len >= 2 and !options.is(.undefined_value)) {
         const padding_key = core.atom.ids.padding;
         const padding_value = try object_ops.getValueProperty(ctx, output, global, options, padding_key, caller_function, caller_frame);
-        if (!padding_value.isUndefined() and objectFromValue(padding_value) == null) return error.TypeError;
+        if (!padding_value.is(.undefined_value) and objectFromValue(padding_value) == null) return error.TypeError;
         padding_val = padding_value;
     }
 
@@ -1683,11 +1683,11 @@ pub fn iteratorZipModeFromOptions(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorZipMode {
-    if (options.isUndefined()) return .shortest;
+    if (options.is(.undefined_value)) return .shortest;
     _ = objectFromValue(options) orelse return error.TypeError;
     const mode_key = core.atom.ids.mode;
     const mode_value = try object_ops.getValueProperty(ctx, output, global, options, mode_key, caller_function, caller_frame);
-    if (mode_value.isUndefined()) return .shortest;
+    if (mode_value.is(.undefined_value)) return .shortest;
     if (string_ops.stringValueUnitsEqualBytes(mode_value, "shortest")) return .shortest;
     if (string_ops.stringValueUnitsEqualBytes(mode_value, "longest")) return .longest;
     if (string_ops.stringValueUnitsEqualBytes(mode_value, "strict")) return .strict;
@@ -1733,7 +1733,7 @@ pub fn iteratorZipCollectIndexed(
     }
 
     if (mode == .longest) {
-        if (!padding.isUndefined() and !padding.isNull()) {
+        if (!padding.is(.undefined_value) and !padding.is(.null_value)) {
             var padding_iterator = iteratorForValue(ctx, output, global, padding, caller_function, caller_frame) catch |err| {
                 return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
             };
@@ -1811,7 +1811,7 @@ pub fn iteratorZipCollectKeyed(
         const iter = object_ops.getValueProperty(ctx, output, global, iterables.value(), key, caller_function, caller_frame) catch |err| {
             return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
         };
-        if (iter.isUndefined()) continue;
+        if (iter.is(.undefined_value)) continue;
 
         const record = iteratorZipFlattenableRecord(ctx, output, global, iter, caller_function, caller_frame) catch |err| {
             return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
@@ -1829,7 +1829,7 @@ pub fn iteratorZipCollectKeyed(
     if (mode == .longest) {
         var index: usize = 0;
         while (index < count) : (index += 1) {
-            if (!padding.isUndefined() and !padding.isNull()) {
+            if (!padding.is(.undefined_value) and !padding.is(.null_value)) {
                 const key_value = iteratorZipGetIndex(keys, index);
                 const key = property_ops.propertyKeyAtom(ctx.runtime, key_value) catch |err| {
                     return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
@@ -1858,7 +1858,7 @@ pub fn iteratorZipFlattenableRecord(
     _ = objectFromValue(value) orelse return error.TypeError;
     const symbol_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
     const iterator_method = try object_ops.getValueProperty(ctx, output, global, value, symbol_key, caller_function, caller_frame);
-    const iterator_value = if (!iterator_method.isUndefined() and !iterator_method.isNull()) blk: {
+    const iterator_value = if (!iterator_method.is(.undefined_value) and !iterator_method.is(.null_value)) blk: {
         if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
         const iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, iterator_method, &.{}, caller_function, caller_frame);
         _ = objectFromValue(iterator) orelse return error.TypeError;
@@ -2054,7 +2054,7 @@ pub fn iteratorZipCloseAllWithCompletion(
         index -= 1;
         const iterator_value = iteratorZipGetIndex(iters, index);
         try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
-        if (iterator_value.isUndefined() or iterator_value.isNull()) continue;
+        if (iterator_value.is(.undefined_value) or iterator_value.is(.null_value)) continue;
         iteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame);
     }
 }
@@ -2069,7 +2069,7 @@ pub fn iteratorZipClose(
 ) !void {
     const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
-    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
     _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
         ctx,
@@ -2203,7 +2203,7 @@ fn iteratorDisposeCall(
 ) !core.JSValue {
     const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, receiver, return_key, caller_function, caller_frame);
-    if (return_method.isUndefined() or return_method.isNull()) return core.JSValue.undefinedValue();
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return core.JSValue.undefinedValue();
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
     _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, return_method, &.{}, caller_function, caller_frame);
     return core.JSValue.undefinedValue();
@@ -2495,12 +2495,12 @@ fn iteratorLimitArgument(
     args: []const core.JSValue,
 ) !usize {
     const limit_arg = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
-    const primitive = if (limit_arg.isObject())
+    const primitive = if (limit_arg.is(.object))
         try coercion_ops.toPrimitiveForNumber(ctx, output, global, limit_arg)
     else
         limit_arg;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    const number = number_value.asFloat64() orelse @as(f64, @floatFromInt(number_value.asInt32() orelse 0));
+    const number = number_value.as(.float64) orelse @as(f64, @floatFromInt(number_value.as(.int) orelse 0));
     if (std.math.isNan(number)) return error.RangeError;
     if (!std.math.isFinite(number)) return std.math.maxInt(usize);
     const integer = std.math.trunc(number);
@@ -2542,7 +2542,7 @@ fn iteratorCreateHelper(
     helper.iteratorKindSlot().* = @intFromEnum(kind);
     helper.iteratorIndexSlot().* = limit orelse 0;
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorNextSlot(), rooted_next_method);
-    if (!rooted_callback.isUndefined()) try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorCallbackSlot(), rooted_callback);
+    if (!rooted_callback.is(.undefined_value)) try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorCallbackSlot(), rooted_callback);
     return helper.value();
 }
 
@@ -2690,7 +2690,7 @@ fn iteratorZipHelperNext(
     var index: usize = 0;
     while (index < count) : (index += 1) {
         const iter = iteratorZipGetIndex(iters, index);
-        if (iter.isUndefined() or iter.isNull()) {
+        if (iter.is(.undefined_value) or iter.is(.null_value)) {
             if (mode != .longest) return error.TypeError;
             const pad = iteratorZipGetIndex(pads, index);
             try iteratorZipPutResult(ctx.runtime, results, keys, index, pad);
@@ -2929,7 +2929,7 @@ fn iteratorHelperSetInner(
     const mapped_object = objectFromValue(mapped) orelse return error.TypeError;
     const symbol_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
     const iterator_method = try object_ops.getValueProperty(ctx, output, global, mapped, symbol_key, caller_function, caller_frame);
-    const inner_iterator = if (iterator_method.isUndefined() or iterator_method.isNull())
+    const inner_iterator = if (iterator_method.is(.undefined_value) or iterator_method.is(.null_value))
         mapped_object.value()
     else blk: {
         if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
@@ -3071,7 +3071,7 @@ pub fn iteratorCloseValue(
 ) !void {
     const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
-    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
     _ = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
 }
@@ -3243,7 +3243,7 @@ pub fn iteratorFromSourceForIteratorFrom(
             break :blk try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         }
         const source_object = object_ops.objectFromValue(source) orelse return error.TypeError;
-        if (iterator_method.isUndefined() or iterator_method.isNull()) {
+        if (iterator_method.is(.undefined_value) or iterator_method.is(.null_value)) {
             break :blk source_object.value();
         }
         if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
@@ -3298,7 +3298,7 @@ noinline fn iteratorWrapMethodCall(
         .return_ => blk: {
             const return_key = core.atom.ids.return_;
             const return_method = try object_ops.getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
-            if (return_method.isUndefined() or return_method.isNull()) {
+            if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
                 return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
@@ -3378,7 +3378,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
 ) !void {
     const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
     _ = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
 }

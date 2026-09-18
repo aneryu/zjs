@@ -102,7 +102,7 @@
 
 - **签名**：`pub fn adapterValueIsUninitialized(slot: core.JSValue) bool`。
 - **作用**：解 cell 后是否仍是 uninitialized。
-- **实现**：`adapterValueBorrow(slot).isUninitialized()`。
+- **实现**：`adapterValueBorrow(slot).is(.uninitialized)`。
 - **所有权 / 错误 / 调用**：`getSuperValue` 用它测派生 `this` TDZ。
 
 ### `adapterIsDeletedEvalBinding` (`src/exec/slot_ops.zig:292`)
@@ -116,7 +116,7 @@
 
 - **签名**：`pub inline fn replaceAdapterOwned(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void`。
 - **作用**：替换 Adapter 槽；两侧都可以是 VarRef 句柄，保持 write-through。禁止用于 frame locals/args。
-- **实现**：两侧都不 `requiresRefCount` 则直接赋值；否则 `replaceAdapterRefCounted`。
+- **实现**：两侧都不是 `isTracerOwned` 则直接赋值；否则 `replaceAdapterRefCounted`。
 - **所有权 / 错误 / 调用**：冷边界。locals 有自己的 put/set。
 
 ### `replaceAdapterRefCounted` (`src/exec/slot_ops.zig:309`)

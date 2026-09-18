@@ -631,7 +631,7 @@ fn iteratorPrototype(
     const slot: usize = iterator_class;
     if (slot < realm.class_prototypes.len) {
         const stored = realm.class_prototypes[slot];
-        if (stored.isObject()) return .{ .object = try expectObject(stored), .owned = false };
+        if (stored.is(.object)) return .{ .object = try expectObject(stored), .owned = false };
     }
 
     const prototype = try createIteratorPrototype(rt, global, iterator_class, tag_name);
@@ -924,7 +924,7 @@ fn mapGetOrInsertComputed(
 }
 
 fn canonicalizeKey(key: core.JSValue) core.JSValue {
-    if (key.asFloat64()) |number| {
+    if (key.as(.float64)) |number| {
         if (number == 0) return core.JSValue.int32(0);
     }
     return key;
@@ -1166,7 +1166,7 @@ fn setLikeRecord(object: *core.Object) !SetLikeRecord {
 fn setLikeSize(object: *core.Object) !usize {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return strongSize(object);
     const size_value = try object.getProperty(core.atom.predefinedId("size", .string).?);
-    const size = size_value.asInt32() orelse return error.TypeError;
+    const size = size_value.as(.int) orelse return error.TypeError;
     if (size < 0) return error.TypeError;
     return @intCast(size);
 }
@@ -1187,14 +1187,14 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, hos
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         const out = try collectionHas(rt, object, key);
-        return out.asBool() orelse false;
+        return out.as(.boolean) orelse false;
     }
     const has_key = core.atom.ids.has;
     const has_value = try object.getProperty(has_key);
     if (!isCallableClosure(has_value)) return error.TypeError;
     var has_args = [_]core.JSValue{key};
     const out = try host.callWithThis(has_value, object.value(), &has_args);
-    return out.asBool() orelse false;
+    return out.as(.boolean) orelse false;
 }
 
 fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) ![]core.JSValue {
@@ -1346,7 +1346,7 @@ fn addGroupedItem(
     key = try host.callValue(callback, &callback_args);
 
     existing = try mapGet(rt, map, key);
-    if (!existing.isUndefined()) {
+    if (!existing.is(.undefined_value)) {
         const group = try expectObject(existing);
         try appendArrayValue(rt, group, rooted_item);
         return;
@@ -1381,14 +1381,14 @@ fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, inde
 }
 
 fn isCallableClosure(value: core.JSValue) bool {
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const header = value.refHeader() orelse return false;
     const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_closure;
 }
 
 fn isCallableObject(value: core.JSValue) bool {
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const header = value.refHeader() orelse return false;
     const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.c_closure or object.class_id == core.class.ids.c_function;
@@ -1737,7 +1737,7 @@ fn getSetRecord(
         size = @intCast(setStrongSize(object));
     } else {
         const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
-        const size_value = if (raw_size.isObject())
+        const size_value = if (raw_size.is(.object))
             try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
         else
             raw_size;
@@ -1763,7 +1763,7 @@ fn getSetRecord(
 
     const has_key = core.atom.ids.has;
     const has_value = try object_ops.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
-    if (has_value.isUndefined()) {
+    if (has_value.is(.undefined_value)) {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".has is undefined");
         unreachable;
     }
@@ -1774,7 +1774,7 @@ fn getSetRecord(
 
     const keys_key = core.atom.ids.keys;
     const keys_value = try object_ops.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
-    if (keys_value.isUndefined()) {
+    if (keys_value.is(.undefined_value)) {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, ".keys is undefined");
         unreachable;
     }
@@ -2204,7 +2204,7 @@ pub fn mapGetOrInsertComputedCall(
     }
 
     const has_value = try methodCall(ctx.runtime, receiver_value, 3, &.{key});
-    if (has_value.asBool() == true) {
+    if (has_value.as(.boolean) == true) {
         return try methodCall(ctx.runtime, receiver_value, 2, &.{key});
     }
 
@@ -2234,7 +2234,7 @@ pub fn collectionMethodOwnerClass(function_object: *core.Object) ?core.ClassId {
 }
 
 fn canonicalizeMapKey(key: core.JSValue) core.JSValue {
-    if (key.asFloat64()) |number| {
+    if (key.as(.float64)) |number| {
         if (number == 0) return core.JSValue.int32(0);
     }
     return key;
@@ -2285,7 +2285,7 @@ fn mapAppendGroupByValue(
 ) !void {
     const existing = try methodCall(ctx.runtime, map_value, 2, &.{key});
 
-    if (!existing.isUndefined()) {
+    if (!existing.is(.undefined_value)) {
         const group = try property_ops.expectObject(existing);
         if (!group.isArray()) return error.TypeError;
         try group.defineOwnProperty(

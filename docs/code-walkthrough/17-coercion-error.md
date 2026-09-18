@@ -415,7 +415,7 @@
 - **签名**：`pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt`。
 - **作用**：拿到可运算的 `bignum.BigInt` 视图：short 会新分配，堆 BigInt 只借 limbs。
 - **实现**：short BigInt → `fromIntAlloc`（**调用方要 deinit**）；堆 BigInt → `big.borrowedValue`（借用，不拷贝，不可 deinit）；其余 TypeError。
-- **所有权 / 错误 / 调用**：所有权取决于入参形态，`binaryBigInt` 用 `asShortBigInt() != null` 判断该不该释放。
+- **所有权 / 错误 / 调用**：所有权取决于入参形态，`binaryBigInt` 用 `as(.short_big_int) != null` 判断该不该释放。
 
 ### `isTruthy` (`src/exec/value_ops.zig:572`)
 

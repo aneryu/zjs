@@ -223,7 +223,7 @@ pub fn JSBytes(comptime Value: type) type {
         // mirror of value_semantics.objectFromValue, keep in sync — kept
         // local: generic `Value` parameter context.
         fn objectFromValue(value: Value) ?*@import("object.zig").Object {
-            if (!value.isObject()) return null;
+            if (!value.is(.object)) return null;
             const header = value.refHeader() orelse return null;
             if (header.meta().flags.kind != .object) return null;
             return @import("object.zig").Object.fromHeader(header);
@@ -333,7 +333,7 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
 
     const value = try ctx.arrayBuffer(&store);
     try std.testing.expect(store.bytes.len == 0);
-    const bytes = try value.asBytes(ctx);
+    const bytes = try value.asBytes();
     try std.testing.expectEqualSlices(u8, &.{ 4, 5, 6, 7 }, bytes.slice());
     const mutable = try bytes.sliceMut();
     mutable[2] = 9;
@@ -377,7 +377,7 @@ test "JSBytes.Store ArrayBuffer detach releases owned bytes immediately" {
     const object = testObjectFromValue(core.JSValue, value).?;
     object.detachByteStorage(rt);
     try std.testing.expectEqual(@as(usize, 1), state.calls);
-    try std.testing.expectError(error.Detached, value.asBytes(ctx));
+    try std.testing.expectError(error.Detached, value.asBytes());
 }
 
 test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying" {
@@ -412,7 +412,7 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     try std.testing.expectEqual(@import("class.zig").ids.shared_array_buffer, object.class_id);
     try std.testing.expect(object.sharedByteStorageStore() != null);
 
-    const bytes = try value.asBytes(ctx);
+    const bytes = try value.asBytes();
     try std.testing.expect(bytes.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 8, 9, 10 }, bytes.slice());
     const mutable = try bytes.sliceMut();
@@ -420,7 +420,7 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     try std.testing.expectEqual(@as(u8, 12), backing[0]);
     object.detachByteStorage(rt);
     try std.testing.expect(!object.arrayBufferDetached());
-    const after_detach = try value.asBytes(ctx);
+    const after_detach = try value.asBytes();
     try std.testing.expect(after_detach.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 12, 9, 10 }, after_detach.slice());
 
@@ -496,7 +496,7 @@ test "JSBytes views ArrayBuffer storage without copying" {
     @memcpy(backing, &initial);
     try object.installByteStorage(rt, backing);
 
-    const bytes = try value.asBytes(undefined);
+    const bytes = try value.asBytes();
     try std.testing.expect(!bytes.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, bytes.slice());
     const mutable = try bytes.sliceMut();
@@ -504,7 +504,7 @@ test "JSBytes views ArrayBuffer storage without copying" {
     try std.testing.expectEqual(@as(u8, 9), object.byteStorage()[1]);
 
     object.arrayBufferImmutableSlot().* = true;
-    const readonly = try value.asBytes(undefined);
+    const readonly = try value.asBytes();
     try std.testing.expectError(error.ReadOnly, readonly.sliceMut());
 }
 
@@ -526,7 +526,7 @@ test "JSBytes views TypedArray byte range without copying" {
     const view_value = view.value();
     try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, 2);
 
-    const bytes = try view_value.asBytes(undefined);
+    const bytes = try view_value.asBytes();
     try std.testing.expectEqualSlices(u8, &.{ 2, 3, 4, 5 }, bytes.slice());
     const mutable = try bytes.sliceMut();
     mutable[0] = 8;
@@ -557,7 +557,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
     const view_value = view.value();
     try view.initTypedArrayView(rt, buffer_value, 1, 2, null, 5);
 
-    const bytes = try view_value.asBytes(undefined);
+    const bytes = try view_value.asBytes();
     // 6 bytes (3 elements), floored from the 6 trailing bytes — already aligned
     // here, but the floor logic must NOT include any trailing partial element.
     try std.testing.expectEqual(@as(usize, 6), bytes.len);
@@ -584,7 +584,7 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
     const view_value = view.value();
     try view.initTypedArrayView(rt, buffer_value, 0, 2, null, 5);
 
-    const bytes = try view_value.asBytes(undefined);
+    const bytes = try view_value.asBytes();
     try std.testing.expectEqual(@as(usize, 4), bytes.len);
     try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, bytes.slice());
 }
@@ -607,7 +607,7 @@ test "JSBytes views DataView byte range without copying" {
     const view_value = view.value();
     try view.initTypedArrayView(rt, buffer_value, 1, 0, 3, 0);
 
-    const bytes = try view_value.asBytes(undefined);
+    const bytes = try view_value.asBytes();
     try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13 }, bytes.slice());
 }
 
@@ -631,13 +631,13 @@ test "JSBytes views length-tracking DataView to end of buffer" {
 
     // A length-tracking DataView spans to the end of the buffer (byte-addressed,
     // so no element-size flooring): 5 - 2 = 3 trailing bytes.
-    const bytes = try view_value.asBytes(undefined);
+    const bytes = try view_value.asBytes();
     try std.testing.expectEqual(@as(usize, 3), bytes.len);
     try std.testing.expectEqualSlices(u8, &.{ 12, 13, 14 }, bytes.slice());
 }
 
 fn testObjectFromValue(comptime Value: type, value: Value) ?*@import("object.zig").Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
     return @import("object.zig").Object.fromHeader(header);

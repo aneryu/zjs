@@ -1,7 +1,7 @@
-//! Public embedding surface for the zjs engine and runtime.
+//! Host facade used by the CLI and in-repo tests.
 const std = @import("std");
 const zjs_binding = @import("binding/root.zig");
-pub const runtime = @import("runtime/public.zig");
+pub const runtime = @import("runtime/root.zig");
 const zjs_core = @import("core/root.zig");
 const zjs_exec = @import("exec/root.zig");
 const CoreObject = zjs_binding.Object;
@@ -10,14 +10,6 @@ pub const JSRuntime = zjs_binding.JSRuntime;
 pub const GCStats = zjs_binding.GCStats;
 pub const GCPauseDistribution = zjs_binding.GCPauseDistribution;
 pub const JSContext = zjs_binding.JSContext;
-/// Resolved-once native -> JS call target for repeated calls to one function
-/// (`zjs.CallSite.init` / `call` / `deinit`); see docs/public-api-contract.md.
-pub const CallSite = zjs_binding.CallSite;
-/// Resolved-once host-side property access for one property name
-/// (`zjs.PropertySite.init` / `get` / `set` / `deinit`); the embedder's
-/// analogue of a `get_field` inline-cache site. See
-/// docs/public-api-contract.md.
-pub const PropertySite = zjs_binding.PropertySite;
 pub const JSValue = zjs_binding.JSValue;
 pub const RuntimeOptions = zjs_binding.RuntimeOptions;
 pub const RuntimeMemoryUsage = zjs_binding.RuntimeMemoryUsage;
@@ -128,10 +120,6 @@ pub const value = struct {
 pub const native = zjs_binding.native;
 
 pub const host = struct {
-    pub const NativeBinding = zjs_binding.binding;
-    pub const NativeObject = object.Object;
-    pub const PropName = zjs_binding.PropNameID;
-
     pub fn defineScriptArgs(ctx: *JSContext, args: []const []const u8) !void {
         try object.defineStringArrayGlobal(ctx, "scriptArgs", args);
     }
@@ -196,7 +184,7 @@ pub const object = struct {
     }
 
     fn coreFromValue(v: value.Value) ?*CoreObject {
-        if (!v.isObject()) return null;
+        if (!v.is(.object)) return null;
         const header = v.refHeader() orelse return null;
         if (header.meta().flags.kind != .object) return null;
         return CoreObject.fromHeader(header);
@@ -717,8 +705,8 @@ test "public object appendArrayValue maintains array length once" {
     try std.testing.expectEqual(@as(u32, 2), object.arrayLength(array));
     const first = (try object.getOwnIndexPropertyValue(rt, array, 0)).?;
     const second = (try object.getOwnIndexPropertyValue(rt, array, 1)).?;
-    try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
-    try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
+    try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
 }
 
 test "public host defineScriptArgs materializes empty array on first read" {
@@ -742,7 +730,7 @@ test "public host defineScriptArgs materializes empty array on first read" {
         \\delete globalThis.scriptArgs &&
         \\!("scriptArgs" in globalThis);
     , .{});
-    try std.testing.expectEqual(true, result.asBool().?);
+    try std.testing.expectEqual(true, result.as(.boolean).?);
 }
 
 test "public Buffer helpers create and copy Uint8Array bytes" {
@@ -1141,7 +1129,7 @@ test "public job drain stops at the first exception and leaves the tail queued" 
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expect(ctx.core.hasException());
     const exception = ctx.core.takeException();
-    try std.testing.expectEqual(@as(?i32, 73), exception.asInt32());
+    try std.testing.expectEqual(@as(?i32, 73), exception.as(.int));
 
     const tail = try job.drain(ctx, .{});
     try std.testing.expectEqual(@as(usize, 1), tail.jobs_drained);
@@ -1198,11 +1186,11 @@ test "public root exposes only the explicit runtime surface" {
     try std.testing.expect(@hasDecl(runtime, "EventLoopOptions"));
     try std.testing.expect(@hasDecl(runtime, "EventLoopRunResult"));
     try std.testing.expect(@hasDecl(runtime, "runUntilIdle"));
-    try std.testing.expect(@hasDecl(runtime, "cleanupAtomicsWaitersForContext"));
-    try std.testing.expect(@hasDecl(runtime, "wakeAtomicsWaitersForRuntimes"));
-    try std.testing.expect(@hasDecl(runtime, "detachArrayBuffer"));
-    try std.testing.expect(@hasDecl(runtime, "evalFileModuleGraphWithOutput"));
-    try std.testing.expect(@hasDecl(runtime, "resolveModuleSpecifier"));
+    try std.testing.expect(!@hasDecl(runtime, "cleanupAtomicsWaitersForContext"));
+    try std.testing.expect(!@hasDecl(runtime, "wakeAtomicsWaitersForRuntimes"));
+    try std.testing.expect(!@hasDecl(runtime, "detachArrayBuffer"));
+    try std.testing.expect(!@hasDecl(runtime, "evalFileModuleGraphWithOutput"));
+    try std.testing.expect(!@hasDecl(runtime, "resolveModuleSpecifier"));
     try std.testing.expect(@typeInfo(object.Object) == .@"opaque");
     try std.testing.expect(!@hasDecl(object.Object, "value"));
     try std.testing.expect(!@hasDecl(@This(), "JSValueHandle"));

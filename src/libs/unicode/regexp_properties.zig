@@ -26,7 +26,7 @@ const lu_mask = names.gcBit("Lu");
 const ll_mask = names.gcBit("Ll");
 
 fn unicodeGeneralCategory1(code_point: u21, gc_mask: u32) bool {
-    var p: []const u8 = &data.unicode_gc_table;
+    var p: []const u8 = data.unicode_gc_table;
     var c: u32 = 0;
     while (p.len > 0) {
         const b = p[0];
@@ -210,7 +210,7 @@ fn isSupportedProperty(prop: data.Prop) bool {
 fn unicodeScript(code_point: u21, script_idx: data.Script, is_ext: bool) bool {
     const script_idx_value = @intFromEnum(script_idx);
     const is_common = script_idx == data.Script.Common or script_idx == data.Script.Inherited;
-    var p: []const u8 = &data.unicode_script_table;
+    var p: []const u8 = data.unicode_script_table;
     var c: u32 = 0;
     var primary_match = false;
     var found_range = false;
@@ -258,7 +258,7 @@ fn unicodeScript(code_point: u21, script_idx: data.Script, is_ext: bool) bool {
         return primary_match;
     }
 
-    var p_ext: []const u8 = &data.unicode_script_ext_table;
+    var p_ext: []const u8 = data.unicode_script_ext_table;
     c = 0;
     var ext_match = false;
     var ext_has_any = false;

@@ -196,6 +196,16 @@ pub const Stack = struct {
         self.capacity = 0;
     }
 
+    /// Free heap backing reserved for an empty stack that never received a push.
+    /// Used when `reserveAdditional` grew storage and a later allocation failed.
+    pub fn discardEmptyHeapBacking(self: *Stack) void {
+        if (self.len() != 0 or self.capacity == 0) return;
+        if (self.policy.arena_window or self.policy.resident_window) return;
+        const backing = self.backingValues();
+        self.clearBacking();
+        self.memory.free(JSValue, backing);
+    }
+
     pub inline fn deinit(self: *Stack, _: anytype) void {
         const values = self.liveValues();
         const backing = self.backingValues();

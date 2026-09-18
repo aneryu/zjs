@@ -82,7 +82,7 @@ catch-marker 与普通 catch-offset 共享 tag，但 payload 小于等于 -2。
 
 - **签名**：`pub fn iteratorCatchMarkerPreviousTarget(value: core.JSValue) ?i32`。
 - **作用**：从 iterator catch marker 解回保存的外层 catch target；不是同步 marker 则返回 null。
-- **实现**：取 `value.asCatchOffset()`，不是 catch-offset 返回 null；`encoded >= -2`（普通 catch offset 与 async marker）也返回 null；`encoded == minInt(i32)` 还原成 -1，其余还原成 `encoded - minInt(i32) - 1`。
+- **实现**：取 `value.as(.catch_offset)`，不是 catch-offset 返回 null；`encoded >= -2`（普通 catch offset 与 async marker）也返回 null；`encoded == minInt(i32)` 还原成 -1，其余还原成 `encoded - minInt(i32) - 1`。
 - **所有权 / 错误 / 调用**：纯解码，不分配、无 error。生产里只有本文件 `forof_ops.zig:289`（`isIteratorCatchMarker`）调用，而且只用它「是否为 null」做判别——**编码进 marker 的外层 catch target 目前没有任何生产代码读回来**，只有 `forof_ops.zig:300`/`:305` 的测试断言往返一致。
 
 ### `asyncIteratorCatchMarker` (`src/exec/forof_ops.zig:279`)
@@ -96,7 +96,7 @@ catch-marker 与普通 catch-offset 共享 tag，但 payload 小于等于 -2。
 
 - **签名**：`pub fn isAsyncIteratorCatchMarker(value: core.JSValue) bool`。
 - **作用**：判断值是否是 payload == -2 的 async iterator marker。
-- **实现**：`value.asCatchOffset()` 不存在时 false，否则与常量 `async_iterator_catch_offset`（-2）比较。
+- **实现**：`value.as(.catch_offset)` 不存在时 false，否则与常量 `async_iterator_catch_offset`（-2）比较。
 - **所有权 / 错误 / 调用**：纯判定，不分配、无 error、不消费栈。调用方 `iterator_ops.zig:1015`（`iteratorClose` 据此决定走 for-await 还是同步 IteratorClose）与本文件 `forof_ops.zig:289`（`isIteratorCatchMarker`）。
 
 ### `isIteratorCatchMarker` (`src/exec/forof_ops.zig:287`)

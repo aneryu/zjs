@@ -157,7 +157,7 @@ pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValu
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    if (rooted_value.isUndefined()) return core.JSValue.undefinedValue();
+    if (rooted_value.is(.undefined_value)) return core.JSValue.undefinedValue();
 
     var property_list = try stringifyPropertyList(rt, rooted_replacer);
     defer freePropertyList(rt, property_list);
@@ -905,7 +905,7 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     defer bytes.deinit(rt.memory.allocator);
     appendJsonInputString(rt, &bytes, rooted_value) catch |err| switch (err) {
         error.TypeError => {
-            if (rooted_value.isObject()) return error.SyntaxError;
+            if (rooted_value.is(.object)) return error.SyntaxError;
             return error.TypeError;
         },
         else => return err,
@@ -914,7 +914,7 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 
     {
         const validated = try jsonParseFullFromBytes(rt, null, bytes.items);
-        if (validated.isObject()) return error.SyntaxError;
+        if (validated.is(.object)) return error.SyntaxError;
     }
 
     const object = try core.Object.create(rt, core.class.ids.raw_json, null);
@@ -931,7 +931,7 @@ fn isRawJsonEdgeWhitespace(byte: u8) bool {
 
 pub fn isRawJSON(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const object = core.Object.fromHeader(header);
     return object.class_id == core.class.ids.raw_json;
 }
@@ -949,17 +949,17 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    if (rooted_value.isUndefined()) {
+    if (rooted_value.is(.undefined_value)) {
         try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
-    } else if (rooted_value.isNull()) {
+    } else if (rooted_value.is(.null_value)) {
         try buffer.appendSlice(rt.memory.allocator, "null");
-    } else if (rooted_value.isSymbol()) {
+    } else if (rooted_value.is(.symbol)) {
         try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
-    } else if (rooted_value.asInt32()) |int_value| {
+    } else if (rooted_value.as(.int)) |int_value| {
         var int_buf: [20]u8 = undefined;
         const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
         try buffer.appendSlice(rt.memory.allocator, printed);
-    } else if (rooted_value.asFloat64()) |float_value| {
+    } else if (rooted_value.as(.float64)) |float_value| {
         if (!std.math.isFinite(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "null");
         } else if (float_value == 0) {
@@ -969,13 +969,13 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, float_value);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
-    } else if (rooted_value.asBool()) |bool_value| {
+    } else if (rooted_value.as(.boolean)) |bool_value| {
         try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
     } else if (rooted_value.isString()) {
         try appendJsonStringValue(rt, buffer, rooted_value);
     } else if (rooted_value.isBigInt()) {
         return error.TypeError;
-    } else if (rooted_value.isObject()) {
+    } else if (rooted_value.is(.object)) {
         const header = rooted_value.refHeader() orelse return;
         const object_value = core.Object.fromHeader(header);
         if (object_value.class_id == core.class.ids.raw_json) {
@@ -1040,8 +1040,8 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
         var root_frame = core.runtime.rootValues(.{&rooted_value});
         root_frame.activate(rt);
         defer root_frame.deactivate(rt);
-        if (rooted_value.isUndefined() or rooted_value.isSymbol()) continue;
-        if (rooted_value.isObject()) {
+        if (rooted_value.is(.undefined_value) or rooted_value.is(.symbol)) continue;
+        if (rooted_value.is(.object)) {
             const header = rooted_value.refHeader() orelse continue;
             const child_object = core.Object.fromHeader(header);
             if (isCallableJsonOmittedObject(child_object)) continue;
@@ -1260,10 +1260,10 @@ test "simple JSON parser uses shared ASCII digit classification for integers" {
     defer rt.destroy();
 
     const int_value = (try parseSimpleJsonValue(rt, null, "12345")).?;
-    try std.testing.expectEqual(@as(?i32, 12345), int_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 12345), int_value.as(.int));
 
     const zero_value = (try parseSimpleJsonValue(rt, null, "0")).?;
-    try std.testing.expectEqual(@as(?i32, 0), zero_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), zero_value.as(.int));
 
     try std.testing.expect((try parseSimpleJsonValue(rt, null, "01")) == null);
     try std.testing.expect((try parseSimpleJsonValue(rt, null, "1.5")) == null);
@@ -1344,7 +1344,7 @@ test "JSON callable omission recognizes every bytecode function class" {
 
 fn isArrayObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const object = core.Object.fromHeader(header);
     return object.isArray();
 }
@@ -1356,7 +1356,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
     defer root_frame.deactivate(rt);
 
     const header = rooted_replacer.refHeader() orelse return &.{};
-    if (!rooted_replacer.isObject()) return &.{};
+    if (!rooted_replacer.is(.object)) return &.{};
     const object = core.Object.fromHeader(header);
     if (!object.isArray()) return &.{};
 
@@ -1396,12 +1396,12 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
         const string_object = rooted_value.asStringBody().?;
         return try string_object.internAtom(rt);
     }
-    if (rooted_value.asInt32()) |int_value| {
+    if (rooted_value.as(.int)) |int_value| {
         var buf: [20]u8 = undefined;
         const text = number_format.formatInt64(&buf, @as(i64, int_value));
         return try rt.internAtom(text);
     }
-    if (rooted_value.asFloat64()) |float_value| {
+    if (rooted_value.as(.float64)) |float_value| {
         var buf: [128]u8 = undefined;
         const text = if (std.math.isNan(float_value))
             "NaN"
@@ -1416,7 +1416,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
         return try rt.internAtom(text);
     }
     const header = rooted_value.refHeader() orelse return null;
-    if (!rooted_value.isObject()) return null;
+    if (!rooted_value.is(.object)) return null;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.string and object.class_id != core.class.ids.number) return null;
     primitive = jsonPrimitiveWrapperValue(object) orelse return null;
@@ -1431,17 +1431,17 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
     defer root_frame.deactivate(rt);
 
     var out = std.ArrayList(u8).empty;
-    const number = if (rooted_space.asInt32()) |int_value|
+    const number = if (rooted_space.as(.int)) |int_value|
         @as(f64, @floatFromInt(int_value))
-    else if (rooted_space.asFloat64()) |float_value|
+    else if (rooted_space.as(.float64)) |float_value|
         float_value
     else blk: {
         const header = rooted_space.refHeader() orelse break :blk null;
-        if (!rooted_space.isObject()) break :blk null;
+        if (!rooted_space.is(.object)) break :blk null;
         const object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.number) {
             primitive = jsonPrimitiveWrapperValue(object) orelse break :blk null;
-            break :blk primitive.asInt32() orelse primitive.asFloat64();
+            break :blk primitive.as(.int) orelse primitive.as(.float64);
         }
         break :blk null;
     };
@@ -1453,7 +1453,7 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
 
     if (rooted_space.isString()) {
         try core.string.appendValueUtf8(rt, &out, rooted_space);
-    } else if (rooted_space.isObject()) {
+    } else if (rooted_space.is(.object)) {
         const header = rooted_space.refHeader() orelse return out;
         const object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.string) {
@@ -1499,23 +1499,23 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     defer root_frame.deactivate(rt);
 
     if (rooted_value.isString()) return core.string.appendValueUtf8(rt, buffer, rooted_value);
-    if (rooted_value.isSymbol()) return error.TypeError;
-    if (rooted_value.isNull()) return buffer.appendSlice(rt.memory.allocator, "null");
-    if (rooted_value.isUndefined()) return buffer.appendSlice(rt.memory.allocator, "undefined");
-    if (rooted_value.asBool()) |bool_value| return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
-    if (rooted_value.asInt32()) |int_value| {
+    if (rooted_value.is(.symbol)) return error.TypeError;
+    if (rooted_value.is(.null_value)) return buffer.appendSlice(rt.memory.allocator, "null");
+    if (rooted_value.is(.undefined_value)) return buffer.appendSlice(rt.memory.allocator, "undefined");
+    if (rooted_value.as(.boolean)) |bool_value| return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
+    if (rooted_value.as(.int)) |int_value| {
         var int_buf: [20]u8 = undefined;
         const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
-    if (rooted_value.asFloat64()) |float_value| {
+    if (rooted_value.as(.float64)) |float_value| {
         if (float_value == 0) return buffer.append(rt.memory.allocator, '0');
         var float_buf: [128]u8 = undefined;
         const printed = value_ops.formatFiniteNumberAssumeCapacity(&float_buf, float_value);
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
     if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, rooted_value);
-    if (rooted_value.isObject()) {
+    if (rooted_value.is(.object)) {
         const header = rooted_value.refHeader() orelse return error.TypeError;
         const object = core.Object.fromHeader(header);
         primitive = jsonPrimitiveWrapperValue(object) orelse return error.TypeError;
@@ -1781,7 +1781,7 @@ pub fn jsonInternalizeChild(
     defer root_frame.deactivate(ctx.runtime);
 
     revived = try jsonInternalizeProperty(ctx, output, global, rooted_holder_value, key, rooted_reviver, reviver_call, record, caller_function, caller_frame);
-    if (revived.isUndefined()) {
+    if (revived.is(.undefined_value)) {
         _ = try object_ops.deleteValueProperty(ctx, output, global, rooted_holder_value, holder, key, caller_function, caller_frame);
     } else {
         try jsonCreateDataProperty(ctx, output, global, rooted_holder_value, holder, key, revived, caller_function, caller_frame);
@@ -1858,7 +1858,7 @@ pub fn jsonStringifyCall(
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    if (replacer.isUndefined() and space.isUndefined()) {
+    if (replacer.is(.undefined_value) and space.is(.undefined_value)) {
         if (try jsonStringifySimpleNoOptions(ctx.runtime, global, value)) |fast| return fast;
     }
 
@@ -1966,14 +1966,14 @@ fn jsonAppendSimpleValue(
     // must turn into a catchable InternalError "stack overflow" (QuickJS
     // js_json_to_str, quickjs.c:50075) instead of a native crash.
     if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
-    if (value.isUndefined() or value.isSymbol()) {
+    if (value.is(.undefined_value) or value.is(.symbol)) {
         if (array_slot) {
             try buffer.appendSlice(rt.memory.allocator, "null");
             return .appended;
         }
         return .omitted;
     }
-    if (value.isNull()) {
+    if (value.is(.null_value)) {
         try buffer.appendSlice(rt.memory.allocator, "null");
         return .appended;
     }
@@ -1981,11 +1981,11 @@ fn jsonAppendSimpleValue(
         try appendJsonStringValue(rt, buffer, value);
         return .appended;
     }
-    if (value.asBool()) |bool_value| {
+    if (value.as(.boolean)) |bool_value| {
         try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
         return .appended;
     }
-    if (value.asInt32()) |int_value| {
+    if (value.as(.int)) |int_value| {
         var int_buf: [20]u8 = undefined;
         const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
         try buffer.appendSlice(rt.memory.allocator, printed);
@@ -2219,7 +2219,7 @@ pub fn jsonStringifyGap(
     defer root_frame.deactivate(ctx.runtime);
 
     var out = std.ArrayList(u8).empty;
-    if (rooted_space.isObject()) {
+    if (rooted_space.is(.object)) {
         if (object_ops.objectFromValue(rooted_space)) |object| {
             if (object.class_id == core.class.ids.number) {
                 primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rooted_space);
@@ -2364,13 +2364,13 @@ pub fn jsonAppendValue(
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    if (rooted_value.isUndefined() or rooted_value.isSymbol()) {
+    if (rooted_value.is(.undefined_value) or rooted_value.is(.symbol)) {
         try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
-    } else if (rooted_value.isNull()) {
+    } else if (rooted_value.is(.null_value)) {
         try buffer.appendSlice(ctx.runtime.memory.allocator, "null");
     } else if (rooted_value.isString()) {
         try appendJsonStringValue(ctx.runtime, buffer, rooted_value);
-    } else if (rooted_value.asBool()) |bool_value| {
+    } else if (rooted_value.as(.boolean)) |bool_value| {
         try buffer.appendSlice(ctx.runtime.memory.allocator, if (bool_value) "true" else "false");
     } else if (value_ops.numberValue(rooted_value)) |number| {
         if (!std.math.isFinite(number)) {
@@ -2628,7 +2628,7 @@ test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors tak
 
     // The last occurrence won as the property value...
     const parsed_object = object_ops.objectFromValue(parsed) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?i32, 1), (try parsed_object.getProperty(key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), (try parsed_object.getProperty(key)).as(.int));
 
     // ...while the record still names the first, and that object is still
     // live enough to read its own property back.

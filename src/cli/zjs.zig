@@ -212,7 +212,16 @@ fn runFileModule(
     allocator: std.mem.Allocator,
     max_size: usize,
 ) !zjs.JSValue {
-    return try runtime_layer.evalFileModuleGraphWithOutput(ctx, source_text, output, path, io, allocator, max_size);
+    return try engine.exec.module_graph.evalFileModuleGraphWithOutput(
+        ctx.runtimePtr(),
+        ctx.core,
+        source_text,
+        output,
+        path,
+        io,
+        allocator,
+        max_size,
+    );
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -381,7 +390,7 @@ pub fn main(init: std.process.Init) !void {
     eval_ns = platform_clock.elapsedNanosSince(eval_start);
     try stdout_writer.interface.flush();
 
-    if (value.isException()) {
+    if (value.is(.exception)) {
         try cli_process.printError(io, "zjs: uncaught exception\n");
         std.process.exit(1);
     }
@@ -1429,7 +1438,7 @@ fn printEvaluationError(io: std.Io, runtime: *Runtime, err: anyerror) !void {
 
 fn printExceptionValue(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSValue) !bool {
     const rt = runtime.runtime;
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
 
     const header = try runtime.context.formatException(value, rt.memory.allocator);
     defer rt.memory.allocator.free(header);
@@ -1463,17 +1472,17 @@ fn printExceptionValue(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSV
 /// is redirected to a regular file.
 fn printUnhandledRejectionTo(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSValue) !void {
     try stderr.print("Possibly unhandled promise rejection: ", .{});
-    if (value.asInt32()) |int_value| {
+    if (value.as(.int)) |int_value| {
         try stderr.print("{d}", .{int_value});
-    } else if (value.asBool()) |bool_value| {
+    } else if (value.as(.boolean)) |bool_value| {
         try stderr.print("{s}", .{if (bool_value) "true" else "false"});
-    } else if (value.isUndefined()) {
+    } else if (value.is(.undefined_value)) {
         try stderr.print("undefined", .{});
-    } else if (value.isNull()) {
+    } else if (value.is(.null_value)) {
         try stderr.print("null", .{});
     } else if (value.isString()) {
         try stderr.print("[object String]", .{});
-    } else if (value.isObject()) {
+    } else if (value.is(.object)) {
         if (try printExceptionValue(stderr, runtime, value)) return;
     } else {
         try stderr.print("[object Object]", .{});
@@ -1647,10 +1656,10 @@ test "zjs detects module mode from extension and first token (qjs JS_DetectModul
 }
 
 test "zjs module specifier resolver uses referrer directory" {
-    const resolved = try runtime_layer.resolveModuleSpecifier(std.testing.allocator, "tests/fixtures/main.mjs", "./dep.mjs");
+    const resolved = try engine.exec.module.resolveModuleSpecifier(std.testing.allocator, "tests/fixtures/main.mjs", "./dep.mjs");
     defer std.testing.allocator.free(resolved);
     try std.testing.expectEqualStrings("tests/fixtures/dep.mjs", resolved);
-    try std.testing.expectError(error.ModuleNotFound, runtime_layer.resolveModuleSpecifier(std.testing.allocator, "main.mjs", "bare"));
+    try std.testing.expectError(error.ModuleNotFound, engine.exec.module.resolveModuleSpecifier(std.testing.allocator, "main.mjs", "bare"));
 }
 
 test "zjs args reject missing source" {

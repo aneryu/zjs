@@ -232,7 +232,7 @@ test "latin1 string literal append range fast path collapses loop opcodes" {
         \\print(s.length);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("2000\n", stream.buffered());
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.add]);
 }
@@ -253,7 +253,7 @@ test "latin1 string literal append range fast path accepts i8 loop limits" {
         \\print(s.length);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("50\n", stream.buffered());
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.add]);
 }
@@ -272,7 +272,7 @@ test "host output Number static literal fast path materializes lazy constructor"
         \\print(Number.parseInt("12345", 10));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("12345\n", stream.buffered());
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.get_field2]);
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.call1]);
@@ -288,7 +288,7 @@ test "empty script eval uses root entry without user call opcodes" {
 
     const result = try js.eval("");
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     // The root evaluator is not a bytecode `call` instruction, so entering its
     // generic VM path does not increment the user-call profile counters.
     try std.testing.expectEqual(@as(u64, 0), profile.totalOpcodeCount());
@@ -511,7 +511,7 @@ test "array dense writers distinguish own Set holes and CreateDataProperty" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "push splice fill and unshift preserve prototype and payload semantics" {
@@ -574,7 +574,7 @@ test "push splice fill and unshift preserve prototype and payload semantics" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "array indexed setter guards follow the receiver realm" {
@@ -630,7 +630,7 @@ test "array indexed setter guards follow the receiver realm" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "array dense append guard distinguishes custom proxy and null prototypes" {
@@ -680,7 +680,7 @@ test "array dense append guard distinguishes custom proxy and null prototypes" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "standard Array prototype guard publication and invalidation are realm local" {
@@ -914,7 +914,7 @@ test "sparse array literal length add range fast path collapses loop opcodes" {
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(source, &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(expected, stream.buffered());
     try std.testing.expect(profile.totalOpcodeCount() <= 20);
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.array_from]);
@@ -956,7 +956,7 @@ test "collection constructors iterate their array argument, not index it" {
         \\print(JSON.stringify([...new Set([1, 2, 2, 3])]), JSON.stringify([...new Set([1, , 3])]));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         \\[9,8]
         \\[[7,"z"]]
@@ -1003,7 +1003,7 @@ test "collection constructors do not bulk fill past an overridable adder" {
         \\print(JSON.stringify([...new Set([1, 2, 3])]));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         \\2 [1,3]
         \\1
@@ -1094,7 +1094,7 @@ test "Array.of and Array.from set factory result length with throw semantics" {
         \\});
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Array.from rejects invalid typed array element definitions" {
@@ -1113,7 +1113,7 @@ test "Array.from rejects invalid typed array element definitions" {
         \\);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Number.prototype.toString(radix) digits identify the double" {
@@ -1417,7 +1417,7 @@ test "escaped direct eval function keeps script referrer for dynamic import" {
         std.testing.allocator,
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expect(host.saw_expected_referrer);
     try std.testing.expectEqualStrings("42\n", stream.buffered());
 }
@@ -1443,7 +1443,7 @@ test "escaped direct eval function keeps eval stack filename" {
         "/fixture/scripts/original.js",
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("", stream.buffered());
 }
 
@@ -1485,7 +1485,7 @@ test "direct and indirect eval regexp literals share the generic parser semantic
         \\  assert.sameValue(syntax, true);
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "direct eval expression completion does not depend on a source terminator" {
@@ -1513,7 +1513,7 @@ test "direct eval expression completion does not depend on a source terminator" 
         \\  assert.sameValue(typeError, true);
         \\}
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "test262 frontmatter comments do not change engine strict mode" {
@@ -1530,7 +1530,7 @@ test "test262 frontmatter comments do not change engine strict mode" {
         \\print(acceptsEval(1));
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("1\n", stream.buffered());
 }
 
@@ -1550,7 +1550,7 @@ test "Engine eval executes declaration-only side effects" {
         \\print(typeof evalDeclOnlyFunc, typeof globalThis.evalDeclOnlyFunc);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("undefined\ntrue undefined\nundefined\nfunction function\n", stream.buffered());
 }
 
@@ -2561,7 +2561,7 @@ test "Engine async parameter grammar parses await only as an expression" {
         \\assert.sameValue(constructorSyntax, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine Dynamic Function preserves typed array subclass source" {
@@ -2580,7 +2580,7 @@ test "Engine Dynamic Function preserves typed array subclass source" {
         \\assert.sameValue(value.length, 2);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine direct eval callback passed to assert.throws keeps eval var scope" {
@@ -2596,7 +2596,7 @@ test "Engine direct eval callback passed to assert.throws keeps eval var scope" 
         \\assert.sameValue(typeof evalAssertVar, "undefined");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine generator created by direct eval keeps eval var scope across resume" {
@@ -2624,7 +2624,7 @@ test "Engine generator created by direct eval keeps eval var scope across resume
         \\assert.sameValue(typeof evalGenVar, "undefined");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine sloppy direct eval deleted var can be redeclared" {
@@ -2809,7 +2809,7 @@ test "Engine function global data IC preserves binding guards" {
         \\delete globalThis.__zjsGlobalDataIcRedefine;
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine top-level var probes preserve QuickJS global object semantics" {
@@ -2848,7 +2848,7 @@ test "Engine top-level var probes preserve QuickJS global object semantics" {
         \\try { Object.preventExtensions(globalThis); eval("var blockedVarProbe;"); print("nonExtensible", "noThrow"); } catch(e) { print("nonExtensible", e.name); }
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "desc true false 1\nwrite 2\nglobalWrite 5\nredefineData 9\ndelete false 9\nlexical 4 undefined\nwith 11 1\nevalInside 8 8\nevalAfter 8 8 true undefined\nstrictAssign TypeError 1\naccessorEvalInside 1 1\naccessorEvalAfter 1 1\ninherited true undefined undefined\nnonExtensible TypeError\n",
         stream.buffered(),
@@ -2922,7 +2922,7 @@ test "Engine top-level var probes preserve cross-realm global identity" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine createRealm owns independent intrinsics with realm-local instanceof" {
@@ -2938,7 +2938,7 @@ test "Engine createRealm owns independent intrinsics with realm-local instanceof
         \\assert.sameValue(new other.Array() instanceof other.Array, true);
         \\assert.sameValue(new other.Array() instanceof Array, false);
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "cross-realm construction uses class prototype state without observable realm keys" {
@@ -2988,7 +2988,7 @@ test "cross-realm construction uses class prototype state without observable rea
         \\    assert.sameValue(R.Function.__realm_Object_proto, fakePrototype);
         \\})();
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Object RegExp and TypedArray use their C function Realm state" {
@@ -3023,7 +3023,7 @@ test "Object RegExp and TypedArray use their C function Realm state" {
         \\    assert.notSameValue(Object.getPrototypeOf(backing), ArrayBuffer.prototype);
         \\})();
     );
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine cross-realm eval keeps global lexical declarations per realm" {
@@ -3038,7 +3038,7 @@ test "Engine cross-realm eval keeps global lexical declarations per realm" {
         \\assert.sameValue(other.crossRealmLexicalProbe, 2);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "native builtin records use callee realm for errors and created objects" {
@@ -3061,7 +3061,7 @@ test "native builtin records use callee realm for errors and created objects" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "collection callback adapter materializes errors in its explicit realm" {
@@ -3160,7 +3160,7 @@ test "constructor static prototype and accessor handlers keep their callee realm
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "bound and proxy wrappers defer realm switching to the final target" {
@@ -3193,7 +3193,7 @@ test "bound and proxy wrappers defer realm switching to the final target" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Array species compares exact realm intrinsics without skipping wrapper gets" {
@@ -3275,7 +3275,7 @@ test "Array species compares exact realm intrinsics without skipping wrapper get
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Array species does not confuse a foreign native named Array with the intrinsic" {
@@ -3315,7 +3315,7 @@ test "Array species does not confuse a foreign native named Array with the intri
         \\assert.sameValue(output.length, 2);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "TypedArray iterator methods accept cross-realm typed array receivers" {
@@ -3334,7 +3334,7 @@ test "TypedArray iterator methods accept cross-realm typed array receivers" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "TypedArray iterator methods reject proxy-wrapped shared typed array receivers" {
@@ -3378,7 +3378,7 @@ test "TypedArray iterator methods reject proxy-wrapped shared typed array receiv
         \\})(this);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval assigns missing with references through outer scope" {
@@ -3490,7 +3490,7 @@ test "TypedArray array-like construction does not replay coercions after fast pa
         \\assert.sameValue(typed[1], 8);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "TypedArray defineProperty value conversion may detach buffer" {
@@ -3521,7 +3521,7 @@ test "TypedArray defineProperty value conversion may detach buffer" {
         \\assert.sameValue(big[0], undefined);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "TypedArray and species accessors follow inherited QuickJS shape" {
@@ -3552,7 +3552,7 @@ test "TypedArray and species accessors follow inherited QuickJS shape" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Well-known symbol method aliases share lazy native identity" {
@@ -3584,7 +3584,7 @@ test "Well-known symbol method aliases share lazy native identity" {
         \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose].name, "disposeAsync");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "functionPrototypeFromGlobal alias preserves Function.prototype identity" {
@@ -3601,7 +3601,7 @@ test "functionPrototypeFromGlobal alias preserves Function.prototype identity" {
         \\assert.sameValue(C instanceof Function, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Date/Function prototype auto-init install preserves toPrimitive and hasInstance descriptors" {
@@ -3628,7 +3628,7 @@ test "Date/Function prototype auto-init install preserves toPrimitive and hasIns
         \\assert.sameValue(1 instanceof C, false);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Lazy standard native accessors preserve descriptors and receiver markers" {
@@ -3678,7 +3678,7 @@ test "Lazy standard native accessors preserve descriptors and receiver markers" 
         \\assert.throws(TypeError, function() { asyncDisposedDesc.get.call({}); });
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Map and Set size live on prototype getter rather than instances" {
@@ -3706,7 +3706,7 @@ test "Map and Set size live on prototype getter rather than instances" {
         \\assert.sameValue(set.size, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "typed array instances keep concrete class identity" {
@@ -3728,7 +3728,7 @@ test "typed array instances keep concrete class identity" {
         \\assert.sameValue(Object.prototype.toString.call(big), "[object BigUint64Array]");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "RegExp lazy native accessors preserve descriptor and mutation semantics" {
@@ -3770,7 +3770,7 @@ test "RegExp lazy native accessors preserve descriptor and mutation semantics" {
         \\assert.sameValue(dotAllDesc.set, undefined);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Buffer and TypedArray lazy native accessors preserve descriptor semantics" {
@@ -3819,7 +3819,7 @@ test "Buffer and TypedArray lazy native accessors preserve descriptor semantics"
         \\assert.sameValue(tagDesc.get.call(typed), "Uint8Array");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "standard constructors publish final prototype graphs and eager metadata" {
@@ -3860,7 +3860,7 @@ test "standard constructors publish final prototype graphs and eager metadata" {
         \\assert.sameValue(Object.getPrototypeOf(Function.prototype), Object.prototype);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "DOMException participates in builtin construction protocols" {
@@ -3892,7 +3892,7 @@ test "DOMException participates in builtin construction protocols" {
         \\assert.sameValue(retargeted instanceof DOMException, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Function apply CreateListFromArrayLike observes array indexed gets" {
@@ -3958,7 +3958,7 @@ test "Function apply CreateListFromArrayLike observes array indexed gets" {
         \\assert.sameValue(order.join(","), "length,0,1");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "String.fromCodePoint through apply follows CreateListFromArrayLike" {
@@ -4010,7 +4010,7 @@ test "String.fromCodePoint through apply follows CreateListFromArrayLike" {
         \\});
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Function and Reflect apply preserve target classes and argument shapes" {
@@ -4132,7 +4132,7 @@ test "Function and Reflect apply preserve target classes and argument shapes" {
         \\assert.sameValue(globalThis.__nativeApplyIndirect, 42);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise constructor resolve and reject functions inherit Function.prototype" {
@@ -4150,7 +4150,7 @@ test "Promise constructor resolve and reject functions inherit Function.prototyp
         \\assert.sameValue(Object.getPrototypeOf(rejectFunction), Function.prototype);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "C function data callbacks are callable but not constructors" {
@@ -4182,7 +4182,7 @@ test "C function data callbacks are callable but not constructors" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise resolving functions keep internal state off user properties" {
@@ -4221,7 +4221,7 @@ test "Promise resolving functions keep internal state off user properties" {
         \\);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise self-resolution rejects with the caller realm TypeError" {
@@ -4263,7 +4263,7 @@ test "cross-realm promise resolving data function keeps caller realm" {
         \\})();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise.resolve rejects self-resolution from custom capability" {
@@ -4287,7 +4287,7 @@ test "Promise.resolve rejects self-resolution from custom capability" {
         \\);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise.resolve returns an identity match before constructor validation" {
@@ -4337,7 +4337,7 @@ test "Promise.resolve returns an identity match before constructor validation" {
         \\});
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise capability executor keeps internal slot off user properties" {
@@ -4364,7 +4364,7 @@ test "Promise capability executor keeps internal slot off user properties" {
         \\print("done");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("executor ok\nresolve 1\ndone\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4398,7 +4398,7 @@ test "Promise.all preserves a resolve abrupt completion across IteratorClose" {
         \\);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true resolve-error 1\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4429,7 +4429,7 @@ test "Promise.all next abrupt completion does not close the iterator" {
         \\);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true next-error 0\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4465,7 +4465,7 @@ test "Promise.all preserves a then abrupt completion across IteratorClose" {
         \\);
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("true then-error 1\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4497,7 +4497,7 @@ test "Promise combinator element callbacks inherit Function.prototype" {
         \\assert.sameValue(Object.getPrototypeOf(rejectElementFunction), Function.prototype);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise combinator callbacks keep internal state off user properties" {
@@ -4552,7 +4552,7 @@ test "Promise combinator callbacks keep internal state off user properties" {
         \\);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "pending Promise.then reactions run after deferred settlement" {
@@ -4584,7 +4584,7 @@ test "pending Promise.then reactions run after deferred settlement" {
         \\print("after pass");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "after resolve\nafter reject\nafter pass\nfirst ok\nsecond ok\ncaught boom\nchain ok!\nrecovered handled\npass through\n",
         stream.buffered(),
@@ -4608,7 +4608,7 @@ test "settled Promise.then reactions run as deferred jobs" {
         \\print("sync");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "sync\nthen ok\ncaught bad\nchain ok!\nrecovered handled\n",
         stream.buffered(),
@@ -4652,7 +4652,7 @@ test "Promise.finally callbacks keep internal state off user properties" {
         \\print("after direct");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("cleanup 1\nafter direct\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4690,7 +4690,7 @@ test "Promise.allSettled reject element callback is alreadyCalled guarded" {
         \\assert.sameValue(rejectCallCount, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Promise.all accepts string iterables through the built-in Promise path" {
@@ -4708,7 +4708,7 @@ test "Promise.all accepts string iterables through the built-in Promise path" {
         \\print("after");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("after\n2\na\nb\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4724,7 +4724,7 @@ test "Promise.race accepts Set iterables through the built-in Promise path" {
         \\print("after");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("after\n1\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4746,7 +4746,7 @@ test "Promise.allSettled accepts Set iterables through the built-in Promise path
         \\print("after");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("after\n2\nfulfilled\n1\nfulfilled\n2\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4788,7 +4788,7 @@ test "Promise keyed combinators preserve enumerable own keys" {
         \\print("after");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "1\nallSettledKeyed\nafter\nfulfilled:1\nrejected:x\ntrue\nfirst|second\none|two|sym\nundefined\n",
         stream.buffered(),
@@ -4807,7 +4807,7 @@ test "Promise.any accepts Set iterables through the built-in Promise path" {
         \\print("after");
     , &stream);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("after\n1\n", stream.buffered());
     try std.testing.expect(!js.context.hasException());
 }
@@ -4859,7 +4859,7 @@ test "Object constructor record preserves call and construct semantics" {
         \\Object.defineProperty(renamed, "name", originalName);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "property compaction preserves enumeration order across interleaved deletes" {
@@ -4880,7 +4880,7 @@ test "property compaction preserves enumeration order across interleaved deletes
         \\assert.sameValue(Object.keys(object).map(k => k + ":" + object[k]).join("|"), "p16:160|p17:170|p18:180|p19:190|p20:200|p21:210|p22:220|p23:230|p3:303");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "shared engine baseline restore survives compacting global deletes" {
@@ -4906,7 +4906,7 @@ test "shared engine baseline restore survives compacting global deletes" {
         \\assert.sameValue(typeof print, "function");
         \\assert.sameValue(eval("1 + 1"), 2);
     );
-    try std.testing.expect(check.isUndefined());
+    try std.testing.expect(check.is(.undefined_value));
 }
 
 test "native cproto distinguishes construct-only and callable constructors" {
@@ -4925,7 +4925,7 @@ test "native cproto distinguishes construct-only and callable constructors" {
         \\assert.sameValue(Object(null) instanceof Object, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
@@ -4952,7 +4952,7 @@ test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
         \\assert.throws(TypeError, function () { set.add(Symbol.for("registered")); });
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "host WeakMap mutation closure rejects registered symbol keys" {
@@ -5113,7 +5113,7 @@ test "Set combinator results use the realm intrinsic prototype after global muta
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Map.groupBy result uses the realm intrinsic prototype after global mutation" {
@@ -5141,7 +5141,7 @@ test "Map.groupBy result uses the realm intrinsic prototype after global mutatio
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "RegExp call and String RegExpCreate use the realm intrinsic after global mutation" {
@@ -5175,7 +5175,7 @@ test "RegExp call and String RegExpCreate use the realm intrinsic after global m
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Uint8Array.fromHex/fromBase64 use realm intrinsic prototypes after global mutation" {
@@ -5210,7 +5210,7 @@ test "Uint8Array.fromHex/fromBase64 use realm intrinsic prototypes after global 
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Uint8Array fromBase64/toBase64 named options preserve alphabet and lastChunkHandling" {
@@ -5230,7 +5230,7 @@ test "Uint8Array fromBase64/toBase64 named options preserve alphabet and lastChu
         \\assert.sameValue(Uint8Array.fromBase64("YQ==", {})[0], 0x61);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "native Error Reflect.construct fallback uses the realm intrinsic after global mutation" {
@@ -5269,7 +5269,7 @@ test "native Error Reflect.construct fallback uses the realm intrinsic after glo
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Error.prototype.stack setter still recognizes the intrinsic after global mutation" {
@@ -5303,7 +5303,7 @@ test "Error.prototype.stack setter still recognizes the intrinsic after global m
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "DisposableStack.move and dispose keep realm intrinsic prototypes after global mutation" {
@@ -5352,7 +5352,7 @@ test "DisposableStack.move and dispose keep realm intrinsic prototypes after glo
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "JSON.parse uses realm intrinsic Object/Array prototypes after global mutation" {
@@ -5384,7 +5384,7 @@ test "JSON.parse uses realm intrinsic Object/Array prototypes after global mutat
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "TypedArray Reflect.construct fallback uses the realm intrinsic after global mutation" {
@@ -5410,7 +5410,7 @@ test "TypedArray Reflect.construct fallback uses the realm intrinsic after globa
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set.prototype.symmetricDifference tracks receiver mutations from a set-like keys call" {
@@ -5568,7 +5568,7 @@ test "Set.prototype.isDisjointFrom propagates IteratorClose errors on early fals
         \\assert.sameValue(returnCalls, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set.prototype.isSupersetOf propagates IteratorClose errors on early false" {
@@ -5597,7 +5597,7 @@ test "Set.prototype.isSupersetOf propagates IteratorClose errors on early false"
         \\assert.sameValue(returnCalls, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set relation IteratorClose rejects a non-object return result" {
@@ -5622,7 +5622,7 @@ test "Set relation IteratorClose rejects a non-object return result" {
         \\assert.sameValue(returnCalls, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set relation next abrupt completion does not close the iterator" {
@@ -5655,7 +5655,7 @@ test "Set relation next abrupt completion does not close the iterator" {
         \\assert.sameValue(returnCalls, 0);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set.prototype.union uses GetSetRecord order for set-like classes" {
@@ -5743,7 +5743,7 @@ test "Set.prototype.union uses GetSetRecord order for set-like classes" {
         \\assert.sameValue(coercionCalls, 1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set.prototype.intersection consumes set-like keys as a direct iterator" {
@@ -5783,7 +5783,7 @@ test "Set.prototype.intersection consumes set-like keys as a direct iterator" {
         \\assert.compareArray(log, ["call keys", "get next", "call next"]);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set union methods copy receiver after reading set-like keys next" {
@@ -5816,7 +5816,7 @@ test "Set union methods copy receiver after reading set-like keys next" {
         \\assert.compareArray([...symmetricBase.symmetricDifference(setLikeThatReplaces(symmetricBase))], [4]);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Set.prototype.difference has branch ignores entries appended by receiver mutation" {
@@ -5846,7 +5846,7 @@ test "Set.prototype.difference has branch ignores entries appended by receiver m
         \\assert.compareArray(seen, [1, 2, 3, 4]);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "URI globals use observable string coercion and reject malformed UTF-8" {
@@ -5872,7 +5872,7 @@ test "URI globals use observable string coercion and reject malformed UTF-8" {
         \\assert.sameValue(encodeURI(), "undefined");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "URI four byte decode range preserves globals and completion" {
@@ -5922,7 +5922,7 @@ test "URI four byte decode range preserves globals and completion" {
         \\`), 3);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "URI decodeUriUnits walks latin1 and utf16 widths" {
@@ -5950,7 +5950,7 @@ test "URI decodeUriUnits walks latin1 and utf16 widths" {
         \\assert.sameValue(utf16Bad, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "ArrayBuffer construct args share maxByteLength walk" {
@@ -5978,7 +5978,7 @@ test "ArrayBuffer construct args share maxByteLength walk" {
         \\assert.sameValue(sabRange, true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval builds frozen tagged template objects with raw arrays" {
@@ -6003,7 +6003,7 @@ test "Engine eval builds frozen tagged template objects with raw arrays" {
         \\assert.sameValue(Object.getOwnPropertyDescriptor(captured.raw, "length").writable, false);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval applies tagged template before new invocation" {
@@ -6039,7 +6039,7 @@ test "Engine eval permits invalid escapes only in tagged template cooked values"
         \\})`\u{10FFFFF}${"inner"}right`;
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Engine eval closures inherit direct eval function declarations" {
@@ -6070,7 +6070,7 @@ test "destructured parameter default class keeps initialized parameter bindings"
         \\f([]);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "top-level lexical destructuring reuses its predeclared global cells" {
@@ -6084,7 +6084,7 @@ test "top-level lexical destructuring reuses its predeclared global cells" {
         \\assert.sameValue(second, 2);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "for-of var destructuring predeclares generic binding patterns" {
@@ -6098,7 +6098,7 @@ test "for-of var destructuring predeclares generic binding patterns" {
         \\assert.sameValue(seen, 42);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "block function closures keep the current lexical binding cells" {
@@ -6117,7 +6117,7 @@ test "block function closures keep the current lexical binding cells" {
         \\outer();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "nested assignment patterns preserve yield identifier and expression grammar" {
@@ -6139,7 +6139,7 @@ test "nested assignment patterns preserve yield identifier and expression gramma
         \\assert.sameValue(suspended.key, 23);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "class field initializers inherit QuickJS arguments grammar" {
@@ -6160,7 +6160,7 @@ test "class field initializers inherit QuickJS arguments grammar" {
         \\assert.sameValue(Allowed.method(1, 2), 2);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "captured derived this binding can only be initialized once" {
@@ -6180,7 +6180,7 @@ test "captured derived this binding can only be initialized once" {
         \\assert.throws(ReferenceError, callSuperAgain);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "class name binding is in TDZ throughout its heritage expression" {
@@ -6197,7 +6197,7 @@ test "class name binding is in TDZ throughout its heritage expression" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "class computed names observe the class name TDZ" {
@@ -6217,7 +6217,7 @@ test "class computed names observe the class name TDZ" {
         \\assert.sameValue(named.prototype.m(), named);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Array and String iterator prototypes inherit @@iterator from Iterator.prototype" {
@@ -6237,7 +6237,7 @@ test "Array and String iterator prototypes inherit @@iterator from Iterator.prot
         \\expectIteratorChain(""[Symbol.iterator]());
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "Object.assign writes through a proxy set trap" {
@@ -6251,7 +6251,7 @@ test "Object.assign writes through a proxy set trap" {
         \\assert.sameValue(set + "", "foo,bar");
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "String match and search Get a proxy matcher then ToPrimitive" {
@@ -6273,7 +6273,7 @@ test "String match and search Get a proxy matcher then ToPrimitive" {
         \\expectWellKnownThenToPrimitive((p) => "".search(p), Symbol.search);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "class static blocks use their installed receiver as the super home object" {
@@ -6290,7 +6290,7 @@ test "class static blocks use their installed receiver as the super home object"
         \\assert.sameValue(observed, 42);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "body function declarations reuse same-name parameter bindings" {
@@ -6311,7 +6311,7 @@ test "body function declarations reuse same-name parameter bindings" {
         \\declarationWinsArguments(1);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "parameter-expression and body environments classify body functions by recorded scope" {
@@ -6327,7 +6327,7 @@ test "parameter-expression and body environments classify body functions by reco
         \\f();
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "eval source conversion combines valid UTF-16 surrogate pairs" {
@@ -6339,7 +6339,7 @@ test "eval source conversion combines valid UTF-16 surrogate pairs" {
         \\assert.sameValue(rawUnicodePattern.test("\u{1F438}"), true);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "invalid opcode reports invalid bytecode without context exception" {
@@ -6365,7 +6365,7 @@ test "module top-level await works in object computed property names" {
         \\assert.sameValue(o[String(await 9)], 9);
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 test "module top-level await works in class computed fields inside try" {
@@ -6388,7 +6388,7 @@ test "module top-level await works in class computed fields inside try" {
         \\}
     );
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 fn fillOwnPropertyStorageForFailure(rt: *core.JSRuntime, object: *core.Object) !void {

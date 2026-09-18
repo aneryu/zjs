@@ -1,6 +1,6 @@
 # 06 — core 值层：`JSValue`、atom、string、number、bigint、json、uri、error
 
-本册覆盖引擎的 **16 字节 tagged 值** 以及围绕它的 intern / 字符串 / 数字 / 错误叶子。权威仍是源码与 [docs/vm-value-representation-contract.md](../vm-value-representation-contract.md)；本文把契约落到函数。
+本册覆盖引擎的 **8 字节 NaN-boxed 值** 以及围绕它的 intern / 字符串 / 数字 / 错误叶子。权威仍是源码与 [docs/vm-value-representation-contract.md](../vm-value-representation-contract.md)；本文把契约落到函数。
 
 子文件：
 
@@ -12,29 +12,29 @@
 | [06-core-value-number-bigint.md](06-core-value-number-bigint.md) | `number.zig` / `bigint.zig` / `json.zig` / `uri.zig` |
 | [06-core-value-errors.md](06-core-value-errors.md) | `errors.zig` / `error_names.zig` / `exception.zig` / `descriptor.zig` |
 
-## 1. `JSValue.Repr`：payload + i64 tag
+## 1. `JSValue`：8 字节 NaN-box
 
-`JSValue` 是 `extern struct { repr: Repr }`，`Repr` 是 `{ payload: u64, tag: i64 }`，comptime 钉 `@sizeOf == 16`、`@alignOf == 8`（`src/core/value.zig:44-81`）。这是 **语义** 上对齐 QuickJS 的 tagged 值，不是 libquickjs C ABI 的 bit 级 drop-in。
+`JSValue` 是 `extern struct { bits: u64 }`，comptime 钉 `@sizeOf == 8`、`@alignOf == 8`（`src/core/value.zig`）。这是 **语义** 上对齐 QuickJS 的 tagged 值，不是 libquickjs C ABI 的 bit 级 drop-in。
 
-tag使用8字节i64，payload也为8字节。源码注释以历史机器码/性能实验解释此选择；SIMD寄存器使用和store forwarding效果取决于目标平台与编译器，不能当作所有构建的固定执行方式。
+float64 存 IEEE 位（NaN 规范化到 `0x7FF8_0000_0000_0000`），判定是 `bits <= 0xFFF0_0000_0000_0000`（−Inf）。其余 kind 是 16-bit 前缀 `0xFFF0 + index` 加 48-bit payload：`index` 把 Kind 稠密编进 1..15，跳过 −5 空位（symbol→0xFFF1，object→0xFFF7，int→0xFFF8，short_big_int→0xFFFF）。`tagOf` 由 `index - 8` 再对 −5 空位做一步校正，无查找表。tracer-owned 是 raw word 区间 `[0xFFF1_0000_0000_0000, 0xFFF8_0000_0000_0000)`。
 
-`abi_encoding_revision = 1` 是插件ABI指纹使用的编码版本。即使字段类型未变，只要payload/tag含义变化，也应更新该版本；它不是仅在字段布局改变时才递增。其他ABI契约字段见对应契约文档。
+`abi_encoding_revision = 2` 是插件ABI指纹使用的编码版本。即使字段类型未变，只要 payload 位含义变化，也应更新该版本。其他ABI契约字段见对应契约文档。
 
-值按位复制。热路径用 `loadSlotAsIntPair` / `storeSlotAsIntPair` 拆成两个 `u64` 整数 load/store，避免 128-bit SIMD 访问把另一半整数读打成 stall（对照 qjs `ldp`/`stp`）。
+值按 8 字节字复制。
 
 ## 2. Tag 表与 tracer-owned 区间
 
-`Tag` 是一组 `i32` 常量，不是 Zig enum（`src/core/value.zig:19-42`）。
+`JSValue.Kind` 是 `enum(i32)` 种类（调用 `v.is(.int)` / `v.as(.int)` / `JSValue.from(.int, n)`）。槽里是 NaN-boxed `bits`。`Tag` 是同一套编号的 i32 投影，给 `tagOf()` 上的 switch 用。−5 空洞没有成员，boxed 前缀也不给它留槽。
 
 | 常量 | 值 | 载荷 | tracer? |
 | --- | --- | --- | --- |
-| `symbol` | −8 | `*GCObjectHeader`（符号体，`String` 形状） | 是 |
-| `string` | −7 | `*GCObjectHeader`（flat `String`） | 是 |
-| `string_rope` | −6 | `*GCObjectHeader`（`StringRope`） | 是 |
+| `symbol` | −8 | `*gc.Header`（符号体，`String` 形状） | 是 |
+| `string` | −7 | `*gc.Header`（flat `String`） | 是 |
+| `string_rope` | −6 | `*gc.Header`（`StringRope`） | 是 |
 | （空位） | −5 | — | — |
 | `big_int` | −4 | `*gc.Header`（堆 BigInt） | 是 |
 | `module` | −3 | `*gc.Header` | 是 |
-| `function_bytecode` | −2 | `*GCObjectHeader` | 是 |
+| `function_bytecode` | −2 | `*gc.Header` | 是 |
 | `object` | −1 | `*gc.Header`（Object 手柄=体指针） | 是 |
 | `int` | 0 | i32 零扩展到 u64 | 否 |
 | `boolean` | 1 | 0/1 | 否 |
@@ -48,21 +48,17 @@ tag使用8字节i64，payload也为8字节。源码注释以历史机器码/性�
 
 **tracer-owned tag = 连续区间 `[Tag.symbol, Tag.object] = [−8, −1]`。**
 
-`tracer_owned_first_tag` 钉在 `Tag.symbol`（`value.zig:17`）。`cycleMarkHeader` / `isTracerOwned` 用一次有符号区间比较：
-
-```text
-tag >= −8 && tag <= −1
-```
+`isTracerOwned` 用一次 raw word 无符号区间比较，选出 boxed 前缀 0xFFF1..0xFFF7（解码后 `[−8, −1]`，不含 −5 空位，因为空位不编码）；`cycleMarkHeader` 在同一区间上取 48-bit payload 当 header。
 
 当前区间覆盖 symbol、字符串族和堆 BigInt 等负 tag；−5 是保留空位，不是有效值构造器产生的 tag。堆 BigInt 使用 −4，与 pinned QuickJS 的 −9 不同。这里的事实是当前源码中的范围判定，不能将它描述成对早期三种 RC 对象的一档简单扩展。`cycleMarkHeader` 按该区间提取非零载荷，`isTracerOwned` 只检查区间；新增GC kind未必新增tag或改变范围，仍需接入具体追踪逻辑。
 
-`requiresRefCount` 是 **遗留名字**：现在只是「tag 的无符号解释 ≥ `Tag.first`」的廉价堆值分类器，给 store/barrier 快路径用，不再做引用计数。
+store/barrier 快路径看的是 `!isTracerOwned()`（两侧都是立即数则跳过 root 和分代屏障）。没有单独的 `requiresRefCount`。
 
 ## 3. `dup` / `free` 是兼容操作，不是生命周期
 
-契约 v3（`docs/vm-value-representation-contract.md` §1.3）：全 kind 无引用计数。`JSValue.dup` / `JSValue.free` **作为方法已删除**。文件头的「`dup`/`free` remain compatibility operations」是过时注释，不能据此使用这些已不存在的方法。当前应遵守：
+契约 v3（`docs/vm-value-representation-contract.md` §1.3）：全 kind 无引用计数。`JSValue.dup` / `JSValue.free` **作为方法已删除**。当前应遵守：
 
-- 值本身按 16 字节拷贝；拷贝 **不** 改变堆对象寿命。
+- 值本身按 8 字节拷贝；拷贝 **不** 改变堆对象寿命。
 - 堆对象靠 **堆边、root frame、native pin** 活着。
 - 旧代码里「dup 再交给别人、用完 free」现在变成「拷贝 `JSValue`，确保有一条 GC 边或 pin 指向它」。
 - atom 侧同理：`AtomTable.dup`/`free` 已删；动态 atom 在 `sweepDead` 中按 mark/born epoch、host pin 和 body 标记判定，符号体销毁回调也可使条目失效；最后一个弱引用释放可回收已死的壳。预定义 id 与 tagged-int 分别由 `isConst` 和 `isTaggedInt` 识别，不需要动态槽保活。

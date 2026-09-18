@@ -47,9 +47,9 @@ pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, gen
 // Inlined so the per-return arm pays no call (it was ~1% of fib as a separate fn).
 pub inline fn finishFunctionReturn(_: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
     if (!frame.function.isDerivedClassConstructor()) return value;
-    if (value.isObject()) return value;
-    if (!value.isUndefined()) return error.DerivedConstructorReturn;
-    if (adapterValueBorrow(frame.this_value).isUninitialized()) return error.DerivedThisUninitialized;
+    if (value.is(.object)) return value;
+    if (!value.is(.undefined_value)) return error.DerivedConstructorReturn;
+    if (adapterValueBorrow(frame.this_value).is(.uninitialized)) return error.DerivedThisUninitialized;
     return adapterValueBorrow(frame.this_value);
 }
 
@@ -76,7 +76,7 @@ pub fn branch32(_: *core.JSContext, stack: *stack_mod.Stack, function: *const by
     const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try stack.pop();
-    const truthy = value.asBool() orelse value_ops.isTruthy(value);
+    const truthy = value.as(.boolean) orelse value_ops.isTruthy(value);
     if (truthy == branch_if_true) {
         frame.pc = relativePc(operand_pc, diff);
     }
@@ -87,7 +87,7 @@ pub fn branch8(_: *core.JSContext, stack: *stack_mod.Stack, function: *const byt
     const diff: i8 = @bitCast(function.byteCode()[frame.pc]);
     frame.pc += 1;
     const value = try stack.pop();
-    const truthy = value.asBool() orelse value_ops.isTruthy(value);
+    const truthy = value.as(.boolean) orelse value_ops.isTruthy(value);
     if (truthy == branch_if_true) {
         frame.pc = relativePc(operand_pc, diff);
     }
@@ -213,7 +213,7 @@ pub fn gosub(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame
 
 pub fn ret(_: *core.JSContext, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
     const target = try stack.pop();
-    const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
+    const pc_i32 = target.as(.int) orelse return error.InvalidBytecode;
     if (pc_i32 < 0) return error.InvalidBytecode;
     const pc: usize = @intCast(pc_i32);
     if (pc >= function.byteCode().len) return error.InvalidBytecode;

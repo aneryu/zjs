@@ -48,10 +48,14 @@ v2(2026-08-26)= FNABI ABI tuple 过渡 + layout_epoch 定义;v1
 
 ### 1.1 `JSValue` 与 `property.Slot`
 
-- **`JSValue` 16 字节 extern tagged 布局不变**:`{ payload: u64, tag: i64 }`,
-  align 8(`src/core/value.zig:JSValue.Repr`,comptime 断言
-  `@sizeOf == 16`/`@alignOf == 8`;`src/tests/abi_layout.zig` 把
-  `ZjsJSValue` 绑到同一现实)。
+- **`JSValue` 8 字节 NaN-boxed**:`{ bits: u64 }`, align 8
+  (`src/core/value.zig:JSValue`; float64 为 IEEE 位，NaN 规范化；其余 kind
+  为 16-bit 前缀 `0xFFF0 + index` + 48-bit payload。`index` 把 Kind 稠密
+  编进 1..15，跳过 −5 空位：symbol→0xFFF1，object→0xFFF7，int→0xFFF8，
+  short_big_int→0xFFFF。`tagOf` 是算术，无查找表。tracer-owned 是 raw
+  word 区间 `[0xFFF1_0000_0000_0000, 0xFFF8_0000_0000_0000)`)。
+  语义 tag 编号仍见 `Kind`/`Tag`。`value.zig` 的 comptime assert 钉
+  8 字节布局与 `abi_encoding_revision`。
 - tag 值空间(`value.zig:Tag`):
 
   ```text
@@ -62,14 +66,14 @@ v2(2026-08-26)= FNABI ABI tuple 过渡 + layout_epoch 定义;v1
   ```
 
   **tracer-owned tag = 一个连续区间 `[symbol, object]` = `[−8, −1]`**
-  (`value.zig:tracer_owned_first_tag`,`cycleMarkHeader`/`isTracerOwned`
+  (`value.zig:Tag.symbol`,`cycleMarkHeader`/`isTracerOwned`
   用一次区间比较);heap BigInt 坐在 qjs 的 −4 空位而非 −9,这是与
   qjs 的**刻意偏离**。`cycleMarkHeader` 是「哪些 tag 带可追踪 header」的
   唯一定义;kind 加入 tracer 的时刻就是它被加宽的时刻。
-- 对插件的表示承诺以 **FNABI ABI tuple** 表达:`FUN_VALUE_ABI` =
-  (`layout_epoch`, `JSValue.abi_encoding_revision`)。**layout_epoch 现值
-  2**(v3,理由见 changelog C3);`abi_encoding_revision` 现值 1
-  (`value.zig:JSValue.abi_encoding_revision`,`abi_layout.zig` 钉住)。
+- 表示修订以 `JSValue.abi_encoding_revision` 记录（现值 2，由
+  `value.zig` comptime assert 钉住）。历史 FNABI 的 `FUN_VALUE_ABI` =
+  (`layout_epoch`, revision) 已随公开 ABI 撤回；**layout_epoch 现值
+  3**(8-byte NaN-box)。
   layout_epoch 只在真实表示变化(布局 / tag 语义 / 地址稳定性 / 所有权
   语义)时递增,与本文档版号解耦;见
   [fun-native-plugin-design.md](fun-native-plugin-design.md) §11.3。

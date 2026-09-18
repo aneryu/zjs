@@ -80,9 +80,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const scoped_test_options = addEngineOptions(b, engine_option_inputs.withExpect(expect_config_debug));
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
-    // FNABI C/Zig round-trip (src/tests/abi_layout.zig) @cImports the
-    // generated src/abi/fun_native_abi.h.
-    unified_tests.root_module.addIncludePath(b.path("src"));
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
     for (0..test_shards) |shard| {
         const run_unified_tests = runArtifactOnCpus(b, ctx.gate_run_cpus, unified_tests);
@@ -263,7 +260,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .{ .name = "test-bytecode", .description = "Run focused bytecode and pipeline tests", .root_source_file = "src/bytecode_tests.zig", .filter = "tests.bytecode." },
         .{ .name = "test-exec", .description = "Run focused execution and VM tests", .root_source_file = "src/exec_tests.zig", .filter = "tests.exec." },
         .{ .name = "test-builtins", .description = "Run focused ECMAScript built-in tests", .root_source_file = "src/builtins_tests.zig", .filter = "tests.builtins." },
-        .{ .name = "test-runtime", .description = "Run focused host runtime and plugin tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime." },
+        .{ .name = "test-runtime", .description = "Run focused host event-loop tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime." },
         .{ .name = "test-runner", .description = "Run focused test262 runner tests", .root_source_file = "src/runner_tests.zig", .filter = "cli.run_test262" },
         .{ .name = "test-compiler", .description = "Run focused compiler (QCP) tests", .root_source_file = "src/compiler_tests.zig", .filter = "compiler." },
     };

@@ -777,7 +777,7 @@ test "FunctionBytecode raw flag bytes and packed nullable pointers are canonical
     try std.testing.expect(fb.vardefs != null);
     try std.testing.expect(fb.closure_var != null);
     try std.testing.expect(fb.cpool != null);
-    try std.testing.expect(fb.cpoolSlice()[0].isUndefined());
+    try std.testing.expect(fb.cpoolSlice()[0].is(.undefined_value));
 
     const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, 1, 0, 0);
     const layout = fb.layout();
@@ -820,7 +820,7 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
     );
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
     const hot_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
-    const expected_code_end: usize = 0x74;
+    const expected_code_end: usize = 0x6c;
     try std.testing.expectEqual(expected_code_end, layout.byte_code_end);
     try std.testing.expectEqual(@as(?usize, expected_code_end), layout.hot_off);
     try std.testing.expectEqual(expected_code_end + hot_bytes, layout.total_size);
@@ -917,7 +917,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, &second._flag_padding);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, &second._realm_padding);
     try std.testing.expectEqual(@as(u32, 0), second.debugInfo().?._padding);
-    try std.testing.expect(second.cpoolSlice()[0].isUndefined());
+    try std.testing.expect(second.cpoolSlice()[0].is(.undefined_value));
     try std.testing.expectEqual(atom_module.null_atom, second.allVarDefs()[0].var_name);
     try std.testing.expectEqual(@as(i32, 0), second.allVarDefs()[0].scope_next);
     try std.testing.expectEqual(@as(u8, 0), second.allVarDefs()[0].flags);
@@ -1438,8 +1438,8 @@ test "parent finalization failure releases its published child realm owner" {
         pipeline.finalize.createFunctionBytecode(&parent, .{ .realm = realm }),
     );
 
-    try std.testing.expect(parent.cpool[0].isFunctionBytecode());
-    const child_header = parent.cpool[0].objectHeader() orelse return error.TestExpectedEqual;
+    try std.testing.expect(parent.cpool[0].is(.function_bytecode));
+    const child_header = parent.cpool[0].functionBytecodeHeader() orelse return error.TestExpectedEqual;
     const child_fb: *bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", child_header));
     try std.testing.expectEqual(realm, child_fb.realmContext());
 
@@ -1478,13 +1478,13 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
     const parent_fb = &parent_slice[0];
     var parent_alive = true;
 
-    try std.testing.expect(fd.cpool[0].isUndefined());
-    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
+    try std.testing.expect(fd.cpool[0].is(.undefined_value));
+    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].functionBytecodeHeader().?);
 
     fd.deinit(rt);
     fd_alive = false;
     try std.testing.expectEqual(name, child_fb.funcName());
-    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
+    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].functionBytecodeHeader().?);
 
     _ = parent_fb.cpoolSlice()[0];
     {
@@ -1602,7 +1602,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     try std.testing.expectEqual(atom_module.null_atom, fd.args[0].var_name);
     try std.testing.expectEqual(atom_module.null_atom, fd.vars[0].var_name);
     try std.testing.expectEqual(atom_module.null_atom, fd.closure_var[0].var_name);
-    try std.testing.expect(fd.cpool[0].isUndefined());
+    try std.testing.expect(fd.cpool[0].is(.undefined_value));
     try std.testing.expect(fd.source_text == null);
     try std.testing.expect(fb.hasDebug());
     try std.testing.expect(fb.hasExtension());
@@ -1666,7 +1666,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
         try std.testing.expectEqual(@as(?atom_module.Atom, null), it.next());
     }
     try std.testing.expectEqual(@as(i32, 1), fb.cpool_count);
-    try std.testing.expectEqual(@as(i32, 99), fb.cpoolSlice()[0].asInt32().?);
+    try std.testing.expectEqual(@as(i32, 99), fb.cpoolSlice()[0].as(.int).?);
     try std.testing.expectEqual(@as(i32, 7), fb.lineNum());
     try std.testing.expectEqual(@as(i32, 3), fb.colNum());
     try std.testing.expect(fb.pc2lineBuf().len >= 2);

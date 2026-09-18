@@ -43,7 +43,7 @@
 
 - **签名**：`pub fn getValueProperty( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, atom_id: core.Atom, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：可观察 `[[Get]]` 总入口（qjs `JS_GetPropertyInternal`）。
-- **实现**：`value.isObject()` 为真走对象臂，否则尾调 `getValuePropertyNonObject`。对象臂按下列固定顺序试探，前一步不命中才进下一步：
+- **实现**：`value.is(.object)` 为真走对象臂，否则尾调 `getValuePropertyNonObject`。对象臂按下列固定顺序试探，前一步不命中才进下一步：
   1. `mightBePrivate` 且 kind==private → `getPrivateValueProperty`（QJS 把私有挡在 Internal 外；`mightBePrivate` 是 AtomTable 的保守下界，`exec`/`flags`/`lastIndex` 这类预定义名只付这一次便宜比较，确认是私有才查完整 kind 表）。
   2. `mappedArgumentsValue`：映射 arguments 覆盖 live cell。
   3. `class_id == proxy` → `getProxyProperty`。
@@ -73,7 +73,7 @@
 - **签名**：`noinline fn getValuePropertyNonObject( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, atom_id: core.Atom, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`[[Get]]` 的非对象臂：原始值读原型，nullish 带消息 TypeError。
 - **实现**：私有 atom → `TypeError`（原始值没有私有字段）。字符串：`length` 走 `value_ops.length`；整数下标 `getStringIndexValue`；否则 `getPrimitiveProperty`。number/bool/bigint/symbol 一律 `getPrimitiveProperty`（不装箱）。null/undefined → `throwNullishPropertyTypeError`。其它 tag `TypeError`。
-- **所有权 / 错误 / 调用**：`getValueProperty` 在 `!value.isObject()` 时。outlined 避免把原始值/nullish 冷路径拼进对象热入口。返回 owned。
+- **所有权 / 错误 / 调用**：`getValueProperty` 在 `!value.is(.object)` 时。outlined 避免把原始值/nullish 冷路径拼进对象热入口。返回 owned。
 
 ### `functionCallerArgumentsProperty` (`src/exec/object_ops.zig:2635`)
 

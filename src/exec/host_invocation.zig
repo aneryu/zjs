@@ -153,8 +153,7 @@ pub const HostInvocation = struct {
     /// null when the callee's shape is not lean-eligible.
     pub inline fn leanFrameFor(self: *HostInvocation, rt: *core.JSRuntime, target: *const inline_calls.InlineTarget) ?*inline_calls.LeanFrame {
         if (self.lean_valid and self.lean.isIntact() and
-            self.lean_callee.repr.payload == target.callable.repr.payload and
-            self.lean_callee.repr.tag == target.callable.repr.tag and
+            self.lean_callee.bits == target.callable.bits and
             self.lean.entry.frame.function == target.fb and
             self.lean.entry.frame.var_refs.ptr == target.var_refs)
         {
@@ -190,13 +189,12 @@ pub const HostInvocation = struct {
     ) ?OneShotRoute {
         const target = &self.one_shot_target;
         if (self.one_shot_global == global and
-            target.callable.repr.payload == callee.repr.payload and
-            target.callable.repr.tag == callee.repr.tag)
+            target.callable.bits == callee.bits)
         {
             // By value, not through `&this_value`: taking the caller's
             // address forces the receiver into the caller's frame and adds a
             // `str q` / `ldr` round trip in front of every call.
-            core.JSValue.storeSlotAsIntPair(&target.this_value, this_value);
+            target.this_value = this_value;
             return .{
                 .target = target,
                 .lean = if (self.lean_valid and self.lean.isIntact()) &self.lean else null,

@@ -83,10 +83,10 @@ pub fn createForInIterator(
 
     // null/undefined: it->obj stays null and the first next() reports done
     // (quickjs.c:16301-16302 / 16428-16429).
-    if (object_value.isNull() or object_value.isUndefined()) return iterator.value();
+    if (object_value.is(.null_value) or object_value.is(.undefined_value)) return iterator.value();
 
     // JS_ToObjectFree for primitives (quickjs.c:16277-16279).
-    source_val = if (object_value.isObject()) object_value else try primitiveObjectForAccess(rt, global, object_value);
+    source_val = if (object_value.is(.object)) object_value else try primitiveObjectForAccess(rt, global, object_value);
     const source = try property_ops.expectObject(source_val);
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), source_val);
 
@@ -270,7 +270,7 @@ pub fn iteratorCatchMarker(previous_target: i32) core.JSValue {
 }
 
 pub fn iteratorCatchMarkerPreviousTarget(value: core.JSValue) ?i32 {
-    const encoded = value.asCatchOffset() orelse return null;
+    const encoded = value.as(.catch_offset) orelse return null;
     if (encoded >= async_iterator_catch_offset) return null;
     if (encoded == std.math.minInt(i32)) return -1;
     return @intCast(@as(i64, encoded) - @as(i64, std.math.minInt(i32)) - 1);
@@ -281,7 +281,7 @@ pub fn asyncIteratorCatchMarker() core.JSValue {
 }
 
 pub fn isAsyncIteratorCatchMarker(value: core.JSValue) bool {
-    return (value.asCatchOffset() orelse return false) == async_iterator_catch_offset;
+    return (value.as(.catch_offset) orelse return false) == async_iterator_catch_offset;
 }
 
 pub fn isIteratorCatchMarker(value: core.JSValue) bool {
@@ -404,7 +404,7 @@ pub fn abandonForOfIteratorAtDepth(_: *core.JSRuntime, stack: *stack_mod.Stack, 
 pub fn hasCatchMarkerAboveForOfRecord(stack: *const stack_mod.Stack, record_index: usize) bool {
     var index = record_index + 3;
     while (index < stack.len()) : (index += 1) {
-        if (!stack.values[index].isCatchOffset()) continue;
+        if (!stack.values[index].is(.catch_offset)) continue;
         // Nested iterator markers are cleanup records, not catch boundaries.
         if (isIteratorCatchMarker(stack.values[index])) continue;
         return true;
@@ -429,8 +429,8 @@ pub fn closeIteratorFromVmImpl(
 ) !void {
     const return_key = core.atom.ids.return_;
     const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!isCallableValue(return_method)) return error.TypeError;
     const out = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
-    if (!out.isObject()) return error.TypeError;
+    if (!out.is(.object)) return error.TypeError;
 }

@@ -117,23 +117,23 @@ pub fn mathMinMaxNumberFast(args: []const core.JSValue, is_max: bool) ?core.JSVa
     if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
     var index: usize = 1;
     var result: f64 = undefined;
-    if (args[0].asInt32()) |first| {
+    if (args[0].as(.int)) |first| {
         var int_result = first;
         while (index < args.len) : (index += 1) {
-            const next = args[index].asInt32() orelse break;
+            const next = args[index].as(.int) orelse break;
             int_result = if (is_max) @max(int_result, next) else @min(int_result, next);
         }
         if (index == args.len) return core.JSValue.int32(int_result);
         result = @floatFromInt(int_result);
     } else {
-        result = args[0].asFloat64() orelse return null;
+        result = args[0].as(.float64) orelse return null;
     }
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        const number: f64 = if (arg.asInt32()) |int_value|
+        const number: f64 = if (arg.as(.int)) |int_value|
             @floatFromInt(int_value)
         else
-            arg.asFloat64() orelse return null;
+            arg.as(.float64) orelse return null;
         if (!std.math.isNan(result)) {
             result = if (std.math.isNan(number))
                 number
@@ -358,7 +358,7 @@ pub fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
         return error.TypeError;
     }
-    if (primitive.isSymbol()) {
+    if (primitive.is(.symbol)) {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert symbol to number") catch |err| return err;
         return error.TypeError;
     }
@@ -370,9 +370,9 @@ pub fn mathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.O
     if (args.len == 2) {
         const a_val = args[0];
         const b_val = args[1];
-        if (a_val.isInt() and b_val.isInt()) {
-            const a_i32 = a_val.asInt32().?;
-            const b_i32 = b_val.asInt32().?;
+        if (a_val.is(.int) and b_val.is(.int)) {
+            const a_i32 = a_val.as(.int).?;
+            const b_i32 = b_val.as(.int).?;
             if (a_i32 == 0 and b_i32 == 0) return 0.0;
             return @floatFromInt(if (is_max) (if (a_i32 > b_i32) a_i32 else b_i32) else (if (a_i32 < b_i32) a_i32 else b_i32));
         }
@@ -418,11 +418,11 @@ pub fn mathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
 }
 
 pub fn primitiveMathNumber(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.is(.int)) return @floatFromInt(value.as(.int).?);
+    if (value.is(.float64)) return value.as(.float64).?;
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
     return null;
 }
 
@@ -723,11 +723,11 @@ fn exactPowerOfTwoExponent(value: f64) ?i32 {
 }
 
 fn numberValue(value: core.JSValue) !f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    if (value.asBool()) |v| return if (v) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.is(.int)) return @floatFromInt(value.as(.int).?);
+    if (value.is(.float64)) return value.as(.float64).?;
+    if (value.as(.boolean)) |v| return if (v) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
     return error.TypeError;
 }
 
@@ -747,24 +747,24 @@ test "mathMinMaxNumberFast mirrors js_math_min_max over int32/float64 and misses
     const int = core.JSValue.int32;
     const flt = core.JSValue.float64;
     // int32 prefix folds with max_int / min_int and returns JS_NewInt32.
-    try std.testing.expectEqual(@as(?i32, 7), mathMinMaxNumberFast(&.{ int(3), int(7), int(2) }, true).?.asInt32());
-    try std.testing.expectEqual(@as(?i32, 2), mathMinMaxNumberFast(&.{ int(3), int(7), int(2) }, false).?.asInt32());
-    try std.testing.expectEqual(@as(?i32, 5), mathMinMaxNumberFast(&.{int(5)}, true).?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), mathMinMaxNumberFast(&.{ int(3), int(7), int(2) }, true).?.as(.int));
+    try std.testing.expectEqual(@as(?i32, 2), mathMinMaxNumberFast(&.{ int(3), int(7), int(2) }, false).?.as(.int));
+    try std.testing.expectEqual(@as(?i32, 5), mathMinMaxNumberFast(&.{int(5)}, true).?.as(.int));
     // No arguments: +/-Infinity as a float.
-    try std.testing.expect(std.math.isNegativeInf(mathMinMaxNumberFast(&.{}, true).?.asFloat64().?));
-    try std.testing.expect(std.math.isPositiveInf(mathMinMaxNumberFast(&.{}, false).?.asFloat64().?));
+    try std.testing.expect(std.math.isNegativeInf(mathMinMaxNumberFast(&.{}, true).?.as(.float64).?));
+    try std.testing.expect(std.math.isPositiveInf(mathMinMaxNumberFast(&.{}, false).?.as(.float64).?));
     // Mixed int / float leg: the int prefix switches to the float leg.
     try std.testing.expectEqual(@as(?f64, 7.5), mathMinMaxNumberFast(&.{ int(3), flt(7.5), int(2) }, true).?.asNumber());
-    try std.testing.expectEqual(@as(?i32, 2), mathMinMaxNumberFast(&.{ int(3), flt(7.5), int(2) }, false).?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), mathMinMaxNumberFast(&.{ int(3), flt(7.5), int(2) }, false).?.as(.int));
     // Int-valued double collapses to int32 like JS_NewFloat64.
-    try std.testing.expectEqual(@as(?i32, 9), mathMinMaxNumberFast(&.{ flt(9.0), int(4) }, true).?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 9), mathMinMaxNumberFast(&.{ flt(9.0), int(4) }, true).?.as(.int));
     // NaN is sticky once seen, in either position.
-    try std.testing.expect(std.math.isNan(mathMinMaxNumberFast(&.{ int(1), flt(std.math.nan(f64)), int(9) }, true).?.asFloat64().?));
-    try std.testing.expect(std.math.isNan(mathMinMaxNumberFast(&.{ flt(std.math.nan(f64)), int(9) }, false).?.asFloat64().?));
+    try std.testing.expect(std.math.isNan(mathMinMaxNumberFast(&.{ int(1), flt(std.math.nan(f64)), int(9) }, true).?.as(.float64).?));
+    try std.testing.expect(std.math.isNan(mathMinMaxNumberFast(&.{ flt(std.math.nan(f64)), int(9) }, false).?.as(.float64).?));
     // Signed zero: max(-0, +0) is +0, min(+0, -0) is -0.
-    try std.testing.expectEqual(@as(?i32, 0), mathMinMaxNumberFast(&.{ flt(-0.0), int(0) }, true).?.asInt32());
-    try std.testing.expect(std.math.isNegativeZero(mathMinMaxNumberFast(&.{ int(0), flt(-0.0) }, false).?.asFloat64().?));
-    try std.testing.expect(std.math.isNegativeZero(mathMinMaxNumberFast(&.{ flt(-0.0), flt(0.0) }, false).?.asFloat64().?));
+    try std.testing.expectEqual(@as(?i32, 0), mathMinMaxNumberFast(&.{ flt(-0.0), int(0) }, true).?.as(.int));
+    try std.testing.expect(std.math.isNegativeZero(mathMinMaxNumberFast(&.{ int(0), flt(-0.0) }, false).?.as(.float64).?));
+    try std.testing.expect(std.math.isNegativeZero(mathMinMaxNumberFast(&.{ flt(-0.0), flt(0.0) }, false).?.as(.float64).?));
     // Anything that needs ToNumber misses to the generic path.
     try std.testing.expect(mathMinMaxNumberFast(&.{ int(1), core.JSValue.boolean(true) }, true) == null);
     try std.testing.expect(mathMinMaxNumberFast(&.{core.JSValue.undefinedValue()}, false) == null);

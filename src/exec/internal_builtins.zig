@@ -251,7 +251,7 @@ test "every occupied standard native entry is a well-formed NativeEntry" {
         for (records.dense) |record| {
             if (record.kind == .retired) continue;
             try testing.expect(record.fallback == null or record.kind == .leaf or record.kind == .method_leaf);
-            if (record.kind == .leaf or record.kind == .method_leaf) try testing.expect(record.sig != 0);
+            if (record.kind == .leaf or record.kind == .method_leaf) try testing.expect(record.sig != .none);
             if (record.kind == .method_leaf) try testing.expect(record.fallback != null);
         }
         for (records.sparse) |entry| {

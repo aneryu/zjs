@@ -154,7 +154,7 @@
 
 - **签名**：`pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !void`。
 - **作用**：写入 this/current_function；new.target 非 undefined 才 ensureCold。
-- **实现**：先按 `inputs.new_target_value.isUndefined()` 决定要不要 `ensureCold(&rt.memory)`（分配放在写任何绑定之前，失败时帧还没被改过），再写 `this_value` / `current_function`，最后把 new_target 存进冷盒。
+- **实现**：先按 `inputs.new_target_value.is(.undefined_value)` 决定要不要 `ensureCold(&rt.memory)`（分配放在写任何绑定之前，失败时帧还没被改过），再写 `this_value` / `current_function`，最后把 new_target 存进冷盒。
 - **所有权 / 错误 / 调用**：错误：error union——只有 `new_target` 非 undefined 时才 `ensureCold` 分配 `FrameCold`，OOM 由此上抛。所有权：`this`/`current_function` 存热字段（借用值），`new_target` 存 cold；cold 块归帧所有，随 `deinit` 释放。调用：唯一调用方 `src/exec/zjs_vm.zig:528`。
 
 ### `Frame.initArguments` (`src/exec/frame.zig:386`)

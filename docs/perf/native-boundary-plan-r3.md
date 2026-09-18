@@ -16,9 +16,8 @@ worktree、一个 Opus 子代理，文件所有权互斥；合并由 driver 做�
 - 16 B `JSValue` 的内存拷贝一律用整数对（`JSValue.loadSlotAsIntPair` /
   `storeSlotAsIntPair`、`call_site.pinnedLoad/pinnedStore`）：X925 上 128 位
   访存对 64 位访存不做 store-forwarding（每次 ~12 cyc）。
-- FNABI schema（`src/abi/fun_native_abi.zig` `signatures`）追加签名 id 时
-  **本轮统一从 33 起，按包预留**：WP2 无；WP4 无；其他包需要时先在报告里
-  申请，driver 分配后再落地（第二轮 K/D 撞号教训）。
+- 叶签名现为引擎私有 `LeafSig`（`src/core/native_entry.zig`）。本稿撰写时
+  的 FNABI `signatures` 表与「从 33 起统一发号」规则已随公开 ABI 撤回。
 - 不 push；不碰其他包的文件；报告 ≤ 60 行：SHA、机制、读数前/后/qjs、门、欠账。
 
 ---

@@ -143,8 +143,8 @@ pub const Accessor = struct {
 };
 
 fn accessorHeaderFromValue(value: JSValue) ?*gc.Header {
-    if (value.isUndefined()) return null;
-    std.debug.assert(value.isObject());
+    if (value.is(.undefined_value)) return null;
+    std.debug.assert(value.is(.object));
     return value.refHeader().?;
 }
 

@@ -95,7 +95,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
             const primitive = if (construct_args.values.len >= 1) blk: {
-                if (construct_args.values[0].isSymbol()) return error.TypeError;
+                if (construct_args.values[0].is(.symbol)) return error.TypeError;
                 // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric,
                 // then a bigint result converts to float64 rather than throwing.
                 if (construct_args.values[0].isBigInt()) {
@@ -244,7 +244,7 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
 fn reflectConstructPrototype(ctx: *core.JSContext, target_name: []const u8, new_target: core.JSValue) !object_ops.OwnedPrototype {
     const new_target_object = thisObject(new_target) orelse return error.TypeError;
     const prototype_value = try new_target_object.getProperty(core.atom.ids.prototype);
-    if (prototype_value.isObject()) return .{ .value = prototype_value };
+    if (prototype_value.is(.object)) return .{ .value = prototype_value };
 
     const fallback_realm = try call_runtime.functionRealmContext(ctx, new_target);
     if (object_ops.constructorClassPrototypeId(target_name)) |class_id| {
@@ -446,7 +446,7 @@ pub fn reflectIsExtensibleCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    if (!args[0].isObject()) return error.TypeError;
+    if (!args[0].is(.object)) return error.TypeError;
     return object_ops.objectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame);
 }
 

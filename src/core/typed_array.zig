@@ -171,7 +171,7 @@ pub fn arrayBufferSliceToImmutableRange(rt: *JSRuntime, buffer_value: JSValue, s
 
 pub fn arrayBufferTransfer(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue, fixed_length: bool) !JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
-    const new_length = if (new_length_value.isUndefined()) buffer.byteStorage().len else try toIndexUsize(rt, new_length_value);
+    const new_length = if (new_length_value.is(.undefined_value)) buffer.byteStorage().len else try toIndexUsize(rt, new_length_value);
     return arrayBufferTransferLength(rt, buffer_value, new_length, fixed_length);
 }
 
@@ -199,7 +199,7 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
 
 pub fn arrayBufferTransferToImmutable(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
-    const new_length = if (new_length_value.isUndefined()) buffer.byteStorage().len else try toIndexUsize(rt, new_length_value);
+    const new_length = if (new_length_value.is(.undefined_value)) buffer.byteStorage().len else try toIndexUsize(rt, new_length_value);
     return arrayBufferTransferToImmutableLength(rt, buffer_value, new_length);
 }
 
@@ -357,9 +357,9 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
     const buffer = try expectArrayBufferObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     const buffer_length = buffer.byteStorage().len;
-    const byte_offset = if (args.len >= 2 and !args[1].isUndefined()) try toIndexUsize(rt, args[1]) else @as(usize, 0);
+    const byte_offset = if (args.len >= 2 and !args[1].is(.undefined_value)) try toIndexUsize(rt, args[1]) else @as(usize, 0);
     if (byte_offset > buffer_length or byte_offset % element_size != 0) return error.RangeError;
-    const explicit_fixed_length = args.len >= 3 and !args[2].isUndefined();
+    const explicit_fixed_length = args.len >= 3 and !args[2].is(.undefined_value);
     const remaining = buffer_length - byte_offset;
     const fixed_length: ?u32 = if (explicit_fixed_length) blk: {
         const requested = try toIndexUsize(rt, args[2]);
@@ -407,7 +407,7 @@ pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Obj
     const buffer_length = arrayBufferByteLength(buffer);
     const byte_offset = if (args.len >= 2) try toIndexUsize(rt, args[1]) else @as(usize, 0);
     if (byte_offset > buffer_length) return error.RangeError;
-    const auto_length = !(args.len >= 3 and !args[2].isUndefined());
+    const auto_length = !(args.len >= 3 and !args[2].is(.undefined_value));
     const view_length = if (!auto_length)
         try toIndexUsize(rt, args[2])
     else
@@ -735,7 +735,7 @@ pub fn expectDataViewObject(value: JSValue) !*Object {
 // --- Index / number coercion primitives -------------------------------------
 
 fn relativeSliceIndex(rt: *JSRuntime, value: JSValue, len: usize, undefined_is_len: bool) !usize {
-    if (undefined_is_len and value.isUndefined()) return len;
+    if (undefined_is_len and value.is(.undefined_value)) return len;
 
     const relative = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(relative)) return 0;
@@ -836,8 +836,8 @@ fn bigIntResult(rt: *JSRuntime, value: i128) !JSValue {
 }
 
 fn numberValue(value: JSValue) ?f64 {
-    if (value.asInt32()) |int_value| return @floatFromInt(int_value);
-    if (value.asFloat64()) |float_value| return float_value;
+    if (value.as(.int)) |int_value| return @floatFromInt(int_value);
+    if (value.as(.float64)) |float_value| return float_value;
     return null;
 }
 
@@ -865,10 +865,10 @@ fn numberToUint8Clamp(number: f64) u8 {
 }
 
 fn coerceNumber(rt: *JSRuntime, value: JSValue) !f64 {
-    if (value.isSymbol()) return error.TypeError;
+    if (value.is(.symbol)) return error.TypeError;
     if (numberValue(value)) |number| return number;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
     if (value.isString()) {
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.memory.allocator);
@@ -965,7 +965,7 @@ pub inline fn writeInt32NumericElement(kind: u8, bytes: [*]u8, integer: i32) boo
 }
 
 noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
-    const bits: u32 = if (value.asInt32()) |integer|
+    const bits: u32 = if (value.as(.int)) |integer|
         @bitCast(integer)
     else
         numberToUint32(try coerceNumber(rt, value));
@@ -978,7 +978,7 @@ noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: u8, bytes: []u8,
 }
 
 noinline fn writeClampedElement(rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
-    bytes[0] = if (value.asInt32()) |integer|
+    bytes[0] = if (value.as(.int)) |integer|
         if (integer <= 0)
             0
         else if (integer >= 255)
@@ -1020,11 +1020,11 @@ fn valueToBigInt64Bits(rt: *JSRuntime, value: JSValue) !u64 {
 fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
     if (value.isBigInt()) return value_format.cloneBigIntValue(rt.memory.allocator, value);
     if (value.isNumber()) return error.TypeError;
-    if (value.asBool()) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
+    if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
-    if (value.isString() or value.isObject()) {
+    if (value.isString() or value.is(.object)) {
         try appendValueString(rt, &buffer, value);
         // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
         const trimmed = value_format.trimJsWhitespace(buffer.items);
@@ -1041,9 +1041,9 @@ fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
 
 fn toIntegerOrInfinity(rt: *JSRuntime, value: JSValue) !f64 {
     if (numberValue(value)) |number| return number;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);

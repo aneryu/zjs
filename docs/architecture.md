@@ -34,20 +34,18 @@ Three `src/` companions sit beside those layers:
 
 ## Public entry — `src/root.zig`
 
-Embedders import `zjs`. The stable surface is `JSRuntime`, `JSContext`,
-`JSValue`, `zjs.value` handles, `zjs.native` (host functions), `zjs.CallSite`
-(native -> JS calls), `zjs.host` (native objects, property names),
-and `zjs.runtime`.
+Embedders import `zjs`. The remaining host surface is `JSRuntime`, `JSContext`,
+`JSValue`, `zjs.value` handles, `zjs.native.managed` (host functions),
+and `zjs.runtime` (the host event loop).
 Contract: [public-api-contract.md](public-api-contract.md). Examples:
 [embedding-cookbook.md](embedding-cookbook.md).
 
 `src/internal_root.zig` aggregates CLI, test262, and in-repo tests. It is not
 the public embedding contract.
 
-`src/binding/` adapts core types into that public surface: context helpers
-and `CallSite` (`context.zig`), strings, bytes, property names, native
-functions (`native.zig`: the comptime thunk generators over `NativeEntry`),
-and native objects (`binding.zig`).
+`src/binding/` adapts core types for CLI and in-repo tests: context helpers
+(`context.zig`) and native functions (`native.zig`: comptime thunks over
+`NativeEntry` via `managed`).
 
 ## Core — `src/core/`
 
@@ -82,9 +80,9 @@ container/window value-root frames are linked
 Promises through `trace_atomics_wait_async`. Host values that outlive a call
 must use public handles, not a raw `JSValue`.
 
-`JSValue` has a single representation: a 16-byte struct of payload plus a
-signed 8-byte tag. The alignment with QuickJS is semantic and ownership-level,
-not a bit-level ABI match.
+`JSValue` has a single representation: an 8-byte NaN-boxed word. The
+alignment with QuickJS is semantic and ownership-level, not a bit-level ABI
+match.
 
 `object.zig` is the large object-model file. For property behavior start at
 `shape.zig` and `property.zig`, then the call site in `src/exec/`.
@@ -190,11 +188,12 @@ nine `perf-*-profile` steps with exact opcode pins, and
 Only host policy that must stay out of core:
 
 - `event_loop.zig`: timers, fd/signal handlers, job draining
+- `root.zig`: `zjs.runtime` aliases (`EventLoop`, `runUntilIdle`)
 
-Atomics waiter cleanup is in exec and re-exported from `runtime/root.zig`.
-There is no `cleanup.zig`, `modules.zig`, `buffer.zig`, or `plugin.zig` in
-this directory (the dynamic plugin loader and its `zjs.ffi` ABI were deleted
-2026-09-06; the FNABI loader lives in `fun`). Host functions register
+Atomics waiter cleanup, module file graphs, and ArrayBuffer detach live in
+`src/exec/`. There is no `cleanup.zig`, `modules.zig`, `buffer.zig`,
+`plugin.zig`, or `public.zig` in this directory (the dynamic plugin loader
+and its `zjs.ffi` ABI were deleted 2026-09-06). Host functions register
 through `zjs.native` (`JSContext.defineFunction` / `createFunction`): each
 registration is one immutable `NativeEntry` (`src/core/native_entry.zig`)
 that the VM dispatches exactly like a builtin (`src/exec/vm_native.zig`);
@@ -303,8 +302,7 @@ provide only the root storage and keep its stack address valid for that scope.
 Property access has a per-site cache (W1, 2026-09): `FunctionBytecode`
 carries a `PropSiteCache` table (`src/bytecode.zig`, `PropSiteCache`) that
 `get_field`/`put_field` sites fill through `captureFieldSite` /
-`capturePutSite` in `src/exec/vm_property_field.zig`; the embedding
-`PropertySite` in `src/binding/property_site.zig` reuses the same cache.
+`capturePutSite` in `src/exec/vm_property_field.zig`.
 There is still no `src/core/ic.zig`, no `zjs_enable_ic` option, and no call
 inline cache.
 

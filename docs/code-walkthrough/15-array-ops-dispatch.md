@@ -13,7 +13,7 @@
 
 - **签名**：`pub fn popCatchMarker(_: *core.JSRuntime, stack: *stack_mod.Stack) !??usize`。
 - **作用**：for-of 记录的 catch-offset 编码或识别。
-- **实现**：从栈顶往下扫：遇 `forof_ops.isIteratorCatchMarker` 认定的 marker 就连弹三格（iterator / nextMethod / marker 三元组，不足 3 格是 `error.StackUnderflow`）继续扫；否则弹一格，若它 `isCatchOffset()` 就返回 `popped.catchTarget()`。扫空整条栈都没有 catch offset 时返回外层 `null`（返回类型是 `!??usize`：外层 null = 没有 catch 目标，内层 optional 是 `catchTarget()` 自己的）。错误：error.StackUnderflow。
+- **实现**：从栈顶往下扫：遇 `forof_ops.isIteratorCatchMarker` 认定的 marker 就连弹三格（iterator / nextMethod / marker 三元组，不足 3 格是 `error.StackUnderflow`）继续扫；否则弹一格，若它 `is(.catch_offset)` 就返回 `popped.catchTarget()`。扫空整条栈都没有 catch offset 时返回外层 `null`（返回类型是 `!??usize`：外层 null = 没有 catch 目标，内层 optional 是 `catchTarget()` 自己的）。错误：error.StackUnderflow。
 - **所有权 / 错误 / 调用**：`stack` 借用；弹出的值直接丢弃（TGC 下出栈没有 release 义务，槽位由栈顶指针回退失去根身份），不分配、不建根。error set 只有 `error.StackUnderflow`——迭代器 catch marker 后面不足三个槽意味着引擎不变量已破；`exception_ops.runtimeErrorInfo` 不认识这个 sentinel，所以它没有对应的 JS 错误构造器，万一逃到 native 边界只会被 `nativeFromHostError` 兜底成 `Error: StackUnderflow`。调用方：`exec/vm_control.zig:114`、`:119`（throw 处理）与 `exec/call_runtime.zig:198`（catch 派发）。
 
 ### `arrayPrototypeFromGlobal` (`src/exec/array_ops.zig:132`)

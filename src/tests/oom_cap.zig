@@ -65,7 +65,7 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
     // Same context must keep working after the OOM was caught and the
     // oversized value released.
     const followup = try wrapper.eval("6 * 7", .{ .filename = "<oom-cap>" });
-    try std.testing.expectEqual(@as(?i32, 42), followup.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), followup.as(.int));
 
     // Array growth variant: same cap, same catchable shape. Chunky
     // elements keep the loop short (sub-second tier).

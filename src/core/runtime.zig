@@ -1111,7 +1111,7 @@ pub const NativePin = struct {
 };
 
 pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
-    const header = value.refHeader() orelse value.objectHeader() orelse return null;
+    const header = value.refHeader() orelse value.functionBytecodeHeader() orelse return null;
     return try pinHeaderForNative(runtime, header);
 }
 
@@ -2973,6 +2973,7 @@ pub const JSRuntime = struct {
             try self.atoms.newValueSymbol(bytes)
         else
             try self.atoms.newValueSymbolNoDescription();
+        errdefer self.atoms.abandonUnpublishedSymbol(atom_id);
         return self.takeSymbolValue(atom_id);
     }
 
@@ -4862,11 +4863,11 @@ test "value handle uses runtime persistent root slot" {
     const object = try Object.create(&rt, class.ids.object, null);
     var handle = try rt.takeValueHandle(object.value());
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
-    try std.testing.expect(handle.get().isObject());
+    try std.testing.expect(handle.get().is(.object));
 
     const released = handle.take();
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
-    try std.testing.expect(released.isObject());
+    try std.testing.expect(released.is(.object));
 
     handle.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());

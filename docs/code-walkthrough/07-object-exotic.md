@@ -208,7 +208,7 @@
 - **签名**：`pub fn setOwnWritableDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool`。
 - **作用**：尝试更新自有可写 data、VarRef 或 auto-init 槽。
 - **实现**：拒绝 module_ns，trusted probe 未命中或 deleted/不可写则 false；accessor false，VarRef 写 cell 并 true，auto-init 准备 Shape 改 data 后 prune。data 的旧/新值均无需引用处理且 atom 非 Private_brand 时直接赋值；其他 data 写后屏障并 prune。
-- **所有权 / 错误 / 调用**：函数名称中的 Data 也包含上述 VarRef/auto-init 分支；不调用 setter、查原型或创建缺失属性。primitive 分支无屏障，requiresRefCount 名称不表示此处执行 RC 操作。
+- **所有权 / 错误 / 调用**：函数名称中的 Data 也包含上述 VarRef/auto-init 分支；不调用 setter、查原型或创建缺失属性。立即数分支无屏障（`!isTracerOwned()`）。
 
 ### `Object.setOwnDataPropertyAtForLexicalSyncOwned` (`src/core/object.zig:9332`)
 

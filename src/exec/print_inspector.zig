@@ -631,16 +631,16 @@ fn printStackIndex(s: *State, object: *const core.Object) ?usize {
 
 /// `js_print_value` (quickjs.c:14278-14399).
 fn printValueRec(s: *State, value: core.JSValue) Error!void {
-    if (value.asInt32()) |int_value| {
+    if (value.as(.int)) |int_value| {
         var buf: [32]u8 = undefined;
         return s.puts(dtoa.formatInt32(&buf, int_value));
     }
-    if (value.asBool()) |b| return s.puts(if (b) "true" else "false");
-    if (value.isNull()) return s.puts("null");
-    if (value.isUndefined()) return s.puts("undefined");
-    if (value.isUninitialized()) return s.puts("uninitialized");
-    if (value.asFloat64()) |d| return printFloat64(s, d);
-    if (value.asShortBigInt()) |small| {
+    if (value.as(.boolean)) |b| return s.puts(if (b) "true" else "false");
+    if (value.is(.null_value)) return s.puts("null");
+    if (value.is(.undefined_value)) return s.puts("undefined");
+    if (value.is(.uninitialized)) return s.puts("uninitialized");
+    if (value.as(.float64)) |d| return printFloat64(s, d);
+    if (value.as(.short_big_int)) |small| {
         var buf: [32]u8 = undefined;
         try s.puts(dtoa.formatInt64(&buf, small));
         return s.putc('n');
@@ -654,12 +654,12 @@ fn printValueRec(s: *State, value: core.JSValue) Error!void {
         return s.putc('n');
     }
     if (value.isString()) return printString(s, value);
-    if (value.isSymbol()) {
+    if (value.is(.symbol)) {
         try s.puts("Symbol(");
         try printAtom(s, value.asSymbolAtom() orelse core.atom.null_atom);
         return s.putc(')');
     }
-    if (value.isObject()) {
+    if (value.is(.object)) {
         const header = value.refHeader() orelse return s.puts("[Object]");
         const object = core.Object.fromHeader(header);
         if (printStackIndex(s, object)) |idx| {

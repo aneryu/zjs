@@ -635,8 +635,8 @@ fn runParseOnly(allocator: std.mem.Allocator, source: []const u8) !void {
         if (root.realmContext() != realm) return error.TestUnexpectedResult;
         var has_final_child = false;
         for (root.cpoolSlice()) |value| {
-            if (!value.isFunctionBytecode()) continue;
-            const header = value.objectHeader() orelse return error.TestUnexpectedResult;
+            if (!value.is(.function_bytecode)) continue;
+            const header = value.functionBytecodeHeader() orelse return error.TestUnexpectedResult;
             const child: *const zjs.bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
             if (child.byteCode().len == 0 or child.realmContext() != realm) return error.TestUnexpectedResult;
             has_final_child = true;
@@ -1015,19 +1015,19 @@ fn recoveryCanarySweep(snippet: Snippet) !void {
 
 fn expectIntrinsicBootstrapCleared(ctx: *core.JSContext) !void {
     try std.testing.expect(ctx.global == null);
-    try std.testing.expect(ctx.eval_function.isNull());
+    try std.testing.expect(ctx.eval_function.is(.null_value));
     try std.testing.expect(ctx.preallocated_oom_error == null);
     try std.testing.expect(ctx.cached_function_proto == null);
     try std.testing.expect(ctx.cached_promise_proto == null);
     for (ctx.cached_values) |value| try std.testing.expect(value == null);
-    for (ctx.native_error_prototypes) |value| try std.testing.expect(value.isNull());
+    for (ctx.native_error_prototypes) |value| try std.testing.expect(value.is(.null_value));
     try std.testing.expect(ctx.array_shape == null);
     try std.testing.expect(ctx.arguments_shape == null);
     try std.testing.expect(ctx.mapped_arguments_shape == null);
     try std.testing.expect(ctx.regexp_shape == null);
     try std.testing.expect(ctx.regexp_result_shape == null);
     const builtin_count = @min(ctx.class_prototypes.len, @as(usize, @intCast(core.class.ids.init_count)));
-    for (ctx.class_prototypes[0..builtin_count]) |value| try std.testing.expect(value.isNull());
+    for (ctx.class_prototypes[0..builtin_count]) |value| try std.testing.expect(value.is(.null_value));
 }
 
 test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {

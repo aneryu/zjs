@@ -71,20 +71,20 @@ pub noinline fn appendValueString(
             return;
         }
     }
-    if (value.asInt32()) |int_value| {
+    if (value.as(.int)) |int_value| {
         var int_buf: [32]u8 = undefined;
         try buffer.appendSlice(rt.memory.allocator, dtoa.formatInt32(&int_buf, int_value));
         return;
     }
-    if (value.asFloat64()) |float_value| return appendFloat(rt, buffer, float_value);
+    if (value.as(.float64)) |float_value| return appendFloat(rt, buffer, float_value);
     if (value.isBigInt()) return value_format.appendBigIntBase10(rt.memory.allocator, buffer, value);
-    if (value.asBool()) |bool_value| {
+    if (value.as(.boolean)) |bool_value| {
         return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
     }
-    if (value.isUndefined()) return buffer.appendSlice(rt.memory.allocator, "undefined");
-    if (value.isNull()) return buffer.appendSlice(rt.memory.allocator, "null");
+    if (value.is(.undefined_value)) return buffer.appendSlice(rt.memory.allocator, "undefined");
+    if (value.is(.null_value)) return buffer.appendSlice(rt.memory.allocator, "null");
     if (value.isString()) return string.appendValueUtf8(rt, buffer, value);
-    if (value.isObject()) return appendObjectString(rt, buffer, value, policy);
+    if (value.is(.object)) return appendObjectString(rt, buffer, value, policy);
     return unsupportedValue(rt, buffer, policy);
 }
 
@@ -150,6 +150,6 @@ fn appendArrayString(
     while (index < array.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
         const value = try array.getProperty(atom.atomFromUInt32(index));
-        if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value, policy);
+        if (!value.is(.undefined_value) and !value.is(.null_value)) try appendValueString(rt, buffer, value, policy);
     }
 }

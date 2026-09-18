@@ -52,7 +52,7 @@ pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSV
     const cell = slot_ops.varRefSlotCell(frame, idx);
     // Deleted binding = cell parked at UNINITIALIZED; the check below covers it.
     const value = cell.varRefValue();
-    if (value.isUninitialized()) return null;
+    if (value.is(.uninitialized)) return null;
     return value;
 }
 
@@ -156,7 +156,7 @@ pub fn frameHasVarRefBinding(function: *const bytecode.FunctionBytecode, frame: 
 }
 
 pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
-    const index_i32 = key.asInt32() orelse return null;
+    const index_i32 = key.as(.int) orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
     const index: u32 = @intCast(index_i32);
@@ -176,7 +176,7 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
 /// unchanged — pure layout). Only the hot `OP_get_array_el` handler pays the
 /// extra probe.
 pub noinline fn fastMappedArgumentsElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
-    const index_i32 = key.asInt32() orelse return null;
+    const index_i32 = key.as(.int) orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
     return object.mappedArgumentsElementDup(@intCast(index_i32));
@@ -196,7 +196,7 @@ pub noinline fn fastMappedArgumentsElementValue(value: core.JSValue, key: core.J
 /// the full slow path; gating on isArray keeps mapped-arguments (live-cell
 /// overlay) and other exotics on the exact getValueProperty ordering.
 pub fn fastArrayOwnIntElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
-    const index_i32 = key.asInt32() orelse return null;
+    const index_i32 = key.as(.int) orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
     if (!object.isArray()) return null;
@@ -216,7 +216,7 @@ pub fn fastArrayOwnIntElementValue(value: core.JSValue, key: core.JSValue) ?core
 /// hot caller frees its own operand ref exactly as the dense leg does. Gating on
 /// isArray keeps mapped-arguments and other exotics on the exact set path.
 pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue, new_value: core.JSValue) !bool {
-    const index_i32 = key.asInt32() orelse return false;
+    const index_i32 = key.as(.int) orelse return false;
     if (index_i32 < 0) return false;
     const object = objectFromValue(value) orelse return false;
     if (!object.isArray()) return false;

@@ -165,7 +165,7 @@ Array/String 等已在 15 册；Promise/模块在 16 册。本册后半的 glue 
 
 - **签名**：`fn applyNativeFunctionMetadata( rt: *core.JSRuntime, value: core.JSValue, metadata: NativeFunctionMetadata, ) !void`。
 - **作用**：给刚造出来的 native 函数对象盖上元数据：native-builtin 记录 id，以及可选的 array marker / collection owner class / disposable-stack 方法号。
-- **实现**：先要求 `value.isObject()`，否则 `error.InvalidBuiltinRegistry`；`expectObjectAssumeBootstrap` 无检查地取出对象。`metadata.native_builtin_id != 0` 时 `setNativeBuiltinIdAndRecord` 盖 id 并顺带解析出 `NativeEntry`。随后按 `metadata.tag` 五路分支求一个 `valid: bool`：`.none` 恒 true，其余四路分别 `addArrayBuiltinMarker` / `addCollectionMethodOwnerClass` / `addDisposableStackMethod` / `addAsyncDisposableStackMethod`（这四个都返回 bool，槽位已被别的标记占用时返回 false）。`valid` 为假统一 `return error.InvalidBuiltinRegistry`。
+- **实现**：先要求 `value.is(.object)`，否则 `error.InvalidBuiltinRegistry`；`expectObjectAssumeBootstrap` 无检查地取出对象。`metadata.native_builtin_id != 0` 时 `setNativeBuiltinIdAndRecord` 盖 id 并顺带解析出 `NativeEntry`。随后按 `metadata.tag` 五路分支求一个 `valid: bool`：`.none` 恒 true，其余四路分别 `addArrayBuiltinMarker` / `addCollectionMethodOwnerClass` / `addDisposableStackMethod` / `addAsyncDisposableStackMethod`（这四个都返回 bool，槽位已被别的标记占用时返回 false）。`valid` 为假统一 `return error.InvalidBuiltinRegistry`。
 - **所有权 / 错误 / 调用**：只在既有函数对象上写标记位，不分配、不建根；`value` 是调用方刚用 `nativeFunction` 建的，所有权不转移。错误：`error.InvalidBuiltinRegistry`（非对象 / 标记槽冲突）+ `add*Marker` 内部的 `error.OutOfMemory`。整条 bootstrap install 家族的错误协议一致：错误集由 Zig 推断（实际只有 `error.OutOfMemory` 与本文件自己 `return` 的 `error.InvalidBuiltinRegistry`），一路 `try` 上抛到 `installStandardGlobals`，再由 `JSRuntime.installStandardGlobals`（`src/core/runtime.zig:4303`）`@errorCast` 成 `errors.RuntimeError`；失败时 `rollbackIntrinsicBootstrap` 回滚 realm、context 创建失败——**不经 `materializeRuntimeError`，也不会变成 JS 异常**。 树内唯一调用方：`defineLazyNativeGetterAtomWithRealmAndMetadata`（`src/exec/standard_globals.zig:914`）。
 
 ### `defineLazyNativeGetterAtom` (`src/exec/standard_globals.zig:873`)
@@ -971,7 +971,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 
 - **签名**：`pub inline fn nativeIsExc(ctx: *core.JSContext, v: NativeValue) bool`。
 - **作用**：判断 native 返回值是否是异常 sentinel。
-- **实现**：取 `v.isException()`，并在 Debug/ReleaseSafe 下断言它与 `ctx.hasException()` 一致。
+- **实现**：取 `v.is(.exception)`，并在 Debug/ReleaseSafe 下断言它与 `ctx.hasException()` 一致。
 - **所有权 / 错误 / 调用**：无：读哨兵 tag，不分配、无 error set。副作用是一条 `std.debug.assert(exc == ctx.hasException())`——Debug/ReleaseSafe 下强制「哨兵 ⟺ 有 pending exception」这条不变量（源码 469 行的注释就是靠它）。两个调用方：`src/exec/vm_native.zig:77` 与本文件 `callNativeAccessorTarget`（1079）。注意 `sentinelToHost`（108）**故意不用它**，因为 rooted host 调用允许带着无关的 pending exception 进入。
 
 ### `nativeFromHostError` (`src/exec/builtin_dispatch.zig:54`)
@@ -999,7 +999,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 
 - **签名**：`inline fn sentinelToHost(ctx: *core.JSContext, v: NativeValue) HostError!core.JSValue`。
 - **作用**：rooted 路径的接收端：把 sentinel 收成 `HostError`，否则原值返回。
-- **实现**：`v.isException()` 则 `nativeHostError(ctx)`。故意不断言 sentinel ⇔ pending：宿主调用方可以带着 pending 进来（qjs `JS_Call` 允许）。
+- **实现**：`v.is(.exception)` 则 `nativeHostError(ctx)`。故意不断言 sentinel ⇔ pending：宿主调用方可以带着 pending 进来（qjs `JS_Call` 允许）。
 - **所有权 / 错误 / 调用**：不分配、不建根；返回值是被调 native 体刚产出的值，所有权随之转给调用方。错误：哨兵值转成 `HostError`——`nativeHostError` 在 `ctx.exceptionIsUncatchable()` 时给 `error.Interrupted`，否则一律 `error.JSException`（OOM 也被折叠进去，理由见 `nativeHostError` 的长注释）。**它不 assert 哨兵与 pending 的等价关系**：host 调用方可以带着已有的 pending exception 进来（qjs `JS_Call` 允许），函数注释明说了这点。6 个调用方全在本文件 `invokeEntry` 的各 kind 臂（`src/exec/builtin_dispatch.zig:812`、817、821、826、841）与 `invokeLeafFallback`（1246）。
 
 ### `hostResultToValue` (`src/exec/builtin_dispatch.zig:114`)
@@ -1405,7 +1405,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 
 - **签名**：`inline fn invokeLeafFast(entry: *const core.NativeEntry, args: []const core.JSValue) ?core.JSValue`。
 - **作用**：K1 leaf 臂：按 `entry.sig` 做标签检查 + 直接 C 调用 + 装箱，不建 environment。
-- **实现**：按 `entry.sig` 覆盖 f64→f64、(f64,f64)→f64、void→void、i32→i32、(i32,i32)→i32、f64→void、bool→bool、state+f64→void、state+i32→i32；两条返回 f64 的 sig（`f64_to_f64` / `f64_f64_to_f64`）用宽松的 `primitiveF64Arg`（bool/null/undefined 也给值），而 `f64_to_void` / `state_f64_to_void` 两条用严格的 `leafF64Arg`（只收 Number）；整数 sig 用 `leafI32Arg`，`bool_to_bool` 用 `args[0].asBool()`；任一 miss 或未知 sig 返回 null。
+- **实现**：按 `entry.sig` 覆盖 f64→f64、(f64,f64)→f64、void→void、i32→i32、(i32,i32)→i32、f64→void、bool→bool、state+f64→void、state+i32→i32；两条返回 f64 的 sig（`f64_to_f64` / `f64_f64_to_f64`）用宽松的 `primitiveF64Arg`（bool/null/undefined 也给值），而 `f64_to_void` / `state_f64_to_void` 两条用严格的 `leafF64Arg`（只收 Number）；整数 sig 用 `leafI32Arg`，`bool_to_bool` 用 `args[0].as(.boolean)`；任一 miss 或未知 sig 返回 null。
 - **所有权 / 错误 / 调用**：不分配、不建根、无 error set：按 `entry.sig` 选九选一的直调臂（f64/i32/bool/void 组合，外加两条带 `entry.state.?` 的 state 臂），结果用 `numberToValue` / `int32` / `boolean` 装箱。任何 tag miss 或未登记 sig 一律 null——注释写明这是 FNABI §15.3/§15.6 的 canonical 策略：缺参数即 `undefined`，因此也算 miss。⚠️ 两条 state 臂用 `entry.state.?` 解包，登记了 state sig 却没填 state 的记录会在这里 panic。两个调用点都在本文件：`invokeEntry` 的 `.leaf` 臂（`src/exec/builtin_dispatch.zig:829`）与 `invokeLeafFastEntry`（1085）。
 
 ### `leafI32Arg` (`src/exec/builtin_dispatch.zig:1228`)
@@ -1419,7 +1419,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 
 - **签名**：`inline fn leafF64Arg(args: []const core.JSValue, index: usize) ?f64`。
 - **作用**：规范 f64 marshal（FNABI §15.3）：只接受 Number。
-- **实现**：缺参即 miss；int 标签转 f64，否则 `asFloat64()`（非 Number 返回 null）。
+- **实现**：缺参即 miss；int 标签转 f64，否则 `as(.float64)`（非 Number 返回 null）。
 - **所有权 / 错误 / 调用**：无：不分配、无 error set。比 `primitiveF64Arg` 严格——只接受 Number（int 标签转 float 或 double），缺参数/其它 tag 一律 null，不把 `undefined` 当 NaN。6 个调用点全在本文件：`marshalF64`（886）、`invokeNativeMethodLeafFast`（929/935/936）、`invokeLeafFast`（1188/1200）。
 
 ### `invokeLeafFallback` (`src/exec/builtin_dispatch.zig:1250`)

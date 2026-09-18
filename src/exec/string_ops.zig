@@ -115,13 +115,13 @@ pub fn toStringForAnnexB(
 ) !core.JSValue {
     // qjs `JS_ToString` on a symbol throws TypeError "cannot convert symbol to
     // string" (JS_ToStringInternal quickjs.c:13632).
-    if (value.isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
+    if (value.is(.symbol)) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
     if (value.isString()) return value;
-    const primitive = if (value.isObject())
+    const primitive = if (value.is(.object))
         try toPrimitiveForString(ctx, output, global, value, caller_function, caller_frame)
     else
         value;
-    if (primitive.isSymbol()) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
+    if (primitive.is(.symbol)) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
     if (primitive.isString()) return primitive;
     return value_ops.toStringValue(ctx.runtime, primitive);
 }
@@ -142,7 +142,7 @@ pub fn toStringCheckObject(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (value.isNull() or value.isUndefined())
+    if (value.is(.null_value) or value.is(.undefined_value))
         return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     return toStringForAnnexB(ctx, output, global, value, caller_function, caller_frame);
 }
@@ -155,18 +155,18 @@ pub fn toPrimitiveForString(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!value.isObject()) return value;
+    if (!value.is(.object)) return value;
     const symbol_to_primitive = (comptime core.atom.predefinedId("Symbol.toPrimitive", .symbol)) orelse
         return toOrdinaryPrimitiveString(ctx, output, global, value, caller_function, caller_frame);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, caller_function, caller_frame);
-    if (!method.isUndefined() and !method.isNull()) {
+    if (!method.is(.undefined_value) and !method.is(.null_value)) {
         // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
         // object return value throws "toPrimitive" (quickjs.c:11104).
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "string");
         const primitive = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
-        if (primitive.isObject()) {
+        if (primitive.is(.object)) {
             return throwTypeErrorMessage(ctx, global, "toPrimitive");
         }
         return primitive;
@@ -197,8 +197,8 @@ pub fn stringFunctionCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len == 0) return value_ops.createStringValue(ctx.runtime, "");
-    if (args[0].isSymbol()) return value_ops.toStringValue(ctx.runtime, args[0]);
-    if (!args[0].isObject()) return value_ops.toStringValue(ctx.runtime, args[0]);
+    if (args[0].is(.symbol)) return value_ops.toStringValue(ctx.runtime, args[0]);
+    if (!args[0].is(.object)) return value_ops.toStringValue(ctx.runtime, args[0]);
     return toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
 }
 
@@ -241,7 +241,7 @@ pub fn stringConcat(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) {
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) {
         return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     }
 
@@ -418,13 +418,13 @@ noinline fn stringReplaceCore(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
-    if (this_value.isNull() or this_value.isUndefined()) {
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) {
         return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     }
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
 
-    if (search_input.isObject()) {
+    if (search_input.is(.object)) {
         if (is_replace_all) {
             // check_regexp_g_flag (quickjs.c:45807): undefined/null flags throw
             // TypeError "cannot convert to object"; a flags string without 'g'
@@ -432,7 +432,7 @@ noinline fn stringReplaceCore(
             if (try isRegExpObservable(ctx, output, global, search_input, caller_function, caller_frame)) {
                 const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
                 const flags = try getValueProperty(ctx, output, global, search_input, flags_atom, caller_function, caller_frame);
-                if (flags.isNull() or flags.isUndefined())
+                if (flags.is(.null_value) or flags.is(.undefined_value))
                     return throwTypeErrorMessage(ctx, global, "cannot convert to object");
                 const flags_string = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
                 var bytes = std.ArrayList(u8).empty;
@@ -602,10 +602,10 @@ pub fn callStringReplaceMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!search_value.isObject()) return null;
+    if (!search_value.is(.object)) return null;
     const replace_atom = (comptime core.atom.predefinedId("Symbol.replace", .symbol)) orelse return error.TypeError;
     const replacer = try getValueProperty(ctx, output, global, search_value, replace_atom, caller_function, caller_frame);
-    if (replacer.isUndefined() or replacer.isNull()) return null;
+    if (replacer.is(.undefined_value) or replacer.is(.null_value)) return null;
     if (!isCallableValue(replacer)) return error.TypeError;
     // TGC R1-c: NOT rooted. The sync-internal boundary does require rooted
     // inputs -- its `pollInterrupt` is a full collection point reached while
@@ -801,7 +801,7 @@ pub fn stringRaw(
 pub fn toObjectForStringRaw(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !core.JSValue {
     // JS_ToObject on undefined/null (js_string_raw -> quickjs.c:39916) throws
     // TypeError "cannot convert to object".
-    if (value.isNull() or value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
+    if (value.is(.null_value) or value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     if (objectFromValue(value)) |_| return value;
     return primitiveObjectForAccess(ctx.runtime, global, value);
 }
@@ -813,15 +813,15 @@ pub fn stringFromCharCode(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len == 1) {
-        if (args[0].asInt32()) |code| {
+        if (args[0].as(.int)) |code| {
             const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
             if (unit <= 0xff) return (try ctx.runtime.singleByteString(@intCast(unit))).value();
             return (try core.string.String.createUtf16(ctx.runtime, &.{unit})).value();
         }
     }
     if (args.len == 2) {
-        if (args[0].asInt32()) |first_code| {
-            if (args[1].asInt32()) |second_code| {
+        if (args[0].as(.int)) |first_code| {
+            if (args[1].as(.int)) |second_code| {
                 const cached = try ctx.runtime.recentTwoUnitString(
                     @intCast(@as(u32, @bitCast(first_code)) & 0xffff),
                     @intCast(@as(u32, @bitCast(second_code)) & 0xffff),
@@ -863,7 +863,7 @@ pub fn regExpToString(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.is(.object)) return error.TypeError;
 
     const source_atom = core.atom.ids.source;
     const source_value = try getValueProperty(ctx, output, global, this_value, source_atom, caller_function, caller_frame);
@@ -898,7 +898,7 @@ pub fn regExpSymbolSearch(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.is(.object)) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     return try regExpSymbolSearchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
@@ -913,7 +913,7 @@ pub fn regExpSymbolMatch(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.is(.object)) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     return try regExpSymbolMatchGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
@@ -928,7 +928,7 @@ pub fn regExpSymbolMatchAll(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.is(.object)) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
 
@@ -967,25 +967,25 @@ pub fn stringMatchAll(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const match_all_atom = (comptime core.atom.predefinedId("Symbol.matchAll", .symbol)) orelse return error.TypeError;
-    if (!regexp.isUndefined() and !regexp.isNull() and regexp.isObject()) {
+    if (!regexp.is(.undefined_value) and !regexp.is(.null_value) and regexp.is(.object)) {
         const matcher = try getValueProperty(ctx, output, global, regexp, match_all_atom, caller_function, caller_frame);
         if (try isRegExpObservable(ctx, output, global, regexp, caller_function, caller_frame)) {
             // check_regexp_g_flag (quickjs.c:45819/45829): undefined/null flags
             // -> "cannot convert to object"; missing 'g' -> "regexp must have the 'g' flag".
             const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
             const flags_value = try getValueProperty(ctx, output, global, regexp, flags_atom, caller_function, caller_frame);
-            if (flags_value.isUndefined() or flags_value.isNull())
+            if (flags_value.is(.undefined_value) or flags_value.is(.null_value))
                 return throwTypeErrorMessage(ctx, global, "cannot convert to object");
             const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
             if (!try stringValueContainsByte(ctx.runtime, flags_string, 'g'))
                 return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
         }
-        if (!matcher.isUndefined() and !matcher.isNull()) {
+        if (!matcher.is(.undefined_value) and !matcher.is(.null_value)) {
             return callValueOrBytecodeRoot(ctx, output, global, regexp, matcher, &.{string_value}, caller_function, caller_frame);
         }
     }
@@ -994,7 +994,7 @@ pub fn stringMatchAll(
     const regexp_args = [_]core.JSValue{ regexp, flags };
     const matcher = (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, ctx.classPrototypeObject(core.class.ids.regexp), &regexp_args, caller_function, caller_frame)) orelse return error.TypeError;
     const match_all = try getValueProperty(ctx, output, global, matcher, match_all_atom, caller_function, caller_frame);
-    if (match_all.isUndefined() or match_all.isNull()) return error.TypeError;
+    if (match_all.is(.undefined_value) or match_all.is(.null_value)) return error.TypeError;
     return callValueOrBytecodeRoot(ctx, output, global, matcher, match_all, &.{string_value}, caller_function, caller_frame);
 }
 
@@ -1015,7 +1015,7 @@ pub fn regExpSymbolReplace(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.is(.object)) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
     const replace_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -1031,7 +1031,7 @@ pub fn regExpSymbolSplit(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (!this_value.isObject()) return error.TypeError;
+    if (!this_value.is(.object)) return error.TypeError;
     const string_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, string_input, caller_function, caller_frame);
 
@@ -1041,14 +1041,14 @@ pub fn regExpSymbolSplit(
     const splitter = try constructValueOrBytecode(ctx, output, global, constructor_value, &construct_args, caller_function, caller_frame);
 
     var limit_value = core.JSValue.undefinedValue();
-    if (args.len >= 2 and !args[1].isUndefined()) {
+    if (args.len >= 2 and !args[1].is(.undefined_value)) {
         const primitive = try toPrimitiveForNumber(ctx, output, global, args[1]);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
         limit_value = uint32NumberValue(toUint32Number(number));
     }
-    const limit = if (limit_value.isUndefined()) std.math.maxInt(u32) else toUint32Number(value_ops.numberValue(limit_value) orelse std.math.nan(f64));
+    const limit = if (limit_value.is(.undefined_value)) std.math.maxInt(u32) else toUint32Number(value_ops.numberValue(limit_value) orelse std.math.nan(f64));
     if (limit == 0) {
         const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
         return out.value();
@@ -1132,7 +1132,7 @@ pub fn regExpSymbolSplitGeneric(
 
     if (input_len == 0) {
         rooted_result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
-        if (rooted_result.isNull()) try defineSplitValueElement(ctx.runtime, out, out_index, string_value);
+        if (rooted_result.is(.null_value)) try defineSplitValueElement(ctx.runtime, out, out_index, string_value);
         return out.value();
     }
 
@@ -1142,7 +1142,7 @@ pub fn regExpSymbolSplitGeneric(
         try setValuePropertyStrict(ctx, output, global, splitter, core.atom.ids.lastIndex, core.JSValue.int32(@intCast(pos)), caller_function, caller_frame);
         rooted_result = try regExpExecGeneric(ctx, output, global, splitter, string_value, caller_function, caller_frame);
         const result = rooted_result;
-        if (result.isNull()) {
+        if (result.is(.null_value)) {
             pos = advanceStringIndexBody(string_body, pos, unicode_matching);
             continue;
         }
@@ -1217,8 +1217,8 @@ pub fn regExpSymbolSearchGeneric(
         try setValuePropertyStrict(ctx, output, global, rx, core.atom.ids.lastIndex, previous, caller_function, caller_frame);
     }
 
-    if (result.isNull()) return core.JSValue.int32(-1);
-    if (!result.isObject()) return error.TypeError;
+    if (result.is(.null_value)) return core.JSValue.int32(-1);
+    if (!result.is(.object)) return error.TypeError;
     const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
     return getValueProperty(ctx, output, global, result, index_atom, caller_function, caller_frame);
 }
@@ -1246,7 +1246,7 @@ pub fn regExpSymbolMatchGeneric(
     var count: u32 = 0;
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
-        if (result.isNull()) break;
+        if (result.is(.null_value)) break;
         const zero_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
         const match_string = if (zero_value.isString())
             zero_value
@@ -1387,10 +1387,10 @@ pub fn regExpSymbolReplaceGeneric(
 
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
-        if (result.isNull()) {
+        if (result.is(.null_value)) {
             break;
         }
-        if (!result.isObject()) {
+        if (!result.is(.object)) {
             return error.TypeError;
         }
         const match = try captureReplaceMatch(ctx, output, global, result, string_value, caller_function, caller_frame);
@@ -1422,9 +1422,9 @@ pub fn regExpSymbolReplaceGeneric(
 
         const replacement = if (functional_replace)
             try callReplaceFunction(ctx, output, global, replacer_call.?, match, string_value, caller_function, caller_frame)
-        else if (replacement_is_empty and match.groups.isUndefined())
+        else if (replacement_is_empty and match.groups.is(.undefined_value))
             core.JSValue.undefinedValue()
-        else if (replacement_is_literal and match.groups.isUndefined())
+        else if (replacement_is_literal and match.groups.is(.undefined_value))
             replacement_string
         else
             try getSubstitutionString(ctx, output, global, match, string_value, replacement_string, caller_function, caller_frame);
@@ -1655,7 +1655,7 @@ pub fn captureReplaceMatch(
             captures[capture_index] = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(@intCast(capture_index + 1)), caller_function, caller_frame);
             initialized += 1;
             rooted_captures = captures[0..initialized];
-            if (!captures[capture_index].isUndefined()) {
+            if (!captures[capture_index].is(.undefined_value)) {
                 const capture_string = try toStringForAnnexB(ctx, output, global, captures[capture_index], caller_function, caller_frame);
                 captures[capture_index] = capture_string;
             }
@@ -1683,7 +1683,7 @@ pub fn callReplaceFunction(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const extra: usize = if (match.groups.isUndefined()) 2 else 3;
+    const extra: usize = if (match.groups.is(.undefined_value)) 2 else 3;
     const arg_count = 1 + match.captures.len + extra;
     const args = try ctx.runtime.memory.alloc(core.JSValue, arg_count);
     defer ctx.runtime.memory.free(core.JSValue, args);
@@ -1691,7 +1691,7 @@ pub fn callReplaceFunction(
     for (match.captures, 0..) |capture, index| args[index + 1] = capture;
     args[1 + match.captures.len] = core.JSValue.int32(@intCast(match.index));
     args[2 + match.captures.len] = string_value;
-    if (!match.groups.isUndefined()) args[3 + match.captures.len] = match.groups;
+    if (!match.groups.is(.undefined_value)) args[3 + match.captures.len] = match.groups;
     const result = try replacer_call.call(args);
     return toStringForAnnexB(ctx, output, global, result, caller_function, caller_frame);
 }
@@ -1706,11 +1706,11 @@ pub fn getSubstitutionString(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const named_captures = if (match.groups.isUndefined())
+    const named_captures = if (match.groups.is(.undefined_value))
         core.JSValue.undefinedValue()
-    else if (match.groups.isNull())
+    else if (match.groups.is(.null_value))
         return error.TypeError
-    else if (match.groups.isObject())
+    else if (match.groups.is(.object))
         match.groups
     else
         try primitiveObjectForAccess(ctx.runtime, global, match.groups);
@@ -1757,7 +1757,7 @@ pub fn getSubstitutionString(
                     try out.append(ctx.runtime.memory.allocator, '$');
                     continue;
                 };
-                if (!capture.isUndefined()) try appendStringValueUnits(ctx.runtime, &out, capture);
+                if (!capture.is(.undefined_value)) try appendStringValueUnits(ctx.runtime, &out, capture);
             },
             '<' => {
                 if (try appendNamedCaptureSubstitution(ctx, output, global, named_captures, replacement.items, &index, &out, caller_function, caller_frame)) continue;
@@ -2010,7 +2010,7 @@ pub fn stringPrototypeMethod(
     if (method_id == string_id_lookup.legacy_match_all_method_id) {
         return stringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     if (method_id == 10) {
         return stringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
@@ -2079,7 +2079,7 @@ pub fn stringSearchPositionMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -2094,7 +2094,7 @@ pub fn stringSearchPositionMethod(
     var coerced: [2]core.JSValue = .{ search_value, core.JSValue.undefinedValue() };
     var count: usize = 1;
     if (args.len >= 2) {
-        if (args[1].isUndefined()) {
+        if (args[1].is(.undefined_value)) {
             coerced[1] = core.JSValue.undefinedValue();
         } else {
             const primitive = try toPrimitiveForNumber(ctx, output, global, args[1]);
@@ -2141,7 +2141,7 @@ pub fn stringSearch(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, regexp, "Symbol.search", caller_function, caller_frame)) |value| return value;
@@ -2156,7 +2156,7 @@ pub fn stringIteratorCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     const prototype = try stringIteratorPrototypeFromContext(ctx, global);
     const object = try core.Object.create(ctx.runtime, core.class.ids.string_iterator, prototype);
@@ -2170,7 +2170,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     const slot: usize = core.class.ids.string_iterator;
     if (slot < ctx.class_prototypes.len) {
         const stored = ctx.class_prototypes[slot];
-        if (stored.isObject()) return property_ops.expectObject(stored) catch return error.TypeError;
+        if (stored.is(.object)) return property_ops.expectObject(stored) catch return error.TypeError;
     }
 
     const object = try iteratorPrototype(ctx.runtime, global, "String Iterator");
@@ -2200,7 +2200,7 @@ pub fn stringMatch(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     // QuickJS calls an existing @@match method with the original receiver and
     // only performs ToString after that lookup falls through.
@@ -2233,7 +2233,7 @@ pub fn stringRegExpCreateAndInvoke(
     // [@@match|@@search, @@toPrimitive]).
     var owned_pattern: ?core.JSValue = null;
     var pattern = regexp;
-    if (pattern.isObject() and !isRegExpValue(pattern)) {
+    if (pattern.is(.object) and !isRegExpValue(pattern)) {
         const pattern_string = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
         owned_pattern = pattern_string;
         pattern = pattern_string;
@@ -2257,11 +2257,11 @@ pub fn callStringWellKnownMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (candidate.isUndefined() or candidate.isNull()) return null;
-    if (!candidate.isObject()) return null;
+    if (candidate.is(.undefined_value) or candidate.is(.null_value)) return null;
+    if (!candidate.is(.object)) return null;
     const symbol_atom = core.atom.predefinedId(symbol_name, .symbol) orelse return error.TypeError;
     const method = try getValueProperty(ctx, output, global, candidate, symbol_atom, caller_function, caller_frame);
-    if (method.isUndefined() or method.isNull()) return null;
+    if (method.is(.undefined_value) or method.is(.null_value)) return null;
     if (!isCallableValue(method)) return error.TypeError;
     const method_args = [_]core.JSValue{this_value};
     return try callValueOrBytecodeRoot(ctx, output, global, candidate, method, &method_args, caller_function, caller_frame);
@@ -2277,12 +2277,12 @@ pub fn stringSplit(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_split (quickjs.c:46133): nullish receiver -> "cannot convert to object".
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const separator = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (separator.isObject()) {
+    if (separator.is(.object)) {
         const split_atom = (comptime core.atom.predefinedId("Symbol.split", .symbol)) orelse return error.TypeError;
         const splitter = try getValueProperty(ctx, output, global, separator, split_atom, caller_function, caller_frame);
-        if (!splitter.isUndefined() and !splitter.isNull()) {
+        if (!splitter.is(.undefined_value) and !splitter.is(.null_value)) {
             if (!isCallableValue(splitter)) return error.TypeError;
             const split_limit = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             // TGC R1-c: NOT rooted, and the reason is a property of the
@@ -2305,7 +2305,7 @@ pub fn stringSplit(
     var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     var count: usize = 1;
 
-    if (args.len >= 2 and !args[1].isUndefined()) {
+    if (args.len >= 2 and !args[1].is(.undefined_value)) {
         const primitive = try toPrimitiveForNumber(ctx, output, global, args[1]);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
@@ -2320,7 +2320,7 @@ pub fn stringSplit(
     // Mirrors js_string_split (quickjs.c:46139-46165): once the @@split lookup
     // above yielded undefined/null, even a regexp separator takes the string
     // path via R = JS_ToString(ctx, separator) — no builtin regexp split.
-    if (args[0].isUndefined()) {
+    if (args[0].is(.undefined_value)) {
         coerced[0] = core.JSValue.undefinedValue();
     } else {
         coerced[0] = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
@@ -2395,7 +2395,7 @@ pub fn encodeRegExpLegacyCaptureSlice(start: usize, len: usize) ?core.JSValue {
 }
 
 pub fn decodeRegExpLegacyCaptureSlice(value: core.JSValue) ?LazyRegExpLegacyCapture {
-    const payload_i64 = value.asShortBigInt() orelse return null;
+    const payload_i64 = value.as(.short_big_int) orelse return null;
     if (payload_i64 < 0 or payload_i64 >= lazy_legacy_capture_payload_limit) return null;
     const payload: u64 = @intCast(payload_i64);
     return .{
@@ -2713,11 +2713,11 @@ pub fn bigIntPrototypeToString(
 ) !core.JSValue {
     _ = caller_function;
     _ = caller_frame;
-    const radix: u8 = if (args.len == 0 or args[0].isUndefined())
+    const radix: u8 = if (args.len == 0 or args[0].is(.undefined_value))
         10
     else blk: {
         const radix_primitive = try toPrimitiveForNumber(ctx, output, global, args[0]);
-        if (radix_primitive.isBigInt() or radix_primitive.isSymbol()) return error.TypeError;
+        if (radix_primitive.isBigInt() or radix_primitive.is(.symbol)) return error.TypeError;
         const radix_value = try value_ops.toNumberValue(ctx.runtime, radix_primitive);
         const radix_number = value_ops.numberValue(radix_value) orelse return error.RangeError;
         if (std.math.isNan(radix_number) or !std.math.isFinite(radix_number)) return error.RangeError;
@@ -2767,7 +2767,7 @@ pub fn standardStringMethodId(name: []const u8) ?u32 {
 
 pub fn isStringMethodReceiver(value: core.JSValue) bool {
     if (value.isString()) return true;
-    if (!value.isObject()) return !value.isNull() and !value.isUndefined();
+    if (!value.is(.object)) return !value.is(.null_value) and !value.is(.undefined_value);
     const object = objectFromValue(value) orelse return false;
     return object.class_id == core.class.ids.string;
 }
@@ -2809,14 +2809,14 @@ pub fn errorToStringCall(
     _ = objectFromValue(this_value) orelse return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const name_value = try getValueProperty(ctx, output, global, this_value, core.atom.ids.name, caller_function, caller_frame);
-    const name_string = if (name_value.isUndefined())
+    const name_string = if (name_value.is(.undefined_value))
         try value_ops.createStringValue(ctx.runtime, "Error")
     else
         try toStringForAnnexB(ctx, output, global, name_value, caller_function, caller_frame);
 
     const message_atom = (comptime core.atom.predefinedId("message", .string)).?;
     const message_value = try getValueProperty(ctx, output, global, this_value, message_atom, caller_function, caller_frame);
-    const message_string = if (message_value.isUndefined())
+    const message_string = if (message_value.is(.undefined_value))
         try value_ops.createStringValue(ctx.runtime, "")
     else
         try toStringForAnnexB(ctx, output, global, message_value, caller_function, caller_frame);
@@ -2847,7 +2847,7 @@ pub fn toStringBytesForSymbol(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) ![]u8 {
-    if (value.isSymbol()) return error.TypeError;
+    if (value.is(.symbol)) return error.TypeError;
     const string_value = if (value.isString())
         value
     else
@@ -2867,10 +2867,10 @@ pub fn consumePendingExceptionIfMatchesConstructor(ctx: *core.JSContext, expecte
 }
 
 pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSValue, expected_name: []const u8) !bool {
-    if (!thrown_value.isObject()) return false;
+    if (!thrown_value.is(.object)) return false;
     const thrown_object = property_ops.expectObject(thrown_value) catch return false;
     const ctor_value = try thrown_object.getProperty(core.atom.ids.constructor);
-    if (ctor_value.isObject()) {
+    if (ctor_value.is(.object)) {
         const ctor = property_ops.expectObject(ctor_value) catch null;
         if (ctor) |ctor_object| {
             const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(rt, ctor_object);
@@ -2917,7 +2917,7 @@ pub fn arraySearchCall(
             return null;
     };
 
-    if (receiver.isNull() or receiver.isUndefined()) {
+    if (receiver.is(.null_value) or receiver.is(.undefined_value)) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
     }
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver else try primitiveObjectForAccess(ctx.runtime, global, receiver);
@@ -3040,8 +3040,8 @@ pub fn arrayConcatCall(
         if (function_object.arrayBuiltinMarker() != .concat) return null;
     }
 
-    if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
-    const receiver_object_value = if (receiver.isObject()) receiver else try primitiveObjectForAccess(ctx.runtime, global, receiver);
+    if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
+    const receiver_object_value = if (receiver.is(.object)) receiver else try primitiveObjectForAccess(ctx.runtime, global, receiver);
 
     const out_value = try arraySpeciesCreate(ctx, output, global, receiver_object_value, 0, caller_function, caller_frame);
     const out = try property_ops.expectObject(out_value);
@@ -3131,7 +3131,7 @@ pub fn isConcatSpreadable(
 ) !bool {
     const spreadable_atom = (comptime core.atom.predefinedId("Symbol.isConcatSpreadable", .symbol)) orelse return arraySpeciesOriginalIsArray(object);
     const spreadable = try getValueProperty(ctx, output, global, value, spreadable_atom, caller_function, caller_frame);
-    if (!spreadable.isUndefined()) return valueTruthy(spreadable);
+    if (!spreadable.is(.undefined_value)) return valueTruthy(spreadable);
     return arraySpeciesOriginalIsArray(object);
 }
 
@@ -3185,7 +3185,7 @@ pub fn regExpStringIteratorNext(
         return done_result;
     };
     const result = try regExpExecGeneric(ctx, output, global, regexp, string_value, caller_function, caller_frame);
-    if (result.isNull()) {
+    if (result.is(.null_value)) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
         iterator.iteratorIndexSlot().* = 1;
         iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
@@ -3285,8 +3285,8 @@ pub fn arrayToStringCall(
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.to_string))) {
         if (function_object.arrayBuiltinMarker() != .to_string) return null;
     }
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (this_value.isObject()) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    const object_value = if (this_value.is(.object)) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const join_atom = core.atom.ids.join;
     const join_value = try getValueProperty(ctx, output, global, object_value, join_atom, caller_function, caller_frame);
     if (isCallableValue(join_value)) {
@@ -3307,8 +3307,8 @@ pub fn arrayToLocaleStringCall(
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.to_locale_string))) {
         if (function_object.arrayBuiltinMarker() != .to_locale_string) return null;
     }
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (this_value.isObject()) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
+    const object_value = if (this_value.is(.object)) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     const object = property_ops.expectObject(object_value) catch return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     const is_typed_array = core.object.isTypedArrayObject(object);
@@ -3334,7 +3334,7 @@ pub fn arrayToLocaleStringCall(
             defer key.deinit(ctx.runtime);
             break :blk try getValueProperty(ctx, output, global, object_value, key.atom, caller_function, caller_frame);
         };
-        if (!item.isUndefined() and !item.isNull()) {
+        if (!item.is(.undefined_value) and !item.is(.null_value)) {
             const method = try getValueProperty(ctx, output, global, item, to_locale_key, caller_function, caller_frame);
             const locale_value = try callValueOrBytecodeRoot(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
             const locale_string = try toStringForAnnexB(ctx, output, global, locale_value, caller_function, caller_frame);
@@ -3365,9 +3365,9 @@ pub fn objectToStringCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isUndefined()) return try objectTagString(ctx.runtime, "Undefined");
-    if (this_value.isNull()) return try objectTagString(ctx.runtime, "Null");
-    const object_value = if (this_value.isObject()) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    if (this_value.is(.undefined_value)) return try objectTagString(ctx.runtime, "Undefined");
+    if (this_value.is(.null_value)) return try objectTagString(ctx.runtime, "Null");
+    const object_value = if (this_value.is(.object)) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
     return try objectToStringIntrinsic(ctx, output, global, object_value, caller_function, caller_frame);
 }
 
@@ -3635,7 +3635,7 @@ pub fn stringPad(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
     // Resolve the source to its flat code-unit slice ONCE (no per-char UTF-16
@@ -3649,7 +3649,7 @@ pub fn stringPad(
     const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
     if (target_length <= source_len) return string_value;
 
-    const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+    const fill_value = if (args.len >= 2 and !args[1].is(.undefined_value)) blk: {
         break :blk try toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
     } else try value_ops.createStringValue(ctx.runtime, " ");
 
@@ -3693,10 +3693,10 @@ pub fn stringNormalize(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
-    const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].isUndefined()) .nfc else blk: {
+    const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].is(.undefined_value)) .nfc else blk: {
         const form_value = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
         var form_bytes = std.ArrayList(u8).empty;
         defer form_bytes.deinit(ctx.runtime.memory.allocator);
@@ -3731,7 +3731,7 @@ pub fn stringLocaleCompare(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const lhs = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
     const rhs_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const rhs = try toStringForAnnexB(ctx, output, global, rhs_input, caller_function, caller_frame);
@@ -3778,7 +3778,7 @@ pub fn stringNumericArgsMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
     const string_value = if (this_value.isString())
         this_value
     else
@@ -3787,7 +3787,7 @@ pub fn stringNumericArgsMethod(
     var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
     const count = @min(args.len, coerced.len);
     for (args[0..count], 0..) |arg, index| {
-        coerced[index] = if (arg.isUndefined())
+        coerced[index] = if (arg.is(.undefined_value))
             core.JSValue.undefinedValue()
         else if (arg.isNumber())
             arg
@@ -3821,7 +3821,7 @@ fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []
     };
     const len: i64 = @intCast(string.len());
     const start_raw = if (args.len >= 1) int32OrUndefinedStringIndex(args[0]) orelse return null else 0;
-    const end_raw = if (args.len >= 2 and !args[1].isUndefined()) int32OrUndefinedStringIndex(args[1]) orelse return null else len;
+    const end_raw = if (args.len >= 2 and !args[1].is(.undefined_value)) int32OrUndefinedStringIndex(args[1]) orelse return null else len;
     const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
     const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
     const lo = @min(start, end);
@@ -3834,8 +3834,8 @@ fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []
 }
 
 fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
-    if (value.isUndefined()) return null;
-    return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
+    if (value.is(.undefined_value)) return null;
+    return if (value.as(.int)) |int_value| @as(i64, int_value) else null;
 }
 
 /// `output` / `global` are unused: the receiver and both arguments are already
@@ -3854,7 +3854,7 @@ pub fn stringSubstr(
     try appendStringValueUnits(ctx.runtime, &units, string_value);
 
     const size = units.items.len;
-    const start_number = if (args.len >= 1 and !args[0].isUndefined())
+    const start_number = if (args.len >= 1 and !args[0].is(.undefined_value))
         value_ops.numberValue(args[0]) orelse std.math.nan(f64)
     else
         0;
@@ -3878,7 +3878,7 @@ pub fn stringSubstr(
     }
 
     const max_len = size - start;
-    const requested_len = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+    const requested_len = if (args.len >= 2 and !args[1].is(.undefined_value)) blk: {
         const length_number = value_ops.numberValue(args[1]) orelse std.math.nan(f64);
         if (std.math.isNan(length_number) or length_number <= 0) break :blk @as(usize, 0);
         if (std.math.isPositiveInf(length_number)) break :blk max_len;
@@ -3900,7 +3900,7 @@ pub fn stringHtmlMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
     var string_units = std.ArrayList(u16).empty;

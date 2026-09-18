@@ -16,11 +16,11 @@
 | `native` / `binding_root` | binding 聚合。 |
 | `platform_clock` | 单调/墙上时钟。CLI 自己的模块图碰不到 `src/platform_clock.zig`，所以从这里转口。 |
 | `RuntimeError` / `HostError` | `exec.exceptions` 的 error set。 |
-| `JSRuntime` / `JSContext` / `CallSite` / `PropertySite` / `JSValue` | 与公共门面同一批 binding 类型。 |
-| `Object` | **core** `Object`，不是公共 `zjs.object.Object`（后者是 opaque）。文件级 test 断言它等于 `binding_root.Object`、带 `create`，而公共 opaque 类型没有 `create`。 |
+| `JSRuntime` / `JSContext` / `JSValue` | 与门面同一批 binding 类型。 |
+| `Object` | **core** `Object`，不是门面 `zjs.object.Object`（后者是 opaque）。文件级 test 断言它等于 `binding_root.Object`、带 `create`，而 opaque 类型没有 `create`。 |
 | `Descriptor` / `Atom` / `NativePin` / `GCPolicy` / `GCStats` | core 类型；公共 root **不**导出 `Atom` / `NativePin`。 |
 | `JSValueHandle` / `LocalHandle` / `HandleScope` / `WeakPersistent` / `WeakPersistentValue` | 句柄族。公共拼写走 `zjs.value.*`。 |
-| `PropNameID` / `JSString` / `JSBytes` / `binding` | 内部拼写；公共走 `zjs.host.PropName` / `zjs.value.String`。 |
+| `JSString` / `JSBytes` | 内部拼写；门面走 `zjs.value.String`。 |
 | `EvalOptions` / `EvalTiming` / `DataPropertyOptions` | 选项类型。 |
 | `RuntimeMemoryUsage` | binding_root 转出的 core 内存用量记录，包含账户统计和按类别估算的字节字段。 |
 | `core` / `parser` / `simple_token` / `bytecode` / `exec` / `libs` / `runtime` / `compiler` | 整层模块。公共 root 故意没有这些。 |

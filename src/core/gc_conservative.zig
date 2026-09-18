@@ -281,6 +281,19 @@ fn scanWords(
         // plus the `shade` callback's business: this loop forwards every
         // candidate and never filters by kind itself.
         _ = rt.gc.address_registry.forEachTraceCandidateAt(word, scan_filter, shade_ctx, shade);
+        // NaN-boxed JSValues store pointers in the low 48 bits with a prefix
+        // 0xFFF1..0xFFFF (`0xFFF0 + dense Kind index` in value.zig). Keep the
+        // constants here so this leaf does not import the value module. The
+        // 0xFFF0_xxxx hole above -Inf is not a boxed encoding; scanning it
+        // only creates false conservative roots.
+        const nanbox_first_boxed: usize = 0xFFF1_0000_0000_0000;
+        const nanbox_payload_mask: usize = (@as(usize, 1) << 48) - 1;
+        if (word >= nanbox_first_boxed) {
+            const unboxed = word & nanbox_payload_mask;
+            if (unboxed != 0 and unboxed != word) {
+                _ = rt.gc.address_registry.forEachTraceCandidateAt(unboxed, scan_filter, shade_ctx, shade);
+            }
+        }
     }
 }
 

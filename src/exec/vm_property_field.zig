@@ -100,7 +100,7 @@ pub noinline fn setName(
             frame.pc += 4;
             if (stack.len() == 0) return error.StackUnderflow;
             const value = try stackValueFromTop(stack, 0);
-            if (value.isObject()) {
+            if (value.is(.object)) {
                 const object = try property_ops.expectObject(value);
                 const name_value = try call_runtime.functionNameValueFromAtom(ctx.runtime, atom_id, null);
                 try object_ops.defineFunctionNameProperty(ctx.runtime, object, name_value);
@@ -110,7 +110,7 @@ pub noinline fn setName(
             if (stack.len() < 2) return error.StackUnderflow;
             const value = stack.values[stack.len() - 1];
             const key = stack.values[stack.len() - 2];
-            if (value.isObject()) {
+            if (value.is(.object)) {
                 const object = try property_ops.expectObject(value);
                 const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
                 const name_value = try call_runtime.functionNameValueFromAtom(ctx.runtime, atom_id, null);
@@ -617,11 +617,11 @@ inline fn primitivePrototypeObjectForFastPath(
         break :blk .string_prototype;
     } else if (receiver.isNumber())
         .number_prototype
-    else if (receiver.isBool())
+    else if (receiver.is(.boolean))
         .boolean_prototype
     else if (receiver.isBigInt())
         .bigint_prototype
-    else if (receiver.isSymbol())
+    else if (receiver.is(.symbol))
         .symbol_prototype
     else
         return null;
@@ -945,7 +945,7 @@ fn setArrayLengthForPutFieldFastPath(
     value: core.JSValue,
 ) bool {
     if (atom_id != core.atom.ids.length) return false;
-    const length = value.asInt32() orelse return false;
+    const length = value.as(.int) orelse return false;
     if (length < 0) return false;
     const object = objectFromValue(receiver) orelse return false;
     if (!object.isArray() or object.hasExoticMethods() or object.proxyTarget() != null) return false;
@@ -991,7 +991,7 @@ pub inline fn putArrayElementAfterFastMiss(
     // TypedArray). On that exact miss, continue at qjs's JS_ValueToAtom ->
     // JS_SetPropertyInternal slow-path boundary instead of repeating the same
     // typed/dense probes here.
-    const int_object_fast_miss = key.isInt() and obj.isObject();
+    const int_object_fast_miss = key.is(.int) and obj.is(.object);
     if (!int_object_fast_miss) {
         switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -1007,7 +1007,7 @@ pub inline fn putArrayElementAfterFastMiss(
         }
     }
     if (int_object_fast_miss) {
-        const index = key.asInt32().?;
+        const index = key.as(.int).?;
         if (index >= 0) {
             // qjs JS_ValueToAtom -> __JS_AtomFromUInt32: a non-negative int32
             // key is already a tagged integer atom. No JSValue copy/string
@@ -1027,7 +1027,7 @@ pub inline fn putArrayElementAfterFastMiss(
     // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
     // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish base
     // TypeError, so user key-coercion side effects fire first.
-    if (obj.isNull() or obj.isUndefined()) {
+    if (obj.is(.null_value) or obj.is(.undefined_value)) {
         _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
@@ -1066,7 +1066,7 @@ pub noinline fn getArrayElement(
             var get_window: PoppedWindow(2) = .{};
             get_window.activate(ctx.runtime, .{ obj, key });
             defer get_window.deactivate(ctx.runtime);
-            if (obj.isNull() or obj.isUndefined()) {
+            if (obj.is(.null_value) or obj.is(.undefined_value)) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
@@ -1118,7 +1118,7 @@ pub noinline fn getArrayElement(
         op.get_array_el2 => {
             const key = try stackValueFromTop(stack, 0);
             const obj = try stackValueFromTop(stack, 1);
-            if (obj.isNull() or obj.isUndefined()) {
+            if (obj.is(.null_value) or obj.is(.undefined_value)) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
@@ -1151,7 +1151,7 @@ pub noinline fn getArrayElement(
         op.get_array_el3 => {
             const key = try stackValueFromTop(stack, 0);
             const obj = try stackValueFromTop(stack, 1);
-            if (obj.isNull() or obj.isUndefined()) {
+            if (obj.is(.null_value) or obj.is(.undefined_value)) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
@@ -1209,7 +1209,7 @@ pub noinline fn readTypedArrayIndexFast(
 // probes never run on a TA receiver (qjs CASE: class!=ARRAY → GPV jumptable).
 pub fn fastTypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
     const object = objectFromValue(obj) orelse return null;
-    const key_int = key.asInt32() orelse return null;
+    const key_int = key.as(.int) orelse return null;
     if (key_int < 0) return null;
     const class_id = object.class_id;
     if (!core.class.isNumericTypedArrayClass(class_id)) return null;
@@ -1235,14 +1235,14 @@ pub const TypedArrayWriteFast = enum { not_typed_array, handled };
 /// for the caller to route through handleCatchableRuntimeError.
 pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !TypedArrayWriteFast {
     const object = objectFromValue(obj) orelse return .not_typed_array;
-    const key_int = key.asInt32() orelse return .not_typed_array;
+    const key_int = key.as(.int) orelse return .not_typed_array;
     if (key_int < 0) return .not_typed_array;
     // A value object needs ToPrimitive (valueOf / Symbol.toPrimitive), which runs
     // user code and needs the full interpreter context (ctx/output/global) — that
     // conversion lives in the slow path's coerceTypedArrayElementForSet. The
     // canonical typedArraySetElement only coerces primitives, so an object value
     // punts to the slow path; the numeric-primitive write is the fast case.
-    if (value.isObject()) return .not_typed_array;
+    if (value.is(.object)) return .not_typed_array;
     // A BigInt or Symbol value has a ToNumber that THROWS a TypeError, and per
     // IntegerIndexedElementSet (ToNumber at spec step 6) that throw must happen
     // BEFORE the in-bounds/immutable validity check. typedArraySetElement does the
@@ -1251,7 +1251,7 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // throwing-conversion values to the slow path, which converts first. (Number /
     // string / boolean / null / undefined have non-throwing conversions, so the
     // validity-check-first order is observably identical for them — they stay fast.)
-    if (value.isBigInt() or value.isSymbol()) return .not_typed_array;
+    if (value.isBigInt() or value.is(.symbol)) return .not_typed_array;
     // Resolve the payload once. Its live count/data pair is maintained from the
     // backing ArrayBuffer's view list, exactly like qjs `u.array.count/u.ptr`.
     // Keep the qjs operation order: immutable reject -> coerce -> RE-check the
@@ -1273,7 +1273,7 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // run user code, reading the live pair here is equivalent to qjs's required
     // post-conversion recheck; every other value keeps the canonical order below.
     if (core.typed_array.isIntegerNumericKind(kind)) {
-        if (value.asInt32()) |integer| {
+        if (value.as(.int)) |integer| {
             if (index >= payload.live_length) return .handled;
             const data = payload.data orelse return .handled;
             const off = @as(usize, index) * @as(usize, width);
@@ -1360,8 +1360,8 @@ inline fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JS
 }
 
 fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue) ?core.JSValue {
-    if (!value.isString() or !key.isInt()) return null;
-    const index_i32 = key.asInt32().?;
+    if (!value.isString() or !key.is(.int)) return null;
+    const index_i32 = key.as(.int).?;
     if (index_i32 < 0) return null;
     const index: usize = @intCast(index_i32);
     if (index >= core.string.stringValueLenUnchecked(value)) return null;

@@ -205,7 +205,7 @@
 
 ### `Object.payloadCellHeader` (`src/core/object.zig:1876`)
 
-- **签名**：`pub inline fn payloadCellHeader(ptr: *anyopaque) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn payloadCellHeader(ptr: *anyopaque) *gc.Header`。
 - **作用**：将payload cell body指针视作collector handle。
 - **实现**：alignCast并ptrCast原指针。
 - **所有权 / 错误 / 调用**：body与handle同址，不回退prefix；不验证kind、publication或分配归属，不建立pin。

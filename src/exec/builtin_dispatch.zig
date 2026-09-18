@@ -41,9 +41,9 @@ pub inline fn nativeExc() NativeValue {
     return core.JSValue.exception();
 }
 
-/// Debug/ReleaseSafe: isException() iff ctx.hasException().
+/// Debug/ReleaseSafe: is(.exception) iff ctx.hasException().
 pub inline fn nativeIsExc(ctx: *core.JSContext, v: NativeValue) bool {
-    const exc = v.isException();
+    const exc = v.is(.exception);
     std.debug.assert(exc == ctx.hasException());
     return exc;
 }
@@ -106,7 +106,7 @@ pub inline fn nativeHostError(ctx: *core.JSContext) HostError {
 /// with an exception already pending (qjs `JS_Call` allows it) and a body
 /// that returns a value then leaves it pending, unrelated to this call.
 inline fn sentinelToHost(ctx: *core.JSContext, v: NativeValue) HostError!core.JSValue {
-    if (v.isException()) return nativeHostError(ctx);
+    if (v.is(.exception)) return nativeHostError(ctx);
     return v;
 }
 
@@ -628,11 +628,9 @@ pub inline fn callRecordFromVmInRealm(
     const realm_global = realm.global orelse
         return nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry);
     // Native backtrace frame, pushed directly (no scope object, no active
-    // flag): the qjs `sf` link of js_call_c_function. The function value is
-    // written as an integer pair: a q-register store here would stall the
-    // 64-bit reads of the backtrace walker (store-forwarding width rule).
+    // flag): the qjs `sf` link of js_call_c_function.
     var bt_data: NativeBacktraceData = undefined;
-    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    bt_data.function_value = func_obj.value();
     var bt_frame: core.ActiveBacktraceFrame = .{ .data = &bt_data, .resolver = resolveNativeBacktrace };
     realm.pushActiveBacktraceFrame(&bt_frame);
     defer realm.popActiveBacktraceFrame(&bt_frame);
@@ -668,7 +666,7 @@ pub inline fn callManagedFromWindow(
     args: []const core.JSValue,
 ) core.JSValue {
     var bt_data: NativeBacktraceData = undefined;
-    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    bt_data.function_value = func_obj.value();
     var bt_frame: core.ActiveBacktraceFrame = .{
         .previous = rt.hot.current_backtrace_frame,
         .data = &bt_data,
@@ -692,7 +690,7 @@ pub inline fn callGetterFromWindow(
     receiver: core.JSValue,
 ) core.JSValue {
     var bt_data: NativeBacktraceData = undefined;
-    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    bt_data.function_value = func_obj.value();
     var bt_frame: core.ActiveBacktraceFrame = .{
         .previous = rt.hot.current_backtrace_frame,
         .data = &bt_data,
@@ -717,7 +715,7 @@ pub inline fn callMethodManagedFromWindow(
     args: []const core.JSValue,
 ) core.JSValue {
     var bt_data: NativeBacktraceData = undefined;
-    core.JSValue.storeSlotAsIntPair(&bt_data.function_value, func_obj.value());
+    bt_data.function_value = func_obj.value();
     var bt_frame: core.ActiveBacktraceFrame = .{
         .previous = rt.hot.current_backtrace_frame,
         .data = &bt_data,
@@ -817,12 +815,12 @@ inline fn invokeEntry(
             return sentinelToHost(ctx, entry.managed()(ctx, this_value, args.ptr, @intCast(args.len), entry, func_obj));
         },
         .getter => {
-            if (entry.sig != 0) return invokeTypedGetter(ctx, this_value, entry);
+            if (entry.sig != .none) return invokeTypedGetter(ctx, this_value, entry);
             return sentinelToHost(ctx, entry.getter()(ctx, this_value, entry));
         },
         .setter => {
             const new_value = if (args.len == 0) core.JSValue.undefinedValue() else args[0];
-            if (entry.sig != 0) return invokeTypedSetter(ctx, this_value, entry, new_value);
+            if (entry.sig != .none) return invokeTypedSetter(ctx, this_value, entry, new_value);
             return sentinelToHost(ctx, entry.setter()(ctx, this_value, new_value, entry));
         },
         .leaf => {
@@ -875,7 +873,7 @@ pub fn nativeReceiverSelfOrThrow(ctx: *core.JSContext, this_value: core.JSValue,
 }
 
 /// Canonical marshal helpers for thunks built outside this file (typed
-/// accessor thunks of `zjs.native.Class`): FNABI §15.3, no coercion.
+/// accessor thunks of `zjs.native.Class`): canonical leaf marshal, no coercion.
 pub inline fn marshalI32(val: core.JSValue) ?i32 {
     const one = [_]core.JSValue{val};
     return leafI32Arg(&one, 0);
@@ -1072,7 +1070,7 @@ pub fn callNativeAccessorTarget(
 ) HostError!core.JSValue {
     // Typed accessor: leaf contract (§4.7 K1/K2 row) -- no preflight, no
     // backtrace marker; the VM throws on a receiver / marshal miss.
-    if (target.entry.sig != 0) {
+    if (target.entry.sig != .none) {
         if (expected_kind == .getter) {
             return invokeTypedGetter(target.realm, receiver, target.entry);
         } else {
@@ -1164,7 +1162,7 @@ inline fn leafCodeUnitString(rt: *core.JSRuntime, unit: u16) ?core.JSValue {
 /// K1 leaf arm: tag checks + direct C call + boxing, no environment. Returns
 /// null on a tag miss (the caller takes the fallback with the environment,
 /// or throws TypeError when the entry has none -- the canonical marshal
-/// policy of FNABI §15.3 / §15.6: a missing argument is `undefined` and
+/// canonical leaf marshal: a missing argument is `undefined` and
 /// therefore a miss).
 inline fn invokeLeafFast(entry: *const core.NativeEntry, args: []const core.JSValue) ?core.JSValue {
     switch (entry.sig) {
@@ -1204,7 +1202,7 @@ inline fn invokeLeafFast(entry: *const core.NativeEntry, args: []const core.JSVa
         native_legacy.sig_bool_to_bool => {
             const f: native_legacy.LeafBoolToBool = @ptrCast(entry.target);
             if (args.len == 0) return null;
-            const x = args[0].asBool() orelse return null;
+            const x = args[0].as(.boolean) orelse return null;
             return core.JSValue.boolean(f(x));
         },
         native_legacy.sig_state_f64_to_void => {
@@ -1222,14 +1220,14 @@ inline fn invokeLeafFast(entry: *const core.NativeEntry, args: []const core.JSVa
     }
 }
 
-/// Canonical `i32` marshal (FNABI §15.3): a JS Number whose mathematical
+/// Canonical `i32` marshal: a JS Number whose mathematical
 /// value is an int32, whether it is int-tagged or double-represented. Any
 /// other value (including a missing argument) is a miss.
 inline fn leafI32Arg(args: []const core.JSValue, index: usize) ?i32 {
     if (index >= args.len) return null;
     const value = args[index];
-    if (value.isInt()) return value.asInt32().?;
-    if (value.asFloat64()) |f| {
+    if (value.is(.int)) return value.as(.int).?;
+    if (value.as(.float64)) |f| {
         if (f != @trunc(f)) return null;
         if (f < -2147483648.0 or f > 2147483647.0) return null;
         // -0.0 is not an int32 value.
@@ -1239,12 +1237,12 @@ inline fn leafI32Arg(args: []const core.JSValue, index: usize) ?i32 {
     return null;
 }
 
-/// Canonical `f64` marshal (FNABI §15.3): any JS Number, nothing else.
+/// Canonical `f64` marshal: any JS Number, nothing else.
 inline fn leafF64Arg(args: []const core.JSValue, index: usize) ?f64 {
     if (index >= args.len) return null;
     const value = args[index];
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    return value.asFloat64();
+    if (value.is(.int)) return @floatFromInt(value.as(.int).?);
+    return value.as(.float64);
 }
 
 noinline fn invokeLeafFallback(
@@ -1263,7 +1261,7 @@ noinline fn invokeLeafFallback(
 /// typed generic+magic fallback owns their full, observable ToNumber semantics.
 /// Lenient `f64` marshal used ONLY by the two `f64`-returning K1 leaf arms
 /// (`sig_f64_to_f64` / `sig_f64_f64_to_f64`). Unlike the canonical
-/// `leafF64Arg` (FNABI §15.3: any JS Number, nothing else) it also accepts
+/// `leafF64Arg` (any JS Number, nothing else) it also accepts
 /// the values whose ToNumber is exact and allocation-free -- a missing
 /// argument and `undefined` (NaN), `null` (0) and booleans (0/1) -- so the
 /// Math leaves keep the fast arm for them instead of paying the managed
@@ -1271,11 +1269,11 @@ noinline fn invokeLeafFallback(
 inline fn primitiveF64Arg(args: []const core.JSValue, index: usize) ?f64 {
     if (index >= args.len) return std.math.nan(f64);
     const value = args[index];
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    if (value.asBool()) |boolean| return if (boolean) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.is(.int)) return @floatFromInt(value.as(.int).?);
+    if (value.is(.float64)) return value.as(.float64).?;
+    if (value.as(.boolean)) |boolean| return if (boolean) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
     return null;
 }
 

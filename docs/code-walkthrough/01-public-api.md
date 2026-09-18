@@ -1,34 +1,28 @@
-# 01 — 公共嵌入 API
+# 01 — CLI / 测试用的 binding 门面
 
-嵌入方 `@import("zjs")` 只看见这一层。`src/root.zig` 是契约门面；真正的句柄、eval、native thunk、`CallSite` / `PropertySite` 在 `src/binding/`。`src/internal_root.zig` 给 CLI / test262 / 仓内测试用，**不是**公共嵌入契约。旁路文件（配置签名、布局垫片、GC 快照、平台时钟）挂在编译根上，宿主通常不直接 import。
+`src/root.zig` 是 CLI 与仓内测试走的门面；真正的 eval / `native.managed` 在 `src/binding/`。`src/internal_root.zig` 给 CLI / test262 / 仓内测试用。旁路文件（配置签名、布局垫片、GC 快照、平台时钟）挂在编译根上。
 
-契约权威：[public-api-contract.md](../public-api-contract.md)。本册讲这些入口**怎么接到 core / exec**，不复述 cookbook。
+`PropertySite`、`PropNameID`、`NativeBinding`、`zjs.native.leaf` / `Class`、binding 层 `CallSite` 已删除。native → JS 重复调用走 `exec/call_site.zig`；属性 IC 只留在 VM `PropSiteCache`。
 
-## 嵌入地图（一页）
+## 入口地图（一页）
 
 ```
-宿主 / CLI
+CLI / 仓内测试
     │  const zjs = @import("zjs");
     ▼
-src/root.zig                          公共门面（导出、包装与部分宿主操作实现）
+src/root.zig                          门面（导出、包装与部分宿主操作实现）
     JSRuntime / JSContext / JSValue   ← binding/root.zig ← core
-    CallSite                          ← binding/context.zig（native → JS 重复调用）
-    PropertySite                      ← binding/property_site.zig（同一属性名的 get/set）
-    zjs.native                        ← binding/native.zig（managed / leaf / Class）
-    zjs.host                          ← NativeBinding=binding.zig，PropName=prop_name.zig
+    zjs.native                        ← binding/native.zig（仅 managed）
+    zjs.host                          ← defineScriptArgs 等 CLI 形全局助手
     zjs.value                         ← 立即数构造、句柄别名、String/Bytes
     zjs.object                        ← opaque Object + Buffer 零拷贝借阅
     zjs.context / module / job        ← 调用 / 模块图 / Promise job 排水
-    zjs.runtime                       ← runtime/public.zig（事件循环；18 册）
+    zjs.runtime                       ← runtime/root.zig（事件循环；18 册）
     │
     ▼
 src/binding/root.zig                  binding 聚合边界（禁止依赖 CLI）
-    context.zig     JSContext 门面：create / eval / defineFunction / CallSite
+    context.zig     JSContext 门面：create / eval / defineFunction
     native.zig      comptime thunk → 不可变 NativeEntry（VM 当内建分发）
-    binding.zig     JSObject(T, spec)：realm-local 宿主类
-    prop_name.zig   PropNameID（u32 atom + host pin）
-    property_site.zig  与 VM get_field 共用 PropSiteCache
-    native_call_plan.zig  FNABI 描述符 → NativeCallPlanSpec（插件看不见）
     │
     ▼
 src/core/  JSRuntime / JSContext / JSValue / NativeEntry / atoms / GC
@@ -52,14 +46,12 @@ _ = result;
 | --- | --- | --- |
 | 造 Runtime / Realm | `JSRuntime.create` / `JSContext.create` | core；门面在 `binding/context.zig` |
 | 跑脚本 | `JSContext.eval` / `evalScriptSource` | `binding/context.zig` → `exec/eval_entry.zig` |
-| 注册宿主函数 | `zjs.native.managed`/`leaf` + `defineFunction` | `binding/native.zig` + `context.zig` |
-| native → JS 热循环 | `zjs.CallSite.init` / `call` | `binding/context.zig` → `exec/call_site.zig` |
-| 反复读同一字段 | `zjs.PropertySite.init` / `get`/`set` | `binding/property_site.zig` |
-| 宿主对象 | `zjs.host.NativeBinding.JSObject` | `binding/binding.zig` |
+| 注册宿主函数 | `zjs.native.managed` + `defineFunction` | `binding/native.zig` + `context.zig` |
+| native → JS | `JSContext.callFunction` | `binding/context.zig` → `exec/call_site.zig` |
 | 跨调用保住值 | `zjs.value.Persistent` / `Scope` / `Local` | core 句柄；root 只起别名 |
 | 排 Promise job | `zjs.job.drain` 或 `JSContext.runJobs` | `root.zig` / `context.zig` |
 
-`JSContext.destroy` 清理该 context 的 Atomics waiters、撤销宿主持有的 realm 根，并释放公共门面分配；core realm 的回收由 GC 决定，并非在这里立即销毁。`Call.ctx` 是 `borrowCore` 出来的非拥有门面，禁止 `deinit` 或 `destroy`。借用它的 CallSite / PropertySite 等必须先结束使用，不能在门面销毁后继续调用。
+`JSContext.destroy` 清理该 context 的 Atomics waiters、撤销宿主持有的 realm 根，并释放公共门面分配；core realm 的回收由 GC 决定，并非在这里立即销毁。`Call.ctx` 是 `borrowCore` 出来的非拥有门面，禁止 `deinit` 或 `destroy`。
 
 ## 分册目录
 
@@ -67,16 +59,15 @@ _ = result;
 | --- | --- |
 | [01-public-api-root.md](01-public-api-root.md) | `src/root.zig`：value / host / object / Buffer / context / module / job |
 | [01-public-api-companions.md](01-public-api-companions.md) | `internal_root.zig`、`config_signature.zig`、`dossier_pad.zig`、`gc_representation.zig`、`platform_clock.zig` |
-| [01-public-api-binding-facade.md](01-public-api-binding-facade.md) | `binding/root.zig`、`prop_name.zig`、`property_site.zig`、`native_call_plan.zig` |
-| [01-public-api-context.md](01-public-api-context.md) | `binding/context.zig`：`JSContext` + `CallSite` |
-| [01-public-api-native.md](01-public-api-native.md) | `binding/native.zig`：`Call` / `managed` / `leaf` / `Class` |
-| [01-public-api-objects.md](01-public-api-objects.md) | `binding/binding.zig`：`JSObject` 与方法 stub |
+| [01-public-api-binding-facade.md](01-public-api-binding-facade.md) | `binding/root.zig` |
+| [01-public-api-context.md](01-public-api-context.md) | `binding/context.zig`：`JSContext` |
+| [01-public-api-native.md](01-public-api-native.md) | `binding/native.zig`：`Call` / `managed` |
 
 ## 本册不讲什么
 
 - `JSRuntime` / `JSValue` 的方法体在 core（06 / 10 册）。root 只 re-export 类型。
 - `zjs.runtime` 事件循环在 18 册。
-- FNABI C 头与 loader 在 `src/abi/` 与外部 `fun` 仓；本册只讲引擎侧 `native_call_plan.zig`。
+- 叶签名是引擎私有 `LeafSig`（`src/core/native_entry.zig`），给内建 `native_legacy` 用，不再有 `zjs.native.leaf`。
 
 ## 覆盖核对
 

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Host surface:** removed embedder-only binding APIs that CLI and
+  test262 do not use: `zjs.PropertySite`, `zjs.host.PropName` /
+  `PropNameID`, `zjs.host.NativeBinding` (`src/binding/binding.zig`),
+  `zjs.native.leaf` / `leafWithState` / `Class`, `JSContext.defineClass`,
+  and the binding-layer `CallSite` wrapper. Host functions stay on
+  `zjs.native.managed`. Repeated native → JS calls use
+  `JSContext.callFunction`; property IC remains VM-only
+  (`exec/call_site.zig`, `PropSiteCache`).
+
+- **Public API:** `zjs.runtime` is the host event loop only (`EventLoop`,
+  `runUntilIdle`). Removed exec re-exports: `cleanupAtomicsWaitersForContext`,
+  `wakeAtomicsWaitersForRuntimes`, `detachArrayBuffer`,
+  `evalFileModuleGraphWithOutput`, `resolveModuleSpecifier`. Call
+  `JSContext.destroy` / `src/exec/atomics_ops.zig`,
+  `src/exec/buffer_ops.detachArrayBuffer`, `zjs.module`, or
+  `src/exec/module_graph.zig` instead. `src/runtime/public.zig` is gone;
+  `src/runtime/root.zig` is the single facade.
+
 - **BigInt:** `/` and `%` skip a leading quotient digit that is already known to be zero.
 
 - **Promises:** built-in Promise objects and their state share one allocation; custom class payload ownership is preserved.

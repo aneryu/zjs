@@ -1,4 +1,6 @@
-# 01 — `JSContext` 门面与 `CallSite`
+# 01 — `JSContext` 门面
+
+> binding 层 `CallSite` 与 `defineClass` 已删除。native → JS 走 `JSContext.callFunction` → `exec/call_site.zig`。下文若仍写 `CallSite` / `defineClass`，以源码为准。
 
 `src/binding/context.zig` 提供 core realm 的宿主门面。拥有型构造建立 core context 的宿主根，deinit/destroy 撤销这份根；realm 本身由 tracing GC 管理，仍被函数、job 等对象引用时可以继续存活。borrowCore 只借用已有 core 指针。公共构造在成功返回前完成 global/intrinsic bootstrap，但各个 auto-init 属性仍可延迟物化；不能把“公共 context 已就绪”理解为所有 builtin 属性均已实例化。
 

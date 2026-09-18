@@ -225,8 +225,8 @@ pub const InternalEntry = struct {
     prim_leaf: ?PrimLeaf = null,
 
     pub const PrimLeaf = struct {
-        /// FNABI schema signature name (`STRING_I32_TO_I32`, ...).
-        sig: []const u8,
+        /// Leaf discriminant selecting the C prototype (`native_legacy.Leaf*`).
+        sig: native_entry.LeafSig,
         /// Leaf C prototype selected by `sig` (`native_legacy.Leaf*`).
         target: native_entry.CodePtr,
     };

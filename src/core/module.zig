@@ -307,8 +307,8 @@ pub const PendingDefinition = struct {
     /// violate the exact take/adopt transition used when it becomes a function
     /// object.
     pub fn adoptFuncObjectValueNoFail(self: *PendingDefinition, next: value_mod.JSValue) void {
-        std.debug.assert(self.func_obj.isUndefined());
-        std.debug.assert(!next.isUndefined());
+        std.debug.assert(self.func_obj.is(.undefined_value));
+        std.debug.assert(!next.is(.undefined_value));
         self.func_obj = next;
     }
 
@@ -330,19 +330,19 @@ pub const ModuleRecord = struct {
         // MemoryAccount places the common GC metadata immediately before the
         // record, so the embedded header must remain at payload offset zero.
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        std.debug.assert(@sizeOf(@This()) == 272);
+        std.debug.assert(@sizeOf(@This()) == 240);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "registry_prev") == 136);
+        std.debug.assert(@offsetOf(@This(), "registry_prev") == 128);
         std.debug.assert(@offsetOf(@This(), "registry") == 32);
         std.debug.assert(@offsetOf(@This(), "memory") == 40);
-        std.debug.assert(@offsetOf(@This(), "module_name") == 244);
-        std.debug.assert(@offsetOf(@This(), "requests") == 104);
-        std.debug.assert(@offsetOf(@This(), "func_obj") == 192);
-        std.debug.assert(@offsetOf(@This(), "module_ns") == 208);
-        std.debug.assert(@offsetOf(@This(), "status") == 256);
+        std.debug.assert(@offsetOf(@This(), "module_name") == 212);
+        std.debug.assert(@offsetOf(@This(), "requests") == 96);
+        std.debug.assert(@offsetOf(@This(), "func_obj") == 176);
+        std.debug.assert(@offsetOf(@This(), "module_ns") == 184);
+        std.debug.assert(@offsetOf(@This(), "status") == 224);
     }
 
-    header: gc.GCObjectHeader align(16) = .{},
+    header: gc.Header align(16) = .{},
     /// Independent, non-owning membership in the realm's loaded-module list.
     /// The GC header links above remain reserved for the collector.
     registry_prev: ?*ModuleRecord = null,
@@ -414,8 +414,8 @@ pub const ModuleRecord = struct {
         std.debug.assert(self.indirect_exports.len == 0);
         std.debug.assert(self.star_exports.len == 0);
         std.debug.assert(self.import_attributes.len == 0);
-        std.debug.assert(self.func_obj.isUndefined());
-        std.debug.assert(self.module_ns.isUndefined());
+        std.debug.assert(self.func_obj.is(.undefined_value));
+        std.debug.assert(self.module_ns.is(.undefined_value));
         for (pending.requests) |entry| std.debug.assert(entry.module == null);
         for (pending.exports) |entry| std.debug.assert(entry.retained_cell == null);
 
@@ -603,8 +603,8 @@ pub const ModuleRecord = struct {
     /// Complete a FunctionBytecode -> function-object move after the old owner
     /// was taken. A live slot may never be silently replaced or freed here.
     pub fn adoptFuncObjectValueNoFail(self: *ModuleRecord, rt: anytype, next: value_mod.JSValue) void {
-        std.debug.assert(self.func_obj.isUndefined());
-        std.debug.assert(!next.isUndefined());
+        std.debug.assert(self.func_obj.is(.undefined_value));
+        std.debug.assert(!next.is(.undefined_value));
         self.func_obj = next;
         // A ModuleRecord is a traced heap object; installing its function is an
         // owner-to-child store like any other.
@@ -623,8 +623,8 @@ pub const ModuleRecord = struct {
 
     /// Publish a completely-constructed namespace. The record takes ownership.
     pub fn publishModuleNamespaceNoFail(self: *ModuleRecord, rt: anytype, owned: value_mod.JSValue) void {
-        std.debug.assert(self.module_ns.isUndefined());
-        std.debug.assert(owned.isObject());
+        std.debug.assert(self.module_ns.is(.undefined_value));
+        std.debug.assert(owned.is(.object));
         self.module_ns = owned;
         rt.gc.generationalBarrier(&self.header, owned.cycleMarkHeader());
     }
@@ -637,7 +637,7 @@ pub const ModuleRecord = struct {
         self: *ModuleRecord,
         resolve: @FieldType(module_auto_init.AutoInitModuleOwner, "resolve"),
     ) void {
-        std.debug.assert(self.module_ns.isUndefined());
+        std.debug.assert(self.module_ns.is(.undefined_value));
         std.debug.assert(self.namespace_auto_init_owner.resolve == unresolvedModuleAutoInit);
         self.namespace_auto_init_owner.resolve = resolve;
     }

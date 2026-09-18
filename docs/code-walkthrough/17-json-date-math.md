@@ -318,7 +318,7 @@ stringify：replacer/gap/propertyList；循环检测 `objectInStack`；简单无
 
 - **签名**：`pub fn isRawJSON(value: core.JSValue) bool`。
 - **作用**：判断一个值是不是 `JSON.rawJSON` 造出的 raw_json 对象。
-- **实现**：先 `refHeader()` 取堆头（非堆值直接 false），再确认 `isObject()`，最后比 `object.class_id == core.class.ids.raw_json`——`rawJSON` 造出的对象用的正是这个 class id。
+- **实现**：先 `refHeader()` 取堆头（非堆值直接 false），再确认 `is(.object)`，最后比 `object.class_id == core.class.ids.raw_json`——`rawJSON` 造出的对象用的正是这个 class id。
 - **所有权 / 错误 / 调用**：只读不分配。文件内唯一调用方是 `jsonIsRawJsonCall`（`JSON.isRawJSON`，87）；两条序列化路径判 raw 片段时并不经过它，而是直接比 `object.class_id == core.class.ids.raw_json`（990、2413）。它是 `pub`，也留给嵌入方用。
 
 ### `createSimpleJsonAsciiStringValue` (`src/exec/json_ops.zig:939`)
@@ -479,14 +479,14 @@ stringify：replacer/gap/propertyList；循环检测 `objectInStack`；简单无
 
 - **签名**：`fn isArrayObject(value: core.JSValue) bool`。
 - **作用**：判断一个值是不是数组对象，用来决定 replacer 是否提供属性名列表。
-- **实现**：`refHeader()` + `isObject()` 双查后取 `object.isArray()`；这是对象内部的数组标志，不做 proxy 穿透（非 VM 路径不支持 proxy replacer）。
+- **实现**：`refHeader()` + `is(.object)` 双查后取 `object.isArray()`；这是对象内部的数组标志，不做 proxy 穿透（非 VM 路径不支持 proxy replacer）。
 - **所有权 / 错误 / 调用**：只读不分配。唯一调用方是 `stringify`，用它填 `StringifyOptions.has_property_list`。
 
 ### `stringifyPropertyList` (`src/exec/json_ops.zig:1352`)
 
 - **签名**：`fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.Atom`。
 - **作用**：非 VM 路径的 replacer 数组处理：把数组元素规范成去重后的属性名 atom 列表。
-- **实现**：先把 replacer root 住；`refHeader()` / `isObject()` / `object.isArray()` 三查有一不中就返回静态空切片 `&.{}`（非数组 replacer 在这条路径上不产生属性列表）。是数组则按 `object.arrayLength()` 逐下标 `object.getProperty(atomFromUInt32(index))` 取元素（每个元素另开一层 `rootValues`），交 `stringifyPropertyListAtom` 规范成 atom：返回 null 跳过，`atomListContains` 判重复也跳过，否则 `list.append`。最后 `list.toOwnedSlice` 交出。 用 `ValueRootFrame` / `rootValues` 钉住跨分配窗口的值。
+- **实现**：先把 replacer root 住；`refHeader()` / `is(.object)` / `object.isArray()` 三查有一不中就返回静态空切片 `&.{}`（非数组 replacer 在这条路径上不产生属性列表）。是数组则按 `object.arrayLength()` 逐下标 `object.getProperty(atomFromUInt32(index))` 取元素（每个元素另开一层 `rootValues`），交 `stringifyPropertyListAtom` 规范成 atom：返回 null 跳过，`atomListContains` 判重复也跳过，否则 `list.append`。最后 `list.toOwnedSlice` 交出。 用 `ValueRootFrame` / `rootValues` 钉住跨分配窗口的值。
 - **所有权 / 错误 / 调用**：返回 `toOwnedSlice` 的 atom 数组，归调用方，由 `freePropertyList` 释放；列表在构建期用 `rootAtomList` 钉住（`getProperty` 可能触到 JS 访问器）。调用方是 `stringify`。
 
 ### `stringifyPropertyListAtom` (`src/exec/json_ops.zig:1388`)
@@ -1234,7 +1234,7 @@ setter 先经 `captureDateValueMs`（getTime 记录）抓 `[[DateValue]]`，再 
 
 - **签名**：`fn expectDateObject(value: core.JSValue) !*core.Object`。
 - **作用**：校验一个值确实是 Date 实例并取出其 `*core.Object`，否则 `error.TypeError`。
-- **实现**：`refHeader()` 取堆头（非堆值 `error.TypeError`），确认 `isObject()`，再要求 `class_id == core.class.ids.date`；三关都过才返回 `*core.Object`。
+- **实现**：`refHeader()` 取堆头（非堆值 `error.TypeError`），确认 `is(.object)`，再要求 `class_id == core.class.ids.date`；三关都过才返回 `*core.Object`。
 - **所有权 / 错误 / 调用**：只借用不拥有。`error.TypeError` 在 `dateExtendedPrototypeCall` 里被改写成带消息的「not a Date object」，在 `methodCallArgs` 路径上则由上层统一转 JS 异常。
 
 ### `setDateValue` (`src/exec/date_ops.zig:1732`)
@@ -1269,7 +1269,7 @@ setter 先经 `captureDateValueMs`（getTime 记录）抓 `[[DateValue]]`，再 
 
 - **签名**：`fn numberValue(value: core.JSValue) ?f64`。
 - **作用**：把 int32 / float64 的 JSValue 取成 f64，其它类型返回 null。
-- **实现**：`isInt()` 时把 int32 转 f64，`isFloat64()` 时直接取，其余（含字符串、对象、NaN-box 之外的类型）返回 null。
+- **实现**：`is(.int)` 时把 int32 转 f64，`is(.float64)` 时直接取，其余（含字符串、对象、NaN-box 之外的类型）返回 null。
 - **所有权 / 错误 / 调用**：纯函数。文件内被 `dateValue` 与 `toNumber` 用作数值取值的第一关。
 
 ### `numberResult` (`src/exec/date_ops.zig:1765`)
@@ -1463,7 +1463,7 @@ setter 先经 `captureDateValueMs`（getTime 记录）抓 `[[DateValue]]`，再 
 
 - **签名**：`pub fn primitiveMathNumber(value: core.JSValue) ?f64`。
 - **作用**：无副作用地把原始值取成 f64：int32/float64 直取，布尔 → 1/0，null → 0，undefined → NaN；字符串、对象、symbol、bigint 返回 null。
-- **实现**：五条顺序判断：`isInt()` 转 f64、`isFloat64()` 直取、`asBool()` 给 1/0、null 给 0、undefined 给 NaN；都不中（字符串、对象、symbol、bigint）返回 null。全程不回调 JS，因此可以用在快路径上。
+- **实现**：五条顺序判断：`is(.int)` 转 f64、`is(.float64)` 直取、`as(.boolean)` 给 1/0、null 给 0、undefined 给 NaN；都不中（字符串、对象、symbol、bigint）返回 null。全程不回调 JS，因此可以用在快路径上。
 - **所有权 / 错误 / 调用**：纯函数。调用方：`mathMinMax` 的双参快臂与 `mathMinMaxPrimitiveFast`——返回 null 就意味着必须退回可观察的 `toMathNumber` 路径。
 
 ### `fmin` (`src/exec/math_ops.zig:429`)

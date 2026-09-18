@@ -340,8 +340,8 @@ synthetic providers. No plugin or job queue registers a `RootProvider`.
 
 1. the passed `ValueRootFrame` chain (`traceValueRootFrames`);
 2. `current_exception`;
-3. `local_root_slots` (`JSValue.Scope` / `Local`);
-4. `persistent_root_slots` (`JSValue.Persistent`);
+3. `local_root_slots` (`zjs.value.Scope` / `Local`);
+4. `persistent_root_slots` (`zjs.value.Persistent`);
 5. `deferred_class_payload_finalizers` (via `DeferredClassPayloadFinalizer.traceRoots`, which may call `class.PayloadMark`);
 6. `deferred_weak_value_frees`;
 7. `job_queue.traceRoots`;
@@ -418,10 +418,11 @@ state lives on the heap object:
 `createGeneratorShell` unpublished construction remains a ValueRootFrame /
 RC window, not an `active_invocation` root.
 
-### 3.5 Handle types (`JSValue.Scope` / `Local` / `Persistent` / `Weak`)
+### 3.5 Handle types (`zjs.value.Scope` / `Local` / `Persistent` / `Weak`)
 
-Aliases in `src/core/value.zig` → `HandleScope`, `LocalHandle`,
-`JSValueHandle`, `WeakPersistentValue` in `src/core/runtime.zig`.
+Public aliases on `zjs.value` → `HandleScope`, `LocalHandle`,
+`JSValueHandle`, `WeakPersistentValue` in `src/core/runtime.zig`. They are
+not nested on the 16-byte `JSValue` encoding.
 
 Production use of the **handle objects** is thin. Locals/persistents that
 exist are in `local_root_slots` / `persistent_root_slots` and **are** visited

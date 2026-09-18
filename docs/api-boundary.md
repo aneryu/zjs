@@ -22,22 +22,18 @@ This document is the active boundary guide for ordinary project documentation.
 re-exports the low-level embedding API and the explicit `zjs.runtime`
 namespace.
 
-`src/binding/` contains the public adapter layer for value, string, bytes,
-property-name (`prop_name.zig`), property-site (`property_site.zig`:
-`zjs.PropertySite`), native-function (`native.zig`: `zjs.native`),
-native-object (`binding.zig`), and context/CallSite (`context.zig`)
-surfaces. There is no
+`src/binding/` contains the adapter layer for context (`context.zig`) and
+native-function (`native.zig`: `zjs.native.managed`) surfaces. There is no
 landed `src/kernel/` directory; earlier "kernel API" language maps to this
 adapter layer plus `src/root.zig`.
 
-`src/runtime/` owns host/runtime policy. On disk it holds the event loop
-(`event_loop.zig`) and the facade files (`public.zig`, `root.zig`). Module
-file graph helpers, Atomics waiter cleanup, and ArrayBuffer detach
-integration are implemented in `src/exec/` and re-exported through
-`runtime/root.zig`; they are runtime *surface*, not runtime-owned files.
-The former dynamic plugin loader (`plugin.zig`, the `zjs.ffi` ABI) was
-deleted 2026-09-06; its successor, the FNABI loader, lives in the `fun`
-repository and is an embedder of `zjs.native` like any other.
+`src/runtime/` owns the host event loop (`event_loop.zig`) and the
+`zjs.runtime` aliases (`root.zig`). Module file graph helpers, Atomics
+waiter cleanup, and ArrayBuffer detach live in `src/exec/` and are not
+re-exported through this namespace. The former dynamic plugin loader
+(`plugin.zig`, the `zjs.ffi` ABI) was deleted 2026-09-06; its successor,
+the FNABI loader, lives in the `fun` repository and is an embedder of
+`zjs.native` like any other.
 
 `src/internal_root.zig` is repository-local aggregation for CLI, test262, and
 internal tests. It is not the public embedding contract.
@@ -68,15 +64,11 @@ The central public primitives are:
 zjs.JSRuntime
 zjs.JSContext
 zjs.JSValue
-zjs.CallSite
-zjs.PropertySite
-zjs.native.managed / leaf / leafWithState
+zjs.native.managed
 zjs.native.Call / Spec / Options
 zjs.object.Object
 zjs.value.String
 zjs.value.Bytes
-zjs.host.PropName
-zjs.host.NativeBinding.JSObject(T, spec)
 zjs.runtime
 ```
 
@@ -112,10 +104,9 @@ and exception materialization.
 
 ## Runtime Policy
 
-The runtime layer may expose event loops, timers, I/O policy, module file graph
-helpers, SharedArrayBuffer wake/cleanup hooks, and CLI integration (the
-module-graph, wake/cleanup, and detach helpers are implemented in `src/exec/`
-and re-exported). Those policies do not move into `src/core/`.
+The runtime layer may expose event loops, timers, and I/O policy. Module
+file graph helpers, SharedArrayBuffer wake/cleanup hooks, and ArrayBuffer
+detach stay in `src/exec/`. Those policies do not move into `src/core/`.
 
 The `zjs` CLI is a thin benchmark and smoke-test shell. Its default
 JavaScript-visible host surface is intentionally small:

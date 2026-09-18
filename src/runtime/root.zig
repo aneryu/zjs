@@ -1,77 +1,27 @@
-//! Runtime integration for the event loop and host wakeups.
-const std = @import("std");
-const atomics_ops = @import("../exec/atomics_ops.zig");
-const core = @import("../core/root.zig");
-const exec = @import("../exec/root.zig");
-const zjs = @import("../binding/root.zig");
-
-pub const event_loop = @import("event_loop.zig");
-
-pub const EventLoop = event_loop.EventLoop;
-pub const EventLoopOptions = event_loop.Options;
-pub const EventLoopRunResult = event_loop.RunResult;
-pub const runUntilIdle = event_loop.runUntilIdle;
-
-pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void {
-    exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx.core);
-}
-
-pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *zjs.JSRuntime) void {
-    const io = atomics_ops.atomicsWaiterIo();
-    atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
-    defer atomics_ops.atomics_waiter_mutex.unlock(io);
-
-    var cursor = atomics_ops.atomics_waiters;
-    while (cursor) |waiter| {
-        if (waiter.realm.borrow()) |ctx| {
-            if (ctx.runtime == primary or runtimeListContains(related, ctx.runtime)) {
-                if (waiter.completion != .waiting) {
-                    cursor = waiter.next;
-                    continue;
-                }
-                // May be called by a foreign test262 agent/coordinator thread:
-                // publish only the mutex-protected scalar and signal. Promise,
-                // RealmRef, allocator, and JS heap remain owner-thread-only.
-                waiter.completion = .notified;
-                waiter.cond.broadcast(io);
-            }
-        }
-        cursor = waiter.next;
-    }
-}
-
-fn runtimeListContains(list: []const *zjs.JSRuntime, runtime: *zjs.JSRuntime) bool {
-    for (list) |candidate| {
-        if (candidate == runtime) return true;
-    }
-    return false;
-}
-
-pub fn detachArrayBuffer(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
-    return exec.buffer_ops.detachArrayBuffer(ctx.runtimePtr(), value);
-}
-
-pub fn evalFileModuleGraphWithOutput(
-    ctx: *zjs.JSContext,
-    source_text: []const u8,
-    output: *std.Io.Writer,
-    filename: []const u8,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    max_source_size: usize,
-) !zjs.JSValue {
-    return exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx.core, source_text, output, filename, io, allocator, max_source_size);
-}
-
-pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {
-    return exec.module.resolveModuleSpecifier(allocator, referrer_path, specifier);
-}
+//! Host event-loop surface for embedders, CLI, and test262.
+pub const EventLoop = @import("event_loop.zig").EventLoop;
+pub const EventLoopOptions = @import("event_loop.zig").Options;
+pub const EventLoopRunResult = @import("event_loop.zig").RunResult;
+pub const runUntilIdle = @import("event_loop.zig").runUntilIdle;
 
 test {
-    _ = event_loop;
-    _ = cleanupAtomicsWaitersForContext;
-    _ = wakeAtomicsWaitersForRuntimes;
-    _ = detachArrayBuffer;
-    _ = evalFileModuleGraphWithOutput;
-    _ = resolveModuleSpecifier;
+    _ = @import("event_loop.zig");
+}
+
+test "runtime namespace does not expose internals or kernel primitives" {
+    const std = @import("std");
+
+    try std.testing.expect(!@hasDecl(@This(), "event_loop"));
+    try std.testing.expect(!@hasDecl(@This(), "cleanup"));
+    try std.testing.expect(!@hasDecl(@This(), "modules"));
+    try std.testing.expect(!@hasDecl(@This(), "plugin"));
+    try std.testing.expect(!@hasDecl(@This(), "buffer"));
+
+    try std.testing.expect(!@hasDecl(@This(), "Engine"));
+    try std.testing.expect(!@hasDecl(@This(), "JSRuntime"));
+    try std.testing.expect(!@hasDecl(@This(), "JSContext"));
+    try std.testing.expect(!@hasDecl(@This(), "JSValue"));
+    try std.testing.expect(!@hasDecl(@This(), "Object"));
+    try std.testing.expect(!@hasDecl(@This(), "binding"));
+    try std.testing.expect(!@hasDecl(@This(), "ffi"));
 }

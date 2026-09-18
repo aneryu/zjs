@@ -844,7 +844,7 @@ test "promiseSettleValue preserves pending state across reaction prepare and FIF
     }
 
     try promiseSettleValue(ctx, global, promise, core.JSValue.int32(42), false);
-    try std.testing.expectEqual(@as(?i32, 42), promise.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), promise.promiseResult().?.as(.int));
     try std.testing.expectEqual(@as(usize, 0), promise.promiseReactions().len);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     var queued = rt.job_queue.takeFirst().?;
@@ -977,12 +977,12 @@ fn resolvePromiseWithState(
         return core.JSValue.undefinedValue();
     }
 
-    if (reject or !value.isObject() or objectFromValue(value) == null) {
+    if (reject or !value.is(.object) or objectFromValue(value) == null) {
         try publishPromiseResolution(ctx, global, state, target, value, reject);
         return core.JSValue.undefinedValue();
     }
 
-    if (!reject and value.isObject()) {
+    if (!reject and value.is(.object)) {
         if (objectFromValue(value) != null) {
             // No native-promise special case: qjs js_promise_resolve_function_call
             // (quickjs.c:53600-53630) treats every object resolution uniformly —
@@ -1136,7 +1136,7 @@ test "Promise executor recursive OOM rejects with preallocated reason" {
     try std.testing.expect(promise_object.promiseIsRejected());
     const reason = promise_object.promiseResult() orelse return error.TestUnexpectedResult;
     try std.testing.expect(reason.same(preallocated));
-    try std.testing.expect(!reason.isUndefined());
+    try std.testing.expect(!reason.is(.undefined_value));
 }
 
 test "direct Promise resolve OOM is owned by FIFO after resolving pair collection" {
@@ -1191,7 +1191,7 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
 
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
-    try std.testing.expectEqual(@as(?i32, 41), target.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), target.promiseResult().?.as(.int));
     try std.testing.expect(!target.promiseIsRejected());
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
@@ -1264,12 +1264,12 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
     try std.testing.expect(target.promiseResult() == null);
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
-    try std.testing.expectEqual(@as(?i32, 77), rt.job_queue.jobs[0].payload.promise_settlement.completion.asInt32());
+    try std.testing.expectEqual(@as(?i32, 77), rt.job_queue.jobs[0].payload.promise_settlement.completion.as(.int));
 
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expectEqual(@as(?i32, 77), target.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 77), target.promiseResult().?.as(.int));
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
 }
@@ -1447,8 +1447,8 @@ pub fn promiseThenableJobCall(
         // no user code has run yet. Keep the pair in the entry so both the
         // once-guard and the functions survive any later rejection retry.
         const resolving = try createPromiseResolvingPair(ctx.runtime, global, payload.target);
-        std.debug.assert(payload.resolving_resolve.isUndefined());
-        std.debug.assert(payload.resolving_reject.isUndefined());
+        std.debug.assert(payload.resolving_resolve.is(.undefined_value));
+        std.debug.assert(payload.resolving_reject.is(.undefined_value));
         payload.resolving_resolve = resolving.resolve;
         payload.resolving_reject = resolving.reject;
         payload.phase = .invoke;
@@ -1531,7 +1531,7 @@ pub fn promiseReactionJobCall(
             // a callable Proxy may have been revoked after registration and
             // must still be Called (and reject the child with TypeError), not
             // silently become the identity/thrower fallback.
-            if (handler.isUndefined()) {
+            if (handler.is(.undefined_value)) {
                 payload.phase = if (payload.rejected) .reject else .resolve;
                 break :invoke;
             }
@@ -1585,7 +1585,7 @@ pub fn promiseReactionJobCall(
     // we support undefined as value to avoid creating a dummy promise in the
     // 'await' implementation of async functions" — an undefined resolving
     // function is skipped and the value dropped.
-    if (settle.isUndefined()) return core.JSValue.undefinedValue();
+    if (settle.is(.undefined_value)) return core.JSValue.undefinedValue();
     _ = callValueOrBytecodeRoot(
         ctx,
         output,
@@ -1696,7 +1696,7 @@ fn thenCapability(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.O
 /// The caller roots the capability for the entire subscription transaction.
 /// Only handlers need additional roots while the private record is allocated.
 fn thenReactionRecord(rt: *core.JSRuntime, capability: *const ThenCapability, on_fulfilled: core.JSValue, on_rejected: core.JSValue) HostError!core.JSValue {
-    if (capability.intrinsic_global.isUndefined()) return promiseReactionRecord(rt, on_fulfilled, on_rejected, capability.resolve, capability.reject);
+    if (capability.intrinsic_global.is(.undefined_value)) return promiseReactionRecord(rt, on_fulfilled, on_rejected, capability.resolve, capability.reject);
     var fulfilled = on_fulfilled;
     var rejected = on_rejected;
     var roots = core.runtime.rootValues(.{ &fulfilled, &rejected });
@@ -1715,8 +1715,8 @@ pub fn promiseCapabilityExecutorCall(ctx: *core.JSContext, function_object: *cor
     const slot = objectFromValue(slot_value) orelse return error.TypeError;
     const current_resolve = slot.promiseCapabilityResolve();
     const current_reject = slot.promiseCapabilityReject();
-    if ((current_resolve != null and !current_resolve.?.isUndefined()) or
-        (current_reject != null and !current_reject.?.isUndefined()))
+    if ((current_resolve != null and !current_resolve.?.is(.undefined_value)) or
+        (current_reject != null and !current_reject.?.is(.undefined_value)))
     {
         return error.TypeError;
     }
@@ -2149,12 +2149,12 @@ pub fn promiseSpeciesConstructor(
     const default_constructor = try promiseDefaultConstructor(ctx, global);
 
     const constructor_value = try getValueProperty(ctx, output, global, receiver, core.atom.ids.constructor, caller_function, caller_frame);
-    if (constructor_value.isUndefined()) return default_constructor;
-    if (!constructor_value.isObject()) return error.TypeError;
+    if (constructor_value.is(.undefined_value)) return default_constructor;
+    if (!constructor_value.is(.object)) return error.TypeError;
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TypeError;
     const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
-    if (species_value.isUndefined() or species_value.isNull()) return default_constructor;
+    if (species_value.is(.undefined_value) or species_value.is(.null_value)) return default_constructor;
 
     return species_value;
 }
@@ -2176,7 +2176,7 @@ pub fn promiseCombinatorCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!constructor_value.isObject()) return error.TypeError;
+    if (!constructor_value.is(.object)) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
     const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
 
@@ -2318,7 +2318,7 @@ pub fn promiseKeyedCombinatorCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!constructor_value.isObject()) return error.TypeError;
+    if (!constructor_value.is(.object)) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
     const capability = try promiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
 
@@ -2417,7 +2417,7 @@ pub fn promiseResolveStaticCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!constructor_value.isObject()) return error.TypeError;
+    if (!constructor_value.is(.object)) return error.TypeError;
 
     // qjs `js_promise_resolve` reads a native Promise's observable
     // `constructor` and returns an identity match before asking whether
@@ -2447,7 +2447,7 @@ pub fn promiseStaticCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (mode == .resolve) return promiseResolveStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
-    if (!constructor_value.isObject()) return error.TypeError;
+    if (!constructor_value.is(.object)) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
 
     switch (mode) {
@@ -2791,7 +2791,7 @@ test "fulfilled await preparation OOM never publishes a partial FIFO job" {
             try std.testing.expectEqual(error.OutOfMemory, err);
             try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
             try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
-            try std.testing.expectEqual(@as(?i32, 42), (try core.Object.expect(awaited)).promiseResult().?.asInt32());
+            try std.testing.expectEqual(@as(?i32, 42), (try core.Object.expect(awaited)).promiseResult().?.as(.int));
             failures += 1;
             continue;
         };
@@ -2921,7 +2921,7 @@ test "async resume callback allocation failure preserves its continuation" {
     try std.testing.expectError(error.OutOfMemory, asyncFunctionResumeCallback(rt, global, continuation.?, false));
     rt.setMemoryLimit(null);
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expectEqual(@as(?i32, 42), (try continuation.?.getProperty(marker_key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), (try continuation.?.getProperty(marker_key)).as(.int));
     const callback = try core.Object.expect(try asyncFunctionResumeCallback(rt, global, continuation.?, true));
     try std.testing.expectEqual(continuation.?, callback.asyncResumeContinuation().?);
 }
@@ -3079,7 +3079,7 @@ test "asyncFunctionSettle needs no allocation for scalar completion" {
         ctx.interrupt_counter = core.JSContext.interrupt_counter_reset;
         try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), rejected, null, null);
         const target = objectFromValue(promise_value) orelse unreachable;
-        try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.asInt32());
+        try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.as(.int));
         try std.testing.expectEqual(rejected, target.promiseIsRejected());
         try std.testing.expectEqual(allocated, rt.memory.allocated_bytes);
         try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
@@ -3109,7 +3109,7 @@ test "asyncFunctionSettle fits the allocation budget of its shared state" {
     defer rt.setMemoryLimit(null);
     try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), false, null, null);
     const target = objectFromValue(promise) orelse unreachable;
-    try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.as(.int));
     try std.testing.expect(!target.promiseIsRejected());
 }
 
@@ -3247,7 +3247,7 @@ pub fn asyncFromSyncIteratorThrow(
     const throw_method = getValueProperty(ctx, output, global, sync_iterator, throw_key, caller_function, caller_frame) catch |err| {
         return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    if (throw_method.isUndefined() or throw_method.isNull()) {
+    if (throw_method.is(.undefined_value) or throw_method.is(.null_value)) {
         // IteratorClose(sync_iter) with no pending exception; a close failure
         // rejects with that error, otherwise reject the TypeError
         // (quickjs.c:54515-54519).
@@ -3345,7 +3345,7 @@ pub fn asyncFromSyncIteratorReturn(
     _ = wrapper;
     const return_key = core.atom.ids.return_;
     const return_method = try getValueProperty(ctx, output, global, sync_iterator, return_key, caller_function, caller_frame);
-    if (return_method.isUndefined() or return_method.isNull()) {
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
         return core.promise.fulfilledWithPrototype(ctx, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
     }
@@ -3727,7 +3727,7 @@ pub fn promiseThen(
     // and never takes the builtin then-capability fast path, so route every
     // catch (incl. on a genuine promise) through the generic this.then path.
     if (is_catch) return try promiseCatchGeneric(ctx, output, global, receiver, args);
-    if (!receiver.isObject()) {
+    if (!receiver.is(.object)) {
         return error.TypeError;
     }
     const object = property_ops.expectObject(receiver) catch {
@@ -4095,7 +4095,7 @@ pub fn drainOnePendingJob(
         },
     }
     if (result) |value| {
-        const status: jobs_mod.RunOneStatus = if (value.isException()) .exception else .success;
+        const status: jobs_mod.RunOneStatus = if (value.is(.exception)) .exception else .success;
         if (status == .exception) return .exception;
     }
     pollGCSafePoint(job_ctx) catch |err| {
@@ -4174,7 +4174,7 @@ pub fn rejectModuleNamespaceSuperSet(ctx: *core.JSContext, receiver: core.JSValu
 var promise_jobs: usize = 0;
 fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue {
     promise_jobs += 1;
-    if (args.len >= 1) promise_jobs += @intCast(args[0].asInt32().?);
+    if (args.len >= 1) promise_jobs += @intCast(args[0].as(.int).?);
     return core.JSValue.undefinedValue();
 }
 

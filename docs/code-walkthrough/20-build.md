@@ -10,7 +10,7 @@ Zig 钉 0.16.0。`build.zig` 把图种子钉成 `0`（可用 `-Dzjs_test_seed` �
 | --- | --- |
 | [`build.zig`](../../build.zig) | 读 CLI 选项、算配置签名、组装 `Ctx`，依次调用四个 `add*` |
 | [`build/config.zig`](../../build/config.zig) | `Ctx`、签名字符串、每模块一份 `addOptions`、Debug 强制 LLVM、Run 步 CPU 列表 |
-| [`build/artifacts.zig`](../../build/artifacts.zig) | 引擎模块与 CLI 产物：`zjs` / `zjs-size` / `zjs-profile` / `zjs-dev` / `run-test262*` / `gen-abi-header` |
+| [`build/artifacts.zig`](../../build/artifacts.zig) | 引擎模块与 CLI 产物：`zjs` / `zjs-size` / `zjs-profile` / `zjs-dev` / `run-test262*` |
 | [`build/tests.zig`](../../build/tests.zig) | 统一套件、分片、scoped 目标、`check`、smoke、OOM、embedding、leak-census |
 | [`build/perf.zig`](../../build/perf.zig) | 诊断用性能步骤；**不是**门禁 |
 | [`build/profiles.zig`](../../build/profiles.zig) | `perf-runtime-profiles` 的 opcode 精确钉表（无函数） |
@@ -161,7 +161,7 @@ QCP-1 配置字段，顺序与 `configSignature` 及 `src/config_signature.zig` 
 - `internal_fast_mod`：ReleaseFast 的 `src/internal_root.zig`，CLI 与 `run-test262` 共用。
 - 五对 `*_exe` / `install_*`：`zjs`、`zjs-profile`、`zjs-dev`、`run-test262`、`run-test262-dev`（每个 exe 配一个 `InstallArtifact`）。
 
-不出现在这个结构里的产物：`zjs-size`、`gen-abi-header`，以及 profile/dev 那几个 `internal_*_mod` 模块——它们只经由自己的 `b.step` 消费，没有下游要拿句柄。
+不出现在这个结构里的产物：`zjs-size`，以及 profile/dev 那几个 `internal_*_mod` 模块——它们只经由自己的 `b.step` 消费，没有下游要拿句柄。
 
 ### `addEngineArtifacts` (`build/artifacts.zig:19`)
 
@@ -174,12 +174,11 @@ QCP-1 配置字段，顺序与 `configSignature` 及 `src/config_signature.zig` 
   4. **`zjs-size`**：内部模块和 CLI **都**跟随 `-Doptimize`，期望签名原文。缓存身份与生产 `zjs` 分离。步骤 `zjs-size`。
   5. **`zjs-profile`**：Fast 引擎但 `enable_opcode_profile=true`（热表 comptime 包一层，见 `exec/vm_profile.zig`）。默认 `zjs` 不带 profiling 代码。同 L-1 linker script。步骤 `zjs-profile`。
   6. **`zjs-dev`**：Debug `internal_root` + Debug CLI。内循环 `smoke-dev` / `quick-gate` 用，避免每次编辑编 Fast 整引擎。步骤 `zjs-dev`。
-  7. **`gen-abi-header`**：Debug exe `src/abi/gen_header.zig`，Run 步 `cwd=.`、`has_side_effects=true`（改 checked-in `src/abi/fun_native_abi.h`）。步骤 `gen-abi-header`。`check_deps.js` 把它登记为构建图根。
-  8. **`run-test262`**：Fast，`src/cli/run_test262.zig` import `internal_fast_mod`。步骤 `run-test262`。
-  9. **`run-test262-dev`**：Debug 孪生。步骤 `run-test262-dev`。
+  7. **`run-test262`**：Fast，`src/cli/run_test262.zig` import `internal_fast_mod`。步骤 `run-test262`。
+  8. **`run-test262-dev`**：Debug 孪生。步骤 `run-test262-dev`。
 - **所有权 / 错误 / 调用**：返回的指针由构建图持有。`addTestGraph` / `addPerfSteps` / `addGates` 消费。非法配置在 `build` 里已退出。
 
-**本函数注册的步骤**：`zjs`、`zjs-size`、`zjs-profile`、`zjs-dev`、`gen-abi-header`、`run-test262`、`run-test262-dev`；并让默认 install 依赖 `zjs`。
+**本函数注册的步骤**：`zjs`、`zjs-size`、`zjs-profile`、`zjs-dev`、`run-test262`、`run-test262-dev`；并让默认 install 依赖 `zjs`。
 
 ---
 

@@ -17,8 +17,7 @@ const gc = @import("gc.zig");
 const shape = @import("shape.zig");
 const context_mod = @import("context.zig");
 
-const Header = gc.GCObjectHeader;
-const GCObjectHeader = gc.GCObjectHeader;
+const Header = gc.Header;
 const GcKind = gc.GcKind;
 const InvariantError = gc.InvariantError;
 
@@ -179,7 +178,7 @@ pub fn verifyCircularHeaderList(
     }
 
     var count: usize = 0;
-    var previous: *GCObjectHeader = sentinel;
+    var previous: *Header = sentinel;
     var current = sentinel.next_non_object;
     while (current) |node| {
         if (node == sentinel) break;
@@ -226,7 +225,7 @@ pub const Lists = struct {
     /// `Registry.containsHeader` reads it so a synchronous class payload
     /// finalizer asking `JSRuntime.ownsObject` about its own object gets
     /// `true` while its callback runs.
-    sweep_current: ?*GCObjectHeader = null,
+    sweep_current: ?*Header = null,
 
     /// Bind the cyclic sentinel (qjs `init_list_head`). Must run before any
     /// header is published, and is idempotent: rebinding an empty list to
@@ -250,7 +249,7 @@ pub const Lists = struct {
     }
 
     /// qjs `list_add_tail` (quickjs.c:6545).
-    pub inline fn linkTail(self: *Lists, header: *GCObjectHeader) void {
+    pub inline fn linkTail(self: *Lists, header: *Header) void {
         std.debug.assert(header.metaConst().flags.kind != .object);
         self.stageYoungTailPredecessor();
         listAddTail(&self.objects, header);

@@ -437,6 +437,20 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 - **实现**：`return promise.promiseAtomicsWaitAsync();`，`rt` 参数未使用。
 - **所有权 / 错误 / 调用**：`rt` 参数未使用。只读 promise 对象上的 `promiseAtomicsWaitAsync` 标志位（判断这个 Promise 是不是 waitAsync 建的），不分配、无 error set、不改变所有权。4 处调用，全在 `src/exec/promise_ops.zig`（`:3631`、`:3751`、`:3918` 等）。
 
+### `wakeAtomicsWaitersForRuntimes` (`src/exec/atomics_ops.zig:1354`)
+
+- **签名**：`pub fn wakeAtomicsWaitersForRuntimes(primary: *core.JSRuntime, related: []const *core.JSRuntime) void`。
+- **作用**：主测线程要拆掉时，叫醒 primary 以及 related（agent runtime）上仍 `.waiting` 的 waiter。
+- **实现**：锁 `atomics_waiter_mutex`，扫链表；`RealmRef.borrow()` 得到 ctx 后，若 runtime 是 primary 或在 related 里，且 `completion == .waiting`，则写成 `.notified` 并 `cond.broadcast`。注释钉死：可被外线程调用，只动 mutex 保护的标量，禁止碰 Promise / RealmRef / JS 堆。
+- **所有权 / 错误 / 调用**：`cleanupTest262Agents`。不分配、无 error set。
+
+### `runtimeListContains` (`src/exec/atomics_ops.zig:1378`)
+
+- **签名**：`fn runtimeListContains(list: []const *core.JSRuntime, runtime: *core.JSRuntime) bool`。
+- **作用**：指针相等成员测试。
+- **实现**：线性扫。
+- **所有权 / 错误 / 调用**：`wakeAtomicsWaitersForRuntimes`。
+
 
 ## `src/exec/atomics_wait.zig` — 方法枚举与 isLockFree
 
@@ -546,6 +560,6 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 
 ## 覆盖核对
 
-- 清单函数数: 73（`src/exec/atomics_ops.zig` 60 + `src/exec/buffer_ops.zig` 10 + `src/exec/typed_array_construct.zig` 3）
-- 本文标题覆盖: 73
+- 清单函数数: 75（`src/exec/atomics_ops.zig` 62 + `src/exec/buffer_ops.zig` 10 + `src/exec/typed_array_construct.zig` 3）
+- 本文标题覆盖: 75
 - 未覆盖: 无

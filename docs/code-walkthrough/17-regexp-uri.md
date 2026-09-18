@@ -176,7 +176,7 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 
 - **签名**：`fn regexpObjectFromValue(value: core.JSValue) ?*core.Object`。
 - **作用**：把值当 RegExp 实例取对象指针。
-- **实现**：先 `refHeader()`，再要求 `value.isObject()`，最后 class 必须是 `regexp`，任一不满足返回 null。
+- **实现**：先 `refHeader()`，再要求 `value.is(.object)`，最后 class 必须是 `regexp`，任一不满足返回 null。
 - **所有权 / 错误 / 调用**：借用指针；构造路径与测试用它。
 
 ### `accessor` (`src/exec/regexp_ops.zig:632`)

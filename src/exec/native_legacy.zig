@@ -13,44 +13,35 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
-const abi = @import("../abi/fun_native_abi.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 
 const JSValue = core.JSValue;
 const NativeEntry = core.NativeEntry;
 const InternalEntry = core.host_function.InternalEntry;
 
-pub fn sigIdByName(comptime name: []const u8) u16 {
-    return comptime blk: {
-        for (abi.signatures) |s| {
-            if (std.mem.eql(u8, s.name, name)) break :blk s.id;
-        }
-        @compileError("unknown signature name: " ++ name);
-    };
-}
-
-pub const sig_void_to_void: u16 = sigIdByName("VOID_TO_VOID");
-pub const sig_i32_to_i32: u16 = sigIdByName("I32_TO_I32");
-pub const sig_i32_i32_to_i32: u16 = sigIdByName("I32_I32_TO_I32");
-pub const sig_f64_to_f64: u16 = sigIdByName("F64_TO_F64");
-pub const sig_f64_f64_to_f64: u16 = sigIdByName("F64_F64_TO_F64");
-pub const sig_f64_to_void: u16 = sigIdByName("F64_TO_VOID");
-pub const sig_bool_to_bool: u16 = sigIdByName("BOOL_TO_BOOL");
-pub const sig_state_f64_to_void: u16 = sigIdByName("STATE_F64_TO_VOID");
-pub const sig_state_i32_to_i32: u16 = sigIdByName("STATE_I32_TO_I32");
-pub const sig_string_i32_to_i32: u16 = sigIdByName("STRING_I32_TO_I32");
-pub const sig_string_i32_to_string: u16 = sigIdByName("STRING_I32_TO_STRING");
+pub const LeafSig = core.LeafSig;
+pub const sig_void_to_void = LeafSig.void_to_void;
+pub const sig_i32_to_i32 = LeafSig.i32_to_i32;
+pub const sig_i32_i32_to_i32 = LeafSig.i32_i32_to_i32;
+pub const sig_f64_to_f64 = LeafSig.f64_to_f64;
+pub const sig_f64_f64_to_f64 = LeafSig.f64_f64_to_f64;
+pub const sig_f64_to_void = LeafSig.f64_to_void;
+pub const sig_bool_to_bool = LeafSig.bool_to_bool;
+pub const sig_state_f64_to_void = LeafSig.state_f64_to_void;
+pub const sig_state_i32_to_i32 = LeafSig.state_i32_to_i32;
+pub const sig_string_i32_to_i32 = LeafSig.string_i32_to_i32;
+pub const sig_string_i32_to_string = LeafSig.string_i32_to_string;
 /// K2 method leaves (NB2 §4.3): `self` = the NativeObject payload pointer.
-pub const sig_self_to_f64: u16 = sigIdByName("SELF_TO_F64");
-pub const sig_self_f64_to_void: u16 = sigIdByName("SELF_F64_TO_VOID");
-pub const sig_self_f64_f64_to_void: u16 = sigIdByName("SELF_F64_F64_TO_VOID");
-pub const sig_self_i32_to_i32: u16 = sigIdByName("SELF_I32_TO_I32");
-pub const sig_self_to_i32: u16 = sigIdByName("SELF_TO_I32");
-pub const sig_self_i32_to_void: u16 = sigIdByName("SELF_I32_TO_VOID");
-pub const sig_self_to_void: u16 = sigIdByName("SELF_TO_VOID");
+pub const sig_self_to_f64 = LeafSig.self_to_f64;
+pub const sig_self_f64_to_void = LeafSig.self_f64_to_void;
+pub const sig_self_f64_f64_to_void = LeafSig.self_f64_f64_to_void;
+pub const sig_self_i32_to_i32 = LeafSig.self_i32_to_i32;
+pub const sig_self_to_i32 = LeafSig.self_to_i32;
+pub const sig_self_i32_to_void = LeafSig.self_i32_to_void;
+pub const sig_self_to_void = LeafSig.self_to_void;
 
-/// Leaf C prototypes selected by `NativeEntry.sig` (schema names). `STATE_*`
-/// prototypes receive `entry.state` as their first argument.
+/// Leaf C prototypes selected by `NativeEntry.sig`. `STATE_*` prototypes
+/// receive `entry.state` as their first argument.
 pub const LeafVoidToVoid = *const fn () callconv(.c) void;
 pub const LeafI32ToI32 = *const fn (i32) callconv(.c) i32;
 pub const LeafI32I32ToI32 = *const fn (i32, i32) callconv(.c) i32;
@@ -242,17 +233,17 @@ pub fn entryFromInternal(comptime e: InternalEntry) NativeEntry {
 fn primLeafOrManaged(comptime e: InternalEntry, comptime managed_entry: NativeEntry) NativeEntry {
     const leaf = e.prim_leaf orelse return managed_entry;
     if (managed_entry.kind != .managed) @compileError("prim_leaf requires a plain managed body: " ++ e.name);
-    const sig = sigIdByName(leaf.sig);
+    if (leaf.sig == .none) @compileError("prim_leaf requires a typed leaf signature: " ++ e.name);
     var entry = managed_entry;
     entry.fallback = @ptrCast(managed_entry.target);
     entry.target = leaf.target;
     entry.kind = .method_leaf;
-    entry.sig = sig;
+    entry.sig = leaf.sig;
     // The string-returning arm allocates the one-unit result; both read the
     // receiver's characters. Neither throws or re-enters JS.
     entry.effect = .{
         .may_throw = false,
-        .may_alloc = sig == sig_string_i32_to_string,
+        .may_alloc = leaf.sig == sig_string_i32_to_string,
         .may_reenter_js = false,
         .reads_heap = true,
         .writes_heap = false,

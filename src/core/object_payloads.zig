@@ -202,7 +202,7 @@ pub fn destroyValueSliceValuesOnly(_: *JSRuntime, slot: *[]JSValue) void {
 /// variable-length slice an a-class payload owns. Only valid where the owning
 /// payload says the slice names a cell (a non-zero capacity, or a non-empty
 /// fixed slice); the empty slice is a sentinel, not an allocation.
-pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.GCObjectHeader {
+pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.Header {
     return @ptrCast(@alignCast(ptr));
 }
 

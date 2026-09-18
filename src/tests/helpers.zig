@@ -131,7 +131,7 @@ pub fn expectPrints(source: []const u8, expected: []const u8) !void {
     var output = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(source, &output);
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(expected, output.buffered());
 }
 
@@ -144,7 +144,7 @@ pub fn countJob(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
 
 pub fn countJobArgs(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
     _ = ctx;
-    for (args) |arg| job_counter += @intCast(arg.asInt32().?);
+    for (args) |arg| job_counter += @intCast(arg.as(.int).?);
     return core.JSValue.int32(@intCast(args.len));
 }
 
@@ -216,7 +216,7 @@ const ExceptionInfo = struct {
     pub fn getMessage(self: ExceptionInfo, allocator: std.mem.Allocator) ![]const u8 {
         const rt = self.value.runtime orelse return error.InvalidEngineState;
         const value = self.value.get();
-        if (value.isObject()) {
+        if (value.is(.object)) {
             const header = value.refHeader() orelse return error.InvalidEngineState;
             const object = core.Object.fromHeader(header);
 
@@ -912,5 +912,5 @@ pub fn scratchDirForProcess(comptime base: []const u8) []const u8 {
     const S = struct {
         var buf: [256]u8 = undefined;
     };
-    return std.fmt.bufPrint(&S.buf, "{s}-{d}", .{ base, std.os.linux.getpid() }) catch base;
+    return std.fmt.bufPrint(&S.buf, "{s}-{d}", .{ base, std.c.getpid() }) catch base;
 }

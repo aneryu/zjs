@@ -26,8 +26,8 @@ zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=Re
 embedder / CLI / tests
         │
         ▼
- src/root.zig          公共嵌入面（JSRuntime / JSContext / JSValue / native / CallSite）
- src/binding/          把 core 类型收成稳定 API（句柄、NativeEntry thunk、PropertySite）
+ src/root.zig          CLI/测试门面（JSRuntime / JSContext / JSValue / native.managed）
+ src/binding/          把 core 类型收成 JSContext 门面与 NativeEntry thunk
         │
         ▼
  src/core/             值、对象、形状、属性、GC、Runtime/Context   ← 禁止依赖 parser/exec/runtime/CLI
@@ -75,9 +75,9 @@ CLI `zjs -e` / `zjs file.js` 走同一条编译-执行链，外面包 `src/cli/z
 
 ## 4. 值：16 字节 tagged `JSValue`
 
-`src/core/value.zig` 里 `JSValue` 是 `extern struct { repr: Repr }`，其中 `Repr` 为 `extern struct { payload: u64, tag: i64 }`，正好 16 字节、8 字节对齐。这是**语义**上对齐 QuickJS，不是 bit 级 ABI 兼容。
+`src/core/value.zig` 里 `JSValue` 是 `extern struct { payload: u64, tag: i64 }`，正好 16 字节、8 字节对齐。这是**语义**上对齐 QuickJS，不是 bit 级 ABI 兼容。
 
-tag 是有符号整数。堆对象走负 tag（object / function_bytecode / module / string 族 / bigint / symbol）；立即数走非负（int32、bool、null、undefined、float64、short bigint、exception 哨兵等）。`cycleMarkHeader` / `isTracerOwned` 用 `[Tag.symbol, Tag.object]` 区间识别需要追踪的值；保留的 `requiresRefCount` 只是历史命名的堆值分类谓词。
+tag 是有符号整数。堆对象走负 tag（object / function_bytecode / module / string 族 / bigint / symbol）；立即数走非负（int32、bool、null、undefined、float64、short bigint、exception 哨兵等）。`cycleMarkHeader` / `isTracerOwned` 用 `[Tag.symbol, Tag.object]` 区间识别需要追踪的值。属性写和 Adapter 替换用 `isTracerOwned` 的否定当立即数快路径（跳过屏障 / VarRef 解包 / root）。
 
 重要后果：
 
@@ -136,9 +136,9 @@ zjs **已经是**栈式字节码解释器，没有迁到寄存器机的证据支
 - 模块记录在 `core/module.zig`（core 层身份）；链接、求值、图在 `exec/module.zig` 与 `module_graph.zig`。
 - `MODULE_NS` 延迟导出走 `module_auto_init.zig` 的不可变 `AutoInitModuleOwner` 回调，不把 Runtime 引进这条叶子契约。
 - Promise 抽象操作在 `exec/promise_ops.zig`；对象状态在 `core/promise.zig`；任务队列原语在 `core/jobs.zig`。
-- 宿主事件循环只在 `runtime/event_loop.zig`：定时器、fd/signal、job draining。Atomics waiter 清理由 exec 做，再从 `runtime/root.zig` re-export。
+- 宿主事件循环只在 `runtime/event_loop.zig`：定时器、fd/signal、job draining。`zjs.runtime` 只暴露这一层。Atomics waiter 清理、模块图、ArrayBuffer detach 在 exec。
 
-动态插件加载器已删除（2026-09-06）。宿主函数经 `zjs.native` 注册成不可变 `NativeEntry`，VM 当内建分发；native→JS 走 `zjs.CallSite`。Fun Native ABI 在 `src/abi/`，加载器在外部 `fun` 仓。
+动态插件加载器已删除（2026-09-06）。宿主函数经 `zjs.native` 注册成不可变 `NativeEntry`，VM 当内建分发；native→JS 走 `zjs.CallSite`。叶签名是引擎私有 `LeafSig`（`src/core/native_entry.zig`），不是公开 ABI。
 
 ## 9. 库、CLI、测试
 

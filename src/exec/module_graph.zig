@@ -164,7 +164,7 @@ pub const ImportLoaderType = enum { none, json, text };
 /// strings). Mirrors js_module_test_json (quickjs-libc.c:656): read the
 /// "type" string; "json" selects the JSON loader, anything else is ignored.
 fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) ImportLoaderType {
-    if (!attributes.isObject()) return .none;
+    if (!attributes.is(.object)) return .none;
     const type_atom = core.atom.ids.type_;
     const object = exec.property_ops.expectObject(attributes) catch return .none;
     const type_value = object.getOwnDataPropertyValue(type_atom) orelse return .none;
@@ -545,9 +545,9 @@ pub fn evaluateImportCall(
 ) exec.exceptions.HostError!core.JSValue {
     // quickjs.c:31100 — `if (!JS_IsUndefined(options))`.
     var attributes = core.JSValue.undefinedValue();
-    if (!options.isUndefined()) {
+    if (!options.is(.undefined_value)) {
         // quickjs.c:31101 — options must be an object.
-        if (!options.isObject()) {
+        if (!options.is(.object)) {
             return rejectedImportTypeError(ctx, global, prototype, "options must be an object");
         }
         const with_atom = core.atom.ids.with;
@@ -555,9 +555,9 @@ pub fn evaluateImportCall(
         const attributes_obj = exec.object_ops.getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err|
             return rejectedImportRuntimeError(ctx, global, prototype, err);
         // quickjs.c:31108 — `if (!JS_IsUndefined(attributes_obj))`.
-        if (!attributes_obj.isUndefined()) {
+        if (!attributes_obj.is(.undefined_value)) {
             // quickjs.c:31113 — options.with must be an object.
-            if (!attributes_obj.isObject()) {
+            if (!attributes_obj.is(.object)) {
                 return rejectedImportTypeError(ctx, global, prototype, "options.with must be an object");
             }
             attributes = buildImportAttributes(ctx, output, global, attributes_obj, function, frame) catch |err|
@@ -750,7 +750,7 @@ fn dynamicImportJobRun(
     };
 
     if (load_result) |namespace| {
-        if (namespace.isObject()) {
+        if (namespace.is(.object)) {
             const object = try exec.property_ops.expectObject(namespace);
             if (object.class_id == core.class.ids.promise) {
                 // A TLA module returns its shared evaluation promise. Chain the

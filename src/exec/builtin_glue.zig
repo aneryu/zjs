@@ -74,13 +74,13 @@ pub fn bigIntFunctionCall(
     // when absent — into JS_ToBigIntCtorFree; ToBigInt(undefined) throws.
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
-    if (primitive.asInt32()) |int_value| return value_ops.createBigIntI128(ctx.runtime, int_value);
-    if (primitive.asFloat64()) |float_value| {
+    if (primitive.as(.int)) |int_value| return value_ops.createBigIntI128(ctx.runtime, int_value);
+    if (primitive.as(.float64)) |float_value| {
         return value_ops.integerNumberToBigIntValue(ctx.runtime, float_value);
     }
     // qjs JS_ToBigIntCtorFree null/undefined/default arm (quickjs.c:56223-56227):
     // symbols fall into the same default arm and share the message.
-    if (primitive.isUndefined() or primitive.isNull() or primitive.isSymbol()) {
+    if (primitive.is(.undefined_value) or primitive.is(.null_value) or primitive.is(.symbol)) {
         return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert to BigInt");
     }
     var bigint = try value_ops.toBigIntValue(ctx.runtime, primitive);
@@ -103,7 +103,7 @@ pub fn bigIntAsN(
     _ = caller_frame;
     const bits_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const bits_primitive = try toPrimitiveForNumber(ctx, output, global, bits_input);
-    if (bits_primitive.isBigInt() or bits_primitive.isSymbol()) return error.TypeError;
+    if (bits_primitive.isBigInt() or bits_primitive.is(.symbol)) return error.TypeError;
     const bits_number_value = try value_ops.toNumberValue(ctx.runtime, bits_primitive);
     const bits_number = value_ops.numberValue(bits_number_value) orelse 0;
     const bits: usize = if (std.math.isNan(bits_number))
@@ -124,7 +124,7 @@ pub fn bigIntAsN(
 
 pub fn toBigIntFromPrimitive(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isBigInt()) return value;
-    if (value.asBool()) |bool_value| return value_ops.createBigIntI128(rt, if (bool_value) 1 else 0);
+    if (value.as(.boolean)) |bool_value| return value_ops.createBigIntI128(rt, if (bool_value) 1 else 0);
     if (value.isString()) {
         var bigint = try value_ops.toBigIntValue(rt, value);
         defer bigint.deinit();
@@ -151,7 +151,7 @@ pub fn globalIsNaNOrFinite(
     }
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
-    if (primitive.isSymbol() or primitive.isBigInt()) return error.TypeError;
+    if (primitive.is(.symbol) or primitive.isBigInt()) return error.TypeError;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
     return core.JSValue.boolean(if (is_nan) std.math.isNan(number) else std.math.isFinite(number));
@@ -185,7 +185,7 @@ pub fn globalParseInt(
 
     const radix_value: ?core.JSValue = if (args.len >= 2) blk: {
         const radix_input = args[1];
-        if (!radix_input.isObject() and !radix_input.isSymbol() and !radix_input.isBigInt()) break :blk radix_input;
+        if (!radix_input.is(.object) and !radix_input.is(.symbol) and !radix_input.isBigInt()) break :blk radix_input;
         const primitive = try toPrimitiveForNumber(ctx, output, global, radix_input);
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
         break :blk value_ops.numberToValue(value_ops.numberValue(number_value) orelse std.math.nan(f64));
@@ -313,7 +313,7 @@ pub fn dataViewConstructorArgs(
         try typedArrayConstructToIndex(ctx, output, global, args[1])
     else
         @as(usize, 0);
-    const view_length = if (args.len >= 3 and !args[2].isUndefined())
+    const view_length = if (args.len >= 3 and !args[2].is(.undefined_value))
         try typedArrayConstructToIndex(ctx, output, global, args[2])
     else
         null;
@@ -468,7 +468,7 @@ pub fn finalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue
     const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     if (!core.symbol.canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
     if (target.sameValue(held_value)) return error.TypeError;
-    if (!unregister_token.isUndefined() and !core.symbol.canBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
+    if (!unregister_token.is(.undefined_value) and !core.symbol.canBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
     // No self-target exclusion: qjs js_finrec_register (quickjs.c:61318) appends
     // the entry unconditionally after the three checks above — a registry may
     // register itself as target (the cell holds only a weak ref to it).

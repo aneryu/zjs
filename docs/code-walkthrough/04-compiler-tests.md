@@ -165,7 +165,7 @@
 
 - **签名**：`fn expectPublishedFunctionBytecodeOwnersResolve( rt: *const core.JSRuntime, fb: *const bytecode_mod.FunctionBytecode, owners: *PublishedEscapeOwners, ) !void`。
 - **作用**：递归：funcName/filename、具名 arg/var/closure、cpool 里的子 FunctionBytecode 都能解析。累加 owners 计数。
-- **实现**：null_atom 跳过。子 FB 经 `objectHeader` + fieldParentPtr。
+- **实现**：null_atom 跳过。子 FB 经 `functionBytecodeHeader` + fieldParentPtr。
 - **所有权 / 错误 / 调用**：证明至少看到具名槽与 child。
 
 ### `expectRelocIntegrity` (`src/compiler/tests.zig:323`)

@@ -114,7 +114,7 @@ to the content identity; physical-line totals count `.zig`, `.c`, `.h`, `.cpp`,
 | Category | Membership |
 |---|---|
 | `engine` | `src/`, excluding the test/generated categories below |
-| `generated` | Unicode `src/libs/unicode/data.zig` and generated `src/abi/fun_native_abi.h` |
+| `generated` | Unicode `src/libs/unicode/data.zig`（表体在 `tables.bin`） |
 | `tests` | `src/tests/`, `tests/`, `*_tests.zig`, `src/compiler/{tests,test_entry}.zig` |
 | `build` | `build/`, `build.zig`, `build.zig.zon` |
 | `tools` | `tools/` |

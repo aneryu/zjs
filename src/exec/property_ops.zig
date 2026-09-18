@@ -36,7 +36,7 @@ pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.
 
 pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     _ = rt;
-    if (value.isNull() or value.isUndefined()) return core.JSValue.undefinedValue();
+    if (value.is(.null_value) or value.is(.undefined_value)) return core.JSValue.undefinedValue();
     const object_value = try expectObject(value);
     return try object_value.getProperty(atom_id);
 }
@@ -59,7 +59,7 @@ pub fn propertyKeyAtomIfReady(value: core.JSValue) ?core.Atom {
         if (string_value.atom_id != core.string.String.no_atom_id) return string_value.atom_id;
         return null;
     }
-    if (value.asInt32()) |index| {
+    if (value.as(.int)) |index| {
         if (index >= 0) return core.atom.atomFromUInt32(@intCast(index));
     }
     return null;
@@ -71,7 +71,7 @@ pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
         const string_value = value.asStringBody().?;
         return string_value.internAtom(rt);
     }
-    if (value.asInt32()) |index| {
+    if (value.as(.int)) |index| {
         if (index >= 0) return core.atom.atomFromUInt32(@intCast(index));
     }
     var bytes = std.ArrayList(u8).empty;

@@ -22,14 +22,14 @@
 
 ### `StringRope.header` (`src/core/string.zig:92`)
 
-- **签名**：`pub inline fn header(self: *const StringRope) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn header(self: *const StringRope) *gc.Header`。
 - **作用**：把 rope 体指针作为统一 GC 手柄返回。
 - **实现**：constCast 后对齐/指针转换，地址不变。
 - **所有权 / 错误 / 调用**：不校验 kind、不分配或建立根；metadata 位于体前 metadata_prefix_size 字节。
 
 ### `StringRope.fromHeader` (`src/core/string.zig:96`)
 
-- **签名**：`pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *StringRope`。
+- **签名**：`pub inline fn fromHeader(hdr: *gc.Header) *StringRope`。
 - **作用**：将已知 rope 的 GC 手柄转换为节点指针。
 - **实现**：alignCast/ptrCast，地址不变。
 - **所有权 / 错误 / 调用**：调用者保证正确 kind、对齐和存活；函数不读取 metadata 来验证。
@@ -115,14 +115,14 @@
 
 ### `StringBuffer.header` (`src/core/string.zig:251`)
 
-- **签名**：`pub inline fn header(self: *const StringBuffer) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn header(self: *const StringBuffer) *gc.Header`。
 - **作用**：取得 buffer 体对应的 GC 手柄。
 - **实现**：constCast、alignCast、ptrCast，地址不变。
 - **所有权 / 错误 / 调用**：不分配或验证 kind，不把 buffer 包装为 JSValue；由 storage-cell 边持有。
 
 ### `StringBuffer.fromHeader` (`src/core/string.zig:255`)
 
-- **签名**：`pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *StringBuffer`。
+- **签名**：`pub inline fn fromHeader(hdr: *gc.Header) *StringBuffer`。
 - **作用**：把已知 string_buffer 手柄转换为 buffer。
 - **实现**：对齐后指针转换。
 - **所有权 / 错误 / 调用**：调用者保证类型和存活；未执行 kind 校验或创建根。
@@ -187,14 +187,14 @@
 
 ### `destroyStringBufferCell` (`src/core/string.zig:322`)
 
-- **签名**：`pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.GCObjectHeader) void`。
+- **签名**：`pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.Header) void`。
 - **作用**：回收已判死的 string_buffer block cell。
 - **实现**：断言是 block cell，依据 capacity/width 算尺寸，用 size-class accounted body bytes 撤销发布，再 memory.destroyStringCell。
 - **所有权 / 错误 / 调用**：输入必须为有效 buffer 且已允许销毁；不处理出边、atom 或外部回调，也不是 extent 的通用释放入口。
 
 ### `accountedStorageSizeFromHeader` (`src/core/string.zig:332`)
 
-- **签名**：`pub fn accountedStorageSizeFromHeader(header: *const gc.GCObjectHeader) usize`。
+- **签名**：`pub fn accountedStorageSizeFromHeader(header: *const gc.Header) usize`。
 - **作用**：查询 string_buffer 的收集器记账体积。
 - **实现**：从 buffer 头计算含前缀请求大小；block cell 返回按请求选取的 accountedBodyBytesForRequest，extent 返回 total−string_prefix_size。
 - **所有权 / 错误 / 调用**：返回值排除 metadata 前缀，block 部分包含分配档位影响；假定合法 buffer 头，尺寸 optional 直接解包，没有错误返回。
@@ -210,14 +210,14 @@
 
 ### `String.header` (`src/core/string.zig:385`)
 
-- **签名**：`pub inline fn header(self: *const String) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn header(self: *const String) *gc.Header`。
 - **作用**：取得 flat String 的 GC 体手柄。
 - **实现**：constCast 后 alignCast/ptrCast，地址不变。
 - **所有权 / 错误 / 调用**：不检查 kind 或注册根；header 并非另一个内嵌字段，metadata 在体之前。
 
 ### `String.fromHeader` (`src/core/string.zig:389`)
 
-- **签名**：`pub inline fn fromHeader(hdr: *gc.GCObjectHeader) *String`。
+- **签名**：`pub inline fn fromHeader(hdr: *gc.Header) *String`。
 - **作用**：把已知字符串形状的手柄转为 String。
 - **实现**：仅做对齐和指针转换。
 - **所有权 / 错误 / 调用**：调用者保证有效存活 body，函数不检查 kind；Symbol 也使用这种 body 表示。
@@ -765,14 +765,14 @@
 
 ### `accountedAllocationSizeFromHeader` (`src/core/string.zig:1635`)
 
-- **签名**：`pub fn accountedAllocationSizeFromHeader(header: *const gc.GCObjectHeader) usize`。
+- **签名**：`pub fn accountedAllocationSizeFromHeader(header: *const gc.Header) usize`。
 - **作用**：查询flat或rope的GC body记账大小。
 - **实现**：体前读取metadata，rope用固定总尺寸，其他按flat长宽计算布局；block按档位返回body bytes，extent返回总尺寸减prefix。
 - **所有权 / 错误 / 调用**：不是所有prefix carrier的通用查询：非rope会被当成String，buffer需使用专门接口。无分配，依赖合法头和尺寸。
 
 ### `destroyCellFromHeader` (`src/core/string.zig:1660`)
 
-- **签名**：`pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void`。
+- **签名**：`pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void`。
 - **作用**：销毁已判死的prefix carrier block cell。
 - **实现**：断言block；buffer委托专门销毁，property/array/payload委托destroyStorageCell；rope撤销发布后释放；其他按flat读取，动态atom先onSymbolBodyDead，再撤销发布和释放。
 - **所有权 / 错误 / 调用**：不递归销毁rope子边、不调用JSValue.free；调用者保证支持的kind与死亡状态，未知kind会落入flat解释，并非安全类型校验。
@@ -807,14 +807,14 @@
 
 ### `traceRopeEdges` (`src/core/string.zig:1819`)
 
-- **签名**：`pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.GCObjectHeader) !void`。
+- **签名**：`pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) !void`。
 - **作用**：报告rope的buffer边及两个值槽。
 - **实现**：断言rope kind，buffer存在则断言string_buffer并调用storageCell shim；之后无条件访问left/right槽，rt参数未使用。
 - **所有权 / 错误 / 调用**：dependent view的左右值是undefined，仍会访问；错误立即传播。此函数只报告边，不自行保证visitor标记了它们。
 
 ### `callVisitStorageCell` (`src/core/string.zig:1838`)
 
-- **签名**：`inline fn callVisitStorageCell(vis: anytype, header: *gc.GCObjectHeader) !void`。
+- **签名**：`inline fn callVisitStorageCell(vis: anytype, header: *gc.Header) !void`。
 - **作用**：按访问器能力报告存储边。
 - **实现**：编译期去掉一层指针类型，缺storageCell声明则返回；存在时按返回是否error union决定try。
 - **所有权 / 错误 / 调用**：缺方法不会回退到visitValue，边被该visitor忽略；无分配，回调错误传播。

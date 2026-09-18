@@ -35,13 +35,13 @@ pub const VarRef = struct {
 
     comptime {
         std.debug.assert(@offsetOf(VarRef, "header") == 0);
-        std.debug.assert(@sizeOf(VarRef) == 40);
+        std.debug.assert(@sizeOf(VarRef) == 32);
         std.debug.assert(@alignOf(VarRef) == 8);
         const header_bytes = @sizeOf(gc.Header);
         std.debug.assert(@offsetOf(VarRef, "value") == header_bytes);
-        std.debug.assert(@offsetOf(VarRef, "pvalue") == header_bytes + 16);
-        std.debug.assert(@offsetOf(VarRef, "is_const") == header_bytes + 24);
-        std.debug.assert(@offsetOf(VarRef, "is_open") == header_bytes + 28);
+        std.debug.assert(@offsetOf(VarRef, "pvalue") == header_bytes + 8);
+        std.debug.assert(@offsetOf(VarRef, "is_const") == header_bytes + 16);
+        std.debug.assert(@offsetOf(VarRef, "is_open") == header_bytes + 20);
     }
 
     pub fn createClosed(rt: anytype, initial_value: JSValue) !*VarRef {
@@ -114,8 +114,8 @@ pub const VarRef = struct {
     /// never the borrowed `cell -> *pvalue`.
     pub fn attachOpenOwner(self: *VarRef, rt: anytype, owner: JSValue) void {
         std.debug.assert(self.is_open);
-        std.debug.assert(owner.isObject());
-        if (!self.value.isUndefined()) {
+        std.debug.assert(owner.is(.object));
+        if (!self.value.is(.undefined_value)) {
             std.debug.assert(self.value.same(owner));
             return;
         }

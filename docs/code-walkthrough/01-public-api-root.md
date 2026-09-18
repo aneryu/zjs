@@ -1,8 +1,8 @@
 # 01 — `src/root.zig`：公共门面
 
-嵌入方 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `JSContext` / `JSValue`、`zjs.native`、`CallSite`、`PropertySite`、`zjs.value`、`zjs.object`、`zjs.host`、`zjs.context` / `module` / `job`、`zjs.runtime`。多数类型从 `binding/root.zig` 再导出；本文件同时实现字节借用描述符、若干对象构造与属性助手，以及有预算的 job 排空循环。
+CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `JSContext` / `JSValue`、`zjs.native`（仅 `managed`）、`zjs.value`、`zjs.object`、`zjs.host`、`zjs.context` / `module` / `job`、`zjs.runtime`。多数类型从 `binding/root.zig` 再导出；本文件同时实现字节借用描述符、若干对象构造与属性助手，以及有预算的 job 排空循环。
 
-`core` / `exec` / `internal` 不作为这里的公开命名空间导出，但部分类型通过别名公开，不能据此声称整个类型图不含 core 类型。句柄公开拼写是 `zjs.value.Scope/Local/Persistent/Weak`，不是根上的 `JSValueHandle`。属性名是 `zjs.host.PropName`。`object.Object` 是 **opaque**，不能通过该类型直接调用 core 的 `Object.create`。
+`core` / `exec` / `internal` 不作为这里的公开命名空间导出，但部分类型通过别名公开，不能据此声称整个类型图不含 core 类型。句柄公开拼写是 `zjs.value.Scope/Local/Persistent/Weak`，不是根上的 `JSValueHandle`。`object.Object` 是 **opaque**，不能通过该类型直接调用 core 的 `Object.create`。`CallSite` / `PropertySite` / `NativeBinding` / `PropName` 已从本文件删除。
 
 ---
 
@@ -10,7 +10,7 @@
 
 | 名字 | 含义 |
 | --- | --- |
-| `runtime` | `runtime/public.zig`：事件循环、模块图、SAB wake、ArrayBuffer detach。 |
+| `runtime` | `runtime/root.zig`：宿主事件循环（`EventLoop` / `runUntilIdle`）。 |
 | `JSRuntime` / `JSContext` / `JSValue` / `CallSite` / `PropertySite` | binding 门面。 |
 | `GCStats` / `GCPauseDistribution` / `RuntimeOptions` / `RuntimeMemoryUsage` / `OpcodeProfile` | 统计与选项。 |
 | `default_stack_size` / `default_gc_threshold` | 默认限额。 |

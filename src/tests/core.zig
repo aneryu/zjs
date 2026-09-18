@@ -201,125 +201,6 @@ fn publishEmptyModule(
     return publishFreshModule(registry, module_name, &pending);
 }
 
-test "QuickJS value tag constants are locked" {
-    // qjs numbers BigInt -9; zjs moved it to the -4 hole (tracer-owned range
-    // `[big_int, object]` is one compare). See value.zig `Tag`.
-    try std.testing.expectEqual(@as(i32, -8), core.Tag.first);
-    try std.testing.expectEqual(@as(i32, -4), core.Tag.big_int);
-    try std.testing.expectEqual(@as(i32, -8), core.Tag.symbol);
-    try std.testing.expectEqual(@as(i32, -7), core.Tag.string);
-    try std.testing.expectEqual(@as(i32, -6), core.Tag.string_rope);
-    try std.testing.expectEqual(@as(i32, -3), core.Tag.module);
-    try std.testing.expectEqual(@as(i32, -2), core.Tag.function_bytecode);
-    try std.testing.expectEqual(@as(i32, -1), core.Tag.object);
-    try std.testing.expectEqual(@as(i32, 0), core.Tag.int);
-    try std.testing.expectEqual(@as(i32, 1), core.Tag.boolean);
-    try std.testing.expectEqual(@as(i32, 2), core.Tag.null_value);
-    try std.testing.expectEqual(@as(i32, 3), core.Tag.undefined_value);
-    try std.testing.expectEqual(@as(i32, 4), core.Tag.uninitialized);
-    try std.testing.expectEqual(@as(i32, 5), core.Tag.catch_offset);
-    try std.testing.expectEqual(@as(i32, 6), core.Tag.exception);
-    try std.testing.expectEqual(@as(i32, 7), core.Tag.short_big_int);
-    try std.testing.expectEqual(@as(i32, 8), core.Tag.float64);
-}
-
-test "every JSValue constructor recovers its QuickJS semantic tag" {
-    var header: core.gc.Header = undefined;
-    var string_header: core.gc.GCObjectHeader = undefined;
-    var object_header: core.gc.GCObjectHeader = undefined;
-
-    const cases = [_]struct { value: core.JSValue, tag: i32 }{
-        .{ .value = core.JSValue.bigInt(&header), .tag = core.Tag.big_int },
-        .{ .value = core.JSValue.symbol(&string_header), .tag = core.Tag.symbol },
-        .{ .value = core.JSValue.string(&string_header), .tag = core.Tag.string },
-        .{ .value = core.JSValue.stringRope(&string_header), .tag = core.Tag.string_rope },
-        .{ .value = core.JSValue.module(&header), .tag = core.Tag.module },
-        .{ .value = core.JSValue.functionBytecode(&object_header), .tag = core.Tag.function_bytecode },
-        .{ .value = core.JSValue.object(&header), .tag = core.Tag.object },
-        .{ .value = core.JSValue.int32(-42), .tag = core.Tag.int },
-        .{ .value = core.JSValue.boolean(true), .tag = core.Tag.boolean },
-        .{ .value = core.JSValue.nullValue(), .tag = core.Tag.null_value },
-        .{ .value = core.JSValue.undefinedValue(), .tag = core.Tag.undefined_value },
-        .{ .value = core.JSValue.uninitialized(), .tag = core.Tag.uninitialized },
-        .{ .value = core.JSValue.catchOffset(-7), .tag = core.Tag.catch_offset },
-        .{ .value = core.JSValue.exception(), .tag = core.Tag.exception },
-        .{ .value = core.JSValue.shortBigInt(-123), .tag = core.Tag.short_big_int },
-        .{ .value = core.JSValue.float64(-1.5), .tag = core.Tag.float64 },
-    };
-
-    for (cases) |case| try std.testing.expectEqual(case.tag, case.value.tagOf());
-}
-
-test "QuickJS branch immediate range admits int bool null and undefined only" {
-    var object_header: core.gc.Header = undefined;
-    const cases = [_]struct {
-        value: core.JSValue,
-        expected: ?bool,
-    }{
-        .{ .value = core.JSValue.int32(-1), .expected = true },
-        .{ .value = core.JSValue.int32(0), .expected = false },
-        .{ .value = core.JSValue.int32(1), .expected = true },
-        .{ .value = core.JSValue.boolean(false), .expected = false },
-        .{ .value = core.JSValue.boolean(true), .expected = true },
-        .{ .value = core.JSValue.nullValue(), .expected = false },
-        .{ .value = core.JSValue.undefinedValue(), .expected = false },
-        .{ .value = core.JSValue.object(&object_header), .expected = null },
-        .{ .value = core.JSValue.float64(1), .expected = null },
-        .{ .value = core.JSValue.uninitialized(), .expected = null },
-        .{ .value = core.JSValue.shortBigInt(1), .expected = null },
-    };
-
-    for (cases) |case| {
-        try std.testing.expectEqual(case.expected, case.value.asBranchImmediateBool());
-    }
-}
-
-test "heap JSValue payloads name collector handles directly" {
-    const RawWideValue = extern struct {
-        payload: u64,
-        tag: i64,
-    };
-    const pointerPayload = struct {
-        fn get(value: core.JSValue) usize {
-            const raw: RawWideValue = @bitCast(value);
-            return @intCast(raw.payload);
-        }
-    }.get;
-
-    var gc_storage: [@sizeOf(core.gc.Metadata) + @sizeOf(core.gc.Header)]u8 align(@alignOf(core.gc.Header)) = undefined;
-    const gc_meta: *core.gc.Metadata = @ptrCast(@alignCast(&gc_storage));
-    const gc_header: *core.gc.Header = @ptrCast(@alignCast(&gc_storage[@sizeOf(core.gc.Metadata)]));
-    gc_meta.* = .{};
-    gc_header.* = .{};
-
-    var flat_storage: [core.gc.string_prefix_size + @sizeOf(core.string.String)]u8 align(@alignOf(core.gc.Metadata)) = undefined;
-    const flat_body: *core.string.String = @ptrCast(@alignCast(&flat_storage[core.gc.string_prefix_size]));
-    flat_body.metadata().* = .{ .flags = .{ .kind = .string } };
-    const flat_header = flat_body.header();
-
-    var rope_storage: [core.string.StringRope.metadata_prefix_size + @sizeOf(core.string.StringRope)]u8 align(@alignOf(core.string.StringRope)) = undefined;
-    const rope_body: *core.string.StringRope = @ptrCast(@alignCast(&rope_storage[core.string.StringRope.metadata_prefix_size]));
-    rope_body.metadata().* = .{ .flags = .{ .kind = .string } };
-    const rope_header = rope_body.header();
-
-    const cases = [_]struct {
-        value: core.JSValue,
-        body_address: usize,
-    }{
-        .{ .value = core.JSValue.bigInt(gc_header), .body_address = @intFromPtr(gc_header) },
-        .{ .value = core.JSValue.symbol(flat_header), .body_address = @intFromPtr(flat_body) },
-        .{ .value = core.JSValue.string(flat_header), .body_address = @intFromPtr(flat_body) },
-        .{ .value = core.JSValue.stringRope(rope_header), .body_address = @intFromPtr(rope_body) },
-        .{ .value = core.JSValue.module(gc_header), .body_address = @intFromPtr(gc_header) },
-        .{ .value = core.JSValue.functionBytecode(gc_header), .body_address = @intFromPtr(gc_header) },
-        .{ .value = core.JSValue.object(gc_header), .body_address = @intFromPtr(gc_header) },
-    };
-
-    for (cases) |case| {
-        try std.testing.expectEqual(case.body_address, pointerPayload(case.value));
-    }
-}
-
 test "over-reserved property storage is freed by prop_size not prop_count" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -457,8 +338,8 @@ test "shape-sized trailing property storage grows externally and compacts in pla
     try std.testing.expect(object.hasSlots2Layout());
     try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_size);
-    try std.testing.expectEqual(@as(?i32, 8), (try object.getProperty(atoms[8])).asInt32());
-    try std.testing.expectEqual(@as(?i32, 9), (try object.getProperty(atoms[9])).asInt32());
+    try std.testing.expectEqual(@as(?i32, 8), (try object.getProperty(atoms[8])).as(.int));
+    try std.testing.expectEqual(@as(?i32, 9), (try object.getProperty(atoms[9])).as(.int));
 
     try rt.gc.verifyObjectPropertyStorageLayouts(rt);
 }
@@ -489,8 +370,8 @@ test "slots2 spill OOM rollback restores inline representation" {
 
     try std.testing.expect(object.propertyStorageIsInline());
     try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(?i32, 0), (try object.getProperty(atoms[0])).asInt32());
-    try std.testing.expectEqual(@as(?i32, 1), (try object.getProperty(atoms[1])).asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), (try object.getProperty(atoms[0])).as(.int));
+    try std.testing.expectEqual(@as(?i32, 1), (try object.getProperty(atoms[1])).as(.int));
     try rt.gc.verifyObjectPropertyStorageLayouts(rt);
 }
 
@@ -591,52 +472,6 @@ test "active bytecode release preserves generic ownership" {
     _ = generic_object;
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
-}
-
-test "primitive value predicates match QuickJS helpers" {
-    try std.testing.expect(core.JSValue.int32(1).isNumber());
-    try std.testing.expect(core.JSValue.float64(1.5).isNumber());
-    try std.testing.expect(core.JSValue.boolean(false).isBool());
-    try std.testing.expect(core.JSValue.nullValue().isNull());
-    try std.testing.expect(core.JSValue.undefinedValue().isUndefined());
-    try std.testing.expect(core.JSValue.uninitialized().isUninitialized());
-    try std.testing.expect(core.JSValue.exception().isException());
-    try std.testing.expect(core.JSValue.shortBigInt(42).isBigInt());
-    try std.testing.expectEqual(@as(?i32, 7), core.JSValue.int32(7).asInt32());
-    try std.testing.expectEqual(@as(?i32, null), core.JSValue.float64(7).asInt32());
-}
-
-test "int32 same-tag update preserves the value representation invariant" {
-    var value = core.JSValue.int32(-1);
-    value.setInt32AssumeInt(1234567);
-
-    try std.testing.expectEqual(core.Tag.int, value.tagOf());
-    try std.testing.expectEqual(@as(?i32, 1234567), value.asInt32());
-}
-
-test "int32 slot move copies the payload when both slots already hold ints" {
-    var destination = core.JSValue.int32(11);
-    const source = core.JSValue.int32(22);
-
-    try std.testing.expect(destination.trySetInt32FromSlot(&source));
-    try std.testing.expectEqual(@as(?i32, 22), destination.asInt32());
-
-    var non_int = core.JSValue.boolean(false);
-    try std.testing.expect(!non_int.trySetInt32FromSlot(&source));
-    try std.testing.expectEqual(@as(?bool, false), non_int.asBool());
-}
-
-test "float construction is valid" {
-    const finite = core.JSValue.float64(1.5);
-    try std.testing.expectEqual(@as(?f64, 1.5), finite.asFloat64());
-
-    const negative_zero = core.JSValue.float64(-0.0);
-    const negative_zero_value = negative_zero.asFloat64().?;
-    try std.testing.expect(negative_zero_value == 0.0);
-    try std.testing.expectEqual(@as(u64, 0x8000_0000_0000_0000), @as(u64, @bitCast(negative_zero_value)));
-
-    const nan_value = core.JSValue.float64(@bitCast(@as(u64, 0x7FF8_0000_0000_0042)));
-    try std.testing.expect(std.math.isNan(nan_value.asFloat64().?));
 }
 
 test "heap BigInt value uses reserved QuickJS tag" {
@@ -854,7 +689,7 @@ test "RealmContext construction stays unpublished and untraced until the live co
 
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asInt32() == marker) self.count += 1;
+            if (slot.as(.int) == marker) self.count += 1;
         }
 
         fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
@@ -1008,7 +843,7 @@ test "array target barrier: three append routes cover grey and black owners" {
                     try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
                     try std.testing.expectEqual(target.gcHeader(), array_slot.?.arrayElements()[0].refHeader().?);
                 } else {
-                    try std.testing.expectEqual(@as(?i32, 37), array_slot.?.arrayElements()[0].asInt32());
+                    try std.testing.expectEqual(@as(?i32, 37), array_slot.?.arrayElements()[0].as(.int));
                 }
             }
         }
@@ -1056,7 +891,7 @@ test "array target barrier: capacity growth shades only storage and preserves co
     try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
     try std.testing.expectEqual(old_child.gcHeader(), array_slot.?.arrayElements()[0].refHeader().?);
     try std.testing.expectEqual(target.gcHeader(), array_slot.?.arrayElements()[capacity].refHeader().?);
-    for (1..capacity) |n| try std.testing.expectEqual(@as(?i32, @intCast(n)), array_slot.?.arrayElements()[n].asInt32());
+    for (1..capacity) |n| try std.testing.expectEqual(@as(?i32, @intCast(n)), array_slot.?.arrayElements()[n].as(.int));
 }
 
 test "array target barrier: public uninitialized slot still queues its owner" {
@@ -1212,7 +1047,7 @@ test "array target barrier: literal fill marks new edges after owner scanning" {
         try std.testing.expect(rt.gc.containsHeader(target.gcHeader()));
         try std.testing.expect(rt.gc.containsHeader(child.gcHeader()));
         try std.testing.expectEqual(@as(u32, 2), array_slot.?.arrayLength());
-        try std.testing.expectEqual(@as(?i32, 37), array_slot.?.arrayElements()[0].asInt32());
+        try std.testing.expectEqual(@as(?i32, 37), array_slot.?.arrayElements()[0].as(.int));
         try std.testing.expectEqual(target.gcHeader(), array_slot.?.arrayElements()[1].refHeader().?);
     }
 }
@@ -1245,7 +1080,7 @@ test "Runtime queues retain their originating Realm until owned jobs are release
     try std.testing.expectEqual(ctx, rt.firstContext().?);
     var generic_job = rt.job_queue.takeFirst().?;
     const generic_result = generic_job.run();
-    try std.testing.expect(!generic_result.isException());
+    try std.testing.expect(!generic_result.is(.exception));
     generic_job.deinit();
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(ctx, rt.firstContext().?);
@@ -1706,16 +1541,16 @@ test "runtime takes typed Promise jobs without allocation" {
     rt.setMemoryLimit(null);
     defer first.deinit();
 
-    try std.testing.expectEqual(@as(?i32, 10), first.payload.promise.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 10), first.payload.promise.value.as(.int));
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
-    try std.testing.expectEqual(@as(?i32, 11), rt.job_queue.jobs[0].payload.promise.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), rt.job_queue.jobs[0].payload.promise.value.as(.int));
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
 
     var second = rt.job_queue.takeFirst().?;
     defer second.deinit();
-    try std.testing.expectEqual(@as(?i32, 11), second.payload.promise.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), second.payload.promise.value.as(.int));
     try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
     try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
     try std.testing.expect(rt.job_queue.takeFirst() == null);
@@ -1746,7 +1581,7 @@ test "typed job reservations preserve capacity without claiming a FIFO position"
     for (expected) |value| {
         var job = rt.job_queue.takeFirst().?;
         defer job.deinit();
-        try std.testing.expectEqual(@as(?i32, value), job.payload.promise.value.asInt32());
+        try std.testing.expectEqual(@as(?i32, value), job.payload.promise.value.as(.int));
     }
     var reserved_job = rt.job_queue.takeFirst().?;
     defer reserved_job.deinit();
@@ -2477,7 +2312,7 @@ test "rope nodes keep the compact tree-only layout" {
     try std.testing.expect(@sizeOf(core.string.StringRope) <= compact_limit);
     // The tail slot is the ONLY growth S2-i is allowed: the flags it needs
     // ride in the padding the node already had.
-    try std.testing.expectEqual(@as(usize, 56), @sizeOf(core.string.StringRope));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(core.string.StringRope));
 }
 
 /// TGC S2-i: force a full collection before every allocation, the shape
@@ -2863,11 +2698,11 @@ test "class prototype inline slots start as JSValue.nullValue" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    try std.testing.expectEqual(@as(usize, 69 * 16), @sizeOf(@TypeOf(ctx.class_prototypes_inline)));
+    try std.testing.expectEqual(@as(usize, 69 * @sizeOf(core.JSValue)), @sizeOf(@TypeOf(ctx.class_prototypes_inline)));
     try std.testing.expectEqual(ctx.class_prototypes_inline[0..].ptr, ctx.class_prototypes.ptr);
     try std.testing.expectEqualDeep(core.JSValue.nullValue(), ctx.class_prototypes[core.class.invalid_class_id]);
     try std.testing.expectEqualDeep(core.JSValue.nullValue(), ctx.class_prototypes[core.class.ids.proxy]);
-    try std.testing.expect(ctx.class_prototypes[core.class.ids.proxy].isNull());
+    try std.testing.expect(ctx.class_prototypes[core.class.ids.proxy].is(.null_value));
 }
 
 test "class standard_plans match standardPayloadKind before and after register" {
@@ -3055,7 +2890,7 @@ const InlineClassFinalizerReentry = struct {
             property_read_failed = true;
             break :blk core.JSValue.undefinedValue();
         };
-        property_read_was_undefined = property_value.isUndefined();
+        property_read_was_undefined = property_value.is(.undefined_value);
         rt.classes.unregisterDynamic(target_id);
         definition_visible_after_unregister = rt.classes.isRegistered(target_id) and rt.classes.unregisterPending(target_id);
         rt.classes.register(growth_id, .{ .class_name = "GrowthDuringInlineFinalizer" }) catch {
@@ -3976,7 +3811,7 @@ test "weak husk keeps its class definition after one synchronous finalizer" {
     // the block that owns the cell (MarkedBlock.cpp `m_weakSet.sweep()`).
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
-    try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
@@ -4114,7 +3949,7 @@ test "strong collection clear publishes empty state before synchronous finalizer
     const clear_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 5, &.{});
     helpers.reclaimNow(rt);
 
-    try std.testing.expect(clear_result.isUndefined());
+    try std.testing.expect(clear_result.is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_collection_clear_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -4198,7 +4033,7 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     try std.testing.expectEqual(@as(usize, 1), reentrant_property_delete_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     const after = try object.getProperty(key);
-    try std.testing.expect(after.isUndefined());
+    try std.testing.expect(after.is(.undefined_value));
 }
 
 test "IC-R1: in-place delete mutates the shape Property word" {
@@ -4233,7 +4068,7 @@ test "IC-R1: in-place delete mutates the shape Property word" {
     }
 
     const got = try object.getProperty(key);
-    try std.testing.expect(got.isUndefined());
+    try std.testing.expect(got.is(.undefined_value));
 }
 
 test "regexp lastIndex set publishes replacement before synchronous finalizer reentry" {
@@ -4272,7 +4107,7 @@ test "regexp lastIndex set publishes replacement before synchronous finalizer re
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.as(.int));
 }
 
 test "regexp lastIndex define publishes replacement before synchronous finalizer reentry" {
@@ -4315,7 +4150,7 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.as(.int));
 }
 
 test "mapped arguments binding update publishes value before synchronous finalizer reentry" {
@@ -4360,7 +4195,7 @@ test "mapped arguments binding update publishes value before synchronous finaliz
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(?i32, 99), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), arguments.argumentsVarRefs()[0].?.varRefValue().as(.int));
 }
 
 test "mapped arguments var-ref update publishes value before synchronous finalizer reentry" {
@@ -4404,7 +4239,7 @@ test "mapped arguments var-ref update publishes value before synchronous finaliz
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().as(.int));
 }
 
 test "mapped arguments binding delete publishes disconnection before synchronous finalizer reentry" {
@@ -4453,7 +4288,7 @@ test "mapped arguments binding delete publishes disconnection before synchronous
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
     const after = try arguments.getProperty(key);
-    try std.testing.expectEqual(@as(?i32, 99), after.asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), after.as(.int));
 }
 
 test "cached iterator next clear publishes null before synchronous finalizer reentry" {
@@ -4778,8 +4613,8 @@ test "collection classes store entries in class payload" {
     entries[0] = .{ .key = core.JSValue.int32(1), .value = core.JSValue.int32(2), .active = true };
     map.collectionEntriesSlot().* = entries;
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), map.collectionEntries()[0].key.asInt32().?);
-    try std.testing.expectEqual(@as(i32, 2), map.collectionEntries()[0].value.asInt32().?);
+    try std.testing.expectEqual(@as(i32, 1), map.collectionEntries()[0].key.as(.int).?);
+    try std.testing.expectEqual(@as(i32, 2), map.collectionEntries()[0].value.as(.int).?);
 }
 
 test "buffer and typed array state use payload storage" {
@@ -5046,7 +4881,7 @@ test "runtime root tracer visits async roots" {
 
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asInt32()) |value| {
+            if (slot.as(.int)) |value| {
                 if (value == 101 or (value >= 106 and value <= 108)) self.count += 1;
             }
         }
@@ -5088,7 +4923,7 @@ test "runtime root frame slots are mutable" {
 
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             _ = context;
-            if (slot.asInt32()) |value| {
+            if (slot.as(.int)) |value| {
                 if (value == 201) slot.* = core.JSValue.int32(202);
             }
         }
@@ -5110,7 +4945,7 @@ test "runtime root frame slots are mutable" {
 
     try rt.traceRoots(&roots, &visitor);
 
-    try std.testing.expectEqual(@as(?i32, 202), rooted_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 202), rooted_value.as(.int));
     try std.testing.expect(rewriter.saw_object);
     try std.testing.expect(rooted_object == null);
 }
@@ -5131,7 +4966,7 @@ test "value root buffer exposes mutable copied slice" {
     const Rewriter = struct {
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             _ = context;
-            if (slot.asInt32()) |value| {
+            if (slot.as(.int)) |value| {
                 if (value == 301) slot.* = core.JSValue.int32(302);
             }
         }
@@ -5150,8 +4985,8 @@ test "value root buffer exposes mutable copied slice" {
 
     try rt.traceRoots(&roots, &visitor);
 
-    try std.testing.expectEqual(@as(?i32, 301), source[0].asInt32());
-    try std.testing.expectEqual(@as(?i32, 302), buffer.values[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 301), source[0].as(.int));
+    try std.testing.expectEqual(@as(?i32, 302), buffer.values[0].as(.int));
 }
 
 test "regexp internals use inline storage and lastIndex uses first shape slot" {
@@ -5175,7 +5010,7 @@ test "regexp internals use inline storage and lastIndex uses first shape slot" {
     try std.testing.expect(regexp.regexpSource() != null);
     try std.testing.expectEqual(@as(usize, 3), regexp.regexpCompiledBytecode().len);
     try std.testing.expectEqual(core.atom.ids.lastIndex, regexp.propAtomAt(0));
-    try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.as(.int));
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
 
@@ -5197,11 +5032,11 @@ test "bound function state uses payload storage" {
     args[1] = core.JSValue.int32(44);
     bound.boundArgsSlot().* = args;
 
-    try std.testing.expectEqual(@as(?i32, 11), bound.boundTarget().?.asInt32());
-    try std.testing.expectEqual(@as(?i32, 22), bound.boundThis().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), bound.boundTarget().?.as(.int));
+    try std.testing.expectEqual(@as(?i32, 22), bound.boundThis().?.as(.int));
     try std.testing.expectEqual(@as(usize, 2), bound.boundArgs().len);
-    try std.testing.expectEqual(@as(?i32, 33), bound.boundArgs()[0].asInt32());
-    try std.testing.expectEqual(@as(?i32, 44), bound.boundArgs()[1].asInt32());
+    try std.testing.expectEqual(@as(?i32, 33), bound.boundArgs()[0].as(.int));
+    try std.testing.expectEqual(@as(?i32, 44), bound.boundArgs()[1].as(.int));
 }
 
 test "proxy state uses payload storage" {
@@ -5216,8 +5051,8 @@ test "proxy state uses payload storage" {
     proxy.proxyTargetSlot().* = core.JSValue.int32(55);
     proxy.proxyHandlerSlot().* = core.JSValue.int32(66);
 
-    try std.testing.expectEqual(@as(?i32, 55), proxy.proxyTarget().?.asInt32());
-    try std.testing.expectEqual(@as(?i32, 66), proxy.proxyHandler().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 55), proxy.proxyTarget().?.as(.int));
+    try std.testing.expectEqual(@as(?i32, 66), proxy.proxyHandler().?.as(.int));
 }
 
 test "mapped arguments state uses inline var-ref storage" {
@@ -5234,8 +5069,8 @@ test "mapped arguments state uses inline var-ref storage" {
     try std.testing.expectEqual(@intFromPtr(refs.ptr), @intFromPtr(arguments.arrayArm().*.values));
     try std.testing.expect(arguments.externalClassPayload() == null);
     try std.testing.expectEqual(@as(usize, 2), arguments.argumentsVarRefs().len);
-    try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
-    try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].?.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].?.varRefValue().as(.int));
+    try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].?.varRefValue().as(.int));
 }
 
 test "unmapped arguments share a prepared shape and use dense element storage" {
@@ -5275,9 +5110,9 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
 
     try std.testing.expect(arguments.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, arguments.arrayElementStorageMode());
-    try std.testing.expectEqual(@as(?i32, 2), (try arguments.getProperty(core.atom.ids.length)).asInt32());
-    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).asInt32());
-    try std.testing.expectEqual(@as(?i32, 32), (try arguments.getProperty(core.atom.atomFromUInt32(1))).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try arguments.getProperty(core.atom.ids.length)).as(.int));
+    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 32), (try arguments.getProperty(core.atom.atomFromUInt32(1))).as(.int));
     try std.testing.expect(arguments.externalClassPayload() == null);
 
     // Redefining a dense numeric property materializes the run into ordinary
@@ -5288,9 +5123,9 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
         core.Descriptor.data(core.JSValue.int32(41), false, false, false),
     );
     try std.testing.expect(!arguments.flags.fast_array);
-    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).asInt32());
-    try std.testing.expectEqual(@as(?i32, 41), (try arguments.getProperty(core.atom.atomFromUInt32(1))).asInt32());
-    try std.testing.expectEqual(@as(?i32, 0), (try template.getProperty(core.atom.ids.length)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 41), (try arguments.getProperty(core.atom.atomFromUInt32(1))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 0), (try template.getProperty(core.atom.ids.length)).as(.int));
 }
 
 test "object data state uses payload storage" {
@@ -5320,7 +5155,7 @@ test "array element state uses inline fast-array storage" {
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(7)));
     try std.testing.expectEqual(@as(usize, 1), array.arrayElements().len);
-    try std.testing.expectEqual(@as(?i32, 7), array.arrayElements()[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), array.arrayElements()[0].as(.int));
 }
 
 test "promise state uses payload storage" {
@@ -5336,9 +5171,9 @@ test "promise state uses payload storage" {
     try promise.setPromiseReactionArg(rt, core.JSValue.int32(303));
     promise.promiseIsRejectedSlot().* = true;
 
-    try std.testing.expectEqual(@as(?i32, 101), promise.promiseResult().?.asInt32());
-    try std.testing.expectEqual(@as(?i32, 202), promise.promiseReactionCallback().?.asInt32());
-    try std.testing.expectEqual(@as(?i32, 303), promise.promiseReactionArg().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 101), promise.promiseResult().?.as(.int));
+    try std.testing.expectEqual(@as(?i32, 202), promise.promiseReactionCallback().?.as(.int));
+    try std.testing.expectEqual(@as(?i32, 303), promise.promiseReactionArg().?.as(.int));
     try std.testing.expect(promise.promiseIsRejected());
 }
 
@@ -5366,18 +5201,18 @@ test "generator state uses payload storage" {
     generator.generatorStartedSlot().* = true;
     generator.generatorJustYieldedSlot().* = true;
 
-    try std.testing.expectEqual(@as(?i32, 404), generator.generatorThis().?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 404), generator.generatorThis().?.as(.int));
     try std.testing.expectEqual(@as(usize, 1), generator.generatorArgs().len);
-    try std.testing.expectEqual(@as(?i32, 505), generator.generatorArgs()[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 505), generator.generatorArgs()[0].as(.int));
     try std.testing.expectEqual(@as(usize, 12), generator.generatorPc());
     try generator.generatorExecutionStateSlot().storage.stack.ensureAdditionalWithResidentBacking(rt, 8, 1, false);
-    try std.testing.expectEqual(@as(?i32, 606), generator.generatorExecutionState().storage.stack.values[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 606), generator.generatorExecutionState().storage.stack.values[0].as(.int));
     var moved: core.object.SuspendedExecutionStorage = .{};
     generator.generatorExecutionStateSlot().storage.moveInto(&moved);
     defer moved.deinit(rt);
     try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
     try std.testing.expectEqual(@as(usize, 12), generator.generatorPc());
-    try std.testing.expectEqual(@as(?i32, 606), moved.stack.values[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 606), moved.stack.values[0].as(.int));
     try std.testing.expect(generator.generatorDone());
     try std.testing.expect(generator.generatorExecuting());
     try std.testing.expect(generator.generatorStarted());
@@ -5504,11 +5339,11 @@ test "suspended execution preserves and closes open frame var refs" {
     defer suspended.deinit(rt);
 
     try std.testing.expect(cell.is_open);
-    try std.testing.expectEqual(@as(?i32, 707), cell.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 707), cell.varRefValue().as(.int));
     suspended.deinit(rt);
     try std.testing.expect(suspended.isEmpty());
     try std.testing.expect(!cell.is_open);
-    try std.testing.expectEqual(@as(?i32, 707), cell.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 707), cell.varRefValue().as(.int));
 }
 
 test "suspended execution republishes running aliases without a second owner" {
@@ -5604,7 +5439,7 @@ test "true C functions own their construction realm while data functions do not"
 
     const data_length = (try data_object.getOwnProperty(rt, core.atom.ids.length)).?;
     defer data_length.destroy(rt);
-    try std.testing.expectEqual(@as(?i32, 1), data_length.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), data_length.value.as(.int));
     try std.testing.expectEqual(false, data_length.writable.?);
     try std.testing.expectEqual(false, data_length.enumerable.?);
     try std.testing.expectEqual(true, data_length.configurable.?);
@@ -5654,7 +5489,7 @@ test "bytecode function state uses the inline qjs function arm" {
     try std.testing.expectEqual(@as(i32, 0), function.hostFunctionKind());
     try std.testing.expectEqual(@as(i32, 0), function.nativeFunctionId());
     try std.testing.expect(function.functionBytecode() != null);
-    try std.testing.expectEqual(@as(?i32, 55), function.functionCaptures()[0].varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 55), function.functionCaptures()[0].varRefValue().as(.int));
     try std.testing.expectEqual(home, function.functionHomeObject().?);
 }
 
@@ -5680,7 +5515,7 @@ test "module namespace uses shape-only live-binding storage" {
     try std.testing.expectEqual(@as(?bool, true), desc.writable);
     try std.testing.expectEqual(@as(?bool, true), desc.enumerable);
     try std.testing.expectEqual(@as(?bool, false), desc.configurable);
-    try std.testing.expectEqual(@as(?i32, 17), desc.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 17), desc.value.as(.int));
 
     try std.testing.expectError(error.ReadOnly, namespace.setProperty(rt, export_name, core.JSValue.int32(18)));
     try namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(17), true, true, false));
@@ -5860,8 +5695,8 @@ test "ordinary object additions reuse transition shapes" {
 
     try std.testing.expectEqual(first.shape_ref, second.shape_ref);
     try std.testing.expectEqual(@as(usize, 2), first.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(?i32, 1), (try first.getProperty(a)).asInt32());
-    try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), (try first.getProperty(a)).as(.int));
+    try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).as(.int));
 }
 
 test "trace object shape summary follows append kind delete and compaction" {
@@ -6024,8 +5859,8 @@ test "pure property value replacement preserves a shared shape until flags chang
     try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), true, false, true));
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
-    try std.testing.expectEqual(@as(?i32, 3), (try first.getProperty(key)).asInt32());
-    try std.testing.expectEqual(@as(?i32, 2), (try second.getProperty(key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 3), (try first.getProperty(key)).as(.int));
+    try std.testing.expectEqual(@as(?i32, 2), (try second.getProperty(key)).as(.int));
 
     // Metadata mutation still requires clone-before-write so the peer keeps
     // the original writable shape.
@@ -6075,7 +5910,7 @@ test "unique transition shape appends in place across FAM relocation" {
     try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(@as(u32, in_place + 1), object.shape_ref.prop_count);
     for (atoms[0 .. in_place + 1], 0..) |name, index| {
-        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try object.getProperty(name)).asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try object.getProperty(name)).as(.int));
         try std.testing.expect(object.shape_ref.firstPropertyIndex(name) != core.shape.no_property_index);
     }
 }
@@ -6112,7 +5947,7 @@ test "first property append OOM restores the no-storage sentinel" {
     // Retrying the same mutation proves the failed append restored a valid
     // empty-object state rather than leaving a dangling pseudo-allocation.
     try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try std.testing.expectEqual(@as(?i32, 2), (try object.getProperty(name)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try object.getProperty(name)).as(.int));
 }
 
 test "failed new property definition rolls back retained entry" {
@@ -6201,7 +6036,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
     // A retry on the same object proves its value buffer still agrees with the
     // shape capacity and catches the former out-of-bounds write on index four.
     try object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(5), true, true, true));
-    try std.testing.expectEqual(@as(?i32, 5), (try object.getProperty(atoms[4])).asInt32());
+    try std.testing.expectEqual(@as(?i32, 5), (try object.getProperty(atoms[4])).as(.int));
 }
 
 test "property compaction removes tombstones without mutating shared sibling shapes" {
@@ -6252,14 +6087,14 @@ test "property compaction removes tombstones without mutating shared sibling sha
         const source_index = index * 2 + 1;
         try std.testing.expectEqual(atoms[source_index], victim.shape_ref.props()[index].atom_id);
         const value = try victim.getProperty(atoms[source_index]);
-        try std.testing.expectEqual(@as(?i32, @intCast(source_index)), value.asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(source_index)), value.as(.int));
     }
 
     try std.testing.expectEqual(shared_shape, sibling.shape_ref);
     try std.testing.expectEqual(@as(u32, 16), sibling.shape_ref.prop_count);
     try std.testing.expectEqual(@as(u32, 0), sibling.shape_ref.deletedPropCount());
     const sibling_value = try sibling.getProperty(atoms[0]);
-    try std.testing.expectEqual(@as(?i32, 0), sibling_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), sibling_value.as(.int));
 }
 
 test "context lexicals property alias releases context strong reference" {
@@ -6783,14 +6618,14 @@ test "large object property lookup uses shape hash across delete and re-add" {
 
     const target = try rt.internAtom("prop_96");
     const before = try obj.getProperty(target);
-    try std.testing.expectEqual(@as(?i32, 96), before.asInt32());
+    try std.testing.expectEqual(@as(?i32, 96), before.as(.int));
 
     try std.testing.expect(obj.deleteProperty(rt, target));
     try std.testing.expect(!obj.hasOwnProperty(target));
 
     try obj.defineOwnProperty(rt, target, core.Descriptor.data(core.JSValue.int32(777), true, true, true));
     const after = try obj.getProperty(target);
-    try std.testing.expectEqual(@as(?i32, 777), after.asInt32());
+    try std.testing.expectEqual(@as(?i32, 777), after.as(.int));
 }
 
 test "exception slot transfers owned value and clears context slot" {
@@ -6802,7 +6637,7 @@ test "exception slot transfers owned value and clears context slot" {
 
     const str = try core.string.String.createAscii(rt, "boom");
     const thrown = ctx.throwValue(str.value());
-    try std.testing.expect(thrown.isException());
+    try std.testing.expect(thrown.is(.exception));
     try std.testing.expect(ctx.hasException());
 
     const taken = ctx.takeException();
@@ -7460,7 +7295,7 @@ test "object child edge tracing exposes mutable value slots" {
         count_402: usize = 0,
 
         pub fn visitValue(self: *@This(), slot: *core.JSValue) void {
-            if (slot.asInt32()) |value| {
+            if (slot.as(.int)) |value| {
                 if (value == 401) {
                     self.count_401 += 1;
                     slot.* = core.JSValue.int32(501);
@@ -7483,8 +7318,8 @@ test "object child edge tracing exposes mutable value slots" {
     try std.testing.expectEqual(@as(usize, 1), rewriter.count_402);
 
     const property_value = try array_obj.getProperty(key);
-    try std.testing.expectEqual(@as(?i32, 501), property_value.asInt32());
-    try std.testing.expectEqual(@as(?i32, 502), array_obj.arrayElements()[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 501), property_value.as(.int));
+    try std.testing.expectEqual(@as(?i32, 502), array_obj.arrayElements()[0].as(.int));
 }
 
 test "gc registry debug verifier accepts linked and unlinked list states" {
@@ -9172,7 +9007,7 @@ test "trace_stw WeakRef symbol target dies with its body" {
     // The only strong holder was the frame above; the body is now garbage.
     _ = rt.runObjectCycleRemoval();
 
-    try std.testing.expect(weak_ref.?.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.?.weakRefDeref(rt).is(.undefined_value));
     // `processWeak` drops the WeakRef's identity before the sweep, so the
     // entry is not even a weak shell by the time the body is unbound.
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
@@ -9274,8 +9109,8 @@ test "trace_stw symbol liveness queries follow the mark inside the sweep phase" 
     try unmarked_ref.?.setWeakRefTarget(rt, unmarked_value);
 
     // Outside the sweep, bound means live -- both derefs succeed.
-    try std.testing.expect(!marked_ref.?.weakRefDeref(rt).isUndefined());
-    try std.testing.expect(!unmarked_ref.?.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(!marked_ref.?.weakRefDeref(rt).is(.undefined_value));
+    try std.testing.expect(!unmarked_ref.?.weakRefDeref(rt).is(.undefined_value));
     rt.clearWeakRefKeptAlive();
 
     const saved_phase = rt.gc.hot.phase;
@@ -9284,17 +9119,17 @@ test "trace_stw symbol liveness queries follow the mark inside the sweep phase" 
 
     // Inside the sweep the mark is the authority, so an unmarked body must
     // report dead everywhere the atom table answers a liveness question.
-    try std.testing.expect(!marked_ref.?.weakRefDeref(rt).isUndefined());
-    try std.testing.expect(unmarked_ref.?.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(!marked_ref.?.weakRefDeref(rt).is(.undefined_value));
+    try std.testing.expect(unmarked_ref.?.weakRefDeref(rt).is(.undefined_value));
     try std.testing.expect(core.symbol.description(rt, marked_atom) != null);
     try std.testing.expect(core.symbol.description(rt, unmarked_atom) == null);
-    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, marked_atom).isUndefined());
-    try std.testing.expect(rt.atoms.symbolValueIfLive(rt, unmarked_atom).isUndefined());
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, marked_atom).is(.undefined_value));
+    try std.testing.expect(rt.atoms.symbolValueIfLive(rt, unmarked_atom).is(.undefined_value));
     try std.testing.expect(rt.atoms.symbolBodyHeaderIfLive(rt, unmarked_atom) == null);
 
     // Nothing was mutated: leaving the phase restores the binding answer.
     rt.gc.hot.phase = saved_phase;
-    try std.testing.expect(!unmarked_ref.?.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(!unmarked_ref.?.weakRefDeref(rt).is(.undefined_value));
     rt.clearWeakRefKeptAlive();
 }
 
@@ -9319,15 +9154,15 @@ test "trace_stw WeakRef symbol deref keep-alive survives the same job" {
     // Every strong holder is gone, but a successful deref put the body in
     // [[KeptAlive]], which `JSRuntime.traceRoots` reports as a root.
     const derefed = weak_ref.?.weakRefDeref(rt);
-    try std.testing.expect(derefed.isSymbol());
+    try std.testing.expect(derefed.is(.symbol));
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(!weak_ref.?.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(!weak_ref.?.weakRefDeref(rt).is(.undefined_value));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
     // Job end releases it; the next collection is free to take the body.
     rt.clearWeakRefKeptAlive();
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(weak_ref.?.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.?.weakRefDeref(rt).is(.undefined_value));
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -10328,7 +10163,7 @@ test "handle scope local keeps object alive until scope exits" {
 
     try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
-    try std.testing.expect(local.get().isObject());
+    try std.testing.expect(local.get().is(.object));
 
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
@@ -10435,7 +10270,7 @@ test "weak persistent value does not retain direct object target" {
 
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
     try std.testing.expect(!weak.isAlive());
-    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expect(weak.get().is(.undefined_value));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 
@@ -10458,7 +10293,7 @@ test "weak persistent value clears object cycle target during gc" {
     try std.testing.expectEqual(@as(usize, single_object_self_cycle_with_storage_count), rt.gc.liveCount());
 
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_with_storage_count, rt.runObjectCycleRemoval());
-    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expect(weak.get().is(.undefined_value));
     // `processWeak` notifies in the same collection that unmarks the target.
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 }
@@ -10485,7 +10320,7 @@ test "weak persistent value clears unrooted symbol target during gc" {
 
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(!weak.isAlive());
-    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expect(weak.get().is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 1), clear_count);
 }
 
@@ -10967,7 +10802,7 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
     try value_holder.defineModuleAutoInitPropertyForFixture(rt, value_key, flags, ctx, &value_fixture.owner);
     try std.testing.expectEqual(core.property.AutoInitId.module_ns, value_holder.propertyEntry(0).*.slot.auto_init.realm_and_id.id());
     const namespace_value = try value_holder.getProperty(value_key);
-    try std.testing.expectEqual(@as(?i32, 41), namespace_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), namespace_value.as(.int));
     try std.testing.expectEqual(@as(usize, 1), value_fixture.calls);
     try std.testing.expectEqual(core.property.Kind.data, value_holder.propKindAt(0));
 
@@ -10978,14 +10813,14 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
     };
     try cell_holder.defineModuleAutoInitPropertyForFixture(rt, cell_key, flags, ctx, &cell_fixture.owner);
     const first_cell_value = try cell_holder.getProperty(cell_key);
-    try std.testing.expectEqual(@as(?i32, 7), first_cell_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), first_cell_value.as(.int));
     try std.testing.expectEqual(@as(usize, 1), cell_fixture.calls);
     try std.testing.expectEqual(core.property.Kind.var_ref, cell_holder.propKindAt(0));
     try std.testing.expectEqual(cell, cell_holder.propertyEntry(0).*.slot.var_ref);
 
     cell.setVarRefValue(rt, core.JSValue.int32(9));
     const updated_cell_value = try cell_holder.getProperty(cell_key);
-    try std.testing.expectEqual(@as(?i32, 9), updated_cell_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 9), updated_cell_value.as(.int));
     try std.testing.expectEqual(@as(usize, 1), cell_fixture.calls);
 }
 
@@ -11009,7 +10844,7 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
     try std.testing.expectEqual(&ctx.header, holder.propertyEntry(0).*.slot.auto_init.realm_and_id.realmHeader().?);
 
     const retried = try holder.getProperty(key);
-    try std.testing.expectEqual(@as(?i32, 88), retried.asInt32());
+    try std.testing.expectEqual(@as(?i32, 88), retried.as(.int));
     try std.testing.expectEqual(@as(usize, 2), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
 }
@@ -11038,7 +10873,7 @@ test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
     const replacement = try holder.getProperty(key);
-    try std.testing.expectEqual(@as(?i32, 99), replacement.asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), replacement.as(.int));
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
 }
 
@@ -11511,7 +11346,7 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
 
     try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
     try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
-    try std.testing.expectEqual(@as(?i32, 1), (try holder.getProperty(key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), (try holder.getProperty(key)).as(.int));
     try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
 
     try holder.defineEmptyArrayAutoInitProperty(rt, key, flags, global);
@@ -11885,7 +11720,7 @@ test "weak ref target identity does not retain object target" {
 
     dropGcPtr(&target);
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 }
 
 test "weak ref target registration roots direct symbol target" {
@@ -11914,7 +11749,7 @@ test "weak ref target registration roots direct symbol target" {
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-    try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 }
 
 test "weak ref target registration failure leaves target unset" {
@@ -11928,7 +11763,7 @@ test "weak ref target registration failure leaves target unset" {
     try std.testing.expectError(error.OutOfMemory, weak_ref.setWeakRefTarget(rt, target.value()));
     rt.setMemoryLimit(null);
 
-    try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 }
 
 test "weak collection capacity failure leaves empty holder unregistered" {
@@ -12060,7 +11895,7 @@ test "weak collection delete and clear unregister empty borrowed holder" {
     try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
 
     const delete_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 4, &.{map_key.value()});
-    try std.testing.expectEqual(@as(?bool, true), delete_result.asBool());
+    try std.testing.expectEqual(@as(?bool, true), delete_result.as(.boolean));
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 
@@ -12071,7 +11906,7 @@ test "weak collection delete and clear unregister empty borrowed holder" {
     try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
 
     const clear_result = try engine.exec.collection_ops.methodCall(rt, weakset.value(), 5, &.{});
-    try std.testing.expect(clear_result.isUndefined());
+    try std.testing.expect(clear_result.is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 0), weakset.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
@@ -12166,7 +12001,7 @@ test "weak collection delete tolerates value cleanup reentry" {
 
     const delete_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 4, &.{key.value()});
 
-    try std.testing.expectEqual(@as(?bool, true), delete_result.asBool());
+    try std.testing.expectEqual(@as(?bool, true), delete_result.as(.boolean));
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
@@ -12185,7 +12020,7 @@ test "weak collection clear tolerates value cleanup reentry" {
 
     const clear_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 5, &.{});
 
-    try std.testing.expect(clear_result.isUndefined());
+    try std.testing.expect(clear_result.is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
@@ -12270,7 +12105,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
     var index: usize = 1;
     while (index < key_count) : (index += 1) {
         const value = try engine.exec.collection_ops.methodCall(rt, map.value(), 2, &.{keys[index].?.value()});
-        try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), value.as(.int));
     }
 }
 
@@ -12437,7 +12272,7 @@ test "finalization registry cleanup enqueue does not allocate after registration
             .finalization => |payload| payload,
             else => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqual(@as(?i32, @intCast(index + 1)), payload.held_value.asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index + 1)), payload.held_value.as(.int));
     }
 
     // A further weak sweep cannot publish any cell twice.
@@ -13586,13 +13421,13 @@ test "ordinary objects define own data properties and descriptors" {
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
     const desc = (try obj.getOwnProperty(rt, key)).?;
     try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
-    try std.testing.expectEqual(@as(?i32, 42), desc.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), desc.value.as(.int));
     try std.testing.expectEqual(true, desc.writable.?);
     try std.testing.expect(obj.hasOwnProperty(key));
 
     try obj.setProperty(rt, key, core.JSValue.int32(7));
     const updated = try obj.getProperty(key);
-    try std.testing.expectEqual(@as(?i32, 7), updated.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), updated.as(.int));
 }
 
 test "define property enforces non-configurable and non-writable invariants" {
@@ -13633,8 +13468,8 @@ test "accessor descriptors store getter setter placeholders" {
 
     const desc = (try obj.getOwnProperty(rt, key)).?;
     try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
-    try std.testing.expect(desc.getter.isObject());
-    try std.testing.expect(desc.setter.isObject());
+    try std.testing.expect(desc.getter.is(.object));
+    try std.testing.expect(desc.setter.is(.object));
 }
 
 test "prototype traversal and cycle checks are enforced" {
@@ -13649,7 +13484,7 @@ test "prototype traversal and cycle checks are enforced" {
 
     try std.testing.expect(!child.hasOwnProperty(key));
     try std.testing.expect(child.hasProperty(key));
-    try std.testing.expectEqual(@as(?i32, 11), (try child.getProperty(key)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), (try child.getProperty(key)).as(.int));
     try std.testing.expectError(error.PrototypeCycle, proto.setPrototype(rt, child));
 }
 
@@ -13737,7 +13572,7 @@ test "array indexed delete does not let dense holes mask ordinary properties" {
     const index_0 = core.atom.atomFromUInt32(0);
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(1)));
     try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try std.testing.expectEqual(@as(?i32, 2), (try array_obj.getProperty(index_0)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try array_obj.getProperty(index_0)).as(.int));
 
     try std.testing.expect(array_obj.deleteProperty(rt, index_0));
     try std.testing.expect(!array_obj.hasOwnProperty(index_0));
@@ -13805,7 +13640,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const real_key = try rt.internAtom("real-own");
 
     const desc = (try obj.getOwnProperty(rt, key)).?;
-    try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), desc.value.as(.int));
 
     // qjs JS_DefineProperty updates an actual own shape entry before the
     // JS_CreateProperty exotic hook. Seed one with dispatch disabled, then
@@ -13817,7 +13652,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     try std.testing.expectEqual(@as(usize, 0), exotic_define_calls);
     obj.flags.has_exotic_methods = false;
     const real_desc = (try obj.getOwnProperty(rt, real_key)).?;
-    try std.testing.expectEqual(@as(?i32, 2), real_desc.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), real_desc.value.as(.int));
     obj.flags.has_exotic_methods = true;
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
@@ -15692,7 +15527,7 @@ test "G-Shape relocation leaves no raw Shape queued and survives declared major 
     _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
     for (0..64) |i| {
         const desc = (try owner.getOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)))).?;
-        try std.testing.expectEqual(@as(i32, @intCast(i)), desc.value.asInt32().?);
+        try std.testing.expectEqual(@as(i32, @intCast(i)), desc.value.as(.int).?);
     }
 }
 
@@ -17213,7 +17048,7 @@ test "incremental destruction credit funds safe assists from actual native backi
     try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.assist_credit_bytes);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.assist_unreconciled_bytes);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.var_ref));
-    try std.testing.expectEqual(@as(?i32, 42), keeper.arrayElements()[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), keeper.arrayElements()[0].as(.int));
 }
 
 test "incremental destruction credit rejects growth without sufficient deferred charges" {
@@ -17260,7 +17095,7 @@ test "incremental destruction credit rejects growth without sufficient deferred 
         helpers.finishGcCycles(rt);
         try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.var_ref));
         try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
-        try std.testing.expectEqual(@as(?i32, 42), keeper.arrayElements()[0].asInt32());
+        try std.testing.expectEqual(@as(?i32, 42), keeper.arrayElements()[0].as(.int));
     }
 }
 
@@ -18138,18 +17973,18 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
     try std.testing.expect(entry.slotOccupied());
     try std.testing.expect(entry.str != null);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
 
     // Repeated minors keep it: the first one promoted the body, after which
     // the major's `visitAtom` rules are the only authority again.
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
-    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
 
     // The shape edge is what keeps it across majors, not the young list.
     try s3RunMajor(rt);
     try std.testing.expectEqual(s3MarkEpoch(rt), entry.mark_epoch);
-    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
 
     // Drop the holder: with no edge left the major retires the entry.
     object = null;
@@ -18183,7 +18018,7 @@ test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they
     }
 
     var alive: usize = 0;
-    for (ids) |id| alive += @intFromBool(!rt.atoms.symbolValueIfLive(rt, id).isUndefined());
+    for (ids) |id| alive += @intFromBool(!rt.atoms.symbolValueIfLive(rt, id).is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 1000), alive);
 }
 
@@ -18214,7 +18049,7 @@ test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
     try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
 
     helpers.finishGcCycles(rt);
-    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 }
 
@@ -18262,14 +18097,14 @@ test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycl
         // A raw weak reference, the same accounting `WeakRef` takes.
         rt.atoms.retainSymbolWeakRef(symbol_atom);
         try s3RunMajor(rt);
-        try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+        try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
     }
 
     // Body unreachable: the entry must become a SHELL (unindexed, no body,
     // still occupying its slot) so the WeakRef can observe the death, not a
     // free slot the next intern could hand back under the same id.
     try s3RunMajor(rt);
-    try std.testing.expect(rt.atoms.symbolValueIfLive(rt, symbol_atom).isUndefined());
+    try std.testing.expect(rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(rt.atoms.entries[entry_index].slotOccupied());
     try std.testing.expect(rt.atoms.entries[entry_index].str == null);
@@ -18351,7 +18186,7 @@ test "TGC S3-c: the atom verdict is applied in the pause that took it, not after
     try std.testing.expectEqualStrings(spelling, rt.atoms.name(reborn).?);
     try std.testing.expectEqual(
         @as(i32, 9),
-        (try object.?.getOwnProperty(rt, reborn)).?.value.asInt32().?,
+        (try object.?.getOwnProperty(rt, reborn)).?.value.as(.int).?,
     );
 }
 
@@ -18417,7 +18252,7 @@ fn expectS4bNamedProperties(rt: *core.JSRuntime, obj: *core.Object, prefix: []co
     while (index < count) : (index += 1) {
         const name = try std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, index });
         const key = try rt.internAtom(name);
-        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try obj.getProperty(key)).asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try obj.getProperty(key)).as(.int));
     }
 }
 
@@ -18458,13 +18293,13 @@ test "storage-cell mint writes runtime kind tags on block and extent paths" {
     for (cases) |case| {
         const small_body = try rt.gc.createStorageCellPublished(case[0], small);
         installMintedStringBufferBody(case[1], small_body, small);
-        const small_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(small_body));
+        const small_header: *core.gc.Header = @ptrCast(@alignCast(small_body));
         try std.testing.expectEqual(case[1], small_header.metaConst().flags.kind);
         try std.testing.expect(core.gc.Registry.isBlockCellHeader(small_header));
 
         const large_body = try rt.gc.createStorageCellPublished(case[0], large);
         installMintedStringBufferBody(case[1], large_body, large);
-        const large_header: *core.gc.GCObjectHeader = @ptrCast(@alignCast(large_body));
+        const large_header: *core.gc.Header = @ptrCast(@alignCast(large_body));
         try std.testing.expectEqual(case[1], large_header.metaConst().flags.kind);
         try std.testing.expect(!core.gc.Registry.isBlockCellHeader(large_header));
     }
@@ -18600,7 +18435,7 @@ test "TGC S4-b: a growing dense array leaves every superseded element cell to th
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCountKind(.array_storage));
     try std.testing.expectEqual(@as(usize, 40), array_slot.?.arrayElements().len);
     for (array_slot.?.arrayElements(), 0..) |element, index| {
-        try std.testing.expectEqual(@as(?i32, @intCast(index)), element.asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), element.as(.int));
     }
 
     array_slot = null;
@@ -18636,7 +18471,7 @@ test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
     array_slot.?.flags.fast_array = true;
     try std.testing.expectEqual(@as(usize, 40), array_slot.?.arrayElements().len);
     for (array_slot.?.arrayElements(), 0..) |element, index| {
-        try std.testing.expectEqual(@as(?i32, @intCast(index)), element.asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), element.as(.int));
     }
 
     array_slot = null;
@@ -18666,7 +18501,7 @@ test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
     const live_refs = arguments_slot.?.argumentsVarRefs();
     try std.testing.expectEqual(@as(usize, 2), live_refs.len);
     try std.testing.expect(live_refs[0].?.varRefValue().sameValue(target_slot.?.value()));
-    try std.testing.expectEqual(@as(?i32, 7), live_refs[1].?.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), live_refs[1].?.varRefValue().as(.int));
 
     arguments_slot = null;
     target_slot = null;
@@ -18702,7 +18537,7 @@ test "TGC S4-b: storage over the block-cell ceiling takes the extent route and i
     _ = rt.runObjectCycleRemoval();
     try expectS4bNamedProperties(rt, owner_slot.?, "s4b-extent-", 200);
     try std.testing.expectEqual(@as(usize, 400), array_slot.?.arrayElements().len);
-    try std.testing.expectEqual(@as(?i32, 399), array_slot.?.arrayElements()[399].asInt32());
+    try std.testing.expectEqual(@as(?i32, 399), array_slot.?.arrayElements()[399].as(.int));
 
     owner_slot = null;
     array_slot = null;
@@ -18991,7 +18826,7 @@ test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cro
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 2), bound_slot.?.boundArgs().len);
     try std.testing.expect(bound_slot.?.boundArgs()[0].same(target_slot.?.value()));
-    try std.testing.expectEqual(@as(?i32, 7), bound_slot.?.boundArgs()[1].asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), bound_slot.?.boundArgs()[1].as(.int));
     var popped: usize = 0;
     while (stack_slot.?.popDisposableResource()) |resource| {
         try std.testing.expect(resource.value.same(target_slot.?.value()));
@@ -19021,7 +18856,7 @@ test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent rou
 
     // 3760 bytes is the small-class ceiling (TGC S2-f). The payload STRUCTS
     // all fit a cell; only a subordinate slice can run off the end of it.
-    const args = try core.Object.createPayloadSliceCell(rt, core.JSValue, 400);
+    const args = try core.Object.createPayloadSliceCell(rt, core.JSValue, 500);
     for (args) |*slot| slot.* = target_slot.?.value();
     bound_slot.?.boundArgsSlot().* = args;
 
@@ -19034,8 +18869,8 @@ test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent rou
     // give it back on the pure-memory arm rather than reading it as a String.
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.gc.containsHeader(storage));
-    try std.testing.expectEqual(@as(usize, 400), bound_slot.?.boundArgs().len);
-    try std.testing.expect(bound_slot.?.boundArgs()[399].same(target_slot.?.value()));
+    try std.testing.expectEqual(@as(usize, 500), bound_slot.?.boundArgs().len);
+    try std.testing.expect(bound_slot.?.boundArgs()[499].same(target_slot.?.value()));
 
     bound_slot = null;
     target_slot = null;

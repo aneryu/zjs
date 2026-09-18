@@ -11,16 +11,9 @@
 | `build/profiles.zig` | 0 | [20-build.md](20-build.md) |
 | `build/tests.zig` | 1 | [20-build.md](20-build.md) |
 | `build.zig` | 1 | [20-build.md](20-build.md) |
-| `src/abi/fun_native_abi.zig` | 2 | [18-abi.md](18-abi.md) |
-| `src/abi/gen_header.zig` | 1 | [18-abi.md](18-abi.md) |
-| `src/abi/sdk.zig` | 9 | [18-abi.md](18-abi.md) |
 | `src/all_tests.zig` | 2 | [20-tests.md](20-tests.md) |
-| `src/binding/binding.zig` | 94 | [01-public-api-objects.md](01-public-api-objects.md) |
 | `src/binding/context.zig` | 104 | [01-public-api-context.md](01-public-api-context.md) |
 | `src/binding/native.zig` | 63 | [01-public-api-native.md](01-public-api-native.md) |
-| `src/binding/native_call_plan.zig` | 5 | [01-public-api-binding-facade.md](01-public-api-binding-facade.md) |
-| `src/binding/prop_name.zig` | 7 | [01-public-api-binding-facade.md](01-public-api-binding-facade.md) |
-| `src/binding/property_site.zig` | 10 | [01-public-api-binding-facade.md](01-public-api-binding-facade.md) |
 | `src/binding/root.zig` | 1 | [01-public-api-binding-facade.md](01-public-api-binding-facade.md) |
 | `src/builtins_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/bytecode.zig` | 507 | [05-bytecode-binding.md](05-bytecode-binding.md), [05-bytecode-function-def.md](05-bytecode-function-def.md), [05-bytecode-function.md](05-bytecode-function.md), [05-bytecode-opcodes.md](05-bytecode-opcodes.md), [05-bytecode-pipeline.md](05-bytecode-pipeline.md), [05-bytecode.md](05-bytecode.md) |
@@ -120,7 +113,7 @@
 | `src/exec/array_ops.zig` | 231 | [15-array-ops-apply.md](15-array-ops-apply.md), [15-array-ops-dispatch.md](15-array-ops-dispatch.md), [15-array-ops-iterate.md](15-array-ops-iterate.md), [15-array-ops-species.md](15-array-ops-species.md) |
 | `src/exec/async_completion.zig` | 5 | [16-promise.md](16-promise.md) |
 | `src/exec/async_generator.zig` | 15 | [16-promise.md](16-promise.md) |
-| `src/exec/atomics_ops.zig` | 60 | [17-atomics-buffer.md](17-atomics-buffer.md) |
+| `src/exec/atomics_ops.zig` | 62 | [17-atomics-buffer.md](17-atomics-buffer.md) |
 | `src/exec/atomics_wait.zig` | 0 | [17-atomics-buffer.md](17-atomics-buffer.md) |
 | `src/exec/buffer_ops.zig` | 10 | [17-atomics-buffer.md](17-atomics-buffer.md) |
 | `src/exec/builtin_dispatch.zig` | 77 | [17-globals-dispatch.md](17-globals-dispatch.md) |
@@ -211,7 +204,7 @@
 | `src/libs/number_format.zig` | 57 | [19-number-format.md](19-number-format.md) |
 | `src/libs/regexp.zig` | 217 | [19-regexp.md](19-regexp.md) |
 | `src/libs/root.zig` | 0 | [19-libs.md](19-libs.md) |
-| `src/libs/unicode/data.zig` | 4 | [19-unicode.md](19-unicode.md) |
+| `src/libs/unicode/data.zig` | 7 | [19-unicode.md](19-unicode.md) |
 | `src/libs/unicode/names.zig` | 15 | [19-unicode.md](19-unicode.md) |
 | `src/libs/unicode/properties.zig` | 2 | [19-unicode.md](19-unicode.md) |
 | `src/libs/unicode/regexp_properties.zig` | 9 | [19-unicode.md](19-unicode.md) |
@@ -223,11 +216,9 @@
 | `src/root.zig` | 91 | [01-public-api-root.md](01-public-api-root.md) |
 | `src/runner_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/runtime/event_loop.zig` | 57 | [18-event-loop.md](18-event-loop.md) |
-| `src/runtime/public.zig` | 0 | [18-event-loop.md](18-event-loop.md) |
-| `src/runtime/root.zig` | 6 | [18-event-loop.md](18-event-loop.md) |
+| `src/runtime/root.zig` | 0 | [18-event-loop.md](18-event-loop.md) |
 | `src/runtime_tests.zig` | 0 | 测试入口（不纳入本轮验收） |
 | `src/simple_token.zig` | 17 | [02-lexer-simple-token.md](02-lexer-simple-token.md) |
-| `src/tests/abi_layout.zig` | 3 | [20-tests.md](20-tests.md) |
 | `src/tests/builtins.zig` | 5 | [20-tests-builtins.md](20-tests-builtins.md) |
 | `src/tests/bytecode.zig` | 6 | [20-tests.md](20-tests.md) |
 | `src/tests/core.zig` | 131 | [20-tests-core.md](20-tests-core.md) |

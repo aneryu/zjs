@@ -20,7 +20,8 @@
 src/libs/root.zig
   subsystem_name = "libs"
   unicode        → unicode.zig
-                   ├─ unicode/data.zig              生成表（libunicode-table.h）
+                   ├─ unicode/data.zig              表加载（@embedFile tables.bin）
+                   │  unicode/tables.bin            QuickJS RLE 表载体
                    ├─ unicode/names.zig             属性名 / 别名
                    ├─ unicode/properties.zig        派生属性表达式
                    └─ unicode/regexp_properties.zig 零分配 per-code-point 查找
@@ -122,7 +123,7 @@ JS `new RegExp` / `RegExp.prototype.exec`
 - 本文标题覆盖: 0
 - 未覆盖: 无
 
-其余函数见同编号分册。总清单 490 个 `src/libs/**/*.zig` 函数；核对命令：
+其余函数见同编号分册。总清单 486 个 `src/libs/**/*.zig` 函数；核对命令：
 
 ```sh
 python3 docs/code-walkthrough/_check_coverage.py \

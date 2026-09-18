@@ -86,7 +86,7 @@ function violationReason(source, target) {
   if (source === 'src/root.zig') {
     if (
       target === 'src/binding/root.zig' ||
-      target === 'src/runtime/public.zig' ||
+      target === 'src/runtime/root.zig' ||
       target === 'src/core/root.zig' ||
       target === 'src/exec/root.zig' ||
       target === 'src/exec/module_graph.zig'
@@ -227,7 +227,6 @@ const TEST_ROOTS = [
   'src/tests/smoke_test.zig',
   // Standalone build-graph tool roots (referenced by build.zig steps, not
   // imported by any module).
-  'src/abi/gen_header.zig', // zig build gen-abi-header
   // tools/ and tests/ files that import the zjs module (scanned for edges;
   // they are build-graph roots, not orphans).
   'tools/perf/same_runtime/zjs_same_runtime.zig',

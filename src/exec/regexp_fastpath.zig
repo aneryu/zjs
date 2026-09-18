@@ -91,7 +91,7 @@ pub fn regExpFunctionCall(
     const input_pattern = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const input_flags = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const pattern_is_regexp = try isRegExpObservable(ctx, output, global, input_pattern, caller_function, caller_frame);
-    if (pattern_is_regexp and input_flags.isUndefined()) {
+    if (pattern_is_regexp and input_flags.is(.undefined_value)) {
         const pattern_constructor = try getValueProperty(ctx, output, global, input_pattern, core.atom.ids.constructor, caller_function, caller_frame);
         const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
         const regexp_ctor = try global.getProperty(regexp_key);
@@ -114,14 +114,14 @@ pub fn regExpFunctionCall(
             }
         }
     }
-    if (pattern.isObject() and !pattern_is_regexp) {
+    if (pattern.is(.object) and !pattern_is_regexp) {
         const pattern_object = objectFromValue(pattern) orelse return error.TypeError;
         if (pattern_object.class_id != core.class.ids.regexp) {
             const string_value = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
             owned_pattern = string_value;
             pattern = string_value;
         }
-    } else if (!pattern_is_regexp and !pattern.isString() and !pattern.isUndefined()) {
+    } else if (!pattern_is_regexp and !pattern.isString() and !pattern.is(.undefined_value)) {
         // Mirrors js_regexp_constructor (quickjs.c:47786-47793): any non-regexp,
         // non-undefined pattern goes through JS_ToString, which throws TypeError
         // for symbols instead of leaking '[object Object]'.
@@ -131,7 +131,7 @@ pub fn regExpFunctionCall(
     }
 
     var owned_flags: ?core.JSValue = null;
-    var flags = if (!input_flags.isUndefined())
+    var flags = if (!input_flags.is(.undefined_value))
         input_flags
     else if (pattern_is_regexp) blk: {
         const pattern_object = objectFromValue(input_pattern) orelse break :blk input_flags;
@@ -147,7 +147,7 @@ pub fn regExpFunctionCall(
     };
     // Mirrors js_compile_regexp (quickjs.c:47577-47578): the flags operand is
     // ToString'd via JS_ToCStringLen, which throws TypeError for symbols.
-    if (!flags.isUndefined() and !flags.isString()) {
+    if (!flags.is(.undefined_value) and !flags.isString()) {
         const string_value = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
         owned_flags = string_value;
         flags = string_value;
@@ -189,8 +189,8 @@ fn regExpConstructCallInNativeScope(
 ) !core.JSValue {
     const input_pattern = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const input_flags = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if ((input_pattern.isString() or input_pattern.isUndefined()) and
-        (input_flags.isString() or input_flags.isUndefined()))
+    if ((input_pattern.isString() or input_pattern.is(.undefined_value)) and
+        (input_flags.isString() or input_flags.is(.undefined_value)))
     {
         // Both operands are already string/undefined primitives, so the
         // construct record's value path runs no observable coercion: thread
@@ -211,7 +211,7 @@ fn regExpConstructCallInNativeScope(
         owned_pattern = empty;
         break :blk empty;
     };
-    if (pattern.isUndefined()) {
+    if (pattern.is(.undefined_value)) {
         const empty = try value_ops.createStringValue(ctx.runtime, "");
         owned_pattern = empty;
         pattern = empty;
@@ -227,7 +227,7 @@ fn regExpConstructCallInNativeScope(
                 pattern = source;
             }
         }
-    } else if (pattern.isObject()) {
+    } else if (pattern.is(.object)) {
         const pattern_object = objectFromValue(pattern) orelse return error.TypeError;
         if (pattern_object.class_id != core.class.ids.regexp) {
             const string_value = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
@@ -244,7 +244,7 @@ fn regExpConstructCallInNativeScope(
     }
 
     var owned_flags: ?core.JSValue = null;
-    var flags = if (!input_flags.isUndefined())
+    var flags = if (!input_flags.is(.undefined_value))
         input_flags
     else if (pattern_is_regexp) blk: {
         const pattern_object = objectFromValue(input_pattern) orelse break :blk core.JSValue.undefinedValue();
@@ -265,7 +265,7 @@ fn regExpConstructCallInNativeScope(
     // 47577-47578): the flags operand is ToString'd inside js_compile_regexp —
     // after js_create_from_ctor resolved new.target's prototype — and
     // JS_ToCStringLen throws TypeError for symbols (not SyntaxError).
-    if (!flags.isUndefined() and !flags.isString()) {
+    if (!flags.is(.undefined_value) and !flags.isString()) {
         const string_value = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
         owned_flags = string_value;
         flags = string_value;
@@ -323,11 +323,11 @@ pub fn regExpTestMethod(
             return core.JSValue.boolean(matched);
         }
         const result = try regExpExecResult(ctx, output, global, this_value, receiver_object, string_value, true, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
-        return core.JSValue.boolean(!result.isNull());
+        return core.JSValue.boolean(!result.is(.null_value));
     }
 
     const result = try regExpExecGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
-    return core.JSValue.boolean(!result.isNull());
+    return core.JSValue.boolean(!result.is(.null_value));
 }
 
 pub fn regExpTestFastNoResult(
@@ -353,7 +353,7 @@ pub fn regExpTestFastNoResult(
 
 pub fn regExpLastIndexCanSkipCoercion(object: *core.Object) bool {
     const value = object.regexpLastIndex() orelse return false;
-    if (value.isObject() or value.isBigInt() or value.isSymbol()) return false;
+    if (value.is(.object) or value.isBigInt() or value.is(.symbol)) return false;
     return true;
 }
 
@@ -378,7 +378,7 @@ pub fn regExpCompile(
     const pattern = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const flags = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
 
-    if (flags.isUndefined()) {
+    if (flags.is(.undefined_value)) {
         if (objectFromValue(pattern)) |pattern_object| {
             if (pattern_object.class_id == core.class.ids.regexp) {
                 const source_value = try regexpInternalStringValue(ctx.runtime, pattern_object, true);
@@ -397,11 +397,11 @@ pub fn regExpCompile(
     const source_value = blk: {
         if (objectFromValue(pattern)) |pattern_object| {
             if (pattern_object.class_id == core.class.ids.regexp) {
-                if (!flags.isUndefined()) return error.TypeError;
+                if (!flags.is(.undefined_value)) return error.TypeError;
                 break :blk try regexpInternalStringValue(ctx.runtime, pattern_object, true);
             }
         }
-        if (pattern.isUndefined()) break :blk try value_ops.createStringValue(ctx.runtime, "");
+        if (pattern.is(.undefined_value)) break :blk try value_ops.createStringValue(ctx.runtime, "");
         break :blk try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
     };
 
@@ -411,7 +411,7 @@ pub fn regExpCompile(
                 break :blk try regexpInternalStringValue(ctx.runtime, pattern_object, false);
             }
         }
-        if (flags.isUndefined()) break :blk try value_ops.createStringValue(ctx.runtime, "");
+        if (flags.is(.undefined_value)) break :blk try value_ops.createStringValue(ctx.runtime, "");
         break :blk try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
     };
 
@@ -451,8 +451,8 @@ pub fn regExpSpeciesConstructor(
     const default_constructor = try regExpConstructorFromGlobal(ctx.runtime, global);
 
     const constructor_value = try getValueProperty(ctx, output, global, rx, core.atom.ids.constructor, caller_function, caller_frame);
-    if (constructor_value.isUndefined()) return default_constructor;
-    if (!constructor_value.isObject()) {
+    if (constructor_value.is(.undefined_value)) return default_constructor;
+    if (!constructor_value.is(.object)) {
         return error.TypeError;
     }
 
@@ -460,7 +460,7 @@ pub fn regExpSpeciesConstructor(
         return error.TypeError;
     };
     const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
-    if (species_value.isUndefined() or species_value.isNull()) return default_constructor;
+    if (species_value.is(.undefined_value) or species_value.is(.null_value)) return default_constructor;
     if (!(try isConstructorLike(ctx, species_value))) {
         return error.TypeError;
     }
@@ -490,7 +490,7 @@ pub fn appendNamedCaptureSubstitution(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    if (named_captures.isUndefined()) return false;
+    if (named_captures.is(.undefined_value)) return false;
     const name_start = index.* + 2;
     const name_end = std.mem.indexOfScalarPos(u16, replacement, name_start, '>') orelse return false;
     var name = std.ArrayList(u8).empty;
@@ -503,7 +503,7 @@ pub fn appendNamedCaptureSubstitution(
     group_atom_roots.activate(ctx.runtime);
     defer group_atom_roots.deactivate(ctx.runtime);
     const capture = try getValueProperty(ctx, output, global, named_captures, atom, caller_function, caller_frame);
-    if (!capture.isUndefined()) {
+    if (!capture.is(.undefined_value)) {
         const capture_string = try toStringForAnnexB(ctx, output, global, capture, caller_function, caller_frame);
         try appendStringValueUnits(ctx.runtime, out, capture_string);
     }
@@ -522,7 +522,7 @@ pub fn regExpExecGeneric(
 ) !core.JSValue {
     const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
     const exec_method = try getValueProperty(ctx, output, global, rx, exec_atom, caller_function, caller_frame);
-    if (!exec_method.isUndefined() and !exec_method.isNull()) {
+    if (!exec_method.is(.undefined_value) and !exec_method.is(.null_value)) {
         if (isCallableValue(exec_method)) {
             // JS_RegExpExec is a synchronous native algorithm boundary. The
             // receiver, method and string are all rooted by this scope, so an
@@ -539,7 +539,7 @@ pub fn regExpExecGeneric(
                 caller_function,
                 caller_frame,
             );
-            if (!result.isNull() and !result.isObject()) {
+            if (!result.is(.null_value) and !result.is(.object)) {
                 return error.TypeError;
             }
             return result;
@@ -828,17 +828,17 @@ pub fn isRegExpObservable(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    if (!value.isObject()) return false;
+    if (!value.is(.object)) return false;
     const match_atom = (comptime core.atom.predefinedId("Symbol.match", .symbol)) orelse return isRegExpValue(value);
     const matcher = try getValueProperty(ctx, output, global, value, match_atom, caller_function, caller_frame);
-    if (!matcher.isUndefined()) return valueTruthy(matcher);
+    if (!matcher.is(.undefined_value)) return valueTruthy(matcher);
     return isRegExpValue(value);
 }
 
 pub fn regexpLastIndex(_: *core.JSRuntime, object: *core.Object) usize {
     const value = (object.regexpLastIndex() orelse return 0);
-    if (value.asInt32()) |int_value| return if (int_value < 0) 0 else @intCast(int_value);
-    if (value.asFloat64()) |float_value| {
+    if (value.as(.int)) |int_value| return if (int_value < 0) 0 else @intCast(int_value);
+    if (value.as(.float64)) |float_value| {
         if (std.math.isNan(float_value) or float_value <= 0) return 0;
         if (float_value >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
         return @intFromFloat(@floor(float_value));

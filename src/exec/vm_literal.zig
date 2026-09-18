@@ -147,7 +147,7 @@ pub noinline fn defineField(
     if (ctx.runtime.atoms.kind(atom_id) == .private) return error.InvalidBytecode;
     const value = try stack.pop();
     const obj = stack.peekBorrowed() orelse return error.StackUnderflow;
-    if (!value.requiresRefCount()) {
+    if (!value.isTracerOwned()) {
         if (property_ops.expectObject(obj)) |target| {
             // flags.extensible gate: qjs OP_define_field (quickjs.c:19269) goes
             // through JS_DefinePropertyValue with JS_PROP_THROW, which enforces
@@ -174,7 +174,7 @@ pub noinline fn defineField(
     if (target.isArray() and atom_id == core.atom.ids.length and
         target.flags.length_writable and target.shape_ref.prop_count == 0)
     {
-        if (value.asInt32()) |length| {
+        if (value.as(.int)) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
             // No index properties to delete, so the length set reduces to the
             // dense case: growth keeps the fast array (tail holes), shrink frees
@@ -215,9 +215,9 @@ pub noinline fn setProto(
     const proto_value = try stack.pop();
     const obj = stack.peek() orelse return error.StackUnderflow;
     const object_value = try property_ops.expectObject(obj);
-    if (proto_value.isNull()) {
+    if (proto_value.is(.null_value)) {
         try object_value.setPrototype(ctx.runtime, null);
-    } else if (proto_value.isObject()) {
+    } else if (proto_value.is(.object)) {
         try object_value.setPrototype(ctx.runtime, try property_ops.expectObject(proto_value));
     }
 }
@@ -264,7 +264,7 @@ pub fn appendSpreadValues(
     _ = opc;
     const array_value = stack.peek() orelse return error.StackUnderflow;
     const array = try property_ops.expectObject(array_value);
-    const start_index = index.asInt32() orelse 0;
+    const start_index = index.as(.int) orelse 0;
     // Faithful to qjs js_append_enumerate (quickjs.c:16814): resolve @@iterator
     // and create the iterator, taking the dense bulk copy ONLY when the Array
     // iterator protocol is un-tampered. The former `is_array`-only fast path
@@ -322,13 +322,13 @@ pub noinline fn copyDataProperties(
     // before OP_copy_data_properties, both engines.) The former
     // null/undefined-only skip let a primitive source fall into expectObject's
     // TypeError — a divergence from qjs, not a spec-ordering guard.
-    if (!rooted_source_value.isObject()) return .done;
+    if (!rooted_source_value.is(.object)) return .done;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     const source = property_ops.expectObject(rooted_source_value) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
-    const exclusion: ?*core.Object = if (rooted_exclusion_value.isNull() or rooted_exclusion_value.isUndefined())
+    const exclusion: ?*core.Object = if (rooted_exclusion_value.is(.null_value) or rooted_exclusion_value.is(.undefined_value))
         null
     else
         property_ops.expectObject(rooted_exclusion_value) catch |err|

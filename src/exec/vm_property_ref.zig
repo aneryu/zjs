@@ -198,8 +198,8 @@ pub fn makeVarRef(
                 const flags = env.propFlagsAt(index);
                 if (!flags.deleted) {
                     const is_uninitialized = switch (flags.kind) {
-                        .data => env.propertyEntry(index).*.slot.data.isUninitialized(),
-                        .var_ref => env.propertyEntry(index).*.slot.var_ref.varRefValue().isUninitialized(),
+                        .data => env.propertyEntry(index).*.slot.data.is(.uninitialized),
+                        .var_ref => env.propertyEntry(index).*.slot.var_ref.varRefValue().is(.uninitialized),
                         .accessor, .auto_init => return error.InvalidBytecode,
                     };
                     if (is_uninitialized) return exception_ops.throwTdzReferenceError(ctx);
@@ -246,7 +246,7 @@ pub fn getRefValue(
     if (stack.len() < 2) return error.StackUnderflow;
     const obj = stack.values[stack.len() - 2];
     const key = stack.values[stack.len() - 1];
-    if (obj.isUndefined()) {
+    if (obj.is(.undefined_value)) {
         // qjs OP_get_ref_value (quickjs.c:19499): the atom is resolved first,
         // then the undefined base reports the identifier.
         const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
@@ -255,7 +255,7 @@ pub fn getRefValue(
     }
     if (varRefCellFromValue(obj) != null) {
         const value = slot_ops.adapterValueBorrow(obj);
-        if (value.isUninitialized()) return error.ReferenceError;
+        if (value.is(.uninitialized)) return error.ReferenceError;
         try stack.pushOwned(value);
         return;
     }
@@ -303,7 +303,7 @@ pub fn putRefValue(
     var obj = try stack.pop();
 
     const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
-    if (obj.isUndefined()) {
+    if (obj.is(.undefined_value)) {
         if (runtime_strict) {
             // qjs OP_put_ref_value (quickjs.c:19606).
             const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
@@ -370,7 +370,7 @@ fn dynEnvProbeStore(
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj = try stack.pop();
-    if (obj.isUndefined()) return .continue_loop;
+    if (obj.is(.undefined_value)) return .continue_loop;
     {
         const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -444,14 +444,14 @@ pub noinline fn deletePropertyVm(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    if (obj.isNull() or obj.isUndefined()) {
+    if (obj.is(.null_value) or obj.is(.undefined_value)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     // JS_DeleteProperty (quickjs.c:10920) converts the base via JS_ToObject and
     // runs the real delete on the wrapper, so string-exotic non-configurable
     // props (indices, .length) report false and strict mode throws.
-    const obj_value = if (obj.isObject()) obj else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
+    const obj_value = if (obj.is(.object)) obj else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };

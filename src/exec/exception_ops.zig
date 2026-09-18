@@ -147,11 +147,11 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
     const message_value = try value_ops.createStringValue(rt, message);
     try defineNonEnumValueProperty(rt, object, core.atom.ids.message, message_value);
     var prototype_installed = false;
-    if (rooted_ctor_value.isObject()) {
+    if (rooted_ctor_value.is(.object)) {
         const ctor = property_ops.expectObject(rooted_ctor_value) catch null;
         if (ctor) |ctor_object| {
             const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
-            if (proto_value.isObject()) {
+            if (proto_value.is(.object)) {
                 const proto = property_ops.expectObject(proto_value) catch null;
                 if (proto) |prototype| {
                     try object.setPrototype(rt, prototype);
@@ -281,10 +281,10 @@ pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors:
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
     const aggregate_error = object.value();
-    if (ctor_value.isObject()) {
+    if (ctor_value.is(.object)) {
         if (property_ops.expectObject(ctor_value) catch null) |ctor_object| {
             const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
-            if (proto_value.isObject()) {
+            if (proto_value.is(.object)) {
                 if (property_ops.expectObject(proto_value) catch null) |prototype| {
                     try object.setPrototype(rt, prototype);
                 }
@@ -471,7 +471,7 @@ fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_
 
 pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.BacktraceFrame) core.Atom {
     const function_value = frame.function_value;
-    if (function_value.isUndefined()) return frame.function_name;
+    if (function_value.is(.undefined_value)) return frame.function_name;
     frame.function_value = core.JSValue.undefinedValue();
     const resolved = backtraceFunctionNameAtom(ctx, frame.function_name, function_value) catch core.atom.ids.empty_string;
     frame.function_name = resolved;

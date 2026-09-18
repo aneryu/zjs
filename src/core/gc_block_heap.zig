@@ -1517,7 +1517,7 @@ pub const Heap = struct {
         while (index < self.young_extents.items.len) : (index += 1) {
             const base = self.young_extents.items[index];
             const user_bytes = self.extentUserBytes(base) orelse continue;
-            const header: *const gc.GCObjectHeader = @ptrFromInt(base + gc.metadata_prefix_size);
+            const header: *const gc.Header = @ptrFromInt(base + gc.metadata_prefix_size);
             if (!header.metaConst().flags.young) continue;
             if (self.extentIsMarked(base, epoch)) continue;
             destroy(ctx, base, user_bytes, self.extentNeedsFinalizer(base));
@@ -1533,7 +1533,7 @@ pub const Heap = struct {
     pub fn retireYoungExtents(self: *Heap) void {
         for (self.young_extents.items) |base| {
             if (!self.containsExtent(base)) continue;
-            const header: *gc.GCObjectHeader = @ptrFromInt(base + gc.metadata_prefix_size);
+            const header: *gc.Header = @ptrFromInt(base + gc.metadata_prefix_size);
             header.meta().flags.young = false;
         }
         self.young_extents.clearRetainingCapacity();

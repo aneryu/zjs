@@ -104,8 +104,9 @@ GC 是非搬移 + 生产保守扫描（表示契约 v3 §1.2/§4），已经具�
 | QuickJS | `f_f` / `f_f_f`：`double f(double)`，`JS_ToFloat64` 在中心 switch 里 | 是，但只有两种签名，且每次仍走 `js_call_c_function` 全税 |
 
 结论：**解释器内的类型化叶调用没有任何引擎做完整**；qjs 的 `f_f` 证明
-了可行且便宜。zjs 已有 FNABI §15 的签名 schema（`src/abi/fun_native_abi.zig`
-`signatures` 表，M0I 落地）和 6–8 个 `exec_direct` 实现。把「VM 侧做
+了可行且便宜。zjs 已有叶签名判别（现为引擎私有 `LeafSig`，
+`src/core/native_entry.zig`；本稿撰写时的 FNABI `signatures` 表已撤回）
+和 6–8 个 `exec_direct` 实现。把「VM 侧做
 tag 检查 + 直接 C 调用 + 装箱」做成通用机制，是本设计最大的差异化点。
 
 ### 1.3 native → JS（宿主发起 / builtin 回调）
@@ -805,7 +806,7 @@ var site = try zjs.CallSite.init(ctx, handler_value, this_value);   // 解析一
 defer site.deinit();
 for (events) |ev| {
     const r = site.call1(zjs.value.int32(ev.code));
-    if (r.isException()) { /* ctx.takeException() */ }
+    if (r.is(.exception)) { /* ctx.takeException() */ }
 }
 ```
 

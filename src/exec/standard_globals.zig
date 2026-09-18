@@ -855,7 +855,7 @@ fn applyNativeFunctionMetadata(
     value: core.JSValue,
     metadata: NativeFunctionMetadata,
 ) !void {
-    if (!value.isObject()) return error.InvalidBuiltinRegistry;
+    if (!value.is(.object)) return error.InvalidBuiltinRegistry;
     const function_object = expectObjectAssumeBootstrap(value);
     if (metadata.native_builtin_id != 0) {
         function_object.setNativeBuiltinIdAndRecord(rt, metadata.native_builtin_id);
@@ -1033,7 +1033,7 @@ fn publishTypedArrayToStringAlias(
     const value = try source.getProperty(atom_id);
     try publishMethodAliasValue(rt, target, atom_id, value, true);
 
-    if (!value.isObject()) return error.InvalidBuiltinRegistry;
+    if (!value.is(.object)) return error.InvalidBuiltinRegistry;
     const function_object = expectObjectAssumeBootstrap(value);
     if (function_object.arrayBuiltinMarker() != .to_string) return error.InvalidBuiltinRegistry;
     if (!try function_object.addTypedArrayBuiltinMarker(rt, .prototype_method)) {
@@ -1803,7 +1803,7 @@ fn installTypedArrayIntrinsicExtras(rt: *core.JSRuntime, global: *core.Object, c
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 8);
     const to_string_atom = core.atom.predefinedId("toString", .string).?;
     const array_proto_value = global.cachedRealmValue(rt, .array_prototype) orelse return error.InvalidBuiltinRegistry;
-    if (!array_proto_value.isObject()) return error.InvalidBuiltinRegistry;
+    if (!array_proto_value.is(.object)) return error.InvalidBuiltinRegistry;
     const array_proto = expectObjectAssumeBootstrap(array_proto_value);
     try publishTypedArrayToStringAlias(rt, proto, array_proto, to_string_atom);
     try defineNativeMethodsAssumingNewWithRealm(rt, proto, &typed_array_intrinsic_extra_methods, global);
@@ -1935,7 +1935,7 @@ fn bindMaterializedNativeRecordByAtom(
     native_id: i32,
 ) !void {
     const value = try object.getProperty(atom_id);
-    if (!value.isObject()) return;
+    if (!value.is(.object)) return;
     const function_object = expectObjectAssumeBootstrap(value);
     function_object.setNativeBuiltinIdAndRecord(rt, native_id);
 }
@@ -3491,7 +3491,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 
     const map_atom = try rt.internAtom("Map");
     const map_ctor = try intrinsics.global.getProperty(map_atom);
-    try std.testing.expect(map_ctor.isObject());
+    try std.testing.expect(map_ctor.is(.object));
     const map_ctor_object = core.Object.fromHeader(map_ctor.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
 
@@ -3500,7 +3500,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(false, prototype_desc.writable.?);
     try std.testing.expectEqual(false, prototype_desc.enumerable.?);
     try std.testing.expectEqual(false, prototype_desc.configurable.?);
-    try std.testing.expect(prototype_desc.value.isObject());
+    try std.testing.expect(prototype_desc.value.is(.object));
     const map_proto = core.Object.fromHeader(prototype_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.object, map_proto.class_id);
 
@@ -3509,7 +3509,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     try std.testing.expectEqual(true, set_desc.writable.?);
     try std.testing.expectEqual(false, set_desc.enumerable.?);
     try std.testing.expectEqual(true, set_desc.configurable.?);
-    try std.testing.expect(set_desc.value.isObject());
+    try std.testing.expect(set_desc.value.is(.object));
     const set_func_obj = core.Object.fromHeader(set_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, set_func_obj.class_id);
 }

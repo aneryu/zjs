@@ -47,25 +47,29 @@ const BytesStoreState = struct {
 };
 
 test "production public API contract exposes Zig-native embedding spellings" {
-    try std.testing.expect(public_zjs.JSValue.Scope == public_zjs.value.Scope);
-    try std.testing.expect(public_zjs.JSValue.Local == public_zjs.value.Local);
-    try std.testing.expect(public_zjs.JSValue.Persistent == public_zjs.value.Persistent);
-    try std.testing.expect(public_zjs.JSValue.Weak == public_zjs.value.Weak);
+    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Scope"));
+    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Local"));
+    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Persistent"));
+    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Weak"));
+    try std.testing.expect(@hasDecl(public_zjs.value, "Scope"));
+    try std.testing.expect(@hasDecl(public_zjs.value, "Local"));
+    try std.testing.expect(@hasDecl(public_zjs.value, "Persistent"));
+    try std.testing.expect(@hasDecl(public_zjs.value, "Weak"));
     try std.testing.expect(public_zjs.value.String == public_zjs.JSValue.String);
     try std.testing.expect(public_zjs.value.Bytes == public_zjs.JSValue.Bytes);
-    try std.testing.expect(@hasDecl(public_zjs.host, "PropName"));
-    try std.testing.expect(@hasDecl(public_zjs.host, "NativeBinding"));
-    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "JSObject"));
-    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "Storage"));
-    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "Properties"));
-    try std.testing.expect(@hasDecl(public_zjs.host.NativeBinding, "method"));
     try std.testing.expect(@typeInfo(public_zjs.object.Object) == .@"opaque");
     try std.testing.expect(!@hasDecl(public_zjs, "internal"));
     try std.testing.expect(!@hasDecl(public_zjs, "kernel"));
+    try std.testing.expect(!@hasDecl(public_zjs, "CallSite"));
+    try std.testing.expect(!@hasDecl(public_zjs, "PropertySite"));
     try std.testing.expect(!@hasDecl(public_zjs, "PropNameID"));
     try std.testing.expect(!@hasDecl(public_zjs, "JSString"));
     try std.testing.expect(!@hasDecl(public_zjs, "JSBytes"));
     try std.testing.expect(!@hasDecl(public_zjs, "binding"));
+    try std.testing.expect(!@hasDecl(public_zjs.host, "NativeBinding"));
+    try std.testing.expect(!@hasDecl(public_zjs.host, "PropName"));
+    try std.testing.expect(!@hasDecl(public_zjs.native, "leaf"));
+    try std.testing.expect(!@hasDecl(public_zjs.native, "Class"));
 }
 
 test "production embedding can own JSRuntime and JSContext directly" {
@@ -78,10 +82,10 @@ test "production embedding can own JSRuntime and JSContext directly" {
     defer ctx.deinit();
 
     const value = try ctx.eval("1 + 1", .{});
-    try std.testing.expectEqual(@as(?i32, 2), value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), value.as(.int));
 
     const object = try ctx.eval("({ answer: 42 })", .{});
-    try std.testing.expect(object.isObject());
+    try std.testing.expect(object.is(.object));
 
     const global = try ctx.globalObject();
     try std.testing.expect(global.isGlobal());
@@ -104,7 +108,7 @@ test "production embedding API applies limits and releases eval handles" {
     var output = std.Io.Writer.fixed(&output_buffer);
     const result = try ctx.eval("print(1 + 2);", .{ .output = &output });
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("3\n", output.buffered());
 }
 
@@ -149,7 +153,7 @@ test "production default host surface stays minimal" {
         \\try { os; } catch (e) { print(e.name); }
     , .{ .output = &output });
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "1\n2\nundefined undefined undefined\nReferenceError\nReferenceError\n",
         output.buffered(),
@@ -175,7 +179,7 @@ test "production event loop does not add product runtime globals" {
         \\print(typeof std, typeof os, typeof setTimeout, typeof setInterval, typeof clearTimeout, typeof clearInterval);
     , .{ .output = &output });
 
-    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings(
         "1\n2\nundefined undefined undefined undefined undefined undefined\n",
         output.buffered(),
@@ -193,7 +197,7 @@ test "production embedding can install external host functions" {
     _ = try ctx.defineFunction("hostValue", zjs.native.managed(HostFunctionState.call), .{ .state = @ptrCast(&state) });
 
     const result = try ctx.eval("hostValue()", .{});
-    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 }
 
 test "production embedding can create external host function values" {
@@ -205,7 +209,7 @@ test "production embedding can create external host function values" {
 
     var state = HostFunctionState{ .value = 7 };
     const function = try ctx.createFunction("HostCtor", zjs.native.managed(HostFunctionState.call), .{ .state = @ptrCast(&state), .with_prototype = true });
-    try std.testing.expect(function.isObject());
+    try std.testing.expect(function.is(.object));
     try std.testing.expect(ctx.isCallable(function));
     try std.testing.expect(ctx.isConstructor(function));
 
@@ -214,7 +218,7 @@ test "production embedding can create external host function values" {
     try std.testing.expectEqualStrings("HostCtor", name);
 
     const prototype = try ctx.getProperty(function, "prototype");
-    try std.testing.expect(prototype.isObject());
+    try std.testing.expect(prototype.is(.object));
 
     const global = try ctx.globalObject();
     try ctx.defineDataProperty(global.value(), "HostCtor", function, .{});
@@ -233,7 +237,7 @@ test "production embedding can create external host function values" {
         \\    throw new Error("invalid external constructor surface");
         \\}
     , .{});
-    try std.testing.expect(surface.isUndefined());
+    try std.testing.expect(surface.is(.undefined_value));
 }
 
 test "production embedding can create objects and define data properties" {
@@ -247,7 +251,7 @@ test "production embedding can create objects and define data properties" {
     try ctx.defineDataProperty(object, "answer", zjs.JSValue.int32(42), .{});
 
     const answer = try ctx.getProperty(object, "answer");
-    try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), answer.as(.int));
 }
 
 test "production embedding can inspect own property descriptors by JS key" {
@@ -277,13 +281,13 @@ test "production embedding can inspect own property descriptors by JS key" {
     try std.testing.expect(try ctx.hasOwnPropertyKey(object, key, .{}));
     var desc = (try ctx.ownPropertyDescriptor(object, key, .{})) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(zjs.PropertyDescriptor.data(zjs.JSValue.int32(17), false, false, true).kind, desc.kind);
-    try std.testing.expectEqual(@as(?i32, 17), desc.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 17), desc.value.as(.int));
     try std.testing.expectEqual(false, desc.writable.?);
     try std.testing.expectEqual(false, desc.enumerable.?);
     try std.testing.expectEqual(true, desc.configurable.?);
 
     const read_value = try ctx.getPropertyKey(object, key, .{});
-    try std.testing.expectEqual(@as(?i32, 17), read_value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 17), read_value.as(.int));
 
     const inherited = try ctx.eval("Object.create({ inherited: 1 })", .{});
     try std.testing.expect(!try ctx.hasOwnProperty(inherited, "inherited"));
@@ -295,7 +299,7 @@ test "production embedding can inspect own property descriptors by JS key" {
     const proxy = try ctx.eval("new Proxy({ visible: 99 }, {})", .{});
     const visible_key = try ctx.createString("visible");
     var proxy_desc = (try ctx.ownPropertyDescriptor(proxy, visible_key, .{})) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(?i32, 99), proxy_desc.value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), proxy_desc.value.as(.int));
 
     const revoked = try ctx.eval("const r = Proxy.revocable({ visible: 1 }, {}); r.revoke(); r.proxy", .{});
     try std.testing.expectError(error.TypeError, ctx.ownPropertyDescriptor(revoked, visible_key, .{}));
@@ -327,7 +331,7 @@ test "production embedding can convert values to numbers" {
     defer ctx.destroy();
 
     try std.testing.expectEqual(@as(?f64, 42), zjs.JSValue.number(42.0).asNumber());
-    try std.testing.expect(zjs.JSValue.number(-0.0).asFloat64().? == 0);
+    try std.testing.expect(zjs.JSValue.number(-0.0).as(.float64).? == 0);
 
     const numeric_object = try ctx.eval("({ valueOf() { return 12.75; } })", .{});
     try std.testing.expectEqual(@as(f64, 12.75), try ctx.toNumber(numeric_object));
@@ -375,13 +379,13 @@ test "production embedding can call JavaScript functions" {
     const result = try ctx.callFunction(function, &.{ zjs.JSValue.int32(2), zjs.JSValue.int32(3) }, .{
         .this_value = receiver,
     });
-    try std.testing.expectEqual(@as(?i32, 15), result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 15), result.as(.int));
 
     const throwing = try ctx.eval("(function fail() { throw new TypeError('call failed'); })", .{});
     try std.testing.expectError(error.JSException, ctx.callFunction(throwing, &.{}, .{}));
     try std.testing.expect(ctx.hasException());
     const exception = ctx.takePendingException();
-    try std.testing.expect(exception.isObject());
+    try std.testing.expect(exception.is(.object));
 }
 
 test "production embedding can compare values with SameValue semantics" {
@@ -412,7 +416,7 @@ test "production embedding can inspect arrays and indexed values" {
     try std.testing.expectEqual(@as(u32, 3), try ctx.arrayLength(array));
 
     const second = try ctx.getIndex(array, 1);
-    try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
 
     const proxy = try ctx.eval("new Proxy([4], {})", .{});
     try std.testing.expect(try ctx.isArray(proxy));
@@ -445,14 +449,14 @@ test "production embedding roots host-held values with public handles" {
 
     const object = try ctx.eval("({ answer: 42 })", .{});
 
-    var scope: zjs.JSValue.Scope = rt.enterHandleScope();
-    const local: zjs.JSValue.Local = try scope.localDup(object);
+    var scope: zjs.value.Scope = rt.enterHandleScope();
+    const local: zjs.value.Local = try scope.localDup(object);
 
     try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
-    try std.testing.expect(local.get().isObject());
+    try std.testing.expect(local.get().is(.object));
 
-    var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
+    var persistent: zjs.value.Persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
     scope.deinit();
@@ -460,7 +464,7 @@ test "production embedding roots host-held values with public handles" {
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
 
     const answer = try ctx.getProperty(persistent.get(), "answer");
-    try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), answer.as(.int));
 
     persistent.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
@@ -488,7 +492,7 @@ test "production embedding can expose owned and shared byte stores" {
     try std.testing.expectEqual(@as(usize, 4), rt.gcStats().external_token_bytes);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_token_count);
 
-    const owned_view: zjs.JSBytes = try owned_value.asBytes(ctx);
+    const owned_view: zjs.JSBytes = try owned_value.asBytes();
     try std.testing.expect(!owned_view.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, owned_view.slice());
     const owned_mut = try owned_view.sliceMut();
@@ -521,7 +525,7 @@ test "production embedding can expose owned and shared byte stores" {
     try std.testing.expectEqual(@as(usize, 3), rt.gcStats().external_token_bytes);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_token_count);
 
-    const shared_view: zjs.JSBytes = try shared_value.asBytes(ctx);
+    const shared_view: zjs.JSBytes = try shared_value.asBytes();
     try std.testing.expect(shared_view.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 8, 9, 10 }, shared_view.slice());
     const shared_mut = try shared_view.sliceMut();
@@ -535,7 +539,7 @@ test "production embedding can expose owned and shared byte stores" {
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
 }
 
-test "production runtime can detach array buffers through public runtime API" {
+test "production runtime can detach array buffers" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -554,10 +558,10 @@ test "production runtime can detach array buffers through public runtime API" {
     const owned_value = try ctx.arrayBuffer(&owned_store);
     try std.testing.expectEqual(@as(usize, 0), owned_state.calls);
 
-    const detached = try zjs.runtime.detachArrayBuffer(ctx.core, owned_value);
-    try std.testing.expect(detached.isUndefined());
+    const detached = try zjs.exec.buffer_ops.detachArrayBuffer(rt, owned_value);
+    try std.testing.expect(detached.is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 1), owned_state.calls);
-    try std.testing.expectError(error.Detached, owned_value.asBytes(ctx));
+    try std.testing.expectError(error.Detached, owned_value.asBytes());
 
     var shared_state = BytesStoreState{ .allocator = std.testing.allocator };
     const shared_backing = try std.testing.allocator.alloc(u8, 1);
@@ -569,7 +573,7 @@ test "production runtime can detach array buffers through public runtime API" {
     errdefer shared_store.release();
 
     const shared_value = try ctx.arrayBuffer(&shared_store);
-    try std.testing.expectError(error.TypeError, zjs.runtime.detachArrayBuffer(ctx.core, shared_value));
+    try std.testing.expectError(error.TypeError, zjs.exec.buffer_ops.detachArrayBuffer(rt, shared_value));
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 }
 
@@ -599,11 +603,11 @@ test "production embedding can retain and rewrap shared array buffers" {
     defer other_ctx.destroy();
 
     const rewrapped = try other_ctx.sharedArrayBufferFromRef(shared_ref);
-    const rewrapped_view = try rewrapped.asBytes(other_ctx);
+    const rewrapped_view = try rewrapped.asBytes();
     const rewrapped_mut = try rewrapped_view.sliceMut();
     rewrapped_mut[1] = 9;
 
-    const original_view = try original.asBytes(ctx);
+    const original_view = try original.asBytes();
     try std.testing.expect(original_view.isShared());
     try std.testing.expectEqualSlices(u8, &.{ 1, 9, 3 }, original_view.slice());
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
@@ -625,7 +629,7 @@ test "production embedding lifecycle deinitializes repeated script and module ev
             \\for (let i = 0; i < 8; i++) values.push({ i });
             \\values.map(v => v.i).join(",");
         , .{ .discard_script_result = true });
-        try std.testing.expect(script_result.isUndefined());
+        try std.testing.expect(script_result.is(.undefined_value));
 
         _ = try ctx.eval(
             \\const value = await Promise.resolve(42);
@@ -807,7 +811,7 @@ test "production embedding takeException captures exception snapshot without lea
     _ = ctx.eval("throw new Error('test exception snapshot');", .{}) catch |err| {
         try std.testing.expectEqual(error.JSException, err);
         const thrown = ctx.takePendingException();
-        try std.testing.expect(thrown.isObject());
+        try std.testing.expect(thrown.is(.object));
     };
 }
 
@@ -871,7 +875,7 @@ test "production embedding can create independent realms" {
         const realm = try ctx.createRealm();
 
         const realm_global = try ctx.realmGlobal(realm);
-        try std.testing.expect(realm_global.isObject());
+        try std.testing.expect(realm_global.is(.object));
 
         const realm_global_object = try ctx.realmGlobalObject(realm);
         try std.testing.expect(realm_global_object.isGlobal());
@@ -917,14 +921,14 @@ test "production embedding can eval script source in explicit function realms" {
         .realm_global = realm_global_object,
         .filename = "embedding-realm-source.js",
     });
-    try std.testing.expectEqual(@as(?i32, 42), source_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), source_result.as(.int));
 
     const source_value = try ctx.createString("realmMarker + 3");
     const value_result = try ctx.evalScriptValue(source_value, .{
         .realm_global = realm_global_object,
         .filename = "embedding-realm-value.js",
     });
-    try std.testing.expectEqual(@as(?i32, 43), value_result.asInt32());
+    try std.testing.expectEqual(@as(?i32, 43), value_result.as(.int));
 
     var state = HostFunctionState{ .value = 1 };
     const function = try ctx.createFunction("RealmTaggedHost", zjs.native.managed(HostFunctionState.call), .{
@@ -963,7 +967,7 @@ test "production embedding getProperty follows JavaScript accessors" {
     try std.testing.expectEqualStrings("semantic stack", stack_text.slice());
 
     const hits = try ctx.getProperty(object, "hits");
-    try std.testing.expectEqual(@as(?i32, 1), hits.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), hits.as(.int));
 }
 
 test "production embedding getProperty reports accessor exceptions" {
@@ -984,7 +988,7 @@ test "production embedding getProperty reports accessor exceptions" {
     try std.testing.expectError(error.JSException, ctx.getProperty(object, "stack"));
     try std.testing.expect(ctx.hasException());
     const thrown = ctx.takePendingException();
-    try std.testing.expect(thrown.isObject());
+    try std.testing.expect(thrown.is(.object));
 }
 
 // --- TGC S3-b: host-held property-name atoms (tracing-gc-s3-spec.md §4 B) ---
@@ -1053,5 +1057,5 @@ test "TGC S3: a host-defined property name stays reachable across a major taken 
     try std.testing.expectEqual(@as(usize, 0), rt.atoms.atom_audit_stale_edge);
 
     const answer = try ctx.getProperty(object, "zjsS3HostDefinedPropertyName");
-    try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
+    try std.testing.expectEqual(@as(?i32, 42), answer.as(.int));
 }

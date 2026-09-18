@@ -33,7 +33,7 @@ fn releaseBytes(context: ?*anyopaque, bytes: []u8) void {
 }
 fn read(c: *zjs.native.Call) !zjs.JSValue {
     const s = c.state(State);
-    if (!c.arg(1).isUndefined()) {
+    if (!c.arg(1).is(.undefined_value)) {
         const mode = try c.ctx.toOwnedUtf8(c.arg(1), s.allocator);
         defer s.allocator.free(mode);
         if (!std.mem.eql(u8, mode, "binary")) {
@@ -72,7 +72,7 @@ fn timer(c: *zjs.native.Call) !zjs.JSValue {
     const loop = c.state(State).loop;
     const host = loop.context.hostEventLoop().?;
     const id = host.nextTimerId();
-    try host.enqueueTimer(c.ctx.core, id, c.arg(0), @intFromFloat(bounded), (c.arg(2).asBool() orelse return c.throwTypeError("repeat flag must be boolean")));
+    try host.enqueueTimer(c.ctx.core, id, c.arg(0), @intFromFloat(bounded), (c.arg(2).as(.boolean) orelse return c.throwTypeError("repeat flag must be boolean")));
     return zjs.JSValue.number(@floatFromInt(id));
 }
 fn clearTimer(c: *zjs.native.Call) !zjs.JSValue {

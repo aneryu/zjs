@@ -4,7 +4,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `unicode/data.zig` | 从 QuickJS `libunicode-table.h` 译过来的不可变表 |
+| `unicode/data.zig` | 从 `tables.bin` `@embedFile` 出来的不可变表 + 枚举 |
 | `unicode/names.zig` | 属性名/别名 → 枚举下标 |
 | `unicode/properties.zig` | 派生属性（Assigned、XID_Start…）的 `Op` 表达式 |
 | `unicode/regexp_properties.zig` | 零分配「码点是否属于 `\p{…}`」 |
@@ -16,9 +16,9 @@
 
 ## `src/libs/unicode/data.zig`：表怎么来、谁消费
 
-文件头：`Immutable generated Unicode tables translated from QuickJS libunicode-table.h`。解码与语义在 `unicode.zig` / `regexp_properties.zig`，本文件只放字节。仓库把它标成 generated（`tools/maintainability/size_screen.py`）；**不要**手改表体。
+文件头说明表来自 QuickJS `libunicode-table.h`，载体是同目录 `tables.bin`（`@embedFile`）。解码与语义在 `unicode.zig` / `regexp_properties.zig`。仓库把 `data.zig` 标成 generated（`tools/maintainability/size_screen.py`）；**不要**手改 `tables.bin` 的表体。
 
-生产侧对照：QuickJS `unicode_gen.c` 读 UCD，写出 `libunicode-table.h` 的 RLE/索引格式；zjs 把这些数组译成 Zig `[_]u8`/`[_]u16`/`[_]u32`。消费时必须用同一套解码（`isInTable`、`unicodeProp1`、`unicodeGeneralCategory1`、`unicodeScript`），否则 `/u` 区间与 per-code-point 谓词会分叉。
+`tables.bin`：`ZJSU` + u32le version=1 + u32le 表个数，随后每表 16 字节 `{name_off, data_off, n_elem, elem_size}`，再是 NUL 名和 4 字节对齐的 payload。`u8` 表是 blob 上的切片；`u16`/`u32` 在 comptime 按小端解成原生整数。编码仍是 QuickJS 的 RLE/索引，查找必须走同一套解码（`isInTable`、`unicodeProp1`、`unicodeGeneralCategory1`、`unicodeScript`）。
 
 主要表（不抄内容）：
 
@@ -38,28 +38,49 @@
 
 枚举：`GC`（含组 `LC/L/M/N/S/P/Z/C`）、`Script`、`Prop`（含内部 `*1` 残差与公共名）、`SequenceProp`（Basic_Emoji…RGI_Emoji）。
 
-### `GC.count` (`src/libs/unicode/data.zig:2412`)
+### `blobU32` (`src/libs/unicode/data.zig:14`)
+
+- **签名**：`fn blobU32(comptime offset: usize) u32`。
+- **作用**：从 `tables.bin` 读一个小端 u32。
+- **实现**：`std.mem.readInt(..., .little)`。
+- **所有权 / 错误 / 调用**：仅 comptime。`table` 读 TOC。
+
+### `tableBytes` (`src/libs/unicode/data.zig:18`)
+
+- **签名**：`fn tableBytes(comptime name: []const u8, comptime elem_size: u32) []const u8`。
+- **作用**：按名取出表的原始字节。
+- **实现**：校验 magic/version，扫 TOC；宽度不对或缺表 `@compileError`。
+- **所有权 / 错误 / 调用**：返回 blob 上的切片。`u8` 表直接用；`tableInts` 再解码。
+
+### `tableInts` (`src/libs/unicode/data.zig:42`)
+
+- **签名**：`fn tableInts(comptime T: type, comptime name: []const u8) []const T`。
+- **作用**：把 `u16`/`u32` 表按小端解成原生整数切片。
+- **实现**：`tableBytes` 之后逐元素 `readInt`，冻成 comptime 数组。
+- **所有权 / 错误 / 调用**：静态数据。只给 case/decomp/comp 那几张多字节表。
+
+### `GC.count` (`src/libs/unicode/data.zig:174`)
 
 - **签名**：`pub fn count() usize`。
 - **作用**：GC 标签个数，给 comptime 名字表校验。
 - **实现**：`@typeInfo(@This()).@"enum".fields.len`。
 - **所有权 / 错误 / 调用**：`names.zig` 的 `countNameGroupsComptime` 比较。
 
-### `Script.count` (`src/libs/unicode/data.zig:2640`)
+### `Script.count` (`src/libs/unicode/data.zig:357`)
 
 - **签名**：`pub fn count() usize`。
 - **作用**：Script 个数。
 - **实现**：枚举字段数。
 - **所有权 / 错误 / 调用**：名字表 comptime 断言。
 
-### `SequenceProp.count` (`src/libs/unicode/data.zig:2976`)
+### `SequenceProp.count` (`src/libs/unicode/data.zig:454`)
 
 - **签名**：`pub fn count() usize`。
 - **作用**：序列属性个数。
 - **实现**：枚举字段数。
 - **所有权 / 错误 / 调用**：`names.zig` 文件级 comptime 块拿它比 `unicode_sequence_prop_name_table` 的组数，并传给 `validateNameTable` 作越界上界。
 
-### `propTable` (`src/libs/unicode/data.zig:3007`)
+### `propTable` (`src/libs/unicode/data.zig:473`)
 
 - **签名**：`pub fn propTable(prop: Prop) ?[]const u8`。
 - **作用**：有独立 RLE 表则返回切片，否则 null（派生属性或无表名）。
@@ -1078,6 +1099,6 @@ ASCII 谓词给 lexer/parser/regexp；非 ASCII 标识符走 `ID_Start`/`ID_Cont
 
 ## 覆盖核对
 
-- 清单函数数: 144（`src/libs/unicode.zig` 114 + `src/libs/unicode/data.zig` 4 + `src/libs/unicode/names.zig` 15 + `src/libs/unicode/properties.zig` 2 + `src/libs/unicode/regexp_properties.zig` 9）
-- 本文标题覆盖: 144
+- 清单函数数: 147（`src/libs/unicode.zig` 114 + `src/libs/unicode/data.zig` 7 + `src/libs/unicode/names.zig` 15 + `src/libs/unicode/properties.zig` 2 + `src/libs/unicode/regexp_properties.zig` 9）
+- 本文标题覆盖: 147
 - 未覆盖: 无

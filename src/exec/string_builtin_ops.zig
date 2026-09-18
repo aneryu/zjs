@@ -81,7 +81,7 @@ pub const internal_entries = stringEntries: {
         // decodes). The remaining String.prototype methods (toString, valueOf,
         // the AnnexB html helpers, …) are installed as plain name-dispatched
         // native functions and never reach record dispatch.
-        stringPrimLeafEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), &stringCall, null, "STRING_I32_TO_STRING", &stringCharAtLeaf),
+        stringPrimLeafEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), &stringCall, null, .string_i32_to_string, &stringCharAtLeaf),
         stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring)),
         stringDirectEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), &stringCaseCall),
         stringDirectEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), &stringCaseCall),
@@ -95,9 +95,9 @@ pub const internal_entries = stringEntries: {
         stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end)),
         stringEntry("split", 2, @intFromEnum(PrototypeMethod.split)),
         stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of)),
-        stringPrimLeafEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall, &stringCharCodeAtDirect, "STRING_I32_TO_I32", &stringCharCodeAtLeaf),
-        stringPrimLeafEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall, null, "STRING_I32_TO_STRING", &stringAtLeaf),
-        stringPrimLeafEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall, null, "STRING_I32_TO_I32", &stringCodePointAtLeaf),
+        stringPrimLeafEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall, &stringCharCodeAtDirect, .string_i32_to_i32, &stringCharCodeAtLeaf),
+        stringPrimLeafEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall, null, .string_i32_to_string, &stringAtLeaf),
+        stringPrimLeafEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall, null, .string_i32_to_i32, &stringCodePointAtLeaf),
         stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
         stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat)),
         stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start)),
@@ -154,7 +154,7 @@ fn stringPrimLeafEntry(
     comptime id: u32,
     comptime handler: anytype,
     comptime direct: ?core.native_entry.ManagedFn,
-    comptime sig: []const u8,
+    comptime sig: core.LeafSig,
     comptime leaf: native_legacy.LeafStringI32ToI32,
 ) core.host_function.InternalEntry {
     var entry = stringEntryWithHandler(name, length, id, handler);
@@ -200,7 +200,7 @@ fn testStringDeclById(comptime id: u32) core.host_function.InternalEntry {
 }
 
 test "String index reads are prim_self method_leaf entries with their legacy bodies as fallback" {
-    const Expect = struct { id: u32, sig: u16, leaf: native_legacy.LeafStringI32ToI32 };
+    const Expect = struct { id: u32, sig: core.LeafSig, leaf: native_legacy.LeafStringI32ToI32 };
     const expected = [_]Expect{
         .{ .id = @intFromEnum(PrototypeMethod.char_code_at), .sig = native_legacy.sig_string_i32_to_i32, .leaf = &stringCharCodeAtLeaf },
         .{ .id = @intFromEnum(PrototypeMethod.char_at), .sig = native_legacy.sig_string_i32_to_string, .leaf = &stringCharAtLeaf },
@@ -340,9 +340,9 @@ inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) Hos
 /// null preserves the observable ToNumber fallback for objects, strings,
 /// Symbols and BigInts.
 inline fn stringPrimitiveInt32Sat(value: core.JSValue) ?i32 {
-    if (value.asInt32()) |integer| return integer;
-    if (value.asBool()) |boolean| return @intFromBool(boolean);
-    if (value.isNull() or value.isUndefined()) return 0;
+    if (value.as(.int)) |integer| return integer;
+    if (value.as(.boolean)) |boolean| return @intFromBool(boolean);
+    if (value.is(.null_value) or value.is(.undefined_value)) return 0;
     const number = value.asNumber() orelse return null;
     if (std.math.isNan(number)) return 0;
     if (number < @as(f64, @floatFromInt(std.math.minInt(i32)))) return std.math.minInt(i32);
@@ -380,7 +380,7 @@ inline fn stringPrimitiveConcat(host_call: NativeCall) HostError!?core.JSValue {
     parts[0] = receiver_bytes;
     var total: usize = receiver_bytes.len;
     for (args, 0..) |arg, index| {
-        if (arg.asInt32()) |int_value| {
+        if (arg.as(.int)) |int_value| {
             parts[index + 1] = number_format.formatInt32(&digit_bufs[index], int_value);
         } else if (arg.isString() and arg.ropeBody() == null) {
             const body = arg.asStringBodyRaw() orelse return null;
@@ -714,7 +714,7 @@ fn stringCall(
 }
 
 fn thisObject(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeader() orelse return null;
     return core.Object.fromHeader(header);
 }
@@ -739,7 +739,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
+    if (rooted_args.len >= 1 and rooted_args[0].is(.symbol)) return error.TypeError;
     data_value = if (rooted_args.len >= 1)
         try stringValueFromSearchArgument(rt, rooted_args[0])
     else
@@ -1037,13 +1037,13 @@ fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
         out_value = core.JSValue.undefinedValue();
     }
 
-    const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].isUndefined())
+    const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value))
         try toUint32Limit(rt, rooted_args[1])
     else
         std.math.maxInt(u32);
     if (limit == 0) return out_value;
 
-    if (rooted_args.len == 0 or rooted_args[0].isUndefined()) {
+    if (rooted_args.len == 0 or rooted_args[0].is(.undefined_value)) {
         try defineStringElement(rt, out, 0, bytes);
         return out_value;
     }
@@ -1101,13 +1101,13 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
         const out = try core.Object.createArray(rt, null);
         out_value = out.value();
 
-        const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].isUndefined())
+        const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value))
             try toUint32Limit(rt, rooted_args[1])
         else
             std.math.maxInt(u32);
         if (limit == 0) return out_value;
 
-        if (rooted_args.len == 0 or rooted_args[0].isUndefined()) {
+        if (rooted_args.len == 0 or rooted_args[0].is(.undefined_value)) {
             try defineStringSliceElement(rt, out, 0, string_value, 0, string_value.len());
             return out_value;
         }
@@ -1371,7 +1371,7 @@ fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower
 
 fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     if (receiver.isString()) return receiver;
-    if (receiver.isObject()) {
+    if (receiver.is(.object)) {
         const object = try expectObject(receiver);
         if (object.class_id == core.class.ids.string) {
             return (object.objectData() orelse return error.TypeError);
@@ -1381,7 +1381,7 @@ fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSV
         try appendValueString(rt, &bytes, receiver);
         return createStringValue(rt, bytes.items);
     }
-    if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
+    if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -1483,7 +1483,7 @@ fn lastIndexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValu
     try appendValueString(rt, &needle, args[0]);
 
     const default_start = if (needle.items.len <= bytes.len) bytes.len - needle.items.len else 0;
-    const start = if (args.len >= 2 and !args[1].isUndefined())
+    const start = if (args.len >= 2 and !args[1].is(.undefined_value))
         try stringLastSearchStart(rt, default_start, args[1])
     else
         default_start;
@@ -1506,7 +1506,7 @@ fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
 
         if (needle.len() == 0) {
-            const start = if (args.len >= 2 and !args[1].isUndefined())
+            const start = if (args.len >= 2 and !args[1].is(.undefined_value))
                 try stringLastSearchStart(rt, string_value.len(), args[1])
             else
                 string_value.len();
@@ -1515,7 +1515,7 @@ fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
         if (needle.len() > string_value.len()) return core.JSValue.int32(-1);
 
         const default_start = string_value.len() - needle.len();
-        const start = if (args.len >= 2 and !args[1].isUndefined())
+        const start = if (args.len >= 2 and !args[1].is(.undefined_value))
             try stringLastSearchStart(rt, default_start, args[1])
         else
             default_start;
@@ -1577,7 +1577,7 @@ fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JS
 fn slice(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const len: i64 = @intCast(bytes.len);
     var start = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    var end = if (args.len >= 2 and !args[1].isUndefined()) try stringInteger(rt, args[1]) else len;
+    var end = if (args.len >= 2 and !args[1].is(.undefined_value)) try stringInteger(rt, args[1]) else len;
     if (start < 0) start = @max(len + start, 0) else start = @min(start, len);
     if (end < 0) end = @max(len + end, 0) else end = @min(end, len);
     if (end < start) end = start;
@@ -1605,7 +1605,7 @@ const StringSliceRange = struct {
 fn stringSubstringRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange {
     const len: i64 = @intCast(len_usize);
     const start_raw = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    const end_raw = if (args.len >= 2 and !args[1].isUndefined()) try stringInteger(rt, args[1]) else len;
+    const end_raw = if (args.len >= 2 and !args[1].is(.undefined_value)) try stringInteger(rt, args[1]) else len;
     const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
     const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
     return .{ .start = @min(start, end), .end = @max(start, end) };
@@ -1614,7 +1614,7 @@ fn stringSubstringRange(rt: *core.JSRuntime, len_usize: usize, args: []const cor
 fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange {
     const len: i64 = @intCast(len_usize);
     var start = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    var end = if (args.len >= 2 and !args[1].isUndefined()) try stringInteger(rt, args[1]) else len;
+    var end = if (args.len >= 2 and !args[1].is(.undefined_value)) try stringInteger(rt, args[1]) else len;
     if (start < 0) start = @max(len + start, 0) else start = @min(start, len);
     if (end < 0) end = @max(len + end, 0) else end = @min(end, len);
     if (end < start) end = start;
@@ -1690,7 +1690,7 @@ fn pad(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, side:
     const target_len: usize = @intCast(target_len_i);
     var fill = std.ArrayList(u8).empty;
     defer fill.deinit(rt.memory.allocator);
-    if (args.len >= 2 and !args[1].isUndefined()) {
+    if (args.len >= 2 and !args[1].is(.undefined_value)) {
         try appendValueString(rt, &fill, args[1]);
     } else {
         try fill.append(rt.memory.allocator, ' ');
@@ -1729,7 +1729,7 @@ fn localeCompare(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSVa
 }
 
 fn normalize(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
-    if (args.len >= 1 and !args[0].isUndefined()) {
+    if (args.len >= 1 and !args[0].is(.undefined_value)) {
         var form = std.ArrayList(u8).empty;
         defer form.deinit(rt.memory.allocator);
         try appendValueString(rt, &form, args[0]);
@@ -1753,7 +1753,7 @@ fn contains(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, 
         .contains => if (pos <= bytes.len) std.mem.indexOfPos(u8, bytes, pos, needle.items) != null else false,
         .starts => pos <= bytes.len and std.mem.startsWith(u8, bytes[pos..], needle.items),
         .ends => blk: {
-            const end = if (args.len >= 2 and !args[1].isUndefined()) pos else bytes.len;
+            const end = if (args.len >= 2 and !args[1].is(.undefined_value)) pos else bytes.len;
             if (needle.items.len > end) break :blk false;
             break :blk std.mem.eql(u8, bytes[end - needle.items.len .. end], needle.items);
         },
@@ -1770,7 +1770,7 @@ fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const c
             .contains => stringIndexOfUnits(string_value, needle, pos) != null,
             .starts => stringMatchesAtUnits(string_value, needle, pos),
             .ends => blk: {
-                const end = if (args.len >= 2 and !args[1].isUndefined()) pos else string_value.len();
+                const end = if (args.len >= 2 and !args[1].is(.undefined_value)) pos else string_value.len();
                 if (needle.len() > end) break :blk false;
                 break :blk stringMatchesAtUnits(string_value, needle, end - needle.len());
             },
@@ -1789,7 +1789,7 @@ fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), ta
         try core.string.appendValueUtf8(rt, buffer, target);
         return;
     }
-    if (target.isObject()) {
+    if (target.is(.object)) {
         const object = try expectObject(target);
         if (object.class_id == core.class.ids.string) {
             const data = object.objectData() orelse return error.TypeError;
@@ -1799,7 +1799,7 @@ fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), ta
         try appendValueString(rt, buffer, target);
         return;
     }
-    if (target.isNull() or target.isUndefined()) return error.TypeError;
+    if (target.is(.null_value) or target.is(.undefined_value)) return error.TypeError;
     try appendValueString(rt, buffer, target);
 }
 
@@ -1915,7 +1915,7 @@ pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
 fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue {
     const string_value = if (value.isString())
         value
-    else if (value.isObject()) blk: {
+    else if (value.is(.object)) blk: {
         const object = expectObject(value) catch return null;
         if (object.class_id != core.class.ids.string) return null;
         break :blk object.objectData() orelse return null;
@@ -2043,7 +2043,7 @@ fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.
 }
 
 fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
-    if (value.isBigInt() or value.isSymbol()) return error.TypeError;
+    if (value.isBigInt() or value.is(.symbol)) return error.TypeError;
     const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
     const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
@@ -2052,7 +2052,7 @@ fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
 }
 
 fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
-    if (value.asInt32()) |int_value| return int_value;
+    if (value.as(.int)) |int_value| return int_value;
     const number = try value_ops.toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return 0;
     if (std.math.isPositiveInf(number)) return std.math.maxInt(i64);

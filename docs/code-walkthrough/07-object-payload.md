@@ -1427,7 +1427,7 @@ iterator / Map-Set / FinalizationRegistry / ArrayBuffer / TypedArray / RegExp / 
 
 ### `Object.arrayStorageCellHeader` (`src/core/object.zig:4519`)
 
-- **签名**：`pub inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.Header`。
 - **作用**：把 storage body 地址解释成 GC header。
 - **实现**：对 values 执行 alignCast/ptrCast。
 - **所有权 / 错误 / 调用**：不查注册表或验证 cell kind；只适用于实际已发布 cell，不能用于空 arm 的 sentinel。

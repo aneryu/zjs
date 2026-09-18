@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     const result = try ctx.eval("let x = 1 + 2; x;", .{});
     defer result.free(rt);
 
-    std.debug.assert(result.asInt32() == @as(?i32, 3));
+    std.debug.assert(result.as(.int) == @as(?i32, 3));
 }
 ```
 
@@ -118,8 +118,8 @@ modules. The examples are covered by the embedding test target.
 ## Runtime And Ownership Boundary
 
 The runtime is single-threaded. Host-owned `JSValue`s must remain in a
-`JSValue.Scope` / local handle for the duration of a call, or in a
-`JSValue.Persistent` handle when they cross callbacks, ticks, or host object
+`zjs.value.Scope` / local handle for the duration of a call, or in a
+`zjs.value.Persistent` handle when they cross callbacks, ticks, or host object
 state. Embedders must release owning values with the runtime that created them.
 
 Memory and interrupt limits are reliability controls for trusted embeddings;

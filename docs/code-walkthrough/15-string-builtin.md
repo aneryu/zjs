@@ -183,7 +183,7 @@
 
 - **签名**：`fn thisObject(value: core.JSValue) ?*core.Object`。
 - **作用**：把 `JSValue` 当对象取 `*core.Object`，非对象或取不到 header 时返回 `null`。
-- **实现**：`value.isObject()` 过滤后 `refHeader()`，再 `core.Object.fromHeader`。
+- **实现**：`value.is(.object)` 过滤后 `refHeader()`，再 `core.Object.fromHeader`。
 - **所有权 / 错误 / 调用**：无：纯 tag 检查，返回借用的 `*Object`（不加引用、不建根）。唯一调用方 `stringCall:656`。
 
 ### `constructWithPrototype` (`src/exec/string_builtin_ops.zig:722`)

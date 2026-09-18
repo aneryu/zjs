@@ -199,7 +199,7 @@ VM 调用路由。操作数窗口借用直到 `popOwnedStackRegion`；`pushOwned
 - **签名**：`noinline fn callRawFunctionBytecode( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：可调用值本身就是裸 `FunctionBytecode` 时的 Call 臂（无函数对象、无捕获）。
 - **实现**：`functionBytecodeFromValue(func)` 失败 `TypeError`。`new.target=undefined`，captures 空切片。class 直调拒绝是字节码入口的 `OP_check_ctor`，对齐 qjs `JS_CallInternal`；普通函数走同一条 undefined-new.target 路，FB 上不携带 class-syntax 事实。转 `callFunctionBytecodeModeStateAfterInterruptPoll`。
-- **所有权 / 错误 / 调用**：`callValueOrBytecodeDispatchAfterInterruptPoll` 在 `func.isFunctionBytecode()` 时。`copy_argv` 原样下传。
+- **所有权 / 错误 / 调用**：`callValueOrBytecodeDispatchAfterInterruptPoll` 在 `func.is(.function_bytecode)` 时。`copy_argv` 原样下传。
 
 ### `callFunctionObjectBytecode` (`src/exec/call_runtime.zig:924`)
 

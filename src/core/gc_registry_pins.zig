@@ -24,8 +24,8 @@ const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const object = @import("object.zig");
 
-const GCObjectHeader = gc.GCObjectHeader;
 const PinEntry = gc.PinEntry;
+const Header = gc.Header;
 
 pub const Ledger = struct {
     entries: []PinEntry = &.{},
@@ -53,12 +53,12 @@ pub const Ledger = struct {
     }
 
     /// Is `header` pinned? The ledger's membership index, not a header read.
-    pub inline fn contains(self: *const Ledger, header: *const GCObjectHeader) bool {
+    pub inline fn contains(self: *const Ledger, header: *const Header) bool {
         if (self.set.count() == 0) return false;
         return self.set.contains(@intFromPtr(header));
     }
 
-    pub fn pin(self: *Ledger, account: *memory.MemoryAccount, header: *GCObjectHeader) !void {
+    pub fn pin(self: *Ledger, account: *memory.MemoryAccount, header: *Header) !void {
         if (self.indexOf(header)) |index| {
             std.debug.assert(self.entries[index].count != gc.construction_pin_count);
             self.entries[index].count +|= 1;
@@ -75,7 +75,7 @@ pub const Ledger = struct {
         self.entries = self.entries.ptr[0 .. self.entries.len + 1];
     }
 
-    pub fn unpin(self: *Ledger, header: *GCObjectHeader) void {
+    pub fn unpin(self: *Ledger, header: *Header) void {
         const index = self.indexOf(header) orelse return;
         std.debug.assert(self.entries[index].count != gc.construction_pin_count);
         if (self.entries[index].count > 1) {
@@ -86,7 +86,7 @@ pub const Ledger = struct {
         _ = self.set.remove(@intFromPtr(header));
     }
 
-    pub fn indexOf(self: *const Ledger, header: *const GCObjectHeader) ?usize {
+    pub fn indexOf(self: *const Ledger, header: *const Header) ?usize {
         for (self.entries, 0..) |entry, index| {
             if (entry.header == header) return index;
         }
@@ -130,7 +130,7 @@ pub const Ledger = struct {
     /// Protect a fully initialized Object whose shape is intentionally not
     /// installed yet. Only the detached generator constructor has this
     /// lifetime; all other block-cell objects publish immediately.
-    pub fn addConstructionRoot(self: *Ledger, header: *GCObjectHeader) void {
+    pub fn addConstructionRoot(self: *Ledger, header: *Header) void {
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!header.metaConst().alloc_info.heap_accounted);
         std.debug.assert(self.indexOf(header) == null);
@@ -143,7 +143,7 @@ pub const Ledger = struct {
         self.set.putAssumeCapacity(@intFromPtr(header), {});
     }
 
-    pub fn removeConstructionRoot(self: *Ledger, header: *GCObjectHeader) void {
+    pub fn removeConstructionRoot(self: *Ledger, header: *Header) void {
         const index = self.indexOf(header) orelse unreachable;
         std.debug.assert(self.entries[index].count == gc.construction_pin_count);
         self.removeAt(index);
@@ -151,14 +151,14 @@ pub const Ledger = struct {
     }
 
     /// The first construction root still in the ledger, for teardown.
-    pub fn firstConstructionRoot(self: *const Ledger) ?*GCObjectHeader {
+    pub fn firstConstructionRoot(self: *const Ledger) ?*Header {
         for (self.entries) |entry| {
             if (entry.count == gc.construction_pin_count) return entry.header;
         }
         return null;
     }
 
-    pub fn isConstructionRoot(self: *const Ledger, header: *const GCObjectHeader) bool {
+    pub fn isConstructionRoot(self: *const Ledger, header: *const Header) bool {
         const index = self.indexOf(header) orelse return false;
         if (self.entries[index].count != gc.construction_pin_count) return false;
         const meta = header.metaConst();

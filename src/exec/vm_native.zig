@@ -95,7 +95,7 @@ pub inline fn managedInlineEligible(rt: *const core.JSRuntime, entry: *const cor
 /// Same preflight for the W1 `.native_getter` arm: an untyped managed
 /// getter without an environment is one `bl` from the field tail.
 pub inline fn getterInlineEligible(rt: *const core.JSRuntime, entry: *const core.NativeEntry) bool {
-    if (entry.kind != .getter or entry.sig != 0 or entry.flags.needs_env) return false;
+    if (entry.kind != .getter or entry.sig != .none or entry.flags.needs_env) return false;
     return !rt.checkNativeStackOverflow(@as(usize, entry.arity) * @sizeOf(core.JSValue));
 }
 

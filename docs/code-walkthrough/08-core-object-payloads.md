@@ -170,7 +170,7 @@ ArrayBuiltinMarker 与 TypedArrayBuiltinMarker 是 property.zig 类型别名。�
 
 ### `payloadSliceCellHeader` (`src/core/object_payloads.zig:205`)
 
-- **签名**：`pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.Header`。
 - **作用**：把 subordinate payload cell 的起始指针解释为 GC header。
 - **实现**：仅 alignCast/ptrCast，不做地址偏移。
 - **所有权 / 错误 / 调用**：调用方须提供真实 cell 起点；非零 capacity/非空 fixed slice 是拥有者侧判据，本函数不验证 registry 或 kind，也不能传空哨兵。

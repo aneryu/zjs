@@ -191,7 +191,7 @@
 
 - **签名**：`fn functionBytecodeFromValue(value: engine.core.JSValue) ?*const engine.bytecode.FunctionBytecode`。
 - **作用**：测试夹具/探针 `functionBytecodeFromValue`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：关键调用：`value.isFunctionBytecode`、`value.objectHeader`。
+- **实现**：关键调用：`value.is(.function_bytecode)`、`value.functionBytecodeHeader`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `expectNoGlobalArgumentsVarOpcode` (`src/tests/parser.zig:1077`)

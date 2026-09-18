@@ -228,7 +228,7 @@ pub fn dateToJsonCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     _ = args;
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
 
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, this_value);
     if (primitive.isNumber()) {
@@ -290,7 +290,7 @@ pub fn dateToPrimitiveCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
+    if (!this_value.is(.object)) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const hint_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const hint = dateToPrimitiveHint(hint_value) orelse
@@ -916,7 +916,7 @@ fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     // VM ToString for objects); primitives are converted without VM re-entry.
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (input.isString()) return core.JSValue.float64(try parseDateString(input));
-    if (input.isObject()) return core.JSValue.float64(std.math.nan(f64));
+    if (input.is(.object)) return core.JSValue.float64(std.math.nan(f64));
     const string_value = try value_ops.toStringValue(rt, input);
     return core.JSValue.float64(try parseDateString(string_value));
 }
@@ -1723,7 +1723,7 @@ fn jsDateParseOtherstring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bo
 
 fn expectDateObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.date) return error.TypeError;
     return object;
@@ -1750,15 +1750,15 @@ fn dateValue(object: *const core.Object) !f64 {
 
 fn dateObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.date) return null;
     return object;
 }
 
 fn numberValue(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
+    if (value.is(.int)) return @floatFromInt(value.as(.int).?);
+    if (value.is(.float64)) return value.as(.float64).?;
     return null;
 }
 
@@ -1770,14 +1770,14 @@ fn numberResult(value: f64) core.JSValue {
 }
 
 fn toNumber(value: core.JSValue) ?f64 {
-    if (value.isSymbol()) return null;
+    if (value.is(.symbol)) return null;
     // JS_ToFloat64 throws "cannot convert bigint to number" (qjs
     // js_date_constructor/set_date_field/js_Date_UTC all coerce through it).
     if (value.isBigInt()) return null;
     if (numberValue(value)) |number| return number;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value)) return std.math.nan(f64);
     if (value.isString()) {
         var scratch: [128]u8 = undefined;
         var writer = std.Io.Writer.fixed(&scratch);

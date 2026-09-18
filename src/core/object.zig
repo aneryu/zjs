@@ -866,7 +866,7 @@ pub const Object = extern struct {
     // ===== create / construction =====
     pub fn expect(val: JSValue) !*Object {
         const header = val.refHeader() orelse return error.TypeError;
-        if (!val.isObject()) return error.TypeError;
+        if (!val.is(.object)) return error.TypeError;
         return fromHeader(header);
     }
 
@@ -1873,7 +1873,7 @@ pub const Object = extern struct {
     }
 
     /// The collector header of an a-class payload cell.
-    pub inline fn payloadCellHeader(ptr: *anyopaque) *gc.GCObjectHeader {
+    pub inline fn payloadCellHeader(ptr: *anyopaque) *gc.Header {
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -4184,7 +4184,7 @@ pub const Object = extern struct {
             property.Flags.data(true, false, false),
             .{ .data = JSValue.int32(0) },
         );
-        std.debug.assert(self.regexpLastIndexSlot().asInt32().? == 0);
+        std.debug.assert(self.regexpLastIndexSlot().as(.int).? == 0);
     }
 
     pub fn regexpCompiledBytecode(self: *const Object) []const u8 {
@@ -4430,7 +4430,7 @@ pub const Object = extern struct {
             const target = rt.atoms.symbolValueIfLive(rt, symbol_atom);
             // A dead target must not enter [[KeptAlive]]: the object arm
             // returns before `keepAliveWeakRefTarget` for the same reason.
-            if (target.isUndefined()) return JSValue.undefinedValue();
+            if (target.is(.undefined_value)) return JSValue.undefinedValue();
             rt.keepAliveWeakRefTarget(target);
             return target;
         }
@@ -4516,7 +4516,7 @@ pub const Object = extern struct {
     /// The collector header of a dense element buffer. Only valid when
     /// `arrayArm().capacity != 0` -- an empty arm's `values` is the null
     /// no-payload sentinel, not a cell.
-    pub inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.GCObjectHeader {
+    pub inline fn arrayStorageCellHeader(values: [*]JSValue) *gc.Header {
         return @ptrCast(@alignCast(values));
     }
 
@@ -4968,7 +4968,7 @@ pub const Object = extern struct {
     pub fn generatorCurrentFunction(self: *const Object) ?JSValue {
         if (self.generatorPayloadConst()) |payload| {
             const execution = payload.execution orelse return null;
-            if (execution.current_function.isUndefined()) return null;
+            if (execution.current_function.is(.undefined_value)) return null;
             return execution.current_function;
         }
         return null;
@@ -4989,7 +4989,7 @@ pub const Object = extern struct {
     pub fn generatorYieldStarIterator(self: *const Object) ?JSValue {
         if (self.generatorPayloadConst()) |payload| {
             const execution = payload.execution orelse return null;
-            if (execution.yield_star_iterator.isUndefined()) return null;
+            if (execution.yield_star_iterator.is(.undefined_value)) return null;
             return execution.yield_star_iterator;
         }
         return null;
@@ -5517,9 +5517,9 @@ pub const Object = extern struct {
         // finalized FunctionBytecode is already the execution record, so
         // attachment is a no-allocation pointer publication just like qjs
         // `js_closure2`'s `p->u.func.function_bytecode = b` transfer.
-        if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
+        if (!next_value.is(.function_bytecode)) return error.InvalidBytecode;
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        const header = next_value.objectHeader() orelse return error.InvalidBytecode;
+        const header = next_value.functionBytecodeHeader() orelse return error.InvalidBytecode;
         std.debug.assert(header.meta().flags.kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
         self.bytecodeArm().*.function_bytecode = fb;
@@ -5555,7 +5555,7 @@ pub const Object = extern struct {
     /// JSAsyncFunctionState.frame.cur_func in the same way.
     pub fn generatorFunctionBytecode(self: *const Object) ?JSValue {
         const current = self.generatorCurrentFunction() orelse return null;
-        if (current.isFunctionBytecode()) return current;
+        if (current.is(.function_bytecode)) return current;
         const current_object = Object.expect(current) catch return null;
         if (current_object == self) return null;
         return current_object.functionBytecode();
@@ -7275,7 +7275,7 @@ pub const Object = extern struct {
             if (self.bytecodeArm().*.function_bytecode) |fb| {
                 var bytecode_value = JSValue.functionBytecode(&fb.header);
                 try Helper.callVisitValue(visitor, &bytecode_value);
-                self.bytecodeArm().*.function_bytecode = if (bytecode_value.objectHeader()) |header|
+                self.bytecodeArm().*.function_bytecode = if (bytecode_value.functionBytecodeHeader()) |header|
                     @alignCast(@fieldParentPtr("header", header))
                 else
                     null;
@@ -7492,7 +7492,7 @@ pub const Object = extern struct {
     }
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
-        const header = stored.objectHeader() orelse return null;
+        const header = stored.functionBytecodeHeader() orelse return null;
         if (header.meta().flags.kind != .function_bytecode) return null;
         return @fieldParentPtr("header", header);
     }
@@ -7604,7 +7604,7 @@ pub const Object = extern struct {
     fn descriptorFromOwnPropertySlot(self: *const Object, index: usize) !descriptor.Descriptor {
         const flags = self.propFlagsAt(index);
         const slot = self.propertyEntry(index).*.slot;
-        if (flags.kind == .var_ref and slot.var_ref.varRefValue().isUninitialized()) {
+        if (flags.kind == .var_ref and slot.var_ref.varRefValue().is(.uninitialized)) {
             return error.ReferenceError;
         }
         var desc = descriptor.Descriptor.fromSlot(flags, slot);
@@ -7699,7 +7699,7 @@ pub const Object = extern struct {
             // VARREF existence path (quickjs.c:8856-8860): an uninitialized
             // cell still throws ReferenceError even though desc==NULL.
             if (self.propKindAt(index) == .var_ref) {
-                if (entry.slot.var_ref.varRefValue().isUninitialized()) return error.ReferenceError;
+                if (entry.slot.var_ref.varRefValue().is(.uninitialized)) return error.ReferenceError;
             }
             // AUTOINIT: qjs "nothing to do" (quickjs.c:8862) -- report
             // presence WITHOUT materializing the placeholder.
@@ -7756,7 +7756,7 @@ pub const Object = extern struct {
                 .data => entry.slot.data,
                 .accessor => entry.slot.accessor.getterValue(),
                 .auto_init => try materializeAutoInit(@constCast(self), index),
-                .var_ref => if (entry.slot.var_ref.varRefValue().isUninitialized())
+                .var_ref => if (entry.slot.var_ref.varRefValue().is(.uninitialized))
                     error.ReferenceError
                 else
                     entry.slot.var_ref.varRefValue(),
@@ -8145,12 +8145,12 @@ pub const Object = extern struct {
         const rt = realm.runtime;
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
-            if (stored.isObject()) return stored;
+            if (stored.is(.object)) return stored;
         }
         const object_ctor_value = try global.getProperty(atom.predefinedId("Object", .string).?);
-        if (!object_ctor_value.isObject()) return error.InvalidBuiltinRegistry;
+        if (!object_ctor_value.is(.object)) return error.InvalidBuiltinRegistry;
         const prototype_value = try objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
-        if (prototype_value.isObject()) return prototype_value;
+        if (prototype_value.is(.object)) return prototype_value;
         return JSValue.nullValue();
     }
 
@@ -8233,13 +8233,13 @@ pub const Object = extern struct {
         const rt = realm.runtime;
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (global.cachedRealmValue(rt, .array_prototype)) |stored| {
-            if (stored.isObject()) return stored;
+            if (stored.is(.object)) return stored;
         }
         const array_key = atom.predefinedId("Array", .string) orelse return error.InvalidBuiltinRegistry;
         const array_ctor_value = try global.getProperty(array_key);
-        if (!array_ctor_value.isObject()) return error.InvalidBuiltinRegistry;
+        if (!array_ctor_value.is(.object)) return error.InvalidBuiltinRegistry;
         const prototype_value = try objectFromValue(array_ctor_value).?.getProperty(atom.ids.prototype);
-        if (prototype_value.isObject()) return prototype_value;
+        if (prototype_value.is(.object)) return prototype_value;
         return JSValue.nullValue();
     }
 
@@ -9315,14 +9315,14 @@ pub const Object = extern struct {
         }
 
         const stored = &entry.slot.data;
-        if (atom_id != atom.ids.Private_brand and !stored.requiresRefCount() and !new_value.requiresRefCount()) {
+        if (atom_id != atom.ids.Private_brand and !stored.isTracerOwned() and !new_value.isTracerOwned()) {
             stored.* = new_value;
             return true;
         }
         const next_value = new_value;
         entry.slot = .{ .data = next_value };
         // Replacing a property value on a long-lived object is an
-        // old-to-young edge; the non-refcounted fast arms above store
+        // old-to-young edge; the immediate fast arms above store
         // primitives and need none.
         rt.gc.generationalBarrier(self.gcHeader(), next_value.cycleMarkHeader());
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
@@ -9336,7 +9336,7 @@ pub const Object = extern struct {
         if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.kind != .data) return false;
         const entry = self.propertyEntry(index);
         const stored = &entry.slot.data;
-        if (!prop_flags.writable and !stored.isUninitialized()) return false;
+        if (!prop_flags.writable and !stored.is(.uninitialized)) return false;
         if (atom_id == atom.ids.Private_brand) return false;
         stored.* = new_value;
         rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader());
@@ -9360,7 +9360,7 @@ pub const Object = extern struct {
                 switch (entry_flags.kind) {
                     .data => {
                         const stored = &entry.slot.data;
-                        if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
+                        if (!stored.isTracerOwned() and !new_value.isTracerOwned()) {
                             stored.* = new_value;
                             return true;
                         }
@@ -10121,9 +10121,9 @@ pub const Object = extern struct {
     /// the handler dragged the duplicate-key Descriptor build and the append
     /// marshaling into the hot arm (a 176-byte frame + 10 callee-saved
     /// registers per literal property); the probe/append run here instead, and
-    /// `appendPreparedPropertyEntryImpl` folds INTO this body so the 16-byte
-    /// property slot is assembled in registers rather than spilled through a
-    /// by-pointer call boundary (the loadSlotAsIntPair store-forward hazard).
+    /// `appendPreparedPropertyEntryImpl` folds INTO this body so the property
+    /// slot is assembled in registers rather than spilled through a by-pointer
+    /// call boundary.
     pub noinline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
         // Do not barrier `data_value` before the property probe. Both commit
         // legs publish it at the actual slot write: `replaceProperty` for a
@@ -10505,7 +10505,7 @@ pub const Object = extern struct {
     /// The collector header of an external property buffer. Only valid when
     /// `propertyStoragePointerIsExternal` says so: the empty sentinel and the
     /// inline slots2 tail are not cells.
-    pub inline fn propertyStorageCellHeader(ptr: [*]property.Entry) *gc.GCObjectHeader {
+    pub inline fn propertyStorageCellHeader(ptr: [*]property.Entry) *gc.Header {
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -11279,13 +11279,13 @@ fn arrayLengthFromValue(rt: *JSRuntime, value: JSValue) !?u32 {
 }
 
 fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
-    if (value.asInt32()) |int_value| return @floatFromInt(int_value);
-    if (value.asFloat64()) |float_value| return float_value;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined() or value.isSymbol() or value.isBigInt()) return null;
+    if (value.as(.int)) |int_value| return @floatFromInt(int_value);
+    if (value.as(.float64)) |float_value| return float_value;
+    if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
+    if (value.is(.null_value)) return 0;
+    if (value.is(.undefined_value) or value.is(.symbol) or value.isBigInt()) return null;
     if (value.isString()) return try arrayLengthStringNumber(rt, value);
-    if (value.isObject()) {
+    if (value.is(.object)) {
         const header = value.refHeader() orelse return null;
         const object = Object.fromHeader(header);
         if (object.class_id == class.ids.string) {
@@ -11371,7 +11371,7 @@ pub const EntriesMode = enum {
 
 fn ownEntriesExpectObject(value: JSValue) !*Object {
     const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
     return Object.fromHeader(header);
 }
 
@@ -11462,7 +11462,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
 fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
     if (value.isString()) return value;
     const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
     const object = Object.fromHeader(header);
     if (object.class_id != class.ids.string) return error.TypeError;
     return (object.objectData() orelse return error.TypeError);
@@ -11486,7 +11486,7 @@ fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8)
     try defineStringIteratorToStringTag(rt, specific, tag_name);
     const next = try function.nativeFunction(ctx, "next", 0);
     const next_object = (next.refHeader() orelse return error.TypeError);
-    if (!next.isObject()) return error.TypeError;
+    if (!next.is(.object)) return error.TypeError;
     const next_function = Object.fromHeader(next_object);
     next_function.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next)));
     try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, true, false, true));

@@ -406,6 +406,9 @@ pub const Entry = struct {
     /// this entry so a captured stack still sees qjs frame order
     /// `target -> call (native) -> caller`.
     native_caller: core.JSValue,
+    /// High word of the 16-byte overlay used when `native_caller` is not a live
+    /// JSValue (empty-leaf resume, tail-chain budget).
+    native_caller_hi: u64 = 0,
     /// Caller's Entry, or null when the caller is the L0 frame — qjs
     /// `JSStackFrame.prev_frame` (quickjs.c:408, "NULL if first stack
     /// frame"). Together with `Machine.top` (≅ rt->current_stack_frame)
@@ -470,7 +473,8 @@ pub const Entry = struct {
     /// caller's next dispatch branch. Written once per empty-leaf push by
     /// `finishEmptyLeafFrame` (the single constructor tail for the shape).
     inline fn emptyLeafResumeWords(self: *Entry) *[2]usize {
-        comptime std.debug.assert(@sizeOf(core.JSValue) == 2 * @sizeOf(usize));
+        comptime std.debug.assert(@sizeOf(core.JSValue) + @sizeOf(u64) == 2 * @sizeOf(usize));
+        comptime std.debug.assert(@offsetOf(Entry, "native_caller_hi") == @offsetOf(Entry, "native_caller") + @sizeOf(core.JSValue));
         return @ptrCast(@alignCast(&self.native_caller));
     }
 
@@ -505,7 +509,7 @@ pub const Entry = struct {
         std.debug.assert(!self.teardown.empty_leaf);
         std.debug.assert(!self.teardown.exact_args_leaf);
         std.debug.assert(!self.isForwardedLeaf());
-        comptime std.debug.assert(@sizeOf(core.JSValue) >= @sizeOf(TailChainBudget));
+        comptime std.debug.assert(@sizeOf(core.JSValue) + @sizeOf(u64) >= @sizeOf(TailChainBudget));
         comptime std.debug.assert(@alignOf(core.JSValue) >= @alignOf(TailChainBudget));
         return @ptrCast(@alignCast(&self.native_caller));
     }
@@ -837,7 +841,7 @@ pub const Entry = struct {
 };
 
 comptime {
-    const expected_size: usize = 256;
+    const expected_size: usize = 240;
     if (@sizeOf(Entry) != expected_size) @compileError(std.fmt.comptimePrint(
         "inline Entry layout drifted: expected {d} bytes, found {d}",
         .{ expected_size, @sizeOf(Entry) },
@@ -1002,23 +1006,20 @@ pub const ActiveInvocation = struct {
         if (core.runtime.value_root_frames_enabled) null else {},
 };
 
-/// Copy one JSValue slot as two 64-bit words, pinned on AArch64 so LLVM
-/// cannot re-merge the pair into a `q` access (a 16-byte mem-to-mem copy is
-/// otherwise vectorized, and a `q` access does not forward against the
-/// 64-bit stores the native caller used to write the value moments ago;
-/// measured double-digit cycles per element at the native boundary).
+/// Copy one 8-byte JSValue slot. AArch64 pins `ldr`/`str` so LLVM does not
+/// widen the copy into a SIMD access.
 pub inline fn copyValueSlotPinned(dst: *core.JSValue, src: *const core.JSValue) void {
     if (comptime builtin.cpu.arch == .aarch64) {
         asm volatile (
-            \\ldp x9, x10, [%[src]]
-            \\stp x9, x10, [%[dst]]
+            \\ldr x9, [%[src]]
+            \\str x9, [%[dst]]
             :
             : [src] "r" (src),
               [dst] "r" (dst),
-            : .{ .x9 = true, .x10 = true, .memory = true });
+            : .{ .x9 = true, .memory = true });
         return;
     }
-    core.JSValue.storeSlotAsIntPair(dst, core.JSValue.loadSlotAsIntPair(src));
+    dst.* = src.*;
 }
 
 pub inline fn activeInvocation(rt: *core.JSRuntime) ?*ActiveInvocation {
@@ -1635,7 +1636,7 @@ pub const Machine = struct {
         if (!execution.simple_inline_eligible) return false;
         if (source.metadata.moved) return false; // tail-call reuse keeps the general path
         if (source.metadata.has_receiver) return false;
-        if (!target.this_value.isUndefined()) return false;
+        if (!target.this_value.is(.undefined_value)) return false;
         if (!canBorrowSourceArgs(function, source)) return false;
         // No captures check: `[]*core.VarRef` makes "every capture is a cell"
         // a type invariant (qjs js_closure2 slots are always JSVarRef*,
@@ -1671,7 +1672,7 @@ pub const Machine = struct {
         const function = target.fb;
         const execution = target.call_facts.execution;
         if (source.metadata.moved or source.metadata.has_receiver) return null;
-        if (!target.this_value.isUndefined()) return null;
+        if (!target.this_value.is(.undefined_value)) return null;
         if (source.argCount() >= function.arg_count) return null;
         if (execution.simple_inline_eligible) return .sloppy;
         if (execution.strict_simple_inline_eligible) return .strict;
@@ -1724,7 +1725,7 @@ pub const Machine = struct {
             execution.strict_simple_inline_eligible;
         if (!eligible) return false;
         if (source.metadata.moved or source.metadata.has_receiver) return false;
-        if (!target.this_value.isUndefined()) return false;
+        if (!target.this_value.is(.undefined_value)) return false;
         if (!canBorrowSourceArgs(function, source)) return false;
         return true;
     }
@@ -3092,7 +3093,7 @@ pub const Machine = struct {
         // bytecode reads lexical this through its ordinary closure cell;
         // method/Function.call receiver slots are still transferred below so
         // the ignored value has one clear owner until teardown.
-        const plain_undefined_this = receiver_slot == null and target.this_value.isUndefined();
+        const plain_undefined_this = receiver_slot == null and target.this_value.is(.undefined_value);
         const effective_this = if (plain_undefined_this)
             if (fb_strict) core.JSValue.undefinedValue() else global.value()
         else
@@ -3534,7 +3535,7 @@ pub const Machine = struct {
         owned_new_target: ?core.JSValue,
     ) align(16) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        std.debug.assert(target.this_value.isObject());
+        std.debug.assert(target.this_value.is(.object));
         const source = ArgsSource.initStack(region_start, argc, true);
         const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
@@ -3625,7 +3626,7 @@ pub const Machine = struct {
         owned_new_target: ?core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        std.debug.assert(target.this_value.isUninitialized());
+        std.debug.assert(target.this_value.is(.uninitialized));
         const source = ArgsSource.initStack(region_start, argc, true);
         const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(
             target.fb,
@@ -3650,7 +3651,7 @@ pub const Machine = struct {
         if (owned_new_target) |value| {
             try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, value);
         }
-        std.debug.assert(entry.frame.this_value.isUninitialized());
+        std.debug.assert(entry.frame.this_value.is(.uninitialized));
         entry.native_caller = core.JSValue.undefinedValue();
         entry.teardown.constructor_completion = true;
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
@@ -5130,7 +5131,7 @@ pub const Machine = struct {
         std.debug.assert(dying.return_action == .constructor);
         std.debug.assert(dying.continuation_payload == 0);
         const fallback = dying.native_caller;
-        if (!fallback.isUndefined()) {
+        if (!fallback.is(.undefined_value)) {
             call_runtime.noteConstructorAllocation(dying.frame.function, fallback);
         }
         // Committed charge persisted at construction; the recompute is the
@@ -5147,8 +5148,8 @@ pub const Machine = struct {
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
         self.top = dying.prev;
-        if (fallback.isUndefined()) return result;
-        if (result.isObject()) {
+        if (fallback.is(.undefined_value)) return result;
+        if (result.is(.object)) {
             return result;
         }
         return fallback;

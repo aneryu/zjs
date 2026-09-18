@@ -345,7 +345,7 @@ append 契约：容量不足 mint 新 cell（旧的交给 sweep）；值先写�
 
 ### `Object.propertyStorageCellHeader` (`src/core/object.zig:10508`)
 
-- **签名**：`pub inline fn propertyStorageCellHeader(ptr: [*]property.Entry) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn propertyStorageCellHeader(ptr: [*]property.Entry) *gc.Header`。
 - **作用**：把外置 Entry backing 指针解释为 GC header。
 - **实现**：直接 alignCast/ptrCast。
 - **所有权 / 错误 / 调用**：不检查注册或 kind；只适用于真实 external cell，sentinel 与 inline tail 均不适用。

@@ -51,7 +51,7 @@
 
 - **签名**：`fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void`。
 - **作用**：测试夹具/探针 `Counter.visitValue`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：把 `context` `@ptrCast`/`@alignCast` 还原成 `*@This()`，`slot.asInt32() == marker` 时 `self.count += 1`；非 int32 槽不计数。
+- **实现**：把 `context` `@ptrCast`/`@alignCast` 还原成 `*@This()`，`slot.as(.int) == marker` 时 `self.count += 1`；非 int32 槽不计数。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `core.runtime.RootTraceError!void`，由测试 `try`/`expectError` 消费。
 
 ### `Counter.visitObject` (`src/tests/core.zig:860`)
@@ -891,7 +891,7 @@
 
 - **签名**：`fn expectS4bNamedProperties(rt: *core.JSRuntime, obj: *core.Object, prefix: []const u8, count: usize) !void`。
 - **作用**：测试夹具/探针 `expectS4bNamedProperties`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：与 `defineS4bNamedProperties` 对称的读回校验：同样用 64 字节栈 buffer 按 `"{s}{d}"` 重建名字、`rt.internAtom` 取 atom，逐条断言 `(try obj.getProperty(key)).asInt32()` 等于 `@as(?i32, @intCast(index))`（用 optional 比较，非 int32 会以 null 暴露）。
+- **实现**：与 `defineS4bNamedProperties` 对称的读回校验：同样用 64 字节栈 buffer 按 `"{s}{d}"` 重建名字、`rt.internAtom` 取 atom，逐条断言 `(try obj.getProperty(key)).as(.int)` 等于 `@as(?i32, @intCast(index))`（用 optional 比较，非 int32 会以 null 暴露）。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!void`，由测试 `try`/`expectError` 消费。
 
 ### `fillS4bDenseArray` (`src/tests/core.zig:18426`)
@@ -973,35 +973,9 @@
 - **实现**：断言 11 处 `std.testing.expect*`。约 11 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "QuickJS value tag constants are locked"` (`src/tests/core.zig:204`)
+`JSValue` / `Tag` 表示测试在 `src/core/value.zig`（见 [06-core-value-value.md](06-core-value-value.md)）。
 
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「QuickJS value tag constants are locked」。
-- **实现**：断言 17 处 `std.testing.expect*`。约 17 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "every JSValue constructor recovers its QuickJS semantic tag"` (`src/tests/core.zig:226`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「every JSValue constructor recovers its QuickJS semantic tag」。
-- **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "QuickJS branch immediate range admits int bool null and undefined only"` (`src/tests/core.zig:253`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「QuickJS branch immediate range admits int bool null and undefined only」。
-- **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "heap JSValue payloads name collector handles directly"` (`src/tests/core.zig:277`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「heap JSValue payloads name collector handles directly」。
-- **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "over-reserved property storage is freed by prop_size not prop_count"` (`src/tests/core.zig:323`)
+### `test "over-reserved property storage is freed by prop_size not prop_count"` (`src/tests/core.zig:204`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「over-reserved property storage is freed by prop_size not prop_count」。
@@ -1064,35 +1038,7 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "primitive value predicates match QuickJS helpers"` (`src/tests/core.zig:596`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「primitive value predicates match QuickJS helpers」。
-- **实现**：断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "int32 same-tag update preserves the value representation invariant"` (`src/tests/core.zig:609`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「int32 same-tag update preserves the value representation invariant」。
-- **实现**：断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "int32 slot move copies the payload when both slots already hold ints"` (`src/tests/core.zig:617`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「int32 slot move copies the payload when both slots already hold ints」。
-- **实现**：断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "float construction is valid"` (`src/tests/core.zig:629`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「float construction is valid」。
-- **实现**：断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "heap BigInt value uses reserved QuickJS tag"` (`src/tests/core.zig:642`)
+### `test "heap BigInt value uses reserved QuickJS tag"` (`src/tests/core.zig:477`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「heap BigInt value uses reserved QuickJS tag」。

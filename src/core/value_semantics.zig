@@ -24,7 +24,7 @@ const JSValue = value_mod.JSValue;
 /// every conversion site must either call this checked form or the
 /// `TrustedExpression` variant below with its documented precondition.
 pub fn objectFromValue(value: JSValue) ?*object.Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
     return object.Object.fromHeader(header);
@@ -41,7 +41,7 @@ pub fn objectFromValue(value: JSValue) ?*object.Object {
 /// trusted-compiler stack discipline that lets get_loc skip bounds checks).
 /// So the kind re-load is dead on this path; Debug keeps it as an assert.
 pub inline fn objectFromValueTrustedExpression(value: JSValue) ?*object.Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeaderAssumeObject();
     if (comptime builtin.mode == .Debug) {
         std.debug.assert(header.meta().flags.kind == .object);
@@ -56,10 +56,10 @@ pub fn expectObject(value: JSValue) error{TypeError}!*object.Object {
 
 pub fn toBoolean(value: JSValue) bool {
     if (isHTMLDDA(value)) return false;
-    if (value.isUndefined() or value.isNull()) return false;
-    if (value.asBool()) |bool_value| return bool_value;
-    if (value.asInt32()) |int_value| return int_value != 0;
-    if (value.asFloat64()) |float_value| return float_value != 0 and !std.math.isNan(float_value);
+    if (value.is(.undefined_value) or value.is(.null_value)) return false;
+    if (value.as(.boolean)) |bool_value| return bool_value;
+    if (value.as(.int)) |int_value| return int_value != 0;
+    if (value.as(.float64)) |float_value| return float_value != 0 and !std.math.isNan(float_value);
     if (value.isBigInt()) {
         return !(value_mod.isZeroBigInt(value) orelse return true);
     }

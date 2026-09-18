@@ -114,7 +114,7 @@ pub fn constructBuiltinSuperConstructor(
     var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
     if (std.mem.eql(u8, name, "Object")) {
-        if (new_target.sameValue(constructor) and args.len >= 1 and args[0].isObject()) return args[0];
+        if (new_target.sameValue(constructor) and args.len >= 1 and args[0].is(.object)) return args[0];
         const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
         return instance.value();
     }
@@ -131,7 +131,7 @@ pub fn constructBuiltinSuperConstructor(
     }
     if (std.mem.eql(u8, name, "String")) return try stringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
-        if (args.len >= 1 and args[0].isSymbol()) return error.TypeError;
+        if (args.len >= 1 and args[0].is(.symbol)) return error.TypeError;
         // qjs js_number_constructor (quickjs.c:44822) uses JS_ToNumeric
         // (qjs:13030 → JS_ToNumberHintFree TON_FLAG_NUMERIC, qjs:12946),
         // which ToPrimitive's objects (qjs:12975-12979) before ToNumber.

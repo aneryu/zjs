@@ -4,52 +4,33 @@
 
 ## `src/core/value.zig` 类型
 
-`Tag`：i32 常量集，见总册 tag 表。`tracer_owned_first_tag = Tag.symbol`。
+`JSValue.Kind`：`enum(i32)` 种类。`Tag` 是 i32 投影。单 kind 用 `is(.int)` / `as(.int)` / `from(.int, n)`，没有 `isInt` / `asInt32` 别名。复合谓词 `isNumber` / `isString` / `isBigInt` 保留。
 
-`JSValue`：`extern struct { repr: Repr }`。`Repr = extern struct { payload: u64, tag: i64 }`。
+`JSValue`：`extern struct { bits: u64 }`。float64 为 IEEE 位；其余 kind 的前缀 = `0xFFF0 + dense index`（跳过 Kind −5），`tagOf` 算术还原。编码就在 `JSValue` 上，没有单独的 NanBox 类型。
 
-嵌套：`Int32Pair { lhs, rhs }`；`Scope`/`Local`/`Persistent`/`Weak` 从 `runtime.zig` 再导出；`String`/`Bytes` 是 view 泛型实例。`abi_encoding_revision = 1`。`short_big_int_bits = 64`，范围整个 i64。
+表示测试（tag 表、NaN-box 前缀、构造器、立即数分支、payload 指针、谓词、int32/float、cycleMarkHeader、asInt64）写在本文件末尾，由统一套件 `zig build test` 拉取。需要 Runtime 的堆 BigInt 会计测试仍在 `src/tests/core.zig`。
+
+嵌套：`Int32Pair { lhs, rhs }`；`String`/`Bytes` 是 view 泛型实例。句柄 `Scope`/`Local`/`Persistent`/`Weak` 在 `zjs.value`，不在 `JSValue` 上。`abi_encoding_revision = 2`。`short_big_int_bits = 48`，范围是 48-bit 有符号立即数。
 
 ### `JSValue.shortBigIntFits` (`src/core/value.zig:89`)
 
 - **签名**：`pub inline fn shortBigIntFits(value: i128) bool`。
 - **作用**：检查i128值能否用立即BigInt表示。
-- **实现**：比较是否在完整i64闭区间内。
+- **实现**：比较是否在 48-bit 有符号立即数闭区间内。
 - **所有权 / 错误 / 调用**：不创建JSValue或分配，仅返回bool。
-
-### `JSValue.make` (`src/core/value.zig:93`)
-
-- **签名**：`inline fn make(comptime tag: i32, payload: u64) JSValue`。
-- **作用**：构造指定tag/payload的值表示。
-- **实现**：把comptime i32 tag扩入i64 tag字段，保存u64 payload。
-- **所有权 / 错误 / 调用**：私有构造不验证tag有效性或载荷与tag匹配，不建立GC根。
-
-### `JSValue.hasTag` (`src/core/value.zig:97`)
-
-- **签名**：`inline fn hasTag(self: JSValue, comptime tag: i32) bool`。
-- **作用**：比较值是否具有指定tag。
-- **实现**：直接比较repr.tag与comptime i32 tag。
-- **所有权 / 错误 / 调用**：比较完整i64字段，不检查payload。
-
-### `JSValue.payloadOf` (`src/core/value.zig:101`)
-
-- **签名**：`inline fn payloadOf(self: JSValue) u64`。
-- **作用**：取原始64位载荷。
-- **实现**：返回repr.payload。
-- **所有权 / 错误 / 调用**：不解码、验证或延长引用寿命。
 
 ### `JSValue.int32` (`src/core/value.zig:105`)
 
 - **签名**：`pub fn int32(v: i32) JSValue`。
 - **作用**：把i32编码为整数JSValue。
-- **实现**：i32先bitCast成u32，再零扩展到u64，配Tag.int。
+- **实现**：i32先bitCast成u32，再零扩展到 48-bit payload，配 int 的 NaN-box 前缀 `0xFFF8`。
 - **所有权 / 错误 / 调用**：负数的高32位也是0；不是i64符号扩展。无分配。
 
 ### `JSValue.float64` (`src/core/value.zig:109`)
 
 - **签名**：`pub fn float64(v: f64) JSValue`。
 - **作用**：保留f64位型构造浮点tag值。
-- **实现**：bitCast f64为u64并配Tag.float64。
+- **实现**：bitCast f64为u64；NaN 规范化到 `0x7FF8_0000_0000_0000`，使所有 float 满足 `bits <= −Inf`。
 - **所有权 / 错误 / 调用**：不把整值归类为int，也不规范化NaN或负零位型。
 
 ### `JSValue.number` (`src/core/value.zig:113`)
@@ -69,8 +50,8 @@
 ### `JSValue.shortBigInt` (`src/core/value.zig:127`)
 
 - **签名**：`pub fn shortBigInt(v: i64) JSValue`。
-- **作用**：构造完整i64范围的立即BigInt。
-- **实现**：将i64位型直接写入u64 payload，配short_big_int tag。
+- **作用**：构造 48-bit 立即 BigInt。
+- **实现**：将有符号值截到 48-bit payload，配 short_big_int 前缀 `0xFFFF`。
 - **所有权 / 错误 / 调用**：不分配堆BigInt，不截为32位；负值以补码位型保存。
 
 ### `JSValue.bigInt` (`src/core/value.zig:131`)
@@ -82,21 +63,21 @@
 
 ### `JSValue.string` (`src/core/value.zig:135`)
 
-- **签名**：`pub fn string(header: *gc.GCObjectHeader) JSValue`。
+- **签名**：`pub fn string(header: *gc.Header) JSValue`。
 - **作用**：将传入header地址包装为string tag的JSValue。
 - **实现**：payload=@intFromPtr(header)，通过make设置对应tag。
 - **所有权 / 错误 / 调用**：只包装地址，不验证header的实际kind、不分配/retain/root；调用方保证类型与寿命。
 
 ### `JSValue.stringRope` (`src/core/value.zig:139`)
 
-- **签名**：`pub fn stringRope(header: *gc.GCObjectHeader) JSValue`。
+- **签名**：`pub fn stringRope(header: *gc.Header) JSValue`。
 - **作用**：将传入header地址包装为string_rope tag的JSValue。
 - **实现**：payload=@intFromPtr(header)，通过make设置对应tag。
 - **所有权 / 错误 / 调用**：只包装地址，不验证header的实际kind、不分配/retain/root；调用方保证类型与寿命。
 
 ### `JSValue.symbol` (`src/core/value.zig:143`)
 
-- **签名**：`pub fn symbol(header: *gc.GCObjectHeader) JSValue`。
+- **签名**：`pub fn symbol(header: *gc.Header) JSValue`。
 - **作用**：将传入header地址包装为symbol tag的JSValue。
 - **实现**：payload=@intFromPtr(header)，通过make设置对应tag。
 - **所有权 / 错误 / 调用**：只包装地址，不验证header的实际kind、不分配/retain/root；调用方保证类型与寿命。
@@ -117,7 +98,7 @@
 
 ### `JSValue.functionBytecode` (`src/core/value.zig:155`)
 
-- **签名**：`pub fn functionBytecode(header: *gc.GCObjectHeader) JSValue`。
+- **签名**：`pub fn functionBytecode(header: *gc.Header) JSValue`。
 - **作用**：将传入header地址包装为function_bytecode tag的JSValue。
 - **实现**：payload=@intFromPtr(header)，通过make设置对应tag。
 - **所有权 / 错误 / 调用**：只包装地址，不验证header的实际kind、不分配/retain/root；调用方保证类型与寿命。
@@ -160,128 +141,30 @@
 ### `JSValue.tagOf` (`src/core/value.zig:179`)
 
 - **签名**：`pub inline fn tagOf(self: JSValue) i32`。
-- **作用**：读取i32形式的tag。
-- **实现**：把repr.tag的i64值@intCast为i32。
-- **所有权 / 错误 / 调用**：依赖repr.tag拟合i32；不检查是否是已定义Tag常量，任意非法大tag不保证可恢复失败。
+- **作用**：读取i32形式的语义 tag。
+- **实现**：float 为 `bits <= −Inf`；否则 `index = prefix - 0xFFF0`，Kind = `index - 8` 再对 −5 空位减一。
+- **所有权 / 错误 / 调用**：依赖tag拟合i32；不检查是否是已定义Tag常量，任意非法大tag不保证可恢复失败。
 
 ### `JSValue.isNumber` (`src/core/value.zig:183`)
 
 - **签名**：`pub fn isNumber(self: JSValue) bool`。
 - **作用**：判断值是否为 JS Number（int 或 float64 两种内部数字表示之一），是算术与 `typeof` 快路径的入口判别。
-- **实现**：两次 `hasTag`：先比 `Tag.int`（0）再比 `Tag.float64`（8）。两个 tag 不相邻，所以只能写成两次全字比较取或，无法像 tracer-owned 家族那样折成一次区间比较；`hasTag` 的 tag 参数是 comptime，展开后就是对 8 字节 `repr.tag` 的常量比较。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不把BigInt或数值字符串视为Number。
-
-### `JSValue.isInt` (`src/core/value.zig:187`)
-
-- **签名**：`pub inline fn isInt(self: JSValue) bool`。
-- **作用**：判断值是否为立即 int32 表示，整数快路径（加减、索引、循环计数）靠它跳过 float 分支。
-- **实现**：单次 `repr.tag == Tag.int`；`Tag.int` 为 0，所以这条比较在 aarch64 上退化成对 tag 字的零测试。标了 `inline`，与 `isFloat64` 一起是解释器最热的两个判别。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不接受虽为整数数值但使用float64 tag的值。
-
-### `JSValue.isFloat64` (`src/core/value.zig:191`)
-
-- **签名**：`pub inline fn isFloat64(self: JSValue) bool`。
-- **作用**：判断值是否为装在 payload 里的 IEEE-754 双精度表示。
-- **实现**：单次 `repr.tag == Tag.float64`（8）。同样标 `inline`；注意数字值只可能落在 int 或 float64 之一，`number()` 构造时已把可精确表示且非 −0 的值规格化成 int32，因此本判别为假不等于「不是数字」。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不判断数值是否有限或是否有小数部分。
+- **实现**：`is(.int)` 或 `is(.float64)`。两个 tag 不相邻，无法折成一次区间比较。
+- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不把BigInt或数值字符串视为Number。单 kind 判别是 `is(.int)` / `is(.float64)`，没有 `isInt` / `isFloat64` 别名。
 
 ### `JSValue.isBigInt` (`src/core/value.zig:195`)
 
 - **签名**：`pub fn isBigInt(self: JSValue) bool`。
 - **作用**：判断值是否为 JS BigInt，覆盖堆 BigInt 与 i64 立即 BigInt 两种表示。
-- **实现**：两次 `hasTag`：`Tag.big_int`（−4，tracer-owned 区间内的堆对象）与 `Tag.short_big_int`（7，payload 直接是 i64 位型）。两个 tag 一正一负分处堆段与非堆段，必须写成两次比较；文件头注释说明 `big_int` 被特意放在 −4 这个空位，是为了让 tracer-owned 段 `[big_int, object]` 保持连续。
+- **实现**：`tag == big_int`（−4，堆）或 `tag == short_big_int`（7，payload 即 i64）。一正一负，必须两次比较。
 - **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。包含堆与立即表示，不验证堆指针。
-
-### `JSValue.isBool` (`src/core/value.zig:199`)
-
-- **签名**：`pub fn isBool(self: JSValue) bool`。
-- **作用**：判断值是否为 JS Boolean，payload 为 0/1。
-- **实现**：单次 `repr.tag == Tag.boolean`（1）。不看 payload，因此 `boolean(false)` 与 `boolean(true)` 同样返回 true。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不执行ToBoolean。
 
 ### `JSValue.isString` (`src/core/value.zig:203`)
 
 - **签名**：`pub fn isString(self: JSValue) bool`。
 - **作用**：判断值是否为 JS 字符串，含尚未拍平的 rope 中间节点。
-- **实现**：两次 `hasTag`：`Tag.string`（−7）与 `Tag.string_rope`（−6）。两个 tag 相邻，但源码按可读性写成两次全字比较而不是区间比较；rope 对调用方通常不可见，取字符数据前需要先经 string 模块拍平。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不包含symbol，即使符号体复用String布局。
-
-### `JSValue.isSymbol` (`src/core/value.zig:207`)
-
-- **签名**：`pub fn isSymbol(self: JSValue) bool`。
-- **作用**：判断值是否为 Symbol，属性键归一化与 `typeof` 走这条判别。
-- **实现**：单次 `repr.tag == Tag.symbol`（−8，即 `Tag.first`，tracer-owned 区间的下界）。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不检查atom_id或符号登记状态。
-
-### `JSValue.isObject` (`src/core/value.zig:211`)
-
-- **签名**：`pub fn isObject(self: JSValue) bool`。
-- **作用**：判断值是否携带对象 tag，是所有属性访问、调用、原型操作的前置门。
-- **实现**：单次 `repr.tag == Tag.object`（−1，tracer-owned 区间的上界）。payload 是 `*gc.Header`，本判别只看 tag，不区分该 header 的 GC kind。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。VarRef等内部包装也使用此tag；真正Object转换须再核对GC kind。
-
-### `JSValue.isNull` (`src/core/value.zig:215`)
-
-- **签名**：`pub fn isNull(self: JSValue) bool`。
-- **作用**：判断值是否为 `null` 哨兵。
-- **实现**：单次 `repr.tag == Tag.null_value`（2）。`nullValue()` 构造时 payload 写 0，本判别不读 payload。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不同时匹配undefined。
-
-### `JSValue.isUndefined` (`src/core/value.zig:219`)
-
-- **签名**：`pub fn isUndefined(self: JSValue) bool`。
-- **作用**：判断值是否为 `undefined` 哨兵（缺参、未赋值、删除后的读取都产出它）。
-- **实现**：单次 `repr.tag == Tag.undefined_value`（3）。与 `uninitialized`（4）是相邻但不同的 tag，两者不可互判。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不同时匹配uninitialized。
-
-### `JSValue.isUninitialized` (`src/core/value.zig:223`)
-
-- **签名**：`pub fn isUninitialized(self: JSValue) bool`。
-- **作用**：判断槽位是否处于 TDZ 状态，即 `let`/`const`/class binding 声明后、初始化前的空洞值。
-- **实现**：单次 `repr.tag == Tag.uninitialized`（4）。这是纯内部哨兵，永远不该逃逸到 JS 层；检查为真的调用方负责抛 `ReferenceError`。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。只是哨兵识别，不在此抛TDZ异常。
-
-### `JSValue.isCatchOffset` (`src/core/value.zig:227`)
-
-- **签名**：`pub fn isCatchOffset(self: JSValue) bool`。
-- **作用**：判断栈槽里放的是否为 catch 跳转偏移，异常展开时解释器用它区分真值与 handler 记录。
-- **实现**：单次 `repr.tag == Tag.catch_offset`（5）。payload 由 `catchOffset()` 用 `payloadFromI32` 写入，本判别不解码它。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不检验偏移正负或字节码边界。
-
-### `JSValue.isException` (`src/core/value.zig:231`)
-
-- **签名**：`pub fn isException(self: JSValue) bool`。
-- **作用**：判断返回值是否为「已抛异常」哨兵——引擎内部用它代替 error union 传播失败。
-- **实现**：单次 `repr.tag == Tag.exception`（6）。哨兵本身不带异常对象，真正的异常值在 runtime 的 `current_exception` 上。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不查询runtime是否确有挂起异常。
-
-### `JSValue.isModule` (`src/core/value.zig:235`)
-
-- **签名**：`pub fn isModule(self: JSValue) bool`。
-- **作用**：判断值是否为模块记录（module namespace/环境背后的内部对象），模块链接与求值路径使用。
-- **实现**：单次 `repr.tag == Tag.module`（−3）。注意 −3 落在 tracer-owned 区间 `[−8, −1]` 内，所以这类值同样由 tracer 持有。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不检查模块状态或指针有效性。
-
-### `JSValue.isFunctionBytecode` (`src/core/value.zig:239`)
-
-- **签名**：`pub fn isFunctionBytecode(self: JSValue) bool`。
-- **作用**：判断值是否为字节码函数体（`JSFunctionBytecode`），即闭包尚未包成函数对象前的内部表示。
-- **实现**：单次 `repr.tag == Tag.function_bytecode`（−2）。同样位于 tracer-owned 区间内；该 tag 的值只在编译产物与闭包构造之间流动，不是可调用的 JS 函数对象。
-- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不意味着该值是可调用JS函数对象。
-
-### `JSValue.requiresRefCount` (`src/core/value.zig:243`)
-
-- **签名**：`pub inline fn requiresRefCount(self: JSValue) bool`。
-- **作用**：以遗留接口名判断负tag堆值区间。
-- **实现**：把i64 tag位型当u64，与Tag.first=-8的u64位型比较；仅-8至-1为true，非负及小于-8的tag为false。
-- **所有权 / 错误 / 调用**：包含保留空位-5，不证明载荷为有效GC对象；不执行引用计数、retain或release。
-
-### `JSValue.asInt32` (`src/core/value.zig:251`)
-
-- **签名**：`pub fn asInt32(self: JSValue) ?i32`。
-- **作用**：解包int tag的低32位有符号数。
-- **实现**：tag为int时payloadAsI32先截低32位再bitCast i32，否则null。
-- **所有权 / 错误 / 调用**：不接受float64整值，不校验payload高位是否符合构造约定。
+- **实现**：`tag == string` 或 `tag == string_rope`。rope 对调用方通常不可见，取字符数据前需要先拍平。
+- **所有权 / 错误 / 调用**：只检查标签，不验证载荷、不保活引用。不包含symbol，即使符号体复用String布局。单 kind 判别是 `is(.string)` / `is(.string_rope)` / `is(.symbol)` 等。
 
 ### `JSValue.setInt32AssumeInt` (`src/core/value.zig:260`)
 
@@ -304,13 +187,6 @@
 - **实现**：用与trySetInt32FromSlot同样的联合tag检查，成功返回两个payloadAsI32，失败null。
 - **所有权 / 错误 / 调用**：无值转换、不修改输入；结果Int32Pair按值返回。
 
-### `JSValue.asFloat64` (`src/core/value.zig:292`)
-
-- **签名**：`pub fn asFloat64(self: JSValue) ?f64`。
-- **作用**：读取float64 tag的原始浮点数。
-- **实现**：只匹配float64 tag，将payload bitCast为f64；其他null。
-- **所有权 / 错误 / 调用**：不将int转换成浮点；NaN、无穷、负零均为有效返回值。
-
 ### `JSValue.asNumber` (`src/core/value.zig:297`)
 
 - **签名**：`pub fn asNumber(self: JSValue) ?f64`。
@@ -324,13 +200,6 @@
 - **作用**：为int/boolean/null/undefined快速给出布尔值。
 - **实现**：tagOf转u32后若大于undefined tag(3)返回null；否则以整个payload!=0为结果。
 - **所有权 / 错误 / 调用**：依赖合法构造：null/undefined载荷为0，int高位规范。float、引用及其他哨兵返回null供外围完整ToBoolean；没有HTMLDDA处理。
-
-### `JSValue.asBool` (`src/core/value.zig:312`)
-
-- **签名**：`pub fn asBool(self: JSValue) ?bool`。
-- **作用**：解包boolean tag。
-- **实现**：匹配时返回payload!=0，否则null。
-- **所有权 / 错误 / 调用**：任意非零payload都视为true，不要求严格等于1；不是全类型布尔转换。
 
 ### `JSValue.asSymbolAtom` (`src/core/value.zig:317`)
 
@@ -346,13 +215,6 @@
 - **实现**：非symbol返回null；匹配则ptrFromPayload(String,payload)。
 - **所有权 / 错误 / 调用**：零载荷由ptrFromPayload返回null；其余依赖有效地址/布局，非GC kind校验，无root。
 
-### `JSValue.asShortBigInt` (`src/core/value.zig:328`)
-
-- **签名**：`pub fn asShortBigInt(self: JSValue) ?i64`。
-- **作用**：解包立即BigInt为i64。
-- **实现**：仅short_big_int tag匹配，将完整u64 payload位型解释成i64。
-- **所有权 / 错误 / 调用**：不接受堆BigInt，即使其数值拟合i64；无分配。
-
 ### `JSValue.asInt64` (`src/core/value.zig:339`)
 
 - **签名**：`pub fn asInt64(self: JSValue) ?i64`。
@@ -365,20 +227,13 @@
 - **签名**：`pub fn asUint64(self: JSValue) ?u64`。
 - **作用**：将非负BigInt精确解包为u64。
 - **实现**：先isBigInt，再bigIntParts借出符号/limbs，构造非拥有bignum视图调用toU64。零为0，负非零或超过一limb范围返回null。
-- **所有权 / 错误 / 调用**：支持2^63至2^64-1，不能用asInt64再转换替代；不接受Number，无分配，不修改底层limbs。
-
-### `JSValue.asCatchOffset` (`src/core/value.zig:374`)
-
-- **签名**：`pub fn asCatchOffset(self: JSValue) ?i32`。
-- **作用**：解包catch_offset的i32偏移。
-- **实现**：匹配tag后以payloadAsI32读低32位，否则null。
-- **所有权 / 错误 / 调用**：保留负偏移值，不检查handler有效性。
+- **所有权 / 错误 / 调用**：支持2^63至2^64-1，不能用asInt64再转换替代；不接受Number，无分配，不修改底层limbs。立即 short BigInt 用 `as(.short_big_int)`。
 
 ### `JSValue.catchTarget` (`src/core/value.zig:382`)
 
 - **签名**：`pub fn catchTarget(self: JSValue) ?usize`。
 - **作用**：从catch标记取得非负usize目标。
-- **实现**：asCatchOffset缺失时按-1处理；负数返回null，非负数转换usize返回。
+- **实现**：`as(.catch_offset)` 缺失时按-1处理；负数返回null，非负数转换usize返回。
 - **所有权 / 错误 / 调用**：偏移0有效；不检查字节码长度、指令边界或所属函数，未匹配tag和负哨兵都表现为null。
 
 ### `JSValue.asString` (`src/core/value.zig:388`)
@@ -411,10 +266,10 @@
 
 ### `JSValue.asBytes` (`src/core/value.zig:423`)
 
-- **签名**：`pub fn asBytes(self: JSValue, ctx: anytype) Bytes.Error!Bytes`。
+- **签名**：`pub fn asBytes(self: JSValue) Bytes.Error!Bytes`。
 - **作用**：借用可提供字节视图的对象存储。
-- **实现**：忽略ctx，直接Bytes.fromValue(self)。
-- **所有权 / 错误 / 调用**：共享实现验证AB/SAB/DataView/TypedArray及相应状态，传播Bytes.Error；不使用ctx自动pin，不复制bytes，存储变化后借用有效性由调用方负责。
+- **实现**：`Bytes.fromValue(self)`。
+- **所有权 / 错误 / 调用**：共享实现验证AB/SAB/DataView/TypedArray及相应状态，传播Bytes.Error；不自动pin，不复制bytes，存储变化后借用有效性由调用方负责。
 
 ### `JSValue.refHeader` (`src/core/value.zig:428`)
 
@@ -432,31 +287,24 @@
 
 ### `JSValue.stringHeader` (`src/core/value.zig:444`)
 
-- **签名**：`pub fn stringHeader(self: JSValue) ?*gc.GCObjectHeader`。
-- **作用**：读取字符串家族GCObjectHeader。
+- **签名**：`pub fn stringHeader(self: JSValue) ?*gc.Header`。
+- **作用**：读取字符串家族收集器手柄。
 - **实现**：symbol/string/string_rope匹配时ptrFromPayload，其余null。
 - **所有权 / 错误 / 调用**：只分类tag，既不flatten也不检查body布局；返回借用header。
 
 ### `JSValue.stringHeaderAssumeStringLike` (`src/core/value.zig:455`)
 
-- **签名**：`pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.GCObjectHeader`。
+- **签名**：`pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.Header`。
 - **作用**：解包已验证的字符串家族非空header。
 - **实现**：assert tag属于string/symbol/rope，再ptrFromPayload并强制解optional。
 - **所有权 / 错误 / 调用**：错误tag或空载荷违反调用前提，不以可恢复错误处理；不flatten、不自动保活。
 
-### `JSValue.objectHeader` (`src/core/value.zig:461`)
+### `JSValue.functionBytecodeHeader` (`src/core/value.zig:461`)
 
-- **签名**：`pub fn objectHeader(self: JSValue) ?*gc.GCObjectHeader`。
-- **作用**：读取function_bytecode的GCObjectHeader。
-- **实现**：只有function_bytecode tag被接受，其余包括object tag返回null。
-- **所有权 / 错误 / 调用**：名称不能理解成通用JS Object转换；不验证字节码或GC kind。
-
-### `JSValue.refCountHeader` (`src/core/value.zig:470`)
-
-- **签名**：`pub fn refCountHeader(self: JSValue) ?*gc.Header`。
-- **作用**：保留旧名称的部分header解包接口。
-- **实现**：object/module/function_bytecode返回gc.Header载荷，其他null。
-- **所有权 / 错误 / 调用**：不进行RC操作；不涵盖堆BigInt或字符串家族，不能当作完整tracer判据。
+- **签名**：`pub fn functionBytecodeHeader(self: JSValue) ?*gc.Header`。
+- **作用**：读取 `.function_bytecode` 的收集器手柄。
+- **实现**：只有 function_bytecode 被接受，包括 `.object` 在内的其余 tag 返回 null。
+- **所有权 / 错误 / 调用**：不是通用 JS Object 转换；不验证字节码或 GC kind。
 
 ### `JSValue.cycleMarkHeader` (`src/core/value.zig:481`)
 
@@ -469,22 +317,8 @@
 
 - **签名**：`pub inline fn isTracerOwned(self: JSValue) bool`。
 - **作用**：检查tag是否在追踪管理区间。
-- **实现**：返回tag>=-8且tag<=-1。
+- **实现**：把 i64 tag 位型当 u64，与 `Tag.symbol`（−8）的 u64 位型做一次 `>=`；选出 `[−8, −1]`，与 `cycleMarkHeader` 接受的 tag 集相同。
 - **所有权 / 错误 / 调用**：只判断tag，因此同区间的零载荷也true，cycleMarkHeader却null；不证明指针有效或当前可达。
-
-### `JSValue.loadSlotAsIntPair` (`src/core/value.zig:501`)
-
-- **签名**：`pub inline fn loadSlotAsIntPair(slot: *const JSValue) JSValue`。
-- **作用**：从槽位按两个64位字读取JSValue。
-- **实现**：将slot指针转换为[2]u64指针，读取两字后bitCast回JSValue。
-- **所有权 / 错误 / 调用**：依赖16字节/8对齐布局；普通非原子读，不保证并发一致快照，也不root引用。具体机器指令仍由编译器决定。
-
-### `JSValue.storeSlotAsIntPair` (`src/core/value.zig:510`)
-
-- **签名**：`pub inline fn storeSlotAsIntPair(slot: *JSValue, value: JSValue) void`。
-- **作用**：按两个64位字覆盖值槽。
-- **实现**：把value bitCast为[2]u64，依次写入slot的两字。
-- **所有权 / 错误 / 调用**：无GC屏障、root或引用计数处理；不是线程原子写，调用方负责槽拥有者的存储屏障。
 
 ### `JSValue.same` (`src/core/value.zig:517`)
 

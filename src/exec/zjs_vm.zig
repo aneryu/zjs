@@ -438,7 +438,7 @@ fn runWithArgsState(
     // resident state, and legacy module/fixture adapters keep their W1e seam.
     if (entry_function.legacyBytecodeAdapter() == null and
         entry_generator_state == null and
-        current_function_value.isUndefined()) return error.InvalidBytecode;
+        current_function_value.is(.undefined_value)) return error.InvalidBytecode;
 
     // qjs js_closure2 PASS1 (quickjs.c:17280-17296): validate the complete
     // GLOBAL_DECL table before creating a single declaration cell. Direct eval
@@ -457,7 +457,7 @@ fn runWithArgsState(
         // Generator/async functions are not constructors; arrow new.target is
         // an ordinary capture. A resident shell therefore never needs the cold
         // new-target slot moved out of the hot Frame header.
-        std.debug.assert(new_target_value.isUndefined());
+        std.debug.assert(new_target_value.is(.undefined_value));
         break :blk frame_mod.Frame.initResidentExecution(
             entry_function,
             initial_this_value,

@@ -1,6 +1,8 @@
-# 01 — `zjs.native`：宿主函数与宿主类
+# 01 — `zjs.native`：宿主函数
 
-`src/binding/native.zig` 为宿主函数生成 comptime 的 C ABI thunk，并通过 NativeEntry 描述其调用种类、参数签名和目标。不同 managed、leaf、method、accessor 路径的参数处理与执行环境不同；不能由共用 NativeEntry 推出所有调用具有相同成本或完全相同的分派步骤。
+> `leaf` / `leafWithState` / `Class` 已从 `src/binding/native.zig` 删除。下文若仍写这些生成器，以源码为准：只剩 `Call` / `Spec` / `Options` / `managed`。内建叶签名仍走 `exec/native_legacy.zig`。
+
+`src/binding/native.zig` 为宿主函数生成 comptime 的 C ABI thunk，并通过 NativeEntry 描述其调用种类、参数签名和目标。
 
 Call 与 argv 是本次调用的借用视图，不能保存到调用结束之后。跨调用保存 JSValue 需要合适的持久根；即使仍在本次调用内，写入宿主堆的数据也不能只依赖 native 栈扫描保活。生成器自身不替任意宿主容器注册根。
 
@@ -20,7 +22,7 @@ Call 与 argv 是本次调用的借用视图，不能保存到调用结束之后
 | `Member` | 原型成员：`name`、`kind`、`spec`。`class_id` 在 `defineClass` 时盖上。 |
 | `Class(...).Handle` | `defineClass` 返回的运行时句柄，持 `*const NativeType`。 |
 
-`leaf` / `leafWithState` 只接受下面列出的受支持签名，不覆盖整个 FNABI 表；其他签名编译失败，没有 generic 回退。VM 的 typed-leaf marshal 中，i32 接受 int32 或范围内、无小数且非 -0 的 float64；f64 分两档：`f64 -> void` 与类成员的 SELF_* f64 形状只接受 JS Number（包括 NaN/Infinity），而 `f64 -> f64` / `f64, f64 -> f64` 走 `primitiveF64Arg`，还会把缺失参数与 undefined 读成 NaN、null 读成 0、布尔读成 0/1；bool 只接受布尔值。除上述原始值外不会隐式做 JavaScript 转换（不调用 valueOf/toString）。leaf 的不分配、不重入、不抛约束是宿主必须遵守的调用契约，生成器只检查类型，不能静态证明函数体没有这些行为。
+`leaf` / `leafWithState` 只接受下面列出的受支持签名；其他签名编译失败，没有 generic 回退。VM 的 typed-leaf marshal 中，i32 接受 int32 或范围内、无小数且非 -0 的 float64；f64 分两档：`f64 -> void` 与类成员的 SELF_* f64 形状只接受 JS Number（包括 NaN/Infinity），而 `f64 -> f64` / `f64, f64 -> f64` 走 `primitiveF64Arg`，还会把缺失参数与 undefined 读成 NaN、null 读成 0、布尔读成 0/1；bool 只接受布尔值。除上述原始值外不会隐式做 JavaScript 转换（不调用 valueOf/toString）。leaf 的不分配、不重入、不抛约束是宿主必须遵守的调用契约，生成器只检查类型，不能静态证明函数体没有这些行为。
 
 ---
 
@@ -112,7 +114,7 @@ Call 与 argv 是本次调用的借用视图，不能保存到调用结束之后
 - **签名**：`pub fn leaf(comptime f: anytype) Spec`。
 - **作用**：无 state 的 typed leaf（K1）。
 - **实现**：`leafSpec(f, false)`。
-- **所有权 / 错误 / 调用**：纯编译期构造：返回按值的 `Spec`，内含指向编译期生成的 `T.*` thunk 的静态代码指针，没有运行期分配、没有 error set；签名不在 FNABI 表里是 `@compileError`，不会退化成 generic 臂。`Spec` 由 `ctx.defineFunction` 消费（`src/tests/embedding_examples.zig:149`、`tools/perf/native_boundary/zjs_boundary_bench.zig:157`），本文件测试 `src/binding/native.zig:262` 只读 `template`。
+- **所有权 / 错误 / 调用**：纯编译期构造：返回按值的 `Spec`，内含指向编译期生成的 `T.*` thunk 的静态代码指针，没有运行期分配、没有 error set；不支持的签名是 `@compileError`，不会退化成 generic 臂。`Spec` 由 `ctx.defineFunction` 消费（`src/tests/embedding_examples.zig:149`、`tools/perf/native_boundary/zjs_boundary_bench.zig:157`），本文件测试 `src/binding/native.zig:262` 只读 `template`。
 
 ### `leafWithState` (`src/binding/native.zig:179`)
 
@@ -124,7 +126,7 @@ Call 与 argv 是本次调用的借用视图，不能保存到调用结束之后
 ### `leafSpec` (`src/binding/native.zig:183`)
 
 - **签名**：`fn leafSpec(comptime f: anytype, comptime with_state: bool) Spec`。
-- **作用**：按 Zig 函数类型挑 FNABI 形状，生成对应 C thunk + `sig`。
+- **作用**：按 Zig 函数类型挑 `LeafSig`，生成对应 C thunk + `sig`。
 - **实现**：校验函数类型；`with_state` 要求第一参数是 pointer。`n = params.len - first`。按 (n, 参数类型, 返回类型) 匹配 `void_to_void` / `i32_to_i32` / `i32_i32_to_i32` / `f64_to_f64` / `f64_f64_to_f64` / `f64_to_void` / `bool_to_bool` 或带 state 的两档。不匹配 `@compileError`。template：`kind=.leaf`、`effect=Effect.leaf`、`arity=n`。
 - **所有权 / 错误 / 调用**：模板记录 native_legacy 的签名 id，实际 marshal 在 builtin_dispatch 执行。生成器不提供无 state 签名之外的自动转换，也不验证传入 Options.state 的真实类型、非空性或生命周期。
 
@@ -154,7 +156,7 @@ Call 与 argv 是本次调用的借用视图，不能保存到调用结束之后
 - **签名**：`fn i32_to_i32(a: i32) callconv(.c) i32`。
 - **作用**：`fn (i32) i32`。
 - **实现**：`return f(a);`
-- **所有权 / 错误 / 调用**：无分配、无 error set（leaf 目标按 FNABI 约定不得抛异常）。没有 Zig 侧调用方：它的地址被 `NativeEntry.code` 钉进 `Spec.template.target`，运行时由 `builtin_dispatch.invokeLeafFast` 的 `sig_i32_to_i32` 臂（`src/exec/builtin_dispatch.zig:1175`）通过 C ABI 直接调用；参数已由 VM 做过 canonical int32 marshal（int32 标签，或无小数、落在 int32 范围内且非 -0 的 float64），返回值在那里被 `JSValue.int32` 装箱。
+- **所有权 / 错误 / 调用**：无分配、无 error set（leaf 目标不得抛异常）。没有 Zig 侧调用方：它的地址被 `NativeEntry.code` 钉进 `Spec.template.target`，运行时由 `builtin_dispatch.invokeLeafFast` 的 `sig_i32_to_i32` 臂（`src/exec/builtin_dispatch.zig:1175`）通过 C ABI 直接调用；参数已由 VM 做过 canonical int32 marshal（int32 标签，或无小数、落在 int32 范围内且非 -0 的 float64），返回值在那里被 `JSValue.int32` 装箱。
 
 ### `native.i32_i32_to_i32` (`src/binding/native.zig:213`)
 

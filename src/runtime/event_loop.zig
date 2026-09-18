@@ -306,7 +306,7 @@ pub const EventLoop = struct {
         while (index < self.rw_handlers.len) : (index += 1) {
             if (self.rw_handlers[index].fd != fd) continue;
             self.rw_handlers[index].clearCallback(write_handler);
-            if (self.rw_handlers[index].read_callback.isNull() and self.rw_handlers[index].write_callback.isNull()) {
+            if (self.rw_handlers[index].read_callback.is(.null_value) and self.rw_handlers[index].write_callback.is(.null_value)) {
                 self.removeRwHandlerAt(ctx, index);
             }
             return;
@@ -342,12 +342,12 @@ pub const EventLoop = struct {
         if (self.rw_handlers.len == 0) return false;
         var callback = zjs.JSValue.nullValue();
         for (self.rw_handlers) |handler| {
-            if (handler.fd == 0 and !handler.read_callback.isNull()) {
+            if (handler.fd == 0 and !handler.read_callback.is(.null_value)) {
                 callback = handler.read_callback;
                 break;
             }
         }
-        if (callback.isNull()) return false;
+        if (callback.is(.null_value)) return false;
 
         const rt = ctx.runtimePtr();
         var timeout_ms: u32 = 0;
@@ -381,8 +381,8 @@ pub const EventLoop = struct {
         var count: usize = 0;
         for (self.rw_handlers) |handler| {
             var events: c_short = 0;
-            if (!handler.read_callback.isNull()) events |= libc.POLLIN;
-            if (!handler.write_callback.isNull()) events |= libc.POLLOUT;
+            if (!handler.read_callback.is(.null_value)) events |= libc.POLLIN;
+            if (!handler.write_callback.is(.null_value)) events |= libc.POLLOUT;
             if (events == 0) continue;
             pollfds[count] = .{ .fd = handler.fd, .events = events, .revents = 0 };
             count += 1;
@@ -419,12 +419,12 @@ pub const EventLoop = struct {
             while (handler_index < self.rw_handlers.len) : (handler_index += 1) {
                 if (self.rw_handlers[handler_index].fd != pollfd.fd) continue;
                 const handler = self.rw_handlers[handler_index];
-                if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.isNull()) {
+                if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.is(.null_value)) {
                     const callback = handler.read_callback;
                     _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
                     return true;
                 }
-                if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.isNull()) {
+                if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.is(.null_value)) {
                     const callback = handler.write_callback;
                     _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, global.value(), callback, &.{}, null, null);
                     return true;
@@ -706,7 +706,7 @@ test "EventLoop drains queued JS callbacks" {
     try std.testing.expect(!result.hasPendingError());
 
     const hit = try ctx.eval("globalThis.__zjs_runtime_event_loop_hit;", .{});
-    try std.testing.expectEqual(@as(?i32, 7), hit.asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), hit.as(.int));
 }
 
 test "EventLoop removes timers without allocation" {
@@ -898,7 +898,7 @@ test "runtime root tracer visits EventLoop host roots" {
 
         fn visitValue(context: *anyopaque, slot: *zjs.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.asInt32()) |value| {
+            if (slot.as(.int)) |value| {
                 if (value >= 102 and value <= 105) self.count += 1;
             }
         }

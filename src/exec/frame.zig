@@ -374,7 +374,7 @@ pub const Frame = struct {
     }
 
     pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !void {
-        const binding_cold = if (inputs.new_target_value.isUndefined())
+        const binding_cold = if (inputs.new_target_value.is(.undefined_value))
             null
         else
             try self.ensureCold(&rt.memory);
@@ -682,8 +682,8 @@ test "Frame setLocal preserves inline locals while growing" {
     try exec_frame.setLocal(&rt.memory, 0, JSValue.int32(11));
     try exec_frame.setLocal(&rt.memory, 1, JSValue.int32(22));
 
-    try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].asInt32());
-    try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].as(.int));
+    try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].as(.int));
     try std.testing.expectEqual(Ownership.owned, exec_frame.ownership.storage);
 }
 

@@ -488,7 +488,7 @@
 
 ### `AtomTable.symbolBodyHeaderIfLive` (`src/core/atom.zig:2128`)
 
-- **签名**：`pub fn symbolBodyHeaderIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*gc.GCObjectHeader`。
+- **签名**：`pub fn symbolBodyHeaderIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*gc.Header`。
 - **作用**：借用符合当前观察条件的符号体 header。
 - **实现**：symbolBodyIfLive 返回 body 后通过指针/对齐转换得到 header，否则 null。
 - **所有权 / 错误 / 调用**：不在这里无条件检查 mark；仅 helper 在 tracer_destroy 阶段这样做。弱键收集逻辑如需判定本轮可达性，仍须结合收集器自身标记处理。

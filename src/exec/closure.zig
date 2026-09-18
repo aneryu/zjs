@@ -47,12 +47,12 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         3 => {
             if (args.len != 1) return error.TypeError;
             const captured = try getIntProperty(rt, closure, "__closure_value");
-            const arg = args[0].asInt32() orelse return error.TypeError;
+            const arg = args[0].as(.int) orelse return error.TypeError;
             return core.JSValue.int32(captured + arg);
         },
         5 => {
             if (args.len != 1) return error.TypeError;
-            const d = args[0].asInt32() orelse return error.TypeError;
+            const d = args[0].as(.int) orelse return error.TypeError;
             const b = try getIntProperty(rt, closure, "__closure_b");
             const c = try getIntProperty(rt, closure, "__closure_c");
             try appendLog(rt, globals, .again, 0, b, c, d);
@@ -61,7 +61,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         6 => {
             if (args.len != 1) return error.TypeError;
             const multiplier = try getIntProperty(rt, closure, "__closure_value");
-            const arg = args[0].asInt32() orelse return error.TypeError;
+            const arg = args[0].as(.int) orelse return error.TypeError;
             return core.JSValue.int32(arg * multiplier);
         },
         7 => return error.TypeError,
@@ -79,7 +79,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         16 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.TypeError;
+            const value = args[0].as(.int) orelse return error.TypeError;
             return try value_ops.createStringValue(rt, if (@mod(value, 2) == 0) "even" else "odd");
         },
         17 => {
@@ -150,7 +150,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         54 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.JSException;
+            const value = args[0].as(.int) orelse return error.JSException;
             if (value == 1) return core.JSValue.boolean(false);
             if (value == 2) return core.JSValue.boolean(true);
             return error.JSException;
@@ -191,19 +191,19 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         62 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.JSException;
+            const value = args[0].as(.int) orelse return error.JSException;
             if (value == 1 or value == 2) return core.JSValue.boolean(true);
             return error.JSException;
         },
         63 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.JSException;
+            const value = args[0].as(.int) orelse return error.JSException;
             if (value == 1 or value == 2) return core.JSValue.boolean(false);
             return error.JSException;
         },
         64 => {
             if (args.len < 1) return error.TypeError;
-            if (args[0].asInt32()) |value| return core.JSValue.boolean(value == 4 or value == 5 or value == 6);
+            if (args[0].as(.int)) |value| return core.JSValue.boolean(value == 4 or value == 5 or value == 6);
             const string = args[0].asStringBody() orelse return core.JSValue.boolean(false);
             return core.JSValue.boolean(string.eqlBytes("a") or string.eqlBytes("b") or string.eqlBytes("c") or string.eqlBytes("x"));
         },
@@ -218,8 +218,8 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
             return core.JSValue.undefinedValue();
         },
         26 => {
-            var value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value;
-            if (value.isUndefined()) {
+            var value = if (this_value.is(.undefined_value)) try globals_mod.getByName(rt, globals, "globalThis") else this_value;
+            if (value.is(.undefined_value)) {
                 value = (try getGlobalThisObject(rt, globals)).value();
             }
             try appendToGlobalArray(rt, globals, "_this", value);
@@ -261,7 +261,7 @@ pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode
 
 fn expectClosure(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
     const closure = core.Object.fromHeader(header);
     if (closure.class_id != core.class.ids.c_closure) return error.TypeError;
     return closure;
@@ -275,12 +275,12 @@ fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8
 fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !i32 {
     const key = try rt.internAtom(name);
     const value = try object.getProperty(key);
-    return value.asInt32() orelse error.TypeError;
+    return value.as(.int) orelse error.TypeError;
 }
 
 fn incrementGlobalInt(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !void {
     const existing = try globals_mod.getByName(rt, globals, name);
-    const current = existing.asInt32() orelse return error.TypeError;
+    const current = existing.as(.int) orelse return error.TypeError;
     try globals_mod.setExistingByName(rt, globals, name, core.JSValue.int32(current + 1));
 }
 
@@ -645,7 +645,7 @@ fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int:
     const value = try value_ops.createStringValue(rt, bytes);
     for (map_object.collectionEntriesSlot().*) |*entry| {
         if (!entry.active) continue;
-        if (entry.key.asInt32() == key_int) {
+        if (entry.key.as(.int) == key_int) {
             const next_value = value;
             entry.value = next_value;
             return;
@@ -658,7 +658,7 @@ fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_
     var key_name_buf: [32]u8 = undefined;
     const key_name = std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int}) catch unreachable;
     var key_value = try globals_mod.getByName(rt, globals, key_name);
-    if (key_value.isUndefined()) {
+    if (key_value.is(.undefined_value)) {
         key_value = try getGlobalObjectProperty(rt, globals, key_name);
     }
     const value = try value_ops.createStringValue(rt, bytes);
@@ -677,7 +677,7 @@ fn appendRecordToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, n
     const record_value = record.value();
     try defineValueProperty(rt, record, "value", rooted_value);
     try defineValueProperty(rt, record, "key", rooted_key);
-    if (!rooted_this_arg.isUndefined()) try defineValueProperty(rt, record, "thisArg", rooted_this_arg);
+    if (!rooted_this_arg.is(.undefined_value)) try defineValueProperty(rt, record, "thisArg", rooted_this_arg);
     try appendToGlobalArray(rt, globals, name, record_value);
 }
 
@@ -725,7 +725,7 @@ const SetForEachMutation = enum {
 fn setForEachMutation(rt: *core.JSRuntime, globals: []globals_mod.Slot, args: []const core.JSValue, mode: SetForEachMutation) !core.JSValue {
     if (args.len < 3) return error.TypeError;
     try assertAndShiftExpected(rt, globals, args[0]);
-    const value = args[0].asInt32() orelse return error.TypeError;
+    const value = args[0].as(.int) orelse return error.TypeError;
     const set = try expectObject(args[2]);
     if (set.class_id != core.class.ids.set) return error.TypeError;
     switch (mode) {
@@ -748,7 +748,7 @@ fn setForEachMutation(rt: *core.JSRuntime, globals: []globals_mod.Slot, args: []
 fn setAddInt(rt: *core.JSRuntime, set: *core.Object, value: i32) !void {
     for (set.collectionEntriesSlot().*) |entry| {
         if (!entry.active) continue;
-        if (entry.key.asInt32() == value) return;
+        if (entry.key.as(.int) == value) return;
     }
     try appendUnindexedCollectionEntryAndDefineSize(rt, set, .{ .key = core.JSValue.int32(value), .value = core.JSValue.undefinedValue(), .active = true });
 }
@@ -756,7 +756,7 @@ fn setAddInt(rt: *core.JSRuntime, set: *core.Object, value: i32) !void {
 fn setDeleteInt(rt: *core.JSRuntime, set: *core.Object, value: i32) !void {
     for (set.collectionEntriesSlot().*, 0..) |*entry, index| {
         if (!entry.active) continue;
-        if (entry.key.asInt32() == value) {
+        if (entry.key.as(.int) == value) {
             try removeUnindexedCollectionEntryAndDefineSize(rt, set, index);
             return;
         }
@@ -831,7 +831,7 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
     defer root_frame.deactivate(rt);
 
     var array_value = try globals_mod.getByName(rt, globals, name);
-    if (array_value.isUndefined()) {
+    if (array_value.is(.undefined_value)) {
         array_value = try getGlobalObjectProperty(rt, globals, name);
     }
     const array = try core.array.expectArray(array_value);
@@ -847,7 +847,7 @@ fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
 fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.Object {
     const global_value = try globals_mod.getByName(rt, globals, "globalThis");
     const header = global_value.refHeader() orelse return error.TypeError;
-    if (!global_value.isObject()) return error.TypeError;
+    if (!global_value.is(.object)) return error.TypeError;
     return core.Object.fromHeader(header);
 }
 

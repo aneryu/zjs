@@ -1,8 +1,8 @@
-# 18 — 事件循环、CLI、test262 runner、FNABI
+# 18 — 事件循环、CLI、test262 runner
 
-本册覆盖引擎边界上的四块宿主代码：`src/runtime/` 的事件循环、`src/cli/` 的 `zjs` 与 `run-test262`、`src/abi/` 的 Fun Native ABI。它们都不进 `core`：`tools/architecture/check_deps.js` 的 core 规则把 `src/runtime/`（事件循环所在）、`src/cli/` 连同 `binding`/`builtins`/`exec`/`parser` 一起列为禁止依赖。
+本册覆盖引擎边界上的宿主代码：`src/runtime/` 的事件循环、`src/cli/` 的 `zjs` 与 `run-test262`。它们都不进 `core`：`tools/architecture/check_deps.js` 的 core 规则把 `src/runtime/`（事件循环所在）、`src/cli/` 连同 `binding`/`builtins`/`exec`/`parser` 一起列为禁止依赖。
 
-语义权威仍是 ECMA-262；QuickJS libc / `qjs.c` / `run-test262.c` 是对照实现。动态插件加载器已于 2026-09-06 删除（owner D8），公开宿主函数只走 `zjs.native`；本册的 ABI 文件是叶签名 schema，不是 loader。
+语义权威仍是 ECMA-262；QuickJS libc / `qjs.c` / `run-test262.c` 是对照实现。动态插件加载器已于 2026-09-06 删除（owner D8），公开宿主函数只走 `zjs.native`。叶签名是引擎私有 `LeafSig`，在 08 / 13 册。
 
 ## 分层地图
 
@@ -29,16 +29,15 @@ zjs / zjs-dev / zjs-profile          run-test262 / test-runner
                 再回到 1，直到四条宿主臂都空
 ```
 
-`src/runtime/public.zig` 是嵌入方看见的门面（`zjs.runtime`）；`src/runtime/root.zig` 再给 CLI / test262 多几条 atomics / 模块图包装。`src/cli/panic_policy.zig` 给两个二进制钉 ReleaseFast 的无符号表 panic。`src/abi/` 是 FNABI v1 冻结面，加载器在外部 `fun` 仓。
+`src/runtime/root.zig` 是嵌入方看见的门面（`zjs.runtime`：事件循环）。模块图、Atomics wake/cleanup、ArrayBuffer detach 由 CLI / test262 直接调 `src/exec/`。`src/cli/panic_policy.zig` 给两个二进制钉 ReleaseFast 的无符号表 panic。
 
 ## 分册目录
 
 | 文件 | 覆盖 |
 | --- | --- |
-| [18-event-loop.md](18-event-loop.md) | `src/runtime/event_loop.zig`、`public.zig`、`root.zig` |
+| [18-event-loop.md](18-event-loop.md) | `src/runtime/event_loop.zig`、`root.zig` |
 | [18-cli.md](18-cli.md) | `src/cli/zjs.zig`、`cli_process.zig`、`panic_policy.zig` |
 | [18-test262.md](18-test262.md) | `run_test262*.zig`：选项、配置、名字、元数据、已知失败、源、host `$262.agent`、reporter、编排 |
-| [18-abi.md](18-abi.md) | `fun_native_abi.zig` / `.h`、`gen_header.zig`、`sdk.zig` |
 
 ## CLI argv 契约
 
@@ -107,16 +106,12 @@ owner 2026-09-06 D8（设计稿 0.9）：**硬切**。下列路径已从树中�
 - `tests/fixtures/*plugin*`
 - 公共名 `zjs.host.*` 旧 FFI、`zjs.ffi`、`zjs.runtime.Plugin`
 
-`src/runtime/public.zig` 的测试钉死：`plugin` / `ffi` / `cleanup` 等内部名不得出现在嵌入门面。
+`src/runtime/root.zig` 的测试钉死：`plugin` / `ffi` / `cleanup` 等内部名不得出现在嵌入门面。
 
 **留下的公开面**只有：
 
 - `zjs.native`（`managed` / `leaf` / `leafWithState` / `Class`）
 - `JSContext.defineFunction` / `createFunction` / `defineClass` / `CallSite`
-
-**FNABI**（`src/abi/fun_native_abi.zig` + 生成的 `fun_native_abi.h`）是叶签名 schema 的单一事实源，v1 冻结（2026-08-26），演进 append-only。它描述 plugin artifact 怎么向 **fun loader** 声明导出；zjs **不含**平台 loader。`src/abi/sdk.zig` 是 M0I 骨架：把 arity≤2 的 `i32`/`f64`/`void` Zig 函数编成 `FunFunctionDescriptorV1`，再经 `NativeCallPlanSpec.fromFunctionDescriptor` 进引擎调用计划。
-
-旧 ABI 的 `CallFrame` trampoline 对应 FNABI managed generic；`OpaqueHostObject`/`HostTypeId` 对应 `NativeObject`/`NativeType`。不要把 `FUN_CALL_*` 再当成 zjs 进程内 dlopen 合同。
 
 ## 本册不讲什么
 
@@ -127,8 +122,7 @@ owner 2026-09-06 D8（设计稿 0.9）：**硬切**。下列路径已从树中�
 
 ## 覆盖核对
 
-- 清单函数数: 324（`src/runtime/*` 63 + `src/cli/*` 249 + `src/abi/*.zig` 12）
-- 零函数文件: `src/runtime/public.zig`、`src/cli/panic_policy.zig`（正文有文件级讲解）
-- C 头: `src/abi/fun_native_abi.h`（每个导出结构 / 宏，见 18-abi.md）
+- 清单函数数: 306（`src/runtime/*` 57 + `src/cli/*` 249）
+- 零函数文件: `src/runtime/root.zig`、`src/cli/panic_policy.zig`（正文有文件级讲解）
 - 本文标题覆盖: 见各分册合计；以 `_check_coverage.py` 为准
 - 未覆盖: 无

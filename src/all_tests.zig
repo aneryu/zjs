@@ -21,8 +21,6 @@ pub const RuntimeError = internal.RuntimeError;
 pub const HostError = internal.HostError;
 pub const JSRuntime = internal.JSRuntime;
 pub const JSContext = internal.JSContext;
-pub const CallSite = internal.CallSite;
-pub const PropertySite = internal.PropertySite;
 pub const JSValue = internal.JSValue;
 pub const Descriptor = internal.Descriptor;
 pub const Atom = internal.Atom;
@@ -33,18 +31,13 @@ pub const WeakPersistent = internal.WeakPersistent;
 pub const WeakPersistentValue = internal.WeakPersistentValue;
 pub const NativePin = internal.NativePin;
 pub const RuntimeMemoryUsage = internal.RuntimeMemoryUsage;
-pub const PropNameID = internal.PropNameID;
 pub const JSString = internal.JSString;
 pub const JSBytes = internal.JSBytes;
-pub const binding = internal.binding;
 pub const GCPolicy = internal.GCPolicy;
 pub const GCStats = internal.GCStats;
 pub const EvalOptions = internal.EvalOptions;
 pub const EvalTiming = internal.EvalTiming;
 pub const DataPropertyOptions = internal.DataPropertyOptions;
-pub const ExternalFunctionOptions = internal.ExternalFunctionOptions;
-pub const ExternalHostCallFn = internal.ExternalHostCallFn;
-pub const ExternalHostFinalizer = internal.ExternalHostFinalizer;
 
 // PUBLIC-SURFACE MIRROR: names that exist only on the unified root, or that
 // intentionally disagree with internal_root (see the exception table below).
@@ -150,9 +143,6 @@ test {
     std.testing.refAllDecls(runtime);
 
     // Relative imports for files that are not module roots
-    std.testing.refAllDecls(@import("tests/abi_layout.zig"));
-    std.testing.refAllDecls(@import("binding/native_call_plan.zig"));
-    std.testing.refAllDecls(@import("abi/sdk.zig"));
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
     // The stress tier compiles into this binary and is selected by name
     // prefix at run time (`--skip-prefix tests.stress.` on the per-change

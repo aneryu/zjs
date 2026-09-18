@@ -63,7 +63,7 @@
 - **签名**：`pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Object) !*core.Object`。
 - **作用**：取当前 realm 的 %StringIteratorPrototype%，没有就建一个并缓存进 `ctx.class_prototypes`。
 - **实现**：槽里已有对象就直接返回。否则 `iteratorPrototype(rt, global, "String Iterator")` 造原型并定义 `next`（带 `(.string, iterator_next)` 原生 id），`@@iterator` 靠继承 %IteratorPrototype% 而不自备一份；随后裸写 `class_prototypes` 槽并手动 `gc.generationalBarrier`（不走 `setClassPrototype`，与 Array 迭代器原型同一处理）。
-- **所有权 / 错误 / 调用**：命中 `ctx.class_prototypes` 时返回**借用**的缓存 prototype；miss 才新建，装好 `next` 后写回槽位——用的是裸槽写 + 手动 `gc.generationalBarrier`（不是 `setClassPrototype`），与 Array 迭代器 prototype 同一处理。失败时 `errdefer` 销毁新建的 proto。缓存槽里存的不是对象（例如仍是 undefined）时不报错，直接落到新建腿；只有 `isObject()` 成立却 `expectObject` 取不出指针才裸 `error.TypeError`。唯一调用方 `stringIteratorCall:2169`。
+- **所有权 / 错误 / 调用**：命中 `ctx.class_prototypes` 时返回**借用**的缓存 prototype；miss 才新建，装好 `next` 后写回槽位——用的是裸槽写 + 手动 `gc.generationalBarrier`（不是 `setClassPrototype`），与 Array 迭代器 prototype 同一处理。失败时 `errdefer` 销毁新建的 proto。缓存槽里存的不是对象（例如仍是 undefined）时不报错，直接落到新建腿；只有 `is(.object)` 成立却 `expectObject` 取不出指针才裸 `error.TypeError`。唯一调用方 `stringIteratorCall:2169`。
 
 ### `stringMatch` (`src/exec/string_ops.zig:2193`)
 
@@ -125,7 +125,7 @@
 
 - **签名**：`pub fn decodeRegExpLegacyCaptureSlice(value: core.JSValue) ?LazyRegExpLegacyCapture`。
 - **作用**：把 `encodeRegExpLegacyCaptureSlice` 的 payload 解回 `{start, len}`。
-- **实现**：取 `asShortBigInt`，为负或超过 `1 << 47` 的 payload 上限返回 `null`；否则按 20 位掩码拆出 `len`、右移拆出 `start`。
+- **实现**：取 `as(.short_big_int)`，为负或超过 `1 << 47` 的 payload 上限返回 `null`；否则按 20 位掩码拆出 `len`、右移拆出 `start`。
 - **所有权 / 错误 / 调用**：无：立即值解包，不是 short BigInt 或越界返回 `null`。唯一调用方 `regexp_fastpath.zig:652`（惰性 Annex-B 静态量的读取侧）。
 
 ### `defineSplitSliceElement` (`src/exec/string_ops.zig:2407`)

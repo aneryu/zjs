@@ -389,7 +389,7 @@
 
 - **签名**：`fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts`。
 - **作用**：bigint/字符串比较，给过渡 sort/equals。
-- **实现**：含循环：按 length 或迭代器步进处理元素。关键调用：`value.asShortBigInt`、`@truncate`、`@bitSizeOf`、`value.isBigInt`、`value.refHeader`、`@alignCast`、`@fieldParentPtr`、`big.negative`。
+- **实现**：含循环：按 length 或迭代器步进处理元素。关键调用：`value.as(.short_big_int)`、`@truncate`、`@bitSizeOf`、`value.isBigInt`、`value.refHeader`、`@alignCast`、`@fieldParentPtr`、`big.negative`。
 - **所有权 / 错误 / 调用**：返回的 `limbs` 全是借用：短 BigInt 写进调用方给的 `scratch`（生命周期＝调用方栈帧），堆 BigInt 直接指向 `BigInt.limbs()`（生命周期＝那个 BigInt）。不分配、无 error set，非 BigInt 返回 null。唯一调用方 `compareBigIntValues`（`:1336`、`:1337`）。
 
 ### `compareStringValues` (`src/exec/array_builtin_ops.zig:1351`)

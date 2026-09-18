@@ -65,7 +65,7 @@ C-shaped structure. QuickJS remains the performance yardstick (bench-v8).
 Shipped default:
 
 ```
-zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off
+zjs-config-v3:compiler=v2,layout=short,repr=nan_boxed,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off
 ```
 
 `compiler=v2` is the only compiler. `layout=short` is the release layout;
@@ -94,7 +94,7 @@ See `docs/architecture.md`. Short map:
 - `src/compiler/`: the compiler.
 - `src/bytecode.zig`: bytecode carrier and packing.
 - `src/exec/`: VM, builtins, calls, modules, promises.
-- `src/runtime/`: event loop and native plugins.
+- `src/runtime/`: host event loop.
 - `src/binding/`: public adapters and FFI descriptors.
 - `src/libs/`, `src/cli/`, `src/tests/`.
 

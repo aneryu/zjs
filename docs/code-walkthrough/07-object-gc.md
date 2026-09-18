@@ -430,8 +430,8 @@
 ### `Object.functionBytecodeFromValue` (`src/core/object.zig:7494`)
 
 - **签名**：`fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode`。
-- **作用**：按 objectHeader kind 提取 FunctionBytecode。
-- **实现**：无 objectHeader 或 kind 非 function_bytecode 返回 null，否则 fieldParentPtr(header)。
+- **作用**：按 functionBytecodeHeader 提取 FunctionBytecode。
+- **实现**：无 functionBytecodeHeader 或 kind 非 function_bytecode 返回 null，否则 fieldParentPtr(header)。
 - **所有权 / 错误 / 调用**：不编译或验证指令内容，不建立根。
 
 ## 覆盖核对

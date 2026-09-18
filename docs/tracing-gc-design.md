@@ -622,8 +622,8 @@ first concurrent marker:
 fn set(slot: *HeapValueSlot, owner: *Header, value: JSValue) void {
     enterBarrierCriticalScope();
     defer leaveBarrierCriticalScope();
-    slot.payload.store(value.repr.payload, .monotonic);
-    slot.tag.store(value.repr.tag, .release);
+    slot.payload.store(value.payload, .monotonic);
+    slot.tag.store(value.tag, .release);
     postWriteBarrier(owner, decodeExactHeapRef(value));
 }
 
@@ -1888,7 +1888,7 @@ unchanged.
 tranche.** Wiring `Heap.alloc` into `createRuntime` was tried and reverted.
 A GC object is not just its struct: `memory.zig` writes an 8-byte prefix
 ahead of every allocation and records the slab class in `alloc_info`, which
-`GCObjectHeader.meta()` reads back through. Cells handed out raw therefore
+`Header.meta()` reads back through. Cells handed out raw therefore
 produce headers whose `meta()` dereferences uninitialised memory — the
 experiment segfaulted in `addInitializedWithSizeNoFail`'s first assertion,
 which is where it should fail.

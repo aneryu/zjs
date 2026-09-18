@@ -332,7 +332,7 @@ pub fn execDirectEval(
 }
 
 pub fn isContextIntrinsicEval(ctx: *core.JSContext, func: core.JSValue) bool {
-    return func.isObject() and func.same(ctx.eval_function);
+    return func.is(.object) and func.same(ctx.eval_function);
 }
 
 pub fn execApplyEval(

@@ -387,7 +387,7 @@ fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {
 
 pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
@@ -415,8 +415,8 @@ fn promiseCapabilityExecutorCall(rt: *core.JSRuntime, function_object: *core.Obj
     const slot = thisObject(slot_value) orelse return error.TypeError;
     const current_resolve = slot.promiseCapabilityResolve();
     const current_reject = slot.promiseCapabilityReject();
-    if ((current_resolve != null and !current_resolve.?.isUndefined()) or
-        (current_reject != null and !current_reject.?.isUndefined()))
+    if ((current_resolve != null and !current_resolve.?.is(.undefined_value)) or
+        (current_reject != null and !current_reject.?.is(.undefined_value)))
     {
         return error.TypeError;
     }
@@ -565,7 +565,7 @@ fn createPromiseCapability(
     promise_val = instance.value();
 
     const call_result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, promise_val, constructor_value, &.{executor_val});
-    if (call_result.isObject()) {
+    if (call_result.is(.object)) {
         const next_promise_val = call_result;
         promise_val = next_promise_val;
     }
@@ -638,7 +638,7 @@ pub fn getValuePropertyViaGlobalSlots(
         return switch (desc.kind) {
             .data => desc.value,
             .generic => core.JSValue.undefinedValue(),
-            .accessor => if (desc.getter.isUndefined())
+            .accessor => if (desc.getter.is(.undefined_value))
                 core.JSValue.undefinedValue()
             else blk: {
                 if (try activeGlobalObject(ctx.runtime, global, globals)) |active_global| {
@@ -970,7 +970,7 @@ pub fn callObjectStatic(
         const target_value = try objectStaticToObjectValue(ctx, global, args[0]);
         const target = try expectObjectArg(target_value);
         for (args[1..]) |source_arg| {
-            if (source_arg.isNull() or source_arg.isUndefined()) continue;
+            if (source_arg.is(.null_value) or source_arg.is(.undefined_value)) continue;
             const source_value = try objectStaticToObjectValue(ctx, global, source_arg);
             const source = try expectObjectArg(source_value);
             const keys = try source.ownKeys(rt);
@@ -986,13 +986,13 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.create)) {
         if (args.len < 1) return error.TypeError;
-        const proto: ?*core.Object = if (args[0].isNull())
+        const proto: ?*core.Object = if (args[0].is(.null_value))
             null
         else
             try expectObjectArg(args[0]);
         const object = try core.Object.create(rt, core.class.ids.object, proto);
         errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-        if (args.len >= 2 and !args[1].isUndefined()) {
+        if (args.len >= 2 and !args[1].is(.undefined_value)) {
             try definePropertiesFromObject(rt, object, args[1]);
         }
         return object.value();
@@ -1092,8 +1092,8 @@ pub fn callObjectStatic(
     }
     if (id == @intFromEnum(method_ids.object.StaticMethod.set_prototype_of)) {
         if (args.len < 2) return error.TypeError;
-        if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
-        const prototype: ?*core.Object = if (args[1].isNull())
+        if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
+        const prototype: ?*core.Object = if (args[1].is(.null_value))
             null
         else
             try expectObjectArg(args[1]);
@@ -1161,17 +1161,17 @@ pub fn callObjectStatic(
 
 fn objectStaticToObjectValue(ctx: *core.JSContext, global: ?*core.Object, value: core.JSValue) !core.JSValue {
     const rt = ctx.runtime;
-    if (value.isNull() or value.isUndefined()) return error.TypeError;
-    if (value.isObject()) return value;
+    if (value.is(.null_value) or value.is(.undefined_value)) return error.TypeError;
+    if (value.is(.object)) return value;
     const class_id: core.class.ClassId = if (value.isString())
         core.class.ids.string
     else if (value.isNumber())
         core.class.ids.number
-    else if (value.asBool() != null)
+    else if (value.as(.boolean) != null)
         core.class.ids.boolean
     else if (value.isBigInt())
         core.class.ids.big_int
-    else if (value.isSymbol())
+    else if (value.is(.symbol))
         core.class.ids.symbol
     else
         core.class.ids.object;
@@ -1194,7 +1194,7 @@ fn objectAssignGet(
         .data => desc.value,
         .generic => core.JSValue.undefinedValue(),
         .accessor => {
-            if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
+            if (desc.getter.is(.undefined_value)) return core.JSValue.undefinedValue();
             return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver, desc.getter, &.{});
         },
     };
@@ -1213,7 +1213,7 @@ fn objectAssignSet(
     if (try target.getOwnProperty(ctx.runtime, key)) |desc| {
         switch (desc.kind) {
             .accessor => {
-                if (desc.setter.isUndefined()) return error.TypeError;
+                if (desc.setter.is(.undefined_value)) return error.TypeError;
                 _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, target_value, desc.setter, &.{value});
                 return;
             },
@@ -1228,7 +1228,7 @@ fn objectAssignSet(
             if (try prototype.getOwnProperty(ctx.runtime, key)) |desc| {
                 switch (desc.kind) {
                     .accessor => {
-                        if (desc.setter.isUndefined()) return error.TypeError;
+                        if (desc.setter.is(.undefined_value)) return error.TypeError;
                         _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, target_value, desc.setter, &.{value});
                         return;
                     },
@@ -1305,13 +1305,13 @@ pub fn objectPrototypeMethodCall(
 }
 
 fn objectPrototypeToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
-    if (receiver.isUndefined()) return value_ops.createStringValue(rt, "[object Undefined]");
-    if (receiver.isNull()) return value_ops.createStringValue(rt, "[object Null]");
-    if (receiver.asBool() != null) return value_ops.createStringValue(rt, "[object Boolean]");
+    if (receiver.is(.undefined_value)) return value_ops.createStringValue(rt, "[object Undefined]");
+    if (receiver.is(.null_value)) return value_ops.createStringValue(rt, "[object Null]");
+    if (receiver.as(.boolean) != null) return value_ops.createStringValue(rt, "[object Boolean]");
     if (receiver.isNumber()) return value_ops.createStringValue(rt, "[object Number]");
     if (receiver.isString()) return value_ops.createStringValue(rt, "[object String]");
     if (receiver.isBigInt()) return value_ops.createStringValue(rt, "[object BigInt]");
-    if (receiver.isSymbol()) return value_ops.createStringValue(rt, "[object Symbol]");
+    if (receiver.is(.symbol)) return value_ops.createStringValue(rt, "[object Symbol]");
     return objectToString(rt, receiver);
 }
 
@@ -1913,7 +1913,7 @@ pub fn nativeFunctionNameForVmEquals(
 }
 
 pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    if (value.isFunctionBytecode()) {
+    if (value.is(.function_bytecode)) {
         const function_bytecode = functionBytecodeFromValue(value) orelse return error.TypeError;
         return functionBytecodeToStringValue(rt, function_bytecode, null);
     }
@@ -2119,7 +2119,7 @@ fn isNativeFunctionComputedPropertyName(name: []const u8) bool {
 }
 
 fn isFunctionToStringCallable(value: core.JSValue) bool {
-    if (value.isFunctionBytecode()) return true;
+    if (value.is(.function_bytecode)) return true;
     const object = thisObject(value) orelse return false;
     if (isFunctionClass(object.class_id)) return true;
     if (!object.isProxy() or object.proxyHandler() == null) return false;
@@ -2128,7 +2128,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
 }
 
 pub fn thisObject(value: core.JSValue) ?*core.Object {
-    if (!value.isObject()) return null;
+    if (!value.is(.object)) return null;
     const header = value.refHeader() orelse return null;
     return core.Object.fromHeader(header);
 }
@@ -2241,10 +2241,10 @@ fn createDOMExceptionValue(ctx: *core.JSContext, global: *core.Object, name: []c
     const rt = ctx.runtime;
     const ctor_key = core.atom.ids.DOMException;
     const ctor_value = try global.getProperty(ctor_key);
-    if (!ctor_value.isObject()) return try hostResult(exception_ops.createNamedError(ctx, global, name, message));
+    if (!ctor_value.is(.object)) return try hostResult(exception_ops.createNamedError(ctx, global, name, message));
     const proto_value = expectObjectArg(ctor_value) catch return try hostResult(exception_ops.createNamedError(ctx, global, name, message));
     const prototype_value = try proto_value.getProperty(core.atom.ids.prototype);
-    const prototype = if (prototype_value.isObject()) expectObjectArg(prototype_value) catch null else null;
+    const prototype = if (prototype_value.is(.object)) expectObjectArg(prototype_value) catch null else null;
     const message_value = try value_ops.createStringValue(rt, message);
     const name_value = try value_ops.createStringValue(rt, name);
     return construct_mod.constructDOMExceptionObject(rt, prototype, &.{ message_value, name_value });
@@ -2378,7 +2378,7 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
 fn optionalBoolProperty(object: *core.Object, key: core.Atom) !?bool {
     if (!object.hasProperty(key)) return null;
     const value = try object.getProperty(key);
-    return value.asBool() orelse false;
+    return value.as(.boolean) orelse false;
 }
 
 fn definePropertiesFromObject(rt: *core.JSRuntime, object: *core.Object, properties_value: core.JSValue) !void {
@@ -2387,7 +2387,7 @@ fn definePropertiesFromObject(rt: *core.JSRuntime, object: *core.Object, propert
     defer core.Object.freeKeys(rt, keys);
     for (keys) |key| {
         const desc_value = try properties.getProperty(key);
-        if (desc_value.isUndefined()) continue;
+        if (desc_value.is(.undefined_value)) continue;
         const desc_object = try expectObjectArg(desc_value);
         const desc = try descriptorFromObjectBare(desc_object);
         object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {

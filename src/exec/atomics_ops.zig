@@ -202,7 +202,7 @@ pub fn atomicsPause(
     _ = global;
     _ = caller_function;
     _ = caller_frame;
-    if (args.len >= 1 and !args[0].isUndefined()) {
+    if (args.len >= 1 and !args[0].is(.undefined_value)) {
         if (!args[0].isNumber()) return error.TypeError;
         const number = value_ops.numberValue(args[0]) orelse std.math.nan(f64);
         if (!std.math.isFinite(number) or @trunc(number) != number) return error.TypeError;
@@ -348,7 +348,7 @@ pub fn atomicsNotifyCount(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
-    if (args.len < 3 or args[2].isUndefined()) return std.math.maxInt(usize);
+    if (args.len < 3 or args[2].is(.undefined_value)) return std.math.maxInt(usize);
     const count_value = try toIntegerValueForAtomics(ctx, output, global, args[2], caller_function, caller_frame);
     const count_number = value_ops.numberValue(count_value) orelse return 0;
     if (std.math.isNan(count_number) or count_number <= 0) return 0;
@@ -693,7 +693,7 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
     try std.testing.expectEqual(memory_before, rt.memory.allocated_bytes);
     try std.testing.expect(waiter.linked);
     try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
-    try std.testing.expectEqual(@as(?i32, 73), waiter.promise.?.asInt32());
+    try std.testing.expectEqual(@as(?i32, 73), waiter.promise.?.as(.int));
     try std.testing.expectEqual(ctx, waiter.realm.borrow().?);
 
     cleanupAtomicsWaitersForContext(ctx);
@@ -774,6 +774,14 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     }
     rt.memory.trigger_gc_fn = Probe.trigger;
     rt.memory.trigger_gc_ctx = &probe;
+    // Fill the first 4-job window (320 bytes with 8-byte JSValue) so
+    // settlement growth is 8 jobs / 640 bytes and misses the small-object
+    // slab. A warm 320-class pop never reaches the backing allocator, so
+    // fail_index would not fire on an empty queue.
+    var filler: usize = 0;
+    while (filler < 4) : (filler += 1) {
+        try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(@intCast(filler)));
+    }
     // Fail in the backing allocator, after MemoryAccount has invoked the GC
     // trigger. A hard MemoryAccount limit is rejected before that trigger and
     // therefore cannot prove that the allocation site is outside the mutex.
@@ -790,6 +798,10 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     rt.memory.trigger_gc_fn = saved_trigger;
     rt.memory.trigger_gc_ctx = saved_trigger_context;
     try processExpiredAtomicsWaiters(ctx);
+    while (rt.job_queue.jobs.len > 1) {
+        var filler_job = rt.job_queue.takeFirst().?;
+        filler_job.deinit();
+    }
     waiter_live = false;
     try std.testing.expect(promise.promiseResult() == null);
     try std.testing.expect((try promise_ops.drainOnePendingJob(ctx, null, global)) == .success);
@@ -1337,4 +1349,35 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
 pub fn atomicsWaitAsyncPromise(rt: *core.JSRuntime, promise: *core.Object) bool {
     _ = rt;
     return promise.promiseAtomicsWaitAsync();
+}
+
+pub fn wakeAtomicsWaitersForRuntimes(primary: *core.JSRuntime, related: []const *core.JSRuntime) void {
+    const io = atomicsWaiterIo();
+    atomics_waiter_mutex.lockUncancelable(io);
+    defer atomics_waiter_mutex.unlock(io);
+
+    var cursor = atomics_waiters;
+    while (cursor) |waiter| {
+        if (waiter.realm.borrow()) |ctx| {
+            if (ctx.runtime == primary or runtimeListContains(related, ctx.runtime)) {
+                if (waiter.completion != .waiting) {
+                    cursor = waiter.next;
+                    continue;
+                }
+                // May be called by a foreign test262 agent/coordinator thread:
+                // publish only the mutex-protected scalar and signal. Promise,
+                // RealmRef, allocator, and JS heap remain owner-thread-only.
+                waiter.completion = .notified;
+                waiter.cond.broadcast(io);
+            }
+        }
+        cursor = waiter.next;
+    }
+}
+
+fn runtimeListContains(list: []const *core.JSRuntime, runtime: *core.JSRuntime) bool {
+    for (list) |candidate| {
+        if (candidate == runtime) return true;
+    }
+    return false;
 }

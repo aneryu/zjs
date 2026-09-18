@@ -78,7 +78,7 @@ pub const ConfigSettings = struct {
 /// from a literal.
 pub fn configSignature(b: *std.Build, settings: ConfigSettings) []const u8 {
     return b.fmt(
-        "zjs-config-v3:compiler={s},layout={s},repr=tagged,gc_layout=obj64_m,optimize={s},force_gc={s},ownership_audit={s}",
+        "zjs-config-v3:compiler={s},layout={s},repr=nan_boxed,gc_layout=obj64_m,optimize={s},force_gc={s},ownership_audit={s}",
         .{
             settings.compiler,
             settings.layout,

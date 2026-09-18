@@ -28,7 +28,7 @@ const property = @import("property.zig");
 const representation = @import("gc_representation_constants.zig");
 
 const Registry = gc.Registry;
-const GCObjectHeader = gc.GCObjectHeader;
+const Header = gc.Header;
 const GcKind = gc.GcKind;
 const InvariantError = gc.InvariantError;
 const CollectionError = gc.CollectionError;
@@ -168,7 +168,7 @@ pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
 /// block-cell sizing meet here without taxing the paths they protect.
 /// Condemned-by-this-cycle test that is valid for every population: the
 /// doomed bit for a block cell, the mark-epoch stamp for everything else.
-fn ownerCondemned(header: *const GCObjectHeader) bool {
+fn ownerCondemned(header: *const Header) bool {
     if (isBlockCellHeader(header)) {
         const block = BlockHeapMod.Block.fromCellTrusted(@intFromPtr(header) - metadata_prefix_size);
         const index = block.cellIndexInterior(@intFromPtr(header)) orelse return false;
@@ -232,7 +232,7 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
         // prefix, so the sweep would read a neighbouring allocation's
         // bytes as a header).
         if (owner.propertyStoragePointerIsExternal(storage)) {
-            const cell_header: *const GCObjectHeader = @ptrCast(@alignCast(storage));
+            const cell_header: *const Header = @ptrCast(@alignCast(storage));
             if (!self.containsHeader(cell_header)) return error.DanglingPropertyStorageCell;
             if (cell_header.metaConst().flags.kind != .property_storage)
                 return error.InvalidPropertyStorageKind;
@@ -241,7 +241,7 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) In
         // arm-derived predicate as the trace (Q21): a cell the arm names
         // must be published whether or not the owner is in dense mode.
         if (owner.denseArmNamesStorageCell()) {
-            const cell_header: *const GCObjectHeader =
+            const cell_header: *const Header =
                 @ptrCast(@alignCast(owner.arrayArm().*.values));
             if (!self.containsHeader(cell_header)) {
                 // Name the owner: the audit fires long after the write
@@ -373,7 +373,7 @@ pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
     var saw_young_head = false;
     const sentinel = &self.lists.objects.sentinel;
     var current = sentinel.next_non_object;
-    var previous: *GCObjectHeader = sentinel;
+    var previous: *Header = sentinel;
     while (current) |h| {
         if (h == sentinel) break;
         // The young set is exactly the suffix starting at
@@ -498,7 +498,7 @@ pub fn verifyConstructionRoots(self: *const Registry) InvariantError!void {
 
 fn verifyPublishedHeaderRepresentation(
     self: *const Registry,
-    header: *const GCObjectHeader,
+    header: *const Header,
     expected_kind: ?GcKind,
 ) InvariantError!void {
     const meta = header.metaConst();
@@ -585,7 +585,7 @@ pub fn verifyRepresentationInvariants(self: *const Registry) InvariantError!void
     }
     var remembered = self.generation.rememberedIterator();
     while (remembered.next()) |addr| {
-        const header: *GCObjectHeader = @ptrFromInt(addr.*);
+        const header: *Header = @ptrFromInt(addr.*);
         if (!self.address_registry.containsHeader(header))
             return error.RememberedOwnerNotLive;
         // map=1 => bit=1, the other direction. Widened with the cache
@@ -615,7 +615,7 @@ pub fn verifyGenerationInvariants(self: *Registry) InvariantError!void {
     // `Heap.young_extents`, which tolerates stale/duplicate bases.
     var extents = self.block_heap.extentKeys();
     while (extents.next()) |base| {
-        const header: *const GCObjectHeader = @ptrFromInt(base + metadata_prefix_size);
+        const header: *const Header = @ptrFromInt(base + metadata_prefix_size);
         if (header.metaConst().flags.young) {
             actual_young += 1;
             if (!kindIsOwnedStorageCell(header.metaConst().flags.kind)) actual_trigger += 1;
@@ -627,7 +627,7 @@ pub fn verifyGenerationInvariants(self: *Registry) InvariantError!void {
     if (actual_trigger != self.generation.stats.young_trigger_count) return error.YoungCountMismatch;
     var remembered = self.generation.remembered.keyIterator();
     while (remembered.next()) |addr| {
-        const header: *GCObjectHeader = @ptrFromInt(addr.*);
+        const header: *Header = @ptrFromInt(addr.*);
         if (!self.address_registry.containsHeader(header)) return error.RememberedOwnerNotLive;
         if (header.metaConst().flags.young) return error.RememberedOwnerYoung;
     }

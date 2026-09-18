@@ -674,7 +674,7 @@ fn runEmbeddedEngine(
     defer {
         event_loop.deinit();
         _ = cleanupTest262Agents(rt);
-        runtime_layer.cleanupAtomicsWaitersForContext(ctx);
+        test262_root.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
         ctx.destroy();
         rt.destroy();
     }
@@ -694,7 +694,7 @@ fn runEmbeddedEngine(
     var dynamic_import_scope = try test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     var value = (if (run_as_module)
-        runtime_layer.evalFileModuleGraphWithOutput(ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
+        test262_root.exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx.core, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
         ctx.eval(source, .{
             .mode = .script,
@@ -723,7 +723,7 @@ fn runEmbeddedEngine(
         break :failed zjs.JSValue.exception();
     };
 
-    if (!value.isException()) {
+    if (!value.is(.exception)) {
         try dynamic_import_state.runJobs(ctx.core);
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
@@ -735,7 +735,7 @@ fn runEmbeddedEngine(
             return false;
         }
     }
-    return !value.isException();
+    return !value.is(.exception);
 }
 
 /// Mirrors the reference runner's async-test oracle: run-test262.c js_print
@@ -762,7 +762,7 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
     if (!ctx.hasException()) return null;
     const thrown = ctx.takePendingException();
 
-    if (thrown.isObject()) {
+    if (thrown.is(.object)) {
         var owned_name: ?[]u8 = null;
         defer if (owned_name) |name| rt.memory.allocator.free(name);
 

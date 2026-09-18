@@ -288,7 +288,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`fn canonicalizeKey(key: core.JSValue) core.JSValue`。
 - **作用**：集合键的 -0 归一。
-- **实现**：`key.asFloat64()` 拿到数值且等于 0（+0 与 -0 都满足）时返回 `core.JSValue.int32(0)`，其余原样返回。
+- **实现**：`key.as(.float64)` 拿到数值且等于 0（+0 与 -0 都满足）时返回 `core.JSValue.int32(0)`，其余原样返回。
 - **所有权 / 错误 / 调用**：纯值变换；`canonicalizeMapKey` 是 VM 路径上的同实现副本。
 
 ### `collectionHas` (`src/exec/collection_ops.zig:933`)
@@ -365,7 +365,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`fn setLikeSize(object: *core.Object) !usize`。
 - **作用**：读 set-like 参数的元素个数。
-- **实现**：原生 `set` / `map` 直接用内部的 `strongSize`；否则读可观察的 `size` 属性，必须是 int32（`asInt32()` 失败 → `error.TypeError`）且非负，否则 `error.TypeError`。
+- **实现**：原生 `set` / `map` 直接用内部的 `strongSize`；否则读可观察的 `size` 属性，必须是 int32（`as(.int)` 失败 → `error.TypeError`）且非负，否则 `error.TypeError`。
 - **所有权 / 错误 / 调用**：读属性可能触发 getter；不分配。
 
 ### `validateSetLikeMethods` (`src/exec/collection_ops.zig:1174`)
@@ -379,7 +379,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, host: CallbackHost) !bool`。
 - **作用**：对 set-like 参数问一次 `has`。
-- **实现**：原生 `set` / `map` 走内部 `collectionHas`，结果 `asBool() orelse false`。否则**每次**重新读 `has` 属性并再校验一遍 `isCallableClosure`（不是就 `error.TypeError`），然后 `host.callWithThis(has_value, object.value(), &.{key})`，返回值同样 `asBool() orelse false`。
+- **实现**：原生 `set` / `map` 走内部 `collectionHas`，结果 `as(.boolean) orelse false`。否则**每次**重新读 `has` 属性并再校验一遍 `isCallableClosure`（不是就 `error.TypeError`），然后 `host.callWithThis(has_value, object.value(), &.{key})`，返回值同样 `as(.boolean) orelse false`。
 - **所有权 / 错误 / 调用**：回调经 `host` 发出；不分配。
 
 ### `setLikeKeys` (`src/exec/collection_ops.zig:1200`)
@@ -680,7 +680,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`fn canonicalizeMapKey(key: core.JSValue) core.JSValue`。
 - **作用**：VM 路径上的键 -0 归一。
-- **实现**：与 `canonicalizeKey` 完全同构：`asFloat64()` 为 0 时返回 `int32(0)`，否则原样返回。
+- **实现**：与 `canonicalizeKey` 完全同构：`as(.float64)` 为 0 时返回 `int32(0)`，否则原样返回。
 - **所有权 / 错误 / 调用**：只被 `mapGetOrInsertComputedCall` 使用。
 
 ### `throwCollectionReceiverTypeError` (`src/exec/collection_ops.zig:2243`)
@@ -838,7 +838,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`pub fn reflectIsExtensibleCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：`Reflect.isExtensible(target)`：只是在 `Object.isExtensible` 之上加了「必须是对象」的前置校验。
-- **实现**：无实参 → `error.TypeError`；`!args[0].isObject()` → `error.TypeError`（这正是 `Reflect.isExtensible` 与对原始值返回 `false` 的 `Object.isExtensible` 的差别）；其余全部转发 `object_ops.objectIsExtensibleCall`，由它处理 proxy trap。
+- **实现**：无实参 → `error.TypeError`；`!args[0].is(.object)` → `error.TypeError`（这正是 `Reflect.isExtensible` 与对原始值返回 `false` 的 `Object.isExtensible` 的差别）；其余全部转发 `object_ops.objectIsExtensibleCall`，由它处理 proxy trap。
 - **所有权 / 错误 / 调用**：不分配；调用方是 `reflectCallForNativeRecord` 的 `is_extensible` 臂。
 
 ### `reflectPreventExtensionsCall` (`src/exec/reflect_ops.zig:453`)

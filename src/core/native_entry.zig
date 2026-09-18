@@ -1,7 +1,7 @@
 //! NativeEntry: the single native-function kind of the NB2 boundary
 //! (docs/perf/native-boundary-design.md §3.1, §4). Builtins, host functions,
-//! plugin functions and native accessors all resolve to one immutable entry;
-//! steady-state dispatch never branches on where the entry came from.
+//! and native accessors all resolve to one immutable entry; steady-state
+//! dispatch never branches on where the entry came from.
 //!
 //! Layout is `extern` and offset-pinned because the entry is the direct input
 //! of the interpreter's native arms today and of machine code tomorrow (§15
@@ -142,7 +142,7 @@ pub const NativeEntry = extern struct {
     /// @0 Native code pointer; typed by `kind` (+ `sig` for leaf kinds).
     target: CodePtr,
     /// @8 Leaf tag-check failure fallback (builtin ToNumber semantics);
-    /// null = throw TypeError/RangeError at the VM side (plugin policy).
+    /// null = throw TypeError/RangeError at the VM side.
     fallback: ?ManagedFn = null,
     /// @16 Stateful entries; null for builtins.
     state: ?*anyopaque = null,
@@ -150,8 +150,8 @@ pub const NativeEntry = extern struct {
     kind: Kind,
     /// @25
     flags: Flags = .{},
-    /// @26 Leaf signature id (FNABI schema); 0 for managed kinds.
-    sig: u16 = 0,
+    /// @26 Leaf signature; `.none` for managed kinds.
+    sig: LeafSig = .none,
     /// @28 JS `length`; also the argv padding upper bound.
     arity: u8 = 0,
     /// @29
@@ -164,7 +164,7 @@ pub const NativeEntry = extern struct {
     builtin_id: u16 = 0,
     /// @36 Name atom for backtraces / diagnostics (null_atom = anonymous).
     name: atom.Atom = atom.null_atom,
-    /// @40 Cold provenance (FNABI §10.3); arms never read it.
+    /// @40 Cold provenance; arms never read it.
     owner: ?*anyopaque = null,
 
     pub inline fn managed(self: *const NativeEntry) ManagedFn {
@@ -177,16 +177,16 @@ pub const NativeEntry = extern struct {
         return @ptrCast(self.target);
     }
 
-    /// K3 managed prototype. A typed accessor (`sig != 0`, the `SELF_*`
+    /// K3 managed prototype. A typed accessor (`sig != .none`, the `self_*`
     /// leaf prototypes of §4.4) is dispatched by the VM-side typed arm
     /// instead and never through this cast.
     pub inline fn getter(self: *const NativeEntry) GetterFn {
-        std.debug.assert(self.kind == .getter and self.sig == 0);
+        std.debug.assert(self.kind == .getter and self.sig == .none);
         return @ptrCast(self.target);
     }
 
     pub inline fn setter(self: *const NativeEntry) SetterFn {
-        std.debug.assert(self.kind == .setter and self.sig == 0);
+        std.debug.assert(self.kind == .setter and self.sig == .none);
         return @ptrCast(self.target);
     }
 
@@ -278,3 +278,28 @@ test "managed target round-trips through the erased code pointer" {
     const f = entry.managed();
     try std.testing.expect(@intFromPtr(f) == @intFromPtr(&testManaged));
 }
+
+/// Private leaf-call discriminant. `.none` for managed kinds; any other
+/// variant selects the C prototype and marshal arm in `builtin_dispatch`.
+/// Not a public ABI: numbers may be renumbered.
+pub const LeafSig = enum(u16) {
+    none = 0,
+    void_to_void,
+    i32_to_i32,
+    i32_i32_to_i32,
+    f64_to_f64,
+    f64_f64_to_f64,
+    f64_to_void,
+    bool_to_bool,
+    state_f64_to_void,
+    state_i32_to_i32,
+    string_i32_to_i32,
+    string_i32_to_string,
+    self_to_f64,
+    self_f64_to_void,
+    self_f64_f64_to_void,
+    self_i32_to_i32,
+    self_to_i32,
+    self_i32_to_void,
+    self_to_void,
+};

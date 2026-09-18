@@ -1,5 +1,10 @@
 # Fun Native Plugin 技术设计
 
+**状态（2026-09-18）：历史设计稿。** zjs 已撤回公开 FNABI：`src/abi/`、
+生成头、`sdk.zig`、`native_call_plan.zig` 与 `abi_layout` 均已删除。叶分
+发改用引擎私有 `LeafSig`（`src/core/native_entry.zig`）。下文冻结面、C 头
+与签名 id 表不再描述当前树。
+
 版本：0.9（**NB2 修订**,2026-09-07:边界重设计取代 §14/§17/§18 的调用模型与 §28.1 的 plugin ABI,见 §0 0.9 条;0.8:FN-M0F FNABI v1 冻结,2026-08-26 owner 批复;0.7:M0D 六项裁决闭合;0.6:side-by-side 移 post-v1、finalizer 方案 B）<br>
 日期：2026-08-26  
 状态：**FNABI v1 FROZEN(2026-08-26)**。冻结面=`src/abi/fun_native_abi.zig`

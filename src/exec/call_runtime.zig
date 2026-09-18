@@ -268,8 +268,8 @@ pub fn coerceCallThis(
     boxed_out: *?core.JSValue,
 ) HostError!core.JSValue {
     if (runtime_strict) return this_value;
-    if (this_value.isUndefined() or this_value.isNull()) return global.value();
-    if (!this_value.isObject()) {
+    if (this_value.is(.undefined_value) or this_value.is(.null_value)) return global.value();
+    if (!this_value.is(.object)) {
         const boxed = try object_ops.primitiveObjectForAccess(ctx.runtime, global, this_value);
         boxed_out.* = boxed;
         return boxed;
@@ -1028,7 +1028,7 @@ pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
     caller_frame: ?*frame_mod.Frame,
     copy_argv: bool,
 ) HostError!core.JSValue {
-    if (func.isFunctionBytecode()) {
+    if (func.is(.function_bytecode)) {
         return callRawFunctionBytecode(ctx, output, global, this_value, func, args, copy_argv);
     }
     if (object_ops.objectFromValue(func)) |object| {
@@ -1623,7 +1623,7 @@ pub fn functionApplyCall(
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const arg_array = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     // qjs:41224: undefined/null array_arg calls the target with no arguments.
-    if (arg_array.isNull() or arg_array.isUndefined()) {
+    if (arg_array.is(.null_value) or arg_array.is(.undefined_value)) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
     }
     return functionApplyArrayLike(
@@ -1662,7 +1662,7 @@ noinline fn functionApplyArrayLike(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     // qjs build_arg_list (qjs:41167) rejects non-object argument lists.
-    if (!arg_array.isObject()) return throwApplyTypeError(ctx, global, "not a object");
+    if (!arg_array.is(.object)) return throwApplyTypeError(ctx, global, "not a object");
     var owned_args = try array_ops.ownedArgsFromArrayLike(
         ctx,
         output,
@@ -2139,7 +2139,7 @@ fn constructOrdinaryBytecodeFunctionObject(
     const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
     defer noteConstructorAllocation(fb, instance);
     const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
-    if (result.isObject()) {
+    if (result.is(.object)) {
         return result;
     }
     return instance;
@@ -2364,7 +2364,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
         }
         if (function_object.class_id == core.class.ids.c_function and !isBuiltinConstructorName(name)) return error.TypeError;
     }
-    if (func.isFunctionBytecode()) {
+    if (func.is(.function_bytecode)) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
         if (!isConstructibleFunctionBytecode(fb)) return error.TypeError;
         // qjs JS_CallConstructorInternal (quickjs.c:20837): a DERIVED class ctor
@@ -2377,7 +2377,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
         }
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
         const result = try callFunctionBytecodeConstruct(ctx, func, func, instance, args, &.{}, output, global, new_target, copy_argv);
-        if (result.isObject()) {
+        if (result.is(.object)) {
             return result;
         }
         return instance;
@@ -2399,7 +2399,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
     // QuickJS JS_CallInternal rejects non-object call targets before the
     // constructor-only object checks. This is the path used by a live
     // `super()` after the derived constructor's [[Prototype]] becomes null.
-    if (!func.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
+    if (!func.is(.object)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     return construct_mod.constructValue(ctx, func, args, &.{});
 }
 
@@ -2418,7 +2418,7 @@ fn constructExternalHostFunction(
 
     const entry = function_object.nativeEntry() orelse return error.TypeError;
     const result = try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, instance, entry, args, caller_function, caller_frame);
-    if (result.isObject()) {
+    if (result.is(.object)) {
         return result;
     }
     return instance;
@@ -2446,7 +2446,7 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-    try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
+    try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 }
 
 test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
@@ -2737,7 +2737,7 @@ pub fn collectIteratorValues(
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        if (done.asBool() == true) break;
+        if (done.as(.boolean) == true) break;
         const item = object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
@@ -2795,7 +2795,7 @@ pub fn appendIteratorValues(
         }
         break :blk try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     };
-    if (!iterator_value.isObject()) return error.TypeError;
+    if (!iterator_value.is(.object)) return error.TypeError;
     var index = start_index;
     while (true) {
         const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
@@ -2924,7 +2924,7 @@ pub fn appendSpreadValuesEnumerate(
 }
 
 pub fn isCallableValue(value: core.JSValue) bool {
-    if (value.isFunctionBytecode()) return true;
+    if (value.is(.function_bytecode)) return true;
     const object = object_ops.objectFromValue(value) orelse return false;
     return isFunctionLikeClass(object.class_id) or
         object_ops.proxyTargetIsCallableObject(object);
@@ -3311,7 +3311,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
         switch (env.propKindAt(index)) {
             .data => {
                 const stored = &env.propertyEntry(index).*.slot.data;
-                if (!stored.isUninitialized()) return false;
+                if (!stored.is(.uninitialized)) return false;
                 const next = value;
                 stored.* = next;
                 // Initialising a binding in a long-lived environment object is
@@ -3321,7 +3321,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
             },
             .var_ref => {
                 const cell = env.propertyEntry(index).*.slot.var_ref;
-                if (!cell.varRefValue().isUninitialized()) return false;
+                if (!cell.varRefValue().is(.uninitialized)) return false;
                 cell.setVarRefValue(rt, value);
                 return true;
             },
@@ -3812,7 +3812,7 @@ pub fn generatorNext(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!receiver.isObject()) return null;
+    if (!receiver.is(.object)) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
@@ -3830,7 +3830,7 @@ pub fn generatorNext(
     }
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
-    const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+    const current_function_value = if (execution.current_function.is(.undefined_value)) receiver else execution.current_function;
     const resume_value = if (execution.suspended.pc != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
     payload.executing = true;
     defer payload.executing = false;
@@ -3867,7 +3867,7 @@ pub const GeneratorValueDone = struct {
 
 inline fn generatorFunctionBytecodeFromExecution(object: *core.Object, execution: *const core.object.GeneratorExecutionState) ?core.JSValue {
     const current = execution.current_function;
-    if (current.isFunctionBytecode()) return current;
+    if (current.is(.function_bytecode)) return current;
     const current_object = object_ops.objectFromValue(current) orelse return null;
     if (current_object == object) return null;
     return current_object.functionBytecode();
@@ -3876,7 +3876,7 @@ inline fn generatorFunctionBytecodeFromExecution(object: *core.Object, execution
 inline fn generatorHasYieldStarResult(payload: *const core.object.GeneratorPayload) bool {
     if (payload.yield_star_suspended) return true;
     const execution = payload.execution orelse return false;
-    return !execution.yield_star_iterator.isUndefined();
+    return !execution.yield_star_iterator.is(.undefined_value);
 }
 
 /// Resume a SYNC generator one step and return (value, done) WITHOUT allocating the
@@ -3895,7 +3895,7 @@ pub fn syncGeneratorStep(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?GeneratorValueDone {
-    if (!receiver.isObject()) return null;
+    if (!receiver.is(.object)) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator) return null; // sync generators only
     const payload = object.generatorPayloadPtr();
@@ -3904,7 +3904,7 @@ pub fn syncGeneratorStep(
     if (payload.done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
-    const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+    const current_function_value = if (execution.current_function.is(.undefined_value)) receiver else execution.current_function;
     const resume_value = if (execution.suspended.pc != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
     payload.executing = true;
     defer payload.executing = false;
@@ -4005,7 +4005,7 @@ pub fn generatorReturn(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!receiver.isObject()) return null;
+    if (!receiver.is(.object)) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
@@ -4038,7 +4038,7 @@ pub fn generatorReturn(
     if (object.generatorPc() != 0 and payload.started) {
         const execution = payload.execution orelse return error.TypeError;
         const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
-        const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+        const current_function_value = if (execution.current_function.is(.undefined_value)) receiver else execution.current_function;
         payload.resume_completion_type = 1;
         payload.executing = true;
         defer payload.executing = false;
@@ -4131,7 +4131,7 @@ pub fn generatorYieldStarReturnStep(
     const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
 
-    if (return_method.isUndefined() or return_method.isNull()) {
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
         generator.clearGeneratorYieldStarIterator(ctx.runtime);
         return .{ .complete = return_arg };
     }
@@ -4166,7 +4166,7 @@ pub fn generatorYieldStarThrowStep(
     const throw_key = core.atom.ids.throw;
     const throw_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, throw_key, null, null);
 
-    if (throw_method.isUndefined() or throw_method.isNull()) {
+    if (throw_method.is(.undefined_value) or throw_method.is(.null_value)) {
         try generatorYieldStarCloseForMissingThrow(ctx, output, global, iterator_value);
         generator.clearGeneratorYieldStarIterator(ctx.runtime);
         return error.TypeError;
@@ -4199,7 +4199,7 @@ pub fn generatorYieldStarCloseForMissingThrow(
 ) !void {
     const return_key = core.atom.ids.return_;
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    if (return_method.isUndefined() or return_method.isNull()) return;
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     _ = property_ops.expectObject(result) catch return error.TypeError;
@@ -4300,7 +4300,7 @@ pub fn generatorThrow(
 }
 
 pub fn generatorCatchResumeResultValue(result: core.JSValue) core.JSValue {
-    return if (result.isCatchOffset()) core.JSValue.undefinedValue() else result;
+    return if (result.is(.catch_offset)) core.JSValue.undefinedValue() else result;
 }
 
 pub fn generatorPcAfterYieldStar(fb: *const bytecode.FunctionBytecode, pc: usize) ?usize {
@@ -4482,7 +4482,7 @@ pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
 }
 
 pub fn functionBytecodeFromValue(value: core.JSValue) ?*const bytecode.FunctionBytecode {
-    const header = value.objectHeader() orelse return null;
+    const header = value.functionBytecodeHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
@@ -4555,7 +4555,7 @@ test "four-class bytecode constructability follows class and function flags" {
 }
 
 pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool {
-    if (value.isFunctionBytecode()) {
+    if (value.is(.function_bytecode)) {
         const fb = functionBytecodeFromValue(value) orelse return false;
         return isConstructibleFunctionBytecode(fb);
     }
@@ -4777,7 +4777,7 @@ pub fn definePropertiesOnTarget(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    if (properties_arg.isNull() or properties_arg.isUndefined()) return error.TypeError;
+    if (properties_arg.is(.null_value) or properties_arg.is(.undefined_value)) return error.TypeError;
     const properties_value = if (object_ops.objectFromValue(properties_arg)) |_| properties_arg else try object_ops.primitiveObjectForAccess(ctx.runtime, global, properties_arg);
     const properties = object_ops.objectFromValue(properties_value) orelse return error.TypeError;
 
@@ -4853,7 +4853,7 @@ pub fn callAccessorSetter(
 ) !bool {
     if (try object_ops.findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
         if (desc.kind != .accessor) return false;
-        if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
+        if (desc.setter.is(.undefined_value)) return error.AccessorWithoutSetter;
         // K3 native setter: direct native terminal (design §8.2).
         if (builtin_dispatch.tryNativeAccessorCall(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame, .setter)) |native_result| {
             _ = try native_result;
@@ -4961,7 +4961,7 @@ pub fn instanceofValueWithMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    if (!has_instance.isUndefined() and !has_instance.isNull()) {
+    if (!has_instance.is(.undefined_value) and !has_instance.is(.null_value)) {
         const result = try callValueOrBytecodeRoot(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         return coercion_ops.valueTruthy(result);
     }
@@ -4969,12 +4969,12 @@ pub fn instanceofValueWithMethod(
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     }
-    if (!lhs.isObject()) {
+    if (!lhs.is(.object)) {
         return false;
     }
     const object = try property_ops.expectObject(lhs);
     const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
-    if (!proto_value.isObject()) {
+    if (!proto_value.is(.object)) {
         return error.TypeError;
     }
     const proto = try property_ops.expectObject(proto_value);
@@ -5020,7 +5020,7 @@ pub fn isBlockedByUnscopables(
 ) !bool {
     const unscopables_atom = core.atom.predefinedId("Symbol.unscopables", .symbol) orelse return false;
     const unscopables = try object_ops.getValueProperty(ctx, output, global, object_value, unscopables_atom, caller_function, caller_frame);
-    if (!unscopables.isObject()) return false;
+    if (!unscopables.is(.object)) return false;
     const blocked = try object_ops.getValueProperty(ctx, output, global, unscopables, atom_id, caller_function, caller_frame);
     return coercion_ops.valueTruthy(blocked);
 }
@@ -5043,7 +5043,7 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
         // parked global/eval placeholder (including an alias of a deleted eval
         // binding), so the name lookup must continue to the next environment.
         // Lexical cells remain visible so the caller can report their TDZ.
-        if (!function.varRefIsLexicalAt(idx) and value.isUninitialized()) {
+        if (!function.varRefIsLexicalAt(idx) and value.is(.uninitialized)) {
             continue;
         }
         return value;
