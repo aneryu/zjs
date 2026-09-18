@@ -1254,7 +1254,7 @@ fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, val
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(rooted_value, true, true, true));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(rooted_value, true, true, true));
 }
 
 fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
@@ -1266,7 +1266,7 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
     const units: [1]u16 = .{unit};
     const string = try core.string.String.createUtf16(rt, &units);
     const value = string.value();
-    try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, false, true, false));
 }
 
 fn trimStartAscii(bytes: []const u8) []const u8 {
@@ -1988,15 +1988,15 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     const separator = try createStringValue(rt, "b");
     const split_value = try splitReceiver(rt, text, &.{separator});
     const split_object = try expectObject(split_value);
-    const split_first = try split_object.getProperty(core.atom.atomFromUInt32(0));
-    const split_second = try split_object.getProperty(core.atom.atomFromUInt32(1));
+    const split_first = try split_object.getProperty(core.Atom.taggedInt(0));
+    const split_second = try split_object.getProperty(core.Atom.taggedInt(1));
     try std.testing.expect((stringValueFromReceiver(split_first) orelse return error.TypeError).eqlBytes("a"));
     try std.testing.expect((stringValueFromReceiver(split_second) orelse return error.TypeError).eqlBytes("a"));
 
     const needle = try createStringValue(rt, "ba");
     const match_value = try match(rt, "ababa", &.{needle});
     const match_object = try expectObject(match_value);
-    const match_item = try match_object.getProperty(core.atom.atomFromUInt32(0));
+    const match_item = try match_object.getProperty(core.Atom.taggedInt(0));
     try std.testing.expect((stringValueFromReceiver(match_item) orelse return error.TypeError).eqlBytes("ba"));
     const input_key = try rt.internAtom("input");
     const input_value = try match_object.getProperty(input_key);

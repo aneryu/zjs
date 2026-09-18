@@ -112,7 +112,6 @@ pub const ResolvedProduct = struct {
 
 /// Geometric grow walk is the already-linked `builder.reserve` /
 /// `reserveSlowBytes` body. This pass still owns its output slices.
-
 const TempInstruction = cfg.TempInstruction;
 // Sequential walks have the exact atom-ledger cursor for their current pc and
 // enforce the QuickJS phase-1 opcode view. Random-access pattern probes compare
@@ -529,7 +528,7 @@ const Resolver = struct {
         if (out_idx != accessor_size or out_idx + probe_size > output.len)
             return error.InvalidBytecode;
         output[out_idx] = op.dyn_env_probe;
-        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id.raw(), .little);
         std.mem.writeInt(u32, output[out_idx + 5 ..][0..4], label_done, .little);
         output[out_idx + 9] = (opcode.dyn_env.Flags{
             .kind = kind,
@@ -837,7 +836,7 @@ const Resolver = struct {
         // byte through phase 2; `resolve_labels` writes the real index.
         var bytes: [6]u8 = undefined;
         bytes[0] = op_id;
-        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
+        std.mem.writeInt(u32, bytes[1..5], atom_id.raw(), .little);
         if (opcode.carriesPropCacheIdx(op_id)) {
             bytes[5] = bytecode.PropSiteCache.no_cache_idx;
             try self.emitInstruction(&bytes, atom_id);
@@ -1071,7 +1070,7 @@ const Resolver = struct {
             return error.BytecodeOverflow;
         if (atom_id) |expected_atom| {
             if (bytes.len < 5 or
-                std.mem.readInt(u32, bytes[1..5], .little) != expected_atom)
+                std.mem.readInt(u32, bytes[1..5], .little) != expected_atom.raw())
             {
                 return error.InvalidBytecode;
             }
@@ -2083,7 +2082,7 @@ const Resolver = struct {
                         // instruction carries the placeholder index byte.
                         var rewritten: [6]u8 = undefined;
                         rewritten[0] = op.get_field;
-                        std.mem.writeInt(u32, rewritten[1..5], input_atom.?, .little);
+                        std.mem.writeInt(u32, rewritten[1..5], input_atom.?.raw(), .little);
                         rewritten[5] = bytecode.PropSiteCache.no_cache_idx;
                         try self.emitInstruction(&rewritten, input_atom);
                     } else {
@@ -2424,7 +2423,7 @@ fn markReachableEvalCaptures(
             if (atom_index >= atom_ledger.len or instruction.size < 5)
                 return error.InvalidBytecode;
             const encoded_atom = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (encoded_atom != atom_ledger[atom_index])
+            if (encoded_atom != atom_ledger[atom_index].raw())
                 return error.InvalidBytecode;
             atom_index += 1;
         }
@@ -2994,7 +2993,7 @@ test "compiler.resolve_variables: set_name null drops and named atom copies" {
     try input.emitAtomOpOwned(op.set_name, named);
 
     var expected = [_]u8{ op.set_name, 0, 0, 0, 0 };
-    std.mem.writeInt(u32, expected[1..5], named, .little);
+    std.mem.writeInt(u32, expected[1..5], named.raw(), .little);
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
@@ -3022,7 +3021,7 @@ test "compiler.resolve_variables: erased temp ops and optional-chain rewrites" {
     // trailing `cache_idx` is the phase-2 placeholder (resolve_labels
     // assigns the real index).
     var expected = [_]u8{ op.get_field, 0, 0, 0, 0, bytecode.PropSiteCache.no_cache_idx, op.get_array_el };
-    std.mem.writeInt(u32, expected[1..5], field, .little);
+    std.mem.writeInt(u32, expected[1..5], field.raw(), .little);
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
@@ -3292,7 +3291,7 @@ test "compiler.resolve_variables: const scope_put_var throw matches the pinned Q
     try std.testing.expectEqual(op.throw_error, product.code[0]);
     try std.testing.expectEqual(@as(u32, 1), product.atom_len);
     var expected_code = [_]u8{ op.throw_error, 0, 0, 0, 0, 0, op.return_undef };
-    std.mem.writeInt(u32, expected_code[1..5], constant, .little);
+    std.mem.writeInt(u32, expected_code[1..5], constant.raw(), .little);
     try expectProductCode(&product, &expected_code);
     try std.testing.expectEqualSlices(
         core.atom.Atom,
@@ -3533,7 +3532,7 @@ test "compiler.resolve_variables: dynamic environment probe uses product label" 
     try std.testing.expectEqual(op.get_loc0, product.code[0]);
     try std.testing.expectEqual(op.dyn_env_probe, product.code[1]);
     try std.testing.expectEqual(
-        dynamic_name,
+        dynamic_name.raw(),
         std.mem.readInt(u32, product.code[2..6], .little),
     );
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, product.code[6..10], .little));
@@ -3578,7 +3577,7 @@ test "compiler.resolve_variables: scope delete and get_ref match the pinned Quic
         op.delete_var, 0,          0, 0, 0,
         op.undefined,  op.get_var, 0, 0, op.return_undef,
     };
-    std.mem.writeInt(u32, expected_code[1..5], global, .little);
+    std.mem.writeInt(u32, expected_code[1..5], global.raw(), .little);
     try expectProductCode(&product, &expected_code);
     try std.testing.expectEqualSlices(
         core.atom.Atom,
@@ -3641,10 +3640,10 @@ test "compiler.resolve_variables: direct eval redeclaration prefix matches the p
     var product = try harness.resolve();
     defer product.deinitUncommitted();
     try std.testing.expectEqual(op.throw_error, product.code[0]);
-    try std.testing.expectEqual(redeclared, std.mem.readInt(u32, product.code[1..5], .little));
+    try std.testing.expectEqual(redeclared.raw(), std.mem.readInt(u32, product.code[1..5], .little));
     try std.testing.expectEqual(op.return_undef, product.code[6]);
     var expected_code = [_]u8{ op.throw_error, 0, 0, 0, 0, 1, op.return_undef };
-    std.mem.writeInt(u32, expected_code[1..5], redeclared, .little);
+    std.mem.writeInt(u32, expected_code[1..5], redeclared.raw(), .little);
     try expectProductCode(&product, &expected_code);
     try std.testing.expectEqualSlices(
         core.atom.Atom,

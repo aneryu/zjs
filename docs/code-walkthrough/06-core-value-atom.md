@@ -4,11 +4,11 @@
 
 ## 类型与表驱动数据
 
-`Atom = u32`。`null_atom=0`。`tagged_int_bit = 1<<31`。`max_int_atom = tagged_int_bit-1`。`max_array_index = 0xfffffffe`。
+`Atom` 是非穷尽 `enum(u32)`：`.empty = 0`，其余 id 走 `fromRaw` / `_`。句柄仍是 4 字节。`null_atom = .empty`。`tagged_int_bit` / `max_int_atom` 是 `u32` 掩码，不是句柄。方法：`raw` / `fromRaw`、`isConst`、`isTaggedInt`、`taggedInt`、`toUInt32`。`max_array_index = 0xfffffffe`。
 
 `AtomKind = enum { string, symbol, global_symbol, private }`。
 
-`PredefinedAtom { id, name, kind=.string }`。`ids` 把关键字、well-known symbols、内建名字钉成 comptime 常量。`predefined_atoms` 长度 692（comptime assert `predefined_count==692`），id 按 1..692 连续排列：676 个 string、15 个 symbol（217..231）及 1 个 private（216，`<brand>`），无 global_symbol。`first_dynamic_atom = 693`；`last_keyword=46`（await）、`last_strict_keyword=45`（yield）。各 zjs_last_* 是分组末项的别名，不是额外条目。
+`PredefinedAtom { id, name, kind=.string }`。`predefined_spec` 是唯一表：`predefined_atoms` 的 id 是 1-based 下标，`ids` 由同一张表 `@Struct` 生成（Zig 关键字、typeof 别名、pseudo-binding、`zjs_last_*` 分组末项另有别名）。长度 692（comptime assert `predefined_count==692`），id 按 1..692 连续排列：676 个 string、15 个 symbol（217..231）及 1 个 private（216，`<brand>`），无 global_symbol。`first_dynamic_atom = 693`；`last_keyword=46`（await）、`last_strict_keyword=45`（yield）。各 zjs_last_* 是分组末项的别名，不是额外条目。
 
 `predefinedId` 的预定义字符串查找走 2048 槽 Wyhash 开地址表 `predefined_string_hash_table`（seed 0）；symbol/private 走 `StaticStringMap`。动态与预定义字符串共用 qjs 链式 `atom_hash`：`hash_string8`（`h = h*%263 +% c`，seed=atom type），32 位拼写哈希存在条目里，链走 `hash_next`。unique symbol / private 不入链（qjs `JS_ATOM_TYPE_SYMBOL` 不进 `atom_hash`，quickjs.c:3316）。
 
@@ -16,7 +16,7 @@
 
 `AtomTable`：entries 几何增长（长度包含已分配但空闲的槽，不是存活数）、free-slot LIFO、可选 ownership-audit 隔离区、`predefined_str` 缓存、`compile_scope`、`young_symbol_atoms`（minor 额外根）、审计计数。源文件顶部及部分字段仍有 refcount/free 的历史注释；当前 DynamicAtom 无 ref_count，不能据此要求每个 intern 结果做 RC 释放。
 
-`CompileAtomScope`：编译期 plain-u32 atom 字段的区间记录，持有 rt/table/allocator、ids、prev、active/registered 及 64 槽 direct-mapped `recent`。只有 activate 在相关配置开启且有 runtime 时注册 provider；过滤冲突可重复记录，不会把不同 id 当成命中。
+`CompileAtomScope`：编译期 `Atom` 字段的区间记录，持有 rt/table/allocator、ids、prev、active/registered 及 64 槽 direct-mapped `recent`。只有 activate 在相关配置开启且有 runtime 时注册 provider；过滤冲突可重复记录，不会把不同 id 当成命中。
 
 `ownership_audit_enabled` 直接来自构建选项 `-Dzjs_ownership_audit`。`OwnershipAuditState` 开启时只有 quarantined_head，关闭时为空结构；槽仍可在后续 sweep 复用，这不是全程禁止复用或防止所有陈旧 id 误用的保证。`EntryIndex=u32`，`no_free_slot=maxInt(u32)`；桶计数只统计入链项，初始 1024 桶、阈值 2048。`EdgeMode` 的 stamp/observe 分别控制是否改 epoch 和审计计数。
 

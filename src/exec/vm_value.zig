@@ -90,14 +90,14 @@ pub noinline fn pushConst8(_: *core.JSContext, stack: *stack_mod.Stack, function
 }
 
 pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     const value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     stack.pushOwnedAssumeCapacity(value);
 }
 
 pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const template_atom = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const template_atom = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     const name = ctx.runtime.atoms.name(template_atom) orelse return error.InvalidAtom;
     const empty_before = stack.capacity == 0;
@@ -530,7 +530,7 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) usize {
     var count: usize = 0;
     for (0..rt.atoms.entries.len) |index| {
-        const atom_id: core.Atom = @intCast(core.atom.first_dynamic_atom + index);
+        const atom_id: core.Atom = core.Atom.fromRaw(@intCast(core.atom.first_dynamic_atom + index));
         if (rt.atoms.kind(atom_id) != .private) continue;
         const name = rt.atoms.name(atom_id) orelse continue;
         if (std.mem.eql(u8, name, expected_name)) count += 1;
@@ -576,7 +576,7 @@ test "push private symbol creates a fresh runtime atom per execution" {
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
     var code: [4]u8 = undefined;
-    std.mem.writeInt(u32, &code, template_atom, .little);
+    std.mem.writeInt(u32, &code, template_atom.raw(), .little);
     try function.setCode(&code);
 
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
@@ -655,7 +655,7 @@ test "push private symbol stack failure does not retain transient private atom" 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
     var code: [4]u8 = undefined;
-    std.mem.writeInt(u32, &code, template_atom, .little);
+    std.mem.writeInt(u32, &code, template_atom.raw(), .little);
     try function.setCode(&code);
 
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
@@ -697,7 +697,7 @@ test "push private symbol releases fresh atom on allocation failure" {
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
     var code: [4]u8 = undefined;
-    std.mem.writeInt(u32, &code, template_atom, .little);
+    std.mem.writeInt(u32, &code, template_atom.raw(), .little);
     try function.setCode(&code);
 
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;

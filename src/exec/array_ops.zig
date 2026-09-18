@@ -290,7 +290,7 @@ pub fn buildCallSiteArray(ctx: *core.JSContext, global: *core.Object, skip_name:
         }
         if (emitted >= limit) break;
         const site = try createCallSiteObject(ctx, global, frames[idx]);
-        try array.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(emitted)), core.Descriptor.data(site, true, true, true));
+        try array.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(@intCast(emitted)), core.Descriptor.data(site, true, true, true));
         emitted += 1;
     }
     array.setArrayLength(@intCast(emitted));
@@ -354,7 +354,7 @@ pub fn aggregateErrorsIterableToArray(
         done = try getValueProperty(ctx, output, global, next_result.value(), done_key, caller_function, caller_frame);
         if (valueTruthy(done)) break;
         item = try getValueProperty(ctx, output, global, next_result.value(), value_key, caller_function, caller_frame);
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(item, true, true, true));
     }
     out.setArrayLength(index);
     try out.defineOwnProperty(ctx.runtime, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, false, false));
@@ -609,7 +609,7 @@ pub fn typedArrayConstructArrayLikeOwnDataFast(
     for (source_object.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted or prop_flags.isAccessor()) continue;
-        if (prop.atom_id == core.atom.atomFromUInt32(0)) {
+        if (prop.atom_id == core.Atom.taggedInt(0)) {
             first_index_property = property_index;
             break;
         }
@@ -625,7 +625,7 @@ pub fn typedArrayConstructArrayLikeOwnDataFast(
 
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const atom_id = core.atom.atomFromUInt32(@intCast(index));
+        const atom_id = core.Atom.taggedInt(@intCast(index));
         item = source_object.getOwnDataPropertyValueAt(first_property + index, atom_id) orelse return false;
 
         coerced = try typedArrayByCopyCoerceValue(ctx, output, global, result_object, item);
@@ -644,7 +644,7 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
         if (property_index >= source_object.shapeProps().len) return false;
         const prop = source_object.shapeProps()[property_index];
         const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.isAccessor()) return false;
+        if (prop.atom_id != core.Atom.taggedInt(@intCast(index)) or prop_flags.deleted or prop_flags.isAccessor()) return false;
         const stored = source_object.asDataAt(property_index) orelse return false;
         if (stored.is(.object)) return false;
     }
@@ -789,7 +789,7 @@ pub fn typedArrayConstructFromIterable(
             try iteratorCloseValue(ctx, output, global, iterator_object.value(), caller_function, caller_frame);
             return err;
         };
-        try values.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true));
+        try values.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(item, true, true, true));
     }
     values.setArrayLength(index);
     if (callableObjectFromValue(constructor)) |function_object| {
@@ -1305,11 +1305,11 @@ pub fn addCollectionEntriesFromArray(
 ) !void {
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        const entry_value = try getValueProperty(ctx, output, global, source.value(), core.atom.atomFromUInt32(index), null, null);
+        const entry_value = try getValueProperty(ctx, output, global, source.value(), core.Atom.taggedInt(index), null, null);
         if (kind == 1 or kind == 3) {
             const entry = property_ops.expectObject(entry_value) catch return error.TypeError;
-            const key = try getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(0), null, null);
-            const value = try getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(1), null, null);
+            const key = try getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(0), null, null);
+            const value = try getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(1), null, null);
             try callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{ key, value });
         } else {
             try callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{entry_value});
@@ -3127,7 +3127,7 @@ pub fn arrayShiftCall(
         return core.JSValue.undefinedValue();
     }
 
-    const first = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.atomFromUInt32(0), null, null);
+    const first = try getValueProperty(ctx, output, global, receiver_object_value, core.Atom.taggedInt(0), null, null);
 
     var index: usize = 1;
     while (index < length) : (index += 1) {
@@ -3756,7 +3756,7 @@ pub fn arrayFromCall(
 
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const key = core.atom.atomFromUInt32(@intCast(index));
+        const key = core.Atom.taggedInt(@intCast(index));
         var item = try getValueProperty(ctx, output, global, source, key, caller_function, caller_frame);
         if (mapper_call) |*call_site| {
             const mapped = try call_site.call2(item, core.JSValue.int32(@intCast(index)));
@@ -4443,7 +4443,7 @@ noinline fn fromArrayLikeSource(
         };
         if (index >= length) break;
         if (kind == .array and index > std.math.maxInt(u32)) return error.RangeError;
-        const key = core.atom.atomFromUInt32(@intCast(index));
+        const key = core.Atom.taggedInt(@intCast(index));
         var item = try getValueProperty(ctx, output, global, source, key, caller_function, caller_frame);
         if (mapper_call) |*call_site| {
             const mapped = try call_site.call2(item, switch (kind) {
@@ -4545,7 +4545,7 @@ pub fn arrayFromIteratorLike(
             };
             item = mapped;
         }
-        createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(index), item, caller_function, caller_frame) catch |err| {
+        createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, core.Atom.taggedInt(index), item, caller_function, caller_frame) catch |err| {
             try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -4586,7 +4586,7 @@ pub fn arrayOfCall(
     const out = objectFromValue(out_value) orelse return error.TypeError;
 
     for (args, 0..) |arg, index| {
-        const key = core.atom.atomFromUInt32(@intCast(index));
+        const key = core.Atom.taggedInt(@intCast(index));
         try createArrayFactoryDataPropertyOrThrow(ctx, output, global, out.value(), out, key, arg, caller_function, caller_frame);
     }
     try setValuePropertyOrThrow(ctx, output, global, out.value(), core.atom.ids.length, length_value, caller_function, caller_frame);
@@ -4729,9 +4729,9 @@ pub fn arrayMapCall(
     errdefer core.Object.destroyFromHeader(ctx.runtime, mapped.gcHeader());
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        const item = try object.getProperty(core.atom.atomFromUInt32(index));
+        const item = try object.getProperty(core.Atom.taggedInt(index));
         const mapped_value = try callValueOrBytecodeSyncInternal(ctx, output, global, core.JSValue.undefinedValue(), args[0], &.{item}, null, null);
-        try mapped.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(mapped_value, true, true, true));
+        try mapped.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(mapped_value, true, true, true));
     }
     return mapped.value();
 }
@@ -5498,7 +5498,7 @@ pub fn typedArrayByCopyCoerceValue(
 }
 
 pub fn defineArrayByCopyElement(rt: *core.JSRuntime, out: *core.Object, index: usize, value: core.JSValue) !void {
-    const key = core.atom.atomFromUInt32(@intCast(index));
+    const key = core.Atom.taggedInt(@intCast(index));
     try out.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
@@ -5632,7 +5632,7 @@ pub fn typedArrayOwnKeys(rt: *core.JSRuntime, source: *core.Object) ![]core.Atom
     const length = try core.object.typedArrayLength(rt, source);
     var index: u32 = 0;
     while (index < length) : (index += 1) {
-        try appendAtom(rt, &keys, core.atom.atomFromUInt32(index));
+        try appendAtom(rt, &keys, core.Atom.taggedInt(index));
     }
 
     const ordinary = try source.ownKeys(rt);
@@ -5925,7 +5925,7 @@ pub noinline fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core
         const index: u32 = @intCast(index_i32);
         if (object.setFastArrayElementDup(rt, index, value)) return .handled;
         if (index > core.atom.max_int_atom) return .miss;
-        const appended = object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+        const appended = object.appendDenseArrayIndex(rt, index, core.Atom.taggedInt(index), value) catch |err| switch (err) {
             error.OutOfMemory => return .out_of_memory,
         };
         return if (appended) .handled else .miss;
@@ -5935,7 +5935,7 @@ pub noinline fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core
     const index: u32 = @intFromFloat(number);
     if (object.setFastArrayElementDup(rt, index, value)) return .handled;
     if (index > core.atom.max_int_atom) return .miss;
-    const appended = object.appendDenseArrayIndex(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+    const appended = object.appendDenseArrayIndex(rt, index, core.Atom.taggedInt(index), value) catch |err| switch (err) {
         error.OutOfMemory => return .out_of_memory,
     };
     return if (appended) .handled else .miss;
@@ -5985,7 +5985,7 @@ pub noinline fn putDenseArrayElementAppendOwnedFast(rt: *core.JSRuntime, object_
     if (index_i32 < 0 or index_i32 > core.array.max_array_index) return .miss;
     const index: u32 = @intCast(index_i32);
     if (index > core.atom.max_int_atom) return .miss;
-    const appended = object.appendDenseArrayIndexOwned(rt, index, core.atom.atomFromUInt32(index), value) catch |err| switch (err) {
+    const appended = object.appendDenseArrayIndexOwned(rt, index, core.Atom.taggedInt(index), value) catch |err| switch (err) {
         error.OutOfMemory => return .out_of_memory,
     };
     return if (appended) .handled else .miss;
@@ -6016,7 +6016,7 @@ pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSV
     }
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        args[index] = try array.getProperty(core.atom.atomFromUInt32(index));
+        args[index] = try array.getProperty(core.Atom.taggedInt(index));
         initialized += 1;
         rooted_args = args[0..initialized];
     }
@@ -6363,7 +6363,7 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
     errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
     try array.reserveDenseArrayElements(rt, @intCast(rooted_args.len));
     for (rooted_args, 0..) |arg, index| {
-        const atom_id = core.atom.atomFromUInt32(@intCast(index));
+        const atom_id = core.Atom.taggedInt(@intCast(index));
         // This is a fresh argument-list array, so each item is defined rather
         // than assigned through ordinary Set semantics.
         if (try array.appendDenseArrayDefineIndex(rt, @intCast(index), atom_id, arg)) continue;
@@ -6398,7 +6398,7 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try array.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try array.getProperty(core.Atom.taggedInt(0));
         try std.testing.expect(stored.same(arg_value));
     }
 
@@ -6694,7 +6694,7 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try entry.getProperty(core.atom.atomFromUInt32(1));
+        const stored = try entry.getProperty(core.Atom.taggedInt(1));
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
@@ -6725,7 +6725,7 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try out.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try out.getProperty(core.Atom.taggedInt(0));
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 

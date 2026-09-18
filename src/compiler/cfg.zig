@@ -985,7 +985,7 @@ fn validateAndAdvanceAtom(
         return error.InvalidBytecode;
     const pc_index: usize = @intCast(pc);
     const operand = std.mem.readInt(u32, input.code[pc_index + 1 ..][0..4], .little);
-    if (operand != input.atom_operands[atom_index.*]) return error.InvalidBytecode;
+    if (core.atom.Atom.fromRaw(operand) != input.atom_operands[atom_index.*]) return error.InvalidBytecode;
     atom_index.* += 1;
 }
 

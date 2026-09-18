@@ -183,7 +183,7 @@ pub const token = struct {
     /// 47 keywords occupy ids 1..47 in `quickjs-atom.h:29..76`.
     pub fn keywordAtom(val: Kind) atom.Atom {
         std.debug.assert(isKeyword(val));
-        return atom.ids.null_ + @as(atom.Atom, @intCast(val - TOK_NULL));
+        return atom.Atom.fromRaw(atom.ids.null_.raw() + @as(u32, @intCast(val - TOK_NULL)));
     }
 
     /// Per-token payload union (mirrors JSToken's anonymous union).
@@ -367,7 +367,7 @@ pub const parser_core = struct {
 
         fn scopeNameKey(scope_level: i32, name: Atom) ?u64 {
             if (scope_level < 0) return null;
-            return (@as(u64, @intCast(scope_level)) << 32) | name;
+            return (@as(u64, @intCast(scope_level)) << 32) | name.raw();
         }
 
         fn validateScopes(fd: *const function_def_mod.FunctionDef) BuildError!void {
@@ -4154,7 +4154,7 @@ pub const parser_core = struct {
                 // qjs get_lvalue (quickjs.c:25948-26013): decode the phase-1
                 // scope getter and retain its atom across the rewind.
                 if (!s.emit_phase1_temp or pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
-                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                 const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
                 if ((s.is_strict or fd.is_strict_mode) and
                     (atomNameEquals(s, name, "eval") or atomNameEquals(s, name, "arguments")))
@@ -4215,7 +4215,7 @@ pub const parser_core = struct {
                 // field-name retain back before removing the getter.
                 // W1: `get_field` is `atom_cache_u8` (opcode + atom + cache_idx).
                 if (pos + 6 != v2b.code_len) return Error.InvalidAssignmentTarget;
-                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                 const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return mapBuilderError(err);
                 lvalue = .{ .opcode = .field, .name = owned_name, .owns_name = true, .depth = 1 };
                 lvalue_initialized = true;
@@ -4224,7 +4224,7 @@ pub const parser_core = struct {
                 // qjs get_lvalue (quickjs.c:25967-25971,26019-26023): retain
                 // the private name and scope across the getter rewind.
                 if (!s.emit_phase1_temp or pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
-                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                 const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
                 const owned_name = v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name) catch |err| return mapBuilderError(err);
                 lvalue = .{
@@ -5105,7 +5105,7 @@ pub const parser_core = struct {
             opcode.op.get_field => {
                 // W1: `get_field` is `atom_cache_u8` (6 bytes).
                 if (pos + 6 != v2b.code_len or v2b.atom_len == 0) return Error.ParserInvariant;
-                const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const atom_id = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                 if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
                 if (atomNameIsPrivate(s, atom_id))
                     return s.failWithMessage(delete_position, "private fields cannot be deleted");
@@ -5138,8 +5138,8 @@ pub const parser_core = struct {
                     return Error.ParserInvariant;
                 }
                 const name = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
-                if (v2b.atom_operands[v2b.atom_len - 1] != name) return Error.ParserInvariant;
-                if (name == atom_this or name == atom_new_target) {
+                if (v2b.atom_operands[v2b.atom_len - 1] != Atom.fromRaw(name)) return Error.ParserInvariant;
+                if (name == atom_this.raw() or name == atom_new_target.raw()) {
                     return emitDeleteNonReference(s);
                 }
                 if (s.is_strict or s.curFunc().is_strict_mode)
@@ -5171,7 +5171,7 @@ pub const parser_core = struct {
 
         if (field_form) {
             if (v2b.atom_len == 0) return Error.ParserInvariant;
-            const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+            const atom_id = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
             if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
             if (atomNameIsPrivate(s, atom_id)) {
                 const snapshot = v2b.snapshot();
@@ -5264,7 +5264,7 @@ pub const parser_core = struct {
                 const optional_label = try optionalChainExitAtEnd(s);
                 if (field_form) {
                     if (v2b.atom_len == 0) return Error.ParserInvariant;
-                    const atom_id = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                    const atom_id = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                     if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
                 }
 
@@ -5314,7 +5314,7 @@ pub const parser_core = struct {
             opcode.op.scope_get_var => {
                 if (!s.emit_phase1_temp or pos + 7 != v2b.code_len)
                     return .{ .kind = .plain, .optional_drop_count = 1 };
-                const name: Atom = std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little);
+                const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
                 const scope = std.mem.readInt(u16, v2b.code[pos + 5 ..][0..2], .little);
                 if (consumer == .normal and !has_optional_site and name == atom_module.ids.eval_) {
                     return .{ .kind = .direct_eval, .optional_drop_count = 1 };
@@ -5616,9 +5616,9 @@ pub const parser_core = struct {
                 else if (tok.isKeyword(s.peekKind()))
                     tok.keywordAtom(s.peekKind())
                 else if (s.peekKind() == tok.TOK_DELETE)
-                    @as(Atom, 9)
+                    Atom.fromRaw(9)
                 else if (s.peekKind() == tok.TOK_CATCH)
-                    @as(Atom, 25)
+                    Atom.fromRaw(25)
                 else
                     return s.failUnexpectedToken();
                 if (private_name and !s.in_class) return s.failUnexpectedToken();
@@ -5671,9 +5671,9 @@ pub const parser_core = struct {
                 else if (tok.isKeyword(s.peekKind()))
                     tok.keywordAtom(s.peekKind())
                 else if (s.peekKind() == tok.TOK_DELETE)
-                    @as(Atom, 9)
+                    Atom.fromRaw(9)
                 else if (s.peekKind() == tok.TOK_CATCH)
-                    @as(Atom, 25)
+                    Atom.fromRaw(25)
                 else
                     return s.failUnexpectedToken();
                 if (private_name and !s.in_class) return s.failUnexpectedToken();
@@ -5734,9 +5734,9 @@ pub const parser_core = struct {
                     else if (tok.isKeyword(next))
                         tok.keywordAtom(next)
                     else if (next == tok.TOK_DELETE)
-                        @as(Atom, 9)
+                        Atom.fromRaw(9)
                     else if (next == tok.TOK_CATCH)
-                        @as(Atom, 25)
+                        Atom.fromRaw(25)
                     else
                         unreachable;
                     if (private_name and !s.in_class) return s.failUnexpectedToken();
@@ -6358,7 +6358,7 @@ pub const parser_core = struct {
             };
             self.template_object.defineOwnProperty(
                 self.rt,
-                core.atom.atomFromUInt32(self.depth),
+                core.Atom.taggedInt(self.depth),
                 core.Descriptor.data(cooked_value, true, true, true),
             ) catch return Error.ParserInvariant;
 
@@ -6371,7 +6371,7 @@ pub const parser_core = struct {
             const raw_value = raw.value();
             self.raw_array.defineOwnProperty(
                 self.rt,
-                core.atom.atomFromUInt32(self.depth),
+                core.Atom.taggedInt(self.depth),
                 core.Descriptor.data(raw_value, true, true, true),
             ) catch return Error.ParserInvariant;
             self.depth += 1;
@@ -8265,7 +8265,7 @@ pub const parser_core = struct {
         // tagged-int atom and therefore falls back to an owned cpool string.
         // Runtime-less parser fragments cannot own JSValues and retain their
         // existing atom-only fallback, like the tagged-template test path.
-        if (atom_module.isTaggedInt(atom_id)) {
+        if (atom_id.isTaggedInt()) {
             if (s.runtime) |rt| {
                 const string = core.string.String.createUtf8(rt, bytes) catch |err| switch (err) {
                     error.OutOfMemory, error.StringTooLong => return Error.OutOfMemory,
@@ -13123,7 +13123,7 @@ pub const parser_core = struct {
         if (define_index > code_len or code_len - define_index < 6 or
             atom_index >= @as(usize, @intCast(builder.atom_len)) or
             builder.code[define_index] != opcode.op.define_class or
-            std.mem.readInt(u32, builder.code[define_index + 1 ..][0..4], .little) != atom_module.ids.empty_string or
+            std.mem.readInt(u32, builder.code[define_index + 1 ..][0..4], .little) != atom_module.ids.empty_string.raw() or
             builder.atom_operands[atom_index] != atom_module.ids.empty_string)
         {
             return Error.ParserInvariant;
@@ -13147,7 +13147,7 @@ pub const parser_core = struct {
                 if (opcode_pos > builder.code_len or builder.code_len - opcode_pos != 5 or builder.atom_len == 0)
                     return Error.ParserInvariant;
                 const placeholder = std.mem.readInt(u32, builder.code[opcode_index + 1 ..][0..4], .little);
-                if (placeholder != atom_module.null_atom) return;
+                if (placeholder != atom_module.null_atom.raw()) return;
                 builder.replaceAtomOperand(
                     opcode_pos,
                     builder.atom_len - 1,
@@ -13187,7 +13187,7 @@ pub const parser_core = struct {
             opcode.op.set_name => {
                 if (opcode_pos > builder.code_len or builder.code_len - opcode_pos != 5) return Error.ParserInvariant;
                 const placeholder = std.mem.readInt(u32, builder.code[opcode_index + 1 ..][0..4], .little);
-                if (placeholder != atom_module.null_atom) return;
+                if (placeholder != atom_module.null_atom.raw()) return;
                 builder.rewriteTrailingAtomOpAsPlain(
                     opcode.op.set_name,
                     atom_module.null_atom,
@@ -14678,9 +14678,9 @@ pub const parser_core = struct {
     // Module parsing
     // =====================================================================
 
-    const atom_default: Atom = 22; // "default"
-    const atom_star_default: Atom = 127; // "*default*"
-    const atom_star: Atom = 128; // "*"
+    const atom_default: Atom = Atom.fromRaw(22); // "default"
+    const atom_star_default: Atom = Atom.fromRaw(127); // "*default*"
+    const atom_star: Atom = Atom.fromRaw(128); // "*"
 
     const ModuleImportSpec = struct {
         import_name: Atom,

@@ -334,8 +334,8 @@ pub const ReturnContinuation = struct {
     /// Move the owned atom into the caller's continuation slot.
     pub fn takeAtom(self: *ReturnContinuation) core.Atom {
         std.debug.assert(self.action == .proxy_get);
-        std.debug.assert(self.payload != core.atom.null_atom);
-        const atom_id: core.Atom = @intCast(self.payload);
+        std.debug.assert(self.payload != core.atom.null_atom.raw());
+        const atom_id: core.Atom = core.Atom.fromRaw(@intCast(self.payload));
         self.payload = 0;
         return atom_id;
     }

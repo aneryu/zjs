@@ -60,7 +60,7 @@ pub fn propertyKeyAtomIfReady(value: core.JSValue) ?core.Atom {
         return null;
     }
     if (value.as(.int)) |index| {
-        if (index >= 0) return core.atom.atomFromUInt32(@intCast(index));
+        if (index >= 0) return core.Atom.taggedInt(@intCast(index));
     }
     return null;
 }
@@ -72,7 +72,7 @@ pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
         return string_value.internAtom(rt);
     }
     if (value.as(.int)) |index| {
-        if (index >= 0) return core.atom.atomFromUInt32(@intCast(index));
+        if (index >= 0) return core.Atom.taggedInt(@intCast(index));
     }
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);

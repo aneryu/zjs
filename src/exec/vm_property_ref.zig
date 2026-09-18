@@ -53,7 +53,7 @@ fn dynEnvProbeAccess(
     catch_target: *?usize,
     flags: bytecode.opcode.dyn_env.Flags,
 ) !Step {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
     const is_with = flags.is_with;
     const operand_pc = frame.pc;
@@ -153,7 +153,7 @@ pub noinline fn makeSlotRef(
     frame: *frame_mod.Frame,
     opc: u8,
 ) !void {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const idx = readInt(u16, function.byteCode()[frame.pc + 4 ..][0..2]);
     frame.pc += 6;
 
@@ -186,7 +186,7 @@ pub fn makeVarRef(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     const global_value = global.value();
     const object_value = object_value: {
@@ -365,7 +365,7 @@ fn dynEnvProbeStore(
     catch_target: *?usize,
     is_with: bool,
 ) !Step {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
     const operand_pc = frame.pc;
     frame.pc += 9;
@@ -412,7 +412,7 @@ pub noinline fn deleteVar(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     // qjs JS_DeleteGlobalVar: declarative globals are not deletable; every
     // object-environment binding goes through the ordinary global property

@@ -528,7 +528,7 @@ pub const JSContext = struct {
     }
 
     pub fn getIndex(self: *JSContext, val: JSValue, index: u32) !JSValue {
-        return self.getPropertyAtom(val, atom.atomFromUInt32(index));
+        return self.getPropertyAtom(val, atom.Atom.taggedInt(index));
     }
 
     fn hasOwnPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {

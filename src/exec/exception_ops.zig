@@ -424,8 +424,8 @@ pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, me
 pub fn throwReferenceErrorNotDefined(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue {
     const allocator = ctx.runtime.memory.allocator;
     var index_buf: [16]u8 = undefined;
-    const name: []const u8 = if (core.atom.isTaggedInt(atom_id))
-        std.fmt.bufPrint(&index_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable
+    const name: []const u8 = if (atom_id.isTaggedInt())
+        std.fmt.bufPrint(&index_buf, "{d}", .{atom_id.toUInt32()}) catch unreachable
     else
         ctx.runtime.atoms.name(atom_id) orelse "";
     const message = try std.fmt.allocPrint(allocator, "'{s}' is not defined", .{name});
@@ -773,5 +773,5 @@ fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, key: co
 /// error object by name.
 fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
     const reference_error_atom = comptime core.atom.predefinedId("ReferenceError", .string).?;
-    _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom)));
+    _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom.raw())));
 }

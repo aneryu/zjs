@@ -1446,7 +1446,7 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
 
     const Trigger = struct {
         rt: *core.JSRuntime,
-        atom_id: u32,
+        atom_id: core.Atom,
         saw_arg: bool = false,
         trace_failed: bool = false,
 
@@ -2742,7 +2742,7 @@ pub fn collectIteratorValues(
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        values.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(item, true, true, true)) catch |err| {
+        values.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(item, true, true, true)) catch |err| {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -2802,7 +2802,7 @@ pub fn appendIteratorValues(
         if (step.done) {
             break;
         }
-        try property_ops.defineDataProperty(ctx.runtime, target, core.atom.atomFromUInt32(@intCast(index)), step.value);
+        try property_ops.defineDataProperty(ctx.runtime, target, core.Atom.taggedInt(@intCast(index)), step.value);
         index += 1;
     }
     return index;
@@ -2902,7 +2902,7 @@ pub fn appendSpreadValuesEnumerate(
             // A contiguous C_W_E definition can stay dense. The shared
             // CreateDataProperty helper retains descriptor/length fallbacks
             // and never invokes an inherited indexed setter.
-            try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
+            try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.Atom.taggedInt(@intCast(index)), item);
             index += 1;
         }
         iterator.iteratorIndexSlot().* = elements.len; // exhaust, matching a full drain
@@ -2917,7 +2917,7 @@ pub fn appendSpreadValuesEnumerate(
             break;
         }
         item = step.value;
-        try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.atom.atomFromUInt32(@intCast(index)), item);
+        try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.Atom.taggedInt(@intCast(index)), item);
         index += 1;
     }
     return index;
@@ -3466,11 +3466,11 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-args-from-array-like-prefix-root");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
+    try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, true, true, true));
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
     try source.defineAutoInitPropertyWithRealm(
         rt,
-        core.atom.atomFromUInt32(1),
+        core.Atom.taggedInt(1),
         "lazyArgsFromArrayLikeValue",
         0,
         core.property.Flags.data(true, true, true),
@@ -3479,7 +3479,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
 
     const Probe = struct {
         rt: *core.JSRuntime,
-        atom_id: u32,
+        atom_id: core.Atom,
         saw_symbol: bool = false,
         trace_failed: bool = false,
 
@@ -5084,9 +5084,9 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
         try bytes.appendSlice(rt.memory.allocator, text);
         try bytes.append(rt.memory.allocator, ' ');
     }
-    if (core.atom.isTaggedInt(atom_id)) {
+    if (atom_id.isTaggedInt()) {
         var buf: [10]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
+        const text = std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
         try bytes.appendSlice(rt.memory.allocator, text);
         return value_ops.createStringValue(rt, bytes.items);
     }

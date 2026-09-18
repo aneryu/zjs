@@ -149,7 +149,7 @@ fn appendArrayString(
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = try array.getProperty(atom.atomFromUInt32(index));
+        const value = try array.getProperty(atom.Atom.taggedInt(index));
         if (!value.is(.undefined_value) and !value.is(.null_value)) try appendValueString(rt, buffer, value, policy);
     }
 }

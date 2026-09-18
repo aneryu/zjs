@@ -557,7 +557,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
 
     try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
     for (rooted.values, 0..) |value, index| {
-        const atom_id = core.atom.atomFromUInt32(@intCast(index));
+        const atom_id = core.Atom.taggedInt(@intCast(index));
         // Array constructor arguments are fresh own data properties;
         // inherited indexed setters do not participate.
         if (try object.appendDenseArrayDefineIndex(rt, @intCast(index), atom_id, value)) continue;
@@ -735,13 +735,13 @@ fn arrayIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue 
 fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kind: ArrayIteratorKind) !core.JSValue {
     return switch (kind) {
         .key => core.JSValue.int32(@intCast(index)),
-        .value => if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index)),
+        .value => if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.Atom.taggedInt(index)),
         .key_value => blk: {
             const pair = try core.Object.createArray(rt, null);
             errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
-            const value = if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index));
-            try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-            try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value, true, true, true));
+            const value = if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.Atom.taggedInt(index));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(value, true, true, true));
             break :blk pair.value();
         },
     };
@@ -828,9 +828,9 @@ test "array splice roots direct function bytecode insert values while creating r
     try std.testing.expect(rt.atoms.name(first_symbol) != null);
     try std.testing.expect(rt.atoms.name(second_symbol) != null);
     {
-        const stored_first = try array.getProperty(core.atom.atomFromUInt32(0));
+        const stored_first = try array.getProperty(core.Atom.taggedInt(0));
         try std.testing.expect(stored_first.same(first_value));
-        const stored_second = try array.getProperty(core.atom.atomFromUInt32(1));
+        const stored_second = try array.getProperty(core.Atom.taggedInt(1));
         try std.testing.expect(stored_second.same(second_value));
     }
 
@@ -863,7 +863,7 @@ test "array constructWithPrototype roots direct function bytecode elements while
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try array.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try array.getProperty(core.Atom.taggedInt(0));
         try std.testing.expect(stored.same(element_value));
     }
 
@@ -898,7 +898,7 @@ test "array concat roots direct function bytecode argument while creating output
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try out.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try out.getProperty(core.Atom.taggedInt(0));
         try std.testing.expect(stored.same(arg_value));
     }
 
@@ -913,10 +913,10 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var out_index: u32 = 0;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.Atom.taggedInt(index));
         if (item.as(.int)) |n| {
             if (@mod(n, 2) == 0) {
-                try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
+                try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(item, true, true, true));
                 out_index += 1;
             }
         }
@@ -929,7 +929,7 @@ fn reduceSum(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var sum: i32 = 0;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.Atom.taggedInt(index));
         sum += item.as(.int) orelse 0;
     }
     return core.JSValue.int32(sum);
@@ -940,7 +940,7 @@ fn someEven(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var found = false;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.Atom.taggedInt(index));
         if (item.as(.int)) |n| found = found or @mod(n, 2) == 0;
     }
     return core.JSValue.boolean(found);
@@ -951,7 +951,7 @@ fn everyPositive(_: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var ok = true;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.Atom.taggedInt(index));
         if ((item.as(.int) orelse 0) <= 0) ok = false;
     }
     return core.JSValue.boolean(ok);
@@ -992,7 +992,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
     }
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.Atom.taggedInt(index));
         if (valuesEqual(item, needle)) {
             found_index = @intCast(index);
             if (mode != .last) break;
@@ -1024,7 +1024,7 @@ fn at(_: *core.JSRuntime, array_value: core.JSValue, index_value: core.JSValue) 
     var index = index_value.as(.int) orelse 0;
     if (index < 0) index = @as(i32, @intCast(array.arrayLength())) + index;
     if (index < 0 or index >= array.arrayLength()) return core.JSValue.undefinedValue();
-    return try array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+    return try array.getProperty(core.Atom.taggedInt(@intCast(index)));
 }
 
 fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSValue) !core.JSValue {
@@ -1037,8 +1037,8 @@ fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSVal
     var out_index: u32 = 0;
     var index: u32 = @intCast(start);
     while (index < array.arrayLength()) : (index += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(index));
-        try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
+        const item = try array.getProperty(core.Atom.taggedInt(index));
+        try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(item, true, true, true));
         out_index += 1;
     }
     return out.value();
@@ -1058,20 +1058,20 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     errdefer core.Object.destroyFromHeader(rt, removed.gcHeader());
     var i: u32 = 0;
     while (i < delete_count) : (i += 1) {
-        const item = try array.getProperty(core.atom.atomFromUInt32(start + i));
-        try removed.defineOwnProperty(rt, core.atom.atomFromUInt32(i), core.Descriptor.data(item, true, true, true));
+        const item = try array.getProperty(core.Atom.taggedInt(start + i));
+        try removed.defineOwnProperty(rt, core.Atom.taggedInt(i), core.Descriptor.data(item, true, true, true));
     }
-    const tail = try array.getProperty(core.atom.atomFromUInt32(start + delete_count));
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start), core.Descriptor.data(insert_a, true, true, true));
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 1), core.Descriptor.data(insert_b, true, true, true));
-    if (!tail.is(.undefined_value)) try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 2), core.Descriptor.data(tail, true, true, true));
+    const tail = try array.getProperty(core.Atom.taggedInt(start + delete_count));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(start), core.Descriptor.data(insert_a, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(start + 1), core.Descriptor.data(insert_b, true, true, true));
+    if (!tail.is(.undefined_value)) try array.defineOwnProperty(rt, core.Atom.taggedInt(start + 2), core.Descriptor.data(tail, true, true, true));
     return removed.value();
 }
 
 fn push(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     for (args) |item| {
-        try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(item, true, true, true));
+        try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(item, true, true, true));
     }
     return core.JSValue.int32(@intCast(array.arrayLength()));
 }
@@ -1080,7 +1080,7 @@ fn pop(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     if (array.arrayLength() == 0) return core.JSValue.undefinedValue();
     const index = array.arrayLength() - 1;
-    const key = core.atom.atomFromUInt32(index);
+    const key = core.Atom.taggedInt(index);
     const value = try array.getProperty(key);
     _ = array.deleteProperty(rt, key);
     try array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, false, false));
@@ -1117,8 +1117,8 @@ fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
         lower += 1;
         upper -= 1;
     }) {
-        const lower_key = core.atom.atomFromUInt32(lower);
-        const upper_key = core.atom.atomFromUInt32(upper);
+        const lower_key = core.Atom.taggedInt(lower);
+        const upper_key = core.Atom.taggedInt(upper);
         const lower_value = try array.getProperty(lower_key);
         const upper_value = try array.getProperty(upper_key);
 
@@ -1160,7 +1160,7 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
 
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const value = try array.getProperty(core.atom.atomFromUInt32(index));
+        const value = try array.getProperty(core.Atom.taggedInt(index));
         if (value.is(.undefined_value)) {
             continue;
         }
@@ -1201,10 +1201,10 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
 fn rewriteSortedArray(rt: *core.JSRuntime, array: *core.Object, entries: []const SortEntry) !void {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        _ = array.deleteProperty(rt, core.atom.atomFromUInt32(index));
+        _ = array.deleteProperty(rt, core.Atom.taggedInt(index));
     }
     for (entries, 0..) |entry, out_index| {
-        try array.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(out_index)), core.Descriptor.data(entry.value, true, true, true));
+        try array.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(out_index)), core.Descriptor.data(entry.value, true, true, true));
     }
 }
 
@@ -1260,9 +1260,9 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
         if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {
-                const item = try object.getProperty(core.atom.atomFromUInt32(index));
+                const item = try object.getProperty(core.Atom.taggedInt(index));
                 if (!item.is(.undefined_value)) {
-                    try out.defineOwnProperty(rt, core.atom.atomFromUInt32(next_index.*), core.Descriptor.data(item, true, true, true));
+                    try out.defineOwnProperty(rt, core.Atom.taggedInt(next_index.*), core.Descriptor.data(item, true, true, true));
                 }
                 next_index.* += 1;
             }
@@ -1270,7 +1270,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
         }
     }
 
-    try out.defineOwnProperty(rt, core.atom.atomFromUInt32(next_index.*), core.Descriptor.data(value, true, true, true));
+    try out.defineOwnProperty(rt, core.Atom.taggedInt(next_index.*), core.Descriptor.data(value, true, true, true));
     next_index.* += 1;
 }
 

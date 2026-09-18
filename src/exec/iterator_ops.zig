@@ -665,7 +665,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     const value = switch (kind) {
         1 => core.JSValue.int32(@intCast(element_index)),
         2 => blk: {
-            const atom_id = core.atom.atomFromUInt32(element_index);
+            const atom_id = core.Atom.taggedInt(element_index);
             if (target.findProperty(atom_id) != null) return false;
             const elements = target.arrayElements();
             if (index >= elements.len) return false;
@@ -887,7 +887,7 @@ pub noinline fn forInNext(
         const obj = try property_ops.expectObject(obj_value);
         if (forof_ops.forInIsArraySlot(iterator).* != 0) {
             // prop = __JS_AtomFromUInt32(it->idx) (quickjs.c:16457-16459).
-            const key = core.atom.atomFromUInt32(@intCast(index));
+            const key = core.Atom.taggedInt(@intCast(index));
             iterator.iteratorIndexSlot().* = index + 1;
             // check if the property was deleted (quickjs.c:16480-16485).
             if (try object_ops.proxyAwareExistsOwnProperty(ctx, output, global, obj, key, null, null)) break :loop key;
@@ -1149,7 +1149,7 @@ pub fn arrayIteratorValue(
         2 => if (core.object.isTypedArrayObject(target))
             try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
         else
-            try getValueProperty(ctx, output, global, target.value(), core.atom.atomFromUInt32(index), null, null),
+            try getValueProperty(ctx, output, global, target.value(), core.Atom.taggedInt(index), null, null),
         3 => blk: {
             var pair_value = core.JSValue.undefinedValue();
             var value = core.JSValue.undefinedValue();
@@ -1163,9 +1163,9 @@ pub fn arrayIteratorValue(
             value = if (core.object.isTypedArrayObject(target))
                 try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
             else
-                try getValueProperty(ctx, output, global, target.value(), core.atom.atomFromUInt32(index), null, null);
-            try pair.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-            try pair.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(1), core.Descriptor.data(value, true, true, true));
+                try getValueProperty(ctx, output, global, target.value(), core.Atom.taggedInt(index), null, null);
+            try pair.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+            try pair.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(1), core.Descriptor.data(value, true, true, true));
             break :blk pair_value;
         },
         else => error.TypeError,
@@ -1201,7 +1201,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-entry-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    try target.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
+    try target.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, true, true, true));
     target.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();
@@ -1213,7 +1213,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = try pair.getProperty(core.atom.atomFromUInt32(1));
+        const stored = try pair.getProperty(core.Atom.taggedInt(1));
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
@@ -1419,8 +1419,8 @@ pub fn iteratorConcatCall(
         _ = property_ops.expectObject(rooted_item) catch return error.TypeError;
         rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
         if (rooted_iterator_method.is(.undefined_value) or rooted_iterator_method.is(.null_value) or !isCallableValue(rooted_iterator_method)) return error.TypeError;
-        try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2)), rooted_item);
-        try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2 + 1)), rooted_iterator_method);
+        try records.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2)), rooted_item);
+        try records.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2 + 1)), rooted_iterator_method);
     }
 
     const prototype = try iteratorMethodsPrototype(ctx.runtime, global, .iterator_concat_prototype, "Iterator Concat");
@@ -1502,7 +1502,7 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     const records_value = helper.iteratorTarget() orelse return error.TypeError;
     const records = objectFromValue(records_value) orelse return error.TypeError;
     {
-        const stored_method = try records.getProperty(core.atom.atomFromUInt32(1));
+        const stored_method = try records.getProperty(core.Atom.taggedInt(1));
         try std.testing.expect(stored_method.same(iterator_method));
     }
 
@@ -1943,7 +1943,7 @@ pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: u
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(rooted_value, true, true, true));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(rooted_value, true, true, true));
 }
 
 test "iteratorZipStoreIndex roots direct function bytecode value while defining property" {
@@ -1977,7 +1977,7 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
         try std.testing.expect(stored.same(stored_value));
     }
 
-    _ = object.deleteProperty(rt, core.atom.atomFromUInt32(0));
+    _ = object.deleteProperty(rt, core.Atom.taggedInt(0));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
@@ -2002,13 +2002,13 @@ test "iteratorZipStoreIndex roots direct symbol value while defining property" {
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = object.deleteProperty(rt, core.atom.atomFromUInt32(0));
+    _ = object.deleteProperty(rt, core.Atom.taggedInt(0));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 pub fn iteratorZipGetIndex(object: *core.Object, index: usize) core.JSValue {
-    return object.getOwnDataPropertyValue(core.atom.atomFromUInt32(@intCast(index))) orelse core.JSValue.undefinedValue();
+    return object.getOwnDataPropertyValue(core.Atom.taggedInt(@intCast(index))) orelse core.JSValue.undefinedValue();
 }
 
 pub fn iteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
@@ -2017,7 +2017,7 @@ pub fn iteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usi
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.setProperty(rt, core.atom.atomFromUInt32(@intCast(index)), rooted_value);
+    try object.setProperty(rt, core.Atom.taggedInt(@intCast(index)), rooted_value);
 }
 
 pub fn iteratorZipCloseWithCompletion(
@@ -2240,7 +2240,7 @@ fn iteratorToArrayCall(
             out.setArrayLength(index);
             return out.value();
         }
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(index), core.Descriptor.data(step.value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(step.value, true, true, true));
     }
 }
 
@@ -2616,7 +2616,7 @@ fn iteratorZipPutResult(
         try results.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
         return;
     }
-    try results.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(value, true, true, true));
+    try results.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(value, true, true, true));
 }
 
 fn iteratorZipCompleteAbrupt(
@@ -2836,8 +2836,8 @@ pub fn iteratorHelperNext(
                 }
                 const item_index: u32 = @intCast((helper.iteratorIndexSlot().*) * 2);
                 helper.iteratorIndexSlot().* += 1;
-                const item = try records.getProperty(core.atom.atomFromUInt32(item_index));
-                const method = try records.getProperty(core.atom.atomFromUInt32(item_index + 1));
+                const item = try records.getProperty(core.Atom.taggedInt(item_index));
+                const method = try records.getProperty(core.Atom.taggedInt(item_index + 1));
                 const inner_iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
                 try iteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
             }

@@ -51,9 +51,9 @@ pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), va
 /// Append the JSON quoted-string form of a property key atom to `buffer`,
 /// rendering tagged-int atoms as their decimal index.
 pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void {
-    if (core.atom.isTaggedInt(atom_id)) {
+    if (atom_id.isTaggedInt()) {
         var int_buf: [10]u8 = undefined;
-        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch unreachable;
+        const printed = std.fmt.bufPrint(&int_buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
         return appendEscapedJsonString(rt, buffer, printed);
     }
     const name = rt.atoms.name(atom_id) orelse "";

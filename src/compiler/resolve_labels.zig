@@ -36,7 +36,6 @@ pub const default_layout: LayoutMode = std.meta.stringToEnum(
 
 /// Stage 3/4 still own independent growable outputs. The geometric grow
 /// walk is the already-linked `builder.reserve` / `reserveSlowBytes` body.
-
 const FinalReloc = struct {
     next: u32,
     addr: u32,
@@ -376,7 +375,7 @@ fn validateProductCode(product: *const resolve_variables.ResolvedProduct) Error!
             if (instruction.size < 5 or atom_index >= product.atom_len)
                 return error.InvalidBytecode;
             const encoded = try readU32At(code, position, operand_off.atom);
-            if (encoded != product.atom_operands[atom_index])
+            if (encoded != product.atom_operands[atom_index].raw())
                 return error.InvalidBytecode;
             atom_index += 1;
         }
@@ -957,7 +956,7 @@ const Resolver = struct {
                     return error.InvalidBytecode;
                 const encoded = try readU32At(self.code, position, operand_off.atom);
                 const ledger_atom = self.input_atoms[self.atom_cursor];
-                if (encoded != ledger_atom) return error.InvalidBytecode;
+                if (encoded != ledger_atom.raw()) return error.InvalidBytecode;
                 if (keep_atom_position != null and keep_atom_position.? == position) {
                     try self.appendOutputAtom(ledger_atom);
                     kept = true;
@@ -987,7 +986,7 @@ const Resolver = struct {
             return error.InvalidBytecode;
         const encoded = try readU32At(self.code, position, operand_off.atom);
         const ledger_atom = self.input_atoms[self.atom_cursor];
-        if (encoded != ledger_atom) return error.InvalidBytecode;
+        if (encoded != ledger_atom.raw()) return error.InvalidBytecode;
         if (keep) try self.appendOutputAtom(ledger_atom);
         self.atom_cursor += 1;
     }
@@ -2742,7 +2741,7 @@ const Resolver = struct {
                 // qjs:35264-35275.
                 .get_field => {
                     if (layout == .short and
-                        try readU32At(self.code, position, operand_off.atom) == core.atom.ids.length)
+                        try readU32At(self.code, position, operand_off.atom) == core.atom.ids.length.raw())
                     {
                         try self.attachSource();
                         try self.appendByte(op.get_length);
@@ -2762,7 +2761,7 @@ const Resolver = struct {
                         position_next = match.end;
                     } else if (layout == .short and
                         try readU32At(self.code, position, operand_off.atom) ==
-                            core.atom.ids.empty_string)
+                            core.atom.ids.empty_string.raw())
                     {
                         try self.attachSource();
                         try self.appendByte(op.push_empty_string);
@@ -2996,7 +2995,7 @@ const Resolver = struct {
                     try self.attachSource();
                     const atom_position = match.positions[0];
                     const atom_id = try readU32At(self.code, atom_position, operand_off.atom);
-                    if (layout == .short and atom_id == core.atom.ids.empty_string) {
+                    if (layout == .short and atom_id == core.atom.ids.empty_string.raw()) {
                         try self.appendByte(op.push_empty_string);
                         try self.consumeAtomsRange(position, match.end, null);
                     } else {
@@ -3151,9 +3150,9 @@ const Resolver = struct {
                         compare_match.positions[0],
                         operand_off.atom,
                     );
-                    const test_op: ?u8 = if (atom_id == core.atom.ids.undefined_)
+                    const test_op: ?u8 = if (atom_id == core.atom.ids.undefined_.raw())
                         opcode.ext0_sub.typeof_is_undefined
-                    else if (atom_id == core.atom.ids.type_function)
+                    else if (atom_id == core.atom.ids.type_function.raw())
                         opcode.ext0_sub.typeof_is_function
                     else
                         null;
@@ -3650,7 +3649,7 @@ const Resolver = struct {
             if (instruction.hasAtom()) {
                 if (atom_index >= self.output_atom_len)
                     return error.InvalidBytecode;
-                if (try readU32At(code, position, operand_off.atom) != self.output_atoms[atom_index])
+                if (try readU32At(code, position, operand_off.atom) != self.output_atoms[atom_index].raw())
                     return error.InvalidBytecode;
                 atom_index += 1;
             }
@@ -4011,7 +4010,7 @@ test "compiler.resolve_labels: discarded field store delays tail sources" {
 
     // W1: `put_field` is `atom_cache_u8`; site 0 is the only property site.
     var expected = [_]u8{ op.put_field, 0, 0, 0, 0, 0, op.object };
-    std.mem.writeInt(u32, expected[1..5], field, .little);
+    std.mem.writeInt(u32, expected[1..5], field.raw(), .little);
     try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
     try std.testing.expectEqualSlices(
         SourceLocSlot,
@@ -4835,7 +4834,7 @@ test "compiler.resolve_labels: post-update tails publish sources afterward" {
         0,               op.inc,
         op.put_array_el, op.object,
     };
-    std.mem.writeInt(u32, expected[4..8], field, .little);
+    std.mem.writeInt(u32, expected[4..8], field.raw(), .little);
     try std.testing.expectEqualSlices(u8, &expected, harness.function.code);
     try std.testing.expectEqualSlices(
         SourceLocSlot,
@@ -4945,12 +4944,12 @@ test "compiler.resolve_labels: shared with probes resolve operand-relative done 
     var expected = [_]u8{0} ** 26;
     expected[0] = op.get_loc0;
     expected[1] = op.dyn_env_probe;
-    std.mem.writeInt(u32, expected[2..6], name, .little);
+    std.mem.writeInt(u32, expected[2..6], name.raw(), .little);
     std.mem.writeInt(i32, expected[6..10], 19, .little);
     expected[10] = 0;
     expected[11] = op.get_loc1;
     expected[12] = op.dyn_env_probe;
-    std.mem.writeInt(u32, expected[13..17], name, .little);
+    std.mem.writeInt(u32, expected[13..17], name.raw(), .little);
     std.mem.writeInt(i32, expected[17..21], 8, .little);
     expected[21] = 0;
     expected[22] = op.get_var;

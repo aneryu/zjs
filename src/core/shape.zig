@@ -1507,7 +1507,7 @@ pub fn initialHash(proto: ?*Object) u32 {
 }
 
 pub fn transitionHash(seed: u32, atom_id: atom.Atom, flags: u6) u32 {
-    return shapeHash(shapeHash(seed, atom_id), flags);
+    return shapeHash(shapeHash(seed, atom_id.raw()), flags);
 }
 
 pub fn hashIndex(hash: u32, bits: u6) u32 {
@@ -1520,7 +1520,7 @@ pub inline fn propertyBucketIndex(shape_hash: u32, atom_id: atom.Atom, mask: u32
     std.debug.assert(mask != no_property_hash);
     std.debug.assert(std.math.isPowerOfTwo(@as(usize, mask) + 1));
     _ = shape_hash;
-    return @intCast(atom_id & mask);
+    return @intCast(atom_id.raw() & mask);
 }
 
 pub fn shapeHash(seed: u32, value: u32) u32 {

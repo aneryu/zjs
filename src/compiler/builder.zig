@@ -603,7 +603,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.atom_operands[self.atom_len] = atom_id;
         self.code[opcode_index] = op_id;
-        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
         if (cache_bearing) self.code[opcode_index + 5] = bytecode.PropSiteCache.no_cache_idx;
 
         self.atom_len += 1;
@@ -634,7 +634,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.atom_operands[self.atom_len] = atom_id;
         self.code[opcode_index] = op_id;
-        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
         self.code[opcode_index + 5] = val;
 
         self.atom_len += 1;
@@ -664,7 +664,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.atom_operands[self.atom_len] = atom_id;
         self.code[opcode_index] = op_id;
-        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
         std.mem.writeInt(u16, self.code[opcode_index + 5 ..][0..2], val, .little);
 
         self.atom_len += 1;
@@ -720,7 +720,7 @@ pub const Builder = struct {
         const operand_offset = opcode_offset + 5;
         self.atom_operands[self.atom_len] = atom_id;
         self.code[opcode_index] = op_id;
-        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], atom_id.raw(), .little);
         std.mem.writeInt(u32, self.code[opcode_index + 5 ..][0..4], label.index(), .little);
         std.mem.writeInt(u16, self.code[opcode_index + 9 ..][0..2], scope, .little);
 
@@ -763,7 +763,7 @@ pub const Builder = struct {
             @as(u32, @intCast(self.last_opcode_pos)) != opcode_offset or
             opcode_offset > self.code_len or self.code_len - opcode_offset < 5 or
             self.code[offset] != expected_opcode or
-            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom.raw() or
             self.atom_len == 0 or
             self.atom_operands[self.atom_len - 1] != expected_atom)
         {
@@ -816,7 +816,7 @@ pub const Builder = struct {
             index >= @as(usize, @intCast(self.atom_len)))
             return error.InvalidBytecode;
         if (self.code[offset] != expected_opcode or
-            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom.raw() or
             self.atom_operands[index] != expected_atom)
         {
             return error.InvalidBytecode;
@@ -824,7 +824,7 @@ pub const Builder = struct {
 
         const retained = replacement;
         self.atom_operands[index] = retained;
-        std.mem.writeInt(u32, self.code[offset + 1 ..][0..4], replacement, .little);
+        std.mem.writeInt(u32, self.code[offset + 1 ..][0..4], replacement.raw(), .little);
     }
 
     /// Rewrite the trailing atom opcode as a one-byte plain opcode while
@@ -845,7 +845,7 @@ pub const Builder = struct {
         const offset: usize = @intCast(opcode_offset);
         if (opcode_offset > self.code_len or self.code_len - opcode_offset != 5 or
             self.code[offset] != expected_opcode or
-            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom or
+            std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom.raw() or
             self.atom_operands[self.atom_len - 1] != expected_atom)
         {
             return error.InvalidBytecode;
@@ -1461,7 +1461,7 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try std.testing.expectEqual(@as(u32, 16), b.code_len);
     try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xd1), b.code[5]);
-    try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[6..10], .little));
+    try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[6..10], .little));
     try std.testing.expectEqual(label.index(), std.mem.readInt(u32, b.code[10..14], .little));
     try std.testing.expectEqual(@as(u16, 0x1234), std.mem.readInt(u16, b.code[14..16], .little));
     try std.testing.expectEqual(@as(u32, 2), b.reloc_len);
@@ -1558,14 +1558,14 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
     try std.testing.expectEqual(@as(u32, 11), b.code_len);
     try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xc2), b.code[5]);
-    try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[6..10], .little));
+    try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[6..10], .little));
     try std.testing.expectEqual(@as(u8, 0xa5), b.code[10]);
 
     try b.emitAtomOpU16Owned(0xc3, atom_id, 0x1234);
     try std.testing.expectEqual(@as(u32, 18), b.code_len);
     try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xc3), b.code[11]);
-    try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[12..16], .little));
+    try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[12..16], .little));
     try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, b.code[16..18]);
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(atom_id, b.atom_operands[0]);
@@ -1917,7 +1917,7 @@ test "compiler.builder: inferred-name patches keep code and atom ownership in lo
 
     try b.emitAtomOpOwned(0x40, placeholder);
     try b.replaceAtomOperand(0, 0, 0x40, placeholder, inferred);
-    try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(inferred.raw(), std.mem.readInt(u32, b.code[1..5], .little));
     try std.testing.expectEqual(inferred, b.atom_operands[0]);
 
     try b.addSourceMarker(7, 3);
@@ -1927,7 +1927,7 @@ test "compiler.builder: inferred-name patches keep code and atom ownership in lo
     try b.rewriteTrailingAtomOpAsPlain(0x41, core.atom.null_atom, 0x42);
     try std.testing.expectEqual(@as(u32, 6), b.code_len);
     try std.testing.expectEqual(@as(u8, 0x40), b.code[0]);
-    try std.testing.expectEqual(inferred, std.mem.readInt(u32, b.code[1..5], .little));
+    try std.testing.expectEqual(inferred.raw(), std.mem.readInt(u32, b.code[1..5], .little));
     try std.testing.expectEqual(@as(u8, 0x42), b.code[5]);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);

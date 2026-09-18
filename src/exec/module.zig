@@ -956,7 +956,7 @@ fn atomLessThan(rt: *core.JSRuntime, lhs: core.Atom, rhs: core.Atom) bool {
     const order = std.mem.order(u8, lhs_name, rhs_name);
     return switch (order) {
         .lt => true,
-        .eq => lhs < rhs,
+        .eq => lhs.raw() < rhs.raw(),
         .gt => false,
     };
 }

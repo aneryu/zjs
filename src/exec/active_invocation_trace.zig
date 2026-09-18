@@ -119,7 +119,7 @@ fn traceEntryExtras(entry: *inline_calls.Entry, visitor: *RootVisitor) RootTrace
     // property key as a bare owned atom id in `continuation_payload`, which
     // outlives the whole nested trap call. Other actions tag the same word as
     // a for-of depth or zero, so the action is the discriminator.
-    if (entry.return_action == .proxy_get and entry.continuation_payload != core.atom.null_atom) {
-        try visitor.atomRoot(@intCast(entry.continuation_payload));
+    if (entry.return_action == .proxy_get and entry.continuation_payload != core.atom.null_atom.raw()) {
+        try visitor.atomRoot(core.Atom.fromRaw(entry.continuation_payload));
     }
 }

@@ -700,7 +700,7 @@ noinline fn errorStackStringValue(
             var index: usize = 0;
             while (index < length) : (index += 1) {
                 if (index > std.math.maxInt(u32)) break;
-                const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+                const site_value = try sites.getProperty(core.Atom.taggedInt(@intCast(index)));
                 const site = objectFromValue(site_value) orelse continue;
                 if (!site.isCallSite()) continue;
                 if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
@@ -785,7 +785,7 @@ pub fn stringRaw(
     var index: usize = 0;
     while (index < length) : (index += 1) {
         if (index > std.math.maxInt(u32)) return error.RangeError;
-        const raw_part = try getValueProperty(ctx, output, global, raw, core.atom.atomFromUInt32(@intCast(index)), caller_function, caller_frame);
+        const raw_part = try getValueProperty(ctx, output, global, raw, core.Atom.taggedInt(@intCast(index)), caller_function, caller_frame);
         const raw_string = try toStringForAnnexB(ctx, output, global, raw_part, caller_function, caller_frame);
         try appendStringValueUnits(ctx.runtime, &out, raw_string);
 
@@ -1164,7 +1164,7 @@ pub fn regExpSymbolSplitGeneric(
         const capture_limit = try toLengthIndex(ctx, output, global, length_value);
         var capture_index: usize = 1;
         while (capture_index < capture_limit) : (capture_index += 1) {
-            const capture = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(@intCast(capture_index)), caller_function, caller_frame);
+            const capture = try getValueProperty(ctx, output, global, result, core.Atom.taggedInt(@intCast(capture_index)), caller_function, caller_frame);
             // CreateDataProperty consumes the capture value as-is. Custom exec
             // methods may return non-string captures, and QuickJS does not
             // coerce them in @@split.
@@ -1247,7 +1247,7 @@ pub fn regExpSymbolMatchGeneric(
     while (true) {
         const result = try regExpExecGeneric(ctx, output, global, rx, string_value, caller_function, caller_frame);
         if (result.is(.null_value)) break;
-        const zero_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
+        const zero_value = try getValueProperty(ctx, output, global, result, core.Atom.taggedInt(0), caller_function, caller_frame);
         const match_string = if (zero_value.isString())
             zero_value
         else blk: {
@@ -1624,7 +1624,7 @@ pub fn captureReplaceMatch(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !ReplaceMatch {
-    const matched_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
+    const matched_value = try getValueProperty(ctx, output, global, result, core.Atom.taggedInt(0), caller_function, caller_frame);
     const matched = try toStringForAnnexB(ctx, output, global, matched_value, caller_function, caller_frame);
 
     const index_atom = (comptime core.atom.predefinedId("index", .string)) orelse return error.TypeError;
@@ -1652,7 +1652,7 @@ pub fn captureReplaceMatch(
         }
         while (initialized < capture_count) {
             const capture_index = initialized;
-            captures[capture_index] = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(@intCast(capture_index + 1)), caller_function, caller_frame);
+            captures[capture_index] = try getValueProperty(ctx, output, global, result, core.Atom.taggedInt(@intCast(capture_index + 1)), caller_function, caller_frame);
             initialized += 1;
             rooted_captures = captures[0..initialized];
             if (!captures[capture_index].is(.undefined_value)) {
@@ -2410,13 +2410,13 @@ pub fn defineSplitSliceElement(rt: *core.JSRuntime, object: *core.Object, index:
 }
 
 pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
-    const atom_id = core.atom.atomFromUInt32(index);
+    const atom_id = core.Atom.taggedInt(index);
     if (try object.appendDenseArrayDefineIndex(rt, index, atom_id, value)) return;
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
 }
 
 pub fn defineSplitValueElementOwned(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
-    const atom_id = core.atom.atomFromUInt32(index);
+    const atom_id = core.Atom.taggedInt(index);
     const appended = try object.appendDenseArrayDefineIndexOwned(rt, index, atom_id, value);
     if (appended) return;
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
@@ -3195,7 +3195,7 @@ pub fn regExpStringIteratorNext(
     const is_global = ((iterator.iteratorKindSlot().*) & 1) != 0;
     if (!is_global) iterator.iteratorIndexSlot().* = 1;
     const unicode = ((iterator.iteratorKindSlot().*) & 2) != 0;
-    const zero_value = try getValueProperty(ctx, output, global, result, core.atom.atomFromUInt32(0), caller_function, caller_frame);
+    const zero_value = try getValueProperty(ctx, output, global, result, core.Atom.taggedInt(0), caller_function, caller_frame);
     const match_string = try toStringForAnnexB(ctx, output, global, zero_value, caller_function, caller_frame);
     if (is_global and isEmptyStringValue(ctx.runtime, match_string)) {
         const last_index = try getValueProperty(ctx, output, global, regexp, core.atom.ids.lastIndex, caller_function, caller_frame);
@@ -3223,7 +3223,7 @@ pub fn getFastStringPrimitiveDataProperty(
     // missed the bitset gate and fell into `primitiveObjectForAccess`, which
     // builds a String wrapper with one own property per character of the
     // receiver -- O(n) per call, ~13x slower than QuickJS on string `.replace`.
-    if (core.atom.isTaggedInt(atom_id) or atom_id == 0 or atom_id > core.atom.predefined_count) return null;
+    if (atom_id.isTaggedInt() or atom_id == core.atom.null_atom or atom_id.raw() > core.atom.predefined_count) return null;
     if (atom_id == core.atom.ids.length) return null;
 
     // Primitive method lookup uses the realm intrinsic `%String.prototype%`,
@@ -3252,7 +3252,7 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
         const units: [1]u16 = .{unit};
         break :blk (try core.string.String.createUtf16(rt, &units)).value();
     };
-    try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, false, true, false));
 }
 
 pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {

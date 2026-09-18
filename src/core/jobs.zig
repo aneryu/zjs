@@ -820,7 +820,7 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
             const appended = array.appendDenseArrayDefineIndex(
                 ctx.runtime,
                 index,
-                core.atom.atomFromUInt32(index),
+                core.Atom.taggedInt(index),
                 args[1],
             ) catch return ctx.throwValue(core.JSValue.int32(-2));
             if (!appended) return ctx.throwValue(core.JSValue.int32(-3));
@@ -847,9 +847,9 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
     try std.testing.expectEqual(RunOneStatus.empty, runGenericOneForTest(&runtime.job_queue));
 
     try std.testing.expectEqual(@as(u32, 3), observed.arrayLength());
-    const first = try observed.getProperty(core.atom.atomFromUInt32(0));
-    const second = try observed.getProperty(core.atom.atomFromUInt32(1));
-    const third = try observed.getProperty(core.atom.atomFromUInt32(2));
+    const first = try observed.getProperty(core.Atom.taggedInt(0));
+    const second = try observed.getProperty(core.Atom.taggedInt(1));
+    const third = try observed.getProperty(core.Atom.taggedInt(2));
     try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
     try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
     try std.testing.expectEqual(@as(?i32, 3), third.as(.int));

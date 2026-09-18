@@ -221,7 +221,7 @@ fn isAsciiIdent(bytes: []const u8) bool {
 /// the quoted arm re-encodes to UTF-16 units so the escaper sees what qjs
 /// sees (`\u00xx` for U+007F..U+009F, raw UTF-8 above).
 fn printAtom(s: *State, atom_id: core.Atom) Error!void {
-    if (core.atom.isTaggedInt(atom_id)) return s.printf("{d}", .{core.atom.atomToUInt32(atom_id)});
+    if (atom_id.isTaggedInt()) return s.printf("{d}", .{atom_id.toUInt32()});
     if (atom_id == core.atom.null_atom) return s.puts("<null>");
     try printNameBytes(s, s.rt.atoms.name(atom_id) orelse "");
 }
@@ -577,7 +577,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         // A String wrapper's index characters are string-exotic properties
         // in qjs (never shape properties); zjs materialises them as shape
         // entries, so they are hidden here to keep `String {  }`.
-        if (class_id == core.class.ids.string and core.atom.isTaggedInt(object.propAtomAt(index))) continue;
+        if (class_id == core.class.ids.string and object.propAtomAt(index).isTaggedInt()) continue;
         if (shown < default_max_item_count) {
             try printComma(s, &comma_state);
             try printAtom(s, object.propAtomAt(index));

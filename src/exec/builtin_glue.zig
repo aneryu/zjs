@@ -604,10 +604,10 @@ pub fn addCollectionEntriesFromIterator(
             const entry = property_ops.expectObject(step.value) catch {
                 return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, error.TypeError, null, null);
             };
-            const key = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(0), null, null) catch |err| {
+            const key = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(0), null, null) catch |err| {
                 return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
             };
-            const value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(1), null, null) catch |err| {
+            const value = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(1), null, null) catch |err| {
                 return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
             };
             callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{ key, value }) catch |err| {

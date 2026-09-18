@@ -493,7 +493,7 @@ pub fn groupByWithCallbackHost(
     if (!source.isArray()) return error.TypeError;
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        const item = try source.getProperty(core.atom.atomFromUInt32(index));
+        const item = try source.getProperty(core.Atom.taggedInt(index));
         try addGroupedItem(rt, map, args[1], host, item, index);
     }
     return map_value;
@@ -740,8 +740,8 @@ fn iteratorValue(rt: *core.JSRuntime, global: ?*core.Object, class_id: core.Clas
             const prototype = if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null;
             const pair = try core.Object.createArray(rt, prototype);
             errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
-            try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
-            try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value_value, true, true, true));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(key_value, true, true, true));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(value_value, true, true, true));
             return pair.value();
         },
     }
@@ -1219,7 +1219,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         errdefer freeValueList(rt, values);
         var index: u32 = 0;
         while (index < iterable.arrayLength()) : (index += 1) {
-            const value = try iterable.getProperty(core.atom.atomFromUInt32(index));
+            const value = try iterable.getProperty(core.Atom.taggedInt(index));
             try appendValue(rt, &values, value);
         }
         return values;
@@ -1265,8 +1265,8 @@ test "appendValue roots existing values and incoming value during growth" {
 
     const Trigger = struct {
         rt: *core.JSRuntime,
-        first_atom: u32,
-        second_atom: u32,
+        first_atom: core.Atom,
+        second_atom: core.Atom,
         saw_first: bool = false,
         saw_second: bool = false,
         trace_failed: bool = false,
@@ -1360,7 +1360,7 @@ fn addGroupedItem(
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     if (!array.isArray()) return error.TypeError;
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(value, true, true, true));
 }
 
 fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
@@ -2290,7 +2290,7 @@ fn mapAppendGroupByValue(
         if (!group.isArray()) return error.TypeError;
         try group.defineOwnProperty(
             ctx.runtime,
-            core.atom.atomFromUInt32(group.arrayLength()),
+            core.Atom.taggedInt(group.arrayLength()),
             core.Descriptor.data(value, true, true, true),
         );
         return;
@@ -2300,7 +2300,7 @@ fn mapAppendGroupByValue(
     errdefer core.Object.destroyFromHeader(ctx.runtime, group.gcHeader());
     try group.defineOwnProperty(
         ctx.runtime,
-        core.atom.atomFromUInt32(group.arrayLength()),
+        core.Atom.taggedInt(group.arrayLength()),
         core.Descriptor.data(value, true, true, true),
     );
     _ = try methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });

@@ -327,7 +327,7 @@ pub const JSValue = extern struct {
         return self.payloadBits() != 0;
     }
 
-    pub fn asSymbolAtom(self: JSValue) ?u32 {
+    pub fn asSymbolAtom(self: JSValue) ?@TypeOf(string_mod.String.no_atom_id) {
         const body = self.asSymbolBody() orelse return null;
         if (body.atom_id == string_mod.String.no_atom_id) return null;
         return body.atom_id;

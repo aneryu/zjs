@@ -89,7 +89,7 @@ pub fn strongEntryHash(value: core.JSValue) u64 {
         core.Tag.undefined_value => mix64(0x3c6e_f372_fe94_f82b),
         core.Tag.short_big_int, core.Tag.big_int => hashBigIntValue(value),
         core.Tag.string, core.Tag.string_rope => hashStringValue(value),
-        core.Tag.symbol => mix64(0x19e3_7789_7cc9_8f7d ^ @as(u64, value.asSymbolAtom().?)),
+        core.Tag.symbol => mix64(0x19e3_7789_7cc9_8f7d ^ @as(u64, value.asSymbolAtom().?.raw())),
         core.Tag.object, core.Tag.module => hashRefPointer(value),
         core.Tag.function_bytecode => hashObjectPointer(value),
         else => mix64(tagHashBits(value.tagOf())),

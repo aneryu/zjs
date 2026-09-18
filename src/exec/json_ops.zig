@@ -715,7 +715,7 @@ fn JsonUnitParser(comptime T: type) type {
                     // The parser owns this fresh array, so this fallback cannot
                     // encounter an AUTOINIT property whose builder widens the
                     // generic define error set.
-                    object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(child, true, true, true)) catch |err| return @errorCast(err);
+                    object.defineOwnProperty(self.rt, core.Atom.taggedInt(index), core.Descriptor.data(child, true, true, true)) catch |err| return @errorCast(err);
                 }
                 index += 1;
                 self.skipWhitespace();
@@ -1009,7 +1009,7 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
             try buffer.append(rt.memory.allocator, '\n');
             try appendIndent(rt, buffer, options.gap, depth + 1);
         }
-        const value = try object.getDenseArrayElementValue(index) orelse object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getDenseArrayElementValue(index) orelse object.getProperty(core.Atom.taggedInt(index));
         var rooted_value = value;
         var root_frame = core.runtime.rootValues(.{&rooted_value});
         root_frame.activate(rt);
@@ -1173,7 +1173,7 @@ const SimpleJsonParser = struct {
                 // The parser owns this fresh array, so this fallback cannot
                 // encounter an AUTOINIT property whose builder widens the
                 // generic define error set.
-                object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(item_value, true, true, true)) catch |err| return @errorCast(err);
+                object.defineOwnProperty(self.rt, core.Atom.taggedInt(index), core.Descriptor.data(item_value, true, true, true)) catch |err| return @errorCast(err);
             }
             index += 1;
             self.skipWhitespace();
@@ -1371,7 +1371,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
     defer list_roots.deactivate(rt);
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        const item = try object.getProperty(core.atom.atomFromUInt32(index));
+        const item = try object.getProperty(core.Atom.taggedInt(index));
         var rooted_item = item;
         var item_root_frame = core.runtime.rootValues(.{&rooted_item});
         item_root_frame.activate(rt);

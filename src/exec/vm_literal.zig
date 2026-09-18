@@ -142,7 +142,7 @@ pub noinline fn defineField(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     if (ctx.runtime.atoms.kind(atom_id) == .private) return error.InvalidBytecode;
     const value = try stack.pop();

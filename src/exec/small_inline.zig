@@ -400,7 +400,7 @@ pub fn specializeCallSite(
     if (analyzeApplyForward(callee)) |plan| {
         const realm = callee.realmContext() orelse return;
         const global = realm.global orelse return;
-        if (!applyForwardGuardHolds(rt, global, callee_fn_obj, @intCast(plan.method_atom))) return;
+        if (!applyForwardGuardHolds(rt, global, callee_fn_obj, plan.method_atom)) return;
     }
     const spec = cloneAndExpand(rt, base_fb, callee, callee_fn_obj, call_pc, kind, argc) orelse return;
     const next = JSValue.functionBytecode(&spec.header);
@@ -411,7 +411,7 @@ pub fn specializeCallSite(
 
 const ApplyForwardPlan = struct {
     args_local: u16,
-    method_atom: u32,
+    method_atom: core.Atom,
     method_get_pc: u32,
     apply_get_pc: u32,
     thisarg_pc: u32,
@@ -483,7 +483,7 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
     var put_args_count: u8 = 0;
     var apply_get_pc: ?usize = null;
     var method_get_pc: ?usize = null;
-    var method_atom: ?u32 = null;
+    var method_atom: ?core.Atom = null;
     var call_pc: ?usize = null;
     var prev_pc: usize = 0;
     var prev_op: u8 = 0;
@@ -533,7 +533,7 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
         if (opc == op.get_field or opc == op.get_field2 or opc == op.get_field2_call_method or
             opc == op.get_field_field2)
         {
-            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            const atom_id = core.Atom.fromRaw(std.mem.readInt(u32, code[pc + 1 ..][0..4], .little));
             if (atom_id == core.atom.ids.apply and
                 (opc == op.get_field2 or opc == op.get_field2_call_method))
             {
@@ -541,7 +541,7 @@ fn analyzeApplyForward(fb: *const FunctionBytecode) ?ApplyForwardPlan {
                 apply_get_pc = pc;
                 if (prev_op != op.get_field and prev_op != op.get_field_field2) return null;
                 method_get_pc = prev_pc;
-                method_atom = std.mem.readInt(u32, code[prev_pc + 1 ..][0..4], .little);
+                method_atom = core.Atom.fromRaw(std.mem.readInt(u32, code[prev_pc + 1 ..][0..4], .little));
                 if (method_atom == core.atom.ids.apply) return null;
             }
         }
@@ -643,7 +643,7 @@ const Rewrite = struct {
     var_base: u16,
     kind: Kind,
     forward_call_rel: u32 = 0xFFFFFFFF,
-    method_atom: u32 = 0,
+    method_atom: core.Atom = core.atom.null_atom,
 };
 
 fn emitByte(out: *Rewrite, b: u8) bool {
@@ -705,10 +705,10 @@ fn clearPropSiteIndices(code: []u8) void {
     }
 }
 
-fn emitGetField2(out: *Rewrite, atom_id: u32) bool {
+fn emitGetField2(out: *Rewrite, atom_id: core.Atom) bool {
     if (!emitByte(out, op.get_field2)) return false;
     var buf: [5]u8 = undefined;
-    std.mem.writeInt(u32, buf[0..4], atom_id, .little);
+    std.mem.writeInt(u32, buf[0..4], atom_id.raw(), .little);
     // W1 `atom_cache_u8`: same reasoning as `emitCallMethodApplyFwd` -- a
     // callee-body site index would alias one of the caller's own property
     // sites, so the rewritten read carries no cache slot.
@@ -1079,7 +1079,7 @@ fn cloneAndExpand(
         pc_map: [max_pc_map]u16,
         pc_map_len: u16,
         forward_call_rel: u32,
-        method_atom: u32,
+        method_atom: core.Atom,
     };
     var pending: [max_sites]Pending = undefined;
 
@@ -1304,8 +1304,8 @@ fn cloneAndExpand(
         };
         state.apply_forward[state.inlined_len] = if (item.forward_call_rel != 0xFFFFFFFF)
             .{
-                .method_atom = if (item.method_atom != 0)
-                    rt.atoms.noteHolderStore(@as(core.Atom, @intCast(item.method_atom)))
+                .method_atom = if (item.method_atom != core.atom.null_atom)
+                    rt.atoms.noteHolderStore(item.method_atom)
                 else
                     core.atom.null_atom,
                 .call_pc = item.pc_lo + item.forward_call_rel,

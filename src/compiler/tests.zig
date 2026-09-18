@@ -123,7 +123,7 @@ fn expectV2Stream(b: *const builder_mod.Builder, expected: []const ExpectedInsn)
         if (insn.label) |label_index|
             try std.testing.expectEqual(label_index, std.mem.readInt(u32, b.code[pc + 1 ..][0..4], .little));
         if (insn.atom) |atom_id|
-            try std.testing.expectEqual(atom_id, std.mem.readInt(u32, b.code[pc + 1 ..][0..4], .little));
+            try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[pc + 1 ..][0..4], .little));
         pc += insn.size;
     }
     try std.testing.expectEqual(@as(usize, @intCast(b.code_len)), pc);
@@ -144,7 +144,7 @@ fn expectResolvedStream(
             );
         if (insn.atom) |atom_id|
             try std.testing.expectEqual(
-                atom_id,
+                atom_id.raw(),
                 std.mem.readInt(u32, product.code[pc + 1 ..][0..4], .little),
             );
         pc += insn.size;
@@ -3698,7 +3698,7 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
 
     for (idents) |name| {
         const id = try rt.atoms.internString(name);
-        const entry = &rt.atoms.entries[id - core.atom.first_dynamic_atom];
+        const entry = &rt.atoms.entries[id.raw() - core.atom.first_dynamic_atom];
         std.testing.expectEqual(epoch, entry.mark_epoch) catch |err| {
             std.debug.print("unmarked parse-time atom: {s}\n", .{name});
             return err;

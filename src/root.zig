@@ -578,7 +578,7 @@ pub const object = struct {
     }
 
     fn atomFromUInt32(index: u32) zjs_core.Atom {
-        return zjs_core.atom.atomFromUInt32(index);
+        return zjs_core.Atom.taggedInt(index);
     }
 
     pub fn getProperty(rt: *JSRuntime, obj: *Object, name: []const u8) !value.Value {
@@ -1080,7 +1080,7 @@ test "public job drain honors budget and reports the real remaining FIFO" {
             const appended = array.appendDenseArrayDefineIndex(
                 core_ctx.runtime,
                 index,
-                zjs_core.atom.atomFromUInt32(index),
+                zjs_core.Atom.taggedInt(index),
                 args[1],
             ) catch return core_ctx.throwValue(zjs_core.JSValue.int32(-2));
             if (!appended) return core_ctx.throwValue(zjs_core.JSValue.int32(-3));

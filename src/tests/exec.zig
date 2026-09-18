@@ -107,11 +107,11 @@ test "dense parameter arrays spread retains CreateDataProperty constraints" {
         switch (mode) {
             0 => target.flags.extensible = false,
             1 => target.flags.length_writable = false,
-            else => try target.defineOwnProperty(js.runtime, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(42), false, true, false)),
+            else => try target.defineOwnProperty(js.runtime, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(42), false, true, false)),
         }
         try std.testing.expectError(error.TypeError, engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
         try std.testing.expectEqual(@as(u32, if (mode == 2) 1 else 0), target.arrayLength());
-        if (mode == 2) try std.testing.expectEqual(@as(?i32, 42), (try target.getProperty(core.atom.atomFromUInt32(0))).as(.int));
+        if (mode == 2) try std.testing.expectEqual(@as(?i32, 42), (try target.getProperty(core.Atom.taggedInt(0))).as(.int));
     }
 }
 
@@ -7788,8 +7788,8 @@ test "constructValue AggregateError releases copied errors array owner" {
     const constructor = try engine.exec.construct.functionObject(ctx, name);
 
     const source = try core.Object.createArray(rt, null);
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try source.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     source.setArrayLength(2);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
 
@@ -8388,7 +8388,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     const exec_array = core.Object.fromHeader(exec_result.refHeader().?);
     try std.testing.expect(exec_array.isArray());
-    const first_match = try exec_array.getProperty(core.atom.atomFromUInt32(0));
+    const first_match = try exec_array.getProperty(core.Atom.taggedInt(0));
     try std.testing.expect(first_match.isString());
     const first_match_string = first_match.asStringBody().?;
     try std.testing.expect(first_match_string.eqlBytes("a"));
@@ -8485,7 +8485,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const match_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match, &one_arg);
     const match_array = core.Object.fromHeader(match_result.refHeader().?);
-    const match_zero = try match_array.getProperty(core.atom.atomFromUInt32(0));
+    const match_zero = try match_array.getProperty(core.Atom.taggedInt(0));
     try std.testing.expect(match_zero.isString());
     const match_zero_string = match_zero.asStringBody().?;
     try std.testing.expect(match_zero_string.eqlBytes("a"));
@@ -17939,8 +17939,8 @@ test "bytecode closures reuse the final function-prototype shape" {
         .{ .filename = "<repl>" },
     );
     const functions = try core.Object.expect(result);
-    const first_value = try functions.getProperty(core.atom.atomFromUInt32(0));
-    const second_value = try functions.getProperty(core.atom.atomFromUInt32(1));
+    const first_value = try functions.getProperty(core.Atom.taggedInt(0));
+    const second_value = try functions.getProperty(core.Atom.taggedInt(1));
     const first = try core.Object.expect(first_value);
     const second = try core.Object.expect(second_value);
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
@@ -18057,7 +18057,7 @@ test "FunctionRealm query separates owned carriers from caller-semantics classes
     const carriers = try global.getProperty(carriers_atom);
     const carrier_array = try core.Object.expect(carriers);
     var values: [7]core.JSValue = undefined;
-    for (&values, 0..) |*slot, index| slot.* = try carrier_array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+    for (&values, 0..) |*slot, index| slot.* = try carrier_array.getProperty(core.Atom.taggedInt(@intCast(index)));
 
     const native = try core.Object.expect(values[0]);
     const remote_realm = native.nativeFunctionRealm() orelse return error.TestUnexpectedResult;
@@ -20363,7 +20363,7 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
 
 const ReflectActiveRootSymbolProbe = struct {
     rt: *core.JSRuntime,
-    atom_id: u32,
+    atom_id: core.Atom,
     saw_symbol: bool = false,
     trace_failed: bool = false,
 
@@ -20388,7 +20388,7 @@ const ReflectActiveRootSymbolProbe = struct {
 };
 
 fn reflectTestSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, true, true, true));
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
@@ -22435,7 +22435,7 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
         id.* = try rt.internAtom(spelling);
         try std.testing.expect(rt.atoms.cachedString(id.*) == null);
         code[offset] = op.push_atom_value;
-        std.mem.writeInt(u32, code[offset + 1 ..][0..4], id.*, .little);
+        std.mem.writeInt(u32, code[offset + 1 ..][0..4], id.*.raw(), .little);
         offset += 5;
     }
     code[offset] = op.return_undef;
@@ -22629,7 +22629,7 @@ test "TGC S3-d: an inline call's argument region stays rooted while the callee f
     code[0] = op.push_const;
     std.mem.writeInt(u32, code[1..5], 0, .little);
     code[5] = op.push_atom_value;
-    std.mem.writeInt(u32, code[6..10], victim_atom, .little);
+    std.mem.writeInt(u32, code[6..10], victim_atom.raw(), .little);
     code[10] = op.call1;
     code[11] = bytecode.CallSiteCache.no_cache_idx;
     code[12] = op.@"return";
@@ -22686,7 +22686,7 @@ test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow alloc
     _ = try function.addConstant(array);
     var code: [18]u8 = undefined;
     code[0] = op.push_atom_value;
-    std.mem.writeInt(u32, code[1..5], victim_atom, .little);
+    std.mem.writeInt(u32, code[1..5], victim_atom.raw(), .little);
     code[5] = op.push_const;
     std.mem.writeInt(u32, code[6..10], 0, .little);
     code[10] = op.push_0;
@@ -22733,9 +22733,9 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     defer function.deinit(rt);
     var code: [16]u8 = undefined;
     code[0] = op.push_atom_value;
-    std.mem.writeInt(u32, code[1..5], victim_atom, .little);
+    std.mem.writeInt(u32, code[1..5], victim_atom.raw(), .little);
     code[5] = op.get_field2;
-    std.mem.writeInt(u32, code[6..10], method_atom, .little);
+    std.mem.writeInt(u32, code[6..10], method_atom.raw(), .little);
     // W1: `get_field2` is `atom_cache_u8`; this hand-built stream has no
     // `prop_sites` tail, so the site carries the no-cache index.
     code[10] = bytecode.PropSiteCache.no_cache_idx;

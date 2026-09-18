@@ -200,7 +200,7 @@ pub fn fastArrayOwnIntElementValue(value: core.JSValue, key: core.JSValue) ?core
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
     if (!object.isArray()) return null;
-    return object.getOwnDataPropertyValue(core.atom.atomFromUInt32(@intCast(index_i32)));
+    return object.getOwnDataPropertyValue(core.Atom.taggedInt(@intCast(index_i32)));
 }
 
 /// Own integer-element OVERWRITE for a NON-fast (sparse/slow) Array — the write
@@ -220,7 +220,7 @@ pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: 
     if (index_i32 < 0) return false;
     const object = objectFromValue(value) orelse return false;
     if (!object.isArray()) return false;
-    return object.setOwnWritableDataProperty(rt, core.atom.atomFromUInt32(@intCast(index_i32)), new_value);
+    return object.setOwnWritableDataProperty(rt, core.Atom.taggedInt(@intCast(index_i32)), new_value);
 }
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;

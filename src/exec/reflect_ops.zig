@@ -202,7 +202,7 @@ fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]cor
     var initialized: usize = 0;
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        out[index] = try object.getProperty(core.atom.atomFromUInt32(index));
+        out[index] = try object.getProperty(core.Atom.taggedInt(index));
         initialized += 1;
         rooted_out = out[0..initialized];
     }
@@ -580,7 +580,7 @@ pub fn reflectOwnKeysCall(
     errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(key_value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(out.arrayLength()), core.Descriptor.data(key_value, true, true, true));
     }
     return out.value();
 }

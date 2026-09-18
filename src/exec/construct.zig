@@ -483,8 +483,8 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
 
     var index: u32 = 0;
     while (index < errors_source.arrayLength()) : (index += 1) {
-        copied_error_val = try errors_source.getProperty(core.atom.atomFromUInt32(index));
-        try errors_array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(copied_error_val, true, true, true));
+        copied_error_val = try errors_source.getProperty(core.Atom.taggedInt(index));
+        try errors_array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(copied_error_val, true, true, true));
         copied_error_val = core.JSValue.undefinedValue();
     }
     errors_array.setArrayLength(errors_source.arrayLength());
@@ -662,7 +662,7 @@ fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, 
 
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        value = try source.getProperty(core.atom.atomFromUInt32(index));
+        value = try source.getProperty(core.Atom.taggedInt(index));
         coerced = try typedArraySourceValue(rt, value);
         _ = try core.typed_array.typedArraySetIndex(rt, object, index, coerced);
 
@@ -728,7 +728,7 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
 
     var index: u32 = 0;
     while (index < length) : (index += 1) {
-        value = try source.getProperty(core.atom.atomFromUInt32(index));
+        value = try source.getProperty(core.Atom.taggedInt(index));
         coerced = try typedArraySourceValue(rt, value);
         _ = try core.typed_array.typedArraySetIndex(rt, object, index, coerced);
 
@@ -773,12 +773,12 @@ fn constructCollectionValue(
     }
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        const entry_value = try source.getProperty(core.atom.atomFromUInt32(index));
+        const entry_value = try source.getProperty(core.Atom.taggedInt(index));
         if (kind == 1 or kind == 3) {
             const entry = try expectObject(entry_value);
             if (!entry.isArray()) return error.TypeError;
-            const key = try entry.getProperty(core.atom.atomFromUInt32(0));
-            const value = try entry.getProperty(core.atom.atomFromUInt32(1));
+            const key = try entry.getProperty(core.Atom.taggedInt(0));
+            const value = try entry.getProperty(core.Atom.taggedInt(1));
             var set_args = [_]core.JSValue{ key, value };
             if (isNativeCollectionAdder(rt, adder, adder_name)) {
                 _ = try collectionPrimitiveMethodCall(ctx, collection_value, 1, &set_args, &.{});
@@ -840,11 +840,11 @@ fn constructCollectionFromIterator(
                 try closeIterator(ctx, iterator, globals);
                 return err;
             };
-            const key = getPropertyWithGetter(ctx, entry, core.atom.atomFromUInt32(0), globals) catch |err| {
+            const key = getPropertyWithGetter(ctx, entry, core.Atom.taggedInt(0), globals) catch |err| {
                 try closeIterator(ctx, iterator, globals);
                 return err;
             };
-            const value = getPropertyWithGetter(ctx, entry, core.atom.atomFromUInt32(1), globals) catch |err| {
+            const value = getPropertyWithGetter(ctx, entry, core.Atom.taggedInt(1), globals) catch |err| {
                 try closeIterator(ctx, iterator, globals);
                 return err;
             };

@@ -754,7 +754,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     const error_atom = error_value.asSymbolAtom().?;
     const cause_value = try rt.newSymbolValue("gc-aggregate-error-cause-symbol");
     const cause_atom = cause_value.asSymbolAtom().?;
-    try errors_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(error_value, true, true, true));
+    try errors_source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(error_value, true, true, true));
     errors_source.setArrayLength(1);
     try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
     try defineDataPropertyByAtom(rt, options, core.atom.ids.cause, cause_value, true, false, true);
@@ -780,7 +780,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     {
         const stored_errors_value = try aggregate.getProperty(errors_key);
         const stored_errors = objectFromValue(stored_errors_value) orelse return error.TypeError;
-        const stored_error = try stored_errors.getProperty(core.atom.atomFromUInt32(0));
+        const stored_error = try stored_errors.getProperty(core.Atom.taggedInt(0));
         try std.testing.expect(stored_error.same(error_value));
 
         const stored_cause = try aggregate.getProperty(cause_key);
@@ -1727,7 +1727,7 @@ pub fn propertyIndexFromLengthKey(rt: *core.JSRuntime, atom_id: core.Atom) ?usiz
 }
 
 pub fn propertyAtomFromLengthIndex(rt: *core.JSRuntime, index: usize) !LengthIndexAtom {
-    if (index <= core.atom.max_int_atom) return .{ .atom = core.atom.atomFromUInt32(@intCast(index)), .owned = false };
+    if (index <= core.atom.max_int_atom) return .{ .atom = core.Atom.taggedInt(@intCast(index)), .owned = false };
     const name = try std.fmt.allocPrint(rt.memory.allocator, "{d}", .{index});
     defer rt.memory.allocator.free(name);
     const id = try rt.internAtom(name);
@@ -2528,8 +2528,8 @@ pub fn getValueProperty(
         if (!object.hasExoticMethods()) {
             if (object.isArray()) {
                 if (atom_id == core.atom.ids.length) return value_ops.length(value);
-                if (core.atom.isTaggedInt(atom_id)) {
-                    const index = core.atom.atomToUInt32(atom_id);
+                if (atom_id.isTaggedInt()) {
+                    const index = atom_id.toUInt32();
                     if (object.getDenseArrayElementValue(index)) |element| return element;
                 }
                 if (object.getOwnDataPropertyValue(atom_id)) |own_data| return own_data;
@@ -2585,7 +2585,7 @@ pub inline fn probeNamedDataProperty(
     receiver: core.JSValue,
     atom_id: core.Atom,
 ) NamedDataPropertyProbe {
-    if (core.atom.isTaggedInt(atom_id) or rt.atoms.mightBePrivate(atom_id)) return .{ .needs_slow = true };
+    if (atom_id.isTaggedInt() or rt.atoms.mightBePrivate(atom_id)) return .{ .needs_slow = true };
     const object = objectFromValueTrustedExpression(receiver) orelse return .{ .needs_slow = true };
     return probePublicNamedDataPropertyFromObject(object, atom_id);
 }
@@ -3204,7 +3204,7 @@ pub fn objectEnumerableOwnPropertiesCall(
         errdefer {
             element = core.JSValue.undefinedValue();
         }
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, core.atom.atomFromUInt32(out.arrayLength()), element, caller_function, caller_frame);
+        try createDataPropertyOrThrow(ctx, output, global, out_value, out, core.Atom.taggedInt(out.arrayLength()), element, caller_function, caller_frame);
         element = core.JSValue.undefinedValue();
     }
     return out_value;
@@ -3918,8 +3918,8 @@ pub fn throwNullishComputedPropertyTypeError(ctx: *core.JSContext, global: *core
 }
 
 pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
-    if (core.atom.isTaggedInt(atom_id)) {
-        return try std.fmt.allocPrint(rt.memory.allocator, "{d}", .{core.atom.atomToUInt32(atom_id)});
+    if (atom_id.isTaggedInt()) {
+        return try std.fmt.allocPrint(rt.memory.allocator, "{d}", .{atom_id.toUInt32()});
     }
     const name = rt.atoms.name(atom_id) orelse "";
     return try rt.memory.allocator.dupe(u8, name);
@@ -4167,7 +4167,7 @@ pub noinline fn defineClass(
     catch_target: *?usize,
     is_computed_name: bool,
 ) !Step {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const flags = function.byteCode()[frame.pc + 4];
     frame.pc += 5;
     var ctor_source = try stack.pop();
@@ -4270,7 +4270,7 @@ pub noinline fn defineMethod(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     const flags = function.byteCode()[frame.pc];
     frame.pc += 1;

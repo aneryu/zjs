@@ -1005,7 +1005,7 @@ test "FunctionDef: init/deinit" {
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
 
-    try std.testing.expectEqual(@as(atom_module.Atom, name), fd.func_name);
+    try std.testing.expectEqual(name, fd.func_name);
     try std.testing.expectEqual(@as(i32, 0), fd.var_count);
     try std.testing.expectEqual(@as(i32, 0), fd.arg_count);
     try std.testing.expectEqual(@as(i32, 0), fd.scope_count);
@@ -1133,7 +1133,7 @@ test "FunctionDef: add var" {
     });
 
     try std.testing.expectEqual(@as(i32, 1), fd.var_count);
-    try std.testing.expectEqual(@as(atom_module.Atom, var_name), fd.vars[0].var_name);
+    try std.testing.expectEqual(var_name, fd.vars[0].var_name);
     try std.testing.expect(fd.vars[0].is_lexical);
 }
 
@@ -1291,7 +1291,7 @@ test "FunctionDef: closure_var" {
 
     try std.testing.expectEqual(@as(i32, 1), fd.closure_var_count);
     try std.testing.expectEqual(function_def.ClosureType.local, fd.closure_var[0].closureType());
-    try std.testing.expectEqual(@as(atom_module.Atom, cv_name), fd.closure_var[0].var_name);
+    try std.testing.expectEqual(cv_name, fd.closure_var[0].var_name);
 }
 
 test "FunctionDef: LabelSlot and JumpSlot" {
@@ -1847,13 +1847,13 @@ test "final variable metadata matches pinned QuickJS physical ABI" {
         .is_const = true,
         .var_kind = .private_setter,
         .var_idx = 0x1234,
-        .var_name = 0x55667788,
+        .var_name = core.Atom.fromRaw(0x55667788),
     });
     const expected_closure = [_]u8{ 0x1a, 0x08, 0x34, 0x12, 0x88, 0x77, 0x66, 0x55 };
     try std.testing.expectEqualSlices(u8, &expected_closure, std.mem.asBytes(&closure));
 
     const compile_vd = function_def.VarDef{
-        .var_name = 0x11223344,
+        .var_name = core.Atom.fromRaw(0x11223344),
         .scope_level = 2,
         .is_const = true,
         .is_lexical = true,
@@ -1866,7 +1866,7 @@ test "final variable metadata matches pinned QuickJS physical ABI" {
     try std.testing.expectEqualSlices(u8, &expected_vardef, std.mem.asBytes(&final_vd));
 
     var uncaptured = FinalVarDef.fromCompile(.{
-        .var_name = 0x10203040,
+        .var_name = core.Atom.fromRaw(0x10203040),
         .scope_level = 0,
     }, -1);
     try std.testing.expect(!uncaptured.isCaptured());
@@ -2114,7 +2114,7 @@ test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
             _ = try child.appendScope(-1);
             var child_code = [_]u8{0} ** 9;
             child_code[0] = bytecode.opcode.op.scope_get_var;
-            std.mem.writeInt(u32, child_code[1..5], arg_name, .little);
+            std.mem.writeInt(u32, child_code[1..5], arg_name.raw(), .little);
             std.mem.writeInt(u16, child_code[5..7], 0, .little);
             child_code[7] = bytecode.opcode.op.drop;
             child_code[8] = bytecode.opcode.op.return_undef;
@@ -2597,9 +2597,9 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
     expected[3] = bytecode.opcode.op.object;
     expected[4] = bytecode.opcode.op.get_loc0;
     expected[5] = bytecode.opcode.op.define_field;
-    std.mem.writeInt(u32, expected[6..10], function_name, .little);
+    std.mem.writeInt(u32, expected[6..10], function_name.raw(), .little);
     expected[10] = bytecode.opcode.op.push_atom_value;
-    std.mem.writeInt(u32, expected[11..15], function_name, .little);
+    std.mem.writeInt(u32, expected[11..15], function_name.raw(), .little);
     expected[15] = bytecode.opcode.op.get_ref_value;
     expected[16] = bytecode.opcode.op.return_undef;
 
@@ -2648,7 +2648,7 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
     try std.testing.expectEqual(@as(u16, 0), fd.args[0].open_binding_idx);
     try std.testing.expectEqual(@as(u16, 0), fb.argVarDefs()[0].var_ref_idx);
     try std.testing.expectEqual(bytecode.opcode.op.make_arg_ref, fb.byteCode()[0]);
-    try std.testing.expectEqual(arg_name, std.mem.readInt(u32, fb.byteCode()[1..5], .little));
+    try std.testing.expectEqual(arg_name.raw(), std.mem.readInt(u32, fb.byteCode()[1..5], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, fb.byteCode()[5..7], .little));
     try std.testing.expectEqual(@as(?u16, 0), fb.argOpenBindingIndex(0));
 }

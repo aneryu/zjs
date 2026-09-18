@@ -2813,8 +2813,8 @@ pub const JSRuntime = struct {
     pub fn retainWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) return;
         const atom_id = identity >> 1;
-        if (atom_id > std.math.maxInt(atom.Atom)) return;
-        self.atoms.retainSymbolWeakRef(@intCast(atom_id));
+        if (atom_id > std.math.maxInt(u32)) return;
+        self.atoms.retainSymbolWeakRef(atom.Atom.fromRaw(@intCast(atom_id)));
     }
 
     /// Mirror of `retainWeakIdentity`: releasing an object identity is a no-op
@@ -2822,8 +2822,8 @@ pub const JSRuntime = struct {
     pub fn releaseWeakIdentity(self: *JSRuntime, identity: usize) void {
         if ((identity & 1) == 0) return;
         const atom_id = identity >> 1;
-        if (atom_id > std.math.maxInt(atom.Atom)) return;
-        self.atoms.releaseSymbolWeakRef(self, @intCast(atom_id));
+        if (atom_id > std.math.maxInt(u32)) return;
+        self.atoms.releaseSymbolWeakRef(self, atom.Atom.fromRaw(@intCast(atom_id)));
     }
 
     pub fn clearWeakIdentitySlot(self: *JSRuntime, slot: *?usize) void {
@@ -2835,8 +2835,8 @@ pub const JSRuntime = struct {
     fn weakIdentityIsCurrentlyLive(self: *JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(atom.Atom)) return false;
-            return self.atoms.kind(@intCast(atom_id)) == .symbol;
+            if (atom_id > std.math.maxInt(u32)) return false;
+            return self.atoms.kind(atom.Atom.fromRaw(@intCast(atom_id))) == .symbol;
         }
         return self.liveObjectFromWeakIdentity(identity) != null;
     }
@@ -2844,8 +2844,8 @@ pub const JSRuntime = struct {
     fn valueFromWeakIdentity(self: *JSRuntime, identity: usize) JSValue {
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(atom.Atom)) return JSValue.undefinedValue();
-            const symbol_atom: atom.Atom = @intCast(atom_id);
+            if (atom_id > std.math.maxInt(u32)) return JSValue.undefinedValue();
+            const symbol_atom: atom.Atom = atom.Atom.fromRaw(@intCast(atom_id));
             if (self.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
             return self.atoms.symbolValueIfLive(self, symbol_atom);
         }

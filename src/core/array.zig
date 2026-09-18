@@ -28,8 +28,8 @@ pub fn arrayIndexFromAtom(atoms: anytype, atom_id: atom.Atom) ?u32 {
     // atoms are array indexes directly. zjs internString tags every
     // array-index-form decimal string <= atom.max_int_atom, so a non-tagged
     // atom shorter than the 10-digit high-index window cannot be an array index.
-    if (atom.isTaggedInt(atom_id)) {
-        const index = atom.atomToUInt32(atom_id);
+    if (atom_id.isTaggedInt()) {
+        const index = atom_id.toUInt32();
         if (index <= max_array_index) return index;
         return null;
     }
@@ -177,7 +177,7 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
 
     try object.reserveDenseArrayElements(rt, @intCast(values.len));
     for (values, 0..) |value, index| {
-        const atom_id = atom.atomFromUInt32(@intCast(index));
+        const atom_id = atom.Atom.taggedInt(@intCast(index));
         if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), value)) continue;
         try object.defineOwnProperty(rt, atom_id, Descriptor.data(value, true, true, true));
     }

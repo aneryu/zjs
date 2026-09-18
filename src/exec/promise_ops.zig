@@ -1855,7 +1855,7 @@ pub fn promiseCapability(
 }
 
 pub fn promiseSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try property_ops.defineDataProperty(rt, array, core.atom.atomFromUInt32(index), value);
+    try property_ops.defineDataProperty(rt, array, core.Atom.taggedInt(index), value);
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
@@ -1880,7 +1880,7 @@ pub fn promiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core
 
     var index: u32 = 0;
     while (index < keys.arrayLength()) : (index += 1) {
-        const index_atom = core.atom.atomFromUInt32(index);
+        const index_atom = core.Atom.taggedInt(index);
         key_value = try keys.getProperty(index_atom);
         defer {
             key_value = core.JSValue.undefinedValue();

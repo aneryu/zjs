@@ -1876,7 +1876,7 @@ pub const opcode = struct {
         /// derived view identical before they were deleted.
         pub inline fn headerAtParser(
             code: []const u8,
-            atoms_ledger: []const u32,
+            atoms_ledger: []const @import("core/atom.zig").Atom,
             pc: u32,
             atom_index: u32,
         ) Error!Header {
@@ -1892,7 +1892,7 @@ pub const opcode = struct {
                     const end = @as(usize, pc) + trow.size;
                     if (end <= code.len and atom_index < atoms_ledger.len) {
                         const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                        if (operand == atoms_ledger[atom_index])
+                        if (@import("core/atom.zig").Atom.fromRaw(operand) == atoms_ledger[atom_index])
                             return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
                     }
                 } else {
@@ -1919,7 +1919,7 @@ pub const opcode = struct {
         /// the ledger entry without re-reading the operand.
         pub inline fn headerAtPhase1(
             code: []const u8,
-            atoms_ledger: []const u32,
+            atoms_ledger: []const @import("core/atom.zig").Atom,
             pc: u32,
             atom_index: u32,
         ) Error!Header {
@@ -1931,7 +1931,7 @@ pub const opcode = struct {
                 if (row.size < 5 or atom_index >= atoms_ledger.len)
                     return error.InvalidOpcode;
                 const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (operand != atoms_ledger[atom_index]) return error.InvalidOpcode;
+                if (@import("core/atom.zig").Atom.fromRaw(operand) != atoms_ledger[atom_index]) return error.InvalidOpcode;
             }
             return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
         }
@@ -4332,7 +4332,7 @@ pub const function_bytecode = struct {
                     if (size == 0) return null; // unknown id: stop
                     const has_atom = self.pc + size <= self.byte_code.len and hasAtomOperandFmt(op_id);
                     const atom_id: ?atom.Atom = if (has_atom)
-                        std.mem.readInt(u32, self.byte_code[self.pc + 1 ..][0..4], .little)
+                        atom.Atom.fromRaw(std.mem.readInt(u32, self.byte_code[self.pc + 1 ..][0..4], .little))
                     else
                         null;
                     self.pc += size;
@@ -6595,7 +6595,7 @@ pub const binding_rules = struct {
         return false;
     }
 
-    fn lookupClosureVar(ctx: *const JSContext, atom_id: u32) ?u16 {
+    fn lookupClosureVar(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
         const fd = ctx.function_def orelse return null;
         for (fd.closure_var, 0..) |cv, idx| {
             if (!closureVarIsRuntimeVarRef(cv)) continue;
@@ -6611,7 +6611,7 @@ pub const binding_rules = struct {
         return null;
     }
 
-    fn lookupGlobalClosureVar(ctx: *const JSContext, atom_id: u32) ?u16 {
+    fn lookupGlobalClosureVar(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
         const fd = ctx.function_def orelse return null;
         for (fd.closure_var, 0..) |cv, idx| {
             if (cv.var_name != atom_id) continue;
@@ -6676,7 +6676,7 @@ pub const binding_rules = struct {
         return addOrFindClosureSource(target, target_type, parent_idx, source);
     }
 
-    fn ensureGlobalClosureVar(ctx: *JSContext, atom_id: u32) Error!u16 {
+    fn ensureGlobalClosureVar(ctx: *JSContext, atom_id: atom.Atom) Error!u16 {
         if (lookupGlobalClosureVar(ctx, atom_id)) |idx| return idx;
         const fd = ctx.function_def orelse return error.NoFunctionDef;
 
@@ -6717,7 +6717,7 @@ pub const binding_rules = struct {
         return threadClosureSource(fd, root, root_idx.?, source, .global_ref);
     }
 
-    fn emitGlobalVarOp(ctx: *JSContext, output: []u8, out_idx: *usize, op_id: u8, atom_id: u32) Error!void {
+    fn emitGlobalVarOp(ctx: *JSContext, output: []u8, out_idx: *usize, op_id: u8, atom_id: atom.Atom) Error!void {
         if (out_idx.* + 3 > output.len) return error.InvalidBytecode;
         const ref_idx = lookupGlobalClosureVar(ctx, atom_id) orelse return error.ClosureVarNotFound;
         output[out_idx.*] = op_id;
@@ -6725,7 +6725,7 @@ pub const binding_rules = struct {
         out_idx.* += 3;
     }
 
-    fn lookupTopLevelModuleLexicalClosureVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
+    fn lookupTopLevelModuleLexicalClosureVar(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?u16 {
         if (scope_level != 0) return null;
         const fd = ctx.function_def orelse return null;
         for (fd.closure_var, 0..) |cv, idx| {
@@ -6734,7 +6734,7 @@ pub const binding_rules = struct {
         return null;
     }
 
-    fn preferTopLevelModuleClassBinding(ctx: *const JSContext, atom_id: u32, loc_idx: u16) ?u16 {
+    fn preferTopLevelModuleClassBinding(ctx: *const JSContext, atom_id: atom.Atom, loc_idx: u16) ?u16 {
         const fd = ctx.function_def orelse return null;
         if (loc_idx >= fd.vars.len) return null;
         const vd = fd.vars[loc_idx];
@@ -6798,7 +6798,7 @@ pub const binding_rules = struct {
     const throw_error_instr_size: usize = 6;
     const JS_THROW_VAR_RO: u8 = 0; // quickjs.c:18334
     const JS_THROW_VAR_REDECL: u8 = 1; // quickjs.c:18335
-    fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: u32) void {
+    fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom) void {
         writeThrowVarError(func, output, out_idx, output_atoms, out_atom_idx, atom_id, JS_THROW_VAR_RO);
     }
 
@@ -6808,27 +6808,27 @@ pub const binding_rules = struct {
         out_idx: *usize,
         output_atoms: []atom.Atom,
         out_atom_idx: *usize,
-        atom_id: u32,
+        atom_id: atom.Atom,
         error_type: u8,
     ) void {
         output[out_idx.*] = opcode.op.throw_error;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
         output[out_idx.* + 5] = error_type;
         output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += throw_error_instr_size;
         out_atom_idx.* += 1;
     }
 
-    fn writeThrowVarRedeclaration(_: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: u32) void {
+    fn writeThrowVarRedeclaration(_: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom) void {
         output[out_idx.*] = opcode.op.throw_error;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
         output[out_idx.* + 5] = JS_THROW_VAR_REDECL;
         output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += throw_error_instr_size;
         out_atom_idx.* += 1;
     }
 
-    fn lowerScopeVarOpForClosure(ctx: *const JSContext, atom_id: u32, ref_idx: u16, op_id: u8) u8 {
+    fn lowerScopeVarOpForClosure(ctx: *const JSContext, atom_id: atom.Atom, ref_idx: u16, op_id: u8) u8 {
         var ref_op = lowerScopeVarOpClosure(op_id);
         const fd = ctx.function_def orelse return ref_op;
         if (ref_idx >= fd.closure_var.len) return ref_op;
@@ -6910,7 +6910,7 @@ pub const binding_rules = struct {
         var_kind: function_def_mod.VarKind,
     };
 
-    fn resolvePrivateField(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?PrivateFieldResolution {
+    fn resolvePrivateField(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?PrivateFieldResolution {
         const fd = ctx.function_def orelse return null;
 
         if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < fd.scopes.len) {
@@ -7284,7 +7284,7 @@ pub const binding_rules = struct {
         return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
     }
 
-    fn lookupArg(ctx: *const JSContext, atom_id: u32) ?u16 {
+    fn lookupArg(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
         const fd = ctx.function_def orelse return null;
         const idx = fd.findArg(atom_id);
         if (idx < 0) return null;
@@ -7296,7 +7296,7 @@ pub const binding_rules = struct {
     /// (resolve_scope_var quickjs.c:32975-32978). That scope deliberately does
     /// not link to the body scope, so the ordinary scope walk cannot find the
     /// lazily materialized function-name slot for a default initializer.
-    fn lookupCurrentFunctionName(ctx: *const JSContext, atom_id: u32) ?u16 {
+    fn lookupCurrentFunctionName(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
         const fd = ctx.function_def orelse return null;
         if (fd.func_var_idx < 0) return null;
         const idx: usize = @intCast(fd.func_var_idx);
@@ -7349,7 +7349,7 @@ pub const binding_rules = struct {
     inline fn resolveScopeVarLookupImpl(
         comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
-        atom_id: u32,
+        atom_id: atom.Atom,
         scope_level: i32,
     ) ScopeVarLookup {
         const fd = ctx.function_def orelse return .{};
@@ -7383,7 +7383,7 @@ pub const binding_rules = struct {
     inline fn resolveScopeVarImpl(
         comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
-        atom_id: u32,
+        atom_id: atom.Atom,
         scope_level: i32,
     ) ?u16 {
         return resolveScopeVarLookupImpl(
@@ -7394,7 +7394,7 @@ pub const binding_rules = struct {
         ).local;
     }
 
-    inline fn resolveScopeVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
+    inline fn resolveScopeVar(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?u16 {
         return resolveScopeVarImpl(false, ctx, atom_id, scope_level);
     }
 
@@ -7417,7 +7417,7 @@ pub const binding_rules = struct {
     inline fn resolveLocalOrArgImpl(
         comptime trust_final_scope_links: bool,
         ctx: *const JSContext,
-        atom_id: u32,
+        atom_id: atom.Atom,
         scope_level: i32,
     ) ?LocalOrArg {
         const fd = ctx.function_def orelse return null;
@@ -7443,7 +7443,7 @@ pub const binding_rules = struct {
         return null;
     }
 
-    inline fn resolveLocalOrArg(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?LocalOrArg {
+    inline fn resolveLocalOrArg(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) ?LocalOrArg {
         return resolveLocalOrArgImpl(false, ctx, atom_id, scope_level);
     }
 
@@ -8023,7 +8023,7 @@ pub const binding_rules = struct {
             .{ .ref = @intCast(idx) };
     }
 
-    fn loweredScopeDeleteVarSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+    fn loweredScopeDeleteVarSize(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
         if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
             return if (isEvalNonLexicalLocal(ctx, loc_idx)) 5 else 1;
         }
@@ -8033,7 +8033,7 @@ pub const binding_rules = struct {
         return 5;
     }
 
-    fn loweredScopeGetRefSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+    fn loweredScopeGetRefSize(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
             .arg => |arg_idx| 1 + selectArgForm(ctx, opcode.op.get_arg, arg_idx).size,
             .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx))
@@ -8049,7 +8049,7 @@ pub const binding_rules = struct {
         return 1 + 3;
     }
 
-    fn loweredScopeMakeRefSize(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+    fn loweredScopeMakeRefSize(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
             .arg => 7,
             .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx))
@@ -8071,7 +8071,7 @@ pub const binding_rules = struct {
         return 5;
     }
 
-    fn loweredScopeMakeRefAtomCount(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+    fn loweredScopeMakeRefAtomCount(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i32) usize {
         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
             .local => |loc_idx| if (!isEvalNonLexicalLocal(ctx, loc_idx) and
                 !localWriteThrowsReadOnly(ctx, loc_idx) and
@@ -8126,13 +8126,13 @@ pub const binding_rules = struct {
         out_idx: *usize,
         output_atoms: []atom.Atom,
         out_atom_idx: *usize,
-        atom_id: u32,
+        atom_id: atom.Atom,
         scope_level: i32,
     ) Error!void {
         if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
             if (isEvalNonLexicalLocal(ctx, loc_idx)) {
                 output[out_idx.*] = opcode.op.delete_var;
-                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
                 output_atoms[out_atom_idx.*] = atom_id;
                 out_idx.* += 5;
                 out_atom_idx.* += 1;
@@ -8148,7 +8148,7 @@ pub const binding_rules = struct {
             out_idx.* += 1;
         } else {
             output[out_idx.*] = opcode.op.delete_var;
-            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
             output_atoms[out_atom_idx.*] = atom_id;
             out_idx.* += 5;
             out_atom_idx.* += 1;
@@ -8159,7 +8159,7 @@ pub const binding_rules = struct {
         ctx: *JSContext,
         output: []u8,
         out_idx: *usize,
-        atom_id: u32,
+        atom_id: atom.Atom,
         scope_level: i32,
     ) Error!void {
         output[out_idx.*] = opcode.op.undefined;
@@ -8218,7 +8218,7 @@ pub const binding_rules = struct {
         out_idx: *usize,
         output_atoms: []atom.Atom,
         out_atom_idx: *usize,
-        atom_id: u32,
+        atom_id: atom.Atom,
         get_form: ShortLocForm,
         binding_idx: u16,
     ) void {
@@ -8227,13 +8227,13 @@ pub const binding_rules = struct {
         writeSelectedLocForm(output, out_idx, get_form, binding_idx);
 
         output[out_idx.*] = opcode.op.define_field;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
         output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += 5;
         out_atom_idx.* += 1;
 
         output[out_idx.*] = opcode.op.push_atom_value;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
         output_atoms[out_atom_idx.*] = atom_id;
         out_idx.* += 5;
         out_atom_idx.* += 1;
@@ -8246,13 +8246,13 @@ pub const binding_rules = struct {
         out_idx: *usize,
         output_atoms: []atom.Atom,
         out_atom_idx: *usize,
-        atom_id: u32,
+        atom_id: atom.Atom,
         scope_level: i32,
     ) Error!void {
         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
             .arg => |arg_idx| {
                 output[out_idx.*] = opcode.op.make_arg_ref;
-                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
                 std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], arg_idx, .little);
                 output_atoms[out_atom_idx.*] = atom_id;
                 out_idx.* += 7;
@@ -8261,7 +8261,7 @@ pub const binding_rules = struct {
             .local => |loc_idx| {
                 if (isEvalNonLexicalLocal(ctx, loc_idx)) {
                     output[out_idx.*] = opcode.op.make_var_ref;
-                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
                     output_atoms[out_atom_idx.*] = atom_id;
                     out_idx.* += 5;
                     out_atom_idx.* += 1;
@@ -8280,7 +8280,7 @@ pub const binding_rules = struct {
                     );
                 } else {
                     output[out_idx.*] = opcode.op.make_loc_ref;
-                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                    std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
                     std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], loc_idx, .little);
                     output_atoms[out_atom_idx.*] = atom_id;
                     out_idx.* += 7;
@@ -8303,7 +8303,7 @@ pub const binding_rules = struct {
                 );
             } else {
                 output[out_idx.*] = opcode.op.make_var_ref_ref;
-                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+                std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
                 std.mem.writeInt(u16, output[out_idx.* + 5 ..][0..2], ref_idx, .little);
                 output_atoms[out_atom_idx.*] = atom_id;
                 out_idx.* += 7;
@@ -8311,7 +8311,7 @@ pub const binding_rules = struct {
             }
         } else {
             output[out_idx.*] = opcode.op.make_var_ref;
-            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+            std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id.raw(), .little);
             output_atoms[out_atom_idx.*] = atom_id;
             out_idx.* += 5;
             out_atom_idx.* += 1;
@@ -8440,7 +8440,7 @@ pub const binding_rules = struct {
         return ctx.function.flags.is_strict or ctx.function.flags.runtime_strict;
     }
 
-    fn functionDeclaresGlobalVar(ctx: *const JSContext, atom_id: u32) bool {
+    fn functionDeclaresGlobalVar(ctx: *const JSContext, atom_id: atom.Atom) bool {
         const fd = ctx.function_def orelse return false;
         for (fd.global_vars) |global_var| {
             if (global_var.var_name == atom_id) return true;
@@ -8448,7 +8448,7 @@ pub const binding_rules = struct {
         return false;
     }
 
-    fn canOptimizeGlobalRefPutTail(ctx: *const JSContext, atom_id: u32) bool {
+    fn canOptimizeGlobalRefPutTail(ctx: *const JSContext, atom_id: atom.Atom) bool {
         return !functionIsStrict(ctx) or functionDeclaresGlobalVar(ctx, atom_id);
     }
 
@@ -9234,7 +9234,7 @@ pub const pipeline_stack_size = struct {
     /// graph. Whenever the graph walk reaches that linear frontier, both
     /// proofs consume the same opcode metadata lookup.
     pub const FinalArtifactValidation = struct {
-        atom_owners: []const u32,
+        atom_owners: []const @import("core/atom.zig").Atom,
         closure_var_count: usize,
     };
 
@@ -9313,7 +9313,7 @@ pub const pipeline_stack_size = struct {
                     return error.InvalidFinalArtifact;
                 const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
                     return error.InvalidFinalArtifact;
-                if (encoded != self.config.atom_owners[self.owner_index])
+                if (@import("core/atom.zig").Atom.fromRaw(encoded) != self.config.atom_owners[self.owner_index])
                     return error.InvalidFinalArtifact;
                 self.owner_index += 1;
             }
@@ -9606,7 +9606,7 @@ pub const pipeline_stack_size = struct {
 
         try std.testing.expectEqual(@as(u16, 1), try compute(&bc, .{
             .final_artifact = .{
-                .atom_owners = &.{owned_atom},
+                .atom_owners = &.{@import("core/atom.zig").Atom.fromRaw(owned_atom)},
                 .closure_var_count = 1,
             },
         }));
@@ -9622,7 +9622,7 @@ pub const pipeline_stack_size = struct {
 
         try std.testing.expectError(error.InvalidFinalArtifact, compute(&bc, .{
             .final_artifact = .{
-                .atom_owners = &.{wrong_owner},
+                .atom_owners = &.{@import("core/atom.zig").Atom.fromRaw(wrong_owner)},
                 .closure_var_count = 0,
             },
         }));
@@ -9670,7 +9670,7 @@ pub const pipeline_stack_size = struct {
         earlier_artifact_mismatch[6] = opcode.op.drop;
         earlier_artifact_mismatch[7] = opcode.op.return_undef;
         try std.testing.expectError(error.StackUnderflow, compute(&earlier_artifact_mismatch, .{
-            .final_artifact = .{ .atom_owners = &.{wrong_owner}, .closure_var_count = 0 },
+            .final_artifact = .{ .atom_owners = &.{@import("core/atom.zig").Atom.fromRaw(wrong_owner)}, .closure_var_count = 0 },
         }));
     }
 
@@ -11901,11 +11901,11 @@ pub const dump = struct {
                 };
             switch (slot.kind) {
                 .atom => {
-                    const a: u32 = @intCast(value);
+                    const a = @import("core/atom.zig").Atom.fromRaw(@intCast(value));
                     if (atoms.name(a)) |name_str| {
                         try writer.print("\"{s}\"", .{name_str});
                     } else {
-                        try writer.print("atom#{d}", .{a});
+                        try writer.print("atom#{d}", .{a.raw()});
                     }
                 },
                 .label => try writer.print("L{d}", .{value}),
@@ -11938,7 +11938,7 @@ pub const dump = struct {
         // dyn_env_probe is `atom_label_u8`: opcode + atom + label + flags.
         var code = [_]u8{0} ** 10;
         code[0] = opcode.op.dyn_env_probe;
-        std.mem.writeInt(u32, code[1..5], name, .little);
+        std.mem.writeInt(u32, code[1..5], name.raw(), .little);
         std.mem.writeInt(i32, code[5..9], 0, .little);
         code[9] = (opcode.dyn_env.Flags{ .kind = .read, .is_with = true }).encode();
 

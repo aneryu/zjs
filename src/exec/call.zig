@@ -681,7 +681,7 @@ fn hasOwnPropertyProxyAware(
 }
 
 fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, true, true, true));
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
@@ -1054,7 +1054,7 @@ pub fn callObjectStatic(
         var out_index: u32 = 0;
         for (keys) |key| {
             const name_value = try rt.atoms.toStringValue(rt, key);
-            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(name_value, true, true, true));
+            try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(name_value, true, true, true));
             out_index += 1;
         }
         return out.value();
@@ -1070,7 +1070,7 @@ pub fn callObjectStatic(
         for (keys) |key| {
             if (!rt.atoms.isPublicSymbol(key)) continue;
             const symbol_value = try rt.symbolValue(key);
-            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(symbol_value, true, true, true));
+            try out.defineOwnProperty(rt, core.Atom.taggedInt(out.arrayLength()), core.Descriptor.data(symbol_value, true, true, true));
         }
         return out.value();
     }
@@ -1630,7 +1630,7 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
 
     const Trigger = struct {
         rt: *core.JSRuntime,
-        atom_id: u32,
+        atom_id: core.Atom,
         saw_arg: bool = false,
         trace_failed: bool = false,
 
@@ -1696,7 +1696,7 @@ test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allo
     // Strictly above the 8-slot inline buffer: this is the `initCopy` arm, and
     // `initCopy` allocates, which is a collection point.
     const arg_count = 9;
-    var arg_atoms: [arg_count]u32 = undefined;
+    var arg_atoms: [arg_count]core.Atom = undefined;
     var args: [arg_count]core.JSValue = undefined;
     for (&arg_atoms, &args, 0..) |*atom_slot, *arg_slot, index| {
         var name_buffer: [64]u8 = undefined;
@@ -1707,7 +1707,7 @@ test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allo
 
     const Trigger = struct {
         rt: *core.JSRuntime,
-        atom_ids: []const u32,
+        atom_ids: []const core.Atom,
         collections: usize = 0,
         lost_arg: bool = false,
 

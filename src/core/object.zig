@@ -4424,8 +4424,8 @@ pub const Object = extern struct {
         const identity = payload.weak_target_identity orelse return JSValue.undefinedValue();
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(atom.Atom)) return JSValue.undefinedValue();
-            const symbol_atom: atom.Atom = @intCast(atom_id);
+            if (atom_id > std.math.maxInt(u32)) return JSValue.undefinedValue();
+            const symbol_atom: atom.Atom = atom.Atom.fromRaw(@intCast(atom_id));
             if (rt.atoms.kind(symbol_atom) != .symbol) return JSValue.undefinedValue();
             const target = rt.atoms.symbolValueIfLive(rt, symbol_atom);
             // A dead target must not enter [[KeptAlive]]: the object arm
@@ -6707,8 +6707,8 @@ pub const Object = extern struct {
     fn weakIdentityIsLive(rt: *const JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
-            if (atom_id > std.math.maxInt(atom.Atom)) return false;
-            return rt.atoms.kind(@intCast(atom_id)) == .symbol;
+            if (atom_id > std.math.maxInt(u32)) return false;
+            return rt.atoms.kind(atom.Atom.fromRaw(@intCast(atom_id))) == .symbol;
         }
         return rt.liveObjectFromWeakIdentity(identity) != null;
     }
@@ -7421,7 +7421,7 @@ pub const Object = extern struct {
     /// runtime's weak identity registry on first use. Symbols encode as
     /// `(atom << 1) | 1`; objects encode as `weak_id << 1`.
     pub fn weakIdentityFromValue(rt: *JSRuntime, stored: JSValue) !?usize {
-        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, @intCast(atom_id)) << 1) | 1;
+        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, atom_id.raw()) << 1) | 1;
         const object = objectFromWeakCandidate(stored) orelse return null;
         return try rt.registerWeakObjectIdentity(object);
     }
@@ -7429,7 +7429,7 @@ pub const Object = extern struct {
     /// Like `weakIdentityFromValue` but never registers: returns null for
     /// objects that were never weakly referenced.
     pub fn weakIdentityFromValuePeek(rt: *const JSRuntime, stored: JSValue) ?usize {
-        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, @intCast(atom_id)) << 1) | 1;
+        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, atom_id.raw()) << 1) | 1;
         const object = objectFromWeakCandidate(stored) orelse return null;
         return rt.peekWeakObjectIdentity(object);
     }
@@ -9006,7 +9006,7 @@ pub const Object = extern struct {
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        return self.appendDenseArrayDefineIndex(rt, index, atom.atomFromUInt32(index), new_value);
+        return self.appendDenseArrayDefineIndex(rt, index, atom.Atom.taggedInt(index), new_value);
     }
 
     /// Dense CreateDataProperty append. Unlike ordinary [[Set]], defining a
@@ -9095,7 +9095,7 @@ pub const Object = extern struct {
 
     pub fn defineDenseArrayDataProperty(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        const atom_id = atom.atomFromUInt32(index);
+        const atom_id = atom.Atom.taggedInt(index);
         if (self.findProperty(atom_id) != null) return false;
 
         const element_index: usize = @intCast(index);
@@ -9440,7 +9440,7 @@ pub const Object = extern struct {
         // out-of-line string-leg probe — an ordinary object's add never asks
         // (qjs add_property, quickjs.c:9884-9890; the index question lives in
         // the fast_array arm's __JS_AtomIsTaggedInt, quickjs.c:9868-9877).
-        if (atom.isTaggedInt(atom_id)) return false;
+        if (atom_id.isTaggedInt()) return false;
         if (classOwnsIndexedElementStorage(self.class_id) and
             array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
 
@@ -9576,7 +9576,7 @@ pub const Object = extern struct {
         // runs for dense-storage-capable classes alone, mirroring qjs's
         // fast_array-arm-only __JS_AtomIsTaggedInt (quickjs.c:9868-9877)
         // against the probe-free ordinary add (quickjs.c:9884-9890).
-        if (atom.isTaggedInt(atom_id)) return .slow;
+        if (atom_id.isTaggedInt()) return .slow;
         if (classOwnsIndexedElementStorage(self.class_id) and
             array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
         if (self.isGlobal()) return .slow;
@@ -9779,7 +9779,7 @@ pub const Object = extern struct {
         if (!has_property_index_keys) {
             var dense_index: u32 = 0;
             while (dense_index < self.arrayElements().len) : (dense_index += 1) {
-                try appendAtom(rt, &keys, atom.atomFromUInt32(dense_index));
+                try appendAtom(rt, &keys, atom.Atom.taggedInt(dense_index));
             }
         } else {
             var index_keys = std.ArrayList(IndexKey).empty;
@@ -9789,7 +9789,7 @@ pub const Object = extern struct {
                     if (mapped == null) continue;
                     try array_list_erased.append(&index_keys, rt.memory.allocator, .{
                         .index = @intCast(mapped_index),
-                        .atom_id = atom.atomFromUInt32(@intCast(mapped_index)),
+                        .atom_id = atom.Atom.taggedInt(@intCast(mapped_index)),
                     });
                 }
             }
@@ -9797,7 +9797,7 @@ pub const Object = extern struct {
             while (dense_index < self.arrayElements().len) : (dense_index += 1) {
                 try array_list_erased.append(&index_keys, rt.memory.allocator, .{
                     .index = dense_index,
-                    .atom_id = atom.atomFromUInt32(dense_index),
+                    .atom_id = atom.Atom.taggedInt(dense_index),
                 });
             }
             for (self.shapeProps()) |prop| {
@@ -10010,7 +10010,7 @@ pub const Object = extern struct {
         const saved_length = self.arrayArm().*.length;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
-            const atom_id = atom.atomFromUInt32(@intCast(index));
+            const atom_id = atom.Atom.taggedInt(@intCast(index));
             if (self.findProperty(atom_id) != null) continue;
             try self.addProperty(rt, atom_id, descriptor.Descriptor.data(stored, true, true, true));
         }
@@ -10023,8 +10023,8 @@ pub const Object = extern struct {
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
         if (!self.flags.fast_array) return null;
-        if (!atom.isTaggedInt(atom_id)) return null;
-        const index = atom.atomToUInt32(atom_id);
+        if (!atom_id.isTaggedInt()) return null;
+        const index = atom_id.toUInt32();
         if (index >= self.arrayArm().*.count) return null;
         return self.arrayArm().*.values[@intCast(index)];
     }
@@ -10251,7 +10251,7 @@ pub const Object = extern struct {
         // intentionally sticky even if the later allocation fails.
         // named_put_no_index: tagged-int never reaches here.
         if (comptime !named_put_no_index) {
-            if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
+            if (atom_id.isTaggedInt()) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
         }
         const is_array_index = if (comptime named_put_no_index) false else rt.atoms.atomIsArrayIndex(atom_id);
         const old_len = self.shape_ref.prop_count;
@@ -10971,8 +10971,8 @@ pub const Object = extern struct {
     }
 
     fn mappedArgumentsTaggedBindingIndex(self: *const Object, atom_id: atom.Atom) ?u32 {
-        if (self.class_id != class.ids.mapped_arguments or !atom.isTaggedInt(atom_id)) return null;
-        const index = atom.atomToUInt32(atom_id);
+        if (self.class_id != class.ids.mapped_arguments or !atom_id.isTaggedInt()) return null;
+        const index = atom_id.toUInt32();
         return if (self.hasMappedArgumentsBinding(index)) index else null;
     }
 
@@ -10993,7 +10993,7 @@ pub const Object = extern struct {
         if (self.class_id != class.ids.mapped_arguments) return;
         for (self.argumentsVarRefs(), 0..) |mapped, index| {
             if (mapped == null) continue;
-            try self.materializeMappedArgumentsProperty(rt, atom.atomFromUInt32(@intCast(index)));
+            try self.materializeMappedArgumentsProperty(rt, atom.Atom.taggedInt(@intCast(index)));
         }
     }
 
@@ -11440,7 +11440,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
         defer {
             element_val = JSValue.undefinedValue();
         }
-        try out.defineOwnProperty(rt, atom.atomFromUInt32(out_index), descriptor.Descriptor.data(element_val, true, true, true));
+        try out.defineOwnProperty(rt, atom.Atom.taggedInt(out_index), descriptor.Descriptor.data(element_val, true, true, true));
         out_index += 1;
     }
     return out_value;

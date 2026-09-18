@@ -8,6 +8,7 @@
 //! quickjs.c:583-599 and atom-table operations nearby. This core module may be
 //! consumed by higher layers but never imports exec or binding.
 
+const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const gc = @import("gc.zig");
@@ -21,11 +22,47 @@ const JSValue = @import("value.zig").JSValue;
 /// path. See `AtomTable.OwnershipAuditState` for what it turns on.
 pub const ownership_audit_enabled: bool = build_options.zjs_ownership_audit;
 
-pub const Atom = u32;
+/// 4-byte table handle. Bytecode operands, shape keys, and host pins store
+/// this tag; it is not a pointer. Non-exhaustive so dynamic ids and tagged
+/// ints stay in the same word as predefined constants.
+pub const Atom = enum(u32) {
+    empty = 0,
+    _,
 
-pub const null_atom: Atom = 0;
-pub const tagged_int_bit: Atom = 1 << 31;
-pub const max_int_atom: Atom = tagged_int_bit - 1;
+    pub inline fn raw(self: Atom) u32 {
+        return @intFromEnum(self);
+    }
+
+    pub inline fn fromRaw(n: u32) Atom {
+        return @enumFromInt(n);
+    }
+
+    pub inline fn isEmpty(self: Atom) bool {
+        return self == .empty;
+    }
+
+    pub inline fn isConst(self: Atom) bool {
+        return self.raw() < first_dynamic_atom;
+    }
+
+    pub inline fn isTaggedInt(self: Atom) bool {
+        return (self.raw() & tagged_int_bit) != 0;
+    }
+
+    pub fn taggedInt(n: u32) Atom {
+        std.debug.assert(n <= max_int_atom);
+        return fromRaw(n | tagged_int_bit);
+    }
+
+    pub fn toUInt32(self: Atom) u32 {
+        std.debug.assert(self.isTaggedInt());
+        return self.raw() & ~tagged_int_bit;
+    }
+};
+
+pub const null_atom: Atom = .empty;
+pub const tagged_int_bit: u32 = 1 << 31;
+pub const max_int_atom: u32 = tagged_int_bit - 1;
 
 pub const AtomKind = enum {
     string,
@@ -48,903 +85,856 @@ pub const PredefinedAtom = struct {
     kind: AtomKind = .string,
 };
 
-pub const ids = struct {
-    pub const null_: Atom = 1;
-    pub const false_: Atom = 2;
-    pub const true_: Atom = 3;
-    pub const if_: Atom = 4;
-    pub const this_: Atom = 8;
-    pub const super: Atom = 36;
-    pub const yield: Atom = 45;
-    pub const await: Atom = 46;
-    pub const empty_string: Atom = 47;
-    pub const length: Atom = 50;
-    pub const name: Atom = 55;
-    pub const eval_: Atom = 59;
-    pub const prototype: Atom = 60;
-    pub const constructor: Atom = 61;
-    pub const value: Atom = 65;
-    pub const get: Atom = 66;
-    pub const of: Atom = 68;
-    pub const done: Atom = 106;
-    pub const undefined_: Atom = 70;
-    // `typeof` result strings — predefined string atoms, so OP_typeof returns
-    // the interned atom string (a refcount dup) instead of allocating a fresh
-    // string each time (qjs `js_operator_typeof` -> `JS_AtomToString`).
-    pub const type_function: Atom = 27;
-    pub const type_number: Atom = 71;
-    pub const type_boolean: Atom = 72;
-    pub const type_string: Atom = 73;
-    pub const type_object: Atom = 74;
-    pub const type_symbol: Atom = 75;
-    pub const type_bigint: Atom = 143;
-    pub const arguments: Atom = 78;
-    pub const caller: Atom = 80;
-    pub const ret: Atom = 82;
-    pub const var_object: Atom = 83;
-    pub const arg_var_object: Atom = 84;
-    pub const with_object: Atom = 85;
-    pub const lastIndex: Atom = 86;
-    pub const target: Atom = 87;
-    pub const apply: Atom = 91;
-    pub const source: Atom = 109;
-    pub const rawJSON: Atom = 114;
-    pub const new_target: Atom = 115;
-    pub const this_active_func: Atom = 116;
-    pub const home_object: Atom = 117;
-    pub const class_fields_init: Atom = 120;
-    pub const async_: Atom = 136;
-    pub const toJSON: Atom = 147;
-    pub const Object: Atom = 151;
-    pub const Array: Atom = 152;
-    pub const Error: Atom = 153;
-    pub const Function: Atom = 162;
-    pub const Map: Atom = 184;
-    pub const Set: Atom = 185;
-    pub const WeakMap: Atom = 186;
-    pub const WeakSet: Atom = 187;
-    pub const Private_brand: Atom = 216;
-    pub const Symbol_iterator: Atom = 218;
-    pub const Symbol_asyncIterator: Atom = 229;
-    pub const Symbol_asyncDispose: Atom = 230;
-    pub const Symbol_dispose: Atom = 231;
-    pub const zjs_proto_keepalive: Atom = 232;
-    pub const zjs_last_internal_marker: Atom = 264;
-    pub const zjs_last_registry_name: Atom = 364;
-    pub const zjs_last_global_setup_name: Atom = 381;
-    pub const zjs_last_global_extra_name: Atom = 419;
-    pub const zjs_last_registry_extra_name: Atom = 586;
-    pub const scriptArgs: Atom = 626;
-    pub const zjs_last_startup_name: Atom = 656;
-
-    // Property-key constants for the S3 predefined migration. Every name below is
-    // a `.string` predefined atom, so `isConst` short-circuits dup/free: holding one
-    // costs nothing and needs no release.
-    pub const return_: Atom = 6; // "return"
-    pub const delete: Atom = 9;
-    pub const throw: Atom = 23;
-    pub const with: Atom = 29;
-    pub const keys: Atom = 48;
-    pub const size: Atom = 49;
-    pub const message: Atom = 51;
-    pub const cause: Atom = 52;
-    pub const errors: Atom = 53;
-    pub const stack: Atom = 54;
-    pub const toString: Atom = 56;
-    pub const toLocaleString: Atom = 57;
-    pub const valueOf: Atom = 58;
-    pub const configurable: Atom = 62;
-    pub const writable: Atom = 63;
-    pub const enumerable: Atom = 64;
-    pub const set: Atom = 67;
-    pub const __proto__: Atom = 69;
-    pub const index: Atom = 88;
-    pub const input: Atom = 89;
-    pub const join: Atom = 92;
-    pub const construct: Atom = 95;
-    pub const getPrototypeOf: Atom = 96;
-    pub const setPrototypeOf: Atom = 97;
-    pub const isExtensible: Atom = 98;
-    pub const preventExtensions: Atom = 99;
-    pub const has: Atom = 100;
-    pub const deleteProperty: Atom = 101;
-    pub const defineProperty: Atom = 102;
-    pub const getOwnPropertyDescriptor: Atom = 103;
-    pub const ownKeys: Atom = 104;
-    pub const add: Atom = 105;
-    pub const next: Atom = 107;
-    pub const values: Atom = 108;
-    pub const global: Atom = 111;
-    pub const raw: Atom = 113;
-    pub const then: Atom = 130;
-    pub const resolve: Atom = 131;
-    pub const reject: Atom = 132;
-    pub const promise: Atom = 133;
-    pub const proxy: Atom = 134;
-    pub const revoke: Atom = 135;
-    pub const status: Atom = 140;
-    pub const reason: Atom = 141;
-    pub const globalThis: Atom = 142;
-    pub const maxByteLength: Atom = 148;
-    pub const Math: Atom = 159;
-    pub const JSON: Atom = 160;
-    pub const RegExp: Atom = 165;
-    pub const ArrayBuffer: Atom = 166;
-    pub const Uint8Array: Atom = 170;
-    pub const Promise: Atom = 199;
-    pub const SyntaxError: Atom = 210;
-    pub const InternalError: Atom = 213;
-    pub const DOMException: Atom = 214;
-    pub const forEach: Atom = 290;
-    pub const toISOString: Atom = 364;
-    pub const Reflect: Atom = 365;
-    pub const Atomics: Atom = 366;
-    pub const escape: Atom = 376;
-    pub const AggregateError: Atom = 421;
-    pub const clear: Atom = 467;
-    pub const entries: Atom = 475;
-    pub const fromBase64: Atom = 480;
-    pub const getOrInsert: Atom = 492;
-    pub const getOrInsertComputed: Atom = 493;
-    pub const stackTraceLimit: Atom = 614;
-    pub const disposed: Atom = 651;
-    pub const disposeAsync: Atom = 653;
-    pub const alphabet: Atom = 657;
-    pub const lastChunkHandling: Atom = 658;
-    pub const omitPadding: Atom = 659;
-    pub const padding: Atom = 660;
-    pub const mode: Atom = 661;
-    pub const prepareStackTrace: Atom = 662;
-    pub const type_: Atom = 663; // "type"
-    pub const userAgent: Atom = 664;
-    pub const E: Atom = 665;
-    pub const LN10: Atom = 666;
-    pub const LN2: Atom = 667;
-    pub const LOG2E: Atom = 668;
-    pub const LOG10E: Atom = 669;
-    pub const PI: Atom = 670;
-    pub const SQRT1_2: Atom = 671;
-    pub const SQRT2: Atom = 672;
-    pub const k: Atom = 673;
-    pub const mapfn: Atom = 674;
-    pub const this_arg: Atom = 675;
-    pub const iter: Atom = 676;
-    pub const items: Atom = 677;
-    pub const len: Atom = 678;
-    pub const phase: Atom = 679;
-    pub const state: Atom = 680;
-    pub const pending: Atom = 681;
-    pub const rejected: Atom = 682;
-    pub const fileName: Atom = 683;
-    pub const lineNumber: Atom = 684;
-    pub const columnNumber: Atom = 685;
-    pub const code: Atom = 686;
-    pub const error_: Atom = 687; // "error"
-    pub const suppressed: Atom = 688;
-    pub const url: Atom = 689;
-    pub const main: Atom = 690;
-    pub const read: Atom = 691;
-    pub const written: Atom = 692;
-    pub const zjs_last_predefined_key_name: Atom = 692;
+/// One row per predefined atom. Ids are 1-based indices into this table;
+/// `ids` and `predefined_atoms` are both generated from it. Order is the
+/// engine contract (keyword token arithmetic, well-known symbol ids, group
+/// markers): append new entries at the end and do not reorder.
+const PredefinedSpec = struct {
+    name: []const u8,
+    kind: AtomKind = .string,
 };
+
+const predefined_spec = [_]PredefinedSpec{
+    // Keywords (1..46). Parser token atoms are `ids.null_ + (tok - TOK_NULL)`.
+    .{ .name = "null" },
+    .{ .name = "false" },
+    .{ .name = "true" },
+    .{ .name = "if" },
+    .{ .name = "else" },
+    .{ .name = "return" },
+    .{ .name = "var" },
+    .{ .name = "this" },
+    .{ .name = "delete" },
+    .{ .name = "void" },
+    .{ .name = "typeof" },
+    .{ .name = "new" },
+    .{ .name = "in" },
+    .{ .name = "instanceof" },
+    .{ .name = "do" },
+    .{ .name = "while" },
+    .{ .name = "for" },
+    .{ .name = "break" },
+    .{ .name = "continue" },
+    .{ .name = "switch" },
+    .{ .name = "case" },
+    .{ .name = "default" },
+    .{ .name = "throw" },
+    .{ .name = "try" },
+    .{ .name = "catch" },
+    .{ .name = "finally" },
+    .{ .name = "function" },
+    .{ .name = "debugger" },
+    .{ .name = "with" },
+    .{ .name = "class" },
+    .{ .name = "const" },
+    .{ .name = "enum" },
+    .{ .name = "export" },
+    .{ .name = "extends" },
+    .{ .name = "import" },
+    .{ .name = "super" },
+    .{ .name = "implements" },
+    .{ .name = "interface" },
+    .{ .name = "let" },
+    .{ .name = "package" },
+    .{ .name = "private" },
+    .{ .name = "protected" },
+    .{ .name = "public" },
+    .{ .name = "static" },
+    .{ .name = "yield" },
+    .{ .name = "await" },
+    // Empty string and common property / typeof keys.
+    .{ .name = "" },
+    .{ .name = "keys" },
+    .{ .name = "size" },
+    .{ .name = "length" },
+    .{ .name = "message" },
+    .{ .name = "cause" },
+    .{ .name = "errors" },
+    .{ .name = "stack" },
+    .{ .name = "name" },
+    .{ .name = "toString" },
+    .{ .name = "toLocaleString" },
+    .{ .name = "valueOf" },
+    .{ .name = "eval" },
+    .{ .name = "prototype" },
+    .{ .name = "constructor" },
+    .{ .name = "configurable" },
+    .{ .name = "writable" },
+    .{ .name = "enumerable" },
+    .{ .name = "value" },
+    .{ .name = "get" },
+    .{ .name = "set" },
+    .{ .name = "of" },
+    .{ .name = "__proto__" },
+    .{ .name = "undefined" },
+    .{ .name = "number" },
+    .{ .name = "boolean" },
+    .{ .name = "string" },
+    .{ .name = "object" },
+    .{ .name = "symbol" },
+    .{ .name = "integer" },
+    .{ .name = "unknown" },
+    .{ .name = "arguments" },
+    .{ .name = "callee" },
+    .{ .name = "caller" },
+    .{ .name = "<eval>" },
+    .{ .name = "<ret>" },
+    .{ .name = "<var>" },
+    .{ .name = "<arg_var>" },
+    .{ .name = "<with>" },
+    .{ .name = "lastIndex" },
+    .{ .name = "target" },
+    .{ .name = "index" },
+    .{ .name = "input" },
+    .{ .name = "defineProperties" },
+    .{ .name = "apply" },
+    .{ .name = "join" },
+    .{ .name = "concat" },
+    .{ .name = "split" },
+    .{ .name = "construct" },
+    .{ .name = "getPrototypeOf" },
+    .{ .name = "setPrototypeOf" },
+    .{ .name = "isExtensible" },
+    .{ .name = "preventExtensions" },
+    .{ .name = "has" },
+    .{ .name = "deleteProperty" },
+    .{ .name = "defineProperty" },
+    .{ .name = "getOwnPropertyDescriptor" },
+    .{ .name = "ownKeys" },
+    .{ .name = "add" },
+    .{ .name = "done" },
+    .{ .name = "next" },
+    .{ .name = "values" },
+    .{ .name = "source" },
+    .{ .name = "flags" },
+    .{ .name = "global" },
+    .{ .name = "unicode" },
+    .{ .name = "raw" },
+    .{ .name = "rawJSON" },
+    .{ .name = "new.target" },
+    .{ .name = "this.active_func" },
+    .{ .name = "<home_object>" },
+    .{ .name = "<computed_field>" },
+    .{ .name = "<static_computed_field>" },
+    .{ .name = "<class_fields_init>" },
+    .{ .name = "<brand>" },
+    .{ .name = "#constructor" },
+    .{ .name = "as" },
+    .{ .name = "from" },
+    .{ .name = "fromAsync" },
+    .{ .name = "meta" },
+    .{ .name = "*default*" },
+    .{ .name = "*" },
+    .{ .name = "Module" },
+    .{ .name = "then" },
+    .{ .name = "resolve" },
+    .{ .name = "reject" },
+    .{ .name = "promise" },
+    .{ .name = "proxy" },
+    .{ .name = "revoke" },
+    .{ .name = "async" },
+    .{ .name = "exec" },
+    .{ .name = "groups" },
+    .{ .name = "indices" },
+    .{ .name = "status" },
+    .{ .name = "reason" },
+    .{ .name = "globalThis" },
+    .{ .name = "bigint" },
+    .{ .name = "not-equal" },
+    .{ .name = "timed-out" },
+    .{ .name = "ok" },
+    .{ .name = "toJSON" },
+    .{ .name = "maxByteLength" },
+    .{ .name = "zip" },
+    .{ .name = "zipKeyed" },
+    .{ .name = "Object" },
+    .{ .name = "Array" },
+    .{ .name = "Error" },
+    .{ .name = "Number" },
+    .{ .name = "String" },
+    .{ .name = "Boolean" },
+    .{ .name = "Symbol" },
+    .{ .name = "Arguments" },
+    .{ .name = "Math" },
+    .{ .name = "JSON" },
+    .{ .name = "Date" },
+    .{ .name = "Function" },
+    .{ .name = "GeneratorFunction" },
+    .{ .name = "ForInIterator" },
+    .{ .name = "RegExp" },
+    .{ .name = "ArrayBuffer" },
+    .{ .name = "SharedArrayBuffer" },
+    .{ .name = "Uint8ClampedArray" },
+    .{ .name = "Int8Array" },
+    .{ .name = "Uint8Array" },
+    .{ .name = "Int16Array" },
+    .{ .name = "Uint16Array" },
+    .{ .name = "Int32Array" },
+    .{ .name = "Uint32Array" },
+    .{ .name = "BigInt64Array" },
+    .{ .name = "BigUint64Array" },
+    .{ .name = "Float16Array" },
+    .{ .name = "Float32Array" },
+    .{ .name = "Float64Array" },
+    .{ .name = "DataView" },
+    .{ .name = "BigInt" },
+    .{ .name = "WeakRef" },
+    .{ .name = "FinalizationRegistry" },
+    .{ .name = "Map" },
+    .{ .name = "Set" },
+    .{ .name = "WeakMap" },
+    .{ .name = "WeakSet" },
+    .{ .name = "Iterator" },
+    .{ .name = "Iterator Concat" },
+    .{ .name = "Iterator Helper" },
+    .{ .name = "Iterator Wrap" },
+    .{ .name = "Map Iterator" },
+    .{ .name = "Set Iterator" },
+    .{ .name = "Array Iterator" },
+    .{ .name = "String Iterator" },
+    .{ .name = "RegExp String Iterator" },
+    .{ .name = "Generator" },
+    .{ .name = "Proxy" },
+    .{ .name = "Promise" },
+    .{ .name = "PromiseResolveFunction" },
+    .{ .name = "PromiseRejectFunction" },
+    .{ .name = "AsyncFunction" },
+    .{ .name = "AsyncFunctionResolve" },
+    .{ .name = "AsyncFunctionReject" },
+    .{ .name = "AsyncGeneratorFunction" },
+    .{ .name = "AsyncGenerator" },
+    .{ .name = "EvalError" },
+    .{ .name = "RangeError" },
+    .{ .name = "ReferenceError" },
+    .{ .name = "SyntaxError" },
+    .{ .name = "TypeError" },
+    .{ .name = "URIError" },
+    .{ .name = "InternalError" },
+    .{ .name = "DOMException" },
+    .{ .name = "CallSite" },
+    // Private brand and well-known symbols.
+    .{ .name = "<brand>", .kind = .private },
+    .{ .name = "Symbol.toPrimitive", .kind = .symbol },
+    .{ .name = "Symbol.iterator", .kind = .symbol },
+    .{ .name = "Symbol.match", .kind = .symbol },
+    .{ .name = "Symbol.matchAll", .kind = .symbol },
+    .{ .name = "Symbol.replace", .kind = .symbol },
+    .{ .name = "Symbol.search", .kind = .symbol },
+    .{ .name = "Symbol.split", .kind = .symbol },
+    .{ .name = "Symbol.toStringTag", .kind = .symbol },
+    .{ .name = "Symbol.isConcatSpreadable", .kind = .symbol },
+    .{ .name = "Symbol.hasInstance", .kind = .symbol },
+    .{ .name = "Symbol.species", .kind = .symbol },
+    .{ .name = "Symbol.unscopables", .kind = .symbol },
+    .{ .name = "Symbol.asyncIterator", .kind = .symbol },
+    .{ .name = "Symbol.asyncDispose", .kind = .symbol },
+    .{ .name = "Symbol.dispose", .kind = .symbol },
+    // Host-internal markers; `zjs_last_internal_marker` aliases the last one.
+    .{ .name = "__zjs_proto_keepalive" },
+    .{ .name = "__zjs_BigInt_proto" },
+    .{ .name = "__zjs_Boolean_proto" },
+    .{ .name = "__zjs_Number_proto" },
+    .{ .name = "__zjs_String_proto" },
+    .{ .name = "__zjs_Symbol_proto" },
+    .{ .name = "__zjs_array_concat" },
+    .{ .name = "__zjs_array_constructor" },
+    .{ .name = "__zjs_array_iterator_kind" },
+    .{ .name = "__zjs_array_species_getter" },
+    .{ .name = "__zjs_array_to_locale_string" },
+    .{ .name = "__zjs_array_to_string" },
+    .{ .name = "__zjs_arraybuffer_proto" },
+    .{ .name = "__zjs_atomics_static" },
+    .{ .name = "__zjs_buffer_method_kind" },
+    .{ .name = "__zjs_define_property_kind" },
+    .{ .name = "__zjs_error_to_string" },
+    .{ .name = "__zjs_function_to_string" },
+    .{ .name = "__zjs_immutable_prototype" },
+    .{ .name = "__zjs_iterator_accessor" },
+    .{ .name = "__zjs_iterator_method" },
+    .{ .name = "__zjs_iterator_static" },
+    .{ .name = "__zjs_json_static" },
+    .{ .name = "__zjs_number_method" },
+    .{ .name = "__zjs_object_method" },
+    .{ .name = "__zjs_object_static" },
+    .{ .name = "__zjs_primitive_method" },
+    .{ .name = "__zjs_reflect_set_prototype_of" },
+    .{ .name = "__zjs_reflect_static" },
+    .{ .name = "__zjs_regexp_method" },
+    .{ .name = "__zjs_string_method" },
+    .{ .name = "__zjs_typedarray_method" },
+    .{ .name = "__zjs_typedarray_static" },
+    // Builtin and registry names.
+    .{ .name = "assign" },
+    .{ .name = "create" },
+    .{ .name = "getOwnPropertyDescriptors" },
+    .{ .name = "getOwnPropertyNames" },
+    .{ .name = "getOwnPropertySymbols" },
+    .{ .name = "hasOwn" },
+    .{ .name = "seal" },
+    .{ .name = "isSealed" },
+    .{ .name = "isFrozen" },
+    .{ .name = "freeze" },
+    .{ .name = "fromEntries" },
+    .{ .name = "groupBy" },
+    .{ .name = "hasOwnProperty" },
+    .{ .name = "isPrototypeOf" },
+    .{ .name = "propertyIsEnumerable" },
+    .{ .name = "__defineGetter__" },
+    .{ .name = "__defineSetter__" },
+    .{ .name = "__lookupGetter__" },
+    .{ .name = "__lookupSetter__" },
+    .{ .name = "bind" },
+    .{ .name = "isArray" },
+    .{ .name = "map" },
+    .{ .name = "filter" },
+    .{ .name = "reduce" },
+    .{ .name = "reduceRight" },
+    .{ .name = "forEach" },
+    .{ .name = "push" },
+    .{ .name = "pop" },
+    .{ .name = "shift" },
+    .{ .name = "unshift" },
+    .{ .name = "some" },
+    .{ .name = "every" },
+    .{ .name = "find" },
+    .{ .name = "findIndex" },
+    .{ .name = "findLast" },
+    .{ .name = "findLastIndex" },
+    .{ .name = "includes" },
+    .{ .name = "indexOf" },
+    .{ .name = "lastIndexOf" },
+    .{ .name = "at" },
+    .{ .name = "copyWithin" },
+    .{ .name = "fill" },
+    .{ .name = "slice" },
+    .{ .name = "splice" },
+    .{ .name = "reverse" },
+    .{ .name = "sort" },
+    .{ .name = "flat" },
+    .{ .name = "flatMap" },
+    .{ .name = "toReversed" },
+    .{ .name = "toSorted" },
+    .{ .name = "toSpliced" },
+    .{ .name = "fromCharCode" },
+    .{ .name = "fromCodePoint" },
+    .{ .name = "charAt" },
+    .{ .name = "charCodeAt" },
+    .{ .name = "codePointAt" },
+    .{ .name = "substring" },
+    .{ .name = "toUpperCase" },
+    .{ .name = "toLowerCase" },
+    .{ .name = "toLocaleUpperCase" },
+    .{ .name = "toLocaleLowerCase" },
+    .{ .name = "startsWith" },
+    .{ .name = "endsWith" },
+    .{ .name = "localeCompare" },
+    .{ .name = "repeat" },
+    .{ .name = "padStart" },
+    .{ .name = "padEnd" },
+    .{ .name = "normalize" },
+    .{ .name = "isWellFormed" },
+    .{ .name = "toWellFormed" },
+    .{ .name = "trim" },
+    .{ .name = "trimStart" },
+    .{ .name = "trimEnd" },
+    .{ .name = "anchor" },
+    .{ .name = "big" },
+    .{ .name = "blink" },
+    .{ .name = "bold" },
+    .{ .name = "fixed" },
+    .{ .name = "fontcolor" },
+    .{ .name = "fontsize" },
+    .{ .name = "italics" },
+    .{ .name = "link" },
+    .{ .name = "small" },
+    .{ .name = "strike" },
+    .{ .name = "substr" },
+    .{ .name = "replace" },
+    .{ .name = "replaceAll" },
+    .{ .name = "sup" },
+    .{ .name = "isInteger" },
+    .{ .name = "isSafeInteger" },
+    .{ .name = "toFixed" },
+    .{ .name = "toExponential" },
+    .{ .name = "toPrecision" },
+    .{ .name = "asIntN" },
+    .{ .name = "asUintN" },
+    .{ .name = "revocable" },
+    .{ .name = "getTime" },
+    .{ .name = "getTimezoneOffset" },
+    .{ .name = "setTime" },
+    .{ .name = "toISOString" },
+    .{ .name = "Reflect" },
+    .{ .name = "Atomics" },
+    .{ .name = "performance" },
+    .{ .name = "print" },
+    .{ .name = "console" },
+    .{ .name = "now" },
+    .{ .name = "timeOrigin" },
+    .{ .name = "decodeURI" },
+    .{ .name = "decodeURIComponent" },
+    .{ .name = "encodeURI" },
+    .{ .name = "encodeURIComponent" },
+    .{ .name = "escape" },
+    .{ .name = "unescape" },
+    .{ .name = "isNaN" },
+    .{ .name = "isFinite" },
+    .{ .name = "parseInt" },
+    .{ .name = "parseFloat" },
+    .{ .name = "btoa" },
+    .{ .name = "atob" },
+    .{ .name = "queueMicrotask" },
+    .{ .name = "gc" },
+    .{ .name = "navigator" },
+    .{ .name = "NaN" },
+    .{ .name = "POSITIVE_INFINITY" },
+    .{ .name = "NEGATIVE_INFINITY" },
+    .{ .name = "MAX_VALUE" },
+    .{ .name = "MIN_VALUE" },
+    .{ .name = "MAX_SAFE_INTEGER" },
+    .{ .name = "MIN_SAFE_INTEGER" },
+    .{ .name = "EPSILON" },
+    .{ .name = "description" },
+    .{ .name = "sub" },
+    .{ .name = "match" },
+    .{ .name = "matchAll" },
+    .{ .name = "search" },
+    .{ .name = "UTC" },
+    .{ .name = "parse" },
+    .{ .name = "getFullYear" },
+    .{ .name = "getMonth" },
+    .{ .name = "getDate" },
+    .{ .name = "getDay" },
+    .{ .name = "getHours" },
+    .{ .name = "getMinutes" },
+    .{ .name = "and" },
+    .{ .name = "compareExchange" },
+    .{ .name = "exchange" },
+    .{ .name = "isLockFree" },
+    .{ .name = "load" },
+    .{ .name = "notify" },
+    .{ .name = "or" },
+    .{ .name = "pause" },
+    .{ .name = "store" },
+    .{ .name = "wait" },
+    .{ .name = "waitAsync" },
+    .{ .name = "xor" },
+    .{ .name = "ABORT_ERR" },
+    .{ .name = "AggregateError" },
+    .{ .name = "DATA_CLONE_ERR" },
+    .{ .name = "DOMSTRING_SIZE_ERR" },
+    .{ .name = "HIERARCHY_REQUEST_ERR" },
+    .{ .name = "INDEX_SIZE_ERR" },
+    .{ .name = "INUSE_ATTRIBUTE_ERR" },
+    .{ .name = "INVALID_ACCESS_ERR" },
+    .{ .name = "INVALID_CHARACTER_ERR" },
+    .{ .name = "INVALID_MODIFICATION_ERR" },
+    .{ .name = "INVALID_NODE_TYPE_ERR" },
+    .{ .name = "INVALID_STATE_ERR" },
+    .{ .name = "NAMESPACE_ERR" },
+    .{ .name = "NETWORK_ERR" },
+    .{ .name = "NOT_FOUND_ERR" },
+    .{ .name = "NOT_SUPPORTED_ERR" },
+    .{ .name = "NO_DATA_ALLOWED_ERR" },
+    .{ .name = "NO_MODIFICATION_ALLOWED_ERR" },
+    .{ .name = "QUOTA_EXCEEDED_ERR" },
+    .{ .name = "SECURITY_ERR" },
+    .{ .name = "SYNTAX_ERR" },
+    .{ .name = "TIMEOUT_ERR" },
+    .{ .name = "TYPE_MISMATCH_ERR" },
+    .{ .name = "TypedArray" },
+    .{ .name = "URL_MISMATCH_ERR" },
+    .{ .name = "VALIDATION_ERR" },
+    .{ .name = "WRONG_DOCUMENT_ERR" },
+    .{ .name = "[Symbol.matchAll]" },
+    .{ .name = "[Symbol.match]" },
+    .{ .name = "[Symbol.replace]" },
+    .{ .name = "[Symbol.search]" },
+    .{ .name = "[Symbol.split]" },
+    .{ .name = "abs" },
+    .{ .name = "acos" },
+    .{ .name = "acosh" },
+    .{ .name = "all" },
+    .{ .name = "allSettled" },
+    .{ .name = "any" },
+    .{ .name = "asin" },
+    .{ .name = "asinh" },
+    .{ .name = "atan" },
+    .{ .name = "atan2" },
+    .{ .name = "atanh" },
+    .{ .name = "call" },
+    .{ .name = "captureStackTrace" },
+    .{ .name = "cbrt" },
+    .{ .name = "ceil" },
+    .{ .name = "clear" },
+    .{ .name = "clz32" },
+    .{ .name = "compile" },
+    .{ .name = "cos" },
+    .{ .name = "cosh" },
+    .{ .name = "deref" },
+    .{ .name = "difference" },
+    .{ .name = "drop" },
+    .{ .name = "entries" },
+    .{ .name = "exp" },
+    .{ .name = "expm1" },
+    .{ .name = "f16round" },
+    .{ .name = "floor" },
+    .{ .name = "fromBase64" },
+    .{ .name = "fromHex" },
+    .{ .name = "fround" },
+    .{ .name = "getBigInt64" },
+    .{ .name = "getBigUint64" },
+    .{ .name = "getFloat16" },
+    .{ .name = "getFloat32" },
+    .{ .name = "getFloat64" },
+    .{ .name = "getInt16" },
+    .{ .name = "getInt32" },
+    .{ .name = "getInt8" },
+    .{ .name = "getMilliseconds" },
+    .{ .name = "getOrInsert" },
+    .{ .name = "getOrInsertComputed" },
+    .{ .name = "getSeconds" },
+    .{ .name = "getUTCDate" },
+    .{ .name = "getUTCDay" },
+    .{ .name = "getUTCFullYear" },
+    .{ .name = "getUTCHours" },
+    .{ .name = "getUTCMilliseconds" },
+    .{ .name = "getUTCMinutes" },
+    .{ .name = "getUTCMonth" },
+    .{ .name = "getUTCSeconds" },
+    .{ .name = "getUint16" },
+    .{ .name = "getUint32" },
+    .{ .name = "getUint8" },
+    .{ .name = "getYear" },
+    .{ .name = "grow" },
+    .{ .name = "hypot" },
+    .{ .name = "imul" },
+    .{ .name = "intersection" },
+    .{ .name = "is" },
+    .{ .name = "isDisjointFrom" },
+    .{ .name = "isError" },
+    .{ .name = "isRawJSON" },
+    .{ .name = "isSubsetOf" },
+    .{ .name = "isSupersetOf" },
+    .{ .name = "isView" },
+    .{ .name = "keyFor" },
+    .{ .name = "log" },
+    .{ .name = "log10" },
+    .{ .name = "log1p" },
+    .{ .name = "log2" },
+    .{ .name = "max" },
+    .{ .name = "min" },
+    .{ .name = "pow" },
+    .{ .name = "race" },
+    .{ .name = "random" },
+    .{ .name = "register" },
+    .{ .name = "resize" },
+    .{ .name = "round" },
+    .{ .name = "setBigInt64" },
+    .{ .name = "setBigUint64" },
+    .{ .name = "setDate" },
+    .{ .name = "setFloat16" },
+    .{ .name = "setFloat32" },
+    .{ .name = "setFloat64" },
+    .{ .name = "setFromBase64" },
+    .{ .name = "setFromHex" },
+    .{ .name = "setFullYear" },
+    .{ .name = "setHours" },
+    .{ .name = "setInt16" },
+    .{ .name = "setInt32" },
+    .{ .name = "setInt8" },
+    .{ .name = "setMilliseconds" },
+    .{ .name = "setMinutes" },
+    .{ .name = "setMonth" },
+    .{ .name = "setSeconds" },
+    .{ .name = "setUTCDate" },
+    .{ .name = "setUTCFullYear" },
+    .{ .name = "setUTCHours" },
+    .{ .name = "setUTCMilliseconds" },
+    .{ .name = "setUTCMinutes" },
+    .{ .name = "setUTCMonth" },
+    .{ .name = "setUTCSeconds" },
+    .{ .name = "setUint16" },
+    .{ .name = "setUint32" },
+    .{ .name = "setUint8" },
+    .{ .name = "setYear" },
+    .{ .name = "sign" },
+    .{ .name = "sin" },
+    .{ .name = "sinh" },
+    .{ .name = "sliceToImmutable" },
+    .{ .name = "sqrt" },
+    .{ .name = "stringify" },
+    .{ .name = "subarray" },
+    .{ .name = "sumPrecise" },
+    .{ .name = "symmetricDifference" },
+    .{ .name = "take" },
+    .{ .name = "tan" },
+    .{ .name = "tanh" },
+    .{ .name = "test" },
+    .{ .name = "toArray" },
+    .{ .name = "toBase64" },
+    .{ .name = "toDateString" },
+    .{ .name = "toHex" },
+    .{ .name = "toLocaleDateString" },
+    .{ .name = "toLocaleTimeString" },
+    .{ .name = "toTimeString" },
+    .{ .name = "toUTCString" },
+    .{ .name = "transfer" },
+    .{ .name = "transferToFixedLength" },
+    .{ .name = "transferToImmutable" },
+    .{ .name = "trunc" },
+    .{ .name = "union" },
+    .{ .name = "unregister" },
+    .{ .name = "withResolvers" },
+    .{ .name = "__zjs_native_name" },
+    .{ .name = "__zjs_dstr_get" },
+    .{ .name = "__zjs_dstr_elide" },
+    .{ .name = "__zjs_dstr_rest" },
+    .{ .name = "__zjs_dstr_obj_rest" },
+    .{ .name = "__zjs_dstr_close" },
+    .{ .name = "__zjs_dstr_require_iterator" },
+    .{ .name = "trimLeft" },
+    .{ .name = "trimRight" },
+    .{ .name = "__primitive" },
+    .{ .name = "toPrimitive" },
+    .{ .name = "species" },
+    .{ .name = "iterator" },
+    .{ .name = "toStringTag" },
+    .{ .name = "isConcatSpreadable" },
+    .{ .name = "hasInstance" },
+    .{ .name = "unscopables" },
+    .{ .name = "asyncIterator" },
+    .{ .name = "asyncDispose" },
+    .{ .name = "dispose" },
+    .{ .name = "toGMTString" },
+    .{ .name = "ignoreCase" },
+    .{ .name = "multiline" },
+    .{ .name = "dotAll" },
+    .{ .name = "sticky" },
+    .{ .name = "hasIndices" },
+    .{ .name = "unicodeSets" },
+    .{ .name = "stackTraceLimit" },
+    .{ .name = "__zjs_collection_method_owner" },
+    .{ .name = "byteLength" },
+    .{ .name = "detached" },
+    .{ .name = "resizable" },
+    .{ .name = "growable" },
+    .{ .name = "BYTES_PER_ELEMENT" },
+    .{ .name = "buffer" },
+    .{ .name = "byteOffset" },
+    .{ .name = "Infinity" },
+    .{ .name = "__zjs_throw_type_error_function_proto" },
+    .{ .name = "__zjs_throw_type_error_intrinsic" },
+    .{ .name = "scriptArgs" },
+    .{ .name = "$_" },
+    .{ .name = "lastMatch" },
+    .{ .name = "$&" },
+    .{ .name = "lastParen" },
+    .{ .name = "$+" },
+    .{ .name = "leftContext" },
+    .{ .name = "$`" },
+    .{ .name = "rightContext" },
+    .{ .name = "$'" },
+    .{ .name = "$1" },
+    .{ .name = "$2" },
+    .{ .name = "$3" },
+    .{ .name = "$4" },
+    .{ .name = "$5" },
+    .{ .name = "$6" },
+    .{ .name = "$7" },
+    .{ .name = "$8" },
+    .{ .name = "$9" },
+    .{ .name = "SuppressedError" },
+    .{ .name = "DisposableStack" },
+    .{ .name = "use" },
+    .{ .name = "adopt" },
+    .{ .name = "defer" },
+    .{ .name = "move" },
+    .{ .name = "disposed" },
+    .{ .name = "AsyncDisposableStack" },
+    .{ .name = "disposeAsync" },
+    .{ .name = "allKeyed" },
+    .{ .name = "allSettledKeyed" },
+    .{ .name = "immutable" },
+    // S3 predefined property keys (append-only).
+    .{ .name = "alphabet" },
+    .{ .name = "lastChunkHandling" },
+    .{ .name = "omitPadding" },
+    .{ .name = "padding" },
+    .{ .name = "mode" },
+    .{ .name = "prepareStackTrace" },
+    .{ .name = "type" },
+    .{ .name = "userAgent" },
+    .{ .name = "E" },
+    .{ .name = "LN10" },
+    .{ .name = "LN2" },
+    .{ .name = "LOG2E" },
+    .{ .name = "LOG10E" },
+    .{ .name = "PI" },
+    .{ .name = "SQRT1_2" },
+    .{ .name = "SQRT2" },
+    .{ .name = "k" },
+    .{ .name = "mapfn" },
+    .{ .name = "this_arg" },
+    .{ .name = "iter" },
+    .{ .name = "items" },
+    .{ .name = "len" },
+    .{ .name = "phase" },
+    .{ .name = "state" },
+    .{ .name = "pending" },
+    .{ .name = "rejected" },
+    .{ .name = "fileName" },
+    .{ .name = "lineNumber" },
+    .{ .name = "columnNumber" },
+    .{ .name = "code" },
+    .{ .name = "error" },
+    .{ .name = "suppressed" },
+    .{ .name = "url" },
+    .{ .name = "main" },
+    .{ .name = "read" },
+    .{ .name = "written" },
+};
+
+pub const predefined_atoms = blk: {
+    @setEvalBranchQuota(100000);
+    var out: [predefined_spec.len]PredefinedAtom = undefined;
+    for (predefined_spec, 0..) |item, i| {
+        out[i] = .{
+            .id = Atom.fromRaw(@intCast(i + 1)),
+            .name = item.name,
+            .kind = item.kind,
+        };
+    }
+    break :blk out;
+};
+
+/// Call-site spellings that differ from the spec name: Zig keywords,
+/// typeof-result aliases, pseudo-bindings, well-known symbols, and the
+/// `zjs_last_*` group markers. `caller` / `arguments` keep their table
+/// names; the comptime asserts below pin the spellings.
+const PredefinedIdAlias = struct {
+    field: []const u8,
+    name: []const u8,
+    kind: AtomKind = .string,
+};
+
+const predefined_id_aliases = [_]PredefinedIdAlias{
+    .{ .field = "null_", .name = "null" },
+    .{ .field = "false_", .name = "false" },
+    .{ .field = "true_", .name = "true" },
+    .{ .field = "if_", .name = "if" },
+    .{ .field = "this_", .name = "this" },
+    .{ .field = "eval_", .name = "eval" },
+    .{ .field = "undefined_", .name = "undefined" },
+    // typeof result strings: interned atoms, not a fresh alloc per `OP_typeof`.
+    .{ .field = "type_function", .name = "function" },
+    .{ .field = "type_number", .name = "number" },
+    .{ .field = "type_boolean", .name = "boolean" },
+    .{ .field = "type_string", .name = "string" },
+    .{ .field = "type_object", .name = "object" },
+    .{ .field = "type_symbol", .name = "symbol" },
+    .{ .field = "type_bigint", .name = "bigint" },
+    .{ .field = "ret", .name = "<ret>" },
+    .{ .field = "var_object", .name = "<var>" },
+    .{ .field = "arg_var_object", .name = "<arg_var>" },
+    .{ .field = "with_object", .name = "<with>" },
+    .{ .field = "new_target", .name = "new.target" },
+    .{ .field = "this_active_func", .name = "this.active_func" },
+    .{ .field = "home_object", .name = "<home_object>" },
+    .{ .field = "class_fields_init", .name = "<class_fields_init>" },
+    .{ .field = "async_", .name = "async" },
+    .{ .field = "Private_brand", .name = "<brand>", .kind = .private },
+    .{ .field = "Symbol_iterator", .name = "Symbol.iterator", .kind = .symbol },
+    .{ .field = "Symbol_asyncIterator", .name = "Symbol.asyncIterator", .kind = .symbol },
+    .{ .field = "Symbol_asyncDispose", .name = "Symbol.asyncDispose", .kind = .symbol },
+    .{ .field = "Symbol_dispose", .name = "Symbol.dispose", .kind = .symbol },
+    .{ .field = "zjs_proto_keepalive", .name = "__zjs_proto_keepalive" },
+    .{ .field = "zjs_last_internal_marker", .name = "__zjs_typedarray_static" },
+    .{ .field = "zjs_last_registry_name", .name = "toISOString" },
+    .{ .field = "zjs_last_global_setup_name", .name = "parseFloat" },
+    .{ .field = "zjs_last_global_extra_name", .name = "xor" },
+    .{ .field = "zjs_last_registry_extra_name", .name = "withResolvers" },
+    .{ .field = "zjs_last_startup_name", .name = "immutable" },
+    .{ .field = "return_", .name = "return" },
+    .{ .field = "type_", .name = "type" },
+    .{ .field = "error_", .name = "error" },
+    .{ .field = "zjs_last_predefined_key_name", .name = "written" },
+};
+
+fn predefinedSpecId(comptime name: []const u8, comptime kind: AtomKind) Atom {
+    @setEvalBranchQuota(10000);
+    for (predefined_spec, 0..) |item, i| {
+        if (item.kind == kind and std.mem.eql(u8, item.name, name)) {
+            return Atom.fromRaw(@intCast(i + 1));
+        }
+    }
+    @compileError("predefined atom not in spec: " ++ name);
+}
+
+fn predefinedFieldName(comptime index: usize) []const u8 {
+    const item = predefined_spec[index];
+    if (item.name.len == 0) return "empty_string";
+    // The only duplicate spelling: string `<brand>` (computed field) vs private.
+    if (std.mem.eql(u8, item.name, "<brand>")) {
+        return "<brand>__" ++ @tagName(item.kind);
+    }
+    return item.name;
+}
+
+const PredefinedIds = blk: {
+    @setEvalBranchQuota(200000);
+    const n = predefined_spec.len + predefined_id_aliases.len;
+    var field_names: [n][]const u8 = undefined;
+    var field_types: [n]type = @splat(Atom);
+    var field_attrs: [n]std.builtin.Type.StructField.Attributes = undefined;
+    for (predefined_spec, 0..) |_, i| {
+        field_names[i] = predefinedFieldName(i);
+        field_attrs[i] = .{
+            .@"comptime" = true,
+            .default_value_ptr = &predefined_atoms[i].id,
+        };
+    }
+    for (predefined_id_aliases, 0..) |alias, j| {
+        const i = predefined_spec.len + j;
+        field_names[i] = alias.field;
+        const id = predefinedSpecId(alias.name, alias.kind);
+        field_attrs[i] = .{
+            .@"comptime" = true,
+            .default_value_ptr = &predefined_atoms[id.raw() - 1].id,
+        };
+    }
+    break :blk @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+};
+
+/// Predefined atom ids generated from `predefined_spec` (1-based index).
+/// Historical spellings (`if_`, `type_function`, `zjs_last_*`, …) are
+/// aliases so existing call sites keep compiling.
+pub const ids: PredefinedIds = .{};
 
 pub const last_keyword = ids.await;
 pub const last_strict_keyword = ids.yield;
 pub const predefined_count = predefined_atoms.len;
 pub const first_dynamic_atom = predefined_count + 1;
 
-pub const predefined_atoms = [_]PredefinedAtom{
-    .{ .id = 1, .name = "null" },
-    .{ .id = 2, .name = "false" },
-    .{ .id = 3, .name = "true" },
-    .{ .id = 4, .name = "if" },
-    .{ .id = 5, .name = "else" },
-    .{ .id = 6, .name = "return" },
-    .{ .id = 7, .name = "var" },
-    .{ .id = 8, .name = "this" },
-    .{ .id = 9, .name = "delete" },
-    .{ .id = 10, .name = "void" },
-    .{ .id = 11, .name = "typeof" },
-    .{ .id = 12, .name = "new" },
-    .{ .id = 13, .name = "in" },
-    .{ .id = 14, .name = "instanceof" },
-    .{ .id = 15, .name = "do" },
-    .{ .id = 16, .name = "while" },
-    .{ .id = 17, .name = "for" },
-    .{ .id = 18, .name = "break" },
-    .{ .id = 19, .name = "continue" },
-    .{ .id = 20, .name = "switch" },
-    .{ .id = 21, .name = "case" },
-    .{ .id = 22, .name = "default" },
-    .{ .id = 23, .name = "throw" },
-    .{ .id = 24, .name = "try" },
-    .{ .id = 25, .name = "catch" },
-    .{ .id = 26, .name = "finally" },
-    .{ .id = 27, .name = "function" },
-    .{ .id = 28, .name = "debugger" },
-    .{ .id = 29, .name = "with" },
-    .{ .id = 30, .name = "class" },
-    .{ .id = 31, .name = "const" },
-    .{ .id = 32, .name = "enum" },
-    .{ .id = 33, .name = "export" },
-    .{ .id = 34, .name = "extends" },
-    .{ .id = 35, .name = "import" },
-    .{ .id = 36, .name = "super" },
-    .{ .id = 37, .name = "implements" },
-    .{ .id = 38, .name = "interface" },
-    .{ .id = 39, .name = "let" },
-    .{ .id = 40, .name = "package" },
-    .{ .id = 41, .name = "private" },
-    .{ .id = 42, .name = "protected" },
-    .{ .id = 43, .name = "public" },
-    .{ .id = 44, .name = "static" },
-    .{ .id = 45, .name = "yield" },
-    .{ .id = 46, .name = "await" },
-    .{ .id = 47, .name = "" },
-    .{ .id = 48, .name = "keys" },
-    .{ .id = 49, .name = "size" },
-    .{ .id = 50, .name = "length" },
-    .{ .id = 51, .name = "message" },
-    .{ .id = 52, .name = "cause" },
-    .{ .id = 53, .name = "errors" },
-    .{ .id = 54, .name = "stack" },
-    .{ .id = 55, .name = "name" },
-    .{ .id = 56, .name = "toString" },
-    .{ .id = 57, .name = "toLocaleString" },
-    .{ .id = 58, .name = "valueOf" },
-    .{ .id = 59, .name = "eval" },
-    .{ .id = 60, .name = "prototype" },
-    .{ .id = 61, .name = "constructor" },
-    .{ .id = 62, .name = "configurable" },
-    .{ .id = 63, .name = "writable" },
-    .{ .id = 64, .name = "enumerable" },
-    .{ .id = 65, .name = "value" },
-    .{ .id = 66, .name = "get" },
-    .{ .id = 67, .name = "set" },
-    .{ .id = 68, .name = "of" },
-    .{ .id = 69, .name = "__proto__" },
-    .{ .id = 70, .name = "undefined" },
-    .{ .id = 71, .name = "number" },
-    .{ .id = 72, .name = "boolean" },
-    .{ .id = 73, .name = "string" },
-    .{ .id = 74, .name = "object" },
-    .{ .id = 75, .name = "symbol" },
-    .{ .id = 76, .name = "integer" },
-    .{ .id = 77, .name = "unknown" },
-    .{ .id = 78, .name = "arguments" },
-    .{ .id = 79, .name = "callee" },
-    .{ .id = 80, .name = "caller" },
-    .{ .id = 81, .name = "<eval>" },
-    .{ .id = 82, .name = "<ret>" },
-    .{ .id = 83, .name = "<var>" },
-    .{ .id = 84, .name = "<arg_var>" },
-    .{ .id = 85, .name = "<with>" },
-    .{ .id = 86, .name = "lastIndex" },
-    .{ .id = 87, .name = "target" },
-    .{ .id = 88, .name = "index" },
-    .{ .id = 89, .name = "input" },
-    .{ .id = 90, .name = "defineProperties" },
-    .{ .id = 91, .name = "apply" },
-    .{ .id = 92, .name = "join" },
-    .{ .id = 93, .name = "concat" },
-    .{ .id = 94, .name = "split" },
-    .{ .id = 95, .name = "construct" },
-    .{ .id = 96, .name = "getPrototypeOf" },
-    .{ .id = 97, .name = "setPrototypeOf" },
-    .{ .id = 98, .name = "isExtensible" },
-    .{ .id = 99, .name = "preventExtensions" },
-    .{ .id = 100, .name = "has" },
-    .{ .id = 101, .name = "deleteProperty" },
-    .{ .id = 102, .name = "defineProperty" },
-    .{ .id = 103, .name = "getOwnPropertyDescriptor" },
-    .{ .id = 104, .name = "ownKeys" },
-    .{ .id = 105, .name = "add" },
-    .{ .id = 106, .name = "done" },
-    .{ .id = 107, .name = "next" },
-    .{ .id = 108, .name = "values" },
-    .{ .id = 109, .name = "source" },
-    .{ .id = 110, .name = "flags" },
-    .{ .id = 111, .name = "global" },
-    .{ .id = 112, .name = "unicode" },
-    .{ .id = 113, .name = "raw" },
-    .{ .id = 114, .name = "rawJSON" },
-    .{ .id = 115, .name = "new.target" },
-    .{ .id = 116, .name = "this.active_func" },
-    .{ .id = 117, .name = "<home_object>" },
-    .{ .id = 118, .name = "<computed_field>" },
-    .{ .id = 119, .name = "<static_computed_field>" },
-    .{ .id = 120, .name = "<class_fields_init>" },
-    .{ .id = 121, .name = "<brand>" },
-    .{ .id = 122, .name = "#constructor" },
-    .{ .id = 123, .name = "as" },
-    .{ .id = 124, .name = "from" },
-    .{ .id = 125, .name = "fromAsync" },
-    .{ .id = 126, .name = "meta" },
-    .{ .id = 127, .name = "*default*" },
-    .{ .id = 128, .name = "*" },
-    .{ .id = 129, .name = "Module" },
-    .{ .id = 130, .name = "then" },
-    .{ .id = 131, .name = "resolve" },
-    .{ .id = 132, .name = "reject" },
-    .{ .id = 133, .name = "promise" },
-    .{ .id = 134, .name = "proxy" },
-    .{ .id = 135, .name = "revoke" },
-    .{ .id = 136, .name = "async" },
-    .{ .id = 137, .name = "exec" },
-    .{ .id = 138, .name = "groups" },
-    .{ .id = 139, .name = "indices" },
-    .{ .id = 140, .name = "status" },
-    .{ .id = 141, .name = "reason" },
-    .{ .id = 142, .name = "globalThis" },
-    .{ .id = 143, .name = "bigint" },
-    .{ .id = 144, .name = "not-equal" },
-    .{ .id = 145, .name = "timed-out" },
-    .{ .id = 146, .name = "ok" },
-    .{ .id = 147, .name = "toJSON" },
-    .{ .id = 148, .name = "maxByteLength" },
-    .{ .id = 149, .name = "zip" },
-    .{ .id = 150, .name = "zipKeyed" },
-    .{ .id = 151, .name = "Object" },
-    .{ .id = 152, .name = "Array" },
-    .{ .id = 153, .name = "Error" },
-    .{ .id = 154, .name = "Number" },
-    .{ .id = 155, .name = "String" },
-    .{ .id = 156, .name = "Boolean" },
-    .{ .id = 157, .name = "Symbol" },
-    .{ .id = 158, .name = "Arguments" },
-    .{ .id = 159, .name = "Math" },
-    .{ .id = 160, .name = "JSON" },
-    .{ .id = 161, .name = "Date" },
-    .{ .id = 162, .name = "Function" },
-    .{ .id = 163, .name = "GeneratorFunction" },
-    .{ .id = 164, .name = "ForInIterator" },
-    .{ .id = 165, .name = "RegExp" },
-    .{ .id = 166, .name = "ArrayBuffer" },
-    .{ .id = 167, .name = "SharedArrayBuffer" },
-    .{ .id = 168, .name = "Uint8ClampedArray" },
-    .{ .id = 169, .name = "Int8Array" },
-    .{ .id = 170, .name = "Uint8Array" },
-    .{ .id = 171, .name = "Int16Array" },
-    .{ .id = 172, .name = "Uint16Array" },
-    .{ .id = 173, .name = "Int32Array" },
-    .{ .id = 174, .name = "Uint32Array" },
-    .{ .id = 175, .name = "BigInt64Array" },
-    .{ .id = 176, .name = "BigUint64Array" },
-    .{ .id = 177, .name = "Float16Array" },
-    .{ .id = 178, .name = "Float32Array" },
-    .{ .id = 179, .name = "Float64Array" },
-    .{ .id = 180, .name = "DataView" },
-    .{ .id = 181, .name = "BigInt" },
-    .{ .id = 182, .name = "WeakRef" },
-    .{ .id = 183, .name = "FinalizationRegistry" },
-    .{ .id = 184, .name = "Map" },
-    .{ .id = 185, .name = "Set" },
-    .{ .id = 186, .name = "WeakMap" },
-    .{ .id = 187, .name = "WeakSet" },
-    .{ .id = 188, .name = "Iterator" },
-    .{ .id = 189, .name = "Iterator Concat" },
-    .{ .id = 190, .name = "Iterator Helper" },
-    .{ .id = 191, .name = "Iterator Wrap" },
-    .{ .id = 192, .name = "Map Iterator" },
-    .{ .id = 193, .name = "Set Iterator" },
-    .{ .id = 194, .name = "Array Iterator" },
-    .{ .id = 195, .name = "String Iterator" },
-    .{ .id = 196, .name = "RegExp String Iterator" },
-    .{ .id = 197, .name = "Generator" },
-    .{ .id = 198, .name = "Proxy" },
-    .{ .id = 199, .name = "Promise" },
-    .{ .id = 200, .name = "PromiseResolveFunction" },
-    .{ .id = 201, .name = "PromiseRejectFunction" },
-    .{ .id = 202, .name = "AsyncFunction" },
-    .{ .id = 203, .name = "AsyncFunctionResolve" },
-    .{ .id = 204, .name = "AsyncFunctionReject" },
-    .{ .id = 205, .name = "AsyncGeneratorFunction" },
-    .{ .id = 206, .name = "AsyncGenerator" },
-    .{ .id = 207, .name = "EvalError" },
-    .{ .id = 208, .name = "RangeError" },
-    .{ .id = 209, .name = "ReferenceError" },
-    .{ .id = 210, .name = "SyntaxError" },
-    .{ .id = 211, .name = "TypeError" },
-    .{ .id = 212, .name = "URIError" },
-    .{ .id = 213, .name = "InternalError" },
-    .{ .id = 214, .name = "DOMException" },
-    .{ .id = 215, .name = "CallSite" },
-    .{ .id = 216, .name = "<brand>", .kind = .private },
-    .{ .id = 217, .name = "Symbol.toPrimitive", .kind = .symbol },
-    .{ .id = 218, .name = "Symbol.iterator", .kind = .symbol },
-    .{ .id = 219, .name = "Symbol.match", .kind = .symbol },
-    .{ .id = 220, .name = "Symbol.matchAll", .kind = .symbol },
-    .{ .id = 221, .name = "Symbol.replace", .kind = .symbol },
-    .{ .id = 222, .name = "Symbol.search", .kind = .symbol },
-    .{ .id = 223, .name = "Symbol.split", .kind = .symbol },
-    .{ .id = 224, .name = "Symbol.toStringTag", .kind = .symbol },
-    .{ .id = 225, .name = "Symbol.isConcatSpreadable", .kind = .symbol },
-    .{ .id = 226, .name = "Symbol.hasInstance", .kind = .symbol },
-    .{ .id = 227, .name = "Symbol.species", .kind = .symbol },
-    .{ .id = 228, .name = "Symbol.unscopables", .kind = .symbol },
-    .{ .id = 229, .name = "Symbol.asyncIterator", .kind = .symbol },
-    .{ .id = 230, .name = "Symbol.asyncDispose", .kind = .symbol },
-    .{ .id = 231, .name = "Symbol.dispose", .kind = .symbol },
-    .{ .id = 232, .name = "__zjs_proto_keepalive" },
-    .{ .id = 233, .name = "__zjs_BigInt_proto" },
-    .{ .id = 234, .name = "__zjs_Boolean_proto" },
-    .{ .id = 235, .name = "__zjs_Number_proto" },
-    .{ .id = 236, .name = "__zjs_String_proto" },
-    .{ .id = 237, .name = "__zjs_Symbol_proto" },
-    .{ .id = 238, .name = "__zjs_array_concat" },
-    .{ .id = 239, .name = "__zjs_array_constructor" },
-    .{ .id = 240, .name = "__zjs_array_iterator_kind" },
-    .{ .id = 241, .name = "__zjs_array_species_getter" },
-    .{ .id = 242, .name = "__zjs_array_to_locale_string" },
-    .{ .id = 243, .name = "__zjs_array_to_string" },
-    .{ .id = 244, .name = "__zjs_arraybuffer_proto" },
-    .{ .id = 245, .name = "__zjs_atomics_static" },
-    .{ .id = 246, .name = "__zjs_buffer_method_kind" },
-    .{ .id = 247, .name = "__zjs_define_property_kind" },
-    .{ .id = 248, .name = "__zjs_error_to_string" },
-    .{ .id = 249, .name = "__zjs_function_to_string" },
-    .{ .id = 250, .name = "__zjs_immutable_prototype" },
-    .{ .id = 251, .name = "__zjs_iterator_accessor" },
-    .{ .id = 252, .name = "__zjs_iterator_method" },
-    .{ .id = 253, .name = "__zjs_iterator_static" },
-    .{ .id = 254, .name = "__zjs_json_static" },
-    .{ .id = 255, .name = "__zjs_number_method" },
-    .{ .id = 256, .name = "__zjs_object_method" },
-    .{ .id = 257, .name = "__zjs_object_static" },
-    .{ .id = 258, .name = "__zjs_primitive_method" },
-    .{ .id = 259, .name = "__zjs_reflect_set_prototype_of" },
-    .{ .id = 260, .name = "__zjs_reflect_static" },
-    .{ .id = 261, .name = "__zjs_regexp_method" },
-    .{ .id = 262, .name = "__zjs_string_method" },
-    .{ .id = 263, .name = "__zjs_typedarray_method" },
-    .{ .id = 264, .name = "__zjs_typedarray_static" },
-    .{ .id = 265, .name = "assign" },
-    .{ .id = 266, .name = "create" },
-    .{ .id = 267, .name = "getOwnPropertyDescriptors" },
-    .{ .id = 268, .name = "getOwnPropertyNames" },
-    .{ .id = 269, .name = "getOwnPropertySymbols" },
-    .{ .id = 270, .name = "hasOwn" },
-    .{ .id = 271, .name = "seal" },
-    .{ .id = 272, .name = "isSealed" },
-    .{ .id = 273, .name = "isFrozen" },
-    .{ .id = 274, .name = "freeze" },
-    .{ .id = 275, .name = "fromEntries" },
-    .{ .id = 276, .name = "groupBy" },
-    .{ .id = 277, .name = "hasOwnProperty" },
-    .{ .id = 278, .name = "isPrototypeOf" },
-    .{ .id = 279, .name = "propertyIsEnumerable" },
-    .{ .id = 280, .name = "__defineGetter__" },
-    .{ .id = 281, .name = "__defineSetter__" },
-    .{ .id = 282, .name = "__lookupGetter__" },
-    .{ .id = 283, .name = "__lookupSetter__" },
-    .{ .id = 284, .name = "bind" },
-    .{ .id = 285, .name = "isArray" },
-    .{ .id = 286, .name = "map" },
-    .{ .id = 287, .name = "filter" },
-    .{ .id = 288, .name = "reduce" },
-    .{ .id = 289, .name = "reduceRight" },
-    .{ .id = 290, .name = "forEach" },
-    .{ .id = 291, .name = "push" },
-    .{ .id = 292, .name = "pop" },
-    .{ .id = 293, .name = "shift" },
-    .{ .id = 294, .name = "unshift" },
-    .{ .id = 295, .name = "some" },
-    .{ .id = 296, .name = "every" },
-    .{ .id = 297, .name = "find" },
-    .{ .id = 298, .name = "findIndex" },
-    .{ .id = 299, .name = "findLast" },
-    .{ .id = 300, .name = "findLastIndex" },
-    .{ .id = 301, .name = "includes" },
-    .{ .id = 302, .name = "indexOf" },
-    .{ .id = 303, .name = "lastIndexOf" },
-    .{ .id = 304, .name = "at" },
-    .{ .id = 305, .name = "copyWithin" },
-    .{ .id = 306, .name = "fill" },
-    .{ .id = 307, .name = "slice" },
-    .{ .id = 308, .name = "splice" },
-    .{ .id = 309, .name = "reverse" },
-    .{ .id = 310, .name = "sort" },
-    .{ .id = 311, .name = "flat" },
-    .{ .id = 312, .name = "flatMap" },
-    .{ .id = 313, .name = "toReversed" },
-    .{ .id = 314, .name = "toSorted" },
-    .{ .id = 315, .name = "toSpliced" },
-    .{ .id = 316, .name = "fromCharCode" },
-    .{ .id = 317, .name = "fromCodePoint" },
-    .{ .id = 318, .name = "charAt" },
-    .{ .id = 319, .name = "charCodeAt" },
-    .{ .id = 320, .name = "codePointAt" },
-    .{ .id = 321, .name = "substring" },
-    .{ .id = 322, .name = "toUpperCase" },
-    .{ .id = 323, .name = "toLowerCase" },
-    .{ .id = 324, .name = "toLocaleUpperCase" },
-    .{ .id = 325, .name = "toLocaleLowerCase" },
-    .{ .id = 326, .name = "startsWith" },
-    .{ .id = 327, .name = "endsWith" },
-    .{ .id = 328, .name = "localeCompare" },
-    .{ .id = 329, .name = "repeat" },
-    .{ .id = 330, .name = "padStart" },
-    .{ .id = 331, .name = "padEnd" },
-    .{ .id = 332, .name = "normalize" },
-    .{ .id = 333, .name = "isWellFormed" },
-    .{ .id = 334, .name = "toWellFormed" },
-    .{ .id = 335, .name = "trim" },
-    .{ .id = 336, .name = "trimStart" },
-    .{ .id = 337, .name = "trimEnd" },
-    .{ .id = 338, .name = "anchor" },
-    .{ .id = 339, .name = "big" },
-    .{ .id = 340, .name = "blink" },
-    .{ .id = 341, .name = "bold" },
-    .{ .id = 342, .name = "fixed" },
-    .{ .id = 343, .name = "fontcolor" },
-    .{ .id = 344, .name = "fontsize" },
-    .{ .id = 345, .name = "italics" },
-    .{ .id = 346, .name = "link" },
-    .{ .id = 347, .name = "small" },
-    .{ .id = 348, .name = "strike" },
-    .{ .id = 349, .name = "substr" },
-    .{ .id = 350, .name = "replace" },
-    .{ .id = 351, .name = "replaceAll" },
-    .{ .id = 352, .name = "sup" },
-    .{ .id = 353, .name = "isInteger" },
-    .{ .id = 354, .name = "isSafeInteger" },
-    .{ .id = 355, .name = "toFixed" },
-    .{ .id = 356, .name = "toExponential" },
-    .{ .id = 357, .name = "toPrecision" },
-    .{ .id = 358, .name = "asIntN" },
-    .{ .id = 359, .name = "asUintN" },
-    .{ .id = 360, .name = "revocable" },
-    .{ .id = 361, .name = "getTime" },
-    .{ .id = 362, .name = "getTimezoneOffset" },
-    .{ .id = 363, .name = "setTime" },
-    .{ .id = 364, .name = "toISOString" },
-    .{ .id = 365, .name = "Reflect" },
-    .{ .id = 366, .name = "Atomics" },
-    .{ .id = 367, .name = "performance" },
-    .{ .id = 368, .name = "print" },
-    .{ .id = 369, .name = "console" },
-    .{ .id = 370, .name = "now" },
-    .{ .id = 371, .name = "timeOrigin" },
-    .{ .id = 372, .name = "decodeURI" },
-    .{ .id = 373, .name = "decodeURIComponent" },
-    .{ .id = 374, .name = "encodeURI" },
-    .{ .id = 375, .name = "encodeURIComponent" },
-    .{ .id = 376, .name = "escape" },
-    .{ .id = 377, .name = "unescape" },
-    .{ .id = 378, .name = "isNaN" },
-    .{ .id = 379, .name = "isFinite" },
-    .{ .id = 380, .name = "parseInt" },
-    .{ .id = 381, .name = "parseFloat" },
-    .{ .id = 382, .name = "btoa" },
-    .{ .id = 383, .name = "atob" },
-    .{ .id = 384, .name = "queueMicrotask" },
-    .{ .id = 385, .name = "gc" },
-    .{ .id = 386, .name = "navigator" },
-    .{ .id = 387, .name = "NaN" },
-    .{ .id = 388, .name = "POSITIVE_INFINITY" },
-    .{ .id = 389, .name = "NEGATIVE_INFINITY" },
-    .{ .id = 390, .name = "MAX_VALUE" },
-    .{ .id = 391, .name = "MIN_VALUE" },
-    .{ .id = 392, .name = "MAX_SAFE_INTEGER" },
-    .{ .id = 393, .name = "MIN_SAFE_INTEGER" },
-    .{ .id = 394, .name = "EPSILON" },
-    .{ .id = 395, .name = "description" },
-    .{ .id = 396, .name = "sub" },
-    .{ .id = 397, .name = "match" },
-    .{ .id = 398, .name = "matchAll" },
-    .{ .id = 399, .name = "search" },
-    .{ .id = 400, .name = "UTC" },
-    .{ .id = 401, .name = "parse" },
-    .{ .id = 402, .name = "getFullYear" },
-    .{ .id = 403, .name = "getMonth" },
-    .{ .id = 404, .name = "getDate" },
-    .{ .id = 405, .name = "getDay" },
-    .{ .id = 406, .name = "getHours" },
-    .{ .id = 407, .name = "getMinutes" },
-    .{ .id = 408, .name = "and" },
-    .{ .id = 409, .name = "compareExchange" },
-    .{ .id = 410, .name = "exchange" },
-    .{ .id = 411, .name = "isLockFree" },
-    .{ .id = 412, .name = "load" },
-    .{ .id = 413, .name = "notify" },
-    .{ .id = 414, .name = "or" },
-    .{ .id = 415, .name = "pause" },
-    .{ .id = 416, .name = "store" },
-    .{ .id = 417, .name = "wait" },
-    .{ .id = 418, .name = "waitAsync" },
-    .{ .id = 419, .name = "xor" },
-    .{ .id = 420, .name = "ABORT_ERR" },
-    .{ .id = 421, .name = "AggregateError" },
-    .{ .id = 422, .name = "DATA_CLONE_ERR" },
-    .{ .id = 423, .name = "DOMSTRING_SIZE_ERR" },
-    .{ .id = 424, .name = "HIERARCHY_REQUEST_ERR" },
-    .{ .id = 425, .name = "INDEX_SIZE_ERR" },
-    .{ .id = 426, .name = "INUSE_ATTRIBUTE_ERR" },
-    .{ .id = 427, .name = "INVALID_ACCESS_ERR" },
-    .{ .id = 428, .name = "INVALID_CHARACTER_ERR" },
-    .{ .id = 429, .name = "INVALID_MODIFICATION_ERR" },
-    .{ .id = 430, .name = "INVALID_NODE_TYPE_ERR" },
-    .{ .id = 431, .name = "INVALID_STATE_ERR" },
-    .{ .id = 432, .name = "NAMESPACE_ERR" },
-    .{ .id = 433, .name = "NETWORK_ERR" },
-    .{ .id = 434, .name = "NOT_FOUND_ERR" },
-    .{ .id = 435, .name = "NOT_SUPPORTED_ERR" },
-    .{ .id = 436, .name = "NO_DATA_ALLOWED_ERR" },
-    .{ .id = 437, .name = "NO_MODIFICATION_ALLOWED_ERR" },
-    .{ .id = 438, .name = "QUOTA_EXCEEDED_ERR" },
-    .{ .id = 439, .name = "SECURITY_ERR" },
-    .{ .id = 440, .name = "SYNTAX_ERR" },
-    .{ .id = 441, .name = "TIMEOUT_ERR" },
-    .{ .id = 442, .name = "TYPE_MISMATCH_ERR" },
-    .{ .id = 443, .name = "TypedArray" },
-    .{ .id = 444, .name = "URL_MISMATCH_ERR" },
-    .{ .id = 445, .name = "VALIDATION_ERR" },
-    .{ .id = 446, .name = "WRONG_DOCUMENT_ERR" },
-    .{ .id = 447, .name = "[Symbol.matchAll]" },
-    .{ .id = 448, .name = "[Symbol.match]" },
-    .{ .id = 449, .name = "[Symbol.replace]" },
-    .{ .id = 450, .name = "[Symbol.search]" },
-    .{ .id = 451, .name = "[Symbol.split]" },
-    .{ .id = 452, .name = "abs" },
-    .{ .id = 453, .name = "acos" },
-    .{ .id = 454, .name = "acosh" },
-    .{ .id = 455, .name = "all" },
-    .{ .id = 456, .name = "allSettled" },
-    .{ .id = 457, .name = "any" },
-    .{ .id = 458, .name = "asin" },
-    .{ .id = 459, .name = "asinh" },
-    .{ .id = 460, .name = "atan" },
-    .{ .id = 461, .name = "atan2" },
-    .{ .id = 462, .name = "atanh" },
-    .{ .id = 463, .name = "call" },
-    .{ .id = 464, .name = "captureStackTrace" },
-    .{ .id = 465, .name = "cbrt" },
-    .{ .id = 466, .name = "ceil" },
-    .{ .id = 467, .name = "clear" },
-    .{ .id = 468, .name = "clz32" },
-    .{ .id = 469, .name = "compile" },
-    .{ .id = 470, .name = "cos" },
-    .{ .id = 471, .name = "cosh" },
-    .{ .id = 472, .name = "deref" },
-    .{ .id = 473, .name = "difference" },
-    .{ .id = 474, .name = "drop" },
-    .{ .id = 475, .name = "entries" },
-    .{ .id = 476, .name = "exp" },
-    .{ .id = 477, .name = "expm1" },
-    .{ .id = 478, .name = "f16round" },
-    .{ .id = 479, .name = "floor" },
-    .{ .id = 480, .name = "fromBase64" },
-    .{ .id = 481, .name = "fromHex" },
-    .{ .id = 482, .name = "fround" },
-    .{ .id = 483, .name = "getBigInt64" },
-    .{ .id = 484, .name = "getBigUint64" },
-    .{ .id = 485, .name = "getFloat16" },
-    .{ .id = 486, .name = "getFloat32" },
-    .{ .id = 487, .name = "getFloat64" },
-    .{ .id = 488, .name = "getInt16" },
-    .{ .id = 489, .name = "getInt32" },
-    .{ .id = 490, .name = "getInt8" },
-    .{ .id = 491, .name = "getMilliseconds" },
-    .{ .id = 492, .name = "getOrInsert" },
-    .{ .id = 493, .name = "getOrInsertComputed" },
-    .{ .id = 494, .name = "getSeconds" },
-    .{ .id = 495, .name = "getUTCDate" },
-    .{ .id = 496, .name = "getUTCDay" },
-    .{ .id = 497, .name = "getUTCFullYear" },
-    .{ .id = 498, .name = "getUTCHours" },
-    .{ .id = 499, .name = "getUTCMilliseconds" },
-    .{ .id = 500, .name = "getUTCMinutes" },
-    .{ .id = 501, .name = "getUTCMonth" },
-    .{ .id = 502, .name = "getUTCSeconds" },
-    .{ .id = 503, .name = "getUint16" },
-    .{ .id = 504, .name = "getUint32" },
-    .{ .id = 505, .name = "getUint8" },
-    .{ .id = 506, .name = "getYear" },
-    .{ .id = 507, .name = "grow" },
-    .{ .id = 508, .name = "hypot" },
-    .{ .id = 509, .name = "imul" },
-    .{ .id = 510, .name = "intersection" },
-    .{ .id = 511, .name = "is" },
-    .{ .id = 512, .name = "isDisjointFrom" },
-    .{ .id = 513, .name = "isError" },
-    .{ .id = 514, .name = "isRawJSON" },
-    .{ .id = 515, .name = "isSubsetOf" },
-    .{ .id = 516, .name = "isSupersetOf" },
-    .{ .id = 517, .name = "isView" },
-    .{ .id = 518, .name = "keyFor" },
-    .{ .id = 519, .name = "log" },
-    .{ .id = 520, .name = "log10" },
-    .{ .id = 521, .name = "log1p" },
-    .{ .id = 522, .name = "log2" },
-    .{ .id = 523, .name = "max" },
-    .{ .id = 524, .name = "min" },
-    .{ .id = 525, .name = "pow" },
-    .{ .id = 526, .name = "race" },
-    .{ .id = 527, .name = "random" },
-    .{ .id = 528, .name = "register" },
-    .{ .id = 529, .name = "resize" },
-    .{ .id = 530, .name = "round" },
-    .{ .id = 531, .name = "setBigInt64" },
-    .{ .id = 532, .name = "setBigUint64" },
-    .{ .id = 533, .name = "setDate" },
-    .{ .id = 534, .name = "setFloat16" },
-    .{ .id = 535, .name = "setFloat32" },
-    .{ .id = 536, .name = "setFloat64" },
-    .{ .id = 537, .name = "setFromBase64" },
-    .{ .id = 538, .name = "setFromHex" },
-    .{ .id = 539, .name = "setFullYear" },
-    .{ .id = 540, .name = "setHours" },
-    .{ .id = 541, .name = "setInt16" },
-    .{ .id = 542, .name = "setInt32" },
-    .{ .id = 543, .name = "setInt8" },
-    .{ .id = 544, .name = "setMilliseconds" },
-    .{ .id = 545, .name = "setMinutes" },
-    .{ .id = 546, .name = "setMonth" },
-    .{ .id = 547, .name = "setSeconds" },
-    .{ .id = 548, .name = "setUTCDate" },
-    .{ .id = 549, .name = "setUTCFullYear" },
-    .{ .id = 550, .name = "setUTCHours" },
-    .{ .id = 551, .name = "setUTCMilliseconds" },
-    .{ .id = 552, .name = "setUTCMinutes" },
-    .{ .id = 553, .name = "setUTCMonth" },
-    .{ .id = 554, .name = "setUTCSeconds" },
-    .{ .id = 555, .name = "setUint16" },
-    .{ .id = 556, .name = "setUint32" },
-    .{ .id = 557, .name = "setUint8" },
-    .{ .id = 558, .name = "setYear" },
-    .{ .id = 559, .name = "sign" },
-    .{ .id = 560, .name = "sin" },
-    .{ .id = 561, .name = "sinh" },
-    .{ .id = 562, .name = "sliceToImmutable" },
-    .{ .id = 563, .name = "sqrt" },
-    .{ .id = 564, .name = "stringify" },
-    .{ .id = 565, .name = "subarray" },
-    .{ .id = 566, .name = "sumPrecise" },
-    .{ .id = 567, .name = "symmetricDifference" },
-    .{ .id = 568, .name = "take" },
-    .{ .id = 569, .name = "tan" },
-    .{ .id = 570, .name = "tanh" },
-    .{ .id = 571, .name = "test" },
-    .{ .id = 572, .name = "toArray" },
-    .{ .id = 573, .name = "toBase64" },
-    .{ .id = 574, .name = "toDateString" },
-    .{ .id = 575, .name = "toHex" },
-    .{ .id = 576, .name = "toLocaleDateString" },
-    .{ .id = 577, .name = "toLocaleTimeString" },
-    .{ .id = 578, .name = "toTimeString" },
-    .{ .id = 579, .name = "toUTCString" },
-    .{ .id = 580, .name = "transfer" },
-    .{ .id = 581, .name = "transferToFixedLength" },
-    .{ .id = 582, .name = "transferToImmutable" },
-    .{ .id = 583, .name = "trunc" },
-    .{ .id = 584, .name = "union" },
-    .{ .id = 585, .name = "unregister" },
-    .{ .id = 586, .name = "withResolvers" },
-    .{ .id = 587, .name = "__zjs_native_name" },
-    .{ .id = 588, .name = "__zjs_dstr_get" },
-    .{ .id = 589, .name = "__zjs_dstr_elide" },
-    .{ .id = 590, .name = "__zjs_dstr_rest" },
-    .{ .id = 591, .name = "__zjs_dstr_obj_rest" },
-    .{ .id = 592, .name = "__zjs_dstr_close" },
-    .{ .id = 593, .name = "__zjs_dstr_require_iterator" },
-    .{ .id = 594, .name = "trimLeft" },
-    .{ .id = 595, .name = "trimRight" },
-    .{ .id = 596, .name = "__primitive" },
-    .{ .id = 597, .name = "toPrimitive" },
-    .{ .id = 598, .name = "species" },
-    .{ .id = 599, .name = "iterator" },
-    .{ .id = 600, .name = "toStringTag" },
-    .{ .id = 601, .name = "isConcatSpreadable" },
-    .{ .id = 602, .name = "hasInstance" },
-    .{ .id = 603, .name = "unscopables" },
-    .{ .id = 604, .name = "asyncIterator" },
-    .{ .id = 605, .name = "asyncDispose" },
-    .{ .id = 606, .name = "dispose" },
-    .{ .id = 607, .name = "toGMTString" },
-    .{ .id = 608, .name = "ignoreCase" },
-    .{ .id = 609, .name = "multiline" },
-    .{ .id = 610, .name = "dotAll" },
-    .{ .id = 611, .name = "sticky" },
-    .{ .id = 612, .name = "hasIndices" },
-    .{ .id = 613, .name = "unicodeSets" },
-    .{ .id = 614, .name = "stackTraceLimit" },
-    .{ .id = 615, .name = "__zjs_collection_method_owner" },
-    .{ .id = 616, .name = "byteLength" },
-    .{ .id = 617, .name = "detached" },
-    .{ .id = 618, .name = "resizable" },
-    .{ .id = 619, .name = "growable" },
-    .{ .id = 620, .name = "BYTES_PER_ELEMENT" },
-    .{ .id = 621, .name = "buffer" },
-    .{ .id = 622, .name = "byteOffset" },
-    .{ .id = 623, .name = "Infinity" },
-    .{ .id = 624, .name = "__zjs_throw_type_error_function_proto" },
-    .{ .id = 625, .name = "__zjs_throw_type_error_intrinsic" },
-    .{ .id = 626, .name = "scriptArgs" },
-    .{ .id = 627, .name = "$_" },
-    .{ .id = 628, .name = "lastMatch" },
-    .{ .id = 629, .name = "$&" },
-    .{ .id = 630, .name = "lastParen" },
-    .{ .id = 631, .name = "$+" },
-    .{ .id = 632, .name = "leftContext" },
-    .{ .id = 633, .name = "$`" },
-    .{ .id = 634, .name = "rightContext" },
-    .{ .id = 635, .name = "$'" },
-    .{ .id = 636, .name = "$1" },
-    .{ .id = 637, .name = "$2" },
-    .{ .id = 638, .name = "$3" },
-    .{ .id = 639, .name = "$4" },
-    .{ .id = 640, .name = "$5" },
-    .{ .id = 641, .name = "$6" },
-    .{ .id = 642, .name = "$7" },
-    .{ .id = 643, .name = "$8" },
-    .{ .id = 644, .name = "$9" },
-    .{ .id = 645, .name = "SuppressedError" },
-    .{ .id = 646, .name = "DisposableStack" },
-    .{ .id = 647, .name = "use" },
-    .{ .id = 648, .name = "adopt" },
-    .{ .id = 649, .name = "defer" },
-    .{ .id = 650, .name = "move" },
-    .{ .id = 651, .name = "disposed" },
-    .{ .id = 652, .name = "AsyncDisposableStack" },
-    .{ .id = 653, .name = "disposeAsync" },
-    .{ .id = 654, .name = "allKeyed" },
-    .{ .id = 655, .name = "allSettledKeyed" },
-    .{ .id = 656, .name = "immutable" },
-    // S3 predefined migration: literal property keys that native builtins used
-    // to intern per call (`rt.internAtom("...")` + `defer atoms.free`). Predefined
-    // ids are process-stable and refcount-free, the way qjs spells `JS_ATOM_xxx`.
-    .{ .id = 657, .name = "alphabet" },
-    .{ .id = 658, .name = "lastChunkHandling" },
-    .{ .id = 659, .name = "omitPadding" },
-    .{ .id = 660, .name = "padding" },
-    .{ .id = 661, .name = "mode" },
-    .{ .id = 662, .name = "prepareStackTrace" },
-    .{ .id = 663, .name = "type" },
-    .{ .id = 664, .name = "userAgent" },
-    .{ .id = 665, .name = "E" },
-    .{ .id = 666, .name = "LN10" },
-    .{ .id = 667, .name = "LN2" },
-    .{ .id = 668, .name = "LOG2E" },
-    .{ .id = 669, .name = "LOG10E" },
-    .{ .id = 670, .name = "PI" },
-    .{ .id = 671, .name = "SQRT1_2" },
-    .{ .id = 672, .name = "SQRT2" },
-    .{ .id = 673, .name = "k" },
-    .{ .id = 674, .name = "mapfn" },
-    .{ .id = 675, .name = "this_arg" },
-    .{ .id = 676, .name = "iter" },
-    .{ .id = 677, .name = "items" },
-    .{ .id = 678, .name = "len" },
-    .{ .id = 679, .name = "phase" },
-    .{ .id = 680, .name = "state" },
-    .{ .id = 681, .name = "pending" },
-    .{ .id = 682, .name = "rejected" },
-    .{ .id = 683, .name = "fileName" },
-    .{ .id = 684, .name = "lineNumber" },
-    .{ .id = 685, .name = "columnNumber" },
-    .{ .id = 686, .name = "code" },
-    .{ .id = 687, .name = "error" },
-    .{ .id = 688, .name = "suppressed" },
-    .{ .id = 689, .name = "url" },
-    .{ .id = 690, .name = "main" },
-    .{ .id = 691, .name = "read" },
-    .{ .id = 692, .name = "written" },
-};
-
 comptime {
     std.debug.assert(@sizeOf(Atom) == 4);
     std.debug.assert(@bitSizeOf(Atom) == 32);
-    std.debug.assert(null_atom == 0);
-    std.debug.assert(tagged_int_bit == @as(Atom, 1) << 31);
+    std.debug.assert(@sizeOf(PredefinedIds) == 0);
+    std.debug.assert(null_atom == .empty);
+    std.debug.assert(null_atom.raw() == 0);
+    std.debug.assert(tagged_int_bit == @as(u32, 1) << 31);
     std.debug.assert(max_int_atom == tagged_int_bit - 1);
     std.debug.assert(predefined_count == 692);
-    std.debug.assert(ids.zjs_last_startup_name == 656);
-    std.debug.assert(ids.zjs_last_predefined_key_name == predefined_count);
+    std.debug.assert(ids.null_.raw() == 1);
+    std.debug.assert(ids.await.raw() == 46);
+    std.debug.assert(ids.yield.raw() == 45);
+    std.debug.assert(ids.zjs_last_startup_name.raw() == 656);
+    std.debug.assert(ids.zjs_last_predefined_key_name.raw() == predefined_count);
     // Legacy-function gates compare `caller`/`arguments` by id, the way qjs
     // compares against JS_ATOM_caller. Pin both to the table so a renumbering
     // fails the build instead of silently turning those gates into no-ops.
-    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.caller - 1].name, "caller"));
-    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.arguments - 1].name, "arguments"));
+    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.caller.raw() - 1].name, "caller"));
+    std.debug.assert(std.mem.eql(u8, predefined_atoms[ids.arguments.raw() - 1].name, "arguments"));
     std.debug.assert(first_dynamic_atom == predefined_count + 1);
 }
 
@@ -1008,7 +998,7 @@ inline fn predefinedStringIdHashed(bytes: []const u8, hash: u64) ?Atom {
     while (remaining != 0) : (remaining -= 1) {
         const id = predefined_string_hash_table[index];
         if (id == null_atom) return null;
-        if (std.mem.eql(u8, predefined_atoms[id - 1].name, bytes)) return id;
+        if (std.mem.eql(u8, predefined_atoms[id.raw() - 1].name, bytes)) return id;
         index = (index + 1) & predefined_string_hash_mask;
     }
     unreachable;
@@ -1202,7 +1192,7 @@ pub const AtomTable = struct {
     /// Geometric-growth capacity for `entries`. The visible slice length
     /// is the live count; the backing buffer extends to `entries_capacity`.
     entries_capacity: usize = 0,
-    next_id: Atom = first_dynamic_atom,
+    next_id: Atom = Atom.fromRaw(first_dynamic_atom),
     /// qjs `JSRuntime.atom_hash` (quickjs.c:3067): bucket heads of the chained
     /// atom hash, a power-of-two array shared by string and global-symbol
     /// atoms. `null_atom` terminates a bucket. Empty until the first intern;
@@ -1230,7 +1220,7 @@ pub const AtomTable = struct {
     /// Conservative lower bound for dynamic private atoms. Dynamic slots are
     /// recycled across atom kinds, so this is intentionally a "might be
     /// private" range for hot-path rejection, not an exact kind predicate.
-    first_private_dynamic_atom: Atom = std.math.maxInt(Atom),
+    first_private_dynamic_atom: Atom = Atom.fromRaw(std.math.maxInt(u32)),
     /// Lazily materialized strings for predefined string-kind atoms and
     /// predefined symbol bodies, indexed by `id - 1`. Predefined ids are never
     /// recycled, so entries here are released only by `releaseCachedStrings`.
@@ -1396,18 +1386,18 @@ pub const AtomTable = struct {
     /// Predefined ids read from the table-owned side array, dynamic ids from
     /// their entry; both are plain `Atom` slots, so this is an address select.
     inline fn hashNextPtr(self: *AtomTable, id: Atom) *Atom {
-        return if (id < first_dynamic_atom)
-            &self.predefined_hash_next[id - 1]
+        return if (id.raw() < first_dynamic_atom)
+            &self.predefined_hash_next[id.raw() - 1]
         else
-            &self.entries[id - first_dynamic_atom].hash_next;
+            &self.entries[id.raw() - first_dynamic_atom].hash_next;
     }
 
     /// Stored spelling hash of any atom id, the `p->hash` of quickjs.c:3363.
     inline fn storedHash(self: *const AtomTable, id: Atom) u32 {
-        return if (id < first_dynamic_atom)
-            predefined_hash[id - 1]
+        return if (id.raw() < first_dynamic_atom)
+            predefined_hash[id.raw() - 1]
         else
-            self.entries[id - first_dynamic_atom].hash;
+            self.entries[id.raw() - first_dynamic_atom].hash;
     }
 
     /// qjs `JS_InitAtoms` (quickjs.c:3078-3089): size the bucket array once and
@@ -1424,7 +1414,7 @@ pub const AtomTable = struct {
         const mask = atom_hash_initial_size - 1;
         for (predefined_atoms, 0..) |entry, i| {
             if (entry.kind != .string) continue;
-            const id: Atom = @intCast(i + 1);
+            const id: Atom = Atom.fromRaw(@intCast(i + 1));
             const bucket = &buckets[predefined_hash[i] & mask];
             self.predefined_hash_next[i] = bucket.*;
             bucket.* = id;
@@ -1469,16 +1459,16 @@ pub const AtomTable = struct {
         if (self.atom_hash.len == 0) return null_atom;
         var i = self.atom_hash[h & (self.atom_hash.len - 1)];
         while (i != null_atom) {
-            if (i < first_dynamic_atom) {
-                const p = &predefined_atoms[i - 1];
-                if (predefined_hash[i - 1] == h and p.kind == atom_kind and
+            if (i.raw() < first_dynamic_atom) {
+                const p = &predefined_atoms[i.raw() - 1];
+                if (predefined_hash[i.raw() - 1] == h and p.kind == atom_kind and
                     p.name.len == bytes.len and std.mem.eql(u8, p.name, bytes))
                 {
                     return i;
                 }
-                i = self.predefined_hash_next[i - 1];
+                i = self.predefined_hash_next[i.raw() - 1];
             } else {
-                const entry = &self.entries[i - first_dynamic_atom];
+                const entry = &self.entries[i.raw() - first_dynamic_atom];
                 if (entry.hash == h and entry.kind == atom_kind and
                     entry.bytes.len == bytes.len and std.mem.eql(u8, entry.bytes, bytes))
                 {
@@ -1543,14 +1533,14 @@ pub const AtomTable = struct {
     fn internStringInner(self: *AtomTable, bytes: []const u8) !Atom {
         // Match JS_NewAtomLen's digit gate: integer atoms do not need a
         // string hash at all (quickjs.c:3465 `is_digit(*str)`).
-        if (parseArrayIndex(bytes)) |n| return atomFromUInt32(n);
+        if (parseArrayIndex(bytes)) |n| return Atom.taggedInt(n);
         try self.ensureAtomHash();
         const hash = spellingHash(bytes, .string);
         const found = self.findAtom(bytes, .string, hash);
         if (found != null_atom) {
             // qjs:3207 / 3370: `__JS_AtomIsConst` atoms carry no ref count.
-            if (isConst(found)) return found;
-            const entry = &self.entries[found - first_dynamic_atom];
+            if (found.isConst()) return found;
+            const entry = &self.entries[found.raw() - first_dynamic_atom];
             std.debug.assert(entry.occupied and entry.kind == .string);
             return found;
         }
@@ -1666,7 +1656,7 @@ pub const AtomTable = struct {
     const EdgeMode = enum { stamp, observe };
 
     fn atomEdge(self: *AtomTable, id: Atom, epoch: u64, mode: EdgeMode) ?*string.String {
-        if (id == null_atom or isConst(id) or isTaggedInt(id)) return null;
+        if (id == null_atom or id.isConst() or id.isTaggedInt()) return null;
         const entry = self.findDynamic(id) orelse return null;
         if (!entry.occupied) {
             if (mode == .observe) return null;
@@ -1771,13 +1761,13 @@ pub const AtomTable = struct {
     /// §2.5 host pin (`pinForHost` / `unpinForHost`): the only count
     /// left in the table, and the only liveness an embedder can assert.
     pub fn pinForHost(self: *AtomTable, id: Atom) void {
-        if (isConst(id) or isTaggedInt(id)) return;
+        if (id.isConst() or id.isTaggedInt()) return;
         const entry = self.findDynamic(id) orelse return;
         entry.host_pins +|= 1;
     }
 
     pub fn unpinForHost(self: *AtomTable, id: Atom) void {
-        if (isConst(id) or isTaggedInt(id)) return;
+        if (id.isConst() or id.isTaggedInt()) return;
         const entry = self.findDynamic(id) orelse return;
         entry.host_pins -|= 1;
     }
@@ -1859,7 +1849,7 @@ pub const AtomTable = struct {
 
     pub fn name(self: *const AtomTable, atom: Atom) ?[]const u8 {
         if (atom == null_atom) return null;
-        if (isTaggedInt(atom)) return null;
+        if (atom.isTaggedInt()) return null;
         if (predefinedById(atom)) |entry| return entry.name;
         if (self.findDynamicConst(atom)) |entry| {
             if (entry.occupied) return entry.bytes;
@@ -1884,8 +1874,8 @@ pub const AtomTable = struct {
     /// uses `parseHighArrayIndex` (bounded by `max_array_index`) — NOT
     /// `parseArrayIndex` (bounded by the tighter `max_int_atom`).
     pub fn atomIsArrayIndex(self: *const AtomTable, atom: Atom) bool {
-        if (isTaggedInt(atom)) return atomToUInt32(atom) <= max_array_index;
-        // Predefined atoms (id < first_dynamic_atom) are fixed identifiers/symbols;
+        if (atom.isTaggedInt()) return atom.toUInt32() <= max_array_index;
+        // Predefined atoms (id.raw() < first_dynamic_atom) are fixed identifiers/symbols;
         // none has an all-numeric name, so none is an array index.
         const idx = dynamicEntryIndex(atom) orelse return false;
         if (idx >= self.entries.len) return false;
@@ -1906,7 +1896,7 @@ pub const AtomTable = struct {
 
     pub fn kind(self: *const AtomTable, atom: Atom) ?AtomKind {
         if (atom == null_atom) return null;
-        if (isTaggedInt(atom)) return .string;
+        if (atom.isTaggedInt()) return .string;
         if (predefinedById(atom)) |entry| return entry.kind;
         if (self.findDynamicConst(atom)) |entry| {
             if (entry.occupied) return entry.kind;
@@ -1940,12 +1930,12 @@ pub const AtomTable = struct {
     /// strong root, so the array-literal elements already pushed above
     /// `top_ptr` were kept alive by the atom table rather than by the stack.
     pub inline fn cachedPushValue(self: *AtomTable, atom_id: Atom) ?JSValue {
-        if (atom_id > null_atom and atom_id < first_dynamic_atom) {
-            if (self.predefined_str[atom_id - 1]) |cached| return cached.value();
+        if (atom_id != null_atom and atom_id.raw() < first_dynamic_atom) {
+            if (self.predefined_str[atom_id.raw() - 1]) |cached| return cached.value();
             return null;
         }
-        if (atom_id >= first_dynamic_atom and atom_id < tagged_int_bit) {
-            const idx: usize = @intCast(atom_id - first_dynamic_atom);
+        if (atom_id.raw() >= first_dynamic_atom and atom_id.raw() < tagged_int_bit) {
+            const idx: usize = @intCast(atom_id.raw() - first_dynamic_atom);
             if (idx < self.entries.len) {
                 const entry = &self.entries[idx];
                 if (entry.kind == .string) {
@@ -1962,9 +1952,9 @@ pub const AtomTable = struct {
     }
 
     pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
-        if (isTaggedInt(atom_id)) {
+        if (atom_id.isTaggedInt()) {
             var buf: [10]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)}) catch unreachable;
+            const text = std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
             if (text.len == 1 and text[0] <= 0x7f) {
                 const cached = try rt.singleByteString(text[0]);
                 return cached.value();
@@ -1978,7 +1968,7 @@ pub const AtomTable = struct {
         // Keep zjs's split Atom/String storage, but resolve the entry only once
         // on this hot OP_push_atom_value path instead of repeating name(),
         // kind(), cachedString(), and cacheString() table lookups.
-        if (isConst(atom_id)) {
+        if (atom_id.isConst()) {
             const predefined = predefinedById(atom_id) orelse return JSValue.undefinedValue();
             const text = predefined.name;
             if (text.len == 1 and text[0] <= 0x7f) {
@@ -1989,7 +1979,7 @@ pub const AtomTable = struct {
                 const created = try string.String.createUtf8(rt, text);
                 return created.value();
             }
-            const slot = &self.predefined_str[atom_id - 1];
+            const slot = &self.predefined_str[atom_id.raw() - 1];
             if (slot.*) |cached| return cached.value();
             const created = try string.String.createUtf8(rt, text);
             created.atom_id = atom_id;
@@ -2029,8 +2019,8 @@ pub const AtomTable = struct {
     /// atom. Returns null for tagged ints, dead atoms, and atoms that were
     /// never converted.
     pub fn cachedString(self: *const AtomTable, atom_id: Atom) ?*string.String {
-        if (atom_id == null_atom or isTaggedInt(atom_id)) return null;
-        if (isConst(atom_id)) return self.predefined_str[atom_id - 1];
+        if (atom_id == null_atom or atom_id.isTaggedInt()) return null;
+        if (atom_id.isConst()) return self.predefined_str[atom_id.raw() - 1];
         const entry = self.findDynamicConst(atom_id) orelse return null;
         if (!entry.isLive()) return null;
         return entry.str;
@@ -2045,7 +2035,7 @@ pub const AtomTable = struct {
     /// into the symbol atom.
     pub fn cacheString(self: *AtomTable, rt: *JSRuntime, atom_id: Atom, s: *string.String) void {
         if (s.atom_id != string.String.no_atom_id) return;
-        if (isTaggedInt(atom_id)) {
+        if (atom_id.isTaggedInt()) {
             // Tagged ints have no table entry, but the id encodes the
             // value itself and is never recycled: a bare back-pointer is
             // always safe and makes future internAtom calls free.
@@ -2053,13 +2043,13 @@ pub const AtomTable = struct {
             return;
         }
         if (atom_id == null_atom) return;
-        if (isConst(atom_id)) {
-            const pre = predefined_atoms[atom_id - 1];
+        if (atom_id.isConst()) {
+            const pre = predefined_atoms[atom_id.raw() - 1];
             if (pre.kind != .string) return;
             // Predefined ids are never recycled either, so the weak
             // back-pointer is safe even when the cache slot is taken.
             s.atom_id = atom_id;
-            const slot = &self.predefined_str[atom_id - 1];
+            const slot = &self.predefined_str[atom_id.raw() - 1];
             if (slot.* == null) {
                 slot.* = s;
             }
@@ -2091,7 +2081,7 @@ pub const AtomTable = struct {
     /// Retire a symbol interned in this call that never became a JSValue.
     /// No-op if the entry was already swept, has a body, or still has pins.
     pub fn abandonUnpublishedSymbol(self: *AtomTable, atom_id: Atom) void {
-        if (isConst(atom_id) or isTaggedInt(atom_id)) return;
+        if (atom_id.isConst() or atom_id.isTaggedInt()) return;
         const idx = dynamicEntryIndex(atom_id) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
@@ -2107,7 +2097,7 @@ pub const AtomTable = struct {
     }
 
     pub fn retainSymbolWeakRef(self: *AtomTable, atom_id: Atom) void {
-        if (isConst(atom_id) or isTaggedInt(atom_id)) return;
+        if (atom_id.isConst() or atom_id.isTaggedInt()) return;
         const entry = self.findDynamic(atom_id) orelse return;
         if (!isValueSymbolKind(entry.kind)) return;
         std.debug.assert(entry.occupied);
@@ -2115,7 +2105,7 @@ pub const AtomTable = struct {
     }
 
     pub fn releaseSymbolWeakRef(self: *AtomTable, _: *JSRuntime, atom_id: Atom) void {
-        if (isConst(atom_id) or isTaggedInt(atom_id)) return;
+        if (atom_id.isConst() or atom_id.isTaggedInt()) return;
         const idx = dynamicEntryIndex(atom_id) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
@@ -2164,14 +2154,14 @@ pub const AtomTable = struct {
     }
 
     fn symbolBodyIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*string.String {
-        if (atom_id == null_atom or isTaggedInt(atom_id)) return null;
-        if (isConst(atom_id)) {
-            const pre = predefined_atoms[atom_id - 1];
+        if (atom_id == null_atom or atom_id.isTaggedInt()) return null;
+        if (atom_id.isConst()) {
+            const pre = predefined_atoms[atom_id.raw() - 1];
             if (!isValueSymbolKind(pre.kind)) return null;
             // Predefined bodies are unconditional trace roots (`traceRoots`),
             // so they are marked whenever a sweep is running; the phase test
             // rides along rather than special-casing them.
-            const body = self.predefined_str[atom_id - 1] orelse return null;
+            const body = self.predefined_str[atom_id.raw() - 1] orelse return null;
             if (!bodyLiveForCurrentPhase(rt, body)) return null;
             return body;
         }
@@ -2186,11 +2176,11 @@ pub const AtomTable = struct {
     }
 
     fn ensureSymbolBody(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !*string.String {
-        if (atom_id == null_atom or isTaggedInt(atom_id)) return error.InvalidAtom;
-        if (isConst(atom_id)) {
-            const pre = predefined_atoms[atom_id - 1];
+        if (atom_id == null_atom or atom_id.isTaggedInt()) return error.InvalidAtom;
+        if (atom_id.isConst()) {
+            const pre = predefined_atoms[atom_id.raw() - 1];
             if (!isValueSymbolKind(pre.kind)) return error.InvalidAtom;
-            const slot = &self.predefined_str[atom_id - 1];
+            const slot = &self.predefined_str[atom_id.raw() - 1];
             if (slot.*) |cached| return cached;
             const body = try string.String.createUtf8(rt, pre.name);
             body.atom_id = atom_id;
@@ -2243,7 +2233,7 @@ pub const AtomTable = struct {
             const idx = self.free_slot_head;
             const entry = &self.entries[idx];
             std.debug.assert(!entry.slotOccupied());
-            std.debug.assert(entry.id == @as(Atom, @intCast(idx)) + first_dynamic_atom);
+            std.debug.assert(entry.id.raw() == idx + first_dynamic_atom);
             std.debug.assert(entry.str == null);
             self.free_slot_head = entry.next_free;
             entry.bytes = owned;
@@ -2266,14 +2256,14 @@ pub const AtomTable = struct {
                 self.free_slot_head = idx;
             }
             if (index_entry) self.indexEntry(idx, lookup_hash);
-            if (atom_kind == .private and entry.id < self.first_private_dynamic_atom) {
+            if (atom_kind == .private and entry.id.raw() < self.first_private_dynamic_atom.raw()) {
                 self.first_private_dynamic_atom = entry.id;
             }
             return entry.id;
         }
 
         const id = self.next_id;
-        self.next_id += 1;
+        self.next_id = Atom.fromRaw(self.next_id.raw() + 1);
         errdefer self.next_id = id;
         const idx = try self.appendEntry(.{
             .id = id,
@@ -2285,7 +2275,7 @@ pub const AtomTable = struct {
         errdefer self.entries = self.entries[0..idx];
         self.stampBirthEpoch(&self.entries[idx]);
         if (index_entry) self.indexEntry(idx, lookup_hash);
-        if (atom_kind == .private and id < self.first_private_dynamic_atom) {
+        if (atom_kind == .private and id.raw() < self.first_private_dynamic_atom.raw()) {
             self.first_private_dynamic_atom = id;
         }
         return id;
@@ -2293,7 +2283,7 @@ pub const AtomTable = struct {
 
     pub inline fn mightBePrivate(self: *const AtomTable, atom_id: Atom) bool {
         if (atom_id == ids.Private_brand) return true;
-        return !isTaggedInt(atom_id) and atom_id >= self.first_private_dynamic_atom;
+        return !atom_id.isTaggedInt() and atom_id.raw() >= self.first_private_dynamic_atom.raw();
     }
 
     fn appendEntry(self: *AtomTable, entry: DynamicAtom) !EntryIndex {
@@ -2415,7 +2405,7 @@ pub const AtomTable = struct {
     /// `symbolValueIfLive` reports it dead), anything else is finalized --
     /// with no retain/release transition.
     pub fn onSymbolBodyDead(self: *AtomTable, atom_id: Atom, body: *string.String) void {
-        std.debug.assert(!isConst(atom_id) and !isTaggedInt(atom_id));
+        std.debug.assert(!atom_id.isConst() and !atom_id.isTaggedInt());
         const idx = dynamicEntryIndex(atom_id) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
@@ -2459,7 +2449,7 @@ pub const AtomTable = struct {
 /// provider, and the list is still kept so the type behaves identically.
 pub const CompileAtomScope = struct {
     /// Power of two; `note` masks with `recent_slots - 1`.
-    const recent_slots: Atom = 64;
+    const recent_slots: u32 = 64;
 
     rt: ?*runtime_mod.JSRuntime,
     table: *AtomTable,
@@ -2538,8 +2528,8 @@ pub const CompileAtomScope = struct {
     /// not table entries and can never be retired, so they are dropped here
     /// rather than growing the list.
     pub fn note(self: *CompileAtomScope, id: Atom) void {
-        if (id == null_atom or isConst(id) or isTaggedInt(id)) return;
-        const slot = id & (recent_slots - 1);
+        if (id == null_atom or id.isConst() or id.isTaggedInt()) return;
+        const slot = id.raw() & (recent_slots - 1);
         if (self.recent[slot] == id) return;
         self.ids.append(self.allocator, id) catch {
             // A root list that cannot grow must not silently drop a root.
@@ -2586,27 +2576,9 @@ pub inline fn callVisitAtom(vis: anytype, id: Atom) !void {
     }
 }
 
-fn dynamicEntryIndex(atom: Atom) ?usize {
-    if (atom < first_dynamic_atom or isTaggedInt(atom)) return null;
-    return @intCast(atom - first_dynamic_atom);
-}
-
-pub fn isConst(atom: Atom) bool {
-    return atom < first_dynamic_atom;
-}
-
-pub fn isTaggedInt(atom: Atom) bool {
-    return (atom & tagged_int_bit) != 0;
-}
-
-pub fn atomFromUInt32(n: u32) Atom {
-    std.debug.assert(n <= max_int_atom);
-    return n | tagged_int_bit;
-}
-
-pub fn atomToUInt32(atom: Atom) u32 {
-    std.debug.assert(isTaggedInt(atom));
-    return atom & ~tagged_int_bit;
+fn dynamicEntryIndex(atom_id: Atom) ?usize {
+    if (atom_id.isConst() or atom_id.isTaggedInt()) return null;
+    return atom_id.raw() - first_dynamic_atom;
 }
 
 /// Spelling of a predefined atom. The bytes live in comptime storage, so the
@@ -2615,13 +2587,13 @@ pub fn atomToUInt32(atom: Atom) u32 {
 /// the atom and still recover the name qjs would have passed around as a
 /// `const char *`.
 pub fn predefinedName(id: Atom) []const u8 {
-    std.debug.assert(id != null_atom and id < first_dynamic_atom);
-    return predefined_atoms[id - 1].name;
+    std.debug.assert(id != null_atom and id.isConst());
+    return predefined_atoms[id.raw() - 1].name;
 }
 
 pub fn predefinedById(id: Atom) ?PredefinedAtom {
-    if (id == null_atom or id >= first_dynamic_atom) return null;
-    return predefined_atoms[id - 1];
+    if (id == null_atom or !id.isConst()) return null;
+    return predefined_atoms[id.raw() - 1];
 }
 
 pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
@@ -2668,8 +2640,6 @@ fn parseHighArrayIndex(bytes: []const u8) ?u32 {
     }
     return @intCast(n);
 }
-
-const std = @import("std");
 
 // Atom-list helpers shared by the VM operation clusters (moved from the
 // dissolved exec/vm_utils.zig).

@@ -825,11 +825,11 @@ pub fn objectFromEntriesCall(
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return error.TypeError;
         };
-        const key_value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(0), caller_function, caller_frame) catch |err| {
+        const key_value = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(0), caller_function, caller_frame) catch |err| {
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
-        const value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(1), caller_function, caller_frame) catch |err| {
+        const value = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(1), caller_function, caller_frame) catch |err| {
             try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
@@ -1042,7 +1042,7 @@ pub fn appendObjectGroupByValue(
         try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, group_value, caller_function, caller_frame);
     }
     const group = objectFromValue(group_value) orelse return error.TypeError;
-    try createDataPropertyOrThrow(ctx, output, global, group_value, group, core.atom.atomFromUInt32(group.arrayLength()), value, caller_function, caller_frame);
+    try createDataPropertyOrThrow(ctx, output, global, group_value, group, core.Atom.taggedInt(group.arrayLength()), value, caller_function, caller_frame);
 }
 
 test "Object.groupBy new group define failure releases group once" {

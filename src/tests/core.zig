@@ -772,7 +772,7 @@ test "array target barrier: known append immediately shades the new target" {
     try std.testing.expect(rt.gc.marking.queue.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.marking.stack.len);
 
-    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), target.value()));
+    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.Atom.taggedInt(0), target.value()));
     // This is the new mechanism's red assertion: an owner-only requeue
     // leaves target white until the owner is scanned again.
     try std.testing.expectEqual(true, rt.gc.headerMarked(target.gcHeader()));
@@ -818,8 +818,8 @@ test "array target barrier: three append routes cover grey and black owners" {
                 try std.testing.expect(rt.gc.marking.queue.isEmpty());
                 const value = if (reference_value) target.value() else core.JSValue.int32(37);
                 switch (route) {
-                    0 => try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value)),
-                    1 => try std.testing.expect(try array_slot.?.appendDenseArrayDefineIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value)),
+                    0 => try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.Atom.taggedInt(0), value)),
+                    1 => try std.testing.expect(try array_slot.?.appendDenseArrayDefineIndexOwned(rt, 0, core.Atom.taggedInt(0), value)),
                     2 => try array_slot.?.initDenseArrayIndexZeroAssumingEmpty(rt, value),
                     else => unreachable,
                 }
@@ -865,7 +865,7 @@ test "array target barrier: capacity growth shades only storage and preserves co
     for (0..capacity) |n| {
         const index: u32 = @intCast(n);
         const value = if (n == 0) old_child.value() else core.JSValue.int32(@intCast(n));
-        try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, index, core.atom.atomFromUInt32(index), value));
+        try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, index, core.Atom.taggedInt(index), value));
     }
     const target = try core.Object.createPlainObject(rt, null);
     try core.gc_trace_stw.beginIncrementalCycle(rt, null, .declared_only);
@@ -882,7 +882,7 @@ test "array target barrier: capacity growth shades only storage and preserves co
     try std.testing.expectEqual(@as(usize, 1), rt.gc.marking.queue.len());
     try std.testing.expectEqual(storage_header, rt.gc.marking.queue.pop().?);
     try std.testing.expect(rt.gc.marking.queue.push(storage_header));
-    try std.testing.expect(try array_slot.?.appendDenseArrayDefineIndexOwned(rt, capacity, core.atom.atomFromUInt32(capacity), target.value()));
+    try std.testing.expect(try array_slot.?.appendDenseArrayDefineIndexOwned(rt, capacity, core.Atom.taggedInt(capacity), target.value()));
     try std.testing.expect(rt.gc.headerMarked(target.gcHeader()));
     while (!try core.gc_trace_stw.incrementalMarkStep(rt, std.math.maxInt(u64))) {}
     _ = try core.gc_trace_stw.finishIncrementalCycle(rt, null, .declared_only);
@@ -935,7 +935,7 @@ test "array target barrier: old array remembers first storage and appended targe
     value_slot = try core.Object.createPlainObject(rt, null);
     const target = value_slot.?.gcHeader();
     try std.testing.expect(target.metaConst().flags.young);
-    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value_slot.?.value()));
+    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.Atom.taggedInt(0), value_slot.?.value()));
     value_slot = null;
     const storage: *core.gc.Header = @ptrCast(@alignCast(array_slot.?.arrayElements().ptr));
     try std.testing.expect(storage.metaConst().flags.young);
@@ -961,14 +961,14 @@ test "array target barrier: failed capacity allocation leaves count and value un
     _ = rt.runObjectCycleRemoval();
     const old_pointer = array_slot.?.arrayElements().ptr;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value_slot.?.value()));
+    try std.testing.expectError(error.OutOfMemory, array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.Atom.taggedInt(0), value_slot.?.value()));
     rt.setMemoryLimit(null);
     try std.testing.expectEqual(@as(u32, 0), array_slot.?.fastArrayCount());
     try std.testing.expectEqual(@as(u32, 0), array_slot.?.arrayLength());
     try std.testing.expectEqual(@as(usize, 0), array_slot.?.arrayElementsCapacity());
     try std.testing.expectEqual(old_pointer, array_slot.?.arrayElements().ptr);
     try std.testing.expect(rt.ownsObject(value_slot.?));
-    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.atom.atomFromUInt32(0), value_slot.?.value()));
+    try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, 0, core.Atom.taggedInt(0), value_slot.?.value()));
     try std.testing.expectEqual(@as(u32, 1), array_slot.?.fastArrayCount());
     try std.testing.expectEqual(value_slot.?.gcHeader(), array_slot.?.arrayElements()[0].refHeader().?);
 }
@@ -994,7 +994,7 @@ test "array target barrier: frontier OOM fails closed after a committed store" {
     rt.gc.marking.queue.failBackingAllocationsForTest(1);
     var stored: u32 = 0;
     while (stored < targets.len and rt.gc.marking.queue.failure() == .none) : (stored += 1) {
-        try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, stored, core.atom.atomFromUInt32(stored), targets[stored].value()));
+        try std.testing.expect(try array_slot.?.appendDenseArrayIndexOwned(rt, stored, core.Atom.taggedInt(stored), targets[stored].value()));
     }
     try std.testing.expect(stored > 0 and stored <= target_count);
     try std.testing.expectEqual(core.gc.mark_queue.Failure.out_of_memory, rt.gc.marking.queue.failure());
@@ -1640,35 +1640,38 @@ test "context backtrace can borrow VM frame pc lazily" {
 }
 
 test "predefined atoms preserve QuickJS order and kinds" {
-    try std.testing.expectEqual(@as(core.Atom, 0), core.atom.null_atom);
-    try std.testing.expectEqual(@as(core.Atom, 1), core.atom.ids.null_);
-    try std.testing.expectEqual(@as(core.Atom, 2), core.atom.ids.false_);
-    try std.testing.expectEqual(@as(core.Atom, 3), core.atom.ids.true_);
+    try std.testing.expectEqual(core.Atom.fromRaw(0), core.atom.null_atom);
+    try std.testing.expectEqual(core.Atom.fromRaw(1), core.atom.ids.null_);
+    try std.testing.expectEqual(core.Atom.fromRaw(2), core.atom.ids.false_);
+    try std.testing.expectEqual(core.Atom.fromRaw(3), core.atom.ids.true_);
     // The core predefined atom layout keeps QuickJS keyword/symbol ordering.
     // zjs startup-only names live after the registry/setup bands.
-    try std.testing.expectEqual(@as(core.Atom, 46), core.atom.last_keyword);
-    try std.testing.expectEqual(@as(core.Atom, 45), core.atom.last_strict_keyword);
-    try std.testing.expectEqual(@as(core.Atom, 229), core.atom.ids.Symbol_asyncIterator);
-    try std.testing.expectEqual(@as(core.Atom, 230), core.atom.ids.Symbol_asyncDispose);
-    try std.testing.expectEqual(@as(core.Atom, 231), core.atom.ids.Symbol_dispose);
-    try std.testing.expectEqual(@as(core.Atom, 232), core.atom.ids.zjs_proto_keepalive);
-    try std.testing.expectEqual(@as(core.Atom, 264), core.atom.ids.zjs_last_internal_marker);
-    try std.testing.expectEqual(@as(core.Atom, 364), core.atom.ids.zjs_last_registry_name);
-    try std.testing.expectEqual(@as(core.Atom, 381), core.atom.ids.zjs_last_global_setup_name);
-    try std.testing.expectEqual(@as(core.Atom, 419), core.atom.ids.zjs_last_global_extra_name);
-    try std.testing.expectEqual(@as(core.Atom, 586), core.atom.ids.zjs_last_registry_extra_name);
-    try std.testing.expectEqual(@as(core.Atom, 626), core.atom.ids.scriptArgs);
-    try std.testing.expectEqual(@as(core.Atom, 656), core.atom.ids.zjs_last_startup_name);
-    try std.testing.expectEqual(@as(core.Atom, 692), core.atom.ids.zjs_last_predefined_key_name);
+    try std.testing.expectEqual(core.Atom.fromRaw(46), core.atom.last_keyword);
+    try std.testing.expectEqual(core.Atom.fromRaw(45), core.atom.last_strict_keyword);
+    try std.testing.expectEqual(core.Atom.fromRaw(229), core.atom.ids.Symbol_asyncIterator);
+    try std.testing.expectEqual(core.Atom.fromRaw(230), core.atom.ids.Symbol_asyncDispose);
+    try std.testing.expectEqual(core.Atom.fromRaw(231), core.atom.ids.Symbol_dispose);
+    try std.testing.expectEqual(core.Atom.fromRaw(232), core.atom.ids.zjs_proto_keepalive);
+    try std.testing.expectEqual(core.Atom.fromRaw(264), core.atom.ids.zjs_last_internal_marker);
+    try std.testing.expectEqual(core.Atom.fromRaw(364), core.atom.ids.zjs_last_registry_name);
+    try std.testing.expectEqual(core.Atom.fromRaw(381), core.atom.ids.zjs_last_global_setup_name);
+    try std.testing.expectEqual(core.Atom.fromRaw(419), core.atom.ids.zjs_last_global_extra_name);
+    try std.testing.expectEqual(core.Atom.fromRaw(586), core.atom.ids.zjs_last_registry_extra_name);
+    try std.testing.expectEqual(core.Atom.fromRaw(626), core.atom.ids.scriptArgs);
+    try std.testing.expectEqual(core.Atom.fromRaw(656), core.atom.ids.zjs_last_startup_name);
+    try std.testing.expectEqual(core.Atom.fromRaw(692), core.atom.ids.zjs_last_predefined_key_name);
     try std.testing.expectEqual(@as(usize, 692), core.atom.predefined_count);
 
     const brand = core.atom.predefinedById(core.atom.ids.Private_brand).?;
     try std.testing.expectEqual(core.atom.AtomKind.private, brand.kind);
     const iterator = core.atom.predefinedById(core.atom.ids.Symbol_iterator).?;
     try std.testing.expectEqual(core.atom.AtomKind.symbol, iterator.kind);
+    try std.testing.expectEqual(core.atom.predefinedId("caller", .string).?, core.atom.ids.caller);
+    try std.testing.expectEqual(core.atom.predefinedId("function", .string).?, core.atom.ids.type_function);
+    try std.testing.expectEqual(core.atom.predefinedId("<brand>", .private).?, core.atom.ids.Private_brand);
 
     for (core.atom.predefined_atoms, 0..) |entry, index| {
-        try std.testing.expectEqual(@as(core.Atom, @intCast(index + 1)), entry.id);
+        try std.testing.expectEqual(core.Atom.fromRaw(@intCast(index + 1)), entry.id);
     }
 }
 
@@ -1709,8 +1712,8 @@ test "atom table interns predefined dynamic and integer atoms" {
     defer rt.destroy();
 
     try std.testing.expectEqual(core.atom.ids.length, try rt.internAtom("length"));
-    try std.testing.expectEqual(core.atom.atomFromUInt32(123), try rt.internAtom("123"));
-    try std.testing.expectEqual(@as(u32, 123), core.atom.atomToUInt32(core.atom.atomFromUInt32(123)));
+    try std.testing.expectEqual(core.Atom.taggedInt(123), try rt.internAtom("123"));
+    try std.testing.expectEqual(@as(u32, 123), core.Atom.taggedInt(123).toUInt32());
 
     var first = try rt.internAtom("customName");
     const second = try rt.internAtom("customName");
@@ -3147,7 +3150,7 @@ fn reentrantArrayDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *c
     reentrant_array_delete_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
     const array = reentrant_array_delete_target orelse return;
-    _ = array.deleteProperty(rt, core.atom.atomFromUInt32(0));
+    _ = array.deleteProperty(rt, core.Atom.taggedInt(0));
 }
 
 fn reentrantPropertyDeleteFinalizer(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
@@ -3985,14 +3988,14 @@ test "dense array delete publishes sparse state before synchronous finalizer ree
         reentrant_array_delete_calls = 0;
     }
 
-    try std.testing.expect(array.deleteProperty(rt, core.atom.atomFromUInt32(0)));
+    try std.testing.expect(array.deleteProperty(rt, core.Atom.taggedInt(0)));
     helpers.reclaimNow(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array.arrayElementStorageMode());
     try std.testing.expectEqual(@as(usize, 0), array.arrayElements().len);
-    try std.testing.expect(!array.hasOwnProperty(core.atom.atomFromUInt32(0)));
+    try std.testing.expect(!array.hasOwnProperty(core.Atom.taggedInt(0)));
 }
 
 test "ordinary property delete publishes absence before synchronous finalizer reentry" {
@@ -4164,7 +4167,7 @@ test "mapped arguments binding update publishes value before synchronous finaliz
     });
 
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
-    const key = core.atom.atomFromUInt32(0);
+    const key = core.Atom.taggedInt(0);
     const value = try core.Object.create(rt, reentrant_id, null);
     const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
     const cell = try core.VarRef.createClosed(rt, value.value());
@@ -4209,7 +4212,7 @@ test "mapped arguments var-ref update publishes value before synchronous finaliz
     });
 
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
-    const key = core.atom.atomFromUInt32(0);
+    const key = core.Atom.taggedInt(0);
     const value = try core.Object.create(rt, reentrant_id, null);
     const cell = try core.VarRef.createClosed(rt, value.value());
     const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
@@ -4253,7 +4256,7 @@ test "mapped arguments binding delete publishes disconnection before synchronous
     });
 
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
-    const key = core.atom.atomFromUInt32(0);
+    const key = core.Atom.taggedInt(0);
     const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
@@ -5111,20 +5114,20 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
     try std.testing.expect(arguments.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, arguments.arrayElementStorageMode());
     try std.testing.expectEqual(@as(?i32, 2), (try arguments.getProperty(core.atom.ids.length)).as(.int));
-    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).as(.int));
-    try std.testing.expectEqual(@as(?i32, 32), (try arguments.getProperty(core.atom.atomFromUInt32(1))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.Atom.taggedInt(0))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 32), (try arguments.getProperty(core.Atom.taggedInt(1))).as(.int));
     try std.testing.expect(arguments.externalClassPayload() == null);
 
     // Redefining a dense numeric property materializes the run into ordinary
     // shape entries, exactly like qjs's arguments define-own-property exotic.
     try arguments.defineOwnProperty(
         rt,
-        core.atom.atomFromUInt32(1),
+        core.Atom.taggedInt(1),
         core.Descriptor.data(core.JSValue.int32(41), false, false, false),
     );
     try std.testing.expect(!arguments.flags.fast_array);
-    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).as(.int));
-    try std.testing.expectEqual(@as(?i32, 41), (try arguments.getProperty(core.atom.atomFromUInt32(1))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.Atom.taggedInt(0))).as(.int));
+    try std.testing.expectEqual(@as(?i32, 41), (try arguments.getProperty(core.Atom.taggedInt(1))).as(.int));
     try std.testing.expectEqual(@as(?i32, 0), (try template.getProperty(core.atom.ids.length)).as(.int));
 }
 
@@ -5153,7 +5156,7 @@ test "array element state uses inline fast-array storage" {
     try std.testing.expectEqual(core.class.PayloadKind.none, array.flags.class_payload_kind);
     try std.testing.expect(array.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array.arrayElementStorageMode());
-    try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(7)));
+    try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, core.Atom.taggedInt(0), core.JSValue.int32(7)));
     try std.testing.expectEqual(@as(usize, 1), array.arrayElements().len);
     try std.testing.expectEqual(@as(?i32, 7), array.arrayElements()[0].as(.int));
 }
@@ -6468,7 +6471,7 @@ test "dense array element self-assignment keeps stored object alive" {
 
     const array = try core.Object.createArray(rt, null);
     const stored = try core.Object.create(rt, core.class.ids.object, null);
-    const index = core.atom.atomFromUInt32(0);
+    const index = core.Atom.taggedInt(0);
 
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, stored.value()));
 
@@ -6485,7 +6488,7 @@ test "owned dense array writes consume values only on success" {
     const array = try core.Object.createArray(rt, null);
     const initial = try core.Object.create(rt, core.class.ids.object, null);
     _ = initial.value();
-    const index_0 = core.atom.atomFromUInt32(0);
+    const index_0 = core.Atom.taggedInt(0);
 
     try std.testing.expect(try array.appendDenseArrayIndexOwned(rt, 0, index_0, initial.value()));
 
@@ -6496,7 +6499,7 @@ test "owned dense array writes consume values only on success" {
 
     const rejected = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expect(!array.setFastArrayElementOwned(rt, 2, rejected.value()));
-    try std.testing.expect(!try array.appendDenseArrayIndexOwned(rt, 3, core.atom.atomFromUInt32(3), rejected.value()));
+    try std.testing.expect(!try array.appendDenseArrayIndexOwned(rt, 3, core.Atom.taggedInt(3), rejected.value()));
 }
 
 test "prototype replacement clones shared transition shape" {
@@ -7288,7 +7291,7 @@ test "object child edge tracing exposes mutable value slots" {
 
     const key = try rt.internAtom("traceSlot");
     try array_obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(401), true, true, true));
-    try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(402)));
+    try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, core.Atom.taggedInt(0), core.JSValue.int32(402)));
 
     const Rewriter = struct {
         count_401: usize = 0,
@@ -12604,7 +12607,7 @@ test "array element self-cycle is released by runtime cycle removal" {
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
-    const index = core.atom.atomFromUInt32(0);
+    const index = core.Atom.taggedInt(0);
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, array.value()));
 
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_with_storage_count, rt.runObjectCycleRemoval());
@@ -13569,7 +13572,7 @@ test "array indexed delete does not let dense holes mask ordinary properties" {
 
     const array_obj = try core.Object.createArray(rt, null);
 
-    const index_0 = core.atom.atomFromUInt32(0);
+    const index_0 = core.Atom.taggedInt(0);
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(1)));
     try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try std.testing.expectEqual(@as(?i32, 2), (try array_obj.getProperty(index_0)).as(.int));
@@ -15418,7 +15421,7 @@ test "G-Shape indexed adoption shades the Shape once without requeueing the arra
         rt.gc.marking.queue.reset();
     }
     for (0..128) |i| {
-        try owner.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)), core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+        try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(core.JSValue.int32(7), true, true, true));
         try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
         try std.testing.expect(rt.gc.marking.queue.isEmpty());
     }
@@ -15511,7 +15514,7 @@ test "G-Shape relocation leaves no raw Shape queued and survives declared major 
     var relocations: usize = 0;
     for (0..64) |i| {
         const before = @intFromPtr(owner.shape_ref);
-        try owner.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)), core.Descriptor.data(core.JSValue.int32(@intCast(i)), true, true, true));
+        try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(core.JSValue.int32(@intCast(i)), true, true, true));
         if (@intFromPtr(owner.shape_ref) != before) relocations += 1;
         try std.testing.expect(rt.gc.incremental.markingActive());
         try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
@@ -15526,7 +15529,7 @@ test "G-Shape relocation leaves no raw Shape queued and survives declared major 
     rt.gc.setMajorMarkingActive(false);
     _ = try core.gc_trace_stw.collectCycles(rt, null, .declared_only);
     for (0..64) |i| {
-        const desc = (try owner.getOwnProperty(rt, core.atom.atomFromUInt32(@intCast(i)))).?;
+        const desc = (try owner.getOwnProperty(rt, core.Atom.taggedInt(@intCast(i)))).?;
         try std.testing.expectEqual(@as(i32, @intCast(i)), desc.value.as(.int).?);
     }
 }
@@ -16796,7 +16799,7 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
         try std.testing.expect(try root.appendDenseArrayIndex(
             rt,
             index,
-            core.atom.atomFromUInt32(index),
+            core.Atom.taggedInt(index),
             child.value(),
         ));
     }
@@ -16859,7 +16862,7 @@ test "incremental marking preserves a frontier beyond both former 65K bounds" {
         try std.testing.expect(try root.appendDenseArrayIndex(
             rt,
             index,
-            core.atom.atomFromUInt32(index),
+            core.Atom.taggedInt(index),
             child.value(),
         ));
     }
@@ -17038,7 +17041,7 @@ test "incremental destruction credit funds safe assists from actual native backi
     try std.testing.expectEqual(reclaimed - interval, rt.gc.morgue.assist_credit_bytes);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.morgue.assist_unreconciled_bytes);
     try keeper.reserveDenseArrayElements(rt, interval / @sizeOf(core.JSValue));
-    try std.testing.expect(try keeper.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(42)));
+    try std.testing.expect(try keeper.appendDenseArrayIndex(rt, 0, core.Atom.taggedInt(0), core.JSValue.int32(42)));
     try std.testing.expectEqual(slices + 1, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
     rt.collectBeforeObjectAllocation(1);
     try std.testing.expectEqual(slices + 2, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
@@ -17082,7 +17085,7 @@ test "incremental destruction credit rejects growth without sufficient deferred 
         try keeper.reserveDenseArrayElements(rt, core.gc.incremental_assist_interval_bytes / @sizeOf(core.JSValue));
         try std.testing.expect(rt.memory.allocated_bytes - account_before >= core.gc.incremental_assist_interval_bytes);
         try std.testing.expectEqual(before, rt.gc.incremental.stats.total_segments_by_kind[destroy_index]);
-        try std.testing.expect(try keeper.appendDenseArrayIndex(rt, 0, core.atom.atomFromUInt32(0), core.JSValue.int32(42)));
+        try std.testing.expect(try keeper.appendDenseArrayIndex(rt, 0, core.Atom.taggedInt(0), core.JSValue.int32(42)));
         rt.collectBeforeObjectAllocation(1);
         // Most corpses are already debited bitmap cells. Storage growth alone
         // must not advance the phase and reprice the next major prematurely.
@@ -17740,7 +17743,7 @@ test "runtime teardown owns a detached generator shell" {
 // ---------------------------------------------------------------------------
 
 fn s3AtomEntry(rt: *core.JSRuntime, id: core.Atom) *core.atom.DynamicAtom {
-    return &rt.atoms.entries[id - core.atom.first_dynamic_atom];
+    return &rt.atoms.entries[id.raw() - core.atom.first_dynamic_atom];
 }
 
 fn s3MarkEpoch(rt: *core.JSRuntime) u64 {
@@ -17842,7 +17845,7 @@ test "TGC S3-c: an atom no edge and no root reaches is retired by the major" {
     // A bare native id nothing declares. Before the flip `ref_count` kept it
     // and the shadow audit named it; now the sweep retires it.
     const orphan = try rt.internAtom("zjs-s3-orphan-atom");
-    const entry_index = orphan - core.atom.first_dynamic_atom;
+    const entry_index = orphan.raw() - core.atom.first_dynamic_atom;
 
     try s3RunMajor(rt);
     try std.testing.expect(rt.atoms.entries[entry_index].mark_epoch != s3MarkEpoch(rt));
@@ -17866,7 +17869,7 @@ test "TGC S3-b: a compile scope roots an atom no holder edge names" {
     // front end's exact situation between interning an identifier and
     // publishing the FunctionBytecode that will finally name it.
     const ident = try rt.internAtom("zjsS3CompileScopeIdent");
-    const entry_index = ident - core.atom.first_dynamic_atom;
+    const entry_index = ident.raw() - core.atom.first_dynamic_atom;
     {
         var scope = core.atom.CompileAtomScope.init(&rt.atoms);
         defer scope.deinit();
@@ -18088,7 +18091,7 @@ test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycl
     rt.forcePreciseRootScanForTest();
 
     const symbol_atom = try rt.atoms.newValueSymbol("zjsS3WeakShellSymbol");
-    const entry_index = symbol_atom - core.atom.first_dynamic_atom;
+    const entry_index = symbol_atom.raw() - core.atom.first_dynamic_atom;
     {
         var symbol_value = try rt.takeSymbolValue(symbol_atom);
         var symbol_roots = core.runtime.rootValues(.{&symbol_value});

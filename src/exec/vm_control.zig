@@ -124,7 +124,7 @@ fn createAtomError(
     ctx: *core.JSContext,
     global: *core.Object,
     error_name: []const u8,
-    atom_id: u32,
+    atom_id: core.Atom,
     prefix: []const u8,
     suffix: []const u8,
 ) !core.JSValue {
@@ -139,7 +139,7 @@ fn createAtomError(
     return exception_ops.createNamedError(ctx, global, error_name, message);
 }
 
-fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: u32, error_type: u8) !core.JSValue {
+fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, error_type: u8) !core.JSValue {
     return switch (error_type) {
         0 => createAtomError(ctx, global, "TypeError", atom_id, "'", "' is read-only"),
         1 => createAtomError(ctx, global, "SyntaxError", atom_id, "redeclaration of '", "'"),
@@ -177,7 +177,7 @@ pub noinline fn throwErrorVm(
     catch_target: *?usize,
     global: *core.Object,
 ) !ThrowResult {
-    const atom_id = std.mem.readInt(u32, function.byteCode()[frame.pc..][0..4], .little);
+    const atom_id = core.Atom.fromRaw(std.mem.readInt(u32, function.byteCode()[frame.pc..][0..4], .little));
     const error_type = function.byteCode()[frame.pc + 4];
     frame.pc += 5;
     const error_value = try createThrowErrorValue(ctx, global, atom_id, error_type);

@@ -1270,7 +1270,7 @@ fn countDefineClassNamedInCode(
         const size = engine.bytecode.opcode.sizeOf(code[pc]);
         if (size == 0 or size > code.len - pc) break;
         if (code[pc] == opcode_id) {
-            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            const atom_id = atom.Atom.fromRaw(std.mem.readInt(u32, code[pc + 1 ..][0..4], .little));
             if (std.mem.eql(u8, rt.atoms.name(atom_id) orelse "", expected_name)) count += 1;
         }
         pc += size;
@@ -2985,7 +2985,7 @@ test "F4: length call consumer preserves get_field2 and its atom operand" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2_call_method, op.call_method });
-    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 4));
+    try std.testing.expectEqual(core.atom.ids.length.raw(), readU32(fn_bc.code, 4));
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 9));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
@@ -3372,7 +3372,7 @@ test "F4: optional length call consumer preserves get_field2 and its atom operan
     });
     try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
     try std.testing.expectEqual(@as(usize, 20), fn_bc.code.len);
-    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 11));
+    try std.testing.expectEqual(core.atom.ids.length.raw(), readU32(fn_bc.code, 11));
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 16));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
@@ -4221,7 +4221,7 @@ test "W5: production with atom-label target threads past destructuring fallback 
         const size = engine.bytecode.opcode.sizeOf(opcode_id);
         try std.testing.expect(size != 0 and pc + size <= code.len);
         if (opcode_id == op.dyn_env_probe and
-            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == y_atom)
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == y_atom.raw())
         {
             with_pc = pc;
         } else if (opcode_id == op.dup and pc + 1 < code.len and code[pc + 1] == op.for_of_start) {
@@ -4483,7 +4483,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     var raw_empty = try parseRawStatement(&env, "\"\";");
     defer raw_empty.deinit(env.rt);
     const raw_empty_pc = (try findPhase1Opcode(raw_empty.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty.code, raw_empty_pc + 1));
+    try std.testing.expectEqual(core.atom.ids.empty_string.raw(), readU32(raw_empty.code, raw_empty_pc + 1));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty.atom_operands);
 
     var raw_tagged = try parseRawExprWithRuntime(&env, "\"123\"");
@@ -4507,7 +4507,7 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     var raw_empty_template = try parseRawStatement(&env, "``;");
     defer raw_empty_template.deinit(env.rt);
     const raw_template_pc = (try findPhase1Opcode(raw_empty_template.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty_template.code, raw_template_pc + 1));
+    try std.testing.expectEqual(core.atom.ids.empty_string.raw(), readU32(raw_empty_template.code, raw_template_pc + 1));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty_template.atom_operands);
 
     var ordinary = try parseStatement(&env, "\"hello\";");
@@ -4756,7 +4756,7 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
     while (pc < code.len) {
         const opcode_id = code[pc];
         if (opcode_id == op.scope_make_ref and
-            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == x_atom)
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == x_atom.raw())
         {
             make_ref_pc = pc;
         } else if (opcode_id == op.push_1 or
@@ -4809,7 +4809,7 @@ test "F5: destructuring dynamic reference publishes an exact long-tail label" {
     while (pc < code.len) {
         const opcode_id = code[pc];
         if (opcode_id == op.scope_make_ref and
-            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == target_atom)
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == target_atom.raw())
         {
             make_ref_pc = pc;
             break;
@@ -5925,7 +5925,7 @@ test "W1d: finalized private operations have no raw private atom operands" {
                     .atom_u16,
                     .atom_label_u8,
                     .atom_label_u16,
-                    => std.mem.readInt(u32, code[pc + 1 ..][0..4], .little),
+                    => core.Atom.fromRaw(std.mem.readInt(u32, code[pc + 1 ..][0..4], .little)),
                     else => null,
                 };
                 if (atom_id) |raw_atom| {
@@ -7843,7 +7843,7 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
     const v = state.function_def.vars[0];
-    try std.testing.expectEqual(@as(engine.core.atom.Atom, x_atom), v.var_name);
+    try std.testing.expectEqual(x_atom, v.var_name);
     try std.testing.expectEqual(true, v.is_lexical);
     try std.testing.expectEqual(false, v.is_const);
     try std.testing.expectEqual(function_def_mod.VarKind.normal, v.var_kind);
@@ -10075,7 +10075,7 @@ fn expectAtomOperandName(rt: *core.JSRuntime, function: anytype, expected: []con
         if (size == 0 or pc + size > code.len) break;
         switch (engine.bytecode.opcode.formatOf(op_id)) {
             .atom, .atom_u8, .atom_cache_u8, .atom_u16, .atom_label_u8, .atom_label_u16 => {
-                const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                const atom_id = atom.Atom.fromRaw(std.mem.readInt(u32, code[pc + 1 ..][0..4], .little));
                 if (rt.atoms.name(atom_id)) |name| {
                     if (std.mem.eql(u8, name, expected)) return;
                 }
@@ -11306,7 +11306,7 @@ test "assignment target scan ignores atom operand bytes" {
         const name = try std.fmt.bufPrint(&name_buf, "operand_pad_{d}", .{index});
         const atom_id = try rt.internAtom(name);
         try held_atoms.append(std.testing.allocator, atom_id);
-        if ((atom_id & 0xff) == engine.bytecode.opcode.op.is_undefined_or_null - 1) break;
+        if ((atom_id.raw() & 0xff) == engine.bytecode.opcode.op.is_undefined_or_null - 1) break;
     }
 
     var parsed = try compileForTest(rt, "var count2 = 2; while (count2 -= 1) { 3; }", .{ .mode = .eval_direct, .filename = "eval" });

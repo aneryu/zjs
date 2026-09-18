@@ -640,7 +640,6 @@ pub inline fn strictUnresolvedGetVar(vm: *Vm) bool {
     return if (vm.machine.depth == 0) vm.machine.l0.strict_unresolved_get_var else (vm.function.isStrictMode() or vm.function.runtimeStrictMode());
 }
 
-
 // ===========================================================================
 // Endpoint handlers
 // ===========================================================================
@@ -1385,7 +1384,7 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
             };
             vm.stack.pushOwnedAssumeCapacity(promise);
         },
-        .proxy_get => completeProxyGetContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
+        .proxy_get => completeProxyGetContinuation(vm, result, core.Atom.fromRaw(payload)) catch |err| return vm.fail(err),
         .to_boolean => {
             std.debug.assert(payload == 0);
             const bool_result = JSValue.boolean(coercion_ops.valueTruthy(result));
@@ -3613,7 +3612,7 @@ pub fn opFclosure(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// `staging/sm/RegExp/unicode-disallow-extended.js`). Before TGC S3-c the
 /// atom table's `entries[].str` root hid it.
 pub fn op_push_atom_value(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (vm.ctx.runtime.atoms.cachedPushValue(atom_id)) |cached| {
         sp[0] = cached;
         return cont(pc + 5, sp + 1, var_buf, vm);
@@ -3875,7 +3874,7 @@ pub fn opArgStore(comptime kind: ArgStoreKind) Handler {
 // 6-byte op (atom u32 + W1 cache_idx u8).
 fn op_get_field_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (vm_property_field.primitivePrototypeDataPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |value| {
         const stack_value = value;
         (sp - 1)[0] = stack_value;
@@ -3917,7 +3916,7 @@ pub fn op_get_loc2_field_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
 /// nativeMethodFastDispatch chain; leftover B is still `call_method`).
 pub fn op_get_field2_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (!receiver.is(.object)) {
         if (zjs_f_tombstone_keep != 0) {
             asm volatile (".space 0x140");
@@ -3964,7 +3963,7 @@ pub fn op_get_field2_call_method_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: 
 
 fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (vm_property_field.atomPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |result| {
         const stack_value = switch (result) {
             .borrowed => |value| value,
@@ -4010,7 +4009,7 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
 /// prototype). The receiver stays in `(sp - 1)` and roots the chain.
 fn op_get_field_after_own_miss_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     var absent = false;
     if (vm_property_field.getFieldFastSlotOrAbsentAfterOwnMiss(
         vm.ctx.runtime,
@@ -4177,7 +4176,7 @@ fn op_prop_site_indirect_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     // reached from here simply re-enters the instruction, whose guard misses
     // again and routes to `op_prop_site_capture_tail` -- which does have the
     // arm, and which charges the miss that bounds the round trip.
-    _ = vm_property_field.captureFieldSite(site, object, readInt(u32, pc + 1), pc[0] == op.get_field);
+    _ = vm_property_field.captureFieldSite(site, object, core.Atom.fromRaw(readInt(u32, pc + 1)), pc[0] == op.get_field);
     return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -4190,7 +4189,7 @@ fn op_prop_site_capture_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     const receiver = if (is_put) (sp - 2)[0] else (sp - 1)[0];
     if (object_ops.objectFromValueTrustedExpression(receiver)) |object| {
         const site = vm.propSite(pc[5]);
-        const atom_id = readInt(u32, pc + 1);
+        const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
         if (is_put) {
             vm_property_field.capturePutSite(site, object, atom_id);
         } else {
@@ -4208,7 +4207,7 @@ fn op_prop_site_capture_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 }
 
 fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (vm_property_field.typedArrayPropertyValueForFastPath(vm.ctx.runtime, vm.property_holder, atom_id)) |result| {
         const stack_value = switch (result) {
             .borrowed => |value| value,
@@ -4272,7 +4271,7 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     }
     if (vm_property_field.siteCapturable(site))
         return @call(.always_tail, propertyTailHandler(vm, .prop_site_capture), .{ pc, sp, var_buf, vm });
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     var slow_property = false;
     if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| {
         const value = loadValueAsIntPair(slot);
@@ -4312,7 +4311,7 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 // handler, preserving observable receiver and ownership semantics there.
 fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (vm_property_field.primitivePrototypeDataPropertyValueForFastPath(vm.ctx.runtime, vm.global, receiver, atom_id)) |value| {
         const stack_value = value;
         sp[0] = stack_value;
@@ -4339,7 +4338,7 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
 
 pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (!receiver.is(.object)) {
         if (zjs_f_tombstone_keep != 0) {
             asm volatile (".space 0x138");
@@ -4625,7 +4624,7 @@ fn op_put_array_el_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
 // eligible). The tracing-only path needs no release tails.
 pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(32) linksection(op_handler_section) callconv(.c) Outcome {
     const receiver = (sp - 2)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     const rt = vm.ctx.runtime;
     // W1 write arm: own writable data slot only. `capturePutSite` fills the
     // site from `findWritableOwnDataSlotFast`, so the identity guard alone
@@ -4702,7 +4701,7 @@ fn op_put_field_add_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
     const receiver_value = (sp - 2)[0];
     const receiver = object_ops.objectFromValueTrustedExpression(receiver_value) orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     const value = (sp - 1)[0];
     const rt = vm.ctx.runtime;
     vm.syncSp(sp - 2);
@@ -4877,7 +4876,7 @@ inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, v
 
     stack.values[region_base] = target_value;
     if (!computed_key) stack.pushOwnedAssumeCapacity(key);
-    return pushMovedAndEnter(var_buf, vm, &target, &moved, .proxy_get, atom_id, false);
+    return pushMovedAndEnter(var_buf, vm, &target, &moved, .proxy_get, atom_id.raw(), false);
 }
 
 fn op_get_array_el_atom_key_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
@@ -5170,7 +5169,7 @@ pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     vm.syncSp(sp);
     const value = (sp - 1)[0];
     const obj = (sp - 2)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (vm_literal.defineFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
         return cont(pc + 5, sp - 1, var_buf, vm);
     }
@@ -7253,7 +7252,7 @@ pub fn op_using_typeof_is_function(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]
 /// `get_field` then `b` `op_get_field2` (7a378c71 share). Leftover B stays.
 pub fn op_get_field_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
-    const atom_id = readInt(u32, pc + 1);
+    const atom_id = core.Atom.fromRaw(readInt(u32, pc + 1));
     if (!receiver.is(.object))
         return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
     const rt = vm.ctx.runtime;

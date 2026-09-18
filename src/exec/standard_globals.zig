@@ -749,7 +749,7 @@ fn temporaryStringAtom(rt: *core.JSRuntime, name: []const u8) !core.Atom {
 }
 
 fn freeTemporaryStringAtom(rt: *core.JSRuntime, atom_id: core.Atom) void {
-    if (core.atom.isConst(atom_id) or core.atom.isTaggedInt(atom_id)) return;
+    if (atom_id.isConst() or atom_id.isTaggedInt()) return;
     rt.atoms.unpinForHost(atom_id);
 }
 

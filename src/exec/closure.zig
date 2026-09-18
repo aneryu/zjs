@@ -415,7 +415,7 @@ fn expectObjectPropertySame(rt: *core.JSRuntime, object: *core.Object, name: []c
 }
 
 fn expectArrayIndexSame(_: *core.JSRuntime, array: *core.Object, index: u32, expected: core.JSValue) !void {
-    const stored = try array.getProperty(core.atom.atomFromUInt32(index));
+    const stored = try array.getProperty(core.Atom.taggedInt(index));
     try std.testing.expect(stored.same(expected));
 }
 
@@ -444,7 +444,7 @@ test "appendRecordToGlobalArray roots direct function bytecode fields while crea
     try std.testing.expect(rt.atoms.name(record_this.symbol_atom) != null);
 
     {
-        const stored_record_value = try results.getProperty(core.atom.atomFromUInt32(0));
+        const stored_record_value = try results.getProperty(core.Atom.taggedInt(0));
         const stored_record = try expectObject(stored_record_value);
         try expectObjectPropertySame(rt, stored_record, "value", record_value.value);
         try expectObjectPropertySame(rt, stored_record, "key", record_key.value);
@@ -482,7 +482,7 @@ test "appendWeakMapAdderRecord roots direct function bytecode fields while creat
     try std.testing.expect(rt.atoms.name(record_this.symbol_atom) != null);
 
     {
-        const stored_record_value = try results.getProperty(core.atom.atomFromUInt32(0));
+        const stored_record_value = try results.getProperty(core.Atom.taggedInt(0));
         const stored_record = try expectObject(stored_record_value);
         try expectObjectPropertySame(rt, stored_record, "_this", record_this.value);
         try expectObjectPropertySame(rt, stored_record, "key", record_key.value);
@@ -518,7 +518,7 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     try std.testing.expect(rt.atoms.name(pair_value.symbol_atom) != null);
 
     {
-        const stored_pair_value = try results.getProperty(core.atom.atomFromUInt32(0));
+        const stored_pair_value = try results.getProperty(core.Atom.taggedInt(0));
         const stored_pair = try core.array.expectArray(stored_pair_value);
         try expectArrayIndexSame(rt, stored_pair, 0, pair_key.value);
         try expectArrayIndexSame(rt, stored_pair, 1, pair_value.value);
@@ -633,7 +633,7 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
     defer root_frame.deactivate(rt);
 
     if (!array.isArray()) return error.TypeError;
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
 }
 
 fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
@@ -701,12 +701,12 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     const expects = try core.array.expectArray(expects_value);
     if (expects.arrayLength() == 0) return error.JSException;
-    const expected = try expects.getProperty(core.atom.atomFromUInt32(0));
+    const expected = try expects.getProperty(core.Atom.taggedInt(0));
     if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.arrayLength()) : (index += 1) {
-        const next = try expects.getProperty(core.atom.atomFromUInt32(index));
-        try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
+        const next = try expects.getProperty(core.Atom.taggedInt(index));
+        try expects.defineOwnProperty(rt, core.Atom.taggedInt(index - 1), core.Descriptor.data(next, true, true, true));
     }
     // Drop the now-duplicated tail: lower the dense extent (no-op when the
     // copy-down already converted to sparse) before lowering .length, so we
@@ -819,8 +819,8 @@ fn appendPairToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
 
     const pair = try core.Object.createArray(rt, null);
     const pair_value = pair.value();
-    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(rooted_key, true, true, true));
-    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(rooted_value, true, true, true));
+    try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(rooted_key, true, true, true));
+    try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(rooted_value, true, true, true));
     try appendToGlobalArray(rt, globals, name, pair_value);
 }
 
@@ -835,7 +835,7 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
         array_value = try getGlobalObjectProperty(rt, globals, name);
     }
     const array = try core.array.expectArray(array_value);
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
 }
 
 fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {

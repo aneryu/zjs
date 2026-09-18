@@ -353,7 +353,7 @@ pub fn isAsciiBytes(bytes: []const u8) bool {
 /// concatenation lives in the separate `StringRope` object, whose content
 /// materializes into a fresh flat `String` on first read.
 pub const String = struct {
-    pub const no_atom_id: u32 = std.math.maxInt(u32);
+    pub const no_atom_id: atom_mod.Atom = atom_mod.Atom.fromRaw(std.math.maxInt(u32));
 
     /// Length + width word, mirroring QuickJS `JSString`'s first u32 bitfield
     /// `{ len:31, is_wide_char:1 }`. `len` is the inline payload length in code
@@ -379,7 +379,7 @@ pub const String = struct {
     /// Combined `{ hash, atom_type }` word (qjs second bitfield). `hash == 0`
     /// means "not computed yet".
     hash_meta: HashMeta = .{},
-    atom_id: u32 = no_atom_id,
+    atom_id: atom_mod.Atom = no_atom_id,
 
     /// Unified collector handle. String-family handles are their body pointer.
     pub inline fn header(self: *const String) *gc.Header {
@@ -397,9 +397,9 @@ pub const String = struct {
     /// visit the cell: stamp `needs_finalizer`. Predefined and tagged-int ids
     /// are never recycled, the handshake skips them, and such a body stays in
     /// the bitmap-only population. The bit only ever goes on (D-S4-4).
-    pub fn bindAtomId(self: *String, rt: *JSRuntime, atom_id: u32) void {
+    pub fn bindAtomId(self: *String, rt: *JSRuntime, atom_id: atom_mod.Atom) void {
         self.atom_id = atom_id;
-        if (atom_id == no_atom_id or atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id)) return;
+        if (atom_id == no_atom_id or atom_id.isConst() or atom_id.isTaggedInt()) return;
         rt.gc.setNeedsFinalizer(self.header());
     }
 
@@ -486,7 +486,7 @@ pub const String = struct {
         return self.len() == 0 and self.isWide();
     }
 
-    pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
+    pub fn createAtomBacked(rt: *JSRuntime, atom_id: atom_mod.Atom) !*String {
         // Atom-table cache hit: reuse the traced string already materialized
         // for this atom, skipping the UTF-8 decode.
         if (rt.atoms.cachedString(atom_id)) |cached| {
@@ -512,7 +512,7 @@ pub const String = struct {
     /// table traces the cached string and `atom_id` becomes a weak
     /// back-pointer; the reverse direction (`AtomTable.toStringValue`) reuses
     /// the same string with zero conversion.
-    pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
+    pub fn internAtom(self: *String, rt: *JSRuntime) !atom_mod.Atom {
         if (self.atom_id != no_atom_id) return self.atom_id;
         _ = self.contentHash();
         var utf8 = std.ArrayList(u8).empty;
@@ -1690,7 +1690,7 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
     // it), a value symbol's body IS the entry's identity (the handshake
     // retires or weakens the entry).
     const atom_id = body.atom_id;
-    if (atom_id != String.no_atom_id and !atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
+    if (atom_id != String.no_atom_id and !atom_id.isConst() and !atom_id.isTaggedInt()) {
         rt.atoms.onSymbolBodyDead(atom_id, body);
     }
     const layout = if (body.len_meta.is_wide)
@@ -1806,7 +1806,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
     // or weaken its entry (spec §5.7 atom ownership rule). Const and
     // tagged-int ids have no entry to tell.
     const atom_id = body.atom_id;
-    if (atom_id != String.no_atom_id and !atom_mod.isConst(atom_id) and !atom_mod.isTaggedInt(atom_id)) {
+    if (atom_id != String.no_atom_id and !atom_id.isConst() and !atom_id.isTaggedInt()) {
         rt.atoms.onSymbolBodyDead(atom_id, body);
     }
     rt.gc.unpublishStringExtent(header, user_bytes - gc.string_prefix_size);

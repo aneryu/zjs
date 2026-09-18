@@ -96,7 +96,7 @@ pub noinline fn setName(
 ) !void {
     switch (opc) {
         op.set_name => {
-            const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+            const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
             frame.pc += 4;
             if (stack.len() == 0) return error.StackUnderflow;
             const value = try stackValueFromTop(stack, 0);
@@ -152,7 +152,7 @@ pub noinline fn field(
     catch_target: *?usize,
     opc: u8,
 ) align(16) !Step {
-    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     // W1: every opcode routed here is `atom_cache_u8` (atom u32 + cache_idx
     // u8), so the operand region is five bytes. The cold shell answers
     // generically; capture lives in the resident handlers' miss leg.
@@ -340,7 +340,7 @@ inline fn getFieldFastSlotWithExoticOrder(
     // Hoisting this loop-invariant decision keeps the common named-field walk (the
     // get_field / get_field2 hot path) off the per-object class test entirely; the
     // predicate comptime-folds to false for the get_length caller (trust=true).
-    const probe_mapped_arguments = !trust_mapped_arguments_probe and core.atom.isTaggedInt(atom_id);
+    const probe_mapped_arguments = !trust_mapped_arguments_probe and atom_id.isTaggedInt();
     // Phase 1 — the absence-authoritative prefix (only compiled for callers that
     // ask for the tri-state). qjs ends its inline window at the chain root with
     // `p = p->shape->proto; if (!p) { val = JS_UNDEFINED; break; }`
@@ -438,7 +438,7 @@ inline fn getFieldFastSlotWithExoticOrder(
 /// `length` stays on the slow arm so the dense-array length scalar is
 /// not skipped. TypedArray / Proxy / String objects are not included.
 inline fn namedAtomUsesOrdinaryWalkOnIndexExotic(class_id: core.class.ClassId, atom_id: core.Atom) bool {
-    if (core.atom.isTaggedInt(atom_id) or atom_id == core.atom.ids.length) return false;
+    if (atom_id.isTaggedInt() or atom_id == core.atom.ids.length) return false;
     return class_id == core.class.ids.array or
         class_id == core.class.ids.arguments or
         class_id == core.class.ids.mapped_arguments;
@@ -613,7 +613,7 @@ inline fn primitivePrototypeObjectForFastPath(
     atom_id: core.Atom,
 ) ?*core.Object {
     const slot: core.object.RealmValueSlot = if (receiver.isString()) blk: {
-        if (atom_id == core.atom.ids.length or core.atom.isTaggedInt(atom_id)) return null;
+        if (atom_id == core.atom.ids.length or atom_id.isTaggedInt()) return null;
         break :blk .string_prototype;
     } else if (receiver.isNumber())
         .number_prototype
@@ -1012,7 +1012,7 @@ pub inline fn putArrayElementAfterFastMiss(
             // qjs JS_ValueToAtom -> __JS_AtomFromUInt32: a non-negative int32
             // key is already a tagged integer atom. No JSValue copy/string
             // conversion or dynamic atom ownership is needed.
-            const atom_id = core.atom.atomFromUInt32(@intCast(index));
+            const atom_id = core.Atom.taggedInt(@intCast(index));
             _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;

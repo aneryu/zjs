@@ -2777,7 +2777,7 @@ const Collector = struct {
                     if (a.owner_kind == .object) {
                         const o = Object.fromHeader(a.owner_ptr);
                         var where: []const u8 = "unknown";
-                        var hit_atom: u32 = 0;
+                        var hit_atom: atom_mod.Atom = .empty;
                         if (o.promisePayload()) |pp| {
                             if (pp.result) |v| if (v.cycleMarkHeader() == child) {
                                 where = "promise.result";
@@ -2856,7 +2856,7 @@ const Collector = struct {
                             .{ .text = " where=" },
                             .{ .text = where },
                             .{ .text = " atom=" },
-                            .{ .text = a.rt.atoms.name(@intCast(hit_atom)) orelse "?" },
+                            .{ .text = a.rt.atoms.name(hit_atom) orelse "?" },
                             .{ .text = " nprops=" },
                             .{ .dec = o.shape_ref.prop_count },
                             .{ .text = " owner_marked=" },
@@ -2972,8 +2972,8 @@ const Collector = struct {
 fn keyIsMarked(rt: *const JSRuntime, identity: usize) bool {
     if ((identity & 1) != 0) {
         const atom_id = identity >> 1;
-        if (atom_id > std.math.maxInt(@import("atom.zig").Atom)) return false;
-        const symbol_atom: @import("atom.zig").Atom = @intCast(atom_id);
+        if (atom_id > std.math.maxInt(u32)) return false;
+        const symbol_atom: @import("atom.zig").Atom = @import("atom.zig").Atom.fromRaw(@intCast(atom_id));
         if (rt.atoms.kind(symbol_atom) != .symbol) return false;
         const header = rt.atoms.symbolBodyHeaderIfLive(rt, symbol_atom) orelse return false;
         return rt.gc.headerMarked(header);
