@@ -98,13 +98,6 @@
 - **实现**：script/module/eval_direct/eval_indirect 一一对应。
 - **所有权 / 错误 / 调用**：`prepareRootFunction`。
 
-### `parserSourceKind` (`src/exec/eval_entry.zig:485`)
-
-- **签名**：`fn parserSourceKind(kind: core.context.EvalSourceKind) parser.SourceKind`。
-- **作用**：auto/javascript/typescript 映射。
-- **实现**：穷尽 switch。TS 只擦除。
-- **所有权 / 错误 / 调用**：纯枚举映射：不分配、无 error set、不触碰 GC。树内唯一调用方是 `prepareRootFunction` 填 `parser.compile` 选项处（`src/exec/eval_entry.zig:101`）。
-
 ---
 
 ## `eval_ops.zig`

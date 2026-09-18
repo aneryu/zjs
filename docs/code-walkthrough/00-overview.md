@@ -55,7 +55,7 @@ const result = try ctx.eval("let x = 1 + 2; x;", .{});
 
 1. **`JSContext.eval`**（`js_context.zig`）把源文、文件名、eval 标志收成内部调用。
 2. **`eval_entry`**（`exec/eval_entry.zig`）决定 script vs module、直接 vs 间接 eval、strict、new.target 等宿主标志。
-3. **`parser.compile`**（`parser.zig`）词法 + 语法 + 作用域 + 发射临时字节码。TypeScript 只做语法擦除，不是类型检查。
+3. **`parser.compile`**（`parser.zig`）词法 + 语法 + 作用域 + 发射临时字节码。文法是 TypeScript 的，JS 按其子集解析；类型语法由不发射的 `tsParse*` 函数族消费，不是类型检查。
 4. **compiler 管线**（`compiler/`）
    - `builder.zig`：临时指令流、标签槽、重定位。
    - `resolve_variables.zig`：变量解析与活性。

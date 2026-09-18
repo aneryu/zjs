@@ -1,69 +1,95 @@
-# 03 — TypeScript 擦除（parser 侧）
+# 03 — TypeScript（parser 侧）
 
-类型注记主要在 `lexer.enableTypeScript()` 丢掉。parser 额外认识：
+文法是 TypeScript 的，JavaScript 按其子集解析；没有 source-kind 开关，词法层也不区分。
+设计与裁决见 [docs/parser-ts-first-class-design.md](../parser-ts-first-class-design.md)。
 
-- `enum` / `const enum` → 运行时对象（双向映射，字符串成员单向）。
-- `namespace` → `N = N || {}` 再往上挂成员。
-- 构造器参数属性 `public/private/protected/readonly x`：`isParameterModifier` 识别，`parseBlockContentsAfterOpen` 在构造器体前插入 `this.x = x`。
-- 不支持的 TS 语法在 `compile` 入口被 `findUnsupportedTypeScriptSyntax` 挡掉。
+`src/parser.zig` 里以 `ts` 为前缀的函数分两类：
 
+- **纯解析函数**（`tsParse*` / `tsSkip*` / `tsAt*` / `tsPeek*`）：只推进 lexer，不发射字节码、不登记作用域、不改 `features`。
+  这保证 JS 输入的字节码逐位不变（门禁：`zjs --bytecode-fingerprint`，`tools/gates/bytecode_fingerprint.sh`），
+  也让每一次投机解析都能用 parser 快照回退。
+- **降级函数**（`parseEnumDeclaration` / `parseNamespaceDeclaration*` / `tsParseImportAlias` / 参数属性）：
+  有运行时语义，按 tsc 输出的形状发射普通字节码。
 
-### `isParameterModifier` (`src/parser.zig:2765`)
+## 投机与回退
 
-- **签名**：`fn isParameterModifier(s: *State) bool`。
-- **作用**：当前 token 是否为 TypeScript 参数属性修饰符。
-- **实现**：
-`TOK_PUBLIC/PRIVATE/PROTECTED` 为真。ident 且无转义时名字是 `public`/`private`/`protected`/`readonly` 也为真。给构造器参数属性用。
-- **所有权 / 错误 / 调用**：无：只读当前 token——关键字臂比 kind，ident 臂拿 `s.lex.atoms.name(...)` 得到 AtomTable 内部的**借用**字节切片当场比较（不复制、不释放，atom id 也只是读）。不分配、无 error set、不推进 lexer。唯一调用方 `parseFunctionParameters`（`src/parser.zig:11319`）的 TypeScript 构造器分支，循环调用直到不再是修饰符。
+- `TsSpeculation` = `takeParserSnapshot` + `pending_diagnostic` 副本。`tsBeginSpeculation` / `tsRollback` / `tsCommit`。
+  `tsCommit` 只释放快照里复制的 token。
+- `tsProbe(s, parse_fn)`：把纯解析当探针跑，语法错误变 `false`，`OutOfMemory` / `StackOverflow` / `BytecodeOverflow` 照常上抛。
+- `tsSkipBalancedGroup` / `tsSkipBalancedRest`：按 `(`/`[`/`{` 深度消费一个平衡组；模板整体（含 `${}`）由 `tsSkipTemplate` 消费。
+  只用于类型位置里的模式跳过、`declare` 体、计算属性名，不用于判断 JS 语义。
 
-### `parseEnumDeclaration` (`src/parser.zig:8283`)
+## 类型文法（全部纯）
 
-- **签名**：`fn parseEnumDeclaration(s: *State) Error!void`。
-- **作用**：把 TypeScript enum 擦成运行时对象（数字双向映射，字符串单向）。
-- **实现**：
-消费 `enum` 与名字；没有同名 var 则 `addScopeVar`。发射 `Enum = Enum || {}`（`scope_get_var_undef` + dup + `if_true` 跳过 `object`）。每个成员：
-- 无初始化：`push_i32` 自增 counter，再双向映射 `Enum[Enum.Member = n] = "Member"`。
-- `= 字符串`：只 `put_field` 正向。
-- `= 数字` / `= -数字`：解析字面量（后面必须是 `,`/`}`），更新 counter，再双向映射。
-`namespace_export` 时把 enum 对象挂到当前命名空间。
-- **所有权 / 错误 / 调用**：不分配堆内存。名字 atom 有明确的取用顺序：`enum_atom` 与每个 `member_atom` 都在 `advance()` **之前**取走（源码注释对照 qjs `next_token`/`free_token` 的所有权顺序），`member_name` 则是 `atoms.name` 的借用切片，只在本轮循环里用。`addScopeVar` 新增的 VarDef 与发出的字节码都是不可回滚的持久副作用。栈契约是本函数最容易读错的地方：双向映射那段按注释里标注的六步维持 `[outer_obj, value, ...]` 形状，最终由 `put_array_el` 消费干净；字符串成员只做正向 `put_field`，因此**不**参与 counter 自增。收尾写 `setLastDeclaredAtom`，供外层 namespace 把它挂到命名空间对象上。错误：名字不是标识符、初始化器后面不是 `,`/`}`（用带位置的 `failExpectedDescriptionAt`）、初始化器既不是字符串也不是（负）数字字面量，都是 fail 族。两个调用方：`parseEnumStatement`（`src/parser.zig:9051`）与 `parseVariableStatement` 的 `const enum` 改道（`:9098`）。
+| 函数 | 产生式 |
+| --- | --- |
+| `tsParseTypeAnnotationOpt` | `: Type`（上下文重置为允许条件类型） |
+| `tsParseReturnTypeOpt` / `tsParseTypeOrPredicate` | 返回类型位：类型或谓词 `x is T` / `asserts x [is T]` / `this is T` |
+| `tsParseType` | 函数/构造器类型，否则联合类型，再可选 `extends B ? C : D`（`ts_disallow_conditional` 为真时不进条件类型） |
+| `tsAtFunctionTypeStart` | `<`、`new`、`abstract new`，或 `(` 经 `scanBalancedToken` 后紧跟 `=>` |
+| `tsParseUnionType` / `tsParseIntersectionType` | 允许前导 `\|` / `&` |
+| `tsParseTypeOperator` | `keyof` / `unique` / `readonly` 前缀；`infer U [extends C]`，约束用投机解析，若会抢走外层条件类型的 `?` 则回退 |
+| `tsParsePostfixType` | 同行的 `[]` 与 `[T]` |
+| `tsParsePrimaryType` | 括号、元组、对象类型、字面量（字符串/数字/负数/`true`/`false`/`null`/`void`/`this`/模板）、`typeof`、`import("m")`、类型引用 |
+| `tsParseTypeReference` / `tsParseEntityName` | `A.B.C<Args>`；点号后允许关键字 |
+| `tsParseTypeArguments` | 类型上下文的 `<T, U>`，闭合处 `tsExpectGreater` 可拆 `>>` / `>=` |
+| `tsParseTypeArgumentsInExpression` | 表达式上下文：闭合必须是独立的 `>` token（tsc `reScanGreaterToken` 语义），`x>>>0<y>>>0` 因此仍是比较 |
+| `tsParseTypeParameters` | `<const in out T extends C = D>` |
+| `tsParseTupleType` | 可选/命名/rest 成员 |
+| `tsParseObjectType` / `tsParseObjectTypeMember` / `tsParseIndexOrMappedMember` | 对象类型字面量、interface 体、映射类型、索引签名、调用/构造/方法签名、访问器签名 |
+| `tsParseSignatureParameters` | 无函数体签名的参数表：修饰符、`this`、模式（平衡跳过）、`?`、注解、rest；不允许初始化器 |
+| `tsParseTemplateLiteralType` | 用 `nextTemplatePartAfterBraceInto` 续扫 |
+| `tsExpectGreater` / `tsExpectLess` | 调 lexer 的 `splitGreaterThan` / `splitLessThan` |
 
-### `parseNamespaceDeclaration` (`src/parser.zig:8399`)
+## 声明
 
-- **签名**：`fn parseNamespaceDeclaration(s: *State) Error!void`。
-- **作用**：消费已匹配的 `namespace` ident，转入带名字的命名空间解析。
-- **实现**：
-调用方已把当前 ident 认成 `namespace`。`expectToken(TOK_IDENT)` 消费它，再 `parseNamespaceDeclarationWithIdent`。
-- **所有权 / 错误 / 调用**：两行转发，不分配、不持有资源。`expectToken(TOK_IDENT)` 吃掉的正是调用方已经用 `isIdent("namespace")` 认过的那枚 contextual 关键字——它本身不是保留字，所以这里只按 `TOK_IDENT` 消费，不校验拼写。唯一调用方 `parseIdentifierStatement` 的 TypeScript 臂（`src/parser.zig:9134`）。
+| 函数 | 内容 |
+| --- | --- |
+| `tsDeclarationStart` | 上下文关键字只在这些形状且下一 token 同行时开启声明：`interface X`、`type X`、`declare <decl>`、`abstract class`、`namespace X`、`module X`。先按名字过滤再前瞻，普通标识符语句不付前瞻代价 |
+| `tsParseInterfaceDeclaration` / `tsParseTypeAliasDeclaration` | 整段丢弃 |
+| `tsParseAmbientDeclaration*` | `declare var/let/const/function/class/enum/namespace/module/global/interface/type`，全部无产出 |
+| `tsFunctionHasBodyAhead` | 用 `scanBalancedToken` 看参数表之后是 `{` 还是 `:`；`:` 时投机解析返回类型再看 `{`。在创建子 `FunctionDef` 之前决定 |
+| `tsSkipFunctionSignature` | 重载签名：消费后要求紧跟 `function` / `async` / `export` / `default`，否则报"implementation is missing" |
+| `tsSkipMethodSignature` | 类里的重载 / `abstract` / 可选方法；非 abstract、非可选且下一 token 是 `}` 时报错 |
+| `tsSkipDeclaredField` | `declare x: T` 不定义字段 |
+| `tsCanFollowClassModifier` / 修饰符循环（`parseClassElement`） | tsc `nextTokenCanFollowModifier`：`static` 容忍换行，其余要求同行；`accessor` 不支持 |
+| `tsIndexSignatureAhead` / `tsSkipIndexSignature` | 类体 `[k: string]: T` |
+| `tsPatternHasInitializerAfterAnnotation` | `{...}?: T = v` 的初始化器藏在注解之后，`parseDestructuringElement` 据此提前发跳转 |
 
-### `parseNamespaceDeclarationWithIdent` (`src/parser.zig:8404`)
+## 表达式
 
-- **签名**：`fn parseNamespaceDeclarationWithIdent(s: *State) Error!void`。
-- **作用**：擦除 TypeScript `namespace N { ... }`：把 `N` 当 var 绑定，发 `N = N || {}`，再在命名空间上下文里解析体。
-- **实现**：
-TypeScript `namespace N { ... }` 擦除：把名字当 var 绑定，发射 `N = N || {}`，再在命名空间 atom 下解析体（`in_namespace` / `current_namespace_atom`）。嵌套 `namespace` 递归。导出时把绑定 `put_field` 到外层命名空间对象。不是类型检查器，只发运行时对象。
-- **所有权 / 错误 / 调用**：`ns_atom` 在 `advance()` 之前取走并由 `addScopeVar` 让 `FunctionDef` 成为所有者（已有同名声明则复用）。两条分支（`.` 点号嵌套与 `{` 块体）各自用同一套三件 `defer` 恢复：`in_namespace`、`current_namespace_atom`（经 `setCurrentNamespaceAtom`）、以及 `pushScopeIdentity` / `popScopeIdentity` 的作用域身份——注意这里用的是 identity 版本，不发 `enter_scope`/`leave_scope`，命名空间在运行时只是一个普通对象。`last_declared_atom` 是跨调用的一次性槽：嵌套分支解析完子命名空间后读它拿到子名字并 `put_field`，然后把自己写回去。`namespace_export` 时再往父命名空间挂一次。错误：名字不是标识符、缺 `{`/`}`，都是 fail 族。三个调用点：`parseNamespaceDeclaration`（`src/parser.zig:8821`）、自身的点号嵌套（`:8864`）、以及体内语句循环经 `parseNamespaceStatement` 间接递归。
+| 函数 | 内容 |
+| --- | --- |
+| `tsGenericArrowHead` | `<T>(...) [: R] =>`；`parseArrowAssignment` 命中后消费类型参数再走 `parseArrowFunction` |
+| `tsParenArrowHeadWithReturnType` | `(...): R =>`；`checkArrowHead` 在 `scanBalancedToken` 看到 `:` 时调用，`ParseFlags.arrow_return_type_forbidden`（三元 whenTrue 分支）为真时不调用 |
+| `tsParseTypeAssertion` | `parseUnary` 顶部的 `<T>expr` / `<const>expr` |
+| `tsTryParseTypeArgumentsInExpression` / `tsCanFollowTypeArgumentsInExpression` | `parseMemberChain` / `parseNewExpr` / `?.` 处的 `<T>` 试探；后跟 `(`、模板、二元运算符、换行或不能起始表达式的 token 才算类型实参；`<` `>` `+` `-` `=` 及各赋值运算符一律不算 |
+| `tsAtAsOrSatisfies` | `parseExprBinary` level 4 循环里的同行 `as T` / `as const` / `satisfies T` |
+| `parseMemberChain` 的 `!` 臂 | 同行后缀 `!` 擦除 |
 
-### `parseNamespaceStatement` (`src/parser.zig:8494`)
+## 模块
 
-- **签名**：`fn parseNamespaceStatement(s: *State) Error!void`。
-- **作用**：可选 `export` 后解析一条命名空间体语句。
-- **实现**：
-可选消费 `export` 并临时打开 `namespace_export`，然后 `parseStatementOrDecl` 解析体（嵌套 namespace / enum / 声明）。
-- **所有权 / 错误 / 调用**：不分配；唯一的状态是 `namespace_export`，用「保存 → 置成本条语句是否带 `export` → `defer` 还原」的形式管理，所以嵌套语句不会继承上一条的导出性。体语句用的是完整 `DeclMask`（`func` / `func_with_label` / `other` 全开），命名空间体内允许任何声明。无自有错误分支。唯一调用方 `parseNamespaceDeclarationWithIdent` 的体循环（`src/parser.zig:8899`）。
+| 函数 | 内容 |
+| --- | --- |
+| `tsImportTypeModifier` | `import type ...` 是否为 type-only（tsc 规则，含 `import type from "m"` 的默认导入名例外） |
+| `tsSpecifierTypeModifier` | `{ type X }` / `{ type as as X }` / `{ type as X }` 三形状 |
+| `tsSkipTypeOnlyImport` / `tsSkipTypeOnlyExport` / `tsSkipFromClause` | 不登记模块请求地消费 |
+| `parseImport` / `parseExport` | 全部 specifier 为 type-only 时整条语句省略（与 tsc 默认一致）；`export type/interface/declare/abstract class/enum/namespace/import x = A.B`；`export =` 与 `import x = require()` 报错 |
+| `tsImportAliasAhead` / `tsParseImportAlias` | `import x = A.B.C;` 降级为 `const x = A.B.C;`，可 `export`，可在 namespace 内 |
 
-### `parseEnumStatement` (`src/parser.zig:8627`)
+## enum
 
-- **签名**：`fn parseEnumStatement(s: *State) Error!void`。
-- **作用**：仅在 TypeScript 模式下解析 enum 声明语句。
-- **实现**：
-非 TypeScript 模式 `failUnexpectedToken`。否则 `parseEnumDeclaration`。
-- **所有权 / 错误 / 调用**：纯守门转发，不分配、不持有资源。唯一自有错误是非 TypeScript 源里出现 `enum` 时的 `failUnexpectedToken`——`enum` 在 JS 里是保留字，词法器始终把它切成 `TOK_ENUM`，所以这条闸是必需的。唯一调用方是 `parseStatementOrDeclSlow` 的 `TOK_ENUM` 臂（`src/parser.zig:9004`）。
+`parseEnumDeclaration`：`E = E || {}` 后逐成员。成员名允许标识符、关键字、字符串。
+初始化器先经 `tsTryFoldEnumInitializer` 常量折叠（字面量、无替换模板、括号、一元 `+ - ~`、二元
+`+ - * / % ** << >> >>> & | ^`、对本 enum 已折叠成员的引用，含 `E.A`），折叠结果数值走
+`E[E["A"] = v] = "A"`、字符串走 `E["A"] = s`；折叠失败则按普通表达式在运行时求值并仍发反向映射；
+其后无初始化器的成员报错（tsc TS1061）。`TsEnumValue` 里的字符串由 `s.function.memory.allocator` 持有，函数结束统一释放。
 
-## 覆盖核对
+## 参数属性与 namespace
 
-- 清单函数数（本文件分到）: 6（`src/parser.zig` 全文件 622）
-- 本文标题覆盖: 6
-- 未覆盖: 无
+- `isParameterModifier`（`public/private/protected/readonly/override`，且后面必须跟绑定）只在构造器参数表生效；`parseFunctionParameters` 收进 `current_parameter_properties`，`parseBlockContentsAfterOpen`（基类）或 `super()` 之后（派生类）插入 `this.x = x`。
+- `parseNamespaceDeclaration` / `parseNamespaceDeclarationWithIdent` / `parseNamespaceStatement`：`namespace` 与 `module` 关键字同形；`N = N || {}`，点号嵌套递归，`export` 成员挂到命名空间对象上。
 
-全文件清单共 622 个函数；以 `03-parser*.md` 合计为准。
+## 明确拒绝
+
+装饰器（`@`，`decoratorDiagnosticMessage` 给出定制消息）、`accessor` 字段、`import x = require()`、`export =`、`.tsx` / `.jsx` 文件（compile 入口直接 `syntax_error_guard`）。

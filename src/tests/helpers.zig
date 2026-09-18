@@ -340,7 +340,6 @@ pub const TestEngine = struct {
         return wrapper.eval(source_text, .{
             .mode = mode,
             .filename = filename,
-            .source_kind = options.source_kind,
             .output = options.output,
             .parse_strict = options.parse_strict,
             .runtime_strict = options.runtime_strict,

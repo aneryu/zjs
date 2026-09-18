@@ -660,7 +660,7 @@
 
 - **签名**：`fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program`。
 - **作用**：测试夹具/探针 `parseRawTSProgram`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：单表达式转调 `test_entry.parseAndCompileV2TestProgram(env.rt, std.testing.allocator, "scope-events-ts", src, .{ .source_kind = .typescript })`。关键调用：`test_entry.parseAndCompileV2TestProgram`。
+- **实现**：单表达式转调 `test_entry.parseAndCompileV2TestProgram(env.rt, std.testing.allocator, "scope-events-ts", src, .{})`。关键调用：`test_entry.parseAndCompileV2TestProgram`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!test_entry.Program`，由测试 `try`/`expectError` 消费。
 
 ### `expectContinueTargetFollowsBodyLeave` (`src/tests/parser.zig:7275`)
@@ -1167,13 +1167,6 @@
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「F1.5: keyword block atom layout matches quickjs-atom.h ordering」。
 - **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
-
-### `test "F1: Lexer enableTypeScript strips variable and function TypeScript annotations dynamically"` (`src/tests/parser.zig:752`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「F1: Lexer enableTypeScript strips variable and function TypeScript annotations dynamically」。
-- **实现**：断言 17 处 `std.testing.expect*`。约 17 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "parser accepts computed public class fields"` (`src/tests/parser.zig:1633`)
@@ -3136,11 +3129,11 @@
 - **实现**：3 组 `parseRawStatement` + `expectPhase1ScopeEvents`：`try {} catch (caught) {;}` 期望 enter 1/2/3/4 后按 4→3→2 的 LIFO leave；`try {} catch (caught) {}`（空 catch 体）不产生第 4 层；带 `finally {;}` 的一组在 catch 收尾后再追加 enter 5 / leave 5。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "M-SCOPE event producers: structural body and namespace scopes stay identity-only"` (`src/tests/parser.zig:7146`)
+### `test "M-SCOPE event producers: structural body scopes stay identity-only, namespace bodies are blocks"` (`src/tests/parser.zig`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「M-SCOPE event producers: structural body and namespace scopes stay identity-only」。
-- **实现**：断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
+- **作用**：函数体/参数/箭头/class 字段的结构性作用域只留 identity，不发 enter/leave；TypeScript `namespace` 体是真正的块作用域（tsc 的 IIFE），发一对 enter/leave。
+- **实现**：`expectPhase1ScopeEvents` 逐条比对 phase-1 事件。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "M-SCOPE abrupt control: labelled break and continue close nested scopes at the source"` (`src/tests/parser.zig:7215`)
@@ -3623,7 +3616,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「TS: Enum Declarations」。
-- **实现**：`parseTSStatement`（`lex.enableTypeScript()` 后走 `parseStatementOrDecl` 并 `finalize`）编 `enum Direction { Up, Down = 2, Left, Right = "Right" }`，用 `expectOpcode` 查根码里存在 `op.put_field` 与 `op.put_array_el`——即 TS enum 被降成运行时对象的正反双向赋值。
+- **实现**：`parseTSStatement`（普通 lexer，走 `parseStatementOrDecl` 并 `finalize`；文法本身就是 TypeScript 的）编 `enum Direction { Up, Down = 2, Left, Right = "Right" }`，用 `expectOpcode` 查根码里存在 `op.put_field` 与 `op.put_array_el`——即 TS enum 被降成运行时对象的正反双向赋值。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "TS: Const Enum Declarations Lower As Runtime Enums"` (`src/tests/parser.zig:9544`)
@@ -3675,11 +3668,11 @@
 - **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "TS: Unsupported Syntax Scan Reports Feature And Position"` (`src/tests/parser.zig:9656`)
+### `test "TS: decorators and import = require are rejected with a clear message"` (`src/tests/parser.zig`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「TS: Unsupported Syntax Scan Reports Feature And Position」。
-- **实现**：断言 8 处 `std.testing.expect*`。约 8 个 Zig expect、0 个 JS `assert.*`。
+- **作用**：钉住三条明确拒绝：装饰器（`@`，报"decorators are not supported"并给行号）、`import X = require("x")`（"not supported"）、`.tsx` 文件名（"JSX"）。
+- **实现**：走 `compileForTest`（真实 `parser.compile` 入口），检查 `Result.syntax_error` 的位置与消息。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "TS: Namespaces"` (`src/tests/parser.zig:9677`)
@@ -3717,11 +3710,11 @@
 - **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "TS: Strict Enum Constant Expression Rejection"` (`src/tests/parser.zig:9749`)
+### `test "TS: Strict Enum Constant Expression Rejection"` (`src/tests/parser.zig`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「TS: Strict Enum Constant Expression Rejection」。
-- **实现**：断言错误 `error.UnexpectedToken`。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
+- **作用**：enum 初始化器按 tsc 规则：常量表达式折叠（`10 - 8`、`Up << 1`）、运行时表达式兜底（`someRuntimeValue()`）都编译通过；字符串成员之后无初始化器的成员报 `error.UnexpectedToken`。
+- **实现**：两次 `parseTSStatement`，一次期望成功一次期望失败。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "try finally parses one shared finalizer body for every abrupt exit"` (`src/tests/parser.zig:9787`)

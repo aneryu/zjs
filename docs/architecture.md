@@ -88,11 +88,15 @@ match.
 
 ## Parser — `src/parser.zig`
 
-`parser.compile` is the compile wrapper. The lexer, TypeScript erasure, and
-QuickJS-aligned parser/emitter live in this one file because QuickJS’s
-`ParseState` is also a single compilation unit. TypeScript support is syntax
-erasure, not a typechecker. `simple_token.zig` holds the token subset used
-by that lookahead path.
+`parser.compile` is the compile wrapper. The QuickJS-aligned parser/emitter
+lives in this one file because QuickJS’s `ParseState` is also a single
+compilation unit. The grammar is TypeScript’s and JavaScript is parsed as its
+subset: there is no source-kind switch. Type syntax is consumed by the
+emission-free `tsParse*` family, so JavaScript input produces byte-identical
+bytecode; `enum`, `namespace`, parameter properties and `import x = A.B` are
+lowered by the ordinary emitter. It is not a typechecker. Design and the
+three tsc-resolved ambiguities: [parser-ts-first-class-design.md](parser-ts-first-class-design.md).
+`simple_token.zig` holds the token subset used by the lookahead path.
 
 ## Compiler — `src/compiler/`
 

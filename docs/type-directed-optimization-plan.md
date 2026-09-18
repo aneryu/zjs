@@ -194,10 +194,11 @@ TS 终门 FAIL。尸检定理：**zjs 属性快臂实测已 2-3 cyc 单探，任
 - zjs parser 扩展 TS 语法：解析类型注解并保留到编译器可见的位置
   （运行语义 = 类型剥离后的 JS，与 tsc/Node type-stripping 对齐）。
   这是独立可交付项（T-gate 0），也让 zjs 可直接执行 .ts。
-  **范围限定为可擦除语法子集**（erasableSyntaxOnly，与 Node
-  `--experimental-strip-types` 同界）：enum / namespace / 装饰器 /
-  参数属性有运行时语义，不属于类型剥离，v1 显式拒绝（lint 前置
-  转换或降级为普通 JS 模块）。
+  **2026-09-19 状态**：语法侧已落地（`docs/parser-ts-first-class-design.md`）：
+  TS 是 parser 的唯一文法，类型语法由纯解析函数族消费，尚未保留成类型
+  AST（接口按"可选 sink"预留）。与本段原口径不同的裁决：enum /
+  namespace / 参数属性 / `import x = A.B` 有运行时语义且已按 tsc 降级
+  实现并保留；装饰器、`import = require()`、`export =`、JSX 明确拒绝。
 - type lint 工具（fun 工具链侧）对模块出具**资格证书
   （certificate）**：声明"该模块的注解在子集 S 下健全"，绑定
   源码 hash + lint 版本 + zjs 配置签名（复用 `zjs-config` 签名机制，

@@ -7,11 +7,9 @@ const parser = @import("../parser.zig");
 
 const Parser = parser.Parser;
 
-pub const SourceKind = enum { javascript, typescript };
 pub const RootKind = enum { script, module };
 
 pub const Options = struct {
-    source_kind: SourceKind = .javascript,
     root: RootKind = .script,
     /// Phase-1 temp scope markers. The parser scope-event tests need them on.
     emit_phase1_temp: bool = true,
@@ -72,7 +70,6 @@ pub fn parseAndCompileV2TestProgram(
 
     var lexer = parser.Lexer.init(testing_allocator, &rt.atoms, source);
     errdefer lexer.deinit();
-    if (options.source_kind == .typescript) try lexer.enableTypeScript();
 
     var state = try Parser.ParseState.init(&lexer, &function);
     errdefer state.deinit(rt);

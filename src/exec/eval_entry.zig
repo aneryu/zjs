@@ -98,7 +98,6 @@ noinline fn prepareRootFunction(
         .mode = parserMode(options.mode),
         .filename = options.filename,
         .script_or_module = if (module_name != core.atom.null_atom) module_name else null,
-        .source_kind = parserSourceKind(options.source_kind),
         .strict = options.parse_strict,
         // QuickJS `js_parse_program` always materializes the hidden `<ret>`
         // completion slot for scripts (quickjs.c:37095-37121). Whether an
@@ -479,14 +478,6 @@ fn parserMode(mode: core.context.EvalMode) parser.Mode {
         .module => .module,
         .eval_direct => .eval_direct,
         .eval_indirect => .eval_indirect,
-    };
-}
-
-fn parserSourceKind(kind: core.context.EvalSourceKind) parser.SourceKind {
-    return switch (kind) {
-        .auto => .auto,
-        .javascript => .javascript,
-        .typescript => .typescript,
     };
 }
 

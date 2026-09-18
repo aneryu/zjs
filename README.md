@@ -22,14 +22,15 @@ replacement.
 | What is it written in? | Zig 0.16.0 |
 | What defines JavaScript behavior? | ECMA-262 as validated by test262; QuickJS is the comparison reference |
 | How do Zig applications use it? | Through the `zjs` module's Zig-native embedding API |
-| Does it support TypeScript? | Partial syntax erasure; it is not a type checker or full `tsc` replacement |
+| Does it support TypeScript? | Yes: the parser's grammar is TypeScript's, so `.ts` sources run directly (types erased, `enum`/`namespace`/parameter properties lowered). It is not a type checker |
 | What is the compatibility evidence? | The repository's pinned test262 profile and checked results |
 | What is the license? | MIT, including the retained QuickJS attribution in [`LICENSE`](LICENSE) |
 
 Use zjs when a Zig application needs an in-process JavaScript interpreter with
 explicit ownership and runtime control. Choose another runtime when the
 application needs Node.js packages and APIs, browser APIs, a security boundary
-for untrusted code, the QuickJS C ABI, or complete TypeScript language support.
+for untrusted code, the QuickJS C ABI, TypeScript type checking, JSX, or
+decorators.
 
 ## Performance: bench-v8
 
@@ -133,12 +134,13 @@ zjs aims to remain aligned with QuickJS for JavaScript semantics while making
 JavaScript and TypeScript first-class, inspectable components of Zig
 applications. Two major areas remain on the roadmap:
 
-1. **Native TypeScript support — partial today.** zjs currently has partial
-   TypeScript syntax-erasure support, but it does not yet cover the full
-   TypeScript syntax surface. The roadmap is to expand direct parsing and
-   execution of `.ts`, `.mts`, `.cts`, and `.tsx` sources without a separate
-   transpilation step, with useful source locations and diagnostics. zjs is not
-   intended to replace the TypeScript type checker or `tsc`.
+1. **Native TypeScript support — grammar level today.** The parser reads
+   TypeScript directly and treats JavaScript as its subset; `.ts`, `.mts`,
+   and `.cts` sources run without a transpilation step. Type-only syntax is
+   erased, `enum` / `namespace` / parameter properties / `import x = A.B`
+   are lowered. Out of scope: type checking, JSX (`.tsx`), decorators, and
+   `import x = require()` / `export =`. zjs is not intended to replace the
+   TypeScript type checker or `tsc`.
 2. **Chrome DevTools Protocol support — not implemented.** zjs does not
    currently expose a CDP inspector or debugger. The roadmap begins with
    runtime evaluation, breakpoints, stepping, call stacks, and scope inspection

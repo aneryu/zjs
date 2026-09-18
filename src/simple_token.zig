@@ -121,6 +121,11 @@ pub const BalancedFollowing = enum {
     right_paren,
     right_bracket,
     right_brace,
+    /// `(...) {` — a function body follows the parameter list.
+    left_brace,
+    /// `(...) :` — either a conditional's colon or a TypeScript arrow return
+    /// type. The borrowed scan cannot tell; callers fall back to the lexer.
+    colon,
     identifier,
     in_keyword,
     line_terminator,
@@ -302,6 +307,7 @@ pub fn balancedAfterOpen(
 /// Compatibility helper for the identifier/parenthesized-arrow callers.
 pub fn parenArrowAfterOpen(source: []const u8, start: usize) ?bool {
     const balanced = balancedAfterOpen(source, start, '(', true) orelse return null;
+    if (balanced.closed and balanced.following == .colon) return null;
     return balanced.closed and balanced.following == .arrow;
 }
 
@@ -359,6 +365,8 @@ fn scanFollowing(source: []const u8, start: usize, no_line_terminator: bool) ?Ba
                 return .assignment;
             },
             ',' => return .comma,
+            ':' => return .colon,
+            '{' => return .left_brace,
             ')' => return .right_paren,
             ']' => return .right_bracket,
             '}' => return .right_brace,
@@ -724,7 +732,7 @@ test "borrowed balanced scanner preserves QuickJS topology bits" {
 
     const params = balancedAfterOpen("(a, b = (c = 1)) {", 1, '(', false).?;
     try std.testing.expect(params.closed);
-    try std.testing.expectEqual(BalancedFollowing.other, params.following);
+    try std.testing.expectEqual(BalancedFollowing.left_brace, params.following);
     try std.testing.expect(params.has_assignment);
 
     const traditional_for = balancedAfterOpen("(i = 0; i < n; i++) body", 1, '(', false).?;

@@ -46,6 +46,10 @@ recover them from git history when needed.
 - [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.
 - [Verification Policy](verification-policy.md): per-change and batch gates.
 - [Compiler Contract](compiler-contract.md): normative compiler identity rules.
+- [Parser: TypeScript as the grammar](parser-ts-first-class-design.md): one
+  grammar for `.js` and `.ts`, the emission-free type parser, the three
+  tsc-resolved ambiguities, and the `zjs --bytecode-fingerprint` identity gate
+  (`tools/gates/bytecode_fingerprint.sh`).
 - [Borrowed Atom Audit](borrowed_atom_audit.md): atom-rooting contract and
   the `-Dzjs_ownership_audit` build.
 

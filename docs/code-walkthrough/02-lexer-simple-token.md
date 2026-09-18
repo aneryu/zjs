@@ -74,7 +74,7 @@ parser 三处入口：
 - **签名**：`pub fn balancedAfterOpen( source: []const u8, start: usize, opening: u8, no_line_terminator: bool, ) ?BalancedScan`。
 - **作用**：从已扫过的 `(` `[` `{` **之后**扫到匹配闭合，分类随后 token，并记下拓扑位。对齐 `js_parse_skip_parens_token`。
 - **实现**：`opening` 必须是三开界之一，否则 null。`delimiters[256]` 栈，`level` 从 2（哨兵 0 + opening）。空白（含 CR/LF）无条件跳过——`no_line_terminator` 只作用于闭合后的 `scanFollowing`。开界入栈，regexp 允许；闭界必须匹配，level 回到 1 则 `closed=true` 并 `scanFollowing`。引号 `skipQuoted`。`/`：注释、或按 `regexp_context`（ident 延迟到 `identifierRegexpContext`）扫 regexp / 除号。`+`/`-`：`-` 处若是 `-->` → null（HTML 注释）；`++`/`--` 禁止 regexp，单 `+`/`-`/`+=` 允许。`.`：`...` 在 level==2 置 ellipsis；`.digit` `skipNumberLike`；否则成员点。数字 `skipNumberLike`。`` ` `` 与 `\\` 立即 null。`<` 遇 `<!--` null。`#` 私有名必须 ASCII ident start。ASCII 单词记下区间，context=`.identifier`。`=` 若下一字节不是 `=`/`>` 则 `has_assignment`，再吞 punct 续字节。`;` 在 level==2 置 semicolon。其它算符吞续字节后 regexp 允许。非 ASCII 或未知 ASCII → null。源耗尽返回当前 `result`（可能 `closed=false`）。
-- **所有权 / 错误 / 调用**：不分配。parser 仅在 `!lex.is_typescript` 时调用。`null` = 回退全量 lexer。当待入栈的 level>=256 时返回 null；256 槽还包含哨兵，最多同时保存 255 个开分隔符。
+- **所有权 / 错误 / 调用**：不分配。parser 的 `scanBalancedToken` 总是先试它。`null` = 回退全量 lexer。`(...) {` 归为 `.left_brace`、`(...) :` 归为 `.colon`；`parenArrowAfterOpen` 遇到 `.colon` 返回 `null`，让 parser 判断那是箭头返回类型还是三元冒号。当待入栈的 level>=256 时返回 null；256 槽还包含哨兵，最多同时保存 255 个开分隔符。
 
 ### `parenArrowAfterOpen` (`src/simple_token.zig:303`)
 

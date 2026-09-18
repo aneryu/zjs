@@ -1,18 +1,17 @@
 # 02 — Lexer：词法扫描与前瞻
 
-本册覆盖 `src/lexer.zig` 与 `src/simple_token.zig`。词法器把源字节变成 `parser.token.Token`，parser 用它做递归下降、模板续扫、regexp 重扫和箭头前瞻。TypeScript 只做语法擦除，不进类型检查。
+本册覆盖 `src/lexer.zig` 与 `src/simple_token.zig`。词法器把源字节变成 `parser.token.Token`，parser 用它做递归下降、模板续扫、regexp 重扫和箭头前瞻。词法层不区分 JS 与 TS：TypeScript 语法由 parser 直接解析，lexer 只为泛型闭合提供 `splitGreaterThan` / `splitLessThan`。
 
 子文件：
 
 - [02-lexer.md](02-lexer.md)（本文件）：`namespace`、`LexerImpl` 热路径、标识符/数字/字符串/模板/regexp/标点
-- [02-lexer-typescript.md](02-lexer-typescript.md)：`enableTypeScript` 之后的擦除区间与 TS 粗词法
 - [02-lexer-simple-token.md](02-lexer-simple-token.md)：非持有的 `simple_next_token` 子集
 
 权威仍是源码与 ECMA-262。`lexer.zig` 对齐 QuickJS `quickjs.c:21794..23200` 的 `next_token` / `js_parse_string` / `js_parse_template_part` / `js_parse_regexp`。token 整数 id 在 `parser.zig` 的 `token` 命名空间，不在本文件。
 
 ## 和 parser 怎么配合
 
-`parser.zig:265` 用 `lexer.namespace(token)` 实例化本文件。生产入口 `compileQjsProgram`（`parser.zig:16180`）构造 `Lexer`，按 `options.mode == .module`（`is_strict_mode` 还或上 `options.strict`）设 `is_strict_mode` / `is_module`，再按 `shouldStrip` 决定是否 `enableTypeScript()`。
+`parser.zig:265` 用 `lexer.namespace(token)` 实例化本文件。生产入口 `compileQjsProgram`（`parser.zig:16180`）构造 `Lexer`，按 `options.mode == .module`（`is_strict_mode` 还或上 `options.strict`）设 `is_strict_mode` / `is_module`。
 
 | 协作点 | parser 侧 | lexer / simple_token |
 | --- | --- | --- |
@@ -22,21 +21,20 @@
 | 模板 | 替换表达式后 lookahead 已吃掉 `}` | `nextTemplatePartAfterBraceInto`（`pos` 已过 `}`，不再 bump） |
 | 模板（pos 在 `}`） | 测试 / 非 lookahead 路径 | `nextTemplatePart` / `nextTemplatePartInto` |
 | regexp | 先看到 `/` 或 `/=`，确认 regexp 上下文 | `rescanRegexpInto(out, mark_pos)` 回到斜杠重扫 |
-| `ident =>` | `checkIdentArrowHead` | 先 `simpleNextIsArrowNoLineTerminator`；TS 或 `.unsupported` 才快照 + 全量 lexer |
+| `ident =>` | `checkIdentArrowHead` | 先 `simpleNextIsArrowNoLineTerminator`；`.unsupported` 才快照 + 全量 lexer |
 | `(...) =>` | `checkAsyncArrowHeadAfterAsync` 等 | `simpleCurrentParenIsArrowHead` → `parenArrowAfterOpen` |
-| 跳过括号/数组/对象 | `scanBalancedToken` | `balancedAfterOpen`；模板、`\\`、非 ASCII、TS 擦除回退全量 lexer |
+| 跳过括号/数组/对象 | `scanBalancedToken` | `balancedAfterOpen`；模板、`\\`、非 ASCII 回退全量 lexer |
 | 投机扫描 | 保存 cursor，`nextInto` 到 scratch | `dupToken` 复制持有 payload；失败路径 `freeToken` |
 
-TypeScript 相关标志：
+TypeScript 相关：
 
-- `is_typescript`：`enableTypeScript` 置位；`skipTrivia` 按 `skipped_intervals` 跳过擦除区间；`simpleNextIsArrowNoLineTerminator` / `simpleCurrentParenIsArrowHead` 直接返回 `null`，parser 不得用 raw 字节前瞻。
-- `skipped_intervals`：`markTypeRanges` 合并后的半开区间 `[start, end)`。命中时 `skipRange` 推进 `pos/line/col`，区间内的 LF 会置 `got_lf`。
+- `splitGreaterThan` / `splitLessThan`：parser 的类型解析器在需要单个 `>`（或 `<`）而当前 token 是 `>>` / `>>>` / `>=` / `>>=` / `>>>=`（`<<` / `<<=`）时调用，把 token 截成首字节并把 `pos` 停在其后，余下字节由下一次 `nextInto` 重切。对齐 tsc 的 `reScanGreaterToken`。
 - `is_strict_mode`：遗留八进制、`\8`/`\9`、keyword 的 FutureReservedWord。
 - `is_module` + `allow_html_comments`：脚本才认 `<!--` / 行首 `-->`；模块报 `HtmlCommentInModule` 的路径在 parser，lexer 这边直接不把它们当 trivia。
 
 ## 文件级类型
 
-`lexer.zig` 只有一个入口：`namespace(comptime token: type)`。返回的匿名 struct 里嵌 `LexerImpl`、`Error`、TS 擦除类型。parser 把 `LexerImpl` re-export 成 `Lexer`。
+`lexer.zig` 只有一个入口：`namespace(comptime token: type)`。返回的匿名 struct 里嵌 `LexerImpl`、`Error`。parser 把 `LexerImpl` re-export 成 `Lexer`。
 
 ### `Error`（`src/lexer.zig:21`）
 
@@ -64,10 +62,8 @@ TypeScript 相关标志：
 | `source` | 整份源，lexer 不拥有 |
 | `pos` / `line` / `col` | 下一字节；`line`/`col` 1-based。`\n` 才换行；`\r\n` 在 trivia/数字等路径分别处理 |
 | `is_strict_mode` / `is_module` / `allow_html_comments` | 对齐 `JSParseState` |
-| `got_lf` | 最近一次 `nextInto` 在 token 前跳过了 LineTerminator（含块注释内、TS skip 区间）。对齐 `got_lf`（`quickjs.c:21572`） |
+| `got_lf` | 最近一次 `nextInto` 在 token 前跳过了 LineTerminator（含块注释内）。对齐 `got_lf`（`quickjs.c:21572`） |
 | `mark_pos` / `mark_line` / `mark_col` | 当前 token 起点；parser 用 `mark_pos` 做 regexp 重扫 |
-| `is_typescript` | 擦除模式 |
-| `skipped_intervals` | 按 `start` 排序、已合并的擦除区间 |
 
 `bump` 把任意非 `\n` 字节（含 `\r`、UTF-8 续字节）都算一列；多字节空白走专门的 `skipNonAsciiWhiteSpace`，把 2/3 字节序列算一列。
 
@@ -98,30 +94,16 @@ token 侧 `parser.token.TemplatePart`：`no_substitution` / `head` / `middle` / 
 ### `LexerImpl.deinit` (`src/lexer.zig:87`)
 
 - **签名**：`pub fn deinit(self: *LexerImpl) void`。
-- **作用**：释放擦除区间表。
-- **实现**：`skipped_intervals.deinit(self.allocator)`。不释放当前 token payload——那是 parser 的 `token` 所有权。
+- **作用**：生命周期对称占位，当前无资源可释放。
+- **实现**：空操作。不释放当前 token payload——那是 parser 的 `token` 所有权。
 - **所有权 / 错误 / 调用**：调用方还要对未 `freeToken` 的 `Token` 自行释放。无 error。
 
-### `LexerImpl.enableTypeScript` (`src/lexer.zig:91`)
+### `LexerImpl.splitGreaterThan` / `splitLessThan` / `splitLeadingByte` (`src/lexer.zig`)
 
-- **签名**：`pub fn enableTypeScript(self: *LexerImpl) !void`。
-- **作用**：打开 TS 擦除：后续 `skipTrivia` 会跳过类型区间。
-- **实现**：`is_typescript = true`，然后 `markTypeRanges`（见 [02-lexer-typescript.md](02-lexer-typescript.md)）。失败来自 tokenize / `ArrayList`。
-- **所有权 / 错误 / 调用**：`compileQjsProgram` 在 `shouldStrip(options.source_kind, options.filename)` 为真时调用。之后 `simple_*` 前瞻全部失效。
-
-### `LexerImpl.getSkippedIntervalAtPos` (`src/lexer.zig:96`)
-
-- **签名**：`fn getSkippedIntervalAtPos(self: *const LexerImpl, pos: usize) ?Range`。
-- **作用**：若 `pos` 正好是某擦除区间起点，返回该区间。
-- **实现**：线性扫 `skipped_intervals`（已按 `start` 排序）。`range.start == pos` 命中；`range.start > pos` 提前结束。不检查 `pos` 落在区间内部——`skipTrivia` 每次只在 token 边界问一次，跳完后 `pos == range.end`。
-- **所有权 / 错误 / 调用**：只读。仅 `skipTrivia` 在 `is_typescript` 时调用。
-
-### `LexerImpl.skipRange` (`src/lexer.zig:104`)
-
-- **签名**：`fn skipRange(self: *LexerImpl, range: Range) bool`。
-- **作用**：把游标从当前 `pos` 推到 `range.end`，维护行列，报告是否见到换行。
-- **实现**：逐字节走 `[pos, range.end)`。`\n` 与 `\r`（可跟 `\n`）都让 `line+=1, col=1` 并记 `saw_lf`；其它字节 `col+=1`。最后 `self.pos = range.end`。
-- **所有权 / 错误 / 调用**：不分配。返回值给 `skipTrivia` 置 `got_lf` / `allow_html_close`。区间本身是源切片，无 payload。
+- **签名**：`pub fn splitGreaterThan(self: *LexerImpl, tok: *t.Token) void`、`pub fn splitLessThan(...)`、`fn splitLeadingByte(self, tok, byte: u8) void`。
+- **作用**：TypeScript 泛型闭合。parser 需要单个 `>` 而当前 token 是 `>>` / `>>>` / `>=` / `>>=` / `>>>=` 时（或需要 `<` 而当前是 `<<` / `<<=`），把该 token 重切成首字节。
+- **实现**：由 `tok.ptr` 算出 token 起点，`pos = start + 1`，`line/col` 按 token 起点加一列；`tok.val` 改成单字符 kind，`len = 1`，payload 清空。余下字节由 parser 随后的 `advance` → `nextInto` 重新切分。对齐 tsc `reScanGreaterToken` / `reScanLessThanToken`。
+- **所有权 / 错误 / 调用**：不分配、无 error。仅 parser 的 `tsExpectGreater` / `tsExpectLess` 调用；表达式上下文的泛型实参列表（`f<T>(x)`）不用它——那里闭合必须是独立的 `>`，见 03-parser-ts.md。
 
 ### `LexerImpl.releaseTokenPayload` (`src/lexer.zig:128`)
 
@@ -246,7 +228,7 @@ token 侧 `parser.token.TemplatePart`：`no_substitution` / `head` / `middle` / 
 
 - **签名**：`pub fn simpleNextIsArrowNoLineTerminator(self: *const LexerImpl) ?bool`。
 - **作用**：不改 lexer 状态，问「下一 token 是不是同行的 `=>`」。对齐 `peek_token(..., TRUE)`。
-- **实现**：`is_typescript` 则 `null`。否则 `simple_token.next(source, &local_pos, true)`：`.arrow` → true；`.unsupported` → null（调用方回退全量 lexer）；其余（含 `.line_terminator`）→ false。
+- **实现**：`simple_token.next(source, &local_pos, true)`：`.arrow` → true；`.unsupported` → null（调用方回退全量 lexer）；其余（含 `.line_terminator`）→ false。
 - **所有权 / 错误 / 调用**：`checkIdentArrowHead`（`parser.zig:3827`）首选。不分配、不置 `got_lf`。
 
 ### `LexerImpl.simpleCurrentParenIsArrowHead` (`src/lexer.zig:330`)
@@ -739,7 +721,7 @@ token 侧 `parser.token.TemplatePart`：`no_substitution` / `head` / `middle` / 
 - **实现**：`null/false/true` 与控制/声明/class/module 关键字 true。`implements interface let package private protected public static yield` 随 `is_strict`。`await`/`of` 上下文，返回 false。
 - **所有权 / 错误 / 调用**：parser 用 `is_reserved` 拒绝 BindingIdentifier。无分配。
 
-TypeScript 擦除函数、`Range` / `SourceKind` 等见 [02-lexer-typescript.md](02-lexer-typescript.md)。`simple_token` 见 [02-lexer-simple-token.md](02-lexer-simple-token.md)。
+`simple_token` 见 [02-lexer-simple-token.md](02-lexer-simple-token.md)。
 
 ## 覆盖核对
 

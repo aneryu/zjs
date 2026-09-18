@@ -50,6 +50,10 @@ pub const RuntimeOptions = struct {
     gc_block_census: bool = false,
     perf_json: bool = false,
     leak_check: bool = false,
+    /// Compile-only diagnostic: print a fingerprint of the compiled bytecode
+    /// tree instead of running the file. Used by the parser identity gate.
+    bytecode_fingerprint: bool = false,
+    bytecode_fingerprint_verbose: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
     include_count: usize = 0,
 
@@ -145,6 +149,17 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         }
         if (std.mem.eql(u8, rest[0], "--perf-json")) {
             options.perf_json = true;
+            rest = rest[1..];
+            continue;
+        }
+        if (std.mem.eql(u8, rest[0], "--bytecode-fingerprint")) {
+            options.bytecode_fingerprint = true;
+            rest = rest[1..];
+            continue;
+        }
+        if (std.mem.eql(u8, rest[0], "--bytecode-fingerprint-verbose")) {
+            options.bytecode_fingerprint = true;
+            options.bytecode_fingerprint_verbose = true;
             rest = rest[1..];
             continue;
         }
@@ -328,6 +343,20 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     include_ns = platform_clock.elapsedNanosSince(include_start);
+    if (commandRuntimeOptions(command).bytecode_fingerprint) {
+        switch (command) {
+            .file => |file| {
+                const mode = detectFileMode(file.path, source_text, file.mode);
+                try printBytecodeFingerprint(&stdout_writer.interface, &runtime, source_text, file.path, mode, commandRuntimeOptions(command).bytecode_fingerprint_verbose);
+                try stdout_writer.interface.flush();
+                return;
+            },
+            .eval => {
+                try cli_process.printError(io, "zjs: --bytecode-fingerprint requires a file argument\n");
+                std.process.exit(2);
+            },
+        }
+    }
     const eval_start = platform_clock.monotonicNanos();
     const value = switch (command) {
         .eval => runtime.context.eval(source_text, .{
@@ -530,6 +559,97 @@ fn parseLimitKBytes(text: []const u8) !usize {
     if (text.len == 0) return error.InvalidCharacter;
     const kbytes = try engine.core.value_format.parseAsciiInt(usize, text, 10);
     return std.math.mul(usize, kbytes, 1024) catch error.Overflow;
+}
+
+/// Parser identity gate: compile the file without running it and print a
+/// stable hash of the whole FunctionBytecode tree (code bytes, counts, and
+/// every nested child in cpool order). Two engine builds that print the same
+/// line for a corpus produce byte-identical bytecode for it.
+fn printBytecodeFingerprint(
+    output: *std.Io.Writer,
+    runtime: *Runtime,
+    source_text: []const u8,
+    path: []const u8,
+    mode: zjs.context.EvalMode,
+    verbose: bool,
+) !void {
+    var compiled = engine.parser.compile(.{ .realm = runtime.context.core }, source_text, .{
+        .mode = if (mode == .module) .module else .script,
+        .filename = path,
+        .return_completion = mode != .module,
+    }) catch |err| {
+        try output.print("error {s} {s}\n", .{ @errorName(err), path });
+        return;
+    };
+    defer compiled.deinit();
+    if (compiled.syntax_error) |syntax_error| {
+        try output.print("syntax-error {d}:{d} {s} {s}\n", .{
+            syntax_error.position.line,
+            syntax_error.position.column,
+            syntax_error.message,
+            path,
+        });
+        return;
+    }
+    const root = compiled.functionBytecode() orelse {
+        try output.print("no-artifact {s}\n", .{path});
+        return;
+    };
+    var hasher = std.hash.Wyhash.init(0x7a6a73);
+    var function_count: u32 = 0;
+    fingerprintFunctionBytecode(&hasher, root, &function_count, if (verbose) output else null);
+    try output.print("{x:0>16} functions={d} {s}\n", .{ hasher.final(), function_count, path });
+}
+
+fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const engine.bytecode.FunctionBytecode, function_count: *u32, verbose: ?*std.Io.Writer) void {
+    function_count.* += 1;
+    const code = fb.byteCode();
+    if (verbose) |out| {
+        out.print("  fn#{d} code_len={d} args={d} vars={d} defined_args={d} stack={d} closure_vars={d} cpool={d} flags={x}/{x}/{x}\n", .{
+            function_count.*,     code.len,       fb.arg_count, fb.var_count,   fb.defined_arg_count, fb.stack_size,
+            fb.closure_var_count, fb.cpool_count, fb.js_mode,   fb.flag_byte17, fb.flag_byte18,
+        }) catch {};
+        if (fb.debugInfo()) |debug| {
+            if (debug.source_ptr) |source_ptr| {
+                const source_len: usize = @intCast(@max(debug.source_len, 0));
+                out.print("    src: {s}\n", .{source_ptr[0..@min(source_len, 200)]}) catch {};
+            }
+        }
+        out.print("    ", .{}) catch {};
+        for (code) |byte| out.print("{x:0>2}", .{byte}) catch {};
+        out.print("\n", .{}) catch {};
+    }
+    hasher.update(std.mem.asBytes(&@as(u32, @intCast(code.len))));
+    hasher.update(code);
+    const scalars = [_]u32{
+        fb.arg_count,                   fb.var_count,
+        fb.defined_arg_count,           fb.stack_size,
+        @bitCast(fb.closure_var_count), fb.js_mode,
+        fb.flag_byte17,                 fb.flag_byte18,
+        @bitCast(fb.cpool_count),
+    };
+    hasher.update(std.mem.sliceAsBytes(scalars[0..]));
+    for (fb.cpoolSlice()) |value| {
+        if (engine.exec.call_runtime.functionBytecodeFromValue(value)) |child| {
+            hasher.update("fb");
+            fingerprintFunctionBytecode(hasher, child, function_count, verbose);
+        } else if (value.isTracerOwned()) {
+            // Heap values: hash the tag and, for strings, the contents. The
+            // address itself differs between runs.
+            const tag: i32 = value.tagOf();
+            hasher.update(std.mem.asBytes(&tag));
+            if (value.asStringBodyRaw()) |body| {
+                if (body.len_meta.is_wide) {
+                    hasher.update(std.mem.sliceAsBytes(body.utf16()));
+                } else {
+                    hasher.update(body.latin1());
+                }
+            }
+        } else {
+            const bits: u64 = @bitCast(value);
+            hasher.update(std.mem.asBytes(&bits));
+        }
+    }
 }
 
 fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.context.EvalMode) zjs.context.EvalMode {

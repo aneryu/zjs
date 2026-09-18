@@ -30,9 +30,7 @@ core 拥有本类型；exec/runtime/binding 可消费，context 不得反向 imp
 
 `EvalMode`：`script` / `module` / `eval_direct` / `eval_indirect`。
 
-`EvalSourceKind`：`auto` / `javascript` / `typescript`。
-
-`ContextEvalOptions`（别名EvalOptions）：mode默认script，filename为<eval>，source_kind为auto，output/timing为null；parse_strict/runtime_strict为false，return_completion为true，discard_script_result为false。选项定义不执行语法判断或求值，消费行为在exec/binding。
+`ContextEvalOptions`（别名EvalOptions）：mode默认script，filename为<eval>，output/timing为null；parse_strict/runtime_strict为false，return_completion为true，discard_script_result为false。选项定义不执行语法判断或求值，消费行为在exec/binding。
 
 `DataPropertyOptions`：writable/enumerable/configurable均默认true。PropertyAccessOptions的output/realm_global默认null；FunctionCallOptions另有可选this_value默认null。ErrorOptions的realm_global默认null、capture_stack默认true；ScriptEvalOptions的output/realm_global默认null、filename默认<evalScript>。PropertyDescriptor直接别名Descriptor，没有新增包装。
 

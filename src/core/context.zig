@@ -171,16 +171,9 @@ pub const EvalMode = enum {
     eval_indirect,
 };
 
-pub const EvalSourceKind = enum {
-    auto,
-    javascript,
-    typescript,
-};
-
 pub const ContextEvalOptions = struct {
     mode: EvalMode = .script,
     filename: []const u8 = "<eval>",
-    source_kind: EvalSourceKind = .auto,
     output: ?*std.Io.Writer = null,
     parse_strict: bool = false,
     runtime_strict: bool = false,

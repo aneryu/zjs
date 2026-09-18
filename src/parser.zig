@@ -516,7 +516,11 @@ pub const parser_core = struct {
         pow_allowed: bool = false,
         result_needed: bool = true,
         yield_forbidden: bool = false,
-        _padding: u28 = 0,
+        /// TypeScript: in the whenTrue branch of `?:` an arrow head may not
+        /// carry a return type, so `c ? (x) : y => z` stays a conditional
+        /// (tsc `allowReturnTypeInArrowFunction`).
+        arrow_return_type_forbidden: bool = false,
+        _padding: u27 = 0,
 
         pub const default = ParseFlags{ .in_accepted = true };
     };
@@ -818,6 +822,13 @@ pub const parser_core = struct {
         last_declared_atom: ?Atom = null,
         current_parameter_properties: ?std.ArrayList(Atom) = null,
         namespace_export: bool = false,
+        /// TypeScript: inside the check type of `A extends B ? C : D`, a
+        /// nested conditional type needs parentheses (tsc
+        /// `inDisallowConditionalTypesContext`).
+        ts_disallow_conditional: bool = false,
+        /// TypeScript: the last `parseFunctionDecl` consumed a body-less
+        /// overload signature and declared nothing.
+        ts_last_decl_was_signature: bool = false,
 
         /// QuickJS `eval_ret_idx` mirror (`quickjs.c:21480`). When ≥ 0,
         /// the slot at this local index receives the result of every
@@ -2037,7 +2048,7 @@ pub const parser_core = struct {
                             .line = self.lex.mark_line,
                             .column = self.lex.mark_col,
                         },
-                        @errorName(err),
+                        decoratorDiagnosticMessage(self.lex.source, err, self.lex.mark_pos) orelse @errorName(err),
                     );
                 }
                 return err;
@@ -2053,6 +2064,13 @@ pub const parser_core = struct {
             @memcpy(pending.message_buffer[0..message_len], message[0..message_len]);
             pending.message_len = @intCast(message_len);
             self.pending_diagnostic = pending;
+        }
+
+        /// `@` is lexed as an invalid identifier start. Name the real cause:
+        /// decorators are outside the supported grammar.
+        pub fn decoratorDiagnosticMessage(source: []const u8, err: anyerror, offset: usize) ?[]const u8 {
+            if (err != error.InvalidIdentifier or offset >= source.len or source[offset] != '@') return null;
+            return "decorators are not supported; remove the decorator or refactor";
         }
 
         fn currentDiagnosticPosition(self: *const State) diagnostics.Position {
@@ -2760,18 +2778,25 @@ pub const parser_core = struct {
                 s.token.payload.ident.atom == atom_module.ids.async_;
         }
 
+        /// TypeScript parameter-property modifier at the current token. The
+        /// word is a modifier only when a binding follows it, so a parameter
+        /// named `readonly` still parses.
         fn isParameterModifier(s: *State) bool {
             const k = s.peekKind();
-            if (k == tok.TOK_PUBLIC or k == tok.TOK_PRIVATE or k == tok.TOK_PROTECTED) return true;
-            if (k == tok.TOK_IDENT) {
-                if (s.token.payload.ident.has_escape) return false;
+            var is_word = k == tok.TOK_PUBLIC or k == tok.TOK_PRIVATE or k == tok.TOK_PROTECTED;
+            if (!is_word and k == tok.TOK_IDENT and !s.token.payload.ident.has_escape) {
                 const ident_str = s.lex.atoms.name(s.token.payload.ident.atom) orelse return false;
-                return std.mem.eql(u8, ident_str, "public") or
+                is_word = std.mem.eql(u8, ident_str, "public") or
                     std.mem.eql(u8, ident_str, "private") or
                     std.mem.eql(u8, ident_str, "protected") or
-                    std.mem.eql(u8, ident_str, "readonly");
+                    std.mem.eql(u8, ident_str, "readonly") or
+                    std.mem.eql(u8, ident_str, "override");
             }
-            return false;
+            if (!is_word) return false;
+            const next = s.peekNextKind();
+            return tsKindIsIdentifierLike(next) or next == tok.TOK_THIS or next == '{' or next == '[' or
+                next == tok.TOK_ELLIPSIS or next == tok.TOK_PUBLIC or next == tok.TOK_PRIVATE or
+                next == tok.TOK_PROTECTED;
         }
 
         fn isOfToken(s: *State) bool {
@@ -3631,7 +3656,7 @@ pub const parser_core = struct {
     /// `token_is_pseudo_keyword(JS_ATOM_async)` succeeds. Keep that atom-id
     /// gate at the caller so ordinary identifiers never take a speculative
     /// lexer snapshot here.
-    fn checkAsyncArrowHeadAfterAsync(s: *State) Error!bool {
+    fn checkAsyncArrowHeadAfterAsync(s: *State, return_type_forbidden: bool) Error!bool {
         std.debug.assert(s.isAsyncIdentifier());
 
         const snapshot = takeLexerCursorSnapshot(s);
@@ -3639,6 +3664,14 @@ pub const parser_core = struct {
 
         const param_kind = nextRegexpAwareLookaheadKind(s, s.peekKind()) catch |err| return lookaheadErrorAsNoMatch(err);
         if (s.lex.gotLineTerminator()) return false;
+        if (param_kind == '<' or param_kind == tok.TOK_SHL) {
+            // TypeScript `async <T>(...) => body`.
+            restoreLexerCursorSnapshot(s, snapshot);
+            const spec = try tsBeginSpeculation(s);
+            defer tsRollback(s, spec);
+            s.advance() catch |err| return lookaheadErrorAsNoMatch(err);
+            return tsGenericArrowHead(s, return_type_forbidden);
+        }
         // qjs `update_token_ident` (quickjs.c:22738-22764) keeps sloppy
         // context keywords as TOK_IDENT. zjs lexes them as dedicated kinds,
         // so AsyncArrowBindingIdentifier must accept those kinds here.
@@ -3649,7 +3682,17 @@ pub const parser_core = struct {
         }
         if (param_kind != '(') return false;
         const balanced = scanBalancedAfterOpening(s, param_kind, true) catch |err| return lookaheadErrorAsNoMatch(err);
-        return balanced.closed and balanced.following == tok.TOK_ARROW;
+        if (!balanced.closed) return false;
+        if (balanced.following == tok.TOK_ARROW) return true;
+        if (balanced.following == ':' and !return_type_forbidden) {
+            // TypeScript `async (...): R => body`.
+            restoreLexerCursorSnapshot(s, snapshot);
+            const spec = try tsBeginSpeculation(s);
+            defer tsRollback(s, spec);
+            s.advance() catch |err| return lookaheadErrorAsNoMatch(err);
+            return tsParenArrowHeadWithReturnType(s);
+        }
+        return false;
     }
 
     /// AsyncArrowBindingIdentifier in sloppy non-generator. Keep `await`
@@ -3670,11 +3713,15 @@ pub const parser_core = struct {
     ///
     /// Saves the lexer position, scans forward with scratch tokens, then
     /// restores the lexer so the cached parser token remains valid.
-    fn checkArrowHead(s: *State) Error!bool {
+    fn checkArrowHead(s: *State, return_type_forbidden: bool) Error!bool {
         if (s.peekKind() == '(') {
             if (s.lex.simpleCurrentParenIsArrowHead()) |matched| return matched;
             const balanced = scanBalancedToken(s, true) catch |err| return lookaheadErrorAsNoMatch(err);
-            return balanced.closed and balanced.following == tok.TOK_ARROW;
+            if (!balanced.closed) return false;
+            if (balanced.following == tok.TOK_ARROW) return true;
+            // TypeScript `(...): R => body`.
+            if (balanced.following == ':' and !return_type_forbidden) return tsParenArrowHeadWithReturnType(s);
+            return false;
         }
         if (s.peekKind() == tok.TOK_IDENT) return try checkIdentArrowHead(s);
         return false;
@@ -3715,7 +3762,7 @@ pub const parser_core = struct {
                 .offset = s.lex.mark_pos,
                 .line = s.lex.mark_line,
                 .column = s.lex.mark_col,
-            }, @errorName(err)),
+            }, State.decoratorDiagnosticMessage(s.lex.source, err, s.lex.mark_pos) orelse @errorName(err)),
         };
     }
 
@@ -3754,16 +3801,27 @@ pub const parser_core = struct {
     /// before destructuring and the ordinary conditional-expression path.
     fn parseArrowAssignment(s: *State, flags: ParseFlags) Error!bool {
         if (s.peekKind() == '(') {
-            if (!(try checkArrowHead(s))) return false;
+            if (!(try checkArrowHead(s, flags.arrow_return_type_forbidden))) return false;
             const source_start = s.currentFunctionSourceStart();
             try parseArrowFunction(s, .normal, source_start, flags);
             return true;
         }
 
+        if (tsAtLess(s)) {
+            // TypeScript generic arrow `<T>(...) => body`; anything else that
+            // starts with `<` is a type assertion handled by parseUnary.
+            if (!(try tsGenericArrowHead(s, flags.arrow_return_type_forbidden))) return false;
+            const source_start = s.currentFunctionSourceStart();
+            try tsParseTypeParameters(s);
+            try parseArrowFunction(s, .normal, source_start, flags);
+            return true;
+        }
+
         if (s.isAsyncIdentifier()) {
-            if (!(try checkAsyncArrowHeadAfterAsync(s))) return false;
+            if (!(try checkAsyncArrowHeadAfterAsync(s, flags.arrow_return_type_forbidden))) return false;
             const source_start = s.currentFunctionSourceStart();
             try s.advance(); // consume contextual `async`
+            if (tsAtLess(s)) try tsParseTypeParameters(s);
             try parseArrowFunction(s, .async, source_start, flags);
             return true;
         }
@@ -4453,6 +4511,7 @@ pub const parser_core = struct {
             try s.advance();
             var then_flags = forceResultNeeded(flags);
             then_flags.in_accepted = true;
+            then_flags.arrow_return_type_forbidden = true;
             const else_flags = forceResultNeeded(flags);
             // qjs js_parse_cond_expr: label1 = emit_goto(if_false), label2 = emit_goto(goto), emit_label at each merge.
             var else_label: Label = .{};
@@ -4552,8 +4611,8 @@ pub const parser_core = struct {
             const retained_private_atom = private_atom;
             try s.advance();
             try s.expectToken(tok.TOK_IN);
-            if ((try checkArrowHead(s)) or
-                (s.isAsyncIdentifier() and (try checkAsyncArrowHeadAfterAsync(s))))
+            if ((try checkArrowHead(s, false)) or
+                (s.isAsyncIdentifier() and (try checkAsyncArrowHeadAfterAsync(s, false))))
             {
                 return s.failUnexpectedToken();
             }
@@ -4563,6 +4622,17 @@ pub const parser_core = struct {
         }
         try parseExprBinary(s, level - 1, flags);
         while (true) {
+            if (level == 4 and tsAtAsOrSatisfies(s)) {
+                // TypeScript `x as T` / `x as const` / `x satisfies T` bind at
+                // relational precedence and erase to their operand.
+                try s.advance();
+                if (s.peekKind() == tok.TOK_CONST) {
+                    try s.advance();
+                } else {
+                    try tsParseTypeAllowConditional(s);
+                }
+                continue;
+            }
             const op_byte = matchBinaryOp(s.peekKind(), level, flags);
             if (op_byte == opcode.op.invalid) return;
             const operator_source = SourcePosition{
@@ -4585,6 +4655,7 @@ pub const parser_core = struct {
     // recursive precedence dispatcher changes code size.
     pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void {
         const k = s.peekKind();
+        if (k == '<' or k == tok.TOK_SHL) return tsParseTypeAssertion(s, flags);
         if (k == @as(tok.TokenKind, @intCast('+'))) {
             const operator_source = SourcePosition{
                 .line_num = s.token.line_num,
@@ -5563,6 +5634,8 @@ pub const parser_core = struct {
             try parsePrimary(s, flags);
             try parseNewCalleeMemberAccess(s);
         }
+        // TypeScript `new C<T>(...)`.
+        if (tsAtLess(s)) _ = try tsTryParseTypeArgumentsInExpression(s);
         if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
             const call_line = s.token.line_num;
             const call_col = s.token.col_num;
@@ -5699,6 +5772,10 @@ pub const parser_core = struct {
                     .col_num = s.token.col_num,
                 };
                 try s.advance();
+                if (tsAtLess(s)) {
+                    // TypeScript `a?.<T>(...)`.
+                    if (!(try tsTryParseTypeArgumentsInExpression(s))) return s.failUnexpectedToken();
+                }
                 const next = s.peekKind();
                 if (next == @as(tok.TokenKind, @intCast('('))) {
                     const call_line = s.token.line_num;
@@ -5800,6 +5877,13 @@ pub const parser_core = struct {
             } else if (k == tok.TOK_TEMPLATE) {
                 if (optional_chain_label.* != null) return s.failUnexpectedToken();
                 try parseTaggedTemplateInvocation(s);
+            } else if (k == '!' and !s.gotLineTerminator()) {
+                // TypeScript non-null assertion `x!` erases to `x`.
+                if (s.last_was_super) return s.failUnexpectedToken();
+                try s.advance();
+            } else if ((k == '<' or k == tok.TOK_SHL) and !s.last_was_super) {
+                // TypeScript `f<T>(...)`, `f<T>\`...\``, or `f<T>`.
+                if (!(try tsTryParseTypeArgumentsInExpression(s))) break;
             } else {
                 break;
             }
@@ -6537,7 +6621,7 @@ pub const parser_core = struct {
                 try s.advance();
                 try parseAssignExpr2(s, computed_flags);
                 try expectPunct(s, ']');
-                if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
+                if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
                 try emitObjectMethodFunction(s, null, .generator, property_source_start);
                 try Emitter.opU8(s, opcode.op.define_method_computed, 4);
                 return;
@@ -6545,7 +6629,7 @@ pub const parser_core = struct {
             const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
             capacity_hint.noteStaticProperty(name);
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
+            if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, .generator, property_source_start);
             try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
             return;
@@ -6554,6 +6638,7 @@ pub const parser_core = struct {
         if (k == tok.TOK_IDENT and s.isIdent("async") and
             s.peekNextKind() != @as(tok.TokenKind, @intCast(':')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('(')) and
+            s.peekNextKind() != @as(tok.TokenKind, @intCast('<')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast(',')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('}')))
         {
@@ -6568,7 +6653,7 @@ pub const parser_core = struct {
                 try s.advance();
                 try parseAssignExpr2(s, computed_flags);
                 try expectPunct(s, ']');
-                if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
+                if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
                 try emitObjectMethodFunction(s, null, func_kind, property_source_start);
                 try Emitter.opU8(s, opcode.op.define_method_computed, 4);
                 return;
@@ -6576,7 +6661,7 @@ pub const parser_core = struct {
             const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
             const name = name_info.atom;
             capacity_hint.noteStaticProperty(name);
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
+            if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, func_kind, property_source_start);
             try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
             return;
@@ -6589,7 +6674,7 @@ pub const parser_core = struct {
             s.features.insert(.expression);
             try parseAssignExpr2(s, computed_flags);
             try expectPunct(s, ']');
-            if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
+            if (tsIsMethodStart(s)) {
                 try emitObjectMethodFunction(s, null, .method, property_source_start);
                 try Emitter.opU8(s, opcode.op.define_method_computed, 4);
             } else {
@@ -6635,7 +6720,7 @@ pub const parser_core = struct {
                     try setObjectName(s, name);
                     try Emitter.opAtom(s, opcode.op.define_field, name);
                 }
-            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
+            } else if (tsIsMethodStart(s)) {
                 capacity_hint.noteStaticProperty(name);
                 try emitObjectMethodFunction(s, null, .method, property_source_start);
                 try Emitter.opAtomU8(s, opcode.op.define_method, name, 4);
@@ -6667,7 +6752,7 @@ pub const parser_core = struct {
             try s.advance();
             try parseAssignExpr2(s, flags);
             try expectPunct(s, ']');
-            if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
+            if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
             try emitObjectMethodFunction(s, null, func_kind, source_start);
             try Emitter.opU8(s, opcode.op.define_method_computed, define_flags | 4);
             return;
@@ -6676,7 +6761,7 @@ pub const parser_core = struct {
         const name_info = (try parseObjectPropertyName(s)) orelse return s.failUnexpectedToken();
         const name = name_info.atom;
         capacity_hint.noteStaticProperty(name);
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('('))) return s.failExpectedToken('(');
+        if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
         try emitObjectMethodFunction(s, null, func_kind, source_start);
         try Emitter.opAtomU8(s, opcode.op.define_method, name, define_flags | 4);
     }
@@ -8265,17 +8350,29 @@ pub const parser_core = struct {
         try Emitter.opAtom(s, opcode.op.push_atom_value, atom_id);
     }
 
+    /// The binding of an `enum` or `namespace` declaration. tsc emits
+    /// `var N;` at function level and `let N;` inside a namespace body, and a
+    /// second declaration of the same name re-opens the first (declaration
+    /// merging), so an existing binding in the same scope is reused.
+    fn tsDefineNamespaceLikeBinding(s: *State, name: Atom) Error!void {
+        if (s.in_namespace) {
+            if (findCurrentScopeVar(s, name) != null) return;
+            _ = try s.defineVar(name, .let_);
+            // `let N;` leaves the binding in its TDZ until here; the
+            // `N = N || {}` prologue that follows reads it, so initialise
+            // it to undefined exactly like `let N;` would.
+            try Emitter.op(s, opcode.op.undefined);
+            try s.emitScopePutVarInit(name);
+            return;
+        }
+        _ = try s.defineVar(name, .var_);
+    }
+
     fn parseEnumDeclaration(s: *State) Error!void {
         try s.expectToken(tok.TOK_ENUM);
-        if (s.peekKind() != tok.TOK_IDENT) return s.failExpectedToken(tok.TOK_IDENT);
+        if (!isIdentifierLikeToken(s)) return s.failExpectedToken(tok.TOK_IDENT);
         const enum_atom = identifierLikeAtomOwned(s);
-
-        // Acquire the declaration owner before advance releases the token's
-        // identifier retain (qjs next_token/free_token ownership order).
-        const existing_var = s.curFunc().findVar(enum_atom);
-        if (existing_var < 0) {
-            _ = try s.addScopeVar(enum_atom, .normal, false, false);
-        }
+        try tsDefineNamespaceLikeBinding(s, enum_atom);
         try s.advance();
 
         // Emit Enum = Enum || {}
@@ -8291,65 +8388,48 @@ pub const parser_core = struct {
 
         try s.expectToken('{');
 
-        var counter: i32 = 0;
+        const allocator = s.function.memory.allocator;
+        var members = std.ArrayList(TsEnumMember).empty;
+        defer {
+            for (members.items) |member| tsFreeEnumValue(s, member.value);
+            members.deinit(allocator);
+        }
+        // Value of the next member without an initializer; null after a
+        // string or runtime-computed member (tsc: "Enum member must have
+        // initializer").
+        var next_auto: ?f64 = 0;
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-            if (!isIdentifierLikeToken(s)) return s.failUnexpectedToken();
-            // Member names are not declaration rows, so retain them explicitly
-            // across advance until every atom-bearing emission has duplicated
-            // its own owner.
-            const member_atom = identifierLikeAtom(s);
-            try s.advance();
-
+            const member_atom = try tsEnumMemberName(s);
             const member_name = s.lex.atoms.name(member_atom) orelse "";
 
-            var is_string_init = false;
+            var folded: ?TsEnumValue = null;
             if (s.peekKind() == '=') {
                 try s.advance();
-                if (s.peekKind() == tok.TOK_STRING) {
-                    const following = try peekNextDiagnosticToken(s);
-                    if (following.kind != ',' and following.kind != '}') {
-                        return s.failExpectedDescriptionAt("',' or '}'", following.kind, following.position);
-                    }
-                    is_string_init = true;
-                    // String initializer: emit Enum.Member = "string"
-                    try s.emitScopeGetVar(enum_atom);
-                    try emitStringLiteralValue(s, s.token.payload.str.bytes);
-                    try s.advance();
-                    try Emitter.opAtom(s, opcode.op.put_field, member_atom);
-                } else {
-                    var has_explicit = false;
-                    var val: i32 = 0;
-                    if (s.peekKind() == tok.TOK_NUMBER) {
-                        const following = try peekNextDiagnosticToken(s);
-                        if (following.kind != ',' and following.kind != '}') {
-                            return s.failExpectedDescriptionAt("',' or '}'", following.kind, following.position);
-                        }
-                        has_explicit = true;
-                        val = @intFromFloat(s.token.payload.num.value);
-                        try parseAssignExpr(s);
-                    } else if (s.peekKind() == '-' and s.peekNextKind() == tok.TOK_NUMBER) {
-                        try s.advance(); // consume '-'
-                        const following = try peekNextDiagnosticToken(s);
-                        if (following.kind != ',' and following.kind != '}') {
-                            return s.failExpectedDescriptionAt("',' or '}'", following.kind, following.position);
-                        }
-                        has_explicit = true;
-                        val = -@as(i32, @intFromFloat(s.token.payload.num.value));
-                        try Emitter.opI32(s, opcode.op.push_i32, val);
-                        try s.advance(); // consume the number
-                    } else {
-                        return s.failUnexpectedToken();
-                    }
-                    if (has_explicit) {
-                        counter = val;
-                    }
+                folded = try tsTryFoldEnumInitializer(s, enum_atom, members.items);
+                if (folded == null) {
+                    // Runtime-computed member: the value is evaluated in
+                    // place, exactly like tsc's `E[E["A"] = expr] = "A"`.
+                    try parseAssignExpr(s);
                 }
             } else {
-                // No initializer: emit push_i32 counter
-                try Emitter.opI32(s, opcode.op.push_i32, counter);
+                const auto = next_auto orelse return s.failWithMessage(null, "enum member must have initializer");
+                folded = .{ .number = auto };
             }
 
-            if (!is_string_init) {
+            var reverse_mapping = true;
+            if (folded) |value| {
+                switch (value) {
+                    .number => |n| try tsEmitNumber(s, n),
+                    .string => |bytes| {
+                        // String member: forward mapping only.
+                        try s.emitScopeGetVar(enum_atom);
+                        try emitStringLiteralValue(s, bytes);
+                        try Emitter.opAtom(s, opcode.op.put_field, member_atom);
+                        reverse_mapping = false;
+                    },
+                }
+            }
+            if (reverse_mapping) {
                 // Double mapping: Enum[Enum["Member"] = value] = "Member"
                 try s.emitScopeGetVar(enum_atom); // Stack: [value, outer_obj]
                 try Emitter.op(s, opcode.op.swap); // Stack: [outer_obj, value]
@@ -8359,7 +8439,19 @@ pub const parser_core = struct {
                 try Emitter.opAtom(s, opcode.op.put_field, member_atom); // Stack: [outer_obj, value]
                 try emitStringLiteralValue(s, member_name); // Stack: [outer_obj, value, "Member"]
                 try Emitter.op(s, opcode.op.put_array_el);
-                counter += 1;
+            }
+
+            if (folded) |value| {
+                next_auto = switch (value) {
+                    .number => |n| n + 1,
+                    .string => null,
+                };
+                members.append(allocator, .{ .name = member_atom, .value = value }) catch |err| {
+                    tsFreeEnumValue(s, value);
+                    return err;
+                };
+            } else {
+                next_auto = null;
             }
 
             if (s.peekKind() == ',') {
@@ -8389,13 +8481,7 @@ pub const parser_core = struct {
     fn parseNamespaceDeclarationWithIdent(s: *State) Error!void {
         if (s.peekKind() != tok.TOK_IDENT) return s.failExpectedToken(tok.TOK_IDENT);
         const ns_atom = identifierLikeAtomOwned(s);
-
-        // FunctionDef must own the name before advance releases the token.
-        // Existing declarations already provide that owner.
-        const existing_var = s.curFunc().findVar(ns_atom);
-        if (existing_var < 0) {
-            _ = try s.addScopeVar(ns_atom, .normal, false, false);
-        }
+        try tsDefineNamespaceLikeBinding(s, ns_atom);
         try s.advance();
 
         // Emit Namespace = Namespace || {}
@@ -8412,7 +8498,13 @@ pub const parser_core = struct {
         if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
             try s.advance(); // consume '.'
 
-            try s.pushScopeIdentity();
+            // The nested namespace is a block of its own: a real lexical
+            // scope, so its declarations (block-level functions included)
+            // are instantiated at scope entry and never collide with
+            // same-named members of sibling namespaces.
+            try s.pushScope();
+            var nested_scope_pushed = true;
+            errdefer if (nested_scope_pushed) s.popScopeIdentity();
             const saved_in_namespace = s.in_namespace;
             const saved_namespace_atom = if (s.current_namespace_atom) |atom_id|
                 atom_id
@@ -8423,7 +8515,6 @@ pub const parser_core = struct {
             defer {
                 s.in_namespace = saved_in_namespace;
                 s.setCurrentNamespaceAtom(saved_namespace_atom);
-                s.popScopeIdentity();
             }
 
             try parseNamespaceDeclarationWithIdent(s);
@@ -8433,6 +8524,8 @@ pub const parser_core = struct {
                 try s.emitScopeGetVar(nested_atom);
                 try Emitter.opAtom(s, opcode.op.put_field, nested_atom);
             }
+            try s.popScope();
+            nested_scope_pushed = false;
 
             s.setLastDeclaredAtom(ns_atom);
             if (s.namespace_export) {
@@ -8446,7 +8539,12 @@ pub const parser_core = struct {
         }
 
         try s.expectToken('{');
-        try s.pushScopeIdentity();
+        // The namespace body is a real lexical scope (tsc: an IIFE): block
+        // level function declarations are instantiated at scope entry, and
+        // sibling namespaces may export same-named members.
+        try s.pushScope();
+        var body_scope_pushed = true;
+        errdefer if (body_scope_pushed) s.popScopeIdentity();
         const saved_in_namespace = s.in_namespace;
         const saved_namespace_atom = if (s.current_namespace_atom) |atom_id|
             atom_id
@@ -8457,7 +8555,6 @@ pub const parser_core = struct {
         defer {
             s.in_namespace = saved_in_namespace;
             s.setCurrentNamespaceAtom(saved_namespace_atom);
-            s.popScopeIdentity();
         }
 
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
@@ -8465,6 +8562,8 @@ pub const parser_core = struct {
         }
 
         try s.expectToken('}');
+        try s.popScope();
+        body_scope_pushed = false;
         s.setLastDeclaredAtom(ns_atom);
 
         if (s.namespace_export) {
@@ -8488,6 +8587,1405 @@ pub const parser_core = struct {
         defer s.namespace_export = saved_namespace_export;
 
         try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
+    }
+
+    // =====================================================================
+    // TypeScript syntax.
+    //
+    // Everything below the `tsParse*` / `tsSkip*` prefix is emission-free: it
+    // only moves the lexer, never touches the code stream, scopes, or
+    // `features`. That keeps the byte code produced for JavaScript input
+    // unchanged and lets every speculative walk be undone by a parser
+    // snapshot. Runtime-bearing TypeScript declarations (enum, namespace,
+    // parameter properties, `import x = A.B`) are lowered by ordinary
+    // emitter paths next to their JavaScript relatives.
+    //
+    // The grammar is TypeScript's; JavaScript is parsed as its subset. The
+    // three known divergences (`f<T>(x)`, `<T>expr`, arrow return types in a
+    // conditional's whenTrue branch) are resolved the way tsc resolves them.
+    // =====================================================================
+
+    fn tsKindIsIdentifierLike(kind: tok.TokenKind) bool {
+        return kind == tok.TOK_IDENT or kind == tok.TOK_AWAIT or kind == tok.TOK_YIELD or
+            kind == tok.TOK_STATIC or kind == tok.TOK_LET or isSloppyFutureReservedToken(kind);
+    }
+
+    /// Token that may name a type, a type parameter, or the head of an
+    /// entity name.
+    fn tsAtTypeName(s: *State) bool {
+        return tsKindIsIdentifierLike(s.peekKind());
+    }
+
+    /// Token that may follow `.` in an entity name or name a member of an
+    /// object type: any identifier, keyword, string, or number.
+    fn tsAtPropertyNameToken(s: *State) bool {
+        const k = s.peekKind();
+        return tsKindIsIdentifierLike(k) or tok.isKeyword(k) or k == tok.TOK_STRING or k == tok.TOK_NUMBER;
+    }
+
+    fn tsIsIdentNoLineTerminator(s: *State, name: []const u8) bool {
+        return !s.gotLineTerminator() and s.isIdent(name);
+    }
+
+    fn tsIsMethodStart(s: *State) bool {
+        const k = s.peekKind();
+        return k == '(' or k == '<' or k == tok.TOK_SHL;
+    }
+
+    fn tsAtGreater(s: *State) bool {
+        const k = s.peekKind();
+        return k == '>' or k == tok.TOK_SAR or k == tok.TOK_SHR or k == tok.TOK_GTE or
+            k == tok.TOK_SAR_ASSIGN or k == tok.TOK_SHR_ASSIGN;
+    }
+
+    fn tsAtLess(s: *State) bool {
+        const k = s.peekKind();
+        return k == '<' or k == tok.TOK_SHL;
+    }
+
+    /// Identifier-name test on the token after the current one. `same_line`
+    /// additionally rejects a line terminator before that token.
+    fn tsPeekNextIsIdent(s: *State, name: []const u8, same_line: bool) bool {
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
+        var next: tok.Token = undefined;
+        s.lex.nextInto(&next) catch return false;
+        defer s.lex.freeToken(&next);
+        if (same_line and s.lex.gotLineTerminator()) return false;
+        return next.val == tok.TOK_IDENT and !next.payload.ident.has_escape and
+            atomNameEquals(s, next.payload.ident.atom, name);
+    }
+
+    /// Kind of the token two positions ahead of the current one.
+    fn tsPeekSecondKind(s: *State) tok.TokenKind {
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
+        var first: tok.Token = undefined;
+        s.lex.nextInto(&first) catch return tok.TOK_EOF;
+        s.lex.freeToken(&first);
+        var second: tok.Token = undefined;
+        s.lex.nextInto(&second) catch return tok.TOK_EOF;
+        defer s.lex.freeToken(&second);
+        return second.val;
+    }
+
+    // ---- speculation --------------------------------------------------
+
+    const TsSpeculation = struct {
+        snapshot: ParserSnapshot,
+        pending_diagnostic: ?PendingDiagnostic,
+    };
+
+    fn tsBeginSpeculation(s: *State) Error!TsSpeculation {
+        return .{
+            .snapshot = try takeParserSnapshot(s),
+            .pending_diagnostic = s.pending_diagnostic,
+        };
+    }
+
+    fn tsRollback(s: *State, spec: TsSpeculation) void {
+        restoreParserLexerSnapshot(s, spec.snapshot);
+        s.pending_diagnostic = spec.pending_diagnostic;
+    }
+
+    fn tsCommit(s: *State, spec: TsSpeculation) void {
+        var snapshot = spec.snapshot;
+        s.lex.freeToken(&snapshot.token);
+    }
+
+    /// Run a pure parse as a probe: syntax failures become `false`, resource
+    /// exhaustion propagates.
+    fn tsProbe(s: *State, comptime parse_fn: fn (*State) Error!void) Error!bool {
+        parse_fn(s) catch |err| switch (err) {
+            error.OutOfMemory, error.StackOverflow, error.BytecodeOverflow => return err,
+            else => return false,
+        };
+        return true;
+    }
+
+    // ---- balanced skipping ------------------------------------------------
+
+    /// Consume one balanced `(...)` / `[...]` / `{...}` group starting at the
+    /// current opening token. Templates are consumed as one item, including
+    /// their substitutions.
+    fn tsSkipBalancedGroup(s: *State) Error!void {
+        const k = s.peekKind();
+        if (k != '(' and k != '[' and k != '{') return s.failExpectedDescription("opening delimiter");
+        try s.advance();
+        try tsSkipBalancedRest(s, 1, true);
+    }
+
+    /// Continue a balanced skip that is already `depth` levels deep. Stops at
+    /// the closer that brings the depth to zero; `consume_close` selects
+    /// whether that closer is consumed or left as the current token.
+    fn tsSkipBalancedRest(s: *State, initial_depth: u32, consume_close: bool) Error!void {
+        var depth = initial_depth;
+        while (true) {
+            const k = s.peekKind();
+            if (k == '(' or k == '[' or k == '{') {
+                depth += 1;
+            } else if (k == ')' or k == ']' or k == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    if (consume_close) try s.advance();
+                    return;
+                }
+            } else if (k == tok.TOK_EOF) {
+                return s.failUnexpectedToken();
+            } else if (k == tok.TOK_TEMPLATE) {
+                try tsSkipTemplate(s);
+                continue;
+            }
+            try s.advance();
+        }
+    }
+
+    fn tsSkipTemplate(s: *State) Error!void {
+        while (true) {
+            if (s.peekKind() != tok.TOK_TEMPLATE) return s.failUnexpectedToken();
+            const part = s.token.payload.str.template orelse return s.failUnexpectedToken();
+            switch (part) {
+                .no_substitution, .tail => return s.advance(),
+                .head, .middle => {
+                    try s.advance();
+                    try tsSkipBalancedRest(s, 1, false);
+                    if (s.peekKind() != '}') return s.failExpectedToken('}');
+                    s.lex.freeToken(&s.token);
+                    try s.lex.nextTemplatePartAfterBraceInto(&s.token);
+                },
+            }
+        }
+    }
+
+    /// Skip to the end of the current statement: `;`, EOF, or the first
+    /// token that starts a new line at nesting depth zero.
+    fn tsSkipToStatementEnd(s: *State) Error!void {
+        var first = true;
+        while (true) {
+            const k = s.peekKind();
+            if (k == tok.TOK_EOF) return;
+            if (k == ';') return s.advance();
+            if (!first and s.gotLineTerminator()) return;
+            first = false;
+            if (k == '(' or k == '[' or k == '{') {
+                try tsSkipBalancedGroup(s);
+            } else if (k == tok.TOK_TEMPLATE) {
+                try tsSkipTemplate(s);
+            } else {
+                try s.advance();
+            }
+        }
+    }
+
+    // ---- type grammar -----------------------------------------------------
+
+    fn tsParseTypeAnnotationOpt(s: *State) Error!void {
+        if (s.peekKind() != ':') return;
+        try s.advance();
+        try tsParseTypeAllowConditional(s);
+    }
+
+    /// Return-type position: a type, or a predicate `x is T` /
+    /// `asserts x [is T]` / `this is T`.
+    fn tsParseReturnTypeOpt(s: *State) Error!void {
+        if (s.peekKind() != ':') return;
+        try s.advance();
+        try tsParseTypeOrPredicate(s);
+    }
+
+    fn tsParseTypeOrPredicate(s: *State) Error!void {
+        const saved = s.ts_disallow_conditional;
+        s.ts_disallow_conditional = false;
+        defer s.ts_disallow_conditional = saved;
+        if (s.isIdent("asserts")) {
+            var has_lt = false;
+            const next = s.peekNextKindWithLineTerminator(&has_lt);
+            if (!has_lt and (next == tok.TOK_THIS or tsKindIsIdentifierLike(next))) {
+                try s.advance();
+                try s.advance();
+                if (tsIsIdentNoLineTerminator(s, "is")) {
+                    try s.advance();
+                    try tsParseType(s);
+                }
+                return;
+            }
+        }
+        if ((s.peekKind() == tok.TOK_THIS or tsAtTypeName(s)) and tsPeekNextIsIdent(s, "is", true)) {
+            try s.advance();
+            try s.advance();
+            try tsParseType(s);
+            return;
+        }
+        try tsParseType(s);
+    }
+
+    fn tsParseTypeAllowConditional(s: *State) Error!void {
+        const saved = s.ts_disallow_conditional;
+        s.ts_disallow_conditional = false;
+        defer s.ts_disallow_conditional = saved;
+        try tsParseType(s);
+    }
+
+    fn tsParseTypeDisallowConditional(s: *State) Error!void {
+        const saved = s.ts_disallow_conditional;
+        s.ts_disallow_conditional = true;
+        defer s.ts_disallow_conditional = saved;
+        try tsParseType(s);
+    }
+
+    /// Type := FunctionType | ConstructorType | UnionType [`extends` Type `?` Type `:` Type]
+    fn tsParseType(s: *State) Error!void {
+        if (try tsAtFunctionTypeStart(s)) return tsParseFunctionType(s);
+        try tsParseUnionType(s);
+        if (s.peekKind() == tok.TOK_EXTENDS and !s.gotLineTerminator() and !s.ts_disallow_conditional) {
+            try s.advance();
+            try tsParseTypeDisallowConditional(s);
+            try s.expectToken('?');
+            try tsParseTypeAllowConditional(s);
+            try s.expectToken(':');
+            try tsParseTypeAllowConditional(s);
+        }
+    }
+
+    fn tsAtFunctionTypeStart(s: *State) Error!bool {
+        const k = s.peekKind();
+        if (k == '<' or k == tok.TOK_SHL or k == tok.TOK_NEW) return true;
+        if (s.isIdent("abstract") and s.peekNextKind() == tok.TOK_NEW) return true;
+        if (k != '(') return false;
+        const balanced = scanBalancedToken(s, false) catch |err| return lookaheadErrorAsNoMatch(err);
+        return balanced.closed and balanced.following == tok.TOK_ARROW;
+    }
+
+    fn tsParseFunctionType(s: *State) Error!void {
+        if (s.isIdent("abstract")) try s.advance();
+        if (s.peekKind() == tok.TOK_NEW) try s.advance();
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
+        try tsParseSignatureParameters(s);
+        try s.expectToken(tok.TOK_ARROW);
+        try tsParseTypeOrPredicate(s);
+    }
+
+    fn tsParseUnionType(s: *State) Error!void {
+        if (s.peekKind() == '|') try s.advance();
+        try tsParseIntersectionType(s);
+        while (s.peekKind() == '|') {
+            try s.advance();
+            try tsParseIntersectionType(s);
+        }
+    }
+
+    fn tsParseIntersectionType(s: *State) Error!void {
+        if (s.peekKind() == '&') try s.advance();
+        try tsParseTypeOperator(s);
+        while (s.peekKind() == '&') {
+            try s.advance();
+            try tsParseTypeOperator(s);
+        }
+    }
+
+    fn tsParseTypeOperator(s: *State) Error!void {
+        if (s.isIdent("keyof") or s.isIdent("unique") or s.isIdent("readonly")) {
+            try s.advance();
+            return tsParseTypeOperator(s);
+        }
+        if (s.isIdent("infer")) {
+            try s.advance();
+            if (!tsAtTypeName(s)) return s.failExpectedDescription("type parameter name");
+            try s.advance();
+            if (s.peekKind() == tok.TOK_EXTENDS) {
+                // `infer U extends C` keeps its constraint unless the constraint
+                // would steal the `?` of the enclosing conditional type.
+                const spec = try tsBeginSpeculation(s);
+                try s.advance();
+                const ok = try tsProbe(s, tsParseTypeDisallowConditional);
+                if (ok and (s.ts_disallow_conditional or s.peekKind() != '?')) {
+                    tsCommit(s, spec);
+                } else {
+                    tsRollback(s, spec);
+                }
+            }
+            return;
+        }
+        return tsParsePostfixType(s);
+    }
+
+    /// Array and indexed-access suffixes must start on the same line.
+    fn tsParsePostfixType(s: *State) Error!void {
+        try tsParsePrimaryType(s);
+        while (s.peekKind() == '[' and !s.gotLineTerminator()) {
+            try s.advance();
+            if (s.peekKind() == ']') {
+                try s.advance();
+            } else {
+                try tsParseTypeAllowConditional(s);
+                try s.expectToken(']');
+            }
+        }
+    }
+
+    fn tsParsePrimaryType(s: *State) Error!void {
+        const k = s.peekKind();
+        if (k == '(') {
+            if (try tsAtFunctionTypeStart(s)) return tsParseFunctionType(s);
+            try s.advance();
+            try tsParseTypeAllowConditional(s);
+            try s.expectToken(')');
+            return;
+        }
+        if (k == '[') return tsParseTupleType(s);
+        if (k == '{') return tsParseObjectType(s);
+        if (k == '<' or k == tok.TOK_SHL or k == tok.TOK_NEW) return tsParseFunctionType(s);
+        if (k == tok.TOK_STRING or k == tok.TOK_NUMBER or k == tok.TOK_TRUE or k == tok.TOK_FALSE or
+            k == tok.TOK_NULL or k == tok.TOK_VOID or k == tok.TOK_THIS)
+        {
+            return s.advance();
+        }
+        if (k == tok.TOK_TEMPLATE) return tsParseTemplateLiteralType(s);
+        if (k == '-') {
+            try s.advance();
+            if (s.peekKind() != tok.TOK_NUMBER) return s.failExpectedDescription("number literal");
+            return s.advance();
+        }
+        if (k == tok.TOK_TYPEOF) {
+            try s.advance();
+            if (s.peekKind() == tok.TOK_IMPORT) return tsParseImportType(s);
+            try tsParseEntityName(s);
+            if (s.peekKind() == '<' and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+            return;
+        }
+        if (k == tok.TOK_IMPORT) return tsParseImportType(s);
+        if (s.isIdent("abstract") and s.peekNextKind() == tok.TOK_NEW) return tsParseFunctionType(s);
+        if (tsAtTypeName(s)) return tsParseTypeReference(s);
+        return s.failExpectedDescription("type");
+    }
+
+    fn tsParseTypeReference(s: *State) Error!void {
+        try tsParseEntityName(s);
+        if (s.peekKind() == '<' and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+    }
+
+    fn tsParseEntityName(s: *State) Error!void {
+        if (!tsAtTypeName(s) and s.peekKind() != tok.TOK_THIS) return s.failExpectedDescription("type name");
+        try s.advance();
+        while (s.peekKind() == '.') {
+            try s.advance();
+            if (!tsAtPropertyNameToken(s) and s.peekKind() != tok.TOK_PRIVATE_NAME) {
+                return s.failExpectedDescription("property name");
+            }
+            try s.advance();
+        }
+    }
+
+    fn tsParseImportType(s: *State) Error!void {
+        try s.expectToken(tok.TOK_IMPORT);
+        try s.expectToken('(');
+        if (s.peekKind() != tok.TOK_STRING) return s.failExpectedDescription("module string");
+        try s.advance();
+        if (s.peekKind() == ',') {
+            try s.advance();
+            if (s.peekKind() == '{') try tsSkipBalancedGroup(s);
+        }
+        try s.expectToken(')');
+        while (s.peekKind() == '.') {
+            try s.advance();
+            if (!tsAtPropertyNameToken(s)) return s.failExpectedDescription("property name");
+            try s.advance();
+        }
+        if (s.peekKind() == '<' and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+    }
+
+    fn tsParseTemplateLiteralType(s: *State) Error!void {
+        while (true) {
+            if (s.peekKind() != tok.TOK_TEMPLATE) return s.failUnexpectedToken();
+            const part = s.token.payload.str.template orelse return s.failUnexpectedToken();
+            switch (part) {
+                .no_substitution, .tail => return s.advance(),
+                .head, .middle => {
+                    try s.advance();
+                    try tsParseTypeAllowConditional(s);
+                    if (s.peekKind() != '}') return s.failExpectedToken('}');
+                    s.lex.freeToken(&s.token);
+                    try s.lex.nextTemplatePartAfterBraceInto(&s.token);
+                },
+            }
+        }
+    }
+
+    /// `>` that closes a type argument or type parameter list. `>>`, `>>>`,
+    /// `>=`, `>>=`, `>>>=` are re-cut so their first byte closes the list.
+    fn tsExpectGreater(s: *State) Error!void {
+        const k = s.peekKind();
+        if (k == '>') return s.advance();
+        if (k == tok.TOK_SAR or k == tok.TOK_SHR or k == tok.TOK_GTE or
+            k == tok.TOK_SAR_ASSIGN or k == tok.TOK_SHR_ASSIGN)
+        {
+            s.lex.splitGreaterThan(&s.token);
+            return s.advance();
+        }
+        return s.failExpectedToken('>');
+    }
+
+    fn tsExpectLess(s: *State) Error!void {
+        const k = s.peekKind();
+        if (k == '<') return s.advance();
+        if (k == tok.TOK_SHL or k == tok.TOK_SHL_ASSIGN) {
+            s.lex.splitLessThan(&s.token);
+            return s.advance();
+        }
+        return s.failExpectedToken('<');
+    }
+
+    fn tsParseTypeArguments(s: *State) Error!void {
+        try tsParseTypeArgumentList(s, false);
+    }
+
+    /// In expression position the closing `>` must be a stand-alone token:
+    /// tsc re-scans it and refuses `>>`, `>>>`, `>=` there, which keeps
+    /// `x>>>0<y>>>0` a comparison (`parseTypeArgumentsInExpression`).
+    fn tsParseTypeArgumentsInExpression(s: *State) Error!void {
+        try tsParseTypeArgumentList(s, true);
+    }
+
+    fn tsParseTypeArgumentList(s: *State, expression_context: bool) Error!void {
+        try tsExpectLess(s);
+        while (true) {
+            try tsParseTypeAllowConditional(s);
+            if (s.peekKind() != ',') break;
+            try s.advance();
+            if (tsAtGreater(s)) break;
+        }
+        if (expression_context and s.peekKind() != '>') return s.failExpectedToken('>');
+        try tsExpectGreater(s);
+    }
+
+    /// `<const in out T extends C = D, ...>`
+    fn tsParseTypeParameters(s: *State) Error!void {
+        try tsExpectLess(s);
+        while (true) {
+            while (true) {
+                const k = s.peekKind();
+                if (k == tok.TOK_CONST or k == tok.TOK_IN) {
+                    try s.advance();
+                    continue;
+                }
+                if (s.isIdent("out")) {
+                    const next = s.peekNextKind();
+                    if (tsKindIsIdentifierLike(next) or next == tok.TOK_CONST or next == tok.TOK_IN) {
+                        try s.advance();
+                        continue;
+                    }
+                }
+                break;
+            }
+            if (!tsAtTypeName(s)) return s.failExpectedDescription("type parameter name");
+            try s.advance();
+            if (s.peekKind() == tok.TOK_EXTENDS) {
+                try s.advance();
+                try tsParseTypeAllowConditional(s);
+            }
+            if (s.peekKind() == '=') {
+                try s.advance();
+                try tsParseTypeAllowConditional(s);
+            }
+            if (s.peekKind() != ',') break;
+            try s.advance();
+            if (tsAtGreater(s)) break;
+        }
+        try tsExpectGreater(s);
+    }
+
+    fn tsParseTupleType(s: *State) Error!void {
+        try s.expectToken('[');
+        while (s.peekKind() != ']') {
+            if (s.peekKind() == tok.TOK_EOF) return s.failExpectedToken(']');
+            if (s.peekKind() == tok.TOK_ELLIPSIS) try s.advance();
+            if (tsAtTypeName(s) and tsTupleMemberIsNamed(s)) {
+                try s.advance();
+                if (s.peekKind() == '?') try s.advance();
+                try s.expectToken(':');
+            }
+            try tsParseTypeAllowConditional(s);
+            if (s.peekKind() == '?') try s.advance();
+            if (s.peekKind() != ',') break;
+            try s.advance();
+        }
+        try s.expectToken(']');
+    }
+
+    fn tsTupleMemberIsNamed(s: *State) bool {
+        const next = s.peekNextKind();
+        if (next == ':') return true;
+        return next == '?' and tsPeekSecondKind(s) == ':';
+    }
+
+    /// Object type literal, interface body, or mapped type.
+    fn tsParseObjectType(s: *State) Error!void {
+        try s.expectToken('{');
+        const saved = s.ts_disallow_conditional;
+        s.ts_disallow_conditional = false;
+        defer s.ts_disallow_conditional = saved;
+        while (s.peekKind() != '}') {
+            if (s.peekKind() == tok.TOK_EOF) return s.failExpectedToken('}');
+            try tsParseObjectTypeMember(s);
+            if (s.peekKind() == ';' or s.peekKind() == ',') {
+                try s.advance();
+            } else if (s.peekKind() != '}' and !s.gotLineTerminator()) {
+                return s.failExpectedToken(';');
+            }
+        }
+        try s.expectToken('}');
+    }
+
+    fn tsParseObjectTypeMember(s: *State) Error!void {
+        if (s.peekKind() == '+' or s.peekKind() == '-') {
+            try s.advance();
+            if (!s.isIdent("readonly")) return s.failExpectedDescription("'readonly'");
+            try s.advance();
+            return tsParseIndexOrMappedMember(s);
+        }
+        if (s.isIdent("readonly") and tsWordIsMemberModifier(s)) try s.advance();
+        const k = s.peekKind();
+        if (k == '[') return tsParseIndexOrMappedMember(s);
+        if (k == '(' or k == '<' or k == tok.TOK_SHL) return tsParseMethodSignatureRest(s);
+        if (k == tok.TOK_NEW) {
+            const next = s.peekNextKind();
+            if (next == '(' or next == '<' or next == tok.TOK_SHL) {
+                try s.advance();
+                return tsParseMethodSignatureRest(s);
+            }
+        }
+        if ((s.isIdent("get") or s.isIdent("set")) and tsWordIsMemberModifier(s)) try s.advance();
+        if (!tsAtPropertyNameToken(s) and k != tok.TOK_PRIVATE_NAME) return s.failExpectedDescription("type member");
+        try s.advance();
+        if (s.peekKind() == '?') try s.advance();
+        const after = s.peekKind();
+        if (after == '(' or after == '<' or after == tok.TOK_SHL) return tsParseMethodSignatureRest(s);
+        try tsParseTypeAnnotationOpt(s);
+    }
+
+    /// A contextual word (`readonly`, `get`, `set`) is a member modifier only
+    /// when a member name follows it on the same line.
+    fn tsWordIsMemberModifier(s: *State) bool {
+        var has_lt = false;
+        const next = s.peekNextKindWithLineTerminator(&has_lt);
+        if (has_lt) return false;
+        return tsKindIsIdentifierLike(next) or tok.isKeyword(next) or next == tok.TOK_STRING or
+            next == tok.TOK_NUMBER or next == '[' or next == tok.TOK_PRIVATE_NAME;
+    }
+
+    fn tsParseMethodSignatureRest(s: *State) Error!void {
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
+        try tsParseSignatureParameters(s);
+        try tsParseReturnTypeOpt(s);
+    }
+
+    /// `[k: string]: T`, `[K in T as U]?: V`, or a computed member name.
+    fn tsParseIndexOrMappedMember(s: *State) Error!void {
+        try s.expectToken('[');
+        if (tsAtTypeName(s)) {
+            const next = s.peekNextKind();
+            if (next == tok.TOK_IN) {
+                try s.advance();
+                try s.advance();
+                try tsParseTypeAllowConditional(s);
+                if (s.isIdent("as")) {
+                    try s.advance();
+                    try tsParseTypeAllowConditional(s);
+                }
+                try s.expectToken(']');
+                if (s.peekKind() == '+' or s.peekKind() == '-') {
+                    try s.advance();
+                    try s.expectToken('?');
+                } else if (s.peekKind() == '?') {
+                    try s.advance();
+                }
+                try tsParseTypeAnnotationOpt(s);
+                return;
+            }
+            if (next == ':') {
+                try s.advance();
+                try s.advance();
+                try tsParseTypeAllowConditional(s);
+                try s.expectToken(']');
+                if (s.peekKind() == '?') try s.advance();
+                try tsParseTypeAnnotationOpt(s);
+                return;
+            }
+        }
+        try tsSkipBalancedRest(s, 1, true);
+        if (s.peekKind() == '?') try s.advance();
+        const after = s.peekKind();
+        if (after == '(' or after == '<' or after == tok.TOK_SHL) return tsParseMethodSignatureRest(s);
+        try tsParseTypeAnnotationOpt(s);
+    }
+
+    /// Parameter list of a signature that has no body: function types,
+    /// method signatures, overloads, ambient functions. Patterns are skipped
+    /// as balanced groups; initializers are not allowed here.
+    fn tsParseSignatureParameters(s: *State) Error!void {
+        try s.expectToken('(');
+        const saved = s.ts_disallow_conditional;
+        s.ts_disallow_conditional = false;
+        defer s.ts_disallow_conditional = saved;
+        while (s.peekKind() != ')') {
+            if (s.peekKind() == tok.TOK_EOF) return s.failExpectedToken(')');
+            while (s.isParameterModifier()) try s.advance();
+            if (s.peekKind() == tok.TOK_ELLIPSIS) try s.advance();
+            const k = s.peekKind();
+            if (k == tok.TOK_THIS or tsKindIsIdentifierLike(k)) {
+                try s.advance();
+            } else if (k == '{' or k == '[') {
+                try tsSkipBalancedGroup(s);
+            } else {
+                return s.failExpectedDescription("parameter");
+            }
+            if (s.peekKind() == '?') try s.advance();
+            try tsParseTypeAnnotationOpt(s);
+            if (s.peekKind() == '=') return s.failWithMessage(null, "initializers are not allowed in a signature");
+            if (s.peekKind() != ',') break;
+            try s.advance();
+        }
+        try s.expectToken(')');
+    }
+
+    // ---- declarations -----------------------------------------------------
+
+    const TsDeclarationKind = enum { none, interface, type_alias, ambient, abstract_class, namespace };
+
+    /// Contextual keywords open a declaration only in these shapes, and only
+    /// when the next token is on the same line: `interface X`, `type X`,
+    /// `declare <decl>`, `abstract class`, `namespace X`, `module X`.
+    fn tsDeclarationStart(s: *State) TsDeclarationKind {
+        const k = s.peekKind();
+        if (k == tok.TOK_INTERFACE) {
+            var has_lt = false;
+            const next = s.peekNextKindWithLineTerminator(&has_lt);
+            return if (!has_lt and tsKindIsIdentifierLike(next)) .interface else .none;
+        }
+        if (k != tok.TOK_IDENT or s.token.payload.ident.has_escape) return .none;
+        const name = s.lex.atoms.name(s.token.payload.ident.atom) orelse return .none;
+        const word: TsDeclarationKind = if (std.mem.eql(u8, name, "type"))
+            .type_alias
+        else if (std.mem.eql(u8, name, "declare"))
+            .ambient
+        else if (std.mem.eql(u8, name, "abstract"))
+            .abstract_class
+        else if (std.mem.eql(u8, name, "namespace") or std.mem.eql(u8, name, "module"))
+            .namespace
+        else
+            return .none;
+        var has_lt = false;
+        const next = s.peekNextKindWithLineTerminator(&has_lt);
+        if (has_lt) return .none;
+        return switch (word) {
+            .type_alias => if (tsKindIsIdentifierLike(next)) .type_alias else .none,
+            .abstract_class => if (next == tok.TOK_CLASS) .abstract_class else .none,
+            .namespace => if (tsKindIsIdentifierLike(next) or (next == tok.TOK_STRING and name[0] == 'm')) .namespace else .none,
+            .ambient => if (tsAmbientDeclarationFollows(next)) .ambient else .none,
+            else => .none,
+        };
+    }
+
+    fn tsAmbientDeclarationFollows(kind: tok.TokenKind) bool {
+        return kind == tok.TOK_VAR or kind == tok.TOK_LET or kind == tok.TOK_CONST or
+            kind == tok.TOK_FUNCTION or kind == tok.TOK_CLASS or kind == tok.TOK_ENUM or
+            kind == tok.TOK_INTERFACE or kind == tok.TOK_IDENT;
+    }
+
+    fn tsParseInterfaceDeclaration(s: *State) Error!void {
+        try s.advance();
+        if (!tsAtTypeName(s)) return s.failExpectedDescription("interface name");
+        try s.advance();
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
+        if (s.peekKind() == tok.TOK_EXTENDS) {
+            try s.advance();
+            while (true) {
+                try tsParseTypeReference(s);
+                if (s.peekKind() != ',') break;
+                try s.advance();
+            }
+        }
+        try tsParseObjectType(s);
+    }
+
+    fn tsParseTypeAliasDeclaration(s: *State) Error!void {
+        try s.advance();
+        if (!tsAtTypeName(s)) return s.failExpectedDescription("type alias name");
+        try s.advance();
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
+        try s.expectToken('=');
+        try tsParseTypeAllowConditional(s);
+        _ = try s.expectSemicolon();
+    }
+
+    /// `declare ...`: the whole declaration is ambient and produces nothing.
+    fn tsParseAmbientDeclaration(s: *State) Error!void {
+        try s.advance();
+        try tsParseAmbientDeclarationBody(s);
+    }
+
+    fn tsParseAmbientDeclarationBody(s: *State) Error!void {
+        const k = s.peekKind();
+        switch (k) {
+            tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => {
+                try s.advance();
+                if (k == tok.TOK_CONST and s.peekKind() == tok.TOK_ENUM) {
+                    try s.advance();
+                    return tsSkipNamedBraceBlock(s);
+                }
+                while (true) {
+                    if (tsAtTypeName(s)) {
+                        try s.advance();
+                    } else if (s.peekKind() == '{' or s.peekKind() == '[') {
+                        try tsSkipBalancedGroup(s);
+                    } else {
+                        return s.failExpectedDescription("binding name");
+                    }
+                    if (s.peekKind() == '!') try s.advance();
+                    try tsParseTypeAnnotationOpt(s);
+                    if (s.peekKind() == '=') {
+                        try s.advance();
+                        try tsSkipAmbientInitializer(s);
+                    }
+                    if (s.peekKind() != ',') break;
+                    try s.advance();
+                }
+                _ = try s.expectSemicolon();
+            },
+            tok.TOK_FUNCTION => {
+                try s.advance();
+                if (s.peekKind() == '*') try s.advance();
+                if (!tsAtTypeName(s)) return s.failExpectedDescription("function name");
+                try s.advance();
+                try tsParseMethodSignatureRest(s);
+                _ = try s.expectSemicolon();
+            },
+            tok.TOK_CLASS => return tsParseAmbientClass(s),
+            tok.TOK_ENUM => {
+                try s.advance();
+                return tsSkipNamedBraceBlock(s);
+            },
+            tok.TOK_INTERFACE => return tsParseInterfaceDeclaration(s),
+            else => {
+                if (s.isIdent("abstract") and s.peekNextKind() == tok.TOK_CLASS) {
+                    try s.advance();
+                    return tsParseAmbientClass(s);
+                }
+                if (s.isIdent("type")) return tsParseTypeAliasDeclaration(s);
+                if (s.isIdent("global")) {
+                    try s.advance();
+                    return tsSkipBraceBlock(s);
+                }
+                if (s.isIdent("namespace") or s.isIdent("module")) {
+                    try s.advance();
+                    if (s.peekKind() == tok.TOK_STRING) {
+                        try s.advance();
+                        if (s.peekKind() == '{') return tsSkipBraceBlock(s);
+                        _ = try s.expectSemicolon();
+                        return;
+                    }
+                    try tsParseEntityName(s);
+                    return tsSkipBraceBlock(s);
+                }
+                return s.failExpectedDescription("ambient declaration");
+            },
+        }
+    }
+
+    fn tsParseAmbientClass(s: *State) Error!void {
+        try s.expectToken(tok.TOK_CLASS);
+        if (!tsAtTypeName(s)) return s.failExpectedDescription("class name");
+        try s.advance();
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
+        if (s.peekKind() == tok.TOK_EXTENDS) {
+            try s.advance();
+            try tsParseTypeReference(s);
+        }
+        if (s.peekKind() == tok.TOK_IMPLEMENTS) {
+            try s.advance();
+            while (true) {
+                try tsParseTypeReference(s);
+                if (s.peekKind() != ',') break;
+                try s.advance();
+            }
+        }
+        try tsSkipBraceBlock(s);
+    }
+
+    fn tsSkipAmbientInitializer(s: *State) Error!void {
+        if (s.peekKind() == '-') try s.advance();
+        const k = s.peekKind();
+        if (k == tok.TOK_NUMBER or k == tok.TOK_STRING or k == tok.TOK_TRUE or k == tok.TOK_FALSE or
+            k == tok.TOK_NULL or tsKindIsIdentifierLike(k))
+        {
+            return s.advance();
+        }
+        if (k == tok.TOK_TEMPLATE) return tsSkipTemplate(s);
+        return s.failExpectedDescription("literal initializer");
+    }
+
+    fn tsSkipNamedBraceBlock(s: *State) Error!void {
+        if (!tsAtTypeName(s)) return s.failExpectedDescription("declaration name");
+        try s.advance();
+        try tsSkipBraceBlock(s);
+    }
+
+    fn tsSkipBraceBlock(s: *State) Error!void {
+        if (s.peekKind() != '{') return s.failExpectedToken('{');
+        try tsSkipBalancedGroup(s);
+    }
+
+    // ---- functions, classes, patterns --------------------------------------
+
+    /// Decide whether a function body follows the parameter list before the
+    /// ordinary function machinery creates a child FunctionDef. Overload,
+    /// abstract, and ambient signatures have none. Current token: the `<` or
+    /// `(` that opens the parameter list.
+    fn tsFunctionHasBodyAhead(s: *State) Error!bool {
+        if (s.peekKind() == '(') {
+            const balanced = scanBalancedToken(s, false) catch |err| return lookaheadErrorAsNoMatch(err);
+            if (!balanced.closed) return true;
+            if (balanced.following == '{') return true;
+            if (balanced.following != ':') return false;
+        } else if (!tsAtLess(s)) {
+            return true;
+        }
+        const spec = try tsBeginSpeculation(s);
+        defer tsRollback(s, spec);
+        const ok = try tsProbe(s, tsSkipParameterListAndReturnType);
+        return ok and s.peekKind() == '{';
+    }
+
+    fn tsSkipParameterListAndReturnType(s: *State) Error!void {
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
+        if (s.peekKind() != '(') return s.failExpectedToken('(');
+        try tsSkipBalancedGroup(s);
+        try tsParseReturnTypeOpt(s);
+    }
+
+    /// Body-less function declaration (overload signature). It declares
+    /// nothing; the implementation that must follow declares the binding.
+    fn tsSkipFunctionSignature(s: *State) Error!void {
+        try tsSkipParameterListAndReturnType(s);
+        _ = try s.expectSemicolon();
+        const k = s.peekKind();
+        if (k != tok.TOK_FUNCTION and k != tok.TOK_EXPORT and k != tok.TOK_DEFAULT and !s.isIdent("async")) {
+            return s.failWithMessage(null, "function implementation is missing or not immediately following the declaration");
+        }
+    }
+
+    /// Body-less class method (overload or abstract signature).
+    fn tsSkipMethodSignature(s: *State, is_abstract: bool) Error!void {
+        try tsSkipParameterListAndReturnType(s);
+        _ = try s.expectSemicolon();
+        if (!is_abstract and s.peekKind() == '}') {
+            return s.failWithMessage(null, "function implementation is missing or not immediately following the declaration");
+        }
+    }
+
+    /// `declare` class field: no runtime field is defined.
+    fn tsSkipDeclaredField(s: *State) Error!void {
+        if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
+            try s.advance();
+        } else if (s.peekKind() == '[') {
+            try tsSkipBalancedGroup(s);
+        } else if (try parseObjectPropertyName(s)) |_| {} else {
+            return s.failExpectedDescription("property name");
+        }
+        if (s.peekKind() == '?' or s.peekKind() == '!') try s.advance();
+        try tsParseTypeAnnotationOpt(s);
+        _ = try s.expectSemicolon();
+    }
+
+    /// Modifier word in a class body. tsc `nextTokenCanFollowModifier`: the
+    /// next token must be able to start a member; `static` alone tolerates a
+    /// line terminator before that token.
+    fn tsCanFollowClassModifier(kind: tok.TokenKind) bool {
+        return kind == '[' or kind == '{' or kind == '*' or kind == tok.TOK_ELLIPSIS or
+            kind == tok.TOK_IDENT or tok.isKeyword(kind) or kind == tok.TOK_STRING or
+            kind == tok.TOK_NUMBER or kind == tok.TOK_PRIVATE_NAME;
+    }
+
+    /// Current token is `[`: is this a class index signature `[k: T]: U`?
+    fn tsIndexSignatureAhead(s: *State) bool {
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
+        var first: tok.Token = undefined;
+        s.lex.nextInto(&first) catch return false;
+        const first_kind = first.val;
+        s.lex.freeToken(&first);
+        if (!tsKindIsIdentifierLike(first_kind)) return false;
+        var second: tok.Token = undefined;
+        s.lex.nextInto(&second) catch return false;
+        defer s.lex.freeToken(&second);
+        return second.val == ':';
+    }
+
+    fn tsSkipIndexSignature(s: *State) Error!void {
+        try tsParseIndexOrMappedMember(s);
+        _ = try s.expectSemicolon();
+    }
+
+    /// `{...}: T = v` / `[...]?: T = v` binding: the pattern's outer
+    /// initializer sits behind an optional marker and a type annotation.
+    fn tsPatternHasInitializerAfterAnnotation(s: *State) Error!bool {
+        const spec = try tsBeginSpeculation(s);
+        defer tsRollback(s, spec);
+        if (!(try tsProbe(s, tsSkipBalancedGroup))) return false;
+        if (s.peekKind() == '?') try s.advance();
+        if (s.peekKind() == ':') {
+            try s.advance();
+            if (!(try tsProbe(s, tsParseTypeAllowConditional))) return false;
+        }
+        return s.peekKind() == '=';
+    }
+
+    // ---- expressions ------------------------------------------------------
+
+    /// `<T>(x) => ...` and `<T>(x): R => ...` at the current `<`.
+    fn tsGenericArrowHead(s: *State, return_type_forbidden: bool) Error!bool {
+        const spec = try tsBeginSpeculation(s);
+        defer tsRollback(s, spec);
+        if (!(try tsProbe(s, tsParseTypeParameters))) return false;
+        if (s.peekKind() != '(') return false;
+        if (!(try tsProbe(s, tsSkipBalancedGroup))) return false;
+        if (s.peekKind() == ':') {
+            if (return_type_forbidden) return false;
+            try s.advance();
+            if (!(try tsProbe(s, tsParseTypeOrPredicate))) return false;
+        }
+        return s.peekKind() == tok.TOK_ARROW and !s.gotLineTerminator();
+    }
+
+    /// `(...): R => ...` at the current `(`; the balanced scan already saw
+    /// the `:` after the closing parenthesis.
+    fn tsParenArrowHeadWithReturnType(s: *State) Error!bool {
+        const spec = try tsBeginSpeculation(s);
+        defer tsRollback(s, spec);
+        if (!(try tsProbe(s, tsSkipBalancedGroup))) return false;
+        if (s.peekKind() != ':') return false;
+        try s.advance();
+        if (!(try tsProbe(s, tsParseTypeOrPredicate))) return false;
+        return s.peekKind() == tok.TOK_ARROW and !s.gotLineTerminator();
+    }
+
+    /// `<T>expr` type assertion at the current `<`.
+    fn tsParseTypeAssertion(s: *State, flags: ParseFlags) Error!void {
+        try tsExpectLess(s);
+        if (s.peekKind() == tok.TOK_CONST) {
+            try s.advance();
+        } else {
+            try tsParseTypeAllowConditional(s);
+        }
+        try tsExpectGreater(s);
+        try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
+    }
+
+    /// `expr<T, U>` after a member expression: a type argument list that a
+    /// call, a tagged template, or an instantiation expression may follow.
+    /// tsc `parseTypeArgumentsInExpression` + `canFollowTypeArgumentsInExpression`.
+    fn tsTryParseTypeArgumentsInExpression(s: *State) Error!bool {
+        const spec = try tsBeginSpeculation(s);
+        if ((try tsProbe(s, tsParseTypeArgumentsInExpression)) and tsCanFollowTypeArgumentsInExpression(s)) {
+            tsCommit(s, spec);
+            return true;
+        }
+        tsRollback(s, spec);
+        return false;
+    }
+
+    fn tsCanFollowTypeArgumentsInExpression(s: *State) bool {
+        const k = s.peekKind();
+        if (k == '(' or k == tok.TOK_TEMPLATE) return true;
+        if (k == '<' or k == '>' or k == '+' or k == '-') return false;
+        // JavaScript keeps `a < b >= c` and `a < b > = c` as comparisons.
+        if (k == '=' or compoundAssignOpcode(k) != null or logicalAssignKind(k) != null) return false;
+        if (s.gotLineTerminator()) return true;
+        if (tsIsBinaryOperatorKind(k)) return true;
+        return !tsTokenStartsExpression(k);
+    }
+
+    fn tsIsBinaryOperatorKind(k: tok.TokenKind) bool {
+        return switch (k) {
+            '*', '/', '%', '&', '|', '^', '?' => true,
+            tok.TOK_POW, tok.TOK_SHL, tok.TOK_SAR, tok.TOK_SHR, tok.TOK_LTE, tok.TOK_GTE, tok.TOK_EQ, tok.TOK_STRICT_EQ, tok.TOK_NEQ, tok.TOK_STRICT_NEQ, tok.TOK_LAND, tok.TOK_LOR, tok.TOK_DOUBLE_QUESTION_MARK, tok.TOK_IN, tok.TOK_INSTANCEOF => true,
+            else => false,
+        };
+    }
+
+    fn tsTokenStartsExpression(k: tok.TokenKind) bool {
+        if (tsKindIsIdentifierLike(k) or tok.isKeyword(k)) return true;
+        return switch (k) {
+            tok.TOK_NUMBER, tok.TOK_STRING, tok.TOK_TEMPLATE, tok.TOK_REGEXP, tok.TOK_PRIVATE_NAME, tok.TOK_INC, tok.TOK_DEC, tok.TOK_DIV_ASSIGN => true,
+            '(', '[', '{', '/', '+', '-', '~', '!', '<' => true,
+            else => false,
+        };
+    }
+
+    /// `as T`, `as const`, `satisfies T` after a relational-level operand.
+    fn tsAtAsOrSatisfies(s: *State) bool {
+        if (s.peekKind() != tok.TOK_IDENT or s.gotLineTerminator()) return false;
+        return s.isIdent("as") or s.isIdent("satisfies");
+    }
+
+    // ---- modules ---------------------------------------------------------
+
+    /// `import` followed by `x =`: an import alias declaration.
+    fn tsImportAliasAhead(s: *State) bool {
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
+        var first: tok.Token = undefined;
+        s.lex.nextInto(&first) catch return false;
+        const first_kind = first.val;
+        s.lex.freeToken(&first);
+        if (!tsKindIsIdentifierLike(first_kind)) return false;
+        var second: tok.Token = undefined;
+        s.lex.nextInto(&second) catch return false;
+        defer s.lex.freeToken(&second);
+        return second.val == '=';
+    }
+
+    /// `import x = A.B.C;` lowers to `const x = A.B.C;`. `require(...)` is
+    /// CommonJS and rejected.
+    fn tsParseImportAlias(s: *State, export_decl: bool) Error!void {
+        if (!isIdentifierLikeToken(s)) return s.failExpectedDescription("binding name");
+        const alias_atom = identifierLikeAtom(s);
+        try s.advance();
+        try s.expectToken('=');
+        if (s.isIdent("require")) {
+            return s.failWithMessage(null, "'import x = require()' is not supported; use ESM import");
+        }
+        if (!isIdentifierLikeToken(s)) return s.failExpectedDescription("entity name");
+        if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and hasKnownBinding(s, alias_atom)) {
+            return s.failUnexpectedToken();
+        }
+        _ = try s.defineVar(alias_atom, .const_);
+        try s.emitScopeGetVar(identifierLikeAtom(s));
+        try s.advance();
+        while (s.peekKind() == '.') {
+            try s.advance();
+            const name = if (isIdentifierLikeToken(s))
+                identifierLikeAtom(s)
+            else if (tok.isKeyword(s.peekKind()))
+                tok.keywordAtom(s.peekKind())
+            else
+                return s.failExpectedDescription("property name");
+            try Emitter.opAtom(s, opcode.op.get_field, name);
+            try s.advance();
+        }
+        try s.emitScopePutVarInit(alias_atom);
+        if (export_decl) try addModuleExportName(s, alias_atom, alias_atom);
+        if (s.namespace_export) {
+            if (s.current_namespace_atom) |ns_atom| {
+                try s.emitScopeGetVar(ns_atom);
+                try s.emitScopeGetVar(alias_atom);
+                try Emitter.opAtom(s, opcode.op.put_field, alias_atom);
+            }
+        }
+        _ = try s.expectSemicolon();
+    }
+
+    /// Current token is the identifier `type` right after `import`. tsc: it is
+    /// the type-only modifier when `{`, `*`, or a binding name follows, except
+    /// for the default import that is itself named `type` (`import type from
+    /// "m"`, but not `import type from from "m"`).
+    fn tsImportTypeModifier(s: *State) bool {
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
+        var first: tok.Token = undefined;
+        s.lex.nextInto(&first) catch return false;
+        defer s.lex.freeToken(&first);
+        if (first.val == '{' or first.val == '*') return true;
+        if (!tsKindIsIdentifierLike(first.val)) return false;
+        const first_is_from = first.val == tok.TOK_IDENT and !first.payload.ident.has_escape and
+            atomNameEquals(s, first.payload.ident.atom, "from");
+        if (!first_is_from) return true;
+        var second: tok.Token = undefined;
+        s.lex.nextInto(&second) catch return false;
+        defer s.lex.freeToken(&second);
+        if (second.val == '=') return true;
+        return second.val == tok.TOK_IDENT and !second.payload.ident.has_escape and
+            atomNameEquals(s, second.payload.ident.atom, "from");
+    }
+
+    /// Current token is the identifier `type` at the start of an import or
+    /// export specifier. tsc `parseImportOrExportSpecifier`.
+    fn tsSpecifierTypeModifier(s: *State) bool {
+        const saved_cursor = takeLexerCursorSnapshot(s);
+        defer restoreLexerCursorSnapshot(s, saved_cursor);
+        var first: tok.Token = undefined;
+        s.lex.nextInto(&first) catch return false;
+        defer s.lex.freeToken(&first);
+        const first_is_name = isModuleNameToken(first.val);
+        if (!first_is_name) return false;
+        const first_is_as = first.val == tok.TOK_IDENT and !first.payload.ident.has_escape and
+            atomNameEquals(s, first.payload.ident.atom, "as");
+        if (!first_is_as) return true;
+        // `{ type as ... }`
+        var second: tok.Token = undefined;
+        s.lex.nextInto(&second) catch return false;
+        defer s.lex.freeToken(&second);
+        const second_is_as = second.val == tok.TOK_IDENT and !second.payload.ident.has_escape and
+            atomNameEquals(s, second.payload.ident.atom, "as");
+        if (second_is_as) return true; // `{ type as as X }`
+        if (isModuleNameToken(second.val)) return false; // `{ type as X }`
+        return true; // `{ type as }`
+    }
+
+    /// The remainder of a type-only import after `import type`.
+    fn tsSkipTypeOnlyImport(s: *State) Error!void {
+        while (true) {
+            const k = s.peekKind();
+            if (k == tok.TOK_EOF) return s.failUnexpectedToken();
+            if (k == '{') {
+                try tsSkipBalancedGroup(s);
+                continue;
+            }
+            if (k == '=') return tsSkipToStatementEnd(s);
+            if (k == tok.TOK_STRING) {
+                try s.advance();
+                break;
+            }
+            try s.advance();
+        }
+        if (s.peekKind() == tok.TOK_WITH) {
+            try s.advance();
+            try tsSkipBraceBlock(s);
+        }
+        _ = try s.expectSemicolon();
+    }
+
+    /// The remainder of a type-only export after `export type`.
+    fn tsSkipTypeOnlyExport(s: *State) Error!void {
+        if (s.peekKind() == '{') {
+            try tsSkipBalancedGroup(s);
+        } else {
+            try s.expectToken('*');
+            if (s.isIdent("as")) {
+                try s.advance();
+                if (!isModuleNameToken(s.peekKind())) return s.failExpectedDescription("export name");
+                try s.advance();
+            }
+        }
+        if (s.isIdent("from")) try tsSkipFromClause(s);
+        _ = try s.expectSemicolon();
+    }
+
+    /// `from "m" [with {...}]` without registering a module request.
+    fn tsSkipFromClause(s: *State) Error!void {
+        if (!s.isIdent("from")) return s.failExpectedDescription("'from'");
+        try s.advance();
+        if (s.peekKind() != tok.TOK_STRING) return s.failExpectedDescription("module string");
+        try s.advance();
+        if (s.peekKind() == tok.TOK_WITH) {
+            try s.advance();
+            try tsSkipBraceBlock(s);
+        }
+    }
+
+    // ---- enum ------------------------------------------------------------
+
+    const TsEnumValue = union(enum) {
+        number: f64,
+        string: []u8,
+    };
+
+    const TsEnumMember = struct {
+        name: Atom,
+        value: TsEnumValue,
+    };
+
+    fn tsFreeEnumValue(s: *State, value: TsEnumValue) void {
+        switch (value) {
+            .string => |bytes| s.function.memory.allocator.free(bytes),
+            .number => {},
+        }
+    }
+
+    /// Enum member name: identifier, keyword, or string literal. Consumes it.
+    fn tsEnumMemberName(s: *State) Error!Atom {
+        const k = s.peekKind();
+        if (k == tok.TOK_STRING) {
+            const atom_id = try s.function.atoms.internString(s.token.payload.str.bytes);
+            try s.advance();
+            return atom_id;
+        }
+        if (isIdentifierLikeToken(s) or tok.isKeyword(k)) {
+            const atom_id = identifierLikeAtom(s);
+            try s.advance();
+            return atom_id;
+        }
+        return s.failExpectedDescription("enum member name");
+    }
+
+    /// tsc constant-folds enum initializers built from literals, the usual
+    /// arithmetic and bitwise operators, and references to earlier members.
+    /// Returns null (with the lexer restored) when the initializer is not
+    /// such a constant expression; the caller then evaluates it at runtime.
+    fn tsTryFoldEnumInitializer(s: *State, enum_atom: Atom, members: []const TsEnumMember) Error!?TsEnumValue {
+        const spec = try tsBeginSpeculation(s);
+        const folded = tsFoldEnumBinary(s, enum_atom, members, 0) catch |err| switch (err) {
+            error.OutOfMemory, error.StackOverflow, error.BytecodeOverflow => return err,
+            else => null,
+        };
+        if (folded) |value| {
+            if (s.peekKind() == ',' or s.peekKind() == '}') {
+                tsCommit(s, spec);
+                return value;
+            }
+            tsFreeEnumValue(s, value);
+        }
+        tsRollback(s, spec);
+        return null;
+    }
+
+    fn tsEnumBinaryPrecedence(k: tok.TokenKind) ?u8 {
+        return switch (k) {
+            '|' => 1,
+            '^' => 2,
+            '&' => 3,
+            tok.TOK_SHL, tok.TOK_SAR, tok.TOK_SHR => 4,
+            '+', '-' => 5,
+            '*', '/', '%' => 6,
+            tok.TOK_POW => 7,
+            else => null,
+        };
+    }
+
+    fn tsFoldEnumBinary(s: *State, enum_atom: Atom, members: []const TsEnumMember, min_prec: u8) Error!?TsEnumValue {
+        var left = (try tsFoldEnumUnary(s, enum_atom, members)) orelse return null;
+        errdefer tsFreeEnumValue(s, left);
+        while (true) {
+            const op = s.peekKind();
+            const prec = tsEnumBinaryPrecedence(op) orelse return left;
+            if (prec < min_prec) return left;
+            try s.advance();
+            // `**` is right-associative; everything else binds left.
+            const rhs_min: u8 = if (op == tok.TOK_POW) prec else prec + 1;
+            const right = (try tsFoldEnumBinary(s, enum_atom, members, rhs_min)) orelse {
+                tsFreeEnumValue(s, left);
+                return null;
+            };
+            const combined = try tsFoldEnumApply(s, op, left, right);
+            tsFreeEnumValue(s, left);
+            tsFreeEnumValue(s, right);
+            left = combined orelse return null;
+        }
+    }
+
+    fn tsFoldEnumApply(s: *State, op: tok.TokenKind, left: TsEnumValue, right: TsEnumValue) Error!?TsEnumValue {
+        if (left == .string or right == .string) {
+            if (op != '+' or left != .string or right != .string) return null;
+            const joined = try s.function.memory.allocator.alloc(u8, left.string.len + right.string.len);
+            @memcpy(joined[0..left.string.len], left.string);
+            @memcpy(joined[left.string.len..], right.string);
+            return .{ .string = joined };
+        }
+        const a = left.number;
+        const b = right.number;
+        const result: f64 = switch (op) {
+            '+' => a + b,
+            '-' => a - b,
+            '*' => a * b,
+            '/' => a / b,
+            '%' => @rem(a, b),
+            tok.TOK_POW => std.math.pow(f64, a, b),
+            '|' => @floatFromInt(tsToInt32(a) | tsToInt32(b)),
+            '&' => @floatFromInt(tsToInt32(a) & tsToInt32(b)),
+            '^' => @floatFromInt(tsToInt32(a) ^ tsToInt32(b)),
+            tok.TOK_SHL => @floatFromInt(tsToInt32(a) << @as(u5, @truncate(tsToUint32(b)))),
+            tok.TOK_SAR => @floatFromInt(tsToInt32(a) >> @as(u5, @truncate(tsToUint32(b)))),
+            tok.TOK_SHR => @floatFromInt(tsToUint32(a) >> @as(u5, @truncate(tsToUint32(b)))),
+            else => return null,
+        };
+        return .{ .number = result };
+    }
+
+    fn tsToUint32(value: f64) u32 {
+        if (!std.math.isFinite(value)) return 0;
+        const truncated = @trunc(value);
+        const modulo = @mod(truncated, 4294967296.0);
+        return @intFromFloat(modulo);
+    }
+
+    fn tsToInt32(value: f64) i32 {
+        return @bitCast(tsToUint32(value));
+    }
+
+    fn tsFoldEnumUnary(s: *State, enum_atom: Atom, members: []const TsEnumMember) Error!?TsEnumValue {
+        const k = s.peekKind();
+        if (k == '-' or k == '+' or k == '~') {
+            try s.advance();
+            const operand = (try tsFoldEnumUnary(s, enum_atom, members)) orelse return null;
+            if (operand != .number) {
+                tsFreeEnumValue(s, operand);
+                return null;
+            }
+            return .{ .number = switch (k) {
+                '-' => -operand.number,
+                '+' => operand.number,
+                else => @floatFromInt(~tsToInt32(operand.number)),
+            } };
+        }
+        return tsFoldEnumPrimary(s, enum_atom, members);
+    }
+
+    fn tsFoldEnumPrimary(s: *State, enum_atom: Atom, members: []const TsEnumMember) Error!?TsEnumValue {
+        const k = s.peekKind();
+        if (k == tok.TOK_NUMBER) {
+            if (s.token.payload.num.is_bigint) return null;
+            const value = s.token.payload.num.value;
+            try s.advance();
+            return .{ .number = value };
+        }
+        if (k == tok.TOK_STRING) {
+            const bytes = try s.function.memory.allocator.dupe(u8, s.token.payload.str.bytes);
+            errdefer s.function.memory.allocator.free(bytes);
+            try s.advance();
+            return .{ .string = bytes };
+        }
+        if (k == tok.TOK_TEMPLATE) {
+            const part = s.token.payload.str;
+            if (part.template != .no_substitution or part.cooked_invalid) return null;
+            const bytes = try s.function.memory.allocator.dupe(u8, part.bytes);
+            errdefer s.function.memory.allocator.free(bytes);
+            try s.advance();
+            return .{ .string = bytes };
+        }
+        if (k == '(') {
+            try s.advance();
+            const inner = (try tsFoldEnumBinary(s, enum_atom, members, 0)) orelse return null;
+            errdefer tsFreeEnumValue(s, inner);
+            try s.expectToken(')');
+            return inner;
+        }
+        if (isIdentifierLikeToken(s)) {
+            var name = identifierLikeAtom(s);
+            try s.advance();
+            if (name == enum_atom and s.peekKind() == '.') {
+                try s.advance();
+                if (!isIdentifierLikeToken(s) and !tok.isKeyword(s.peekKind())) return null;
+                name = identifierLikeAtom(s);
+                try s.advance();
+            }
+            for (members) |member| {
+                if (member.name != name) continue;
+                return switch (member.value) {
+                    .number => |n| .{ .number = n },
+                    .string => |bytes| .{ .string = try s.function.memory.allocator.dupe(u8, bytes) },
+                };
+            }
+            return null;
+        }
+        return null;
+    }
+
+    fn tsEmitNumber(s: *State, value: f64) Error!void {
+        if (numberIsExactI32(value) and !(value == 0 and std.math.signbit(value))) {
+            try Emitter.opI32(s, opcode.op.push_i32, @as(i32, @intFromFloat(value)));
+        } else {
+            try Emitter.pushConst(s, JSValue.float64(value));
+        }
     }
 
     /// Mirror `js_parse_statement_or_decl` (`quickjs.c:28228`).
@@ -8566,7 +10064,11 @@ pub const parser_core = struct {
         switch (tok_kind) {
             '{' => try parseBlockStatement(s),
             tok.TOK_STRING => try parseStringStatement(s),
-            tok.TOK_ENUM => try parseEnumStatement(s),
+            tok.TOK_ENUM => try parseEnumDeclaration(s),
+            tok.TOK_INTERFACE => if (tsDeclarationStart(s) == .interface)
+                try tsParseInterfaceDeclaration(s)
+            else
+                try parseExpressionStatement(s),
             tok.TOK_RETURN => try parseReturnStatement(s),
             tok.TOK_THROW => try parseThrowStatement(s),
             tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => try parseVariableStatement(s, tok_kind, decl_mask),
@@ -8607,13 +10109,6 @@ pub const parser_core = struct {
         } else {
             try Emitter.opNoSource(s, opcode.op.drop);
         }
-    }
-
-    fn parseEnumStatement(s: *State) Error!void {
-        if (!s.lex.is_typescript) {
-            return s.failUnexpectedToken();
-        }
-        try parseEnumDeclaration(s);
     }
 
     fn parseReturnStatement(s: *State) Error!void {
@@ -8658,7 +10153,7 @@ pub const parser_core = struct {
             try parseLetKeywordExpressionStatement(s);
             return;
         }
-        if (s.lex.is_typescript and tok_kind == tok.TOK_CONST and s.peekNextKind() == tok.TOK_ENUM) {
+        if (tok_kind == tok.TOK_CONST and s.peekNextKind() == tok.TOK_ENUM) {
             try s.advance();
             try parseEnumDeclaration(s);
             return;
@@ -8692,9 +10187,18 @@ pub const parser_core = struct {
     }
 
     fn parseIdentifierStatement(s: *State, decl_mask: DeclMask) Error!void {
-        if (s.lex.is_typescript and s.isIdent("namespace") and s.peekNextKind() == tok.TOK_IDENT) {
-            try parseNamespaceDeclaration(s);
-            return;
+        switch (tsDeclarationStart(s)) {
+            .none => {},
+            .interface => return tsParseInterfaceDeclaration(s),
+            .type_alias => return tsParseTypeAliasDeclaration(s),
+            .ambient => return tsParseAmbientDeclaration(s),
+            .namespace => return parseNamespaceDeclaration(s),
+            .abstract_class => {
+                if (!decl_mask.func) return s.failUnexpectedToken();
+                try s.advance();
+                _ = (try parseClass(s, true)) orelse return s.failUnexpectedToken();
+                return;
+            },
         }
         if (usingDeclarationStart(s)) {
             if (!decl_mask.other) return s.failUnexpectedToken();
@@ -8767,6 +10271,12 @@ pub const parser_core = struct {
                 try Emitter.opNoSource(s, opcode.op.drop);
             }
             return;
+        }
+        if (tsImportAliasAhead(s)) {
+            // TypeScript `import x = A.B;` is a declaration in any goal.
+            if (!decl_mask.other) return s.failUnexpectedToken();
+            try s.advance();
+            return tsParseImportAlias(s, false);
         }
         if (!decl_mask.other or !canParseModuleDeclarationHere(s)) {
             return s.failUnexpectedToken();
@@ -9367,6 +10877,7 @@ pub const parser_core = struct {
                     }
                     _ = try s.defineVar(catch_atom, .catch_);
                     try s.advance();
+                    try tsParseTypeAnnotationOpt(s);
                     try s.emitScopePutVar(catch_atom);
                 }
                 try s.expectToken(')');
@@ -10046,8 +11557,11 @@ pub const parser_core = struct {
         return is_global_var and !s.lex.is_module;
     }
 
-    fn parseVar(s: *State, var_tok: tok.TokenKind, export_decl: bool, parse_flags: ParseFlags) Error!void {
-        const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST or s.in_namespace;
+    fn parseVar(s: *State, declared_tok: tok.TokenKind, export_decl: bool, parse_flags: ParseFlags) Error!void {
+        // TypeScript `namespace N { var x }`: tsc scopes the binding to the
+        // namespace's IIFE, so it is lowered as a block-level `let` here.
+        const var_tok = if (s.in_namespace and declared_tok == tok.TOK_VAR) tok.TOK_LET else declared_tok;
+        const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST;
         const is_const = var_tok == tok.TOK_CONST;
         while (true) {
             const sloppy_keyword_var = (s.peekKind() == tok.TOK_YIELD or
@@ -10079,6 +11593,9 @@ pub const parser_core = struct {
                 }
                 var local_lexical_idx: ?u16 = null;
                 try s.advance();
+                // TypeScript `let x!: T` / `let x: T`.
+                if (s.peekKind() == '!' and !s.gotLineTerminator()) try s.advance();
+                try tsParseTypeAnnotationOpt(s);
 
                 // Imported/module-declaration names are represented outside
                 // vars/global_vars until module resolution.  Preserve that
@@ -10633,6 +12150,15 @@ pub const parser_core = struct {
         }
         try s.advance();
 
+        // TypeScript overload signature: no body follows the parameter list,
+        // so nothing is declared here.
+        s.ts_last_decl_was_signature = false;
+        if (!(try tsFunctionHasBodyAhead(s))) {
+            try tsSkipFunctionSignature(s);
+            s.ts_last_decl_was_signature = true;
+            return;
+        }
+
         // Set generator flag for yield parsing
         const was_generator = s.in_generator;
         s.in_generator = is_generator;
@@ -10660,6 +12186,15 @@ pub const parser_core = struct {
         s.pending_function_name = name_atom;
         s.pending_function_is_decl = true;
         try parseFunctionParamsAndBody(s, actual_kind, source_start);
+        if (s.namespace_export) {
+            // TypeScript `namespace N { export function f() {} }`: the
+            // hoisted binding is copied onto the namespace object.
+            if (s.current_namespace_atom) |ns_atom| {
+                try s.emitScopeGetVar(ns_atom);
+                try s.emitScopeGetVar(name_atom);
+                try Emitter.opAtom(s, opcode.op.put_field, name_atom);
+            }
+        }
     }
 
     /// Parse function expression
@@ -10822,6 +12357,8 @@ pub const parser_core = struct {
             s.reject_await_in_parameter_initializer = func_kind == .async or func_kind == .async_generator;
             defer s.reject_await_in_parameter_initializer = saved_reject_await;
 
+            // TypeScript `function f<T>(...)`.
+            if (tsAtLess(s)) try tsParseTypeParameters(s);
             const parameter_scan = try scanParameterList(s);
             try s.expectToken('(');
             if (capture_child) s.curFunc().has_parameter_expressions = parameter_scan.has_parameter_expressions;
@@ -10832,13 +12369,20 @@ pub const parser_core = struct {
 
             while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
                 var has_modifier = false;
-                if (s.lex.is_typescript and (func_kind == .class_constructor or func_kind == .derived_class_constructor)) {
+                if (func_kind == .class_constructor or func_kind == .derived_class_constructor) {
+                    // TypeScript parameter properties `constructor(public x)`.
                     while (s.isParameterModifier()) {
                         has_modifier = true;
                         try s.advance();
                     }
                 }
-                if (isIdentifierLikeToken(s)) {
+                if (s.peekKind() == tok.TOK_THIS) {
+                    // TypeScript `this` parameter: a type annotation on the
+                    // receiver, not an argument.
+                    if (param_count != 0) return s.failUnexpectedToken();
+                    try s.advance();
+                    try tsParseTypeAnnotationOpt(s);
+                } else if (isIdentifierLikeToken(s)) {
                     const param_atom = identifierLikeAtomOwned(s);
                     recordInvalidStrictParameterName(s, &parameters.invalid_strict_name_position, param_atom);
                     if (has_modifier) {
@@ -10878,6 +12422,9 @@ pub const parser_core = struct {
                     }
                     try s.advance();
                     param_count += 1;
+                    // TypeScript `x?: T`.
+                    if (s.peekKind() == '?') try s.advance();
+                    try tsParseTypeAnnotationOpt(s);
 
                     if (s.peekKind() == '=') {
                         parameters.has_simple_list = false;
@@ -10971,6 +12518,7 @@ pub const parser_core = struct {
                             try initializeParameterScopeBinding(s, rest_atom, arg_index);
                         }
                         try s.advance();
+                        try tsParseTypeAnnotationOpt(s);
                     } else if (s.peekKind() == '[') {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
@@ -11018,6 +12566,8 @@ pub const parser_core = struct {
 
             try s.expectToken(')');
             if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
+            // TypeScript return type / type predicate.
+            try tsParseReturnTypeOpt(s);
         }
 
         if (func_kind == .get and (param_count != 0 or has_rest_parameter))
@@ -11072,6 +12622,19 @@ pub const parser_core = struct {
         const saved_in_constructor = s.in_constructor;
         s.in_constructor = func_kind == .class_constructor or func_kind == .derived_class_constructor;
         defer s.in_constructor = saved_in_constructor;
+        // A TypeScript namespace body ends at any nested function: its `var`
+        // rewriting and `export` attachment must not apply inside.
+        const saved_in_namespace = s.in_namespace;
+        const saved_namespace_export = s.namespace_export;
+        const saved_current_namespace_atom = s.current_namespace_atom;
+        s.in_namespace = false;
+        s.namespace_export = false;
+        s.current_namespace_atom = null;
+        defer {
+            s.in_namespace = saved_in_namespace;
+            s.namespace_export = saved_namespace_export;
+            s.current_namespace_atom = saved_current_namespace_atom;
+        }
         const saved_is_outer_constructor_block = s.is_outer_constructor_block;
         s.is_outer_constructor_block = func_kind == .class_constructor or func_kind == .derived_class_constructor;
         defer s.is_outer_constructor_block = saved_is_outer_constructor_block;
@@ -11642,16 +13205,6 @@ pub const parser_core = struct {
                 try s.emitFClosure(child_cpool_idx);
                 try Emitter.op(s, opcode.op.drop);
             }
-            if (s.namespace_export) {
-                if (s.current_namespace_atom) |ns_atom| {
-                    const func_atom = child_ptr.func_name;
-                    if (func_atom != atom_module.ids.empty_string) {
-                        try s.emitScopeGetVar(ns_atom);
-                        try s.emitScopeGetVar(func_atom);
-                        try Emitter.opAtom(s, opcode.op.put_field, func_atom);
-                    }
-                }
-            }
         }
     }
 
@@ -11680,6 +13233,17 @@ pub const parser_core = struct {
         const saved_parameter_properties = s.current_parameter_properties;
         s.current_parameter_properties = null;
         defer s.current_parameter_properties = saved_parameter_properties;
+        const saved_in_namespace = s.in_namespace;
+        const saved_namespace_export = s.namespace_export;
+        const saved_current_namespace_atom = s.current_namespace_atom;
+        s.in_namespace = false;
+        s.namespace_export = false;
+        s.current_namespace_atom = null;
+        defer {
+            s.in_namespace = saved_in_namespace;
+            s.namespace_export = saved_namespace_export;
+            s.current_namespace_atom = saved_current_namespace_atom;
+        }
 
         const arrow_new_target_allowed = saved_new_target_allowed;
         var child_pushed = false;
@@ -11816,6 +13380,9 @@ pub const parser_core = struct {
                     }
                     try s.advance();
                     param_count += 1;
+                    // TypeScript `x?: T`.
+                    if (s.peekKind() == '?') try s.advance();
+                    try tsParseTypeAnnotationOpt(s);
                     if (s.peekKind() == '=') {
                         has_non_simple_params = true;
                         if (first_default_param == null) first_default_param = arg_index;
@@ -11906,6 +13473,7 @@ pub const parser_core = struct {
                             try initializeParameterScopeBinding(s, param_atom, arg_index);
                         }
                         try s.advance();
+                        try tsParseTypeAnnotationOpt(s);
                     } else if (s.peekKind() == '[') {
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
@@ -11967,6 +13535,8 @@ pub const parser_core = struct {
             s.curFunc().has_simple_parameter_list = !has_non_simple_params;
         }
 
+        // TypeScript `(...): R =>`.
+        try tsParseReturnTypeOpt(s);
         // Expect =>
         if (s.lex.got_lf) return s.failUnexpectedToken();
         try s.expectToken(tok.TOK_ARROW);
@@ -12644,7 +14214,10 @@ pub const parser_core = struct {
         s.features.insert(.destructuring);
         const topology = try scanPatternTopology(s);
         const has_initializer = allow_outer_initializer and
-            topology.following == @as(tok.TokenKind, @intCast('='));
+            (topology.following == @as(tok.TokenKind, @intCast('=')) or
+                (mode == .binding and
+                    (topology.following == ':' or topology.following == '?') and
+                    try tsPatternHasInitializerAfterAnnotation(s)));
         if (!has_value and !has_initializer)
             return s.failWithMessage(null, "destructuring declaration requires an initializer");
 
@@ -12669,6 +14242,11 @@ pub const parser_core = struct {
             @as(tok.TokenKind, @intCast('[')) => try parseArrayPatternBody(s, mode),
             @as(tok.TokenKind, @intCast('{')) => try parseObjectPatternBody(s, mode, topology.has_top_level_rest),
             else => return Error.ParserInvariant,
+        }
+        if (mode == .binding) {
+            // TypeScript `{...}?: T` on a binding pattern.
+            if (s.peekKind() == '?') try s.advance();
+            try tsParseTypeAnnotationOpt(s);
         }
 
         if (has_initializer) {
@@ -12909,35 +14487,35 @@ pub const parser_core = struct {
         // The parser only consumes topology from this speculative walk. Keep
         // ordinary ASCII source borrowed, exactly as the simple arrow probe
         // does, and fall back to the owning Lexer for template, escaped,
-        // Unicode, TypeScript-erased, or otherwise context-sensitive input.
-        if (!s.lex.is_typescript) {
-            if (simple_token.balancedAfterOpen(
-                s.lex.source,
-                s.lex.pos,
-                @intCast(opening),
-                no_line_terminator,
-            )) |simple| {
-                const following: tok.TokenKind = switch (simple.following) {
-                    .arrow => tok.TOK_ARROW,
-                    .assignment => @intCast('='),
-                    .comma => @intCast(','),
-                    .right_paren => @intCast(')'),
-                    .right_bracket => @intCast(']'),
-                    .right_brace => @intCast('}'),
-                    .identifier => tok.TOK_IDENT,
-                    .in_keyword => tok.TOK_IN,
-                    .line_terminator => @intCast('\n'),
-                    .other, .eof => tok.TOK_EOF,
+        // Unicode, or otherwise context-sensitive input.
+        if (simple_token.balancedAfterOpen(
+            s.lex.source,
+            s.lex.pos,
+            @intCast(opening),
+            no_line_terminator,
+        )) |simple| {
+            const following: tok.TokenKind = switch (simple.following) {
+                .arrow => tok.TOK_ARROW,
+                .assignment => @intCast('='),
+                .comma => @intCast(','),
+                .colon => @intCast(':'),
+                .left_brace => @intCast('{'),
+                .right_paren => @intCast(')'),
+                .right_bracket => @intCast(']'),
+                .right_brace => @intCast('}'),
+                .identifier => tok.TOK_IDENT,
+                .in_keyword => tok.TOK_IN,
+                .line_terminator => @intCast('\n'),
+                .other, .eof => tok.TOK_EOF,
+            };
+            if (simple.closed) {
+                return .{
+                    .following = following,
+                    .closed = true,
+                    .has_top_level_semicolon = simple.has_top_level_semicolon,
+                    .has_top_level_ellipsis = simple.has_top_level_ellipsis,
+                    .has_assignment = simple.has_assignment,
                 };
-                if (simple.closed) {
-                    return .{
-                        .following = following,
-                        .closed = true,
-                        .has_top_level_semicolon = simple.has_top_level_semicolon,
-                        .has_top_level_ellipsis = simple.has_top_level_ellipsis,
-                        .has_assignment = simple.has_assignment,
-                    };
-                }
             }
         }
 
@@ -13201,12 +14779,23 @@ pub const parser_core = struct {
             try s.advance();
             // ClassHeritage is `extends LeftHandSideExpression`, not a full
             // assignment expression; arrow expressions are rejected here.
-            if ((try checkArrowHead(s)) or
-                (s.isAsyncIdentifier() and (try checkAsyncArrowHeadAfterAsync(s))))
+            if ((try checkArrowHead(s, false)) or
+                (s.isAsyncIdentifier() and (try checkAsyncArrowHeadAfterAsync(s, false))))
             {
                 return s.failWithMessage(null, "class heritage must be a left-hand-side expression");
             }
             try parseLhsExpr(s, ParseFlags.default);
+            // TypeScript `extends B<T>`.
+            if (s.peekKind() == '<' and !s.gotLineTerminator()) try tsParseTypeArguments(s);
+        }
+        if (s.peekKind() == tok.TOK_IMPLEMENTS) {
+            // TypeScript `implements I<T>, J`.
+            try s.advance();
+            while (true) {
+                try tsParseTypeReference(s);
+                if (s.peekKind() != ',') break;
+                try s.advance();
+            }
         }
     }
 
@@ -13220,25 +14809,59 @@ pub const parser_core = struct {
             s.in_constructor = saved_in_constructor;
         }
 
-        // QuickJS treats `static` as a modifier only when it cannot be the
-        // element name itself (`static;`, `static = ...`, `static()`).
-        if (s.peekKind() == tok.TOK_STATIC) {
-            const next = s.peekNextKind();
-            if (next != @as(tok.TokenKind, @intCast(';')) and
-                next != @as(tok.TokenKind, @intCast('}')) and
-                next != @as(tok.TokenKind, @intCast('(')) and
-                next != @as(tok.TokenKind, @intCast('=')))
-            {
-                s.is_static = true;
-                try s.advance();
+        // Member modifiers. `static` is QuickJS's; the TypeScript words
+        // (`public`/`private`/`protected`/`readonly`/`abstract`/`override`/
+        // `declare`) follow tsc `nextTokenCanFollowModifier`: a word is a
+        // modifier only when a member can start right after it on the same
+        // line, otherwise it is the member name. `accessor` (auto-accessors)
+        // belongs to the decorators proposal and stays unsupported.
+        var is_abstract = false;
+        var is_declare = false;
+        while (true) {
+            const modifier_kind = s.peekKind();
+            const Word = enum { none, static, access, readonly, abstract, override, declare };
+            var word: Word = .none;
+            if (modifier_kind == tok.TOK_STATIC) {
+                word = .static;
+            } else if (modifier_kind == tok.TOK_PUBLIC or modifier_kind == tok.TOK_PRIVATE or modifier_kind == tok.TOK_PROTECTED) {
+                word = .access;
+            } else if (modifier_kind == tok.TOK_IDENT and !s.token.payload.ident.has_escape) {
+                const name = s.lex.atoms.name(s.token.payload.ident.atom) orelse "";
+                word = if (std.mem.eql(u8, name, "readonly"))
+                    .readonly
+                else if (std.mem.eql(u8, name, "abstract"))
+                    .abstract
+                else if (std.mem.eql(u8, name, "override"))
+                    .override
+                else if (std.mem.eql(u8, name, "declare"))
+                    .declare
+                else
+                    .none;
             }
+            if (word == .none) break;
+            var has_lt = false;
+            const next = s.peekNextKindWithLineTerminator(&has_lt);
+            if (word != .static and has_lt) break;
+            if (!tsCanFollowClassModifier(next)) break;
+            switch (word) {
+                .static => s.is_static = true,
+                .abstract => is_abstract = true,
+                .declare => is_declare = true,
+                else => {},
+            }
+            try s.advance();
         }
+        if (is_declare) return tsSkipDeclaredField(s);
+        if (s.peekKind() == '[' and tsIndexSignatureAhead(s)) return tsSkipIndexSignature(s);
 
         const element_source_start = s.currentFunctionSourceStart();
         var method_kind_override: ?ParseFunctionKind = null;
         if (s.peekKind() == tok.TOK_IDENT and s.isIdent("async") and
             s.peekNextKind() != @as(tok.TokenKind, @intCast(':')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('(')) and
+            s.peekNextKind() != @as(tok.TokenKind, @intCast('<')) and
+            s.peekNextKind() != @as(tok.TokenKind, @intCast('?')) and
+            s.peekNextKind() != @as(tok.TokenKind, @intCast('!')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('=')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast(';')) and
             s.peekNextKind() != @as(tok.TokenKind, @intCast('}')))
@@ -13270,9 +14893,10 @@ pub const parser_core = struct {
                 try registerClassPrivateElement(s, private_atom, if (is_getter) .getter else .setter);
                 try preparePrivateAccessorBinding(s, private_atom, is_getter);
                 try s.advance();
-                if (s.peekKind() != '(') {
+                if (!tsIsMethodStart(s)) {
                     return s.failExpectedToken('(');
                 }
+                if (!(try tsFunctionHasBodyAhead(s))) return tsSkipMethodSignature(s, is_abstract);
                 // Parse parameters with proper function kind for private getter/setter
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
                 try parseClassElementFunction(s, kind, element_source_start);
@@ -13305,9 +14929,10 @@ pub const parser_core = struct {
                 const prop_atom = prop_name.atom;
                 if (!s.is_static and prop_atom == atom_module.ids.constructor) return s.failUnexpectedToken();
                 if (s.is_static and prop_atom == atom_module.ids.prototype) return s.failUnexpectedToken();
-                if (s.peekKind() != '(') {
+                if (!tsIsMethodStart(s)) {
                     return s.failExpectedToken('(');
                 }
+                if (!(try tsFunctionHasBodyAhead(s))) return tsSkipMethodSignature(s, is_abstract);
                 // Parse parameters with proper function kind for getter/setter
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
                 try parseClassElementFunction(s, kind, element_source_start);
@@ -13333,7 +14958,12 @@ pub const parser_core = struct {
             const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
             if (atomNameEquals(s, private_atom, "#constructor")) return s.failUnexpectedToken();
             try s.advance();
-            if (s.peekKind() == '(') {
+            // TypeScript `#x?: T` / `#x!: T`.
+            const is_optional_private = s.peekKind() == '?';
+            if (s.peekKind() == '?' or (s.peekKind() == '!' and !s.gotLineTerminator())) try s.advance();
+            if (!tsIsMethodStart(s)) try tsParseTypeAnnotationOpt(s);
+            if (tsIsMethodStart(s)) {
+                if (!(try tsFunctionHasBodyAhead(s))) return tsSkipMethodSignature(s, is_abstract or is_optional_private);
                 // Private method
                 try registerClassPrivateElement(s, private_atom, .method);
                 try parseClassElementFunction(s, method_kind_override orelse .method, element_source_start);
@@ -13394,11 +15024,17 @@ pub const parser_core = struct {
         // Check for method or field
         if (try parseObjectPropertyName(s)) |prop_name| {
             const prop_atom = prop_name.atom;
+            // TypeScript `x?: T` / `x!: T` / `m?(): T`.
+            const is_optional_member = s.peekKind() == '?';
+            if (s.peekKind() == '?' or (s.peekKind() == '!' and !s.gotLineTerminator())) try s.advance();
+            if (!tsIsMethodStart(s)) try tsParseTypeAnnotationOpt(s);
             const has_line_terminator_after_name = s.gotLineTerminator();
             const is_constructor = !s.is_static and prop_atom == atom_module.ids.constructor;
-            if (s.is_static and prop_atom == atom_module.ids.prototype and s.peekKind() == '(') return s.failUnexpectedToken();
+            if (s.is_static and prop_atom == atom_module.ids.prototype and tsIsMethodStart(s)) return s.failUnexpectedToken();
             if (is_constructor and method_kind_override != null) return s.failUnexpectedToken();
-            if (s.peekKind() == '(') {
+            if (tsIsMethodStart(s)) {
+                // TypeScript overload / abstract / optional signature: no body.
+                if (!(try tsFunctionHasBodyAhead(s))) return tsSkipMethodSignature(s, is_abstract or is_optional_member);
                 // Method or constructor
                 if (is_constructor) {
                     if (s.class_constructor_cpool_idx != null) return s.failUnexpectedToken();
@@ -13488,6 +15124,10 @@ pub const parser_core = struct {
         const next = s.peekNextKindWithLineTerminator(&has_line_terminator);
         if (has_line_terminator) return null;
         if (next == @as(tok.TokenKind, @intCast('(')) or
+            next == @as(tok.TokenKind, @intCast('<')) or
+            next == @as(tok.TokenKind, @intCast('?')) or
+            next == @as(tok.TokenKind, @intCast('!')) or
+            next == @as(tok.TokenKind, @intCast(':')) or
             next == @as(tok.TokenKind, @intCast('=')) or
             next == @as(tok.TokenKind, @intCast(';')) or
             next == @as(tok.TokenKind, @intCast('}')))
@@ -14002,7 +15642,14 @@ pub const parser_core = struct {
         // its computed key and preserve the class stack.
         try Emitter.op(s, opcode.op.swap);
         try parseClassComputedName(s);
-        if (s.peekKind() == '(') {
+        if (s.peekKind() == '?' or (s.peekKind() == '!' and !s.gotLineTerminator())) try s.advance();
+        if (!tsIsMethodStart(s)) try tsParseTypeAnnotationOpt(s);
+        if (tsIsMethodStart(s)) {
+            if (!(try tsFunctionHasBodyAhead(s))) {
+                try tsSkipMethodSignature(s, false);
+                try Emitter.op(s, opcode.op.swap);
+                return;
+            }
             try parseClassElementFunction(s, kind, source_start);
             // qjs js_parse_class: define an ordinary computed static method.
             try Emitter.opU8(s, opcode.op.define_method_computed, 0);
@@ -14038,7 +15685,10 @@ pub const parser_core = struct {
 
     fn emitInstanceClassComputedElement(s: *State, kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
         try parseClassComputedName(s);
-        if (s.peekKind() == '(') {
+        if (s.peekKind() == '?' or (s.peekKind() == '!' and !s.gotLineTerminator())) try s.advance();
+        if (!tsIsMethodStart(s)) try tsParseTypeAnnotationOpt(s);
+        if (tsIsMethodStart(s)) {
+            if (!(try tsFunctionHasBodyAhead(s))) return tsSkipMethodSignature(s, false);
             try parseClassElementFunction(s, kind, source_start);
             // qjs js_parse_class: define an ordinary computed instance method.
             try Emitter.opU8(s, opcode.op.define_method_computed, 0);
@@ -14066,7 +15716,7 @@ pub const parser_core = struct {
             try Emitter.op(s, opcode.op.swap);
         }
         try parseClassComputedName(s);
-        if (s.peekKind() != '(') return s.failExpectedToken('(');
+        if (!tsIsMethodStart(s)) return s.failExpectedToken('(');
         try parseClassElementFunction(s, kind, source_start);
         // qjs js_parse_class: define the computed getter/setter with its
         // method-kind flag.
@@ -14128,7 +15778,7 @@ pub const parser_core = struct {
         var prev_kind: tok.TokenKind = 0;
         while (brace_depth > 0) {
             var scan_token: tok.Token = undefined;
-            try s.lex.nextInto(&scan_token);
+            s.lex.nextInto(&scan_token) catch |err| return mapLookaheadLexerError(s, err);
             defer s.lex.freeToken(&scan_token);
             const k = scan_token.val;
             if (k == tok.TOK_EOF) break;
@@ -14277,6 +15927,8 @@ pub const parser_core = struct {
                 try s.advance();
             }
         }
+        // TypeScript `class C<T>`.
+        if (tsAtLess(s)) try tsParseTypeParameters(s);
 
         var class_decl_local_idx: ?u16 = null;
         var class_fields_init_local_idx: ?u16 = null;
@@ -14683,6 +16335,12 @@ pub const parser_core = struct {
         try s.advance();
         var default_local_name: ?Atom = null;
 
+        // TypeScript `import type ...`: no runtime import at all.
+        if (s.isIdent("type") and tsImportTypeModifier(s)) {
+            try s.advance();
+            return tsSkipTypeOnlyImport(s);
+        }
+
         // Side-effect import: import 'module'
         if (s.peekKind() == tok.TOK_STRING) {
             const request_index = try addModuleRequestFromCurrentString(s);
@@ -14739,8 +16397,16 @@ pub const parser_core = struct {
         if (s.peekKind() == '{') {
             var imports = std.ArrayList(ModuleImportSpec).empty;
             defer freeModuleImportSpecs(s, &imports);
+            var saw_type_only_specifier = false;
             try s.advance();
             while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+                // TypeScript `import { type X }`: the specifier is erased.
+                var type_only = false;
+                if (s.isIdent("type") and tsSpecifierTypeModifier(s)) {
+                    try s.advance();
+                    type_only = true;
+                    saw_type_only_specifier = true;
+                }
                 // Import name (identifier or string)
                 if (!isModuleNameToken(s.peekKind())) {
                     return s.failExpectedDescription("import name");
@@ -14766,15 +16432,23 @@ pub const parser_core = struct {
                     try validateModuleImportBindingName(s, local_name_owned);
                 }
 
-                imports.append(s.function.memory.allocator, .{
-                    .import_name = import_name_owned,
-                    .local_name = local_name_owned,
-                }) catch return Error.OutOfMemory;
+                if (!type_only) {
+                    imports.append(s.function.memory.allocator, .{
+                        .import_name = import_name_owned,
+                        .local_name = local_name_owned,
+                    }) catch return Error.OutOfMemory;
+                }
 
                 if (s.peekKind() != ',') break;
                 try s.advance();
             }
             try s.expectToken('}');
+            if (saw_type_only_specifier and imports.items.len == 0 and default_local_name == null) {
+                // Every specifier was type-only: tsc elides the whole import.
+                try tsSkipFromClause(s);
+                _ = try s.expectSemicolon();
+                return;
+            }
             const request_index = try parseFromClause(s);
             if (default_local_name) |default_name| {
                 try addModuleImportBinding(s, request_index, atom_default, default_name, false);
@@ -14945,9 +16619,63 @@ pub const parser_core = struct {
 
         const next_tok = s.peekKind();
 
+        // TypeScript export forms.
+        if (next_tok == '=') {
+            return s.failWithMessage(null, "'export =' is not supported; use ESM export");
+        }
+        if (s.isIdent("as") and tsPeekNextIsIdent(s, "namespace", false)) {
+            // `export as namespace X;` (UMD global): type-level only.
+            try s.advance();
+            try s.advance();
+            if (!isIdentifierLikeToken(s)) return s.failExpectedDescription("namespace name");
+            try s.advance();
+            _ = try s.expectSemicolon();
+            return;
+        }
+        if (s.isIdent("type")) {
+            var has_lt = false;
+            const after_type = s.peekNextKindWithLineTerminator(&has_lt);
+            if (after_type == '{' or after_type == '*') {
+                try s.advance();
+                return tsSkipTypeOnlyExport(s);
+            }
+            if (!has_lt and tsKindIsIdentifierLike(after_type)) return tsParseTypeAliasDeclaration(s);
+        }
+        if (next_tok == tok.TOK_INTERFACE and tsDeclarationStart(s) == .interface) return tsParseInterfaceDeclaration(s);
+        if (tsDeclarationStart(s) == .ambient) return tsParseAmbientDeclaration(s);
+        if (s.isIdent("abstract") and s.peekNextKind() == tok.TOK_CLASS) {
+            try s.advance();
+            const name_atom = (try parseClass(s, true)) orelse return Error.ParserInvariant;
+            try addModuleExportName(s, name_atom, name_atom);
+            return;
+        }
+        if (next_tok == tok.TOK_ENUM or (next_tok == tok.TOK_CONST and s.peekNextKind() == tok.TOK_ENUM)) {
+            if (next_tok == tok.TOK_CONST) try s.advance();
+            try parseEnumDeclaration(s);
+            const name_atom = s.last_declared_atom orelse return Error.ParserInvariant;
+            try addModuleExportName(s, name_atom, name_atom);
+            return;
+        }
+        if (tsDeclarationStart(s) == .namespace) {
+            try parseNamespaceDeclaration(s);
+            const name_atom = s.last_declared_atom orelse return Error.ParserInvariant;
+            try addModuleExportName(s, name_atom, name_atom);
+            return;
+        }
+        if (next_tok == tok.TOK_IMPORT) {
+            // `export import x = A.B;`
+            if (!tsImportAliasAhead(s)) return s.failExpectedDescription("import alias");
+            try s.advance();
+            return tsParseImportAlias(s, true);
+        }
+
         // export default
         if (next_tok == tok.TOK_DEFAULT) {
             try s.advance();
+            if (s.isIdent("abstract") and s.peekNextKind() == tok.TOK_CLASS) try s.advance();
+            if (s.peekKind() == tok.TOK_INTERFACE and tsDeclarationStart(s) == .interface) {
+                return tsParseInterfaceDeclaration(s);
+            }
             if (s.peekKind() == tok.TOK_CLASS) {
                 if (hasExportDefaultClassName(s)) {
                     const name_atom = (try parseClass(s, true)) orelse return Error.ParserInvariant;
@@ -14964,6 +16692,7 @@ pub const parser_core = struct {
                 if (exportDefaultFunctionNameOwned(s)) |name_atom| {
                     const source_start = s.currentFunctionSourceStart();
                     try parseFunctionDecl(s, .normal, source_start);
+                    if (s.ts_last_decl_was_signature) return;
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
                     const source_start = s.currentFunctionSourceStart();
@@ -14976,6 +16705,7 @@ pub const parser_core = struct {
                 try s.advance();
                 if (exportDefaultFunctionNameOwned(s)) |name_atom| {
                     try parseFunctionDecl(s, .async, source_start);
+                    if (s.ts_last_decl_was_signature) return;
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
                     try parseAnonymousDefaultFunctionDecl(s, .async, source_start);
@@ -14997,8 +16727,16 @@ pub const parser_core = struct {
         if (next_tok == '{') {
             var export_specs = std.ArrayList(ModuleExportSpec).empty;
             defer freeModuleExportSpecs(s, &export_specs);
+            var saw_type_only_specifier = false;
             try s.advance();
             while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+                // TypeScript `export { type X }`: the specifier is erased.
+                var type_only = false;
+                if (s.isIdent("type") and tsSpecifierTypeModifier(s)) {
+                    try s.advance();
+                    type_only = true;
+                    saw_type_only_specifier = true;
+                }
                 // Export name (identifier or string)
                 if (!isModuleNameToken(s.peekKind())) {
                     return s.failExpectedDescription("export name");
@@ -15024,17 +16762,25 @@ pub const parser_core = struct {
                     try s.advance();
                 }
 
-                export_specs.append(s.function.memory.allocator, .{
-                    .export_name = export_name_owned,
-                    .import_name = local_name_owned,
-                    .import_name_is_string = local_name_was_string,
-                }) catch return Error.OutOfMemory;
+                if (!type_only) {
+                    export_specs.append(s.function.memory.allocator, .{
+                        .export_name = export_name_owned,
+                        .import_name = local_name_owned,
+                        .import_name_is_string = local_name_was_string,
+                    }) catch return Error.OutOfMemory;
+                }
 
                 if (s.peekKind() != ',') break;
                 try s.advance();
             }
             try s.expectToken('}');
 
+            if (saw_type_only_specifier and export_specs.items.len == 0) {
+                // Every specifier was type-only: nothing is exported.
+                if (s.isIdent("from")) try tsSkipFromClause(s);
+                _ = try s.expectSemicolon();
+                return;
+            }
             // Optional from clause for re-export
             if (s.isIdent("from")) {
                 const request_index = try parseFromClause(s);
@@ -15095,6 +16841,7 @@ pub const parser_core = struct {
             const source_start = s.currentFunctionSourceStart();
             const name_atom = exportDefaultFunctionNameOwned(s);
             try parseFunctionDecl(s, .normal, source_start);
+            if (s.ts_last_decl_was_signature) return;
             if (name_atom) |name| try addModuleExportName(s, name, name);
             return;
         }
@@ -15115,6 +16862,7 @@ pub const parser_core = struct {
                 const func_kind: ParseFunctionKind = .async;
                 const name_atom = exportDefaultFunctionNameOwned(s);
                 try parseFunctionDecl(s, func_kind, source_start);
+                if (s.ts_last_decl_was_signature) return;
                 if (name_atom) |name| try addModuleExportName(s, name, name);
                 return;
             }
@@ -15258,7 +17006,6 @@ pub const compile_entry = struct {
         eval_indirect,
     };
 
-    const SourceKindImpl = lexer_mod.SourceKindImpl;
     const FeatureImpl = parser_core.FeatureImpl;
 
     const CompilePathImpl = enum {
@@ -15443,7 +17190,6 @@ pub const compile_entry = struct {
         /// Borrowed stable ScriptOrModule identity. Direct eval supplies its
         /// caller's owned atom while retaining "<eval>" as `filename`.
         script_or_module: ?atom.Atom = null,
-        source_kind: SourceKindImpl = .auto,
         strict: bool = false,
         return_completion: bool = false,
         eval_global_var_bindings: bool = false,
@@ -15565,30 +17311,26 @@ pub const compile_entry = struct {
         var function_owned = true;
         errdefer if (function_owned) function.deinit(rt);
 
-        if (lexer_mod.shouldStrip(options.source_kind, options.filename)) {
-            if (try lexer_mod.findUnsupportedTypeScriptSyntax(rt.memory.allocator, source)) |unsupported| {
-                var result = ResultImpl{
-                    .mode = options.mode,
-                    .direct_eval = options.mode == .eval_direct,
-                };
-                result.syntax_error = try diagnostics_mod.SyntaxError.create(
-                    &rt.memory,
-                    &rt.atoms,
-                    filename_atom,
-                    .{
-                        .line = unsupported.line,
-                        .column = unsupported.column,
-                        .offset = unsupported.offset,
-                    },
-                    unsupported.message,
-                );
-                result.parse_path = .syntax_error_guard;
-                function.deinit(rt);
-                function_owned = false;
-                arena.deinit();
-                arena_owned = false;
-                return result;
-            }
+        // JSX is not part of the grammar: `.tsx` / `.jsx` sources are
+        // rejected up front instead of failing on the first `<tag>`.
+        if (std.mem.endsWith(u8, options.filename, ".tsx") or std.mem.endsWith(u8, options.filename, ".jsx")) {
+            var result = ResultImpl{
+                .mode = options.mode,
+                .direct_eval = options.mode == .eval_direct,
+            };
+            result.syntax_error = try diagnostics_mod.SyntaxError.create(
+                &rt.memory,
+                &rt.atoms,
+                filename_atom,
+                .{ .line = 1, .column = 1, .offset = 0 },
+                "JSX is not supported",
+            );
+            result.parse_path = .syntax_error_guard;
+            function.deinit(rt);
+            function_owned = false;
+            arena.deinit();
+            arena_owned = false;
+            return result;
         }
 
         var features = std.EnumSet(FeatureImpl).initEmpty();
@@ -15670,9 +17412,6 @@ pub const compile_entry = struct {
         defer lex.deinit();
         lex.is_strict_mode = options.mode == .module or effective_strict;
         lex.is_module = options.mode == .module;
-        if (lexer_mod.shouldStrip(options.source_kind, options.filename)) {
-            try lex.enableTypeScript();
-        }
         var state = try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
         defer state.deinit(rt);
         // TGC S3-b: the parse's own interval roots (atoms + cpool values),
@@ -15889,7 +17628,7 @@ pub const compile_entry = struct {
                         &rt.atoms,
                         filename_atom,
                         .{ .line = lex.mark_line, .column = lex.mark_col, .offset = lex.mark_pos },
-                        @errorName(err),
+                        parser_impl.State.decoratorDiagnosticMessage(source, err, lex.mark_pos) orelse @errorName(err),
                     );
                     result.parse_path = .syntax_error_guard;
                     return;
@@ -15990,7 +17729,6 @@ pub const compile_entry = struct {
         };
     }
 
-    pub const SourceKind = SourceKindImpl;
     pub const Feature = FeatureImpl;
     pub const Mode = ModeImpl;
     pub const CompilePath = CompilePathImpl;
@@ -16008,7 +17746,6 @@ pub const TokenKind = token.TokenKind;
 pub const ParseState = parser_core.ParseState;
 pub const Parser = parser_core;
 pub const Mode = compile_entry.Mode;
-pub const SourceKind = compile_entry.SourceKind;
 pub const Feature = parser_core.Feature;
 pub const CompilePath = compile_entry.CompilePath;
 pub const Result = compile_entry.Result;

@@ -4,7 +4,7 @@
 
 ## `test_entry.zig`
 
-`SourceKind`：javascript / typescript。`RootKind`：script / module。`Options.emit_phase1_temp` 默认 true（生产 parser 也默认开）；S2-G1 语句片段测试会关。
+`RootKind`：script / module。`Options.emit_phase1_temp` 默认 true（生产 parser 也默认开）；S2-G1 语句片段测试会关。
 
 `Program` 持有 Bytecode、name_atom、Lexer、ParseState。按值返回，所以 `deinit` 要先把 `state.lex` / `state.function` 修回自身字段地址。
 

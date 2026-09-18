@@ -708,109 +708,6 @@ test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
     }
 }
 
-test "F1: TypeScript erasure survives an unbalanced ')' in constructor params" {
-    var env = try LexerTestEnv.init();
-    defer env.deinit();
-
-    // `markClassAndTypeModifiers` counts constructor-parameter parens. The
-    // eraser runs before parsing, so a stray `)` must saturate at zero instead
-    // of underflowing; the malformed text is reported by the parser later.
-    const src = "class C { constructor()) {} }";
-    var lex = env.lexer(src);
-    defer lex.deinit();
-    try lex.enableTypeScript();
-
-    var tok = try lex.next();
-    defer freeToken(&lex, &tok);
-    try std.testing.expectEqual(t.TOK_CLASS, tok.val);
-}
-
-test "F1: `class <` erasure does not depend on the class keyword being first" {
-    var env = try LexerTestEnv.init();
-    defer env.deinit();
-
-    // `looksLikeTypeParameterStart` refuses a `<` directly after `class`. That
-    // verdict must be the same whether or not `class` opens the file.
-    const sources = [_][]const u8{ "class <T> {}", ";class <T> {}" };
-    var seen: [2]i32 = undefined;
-    for (sources, 0..) |src, i| {
-        var lex = env.lexer(src);
-        defer lex.deinit();
-        try lex.enableTypeScript();
-
-        var tok = try lex.next();
-        defer freeToken(&lex, &tok);
-        while (tok.val != t.TOK_CLASS) {
-            tok = try lex.next();
-        }
-        tok = try lex.next();
-        seen[i] = tok.val;
-    }
-    try std.testing.expectEqual(seen[1], seen[0]);
-}
-
-test "F1: Lexer enableTypeScript strips variable and function TypeScript annotations dynamically" {
-    var env = try LexerTestEnv.init();
-    defer env.deinit();
-
-    const src =
-        \\const x: number = 42;
-        \\function add(a: number, b?: number): number { return a + (b || 0); }
-        \\console.log(add(x, 1));
-    ;
-    var lex = env.lexer(src);
-    defer lex.deinit();
-    try lex.enableTypeScript();
-
-    // The lexer should skip all TS type parts and only emit clean JS tokens.
-    // e.g. "const", "x", "=", "42", ";", etc.
-    var tok = try lex.next();
-    defer freeToken(&lex, &tok);
-    try std.testing.expectEqual(t.TOK_CONST, tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
-    try std.testing.expectEqualStrings("x", tok.ptr[0..tok.len]);
-
-    tok = try lex.next();
-    try std.testing.expectEqual('=', tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(';', tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(t.TOK_FUNCTION, tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
-    try std.testing.expectEqualStrings("add", tok.ptr[0..tok.len]);
-
-    tok = try lex.next();
-    try std.testing.expectEqual('(', tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
-    try std.testing.expectEqualStrings("a", tok.ptr[0..tok.len]);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(',', tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
-    try std.testing.expectEqualStrings("b", tok.ptr[0..tok.len]);
-
-    tok = try lex.next();
-    try std.testing.expectEqual(')', tok.val);
-
-    tok = try lex.next();
-    try std.testing.expectEqual('{', tok.val);
-}
-
-// ================== PARSER TESTS ==================
-
 const TestEnv = ParserTestEnv;
 const ParserTestEnv = struct {
     rt: *engine.core.runtime.JSRuntime,
@@ -933,7 +830,6 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     defer lex.deinit();
-    try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
@@ -950,7 +846,6 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     defer lex.deinit();
-    try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
@@ -6882,7 +6777,7 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
         std.testing.allocator,
         "scope-events-ts",
         src,
-        .{ .source_kind = .typescript },
+        .{},
     );
 }
 
@@ -7143,7 +7038,7 @@ test "M-SCOPE event producers: catch binding wrapper and body leave in LIFO orde
     }
 }
 
-test "M-SCOPE event producers: structural body and namespace scopes stay identity-only" {
+test "M-SCOPE event producers: structural body scopes stay identity-only, namespace bodies are blocks" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
@@ -7155,10 +7050,14 @@ test "M-SCOPE event producers: structural body and namespace scopes stay identit
         });
     }
     {
+        // A namespace body is a block scope of its own (tsc lowers it to an
+        // IIFE), so it produces an ordinary enter/leave pair.
         var program = try parseRawTSProgram(&env, "namespace N { let value = 1; }");
         defer program.deinit(env.rt);
         try expectPhase1ScopeEvents(program.phase1Code(), &.{
             .{ .kind = .enter, .scope = 1 },
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
         });
     }
 
@@ -9653,25 +9552,29 @@ test "TS: Inline Object Type Parameter Constraints Are Skipped" {
     try std.testing.expect(bytecode.code.len > 0);
 }
 
-test "TS: Unsupported Syntax Scan Reports Feature And Position" {
-    const decorator = (try parser.lexer.findUnsupportedTypeScriptSyntax(std.testing.allocator,
+test "TS: decorators and import = require are rejected with a clear message" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var decorated = try compileForTest(rt,
         \\class Before {}
         \\@sealed
         \\class C {}
-    )).?;
-    try std.testing.expectEqual(@as(u32, 2), decorator.line);
-    try std.testing.expectEqual(@as(u32, 1), decorator.column);
-    try std.testing.expect(std.mem.indexOf(u8, decorator.message, "TS decorators") != null);
-    try std.testing.expect(std.mem.indexOf(u8, decorator.message, "remove the decorator") != null);
+    , .{ .mode = .script, .filename = "decorator.ts" });
+    defer decorated.deinit();
+    const decorator_error = decorated.syntax_error orelse return error.TestExpectedSyntaxError;
+    try std.testing.expectEqual(@as(u32, 2), decorator_error.position.line);
+    try std.testing.expect(std.mem.indexOf(u8, decorator_error.message, "decorators are not supported") != null);
 
-    const import_equals = (try parser.lexer.findUnsupportedTypeScriptSyntax(
-        std.testing.allocator,
-        "import X = require(\"x\");",
-    )).?;
-    try std.testing.expectEqual(@as(u32, 1), import_equals.line);
-    try std.testing.expectEqual(@as(u32, 10), import_equals.column);
-    try std.testing.expect(std.mem.indexOf(u8, import_equals.message, "TS import=/export=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, import_equals.message, "use ESM import/export") != null);
+    var import_equals = try compileForTest(rt, "import X = require(\"x\");", .{ .mode = .module, .filename = "alias.ts" });
+    defer import_equals.deinit();
+    const import_error = import_equals.syntax_error orelse return error.TestExpectedSyntaxError;
+    try std.testing.expect(std.mem.indexOf(u8, import_error.message, "not supported") != null);
+
+    var jsx = try compileForTest(rt, "const a = 1;", .{ .mode = .script, .filename = "view.tsx" });
+    defer jsx.deinit();
+    const jsx_error = jsx.syntax_error orelse return error.TestExpectedSyntaxError;
+    try std.testing.expect(std.mem.indexOf(u8, jsx_error.message, "JSX") != null);
 }
 
 test "TS: Namespaces" {
@@ -9761,10 +9664,23 @@ test "TS: Strict Enum Constant Expression Rejection" {
     defer valid_bytecode.deinit(env.rt);
     try std.testing.expect(valid_bytecode.code.len > 0);
 
-    // 2. Invalid enum declaration with complex expression should throw UnexpectedToken
+    // 2. Constant expressions fold like tsc; a runtime expression is also
+    // accepted, but the member after a string or computed one needs its own
+    // initializer.
+    var folded_bytecode = try parseTSStatement(&env,
+        \\enum Direction {
+        \\    Up = 10 - 8,
+        \\    Down = Up << 1,
+        \\    Left = someRuntimeValue()
+        \\}
+    );
+    defer folded_bytecode.deinit(env.rt);
+    try std.testing.expect(folded_bytecode.code.len > 0);
+
     const invalid_res = parseTSStatement(&env,
         \\enum Direction {
-        \\    Up = 10 - 8
+        \\    Up = "up",
+        \\    Down
         \\}
     );
     try std.testing.expectError(error.UnexpectedToken, invalid_res);

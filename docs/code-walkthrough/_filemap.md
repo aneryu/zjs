@@ -187,7 +187,7 @@
 | `src/exec/zjs_vm.zig` | 16 | [11-vm-kernel.md](11-vm-kernel.md) |
 | `src/internal_root.zig` | 1 | [01-public-api-companions.md](01-public-api-companions.md) |
 | `src/js_context.zig` | 104 | [01-public-api-context.md](01-public-api-context.md) |
-| `src/lexer.zig` | 169 | [02-lexer-typescript.md](02-lexer-typescript.md), [02-lexer.md](02-lexer.md) |
+| `src/lexer.zig` | 169 | [02-lexer.md](02-lexer.md) |
 | `src/libs/bigint.zig` | 79 | [19-bigint.md](19-bigint.md) |
 | `src/libs/number_format.zig` | 64 | [19-number-format.md](19-number-format.md) |
 | `src/libs/regexp.zig` | 217 | [19-regexp.md](19-regexp.md) |

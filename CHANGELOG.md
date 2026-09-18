@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Parser:** TypeScript is the grammar; JavaScript is parsed as its subset.
+  The lexer-side type-range eraser (`enableTypeScript`, `SourceKind`,
+  `findUnsupportedTypeScriptSyntax`) is gone; type syntax is consumed by an
+  emission-free type parser inside `parser.zig`, so JavaScript input yields
+  byte-identical bytecode (checked with `zjs --bytecode-fingerprint` over
+  test262 + jetstream3). Newly accepted: modifiers after any member, `for`/
+  `catch` annotations, abstract / optional / overload signatures, `this`
+  parameters, angle-bracket assertions, generic calls and instantiation
+  expressions, `satisfies`, template literal / mapped / conditional /
+  `infer` types, `declare` declarations, `import type` / `export type`,
+  `import x = A.B`, enum constant folding (`1 << 2`, `A | B`, `"a" + "b"`)
+  with runtime fallback, `module X {}`. Rejected with a message: decorators,
+  `import x = require()`, `export =`, `.tsx` / `.jsx`, `accessor`. Public
+  API: `parser.Options.source_kind`, `parser.SourceKind`,
+  `core.context.EvalSourceKind`, and `ContextEvalOptions.source_kind` are
+  removed; drop the field. Known grammar divergence from JavaScript, resolved
+  the tsc way: `f<T>(x)` is a generic call and `<T>x` a type assertion.
+  test262 `staging/sm/syntax/class-error.js` (`class X { x: 1 }`) is now a
+  valid field annotation and is excluded. Namespace fixes that came with it:
+  `namespace N { export function f() {} }` now attaches `f` (it never did),
+  a namespace body is a real block scope (sibling namespaces may export the
+  same names, `var` inside lowers to `let` as in tsc's IIFE), and `enum` /
+  `namespace` bindings are `var` (`let` inside a namespace) so `export enum`
+  / `export namespace` link in modules. Diagnostics: `@` reports "decorators
+  are not supported"; a lexer error inside a class body (for example an
+  escaped `#name`) is reported at that token instead of the class brace.
+
 - **Build:** every artifact follows `-Doptimize` (Zig default: Debug).
   `zjs` is no longer pinned to ReleaseFast; `zjs-dev` / `run-test262-dev` /
   `smoke-dev` are gone. Ship with `zig build -Doptimize=ReleaseFast`.

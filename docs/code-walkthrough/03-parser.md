@@ -2,7 +2,7 @@
 
 本册覆盖 `src/parser.zig`（约 16600 行、清单 649 个函数）。词法主体在 `src/lexer.zig`（02 册）；本文件在词法之后做 **递归下降 + 作用域 + phase-1 字节码发射**，再交给 `src/compiler/` 做变量/标签解析与 short layout。
 
-TypeScript 只做语法擦除，不是类型检查器。
+文法是 TypeScript 的，JavaScript 按其子集解析，没有 source-kind 开关。类型语法由不发射字节码的 `tsParse*` / `tsSkip*` 函数族消费（03-parser-ts.md），所以 JS 输入的字节码逐位不变；不是类型检查器。
 
 ## 子文件目录
 
@@ -15,16 +15,16 @@ TypeScript 只做语法擦除，不是类型检查器。
 | [03-parser-syntax-fn.md](03-parser-syntax-fn.md) | 函数、箭头、解构、类 |
 | [03-parser-scope.md](03-parser-scope.md) | 作用域、`defineVar`、闭包、标签、模块 import/export、私有名 |
 | [03-parser-emit.md](03-parser-emit.md) | `emit*` / `Emitter` / Builder 门面 / lvalue / using 清理 |
-| [03-parser-ts.md](03-parser-ts.md) | TypeScript 擦除：`enum` / `namespace` / 参数属性 |
+| [03-parser-ts.md](03-parser-ts.md) | TypeScript：纯类型解析器、歧义判定、`enum` / `namespace` / 参数属性 / `import x = A.B` 降级 |
 
 ## `compile()` 怎样走 parse → emit
 
 一次 `parser.compile(compile_context, source, options)`（`compile_entry.compile`，`src/parser.zig:16059`）的数据流：
 
 1. **Arena + atom 区间根**。解析期分配走 runtime 的短命 arena；所有 intern 的 atom 进 `CompileAtomScope`，直到产物自己带 tracer 边。
-2. **TS 护栏**。`lexer.shouldStrip` 为真时先 `findUnsupportedTypeScriptSyntax`；不支持的语法直接 `Result.syntax_error`，不建 ParseState。
+2. **JSX 护栏**。文件名以 `.tsx` / `.jsx` 结尾直接 `Result.syntax_error`（"JSX is not supported"），不建 ParseState。
 3. **`compileQjsProgram`**（`src/parser.zig:16180`）
-   - `Lexer.init`，module/strict 旗；TS 源 `lex.enableTypeScript()`（类型注记在词法层丢掉）。
+   - `Lexer.init`，module/strict 旗。
    - `ParseState.initCanonicalRootWithRuntime`：根函数从第一条指令就写进真正的 `FunctionDef`（不再先写一份可变 `Bytecode` 再克隆）。
    - `activateCompileRoots`：atom 根 +（若开启）cpool/RegExp/子函数的 value 根，避免编译中途 major GC 收走还没发布的单元格。
    - 按 `Mode`（script / module / eval_direct / eval_indirect）填 `FunctionDef` 旗：四模式的根都是 QuickJS 意义上的 eval bytecode，`is_global_var` 决定声明落 global 还是局部。
@@ -613,7 +613,7 @@ RegExp 编译回调。`opaque_ptr` 转 `*JSRuntime`，转调 `checkNativeStackOv
 1. 用 runtime persistent allocator 建短命 arena，把 `rt.memory.allocator` 临时改过去（`defer` 改回）。
 2. `CompileAtomScope.activate`：前端所有 intern 的 atom 进区间根，直到产物带上 tracer 边。
 3. intern 文件名；`initCompileCarrier` 建可变 `Bytecode` 壳（strict/module/eval 旗）。
-4. `shouldStrip` 的源（`.ts` 等）先 `findUnsupportedTypeScriptSyntax`，命中则 `syntax_error_guard` 返回，不进解析。
+4. `.tsx` / `.jsx` 文件名直接以 `syntax_error_guard` 返回（不支持 JSX），不进解析。
 5. `compileQjsProgram`：成功得到 canonical `FunctionBytecode`。`OutOfMemory` 上抛；`StackOverflow` 与其它语法错误收成 `Result.syntax_error`；`ParserInvariant` 等走 ICE 文案。
 6. module 把 `module_record` 挪进 `ModuleArtifact`；script/eval 只持有 FB。然后 `function.deinit` + `arena.deinit`（FB 已在 artifact allocator 上）。
 - **所有权 / 错误 / 调用**：两个布尔守着两件必须恰好释放一次的东西：`arena_owned`（`errdefer arena.deinit()`）与 `function_owned`（`errdefer function.deinit(rt)`）——**每一条 `return` 之前都手工 `deinit` 并清标志**，所以正常返回与错误返回都不会重复释放。`rt.memory.allocator` 被临时改指 arena，用 `defer` 还原；`CompileAtomScope` 在第一次 intern 之前 `activate`、`defer deinit`，覆盖从文件名 atom 到发布 FB 的整条链。产物 FB 建在 `compile_context.artifactAllocator()` 上（由 `compileQjsProgram` 切换），所以 arena 释放不影响它；module 还会把 `function.module_record` **移**进 `ModuleArtifact`（移走后把源字段置 `null`）。错误分三类：`OutOfMemory` 原样上抛（唯一会让调用方看到 Zig error 的一类）、`StackOverflow` 与一般解析错误折成 `Result.syntax_error`、`isInternalCompilerError` 命中的走 ICE 文案；三条都仍然返回一个**成功的** `ResultImpl`。`pub` 出口，生产调用方在 `exec/eval_entry.zig`、`exec/eval_ops.zig`、`exec/function_ops.zig`、`exec/module*.zig`、`exec/call*.zig` 共 8 处。
@@ -624,7 +624,7 @@ RegExp 编译回调。`opaque_ptr` 转 `*JSRuntime`，转调 `checkNativeStackOv
 - **作用**：词法+语法+发射+finalize，产出 canonical FunctionBytecode。
 - **实现**：
 真正的 parse→emit→finalize：
-1. `Lexer.init`；module/strict 设词法旗；TS 源 `enableTypeScript()`。
+1. `Lexer.init`；module/strict 设词法旗。
 2. `ParseState.initCanonicalRootWithRuntime`（根从第一天就 emit 进 FunctionDef）+ `activateCompileRoots`。
 3. 按 mode 填 `function_def`：四模式根都是 eval bytecode；`is_global_var` 在 script/module 为真、松散 eval 为真。direct eval 恢复私有绑定、种 `eval_closure_seed`。module 设 `in_async`、`top_level_lexical_as_module_ref`、`ensureModule`。
 4. `beginProgramEmission`（先发 body `enter_scope`）。eval 模式 `enableEvalReturn`，否则可选 `enableReturnCompletion`。
