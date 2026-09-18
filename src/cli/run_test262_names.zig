@@ -33,7 +33,9 @@ pub const NameList = struct {
     }
 
     pub fn append(self: *NameList, item: []const u8) !void {
-        try self.appendOwned(try self.allocator.dupe(u8, item));
+        const copy = try self.allocator.dupe(u8, item);
+        errdefer self.allocator.free(copy);
+        try self.appendOwned(copy);
     }
 
     pub fn sortAndDedupe(self: *NameList) void {

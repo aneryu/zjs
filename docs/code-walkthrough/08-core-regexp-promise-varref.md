@@ -10,49 +10,49 @@ Promise **对象状态**在 `core/promise.zig` + `PromisePayload`；**抽象操�
 
 本文件是字面 character class / 单 escape 对一个 UTF-16 unit 的简化纯谓词，不是完整正则编译器或严格输入验证器。当前 exec/regexp_ops.zig 仅重导出 classMatchesUtf16Unit；源码搜索未见这些解析 helper 在 exec 校验器中的直接使用。实际 compilePatternAndFlags 从 libs/regexp.zig 导出，不能沿用旧注释所称“校验仍共享本文件解析原语”的调用关系。Unicode 分类器实际导入 libs/unicode.zig。
 
-### `classMatchesUtf16Unit` (`src/core/regexp.zig:31`)
+### `classMatchesUtf16Unit` (`src/core/regexp.zig:32`)
 
 - **签名**：`pub fn classMatchesUtf16Unit(source: []const u8, unit: u16) bool`。
 - **作用**：用简化字符类语法判断一个 UTF-16 code unit。
 - **实现**：两字节反斜杠转义先尝试六类 escape；否则要求首尾方括号，处理前导^。逐 atom 扫描，两个 single 由短横相连时用 min/max 构造闭区间；普通 single 比较数值，character_class 委托六类匹配。最后按 negated 取反。
 - **所有权 / 错误 / 调用**：不分配、无 flags 参数；不是完整语法验证或 Unicode code-point matcher。反向范围也按 min/max 匹配；读 atom 失败只向前移一字节，非法输入不保证 false。属性 escape 产生默认值0的 character_class，不贡献匹配，取反类仍会把结果反转。
 
-### `readClassRangeAtom` (`src/core/regexp.zig:92`)
+### `readClassRangeAtom` (`src/core/regexp.zig:93`)
 
 - **签名**：`pub fn readClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom`。
 - **作用**：读取单个字符类 atom 并更新索引。
 - **实现**：越界、右方括号或末尾单反斜杠返回 null。非转义按 UTF-8 长度尝试解码，解码失败回退首字节但仍消费检测出的序列长度。支持六类 escape、控制字符、定长/花括号hex、c后字节与0x1f、连续八进制；其他转义返回被转义字节。p/P 经属性校验通过后返回 value=0 的 character_class，校验失败（格式错或属性名不受支持）返回 null。
 - **所有权 / 错误 / 调用**：不是严格正则解析器：c后不要求字母，八进制不限制位数，u32算术不作checked保护；8/9进入数字分支但不消费八进制位，返回0且索引停在该数字。属性校验失败不更新原索引，无效UTF-8也可能返回single。
 
-### `readFixedHexClassRangeAtom` (`src/core/regexp.zig:169`)
+### `readFixedHexClassRangeAtom` (`src/core/regexp.zig:170`)
 
-- **签名**：`fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: usize, digit_count: usize) ?ClassRangeAtom`。
+- **签名**：`fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: usize, digit_count: usize) ClassRangeAtom`。
 - **作用**：解析指定数量的十六进制位。
 - **实现**：从 index+prefix_len 开始；位数不足或任一非hex时只消费前缀，返回前缀最后字节。成功累积u32并消费所有数字。
-- **所有权 / 错误 / 调用**：当前调用为 x两位/u四位，函数虽返回optional却没有null路径；依赖调用者提供合法前缀位置，不是通用输入校验器。
+- **所有权 / 错误 / 调用**：当前调用为 x两位/u四位；函数没有 null 路径，多余的 optional 返回类型已去掉（结果仍可直接 return 进上层的 `?ClassRangeAtom`）。依赖调用者提供合法前缀位置，不是通用输入校验器。
 
-### `readUnicodeClassRangeAtom` (`src/core/regexp.zig:189`)
+### `readUnicodeClassRangeAtom` (`src/core/regexp.zig:190`)
 
-- **签名**：`fn readUnicodeClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom`。
+- **签名**：`fn readUnicodeClassRangeAtom(pattern: []const u8, index: *usize) ClassRangeAtom`。
 - **作用**：解析 u 转义的花括号或四位形式。
 - **实现**：第三字节为左花括号则读取至少一位hex至右花括号；成功消费闭括号，非法数字/空内容/缺闭合均仅消费反斜杠u并返回字面u。否则委托定长四位解析。
-- **所有权 / 错误 / 调用**：不检查Unicode标量上限、代理项或正则u/v标志；任意长hex以普通u32算术累积，不能描述为对所有畸形输入都安全拒绝。返回值可超过单UTF-16 unit范围。
+- **所有权 / 错误 / 调用**：不检查Unicode标量上限、代理项或正则u/v标志；任意长hex以普通u32算术累积，不能描述为对所有畸形输入都安全拒绝。返回值可超过单UTF-16 unit范围。与定长解析同样没有 null 路径，optional 返回类型已去掉。
 
-### `isCharacterClassEscape` (`src/core/regexp.zig:212`)
+### `isCharacterClassEscape` (`src/core/regexp.zig:213`)
 
 - **签名**：`pub fn isCharacterClassEscape(byte: u8) bool`。
 - **作用**：识别六种字符类 escape 字节。
 - **实现**：仅 d/D/s/S/w/W 返回true。
 - **所有权 / 错误 / 调用**：输入是不带反斜杠的字节；不包含p/P，不分配或修改状态。
 
-### `characterClassEscapeUnitMatches` (`src/core/regexp.zig:218`)
+### `characterClassEscapeUnitMatches` (`src/core/regexp.zig:219`)
 
 - **签名**：`fn characterClassEscapeUnitMatches(byte: u8, unit: u16) ?bool`。
 - **作用**：对UTF-16单元计算六类escape谓词。
 - **实现**：d用ASCII digit，s用ECMA whitespace或line terminator，w用ASCII word；大写分支取反，其他字节返回null。
 - **所有权 / 错误 / 调用**：没有ignoreCase/Unicode flags，不扩展w为Unicode标识符集合；null表示不支持该escape，不是匹配失败false。
 
-### `consumeUnicodePropertyEscape` (`src/core/regexp.zig:234`)
+### `consumeUnicodePropertyEscape` (`src/core/regexp.zig:235`)
 
 - **签名**：`pub fn consumeUnicodePropertyEscape(pattern: []const u8, index: *usize) bool`。
 - **作用**：检查属性表达式并在成功时消费至右花括号后。

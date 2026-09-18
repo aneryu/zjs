@@ -256,7 +256,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         description: []const u8,
         root_source_file: []const u8,
         filter: []const u8,
-        needs_plugin_fixtures: bool = false,
     };
     const scoped_test_configs = [_]ScopedTestConfig{
         .{ .name = "test-core", .description = "Run focused core value, object, GC, and ownership tests", .root_source_file = "src/core_tests.zig", .filter = "tests.core." },
@@ -264,7 +263,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .{ .name = "test-bytecode", .description = "Run focused bytecode and pipeline tests", .root_source_file = "src/bytecode_tests.zig", .filter = "tests.bytecode." },
         .{ .name = "test-exec", .description = "Run focused execution and VM tests", .root_source_file = "src/exec_tests.zig", .filter = "tests.exec." },
         .{ .name = "test-builtins", .description = "Run focused ECMAScript built-in tests", .root_source_file = "src/builtins_tests.zig", .filter = "tests.builtins." },
-        .{ .name = "test-runtime", .description = "Run focused host runtime and plugin tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime.", .needs_plugin_fixtures = true },
+        .{ .name = "test-runtime", .description = "Run focused host runtime and plugin tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime." },
         .{ .name = "test-runner", .description = "Run focused test262 runner tests", .root_source_file = "src/runner_tests.zig", .filter = "cli.run_test262" },
         .{ .name = "test-compiler", .description = "Run focused compiler (QCP) tests", .root_source_file = "src/compiler_tests.zig", .filter = "compiler." },
     };
@@ -291,7 +290,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         };
         const run_scoped_tests = b.addRunArtifact(scoped_tests);
         run_scoped_tests.addArg("--require-tests");
-        if (config.needs_plugin_fixtures) {}
         if (b.args) |args| run_scoped_tests.addArgs(args);
         const scoped_step = b.step(config.name, config.description);
         scoped_step.dependOn(&run_scoped_tests.step);

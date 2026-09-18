@@ -226,21 +226,21 @@
 - **实现**：宽度 0 先 TypeError；检查 buffer class 与 detached。args[1]（非 undefined）提供 offset，须不超当前长度且按宽度对齐。args[2] 非 undefined 表示显式元素数：checked mul 求字节数，须不超剩余空间且元素数拟合 u32；未指定且无 max 时要求剩余字节整除宽度，固定为商；有 max 时 fixed_length=null。最后创建对象并 initTypedArrayView。
 - **所有权 / 错误 / 调用**：只使用 args[1]/args[2]，buffer 来自独立 buffer_value；不验证 kind 与宽度匹配或 immutable。乘法溢出直接传播 error.Overflow，不统一转成 RangeError；无 max 分支用 @intCast 商。对象失败有 errdefer，函数自身不建立显式根帧或调用 species。
 
-### `typedArrayConstructFullBuffer` (`src/core/typed_array.zig:380`)
+### `typedArrayConstructFullBuffer` (`src/core/typed_array.zig:384`)
 
-- **签名**：`pub fn typedArrayConstructFullBuffer(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue`。
-- **作用**：建立固定长度、零偏移的整 buffer 视图。
-- **实现**：原样委托 typedArrayConstructFullBufferOwned。
-- **所有权 / 错误 / 调用**：两者当前没有 RC retain/release 差异，也不会清空调用方的 JSValue 变量；调用方必须保证 buffer_value 与 buffer 指向同一有效缓冲区。
+- **签名**：`pub const typedArrayConstructFullBuffer = typedArrayConstructFullBufferOwned;`。
+- **作用**：建立固定长度、零偏移的整 buffer 视图（借用值拼写）。
+- **实现**：是 typedArrayConstructFullBufferOwned 的别名，不再是一层转发函数。
+- **所有权 / 错误 / 调用**：两者没有 RC retain/release 差异，也不会清空调用方的 JSValue 变量；调用方必须保证 buffer_value 与 buffer 指向同一有效缓冲区。
 
-### `typedArrayConstructFullBufferOwned` (`src/core/typed_array.zig:384`)
+### `typedArrayConstructFullBufferOwned` (`src/core/typed_array.zig:386`)
 
 - **签名**：`pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue`。
 - **作用**：以给定 buffer 的完整长度建立固定视图。
-- **实现**：要求宽度非零、buffer 未 detached 且 max=null，长度整除宽度，元素数拟合 u32；创建对象，把本地 owned_buffer_value 复制到 view_buffer 后置 undefined，再 initTypedArrayView(offset=0,fixed=length)。
-- **所有权 / 错误 / 调用**：本地置 undefined 不是释放或清空调用方值；没有 RC 消费清理。长度检查使用独立 buffer 指针，安装使用 buffer_value，二者同一身份是调用前提；本函数不校验 buffer class，init 才验证所装值。失败只显式销毁新视图。
+- **实现**：要求宽度非零、buffer 未 detached 且 max=null，长度整除宽度，元素数拟合 u32；创建对象后直接 initTypedArrayView(buffer_value, offset=0, fixed=length)。
+- **所有权 / 错误 / 调用**：没有 RC 消费清理（旧实现里 owned_buffer_value→view_buffer→置 undefined 的搬运是 RC 时代的记账残骸，已删除）。长度检查使用独立 buffer 指针，安装使用 buffer_value，二者同一身份是调用前提；本函数不校验 buffer class，init 才验证所装值。失败只显式销毁新视图。
 
-### `dataViewConstruct` (`src/core/typed_array.zig:404`)
+### `dataViewConstruct` (`src/core/typed_array.zig:403`)
 
 - **签名**：`pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Object) !JSValue`。
 - **作用**：按位置参数构造 DataView 内部槽。
@@ -249,56 +249,56 @@
 
 ## 元素读写
 
-### `typedArrayGetIndex` (`src/core/typed_array.zig:434`)
+### `typedArrayGetIndex` (`src/core/typed_array.zig:433`)
 
 - **签名**：`pub fn typedArrayGetIndex(rt: *JSRuntime, obj: *Object, index: u32) !JSValue`。
 - **作用**：按缓存的当前元素数读取一个视图元素。
 - **实现**：无 typed payload 或 element_size=0 返回 TypeError；index>=live_length 或 data=null 返回 undefined；按 index*width 切出字节后 readElement。
 - **所有权 / 错误 / 调用**：使用已维护的 live cache，不重新检查 backing detached；不验证 kind/width 一致性。数值种类无需分配，BigInt 读取可能分配并失败。
 
-### `typedArrayCoerceElementValue` (`src/core/typed_array.zig:444`)
+### `typedArrayCoerceElementValue` (`src/core/typed_array.zig:443`)
 
 - **签名**：`pub fn typedArrayCoerceElementValue(rt: *JSRuntime, obj: *Object, value: JSValue) !void`。
 - **作用**：验证值能编码成该元素类型，不修改视图存储。
 - **实现**：在栈上准备 8 字节 scratch，以 obj 的 kind 和 element_size 调用 writeElement。
 - **所有权 / 错误 / 调用**：不检查 detached、immutable、live_length；元素宽度必须<=8，且调用方须给出合法 kind/width。转换可能分配或报错，scratch 随返回丢弃；不执行用户对象 ToPrimitive。
 
-### `typedArraySetElement` (`src/core/typed_array.zig:449`)
+### `typedArraySetElement` (`src/core/typed_array.zig:448`)
 
 - **签名**：`pub fn typedArraySetElement(rt: *JSRuntime, obj: *Object, index: u32, value: JSValue) !bool`。
 - **作用**：先编码值，再尝试写入合法下标，返回是否实际写入。
 - **实现**：无 payload/backing 返回 TypeError；immutable 立即 false（尚未转换）。宽度 0 返回 TypeError；向 8 字节 scratch 编码，随后 index 越界或 data 为空返回 false，否则复制到目标位置并返回 true。
 - **所有权 / 错误 / 调用**：越界仍进行原语编码，但 immutable 提前返回；kind/width 合法且宽度<=8 是前提。不是完整规范 ToNumber，外围需处理用户转换及其他可观察行为。
 
-### `typedArraySetIndex` (`src/core/typed_array.zig:464`)
+### `typedArraySetIndex` (`src/core/typed_array.zig:463`)
 
 - **签名**：`pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSValue) !bool`。
 - **作用**：按当前有效缓存直接写元素，越界时忽略写入并报告成功。
 - **实现**：无 payload/backing 或零宽度为 TypeError；immutable 返回 false；index>=live_length 或 data=null 返回 true，跳过转换。有效位置调用 writeElement 后返回 true。
 - **所有权 / 错误 / 调用**：true 不证明有字节被写入；与 SetElement 在越界转换顺序、返回含义上不同。原语转换错误传播，完整用户转换由外围负责。
 
-### `typedArrayFillRange` (`src/core/typed_array.zig:483`)
+### `typedArrayFillRange` (`src/core/typed_array.zig:482`)
 
 - **签名**：`pub fn typedArrayFillRange(rt: *JSRuntime, obj: *Object, start: u32, final: u32, value: JSValue) !void`。
 - **作用**：把一个编码后的元素字节模式重复填入范围。
 - **实现**：start>=final 立即返回，甚至不检查对象。其余路径取得 payload，拒绝零宽度，将值编码一次到 8 字节 scratch，再要求 data 非空；宽度 1 使用 memset，其余按宽度重复 memcpy。
 - **所有权 / 错误 / 调用**：本函数不校验 final<=live_length、immutable 或 backing，调用方必须先校验范围和可写状态。writeElement 仍执行一次原语转换，宽度必须<=8；此处不保证任意传入对象/范围都安全。
 
-### `typedArraySetInt32IndexFast` (`src/core/typed_array.zig:506`)
+### `typedArraySetInt32IndexFast` (`src/core/typed_array.zig:505`)
 
 - **签名**：`pub fn typedArraySetInt32IndexFast(rt: *JSRuntime, obj: *Object, index: u32, value: i32) !bool`。
 - **作用**：为 kind=6 的视图直接写入 little-endian i32。
 - **实现**：无 payload 为 TypeError；kind 非 6 返回 false。随后要求 backing，immutable 返回 false；越界或 data=null 返回 true，其他位置按 index*4 写入。
 - **所有权 / 错误 / 调用**：rt 未用，无分配；不重新验证 element_size==4 或 class，依赖 kind/布局一致。false 表示未处理，true 包括越界忽略，不等于实际写入。
 
-### `typedArrayDefineOwnProperty` (`src/core/typed_array.zig:519`)
+### `typedArrayDefineOwnProperty` (`src/core/typed_array.zig:518`)
 
 - **签名**：`pub fn typedArrayDefineOwnProperty(rt: *JSRuntime, obj: *Object, atom_id: Atom, desc: Descriptor) !?bool`。
 - **作用**：处理 TypedArray 的规范数字索引属性定义。
 - **实现**：非 TA 或 canonical index 分类为 none 返回 null；invalid 返回 false。index 分支拒绝 accessor，以及显式 configurable/enumerable/writable=false；再检查有效下标及非 immutable。有 value_present 时调用 SetElement，最终返回 true。
 - **所有权 / 错误 / 调用**：属性标志为 true 或缺省可通过，不是拒绝 true。SetElement 返回的 bool 被丢弃，只有错误传播；?bool 中 null 表示应交普通属性路径，false 表示拒绝此索引定义。
 
-### `typedArrayBufferObject` (`src/core/typed_array.zig:543`)
+### `typedArrayBufferObject` (`src/core/typed_array.zig:542`)
 
 - **签名**：`pub fn typedArrayBufferObject(obj: *Object) !*Object`。
 - **作用**：取得视图保存的 backing buffer 对象。
@@ -307,91 +307,91 @@
 
 ## DataView
 
-### `dataViewGet` (`src/core/typed_array.zig:551`)
+### `dataViewGet` (`src/core/typed_array.zig:550`)
 
 - **签名**：`pub fn dataViewGet(rt: *JSRuntime, view_value: JSValue, kind: u32, args: []const JSValue) !JSValue`。
 - **作用**：读取 DataView 指定字节位置的一项值。
 - **实现**：验证 DataView class；index 默认 0，否则 toIndexUsize。第二参数经 toBoolean 决定 little endian，默认 big endian。取得 kind 宽度，检查 attached 和 bounds，逐字节复制到 8 字节 scratch 后解码。kind 1–6 为整数，7/8 为 Float32/64，9/10 为 BigInt64/BigUint64，11 为 Float16。
 - **所有权 / 错误 / 调用**：index 转换在 detached 检查前；未知 kind 宽度为 0，可能先通过 bounds，再由解码 switch 返回 TypeError。数值读取不分配，BigInt 结果可能分配；逐字节复制不是共享内存原子读取。
 
-### `dataViewSet` (`src/core/typed_array.zig:583`)
+### `dataViewSet` (`src/core/typed_array.zig:582`)
 
 - **签名**：`pub fn dataViewSet(rt: *JSRuntime, view_value: JSValue, kind: u32, args: []const JSValue) !JSValue`。
 - **作用**：把值编码后写入 DataView。
 - **实现**：先验证 view 与 backing，immutable 立即 TypeError；再转换 index（缺省 undefined→0），取 value（缺省 undefined）及第三参数字节序（默认 big）。按 kind 编码到 scratch，未知 kind 立即 TypeError。随后检查 attached/bounds，逐字节写入 backing 并返回 undefined。
 - **所有权 / 错误 / 调用**：原语编码可在 detached/越界错误之前失败或分配；这里不执行用户 valueOf/ToPrimitive，不能把这一顺序描述成此函数会触发用户 ToNumber 副作用。kind 9/10 使用低64位 BigInt 编码；写入不是多字节原子操作。
 
-### `dataViewRejectImmutable` (`src/core/typed_array.zig:615`)
+### `dataViewRejectImmutable` (`src/core/typed_array.zig:614`)
 
 - **签名**：`pub fn dataViewRejectImmutable(rt: *JSRuntime, view_value: JSValue) !void`。
 - **作用**：检查 DataView 的 backing 是否不可变。
 - **实现**：expectDataViewObject 后取得 AB/SAB backing，arrayBufferIsImmutable 为 true 返回 TypeError。
 - **所有权 / 错误 / 调用**：不检查 detached 或视图范围；成功仅证明此处 class/backing/immutable 检查通过。
 
-### `dataViewRequire` (`src/core/typed_array.zig:621`)
+### `dataViewRequire` (`src/core/typed_array.zig:620`)
 
 - **签名**：`pub fn dataViewRequire(view_value: JSValue) !void`。
 - **作用**：验证 JSValue 的具体 class 为 DataView。
 - **实现**：调用 expectDataViewObject 并丢弃借用指针。
 - **所有权 / 错误 / 调用**：不检查 backing 槽是否存在、是否 detached 或视图是否越界。
 
-### `dataViewByteLength` (`src/core/typed_array.zig:625`)
+### `dataViewByteLength` (`src/core/typed_array.zig:624`)
 
 - **签名**：`pub fn dataViewByteLength(rt: *JSRuntime, view: *Object) !usize`。
 - **作用**：计算 accessor 使用的有效视图字节长度。
 - **实现**：委托 dataViewEffectiveByteLength。
 - **所有权 / 错误 / 调用**：传入的是已验证 view 指针，本层不重新检查 DataView class；传播该 helper 的 detached/缺槽/越界错误。
 
-### `dataViewByteOffset` (`src/core/typed_array.zig:629`)
+### `dataViewByteOffset` (`src/core/typed_array.zig:628`)
 
 - **签名**：`pub fn dataViewByteOffset(rt: *JSRuntime, view: *Object) !usize`。
 - **作用**：验证视图有效性后返回保存的偏移。
 - **实现**：先调用 dataViewEffectiveByteLength，成功才返回 typedArrayByteOffset。
 - **所有权 / 错误 / 调用**：不把无效视图的偏移归零；检查失败直接传播错误，调用方负责 view class。
 
-### `dataViewValidateConstructorRange` (`src/core/typed_array.zig:634`)
+### `dataViewValidateConstructorRange` (`src/core/typed_array.zig:633`)
 
 - **签名**：`pub fn dataViewValidateConstructorRange(_: *JSRuntime, buffer_value: JSValue, byte_offset: usize, view_length: ?usize) !void`。
 - **作用**：验证已转换的构造偏移和可选长度。
 - **实现**：要求 AB/SAB 且未 detached；offset>可见长度时 RangeError。先减 offset 求 remaining，可选 length>remaining 再 RangeError。
 - **所有权 / 错误 / 调用**：rt 未用，无分配；减法在已检查 offset 后进行，避免 offset+length 溢出。未检查长度拟合 u32，也不创建视图或拒绝 immutable。
 
-### `dataViewRequireArrayBuffer` (`src/core/typed_array.zig:645`)
+### `dataViewRequireArrayBuffer` (`src/core/typed_array.zig:644`)
 
 - **签名**：`pub fn dataViewRequireArrayBuffer(buffer_value: JSValue) !void`。
 - **作用**：验证构造参数是 AB 或 SAB。
 - **实现**：调用 expectArrayBufferObject 并丢弃结果。
 - **所有权 / 错误 / 调用**：只检查对象身份，不检查 detached、长度或可调整状态。
 
-### `checkDataViewBounds` (`src/core/typed_array.zig:649`)
+### `checkDataViewBounds` (`src/core/typed_array.zig:648`)
 
 - **签名**：`fn checkDataViewBounds(rt: *JSRuntime, view: *Object, index: usize, width: usize) !void`。
 - **作用**：检查一次 get/set 的字节访问范围。
 - **实现**：先取得 backing，detached 返回 TypeError；要求 fixed_length 槽存在。kind==1 且 backing 有 max 时 tracking，访问长度取饱和的 buffer长度-offset；否则取保存长度。index>长度或 width>长度-index 返回 RangeError；随后非tracking整视图超出 backing 才 TypeError。
 - **所有权 / 错误 / 调用**：rt 未用；零 width 并不必然失败，index==长度也可通过。正常正宽度操作在缩短后 tracking offset 越界时 RangeError；这与 byteLength getter 的 TypeError 不同。最后 offset+stored_length 使用普通加法，依赖合法内部槽。
 
-### `checkDataViewAttached` (`src/core/typed_array.zig:672`)
+### `checkDataViewAttached` (`src/core/typed_array.zig:671`)
 
 - **签名**：`fn checkDataViewAttached(rt: *JSRuntime, view: *Object) !void`。
 - **作用**：检查视图 backing 是否已 detached。
 - **实现**：dataViewBuffer 取得 AB/SAB，detached 为 true 返回 TypeError。
 - **所有权 / 错误 / 调用**：rt 未用，不判断视图范围、immutable、元素宽度或 DataView class。
 
-### `dataViewEffectiveByteLength` (`src/core/typed_array.zig:678`)
+### `dataViewEffectiveByteLength` (`src/core/typed_array.zig:677`)
 
 - **签名**：`fn dataViewEffectiveByteLength(rt: *JSRuntime, view: *Object) !usize`。
 - **作用**：按 getter 规则计算视图长度。
 - **实现**：取 backing 并拒绝 detached，要求 fixed_length 存在。backing 无 max 时直接返回保存长度；有 max 且 kind==1 时要求 offset<=可见长度，返回剩余字节；其他情况要求 offset 和完整固定范围均拟合，再返回保存长度。
 - **所有权 / 错误 / 调用**：rt 未用；无 max 分支不重新校验内部 offset/length。tracking 的 offset==buffer长度允许返回 0，而大于长度为 TypeError；此函数不用 payload.live_length。
 
-### `dataViewBuffer` (`src/core/typed_array.zig:694`)
+### `dataViewBuffer` (`src/core/typed_array.zig:693`)
 
 - **签名**：`fn dataViewBuffer(view: *Object) !*Object`。
 - **作用**：读取视图强引用的 backing 对象。
 - **实现**：typedArrayBuffer 槽为空则 TypeError，否则经 expectArrayBufferObject 检查对象及 AB/SAB class。
 - **所有权 / 错误 / 调用**：返回借用指针，不新建根或增加引用计数；不独立验证 view class 或 backing 状态。
 
-### `dataViewKindWidth` (`src/core/typed_array.zig:698`)
+### `dataViewKindWidth` (`src/core/typed_array.zig:697`)
 
 - **签名**：`fn dataViewKindWidth(kind: u32) usize`。
 - **作用**：把 DataView 操作 kind 映射为字节数。
@@ -400,88 +400,88 @@
 
 ## 守卫与编解码
 
-### `expectArrayBufferObject` (`src/core/typed_array.zig:712`)
+### `expectArrayBufferObject` (`src/core/typed_array.zig:711`)
 
 - **签名**：`pub fn expectArrayBufferObject(value: JSValue) !*Object`。
 - **作用**：检查值具有指定的内部对象 class。
 - **实现**：先用共享 expectObject 验证真正的 Object（拒绝同样使用 object tag 的 VarRef），再要求 class_id 为 array_buffer 或 shared_array_buffer，不符返回 TypeError。
 - **所有权 / 错误 / 调用**：返回借用对象指针，不解 Proxy、不沿原型链；不验证内部槽完整性、detached、immutable 或任何范围。
 
-### `expectArrayBufferOnlyObject` (`src/core/typed_array.zig:718`)
+### `expectArrayBufferOnlyObject` (`src/core/typed_array.zig:717`)
 
 - **签名**：`pub fn expectArrayBufferOnlyObject(value: JSValue) !*Object`。
 - **作用**：检查值具有指定的内部对象 class。
 - **实现**：先用共享 expectObject 验证真正的 Object（拒绝同样使用 object tag 的 VarRef），再要求 class_id 为 array_buffer，不符返回 TypeError。
 - **所有权 / 错误 / 调用**：返回借用对象指针，不解 Proxy、不沿原型链；不验证内部槽完整性、detached、immutable 或任何范围。
 
-### `expectSharedArrayBufferObject` (`src/core/typed_array.zig:724`)
+### `expectSharedArrayBufferObject` (`src/core/typed_array.zig:723`)
 
 - **签名**：`pub fn expectSharedArrayBufferObject(value: JSValue) !*Object`。
 - **作用**：检查值具有指定的内部对象 class。
 - **实现**：先用共享 expectObject 验证真正的 Object（拒绝同样使用 object tag 的 VarRef），再要求 class_id 为 shared_array_buffer，不符返回 TypeError。
 - **所有权 / 错误 / 调用**：返回借用对象指针，不解 Proxy、不沿原型链；不验证内部槽完整性、detached、immutable 或任何范围。
 
-### `expectDataViewObject` (`src/core/typed_array.zig:730`)
+### `expectDataViewObject` (`src/core/typed_array.zig:729`)
 
 - **签名**：`pub fn expectDataViewObject(value: JSValue) !*Object`。
 - **作用**：检查值具有指定的内部对象 class。
 - **实现**：先用共享 expectObject 验证真正的 Object（拒绝同样使用 object tag 的 VarRef），再要求 class_id 为 dataview，不符返回 TypeError。
 - **所有权 / 错误 / 调用**：返回借用对象指针，不解 Proxy、不沿原型链；不验证内部槽完整性、detached、immutable 或任何范围。
 
-### `relativeSliceIndex` (`src/core/typed_array.zig:738`)
+### `relativeSliceIndex` (`src/core/typed_array.zig:737`)
 
 - **签名**：`fn relativeSliceIndex(rt: *JSRuntime, value: JSValue, len: usize, undefined_is_len: bool) !usize`。
 - **作用**：将原语相对下标截断并夹紧到给定长度。
 - **实现**：undefined 且 undefined_is_len 时直接返回 len；否则 toIntegerOrInfinity。NaN/负无穷为0，正无穷为len。有限值先 trunc，负数加 len 后夹紧；非负值按0与len夹紧，内部结果再转 usize。
 - **所有权 / 错误 / 调用**：不运行用户数值转换，辅助字符串化可能分配或失败；通过 f64 计算，任意超出精确整数范围的 usize len 不保证精确，而正常内部 buffer 长度受更小上限约束。
 
-### `decodeUint32` (`src/core/typed_array.zig:762`)
+### `decodeUint32` (`src/core/typed_array.zig:761`)
 
 - **签名**：`inline fn decodeUint32(bits: u32) JSValue`。
 - **作用**：把无符号32位整数表示为 JS Number。
 - **实现**：<=maxInt(i32) 使用 int32 tag；更大值通过 floatFromInt 构造 float64。
 - **所有权 / 错误 / 调用**：整个 u32 范围都可精确表示为 f64，无分配；不会把高位为1的值误解释成负 i32。
 
-### `decodeNumericElement` (`src/core/typed_array.zig:771`)
+### `decodeNumericElement` (`src/core/typed_array.zig:770`)
 
 - **签名**：`pub inline fn decodeNumericElement(kind: u8, bytes: [*]const u8) JSValue`。
 - **作用**：从裸字节指针解码数值 TypedArray 元素。
 - **实现**：kind 1–7 读相应整数，Uint8Clamped 与 Uint8 读取相同，Uint32 委托 decodeUint32；8/9/10 分别读 Float16/32/64 并返回 float64 tag。多字节一律 little endian，其他 kind unreachable。
 - **所有权 / 错误 / 调用**：没有长度信息或 bounds/class/detach 检查；调用方保证 kind1–10且指针至少可读对应宽度。浮点结果不做可表示为int32的重新归类，无分配。
 
-### `decodeNumericElementByClass` (`src/core/typed_array.zig:789`)
+### `decodeNumericElementByClass` (`src/core/typed_array.zig:788`)
 
 - **签名**：`pub inline fn decodeNumericElementByClass(class_id: class.ClassId, data: [*]const u8, index: u32) JSValue`。
 - **作用**：按具体数值 TypedArray class 和下标解码元素。
 - **实现**：switch 内直接以 class 固定的1/2/4/8宽度计算偏移，整数/浮点解码与 decodeNumericElement 一致。
 - **所有权 / 错误 / 调用**：不读取对象或 element_size/live_length；要求预先验证的 class、有效裸指针和下标。BigInt class 及其他 class unreachable，不是TypeError。
 
-### `writeInt32NumericElementByClass` (`src/core/typed_array.zig:809`)
+### `writeInt32NumericElementByClass` (`src/core/typed_array.zig:808`)
 
 - **签名**：`pub inline fn writeInt32NumericElementByClass( class_id: class.ClassId, data: [*]u8, index: u32, integer: i32, ) void`。
 - **作用**：把已知 i32 直接编码到指定数值 TypedArray 位置。
 - **实现**：整数 class 按位截断至1/2/4字节；Uint8Clamped 夹到0–255；Float16/32/64转相应浮点位型。按 class 固定宽度计算偏移，多字节写 little endian。
 - **所有权 / 错误 / 调用**：无分配或数值转换错误，但不检查 live范围、immutable、detached 或指针容量；非法 class unreachable。支持浮点 class，这一点与只支持整数 kind 的 writeInt32NumericElement 不同。
 
-### `bigIntResult` (`src/core/typed_array.zig:834`)
+### `bigIntResult` (`src/core/typed_array.zig:833`)
 
 - **签名**：`fn bigIntResult(rt: *JSRuntime, value: i128) !JSValue`。
 - **作用**：将 i128 数值包装成堆 BigInt JSValue。
 - **实现**：调用 bigint.BigInt.create，返回该对象的 valueRef。
 - **所有权 / 错误 / 调用**：分配失败传播；用于有符号和无符号64位读取，无符号值先扩到i128，不会被解释成负数。
 
-### `numberValue` (`src/core/typed_array.zig:839`)
+### `numberValue` (`src/core/typed_array.zig:838`)
 
 - **签名**：`fn numberValue(value: JSValue) ?f64`。
 - **作用**：只解包已经是 Number 的 JSValue。
 - **实现**：先尝试 int32 并精确转成f64，再尝试 float64，其他返回 null。
 - **所有权 / 错误 / 调用**：不做ToNumber；NaN、Infinity及负零仍是有效浮点返回值，null表示非数值tag。
 
-### `numberToUint32` (`src/core/typed_array.zig:845`)
+### `numberToUint32` (`src/core/typed_array.zig:844`)
 
 - **签名**：`fn numberToUint32(number: f64) u32`。
 - **作用**：把 f64 截断并按2^32取模。
-- **实现**：非有限值/NaN返回0；对trunc(number)取模4294967296，负模加2^32，再转u32。
+- **实现**：非有限值（含NaN，isFinite对NaN已为false）返回0；对trunc(number)取模4294967296，负模加2^32，再转u32。
 - **所有权 / 错误 / 调用**：无错误联合体；小数向零截断，负数按模得到无符号位型，正负零均得到0。
 
 ### `numberToUint8Clamp` (`src/core/typed_array.zig:853`)
@@ -619,6 +619,6 @@
 
 ## 覆盖核对
 
-- 清单函数数: 84（`src/core/typed_array.zig` 81 + `src/core/typed_array_names.zig` 3）
-- 本文标题覆盖: 84
+- 清单函数数: 83（`src/core/typed_array.zig` 80 + `src/core/typed_array_names.zig` 3）
+- 本文标题覆盖: 84（含 1 条清单外的内嵌辅助函数标题）
 - 未覆盖: 无

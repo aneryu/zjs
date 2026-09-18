@@ -130,11 +130,17 @@ pub fn JSBytes(comptime Value: type) type {
                 const object_mod = @import("object.zig");
                 const class_ids = @import("class.zig").ids;
                 const store = try object_mod.SharedBufferStore.createExternal(rt, self.bytes, deinit_fn, self.context);
+                // `createExternal` took ownership of the bytes and the host
+                // deinit hook, so this Store must be emptied BEFORE the first
+                // fallible step below. Otherwise the `errdefer` release would
+                // run the host deinit while the caller still holds an armed
+                // Store over the same memory, and its own `release()` would be
+                // a second free of the same host allocation.
+                self.disarm();
                 errdefer store.release();
                 const object = try Object.create(rt, class_ids.shared_array_buffer, null);
                 errdefer Object.destroyFromHeader(rt, object.gcHeader());
                 object.installSharedByteStorage(rt, store);
-                self.disarm();
                 return object.value();
             }
 
@@ -423,6 +429,58 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     // rather than this release. Nothing here needs rooting -- the buffer
     // object is the thing that must die.
     _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+}
+
+test "JSBytes.Store shared transfer failure frees the host bytes once" {
+    const core = @import("root.zig");
+    const State = struct {
+        allocator: std.mem.Allocator,
+        calls: usize = 0,
+
+        fn deinit(context: ?*anyopaque, bytes: []u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            self.allocator.free(bytes);
+        }
+    };
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // Warm the external-token table (capacity grows to 8 on first use) so the
+    // capped attempt below cannot fail inside `createExternal`: the failure has
+    // to land on the object allocation, i.e. AFTER the external store has taken
+    // ownership of the bytes.
+    var warm_state = State{ .allocator = std.testing.allocator };
+    const warm_backing = try std.testing.allocator.alloc(u8, 1);
+    warm_backing[0] = 0;
+    var warm_store = core.JSValue.Bytes.Store.shared(warm_backing, .{
+        .deinit = State.deinit,
+        .context = &warm_state,
+    });
+    _ = try ctx.arrayBuffer(&warm_store);
+
+    var state = State{ .allocator = std.testing.allocator };
+    const backing = try std.testing.allocator.alloc(u8, 3);
+    @memcpy(backing, &[_]u8{ 1, 2, 3 });
+    var store = core.JSValue.Bytes.Store.shared(backing, .{
+        .deinit = State.deinit,
+        .context = &state,
+    });
+
+    // Refuse the SharedArrayBuffer object allocation.
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const result = ctx.arrayBuffer(&store);
+    rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, result);
+
+    // The failure path released the bytes through the store exactly once, and
+    // the embedder's defensive release finds a disarmed Store.
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    store.release();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 

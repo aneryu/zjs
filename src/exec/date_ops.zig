@@ -535,7 +535,7 @@ fn dateCall(
         const active_global = callable_global orelse return error.TypeError;
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const string_value = try string_ops.toStringForAnnexB(ctx, output, active_global, input, caller_function, caller_frame);
-        return core.JSValue.float64(try parseDateString(ctx.runtime, string_value));
+        return core.JSValue.float64(try parseDateString(string_value));
     }
     if (decodeExtendedPrototypeMethodId(id)) |method_id| {
         const active_global = callable_global orelse return error.TypeError;
@@ -567,12 +567,12 @@ fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, 
         if (id == @intFromEnum(PrototypeMethod.set_year_with_captured_ms)) {
             const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
             const year_number = args[1].asNumber() orelse std.math.nan(f64);
-            break :blk setYearNumber(rt, this_value, captured_ms, year_number);
+            break :blk setYearNumber(this_value, captured_ms, year_number);
         }
         if (id == @intFromEnum(PrototypeMethod.set_parts_with_captured_ms)) {
             const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
             const setter_id: u32 = @intFromFloat(args[1].asNumber() orelse 0);
-            break :blk methodCallArgsWithCapturedMs(rt, this_value, setter_id, captured_ms, args[2..]);
+            break :blk methodCallArgsWithCapturedMs(this_value, setter_id, captured_ms, args[2..]);
         }
         if (decodeExtendedPrototypeMethodId(id)) |method_id| {
             break :blk methodCallArgs(rt, this_value, method_id, args);
@@ -612,7 +612,7 @@ fn dateExtendedPrototypeCall(
         while (coerced_len < coerce_count) : (coerced_len += 1) {
             coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
         }
-        return setDateFieldBody(rt, object, captured_ms, coerced_args[0..coerced_len], args.len, span);
+        return setDateFieldBody(object, captured_ms, coerced_args[0..coerced_len], args.len, span);
     }
     return methodCallArgs(rt, this_value, method_id, args) catch |err| switch (err) {
         error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object"),
@@ -718,24 +718,20 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
 
     if (args.len >= 2) {
         const next_ms = try constructDateFromParts(args);
-        try defineDateValue(rt, object, next_ms);
+        setDateValue(object, next_ms);
     } else if (args.len == 1) {
         const ms = if (args[0].isString())
-            try parseDateString(rt, args[0])
+            try parseDateString(args[0])
         else if (dateObjectFromValue(args[0])) |date_object|
             try dateValue(date_object)
         else
             timeClip(toNumber(args[0]) orelse return error.TypeError);
-        try defineDateValue(rt, object, ms);
+        setDateValue(object, ms);
     } else {
-        try defineDateValue(rt, object, currentTimeMs());
+        setDateValue(object, currentTimeMs());
     }
 
     return object.value();
-}
-
-fn defineDateValue(rt: *core.JSRuntime, object: *core.Object, ms: f64) !void {
-    try setDateValue(rt, object, ms);
 }
 
 /// QuickJS source map: Date.UTC / Date.parse / Date.now.
@@ -760,11 +756,11 @@ pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u
     if (setterSpan(method)) |span| {
         // Raw-args setter path (engine-internal callers): coerce here, then run
         // the shared `set_date_field` body.
-        return setDateFieldBody(rt, object, ms, args, args.len, span);
+        return setDateFieldBody(object, ms, args, args.len, span);
     }
     return switch (method) {
         1, 2 => numberResult(ms),
-        24 => try setTime(rt, object, args),
+        24 => try setTime(object, args),
         // get_date_field (quickjs.c:55225): local getters n=0..6, getDay n=7.
         3...9 => getDateFieldValue(ms, @intCast(method - 3), true, false),
         19 => getDateFieldValue(ms, 7, true, false),
@@ -783,7 +779,7 @@ pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u
         43 => try getDateStringValue(rt, ms, 0x33),
         44 => try getDateStringValue(rt, ms, 0x31),
         45 => try getDateStringValue(rt, ms, 0x32),
-        23 => try setYear(rt, object, ms, args),
+        23 => try setYear(object, ms, args),
         // js_date_getTimezoneOffset (quickjs.c:55996).
         32 => if (std.math.isNan(ms))
             core.JSValue.float64(std.math.nan(f64))
@@ -793,10 +789,10 @@ pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u
     };
 }
 
-pub fn methodCallArgsWithCapturedMs(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
+pub fn methodCallArgsWithCapturedMs(object_value: core.JSValue, method: u32, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
     const span = setterSpan(method) orelse return error.TypeError;
-    return setDateFieldBody(rt, object, captured_ms, args, args.len, span);
+    return setDateFieldBody(object, captured_ms, args, args.len, span);
 }
 
 /// set_date_field magic decode (quickjs.c js_date_proto_funcs): selector ->
@@ -827,7 +823,7 @@ fn setterSpan(method: u32) ?SetterSpan {
 /// Mirrors qjs set_date_field (quickjs.c:55253) given the captured time value
 /// and (pre-coerced or raw-primitive) args. `argc` is the caller's argument
 /// count: `argc == 0` sets the date to NaN even without field writes.
-fn setDateFieldBody(rt: *core.JSRuntime, object: *core.Object, captured_ms: f64, args: []const core.JSValue, argc: usize, span: SetterSpan) !core.JSValue {
+fn setDateFieldBody(object: *core.Object, captured_ms: f64, args: []const core.JSValue, argc: usize, span: SetterSpan) !core.JSValue {
     var fields: [9]f64 = undefined;
     var res = getDateFields(captured_ms, &fields, span.is_local, span.first == 0);
     const res1 = res;
@@ -846,37 +842,37 @@ fn setDateFieldBody(rt: *core.JSRuntime, object: *core.Object, captured_ms: f64,
     var d: f64 = std.math.nan(f64);
     if (res and argc > 0) d = setDateFields(fields[0..7], span.is_local);
 
-    try setDateValue(rt, object, d);
+    setDateValue(object, d);
     return numberResult(d);
 }
 
-fn setYear(rt: *core.JSRuntime, object: *core.Object, ms: f64, args: []const core.JSValue) !core.JSValue {
+fn setYear(object: *core.Object, ms: f64, args: []const core.JSValue) !core.JSValue {
     const year_number = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
-    return setYearNumberOnObject(rt, object, ms, year_number);
+    return setYearNumberOnObject(object, ms, year_number);
 }
 
-pub fn setYearNumber(rt: *core.JSRuntime, object_value: core.JSValue, captured_ms: f64, year_number: f64) !core.JSValue {
+pub fn setYearNumber(object_value: core.JSValue, captured_ms: f64, year_number: f64) !core.JSValue {
     const object = try expectDateObject(object_value);
-    return setYearNumberOnObject(rt, object, captured_ms, year_number);
+    return setYearNumberOnObject(object, captured_ms, year_number);
 }
 
 /// Mirrors qjs js_date_setYear (quickjs.c:56030): map finite years 0..99 to
 /// 1900..1999, then run set_date_field with magic 0x011 (first=0, end=1,
 /// local).
-fn setYearNumberOnObject(rt: *core.JSRuntime, object: *core.Object, ms: f64, year_number: f64) !core.JSValue {
+fn setYearNumberOnObject(object: *core.Object, ms: f64, year_number: f64) !core.JSValue {
     var y = year_number;
     if (std.math.isFinite(y)) {
         y = @trunc(y);
         if (y >= 0 and y < 100) y += 1900;
     }
     const year_args = [1]core.JSValue{core.JSValue.float64(y)};
-    return setDateFieldBody(rt, object, ms, &year_args, 1, .{ .first = 0, .end = 1, .is_local = true });
+    return setDateFieldBody(object, ms, &year_args, 1, .{ .first = 0, .end = 1, .is_local = true });
 }
 
-fn setTime(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) !core.JSValue {
+fn setTime(object: *core.Object, args: []const core.JSValue) !core.JSValue {
     const time_number = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
     const next_ms = timeClip(time_number);
-    try setDateValue(rt, object, next_ms);
+    setDateValue(object, next_ms);
     return numberResult(next_ms);
 }
 
@@ -919,10 +915,10 @@ fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     // body only sees pre-coerced args (the record arm in `dateCall` runs the
     // VM ToString for objects); primitives are converted without VM re-entry.
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (input.isString()) return core.JSValue.float64(try parseDateString(rt, input));
+    if (input.isString()) return core.JSValue.float64(try parseDateString(input));
     if (input.isObject()) return core.JSValue.float64(std.math.nan(f64));
     const string_value = try value_ops.toStringValue(rt, input);
-    return core.JSValue.float64(try parseDateString(rt, string_value));
+    return core.JSValue.float64(try parseDateString(string_value));
 }
 
 // --- Host timezone offset (mirrors quickjs.c getTimezoneOffset:47454) -------
@@ -1289,9 +1285,8 @@ fn writeDateString(
 
 /// js_Date_parse string -> byte-array conversion (quickjs.c:55926): 127-byte
 /// truncation, U+2212 -> '-', any other unit > 255 -> 'x'.
-fn parseDateString(rt: *core.JSRuntime, value: core.JSValue) !f64 {
+fn parseDateString(value: core.JSValue) !f64 {
     const string_value = value.asStringBody() orelse return std.math.nan(f64);
-    try string_value.ensureFlat(rt);
     var buf: [128]u8 = undefined;
     var len: usize = 0;
     switch (string_value.resolveData()) {
@@ -1734,9 +1729,8 @@ fn expectDateObject(value: core.JSValue) !*core.Object {
     return object;
 }
 
-fn setDateValue(_: *core.JSRuntime, object: *core.Object, ms: f64) !void {
-    const slot = object.objectDataSlot();
-    slot.* = core.JSValue.float64(ms);
+fn setDateValue(object: *core.Object, ms: f64) void {
+    object.objectDataSlot().* = core.JSValue.float64(ms);
 }
 
 /// CLI print inspector hook (qjs js_print_object JS_CLASS_DATE arm,

@@ -65,7 +65,7 @@ pub fn installParsedModuleArtifact(
     referrer_path: ?[]const u8,
 ) !*core.module.ModuleRecord {
     var pending = try pendingDefinitionFromArtifact(ctx, artifact, referrer_path, null);
-    defer pending.deinit(ctx.runtime);
+    defer pending.deinit();
     return installPendingDefinition(ctx, module_name, &pending);
 }
 
@@ -84,7 +84,7 @@ pub fn installResolvedModuleArtifact(
         null,
         resolved_request_names,
     );
-    defer pending.deinit(ctx.runtime);
+    defer pending.deinit();
     return installPendingDefinition(ctx, module_name, &pending);
 }
 
@@ -118,7 +118,7 @@ fn pendingDefinitionFromArtifact(
 
     var pending = core.module.PendingDefinition.init(&runtime.memory, &runtime.atoms);
     pending.adoptFuncObjectValueNoFail(core.JSValue.functionBytecode(&artifact.function_bytecode.header));
-    errdefer pending.deinit(runtime);
+    errdefer pending.deinit();
 
     const function = artifact.function_bytecode;
     if (!function.isModule() or function.realmContext() != ctx) return error.InvalidBytecode;
@@ -249,7 +249,7 @@ pub fn preloadMissingFileModuleGraphWithOrder(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInnerMode(
+    try preloadFileModuleGraphInner(
         io,
         allocator,
         context,
@@ -258,7 +258,6 @@ pub fn preloadMissingFileModuleGraphWithOrder(
         max_source_size,
         &seen,
         postorder,
-        true,
     );
 }
 
@@ -649,7 +648,7 @@ fn rollbackRecordLinkArtifacts(
     record: *core.module.ModuleRecord,
 ) void {
     for (record.exports, 0..) |_, index| {
-        record.clearRetainedExportCellNoFail(ctx.runtime, @intCast(index));
+        record.clearRetainedExportCellNoFail(@intCast(index));
     }
     if (record.synthetic_kind != .none) return;
 
@@ -962,6 +961,9 @@ fn atomLessThan(rt: *core.JSRuntime, lhs: core.Atom, rhs: core.Atom) bool {
     };
 }
 
+/// Skipping already-preloaded modules is not a caller-selectable mode: the
+/// `seen` list plus the "record with resolved requests returns early" check
+/// below give every entry point the same behaviour.
 fn preloadFileModuleGraphInner(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -971,30 +973,6 @@ fn preloadFileModuleGraphInner(
     max_source_size: usize,
     seen: *std.ArrayList([]const u8),
     postorder: ?*std.ArrayList([]const u8),
-) !void {
-    try preloadFileModuleGraphInnerMode(
-        io,
-        allocator,
-        context,
-        source_text,
-        path,
-        max_source_size,
-        seen,
-        postorder,
-        false,
-    );
-}
-
-fn preloadFileModuleGraphInnerMode(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    context: *core.JSContext,
-    source_text: []const u8,
-    path: []const u8,
-    max_source_size: usize,
-    seen: *std.ArrayList([]const u8),
-    postorder: ?*std.ArrayList([]const u8),
-    skip_existing: bool,
 ) !void {
     const runtime = context.runtime;
     for (seen.items) |existing| {
@@ -1086,7 +1064,7 @@ fn preloadFileModuleGraphInnerMode(
                 },
             };
             defer allocator.free(dependency_source);
-            try preloadFileModuleGraphInnerMode(
+            try preloadFileModuleGraphInner(
                 io,
                 allocator,
                 context,
@@ -1095,7 +1073,6 @@ fn preloadFileModuleGraphInnerMode(
                 max_source_size,
                 seen,
                 postorder,
-                skip_existing,
             );
         }
         const dependency = context.modules.find(request.module_name) orelse
@@ -1177,7 +1154,7 @@ pub fn syntheticModuleRegistryName(allocator: std.mem.Allocator, path: []const u
 }
 
 fn syntheticModuleSourcePath(path: []const u8) []const u8 {
-    const suffix = std.mem.indexOf(u8, path, "#type=") orelse return path;
+    const suffix = std.mem.lastIndexOf(u8, path, "#type=") orelse return path;
     return path[0..suffix];
 }
 
@@ -1214,7 +1191,7 @@ fn preloadSyntheticFileModuleTracked(
         &runtime.memory,
         &runtime.atoms,
     );
-    defer pending.deinit(runtime);
+    defer pending.deinit();
     pending.synthetic_kind = kind;
     pending.addExport(atom_default, atom_default, 0) catch |err|
         return pendingMetadataError(err);

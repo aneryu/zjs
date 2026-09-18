@@ -414,58 +414,9 @@ test "object literal roots direct function bytecode values while creating object
 
 // Relocated to engine core (`core/object.zig`) in Phase 6b-3 STEP 2; the pure
 // own-property iteration constructor now lives there. Re-exported unchanged.
-// (The `entryArrayValue`/`atomToStringValue` helpers below remain here only as
-// the subjects of the GC-rooting unit test that follows.)
 pub const ownEntriesArray = core.object.ownEntriesArray;
 
 const expectObject = core.value_semantics.expectObject;
-
-fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !core.JSValue {
-    var rooted_value = value;
-    var root_frame = core.runtime.rootValues(.{&rooted_value});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const array = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
-    const key_value = try rt.atoms.toStringValue(rt, key);
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key_value, true, true, true));
-    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(rooted_value, true, true, true));
-    return array.value();
-}
-
-test "object entryArrayValue roots direct function bytecode value while creating entry array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const key = try rt.internAtom("entryKey");
-
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-object-entry-array-value-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
-
-    const entry_value = core.JSValue.functionBytecode(&fb.header);
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const pair_value = try entryArrayValue(rt, key, entry_value);
-    const pair = try expectObject(pair_value);
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    {
-        const stored = try pair.getProperty(core.atom.atomFromUInt32(1));
-        try std.testing.expect(stored.same(entry_value));
-    }
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
 
 // ==========================================================================
 // Relocated Object.* method implementations (Phase 6b-2).

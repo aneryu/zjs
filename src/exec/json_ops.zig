@@ -192,7 +192,6 @@ pub fn parse(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !c
     if (try parseSimpleJsonValue(rt, global, bytes.items)) |parsed| return parsed;
 
     if (rooted_value.asStringBody()) |body| {
-        try body.ensureFlat(rt);
         return switch (body.resolveData()) {
             .latin1 => |latin1| jsonParseFull(u8, rt, global, latin1),
             .utf16 => |units| jsonParseFull(u16, rt, global, units),
@@ -224,7 +223,6 @@ pub fn parseWithRecord(rt: *core.JSRuntime, global: ?*core.Object, value: core.J
     defer root_frame.deactivate(rt);
 
     if (rooted_value.asStringBody()) |body| {
-        try body.ensureFlat(rt);
         return switch (body.resolveData()) {
             .latin1 => |latin1| jsonParseFullWithRecord(u8, rt, global, latin1),
             .utf16 => |units| jsonParseFullWithRecord(u16, rt, global, units),
@@ -235,7 +233,6 @@ pub fn parseWithRecord(rt: *core.JSRuntime, global: ?*core.Object, value: core.J
     defer bytes.deinit(rt.memory.allocator);
     try appendJsonInputString(rt, &bytes, rooted_value);
     const text = try core.string.String.createUtf8(rt, bytes.items);
-    try text.ensureFlat(rt);
     return switch (text.resolveData()) {
         .latin1 => |latin1| jsonParseFullWithRecord(u8, rt, global, latin1),
         .utf16 => |units| jsonParseFullWithRecord(u16, rt, global, units),
@@ -262,7 +259,6 @@ fn jsonParseFullWithRecord(comptime T: type, rt: *core.JSRuntime, global: ?*core
 /// parse its code units through the same faithful walk.
 fn jsonParseFullFromBytes(rt: *core.JSRuntime, global: ?*core.Object, bytes: []const u8) !core.JSValue {
     const text = try core.string.String.createUtf8(rt, bytes);
-    try text.ensureFlat(rt);
     return switch (text.resolveData()) {
         .latin1 => |latin1| jsonParseFull(u8, rt, global, latin1),
         .utf16 => |units| jsonParseFull(u16, rt, global, units),
@@ -348,9 +344,11 @@ const JsonParseRecord = union(enum) {
         }
     }
 
-    /// Recursively free the record tree (owned atoms, source bytes, element
-    /// arrays). Mirrors json_free_parse_record (quickjs.c:49459). The cached
-    /// `value` is dup'd on record creation, so it is freed here.
+    /// Recursively free the record tree's native memory: the primitive source
+    /// bytes and the element/entry arrays. Mirrors json_free_parse_record
+    /// (quickjs.c:49459). The cached `value` and the entry atoms are NOT freed
+    /// here — under tracing GC they are reported as roots by `JsonRecordRoots`
+    /// / `JsonPendingRecordRoots` and reclaimed by the collector.
     fn deinit(self: *JsonParseRecord, rt: *core.JSRuntime) void {
         switch (self.*) {
             .primitive => |*p| {
@@ -786,11 +784,8 @@ fn JsonUnitParser(comptime T: type) type {
                     continue;
                 }
                 if (unit < 0x20) return error.SyntaxError;
-                if (T == u8) {
-                    try out.append(self.rt.memory.allocator, unit);
-                } else {
-                    try out.append(self.rt.memory.allocator, unit);
-                }
+                // A `u8` source unit widens implicitly into the `u16` output.
+                try out.append(self.rt.memory.allocator, unit);
             }
         }
 
@@ -941,10 +936,6 @@ pub fn isRawJSON(value: core.JSValue) bool {
     return object.class_id == core.class.ids.raw_json;
 }
 
-pub fn parseInt(bytes: []const u8) !i32 {
-    return core.value_format.parseAsciiInt(i32, bytes, 10);
-}
-
 fn createSimpleJsonAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     return (try core.string.String.createAscii(rt, bytes)).value();
 }
@@ -993,7 +984,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         } else if (isCallableJsonOmittedObject(object_value)) {
             try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
         } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.string or object_value.class_id == core.class.ids.boolean) {
-            primitive = try primitiveValue(rt, object_value) orelse core.JSValue.undefinedValue();
+            primitive = jsonPrimitiveWrapperValue(object_value) orelse core.JSValue.undefinedValue();
             try appendJsonValue(rt, buffer, primitive, array_slot, stack, options, depth);
         } else if (object_value.isArray()) {
             try appendJsonArray(rt, buffer, object_value, stack, options, depth);
@@ -1428,7 +1419,7 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
     if (!rooted_value.isObject()) return null;
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.string and object.class_id != core.class.ids.number) return null;
-    primitive = try primitiveValue(rt, object) orelse return null;
+    primitive = jsonPrimitiveWrapperValue(object) orelse return null;
     return try stringifyPropertyListAtom(rt, primitive);
 }
 
@@ -1449,7 +1440,7 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
         if (!rooted_space.isObject()) break :blk null;
         const object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.number) {
-            primitive = try primitiveValue(rt, object) orelse break :blk null;
+            primitive = jsonPrimitiveWrapperValue(object) orelse break :blk null;
             break :blk primitive.asInt32() orelse primitive.asFloat64();
         }
         break :blk null;
@@ -1466,27 +1457,12 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
         const header = rooted_space.refHeader() orelse return out;
         const object = core.Object.fromHeader(header);
         if (object.class_id == core.class.ids.string) {
-            primitive = try primitiveValue(rt, object) orelse return out;
+            primitive = jsonPrimitiveWrapperValue(object) orelse return out;
             try core.string.appendValueUtf8(rt, &out, primitive);
         }
     }
     if (out.items.len > 10) out.items = out.items[0..10];
     return out;
-}
-
-fn primitiveValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
-    _ = rt;
-    if (object.class_id == core.class.ids.string) {
-        if (object.objectData()) |value| return value;
-    }
-    switch (object.class_id) {
-        core.class.ids.number,
-        core.class.ids.boolean,
-        core.class.ids.big_int,
-        core.class.ids.symbol,
-        => return if (object.objectData()) |value| value else null,
-        else => return null,
-    }
 }
 
 fn atomListContains(list: []const core.Atom, atom: core.Atom) bool {
@@ -1542,7 +1518,7 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     if (rooted_value.isObject()) {
         const header = rooted_value.refHeader() orelse return error.TypeError;
         const object = core.Object.fromHeader(header);
-        primitive = try primitiveValue(rt, object) orelse return error.TypeError;
+        primitive = jsonPrimitiveWrapperValue(object) orelse return error.TypeError;
         return appendJsonInputString(rt, buffer, primitive);
     }
     return error.TypeError;
@@ -2253,14 +2229,13 @@ pub fn jsonStringifyGap(
                 string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_space, caller_function, caller_frame);
                 return jsonStringifyGap(ctx, output, global, string_value, caller_function, caller_frame);
             } else if (object.class_id == core.class.ids.boolean) {
-                primitive = try jsonPrimitiveWrapperValue(ctx.runtime, object) orelse return out;
+                primitive = jsonPrimitiveWrapperValue(object) orelse return out;
                 return jsonStringifyGap(ctx, output, global, primitive, caller_function, caller_frame);
             }
         }
     }
     if (rooted_space.isString()) {
         if (rooted_space.asStringBody()) |body| {
-            try body.ensureFlat(ctx.runtime);
             switch (body.resolveData()) {
                 .latin1 => |bytes| {
                     const take = @min(bytes.len, 10);
@@ -2426,7 +2401,7 @@ pub fn jsonAppendValue(
             string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
             try jsonAppendValue(ctx, output, global, buffer, string_value, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.boolean) {
-            primitive = try jsonPrimitiveWrapperValue(ctx.runtime, object) orelse core.JSValue.undefinedValue();
+            primitive = jsonPrimitiveWrapperValue(object) orelse core.JSValue.undefinedValue();
             try jsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.big_int) {
             primitive = coercion_ops.primitiveWrapperStoredValue(ctx.runtime, rooted_value) orelse return error.TypeError;
@@ -2545,19 +2520,19 @@ pub fn jsonAppendObject(
     try buffer.append(ctx.runtime.memory.allocator, '}');
 }
 
-pub fn jsonPrimitiveWrapperValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
-    _ = rt;
-    if (object.class_id == core.class.ids.string) {
-        if (object.objectData()) |stored| return stored;
-    }
-    switch (object.class_id) {
+/// Unwrap a Number/String/Boolean/BigInt/Symbol wrapper's stored primitive;
+/// null for any other class (and for a wrapper with no stored data). Shared by
+/// the bare and VM stringify paths, which used to carry byte-identical copies.
+pub fn jsonPrimitiveWrapperValue(object: *core.Object) ?core.JSValue {
+    return switch (object.class_id) {
+        core.class.ids.string,
         core.class.ids.number,
         core.class.ids.boolean,
         core.class.ids.big_int,
         core.class.ids.symbol,
-        => return if (object.objectData()) |stored| stored else null,
-        else => return null,
-    }
+        => object.objectData(),
+        else => null,
+    };
 }
 
 pub fn jsonObjectInStack(items: []const *core.Object, object: *core.Object) bool {

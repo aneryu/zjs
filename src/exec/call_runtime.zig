@@ -103,7 +103,7 @@ pub fn execCall(
     // the general dispatch, which handles host-output (console.log) like any other
     // host function — qjs has no per-call host-output fast path.
     if (allow_inline) {
-        if (inline_calls.resolveInlineTarget(ctx, global, core.JSValue.undefinedValue(), func)) |target| {
+        if (inline_calls.resolveInlineTarget(global, core.JSValue.undefinedValue(), func)) |target| {
             req_out.* = .{ .target = target, .region_base = region_base, .argc = argc };
             return .inline_call;
         }
@@ -170,7 +170,7 @@ pub fn tryCatchInFrame(
     // must close this frame's live pattern/loop iterators before the frame is
     // unwound. IteratorNext marks only its failing record undefined before it
     // reaches this seam, so enclosing pattern iterators still close normally.
-    try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
+    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
     const target = catch_target.* orelse return false;
     try stack.reserveAdditional(1);
     const catch_value: core.JSValue = if (is_pending_exception)
@@ -490,7 +490,6 @@ inline fn resolveSyncInlineRoute(
     route.invocation = invocation;
     return inline_calls.resolveInlineTargetInto(
         &route.target,
-        ctx,
         global,
         this_value,
         func,
@@ -3153,10 +3152,8 @@ pub fn defineGlobalDeclVarCell(
     if (ref_idx >= frame.var_refs.len) {
         try frame_mod.ensureVarRefsCapacity(ctx, frame, ref_idx);
     }
-    _ = slot_ops.varRefSlot(frame, ref_idx);
     slot_ops.storeVarRefSlot(frame, ref_idx, cell_value);
 
-    var rebound = true;
     const local_count = @min(function.varDefs().len, frame.locals.len);
     const global_cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
     for (function.varDefs()[0..local_count], 0..) |vd, local_idx| {
@@ -3166,9 +3163,10 @@ pub fn defineGlobalDeclVarCell(
         // frame plane raw; the authoritative global identity remains in the
         // typed frame.var_refs/global property cell.
         frame.locals[local_idx] = global_cell.varRefValue();
-        rebound = true;
     }
-    return rebound;
+    // The slot IS bound at this point (the `storeVarRefSlot` above). `false`
+    // is reserved for the declaration-mismatch early returns at the top.
+    return true;
 }
 
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,

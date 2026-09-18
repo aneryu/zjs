@@ -1251,7 +1251,6 @@ pub const JSContext = struct {
     }
 
     pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void {
-        for (frames) |_| {}
         if (frames.len != 0) self.runtime.memory.free(BacktraceFrame, frames);
     }
 

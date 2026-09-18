@@ -311,67 +311,6 @@ pub fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSV
     return core.JSValue.undefinedValue();
 }
 
-fn reflectHasProperty(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    object: *core.Object,
-    atom_id: core.Atom,
-) HostError!bool {
-    if (object.proxyTarget() != null) return proxyReflectHasProperty(ctx, output, global, globals, object, atom_id);
-    if (try typedArrayReflectHas(ctx.runtime, object, atom_id)) |has| return has;
-    if (object.hasOwnProperty(atom_id)) return true;
-
-    var current = object.getPrototype();
-    while (current) |proto| : (current = proto.getPrototype()) {
-        if (proto.proxyTarget() != null) return proxyReflectHasProperty(ctx, output, global, globals, proto, atom_id);
-        if (try typedArrayReflectHas(ctx.runtime, proto, atom_id)) |has| return has;
-        if (proto.hasOwnProperty(atom_id)) return true;
-    }
-    return false;
-}
-
-fn proxyReflectHasProperty(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    proxy: *core.Object,
-    atom_id: core.Atom,
-) !bool {
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const target = try expectObjectArg(target_value);
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const has_atom = core.atom.ids.has;
-    const trap = try getValuePropertyViaGlobalSlots(ctx, output, global, globals, handler_value, has_atom);
-    if (trap.isUndefined() or trap.isNull()) return reflectHasProperty(ctx, output, global, globals, target, atom_id);
-    const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, atom_id);
-    const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, handler_value, trap, &.{ target_value, key_value });
-    const trap_result = value_ops.isTruthy(result);
-    const global_object = global orelse {
-        // Bare-runtime fallback (no realm global): keep the raw target reads;
-        // the VM path below mirrors js_proxy_has's exotic-dispatching reads.
-        if (trap_result) return true;
-        if (try target.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-            if (desc.configurable == false or !target.isExtensible()) return error.TypeError;
-        }
-        return false;
-    };
-    return try object_ops.validateProxyHasResult(ctx, output, global_object, target, atom_id, trap_result, null, null);
-}
-
-fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
-    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
-        .none => return null,
-        .invalid => return false,
-        .index => |index| {
-            const length = core.object.typedArrayLength(rt, object) catch return false;
-            return index < length;
-        },
-    }
-}
-
 fn isBuiltinConstructorName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Object") or
         std.mem.eql(u8, name, "Function") or

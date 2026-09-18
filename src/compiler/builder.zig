@@ -7,15 +7,16 @@
 //! is a real cache tax). Consumer-proportional side tables only:
 //! LabelSlot[], RelocEntry[], SourceSlot[].
 //!
-//! Ownership contract:
-//!   - atom operands appended to the builder are OWNED (retained) by the
-//!     builder's ledger until the product is committed or the builder is
-//!     deinitialized (item-wise release of the initialized prefix, then
-//!     backings freed by full capacity, uninitialized tails never read);
+//! Ownership contract (post-TGC S3-c: compile-time atoms are rooted by the
+//! enclosing CompileAtomScope, so the builder never retains or releases):
+//!   - atom operands appended to the builder are BORROWED ids recorded in the
+//!     builder's ledger; `deinit` / `rollback` / `discardSegment` only free or
+//!     rewind the backing arrays (by capacity; uninitialized tails never read),
+//!     never touching refcounts. The `*Owned` suffixes are legacy names kept
+//!     for the call sites that transfer an id into a longer-lived table;
 //!   - speculative emission uses snapshot/rollback restoring code length,
-//!     atom ledger length (releasing rolled-back refs), label count,
-//!     reloc length, and source-slot length — mirroring the legacy
-//!     EmissionSnapshot discipline;
+//!     atom ledger length, label count, reloc length, and source-slot length —
+//!     mirroring the legacy EmissionSnapshot discipline;
 //!   - OOM anywhere leaves the builder consistent for deinit; no partial
 //!     state is observable by later passes.
 //!
@@ -948,81 +949,11 @@ pub const Builder = struct {
         self.last_opcode_pos = snap.last_opcode_pos;
     }
 
-    /// Drop the code tail beyond `new_code_len` — the qjs get_lvalue
-    /// `fd->byte_code.size = fd->last_opcode_pos` rewind. Only for tails that
-    /// carry no relocations and no label binds: the newest reloc's operand is the
-    /// high-water mark (operand offsets are emission-ordered), so the no-reloc
-    /// requirement is an O(1) check; binds beyond the boundary are a Debug scan.
-    /// Source markers at or beyond the boundary are dropped (legacy truncateCode
-    /// slot rule). Invalidates last_opcode_pos.
-    pub fn truncateTail(self: *Builder, new_code_len: u32) void {
-        std.debug.assert(new_code_len <= self.code_len);
-        std.debug.assert(self.reloc_len == 0 or
-            self.relocs[self.reloc_len - 1].operand_offset + 4 <= new_code_len);
-
-        if (builtin.mode == .Debug) {
-            for (self.label_slots[0..self.label_len]) |slot| {
-                std.debug.assert(!slot.flags.bound or slot.bound_offset <= new_code_len);
-            }
-        }
-
-        while (self.source_len > 0 and
-            self.source_slots[self.source_len - 1].temp_offset >= new_code_len)
-        {
-            self.source_len -= 1;
-        }
-        while (self.control_len > 0 and
-            self.controlAt(self.control_len - 1).temp_offset >= new_code_len)
-        {
-            self.control_len -= 1;
-        }
-        self.code_len = new_code_len;
-        self.last_opcode_pos = -1;
-    }
-
-    /// Rewind one parser opcode emitted through a marker'd facade while
-    /// retaining older zero-width source events at the same compact offset.
-    /// Legacy OP_line_num bytes keep those older events physically before the
-    /// getter opcode; the compact v2 ledger represents them at one offset, so
-    /// only its newest slot belongs to the opcode being removed.
-    pub fn truncateLastMarkedOpcode(self: *Builder, new_code_len: u32) Error!void {
-        if (new_code_len > self.code_len or
-            self.last_opcode_pos < 0 or
-            @as(u32, @intCast(self.last_opcode_pos)) != new_code_len)
-        {
-            return error.InvalidBytecode;
-        }
-        if (self.reloc_len != 0 and
-            self.relocs[self.reloc_len - 1].operand_offset + 4 > new_code_len)
-        {
-            return error.InvalidBytecode;
-        }
-        for (self.label_slots[0..self.label_len]) |slot| {
-            if (slot.flags.bound and slot.bound_offset > new_code_len)
-                return error.InvalidBytecode;
-        }
-        if (self.source_len == 0 or
-            self.source_slots[self.source_len - 1].temp_offset != new_code_len)
-        {
-            return error.InvalidBytecode;
-        }
-
-        self.source_len -= 1;
-        while (self.control_len > 0 and
-            self.controlAt(self.control_len - 1).temp_offset >= new_code_len)
-        {
-            self.control_len -= 1;
-        }
-        self.code_len = new_code_len;
-        self.last_opcode_pos = -1;
-    }
-
     /// QuickJS `fd->byte_code.size = fd->last_opcode_pos`: remove the trailing
     /// opcode while preserving every source event physically emitted before
     /// it. In the compact v2 ledger those events have `temp_offset ==
     /// new_code_len`; they describe the replacement emitted at that same
-    /// boundary and must not be discarded. Unlike the historical
-    /// marker-coupled helper above, this also accepts a source-less opcode.
+    /// boundary and must not be discarded. A source-less opcode is accepted.
     pub fn truncateLastOpcodePreserveSources(self: *Builder, new_code_len: u32) Error!void {
         if (new_code_len > self.code_len or
             self.last_opcode_pos < 0 or
@@ -1649,7 +1580,7 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
     b.deinit();
 }
 
-test "compiler.builder: s2g4 take atom and truncate speculative tail" {
+test "compiler.builder: s2g4 take last atom operand" {
     var acct = core.memory.MemoryAccount.init(std.testing.allocator);
     var table = core.atom.AtomTable.init(&acct);
     defer table.deinit();
@@ -1676,14 +1607,6 @@ test "compiler.builder: s2g4 take atom and truncate speculative tail" {
     try std.testing.expectEqual(atom_id, returned_atom);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectError(error.InvalidBytecode, b.takeLastAtomOwned());
-
-    b.truncateTail(op_start);
-    try std.testing.expectEqual(op_start, b.code_len);
-    try std.testing.expectEqual(@as(u32, 1), b.reloc_len);
-    try std.testing.expectEqual(@as(u32, 1), b.label_slots[label.index()].ref_count);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try std.testing.expectEqual(@as(u32, 1), b.source_len);
-    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
 }
 
 test "compiler.builder: lvalue atom take and opcode rewind are one transaction" {
@@ -1716,28 +1639,6 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(op_start, b.source_slots[0].temp_offset);
-}
-
-test "compiler.builder: marked opcode rewind preserves older same-offset source" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
-    defer table.deinit();
-
-    var b = Builder.init(&acct, &table);
-    defer b.deinit();
-
-    try b.addSourceMarker(1, 10);
-    try b.addSourceMarker(1, 20);
-    try b.emitOp(0xd4);
-    try std.testing.expectEqual(@as(u32, 2), b.source_len);
-
-    try b.truncateLastMarkedOpcode(0);
-    try std.testing.expectEqual(@as(u32, 0), b.code_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try std.testing.expectEqual(@as(u32, 1), b.source_len);
-    try std.testing.expectEqual(@as(u32, 0), b.source_slots[0].temp_offset);
-    try std.testing.expectEqual(@as(i32, 1), b.source_slots[0].line);
-    try std.testing.expectEqual(@as(i32, 10), b.source_slots[0].col);
 }
 
 test "compiler.builder: s2g4 detach and splice preserves global labels" {

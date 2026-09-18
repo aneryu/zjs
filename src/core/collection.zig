@@ -324,7 +324,10 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     errdefer refreshed_entries.* = refreshed_entries.*[0..index];
     refreshed_entries.*[index] = stored;
     linkWeakEntry(object, index);
-    try rt.registerBorrowedReferenceHolder(object);
+    // No second `registerBorrowedReferenceHolder` here: the registration above
+    // is idempotent and already covered by `errdefer`, whereas a repeat call on
+    // the success path could only fail, and its failure would run that errdefer
+    // and unregister a holder whose entry is already linked into the bucket.
 }
 
 fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void {
@@ -725,7 +728,7 @@ pub fn mapSetLatin1PrefixInt32Range(
             continue;
         }
 
-        const key = (try core.string.String.createLatin1ConcatWithSeed(rt, prefix, digits, prefix_seed)).value();
+        const key = (try core.string.String.createLatin1Concat(rt, prefix, digits)).value();
         const entry = core.object.CollectionEntry{
             .key = key,
             .value = core.JSValue.int32(int_value),
@@ -735,8 +738,6 @@ pub fn mapSetLatin1PrefixInt32Range(
         _ = try appendStrongEntryWithHash(rt, object, entry, hash);
         inserted = true;
     }
-
-    if (inserted) inserted = false;
 }
 
 // === Shared helpers ===

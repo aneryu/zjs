@@ -719,66 +719,66 @@ Realm 生命周期：`createConstructing*` → 填 intrinsics → `finishConstru
 
 - **签名**：`pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void`。
 - **作用**：释放快照数组存储。
-- **实现**：逐帧循环为空操作，非空数组交runtime.memory.free。
+- **实现**：非空数组交runtime.memory.free（RC 时代逐帧释放留下的空循环已删）。
 - **所有权 / 错误 / 调用**：不逐atom/函数值release、不清调用方切片，不允许重复释放非空数组；须匹配创建快照的账户。
 
-### `JSContext.dupBacktraceFrame` (`src/core/context.zig:1258`)
+### `JSContext.dupBacktraceFrame` (`src/core/context.zig:1257`)
 
 - **签名**：`fn dupBacktraceFrame(self: *JSContext, frame: BacktraceFrame) BacktraceFrame`。
 - **作用**：复制持久帧并冻结其当前PC。
 - **实现**：两个atom经noteHolderStore，pc取currentPc，保留行列/data/resolver/is_native；function_value仅对象tag保留，其余undefined，pc_source默认null。
 - **所有权 / 错误 / 调用**：不解析位置或惰性显示名、不深拷贝data；atom记录/屏障不是引用计数，新帧仍需可达持有者。
 
-### `JSContext.dupActiveBacktraceFrameFromSnapshot` (`src/core/context.zig:1272`)
+### `JSContext.dupActiveBacktraceFrameFromSnapshot` (`src/core/context.zig:1271`)
 
 - **签名**：`fn dupActiveBacktraceFrameFromSnapshot(self: *JSContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame`。
 - **作用**：从活帧快照构造BacktraceFrame。
 - **实现**：记录两个atom，复制pc/行列/data/resolver/is_native，仅保留对象function_value；pc_source默认null。
 - **所有权 / 错误 / 调用**：不将backtrace_barrier存入结果，调用方在遍历时处理它；位置resolver数据仍借用，不自动成为持久根。
 
-### `JSContext.pushBacktraceFrameLazyName` (`src/core/context.zig:1289`)
+### `JSContext.pushBacktraceFrameLazyName` (`src/core/context.zig:1288`)
 
 - **签名**：`pub fn pushBacktraceFrameLazyName( self: *JSContext, function_name: atom.Atom, filename: atom.Atom, line_num: i32, col_num: i32, location_data: ?*const anyopaque, location_resolver: ?BacktraceLocationResolver, function_value: JSValue, ) !void`。
 - **作用**：保存带惰性函数名来源的持久帧。
 - **实现**：数组满时从16或两倍容量分配复制并释放旧块；非对象function_value改undefined，两个atom经noteHolderStore，写新帧后增长长度。
 - **所有权 / 错误 / 调用**：此处不解析名称；pc默认0、pc_source默认null、is_native默认false。失败发生在追加前，输入跨分配由调用方保护，成功扩容会使旧帧地址失效。
 
-### `JSContext.popBacktraceFrame` (`src/core/context.zig:1323`)
+### `JSContext.popBacktraceFrame` (`src/core/context.zig:1322`)
 
 - **签名**：`pub fn popBacktraceFrame(self: *JSContext) void`。
 - **作用**：移除最后一个持久回溯帧。
 - **实现**：空数组无操作，否则仅长度减1。
 - **所有权 / 错误 / 调用**：不释放容量或清旧槽，不更改活帧链；被移出的JS值/atom不再由活长度表示持有。
 
-### `JSContext.updateBacktracePc` (`src/core/context.zig:1329`)
+### `JSContext.updateBacktracePc` (`src/core/context.zig:1328`)
 
 - **签名**：`pub fn updateBacktracePc(self: *JSContext, pc: usize) void`。
 - **作用**：更新最后持久帧的固定PC。
 - **实现**：无帧返回，否则pc_source置null并写pc。
 - **所有权 / 错误 / 调用**：不改变位置resolver/data或保存行列，不操作活帧组。
 
-### `JSContext.borrowBacktracePc` (`src/core/context.zig:1336`)
+### `JSContext.borrowBacktracePc` (`src/core/context.zig:1335`)
 
 - **签名**：`pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void`。
 - **作用**：使最后持久帧借用活PC计数器。
 - **实现**：无帧返回，否则将pc_source写为参数指针。
 - **所有权 / 错误 / 调用**：不冻结当前数值，不清备用pc；之后currentPc读来源并减1，来源必须保持有效。
 
-### `JSContext.updateBacktraceLocation` (`src/core/context.zig:1341`)
+### `JSContext.updateBacktraceLocation` (`src/core/context.zig:1340`)
 
 - **签名**：`pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void`。
 - **作用**：更新最后持久帧固定PC与保存行列。
 - **实现**：无帧返回，否则清pc_source并写pc、line_num、col_num。
 - **所有权 / 错误 / 调用**：不清location_resolver/data；若仍有resolver，location()仍优先采用resolver结果，而非这两个保存字段。
 
-### `JSContext.takePendingException` (`src/core/context.zig:1350`)
+### `JSContext.takePendingException` (`src/core/context.zig:1349`)
 
 - **签名**：`pub fn takePendingException(self: *JSContext) JSValue`。
 - **作用**：优先取出最早拒绝原因，否则取runtime异常。
 - **实现**：有拒绝则takeUnhandledRejection，若runtime有异常则clearException，再返回拒绝；无拒绝才takeException。
 - **所有权 / 错误 / 调用**：即便runtime挂起的是不同异常，也会在拒绝分支清掉；不是两个来源独立保留。返回值不另建根。
 
-### `JSContext.globalObject` (`src/core/context.zig:1359`)
+### `JSContext.globalObject` (`src/core/context.zig:1358`)
 
 - **签名**：`pub fn globalObject(self: *JSContext) !*Object`。
 - **作用**：返回已有global或调用runtime物化钩子。
@@ -789,35 +789,35 @@ Realm 生命周期：`createConstructing*` → 填 intrinsics → `finishConstru
 
 `RealmContext = JSContext`。`RealmRef` 是 `extern struct { ptr: ?*RealmContext }`，大小等于可选指针。Runtime 列表 membership **不**表示在这里。
 
-### `RealmRef.takeOwned` (`src/core/context.zig:1382`)
+### `RealmRef.takeOwned` (`src/core/context.zig:1381`)
 
 - **签名**：`pub fn takeOwned(ctx: *RealmContext) RealmRef`。
 - **作用**：把宿主create-ref转换为普通realm指针边。
 - **实现**：ctx.consumeHostApiRelease后返回ptr=ctx。
 - **所有权 / 错误 / 调用**：撤销宿主根而不新建根；调用方必须把结果放入可追踪持有者，不能把裸结构当Persistent句柄。不能重复消费同一host引用。
 
-### `RealmRef.retain` (`src/core/context.zig:1390`)
+### `RealmRef.retain` (`src/core/context.zig:1389`)
 
 - **签名**：`pub fn retain(ctx: *RealmContext) RealmRef`。
 - **作用**：构造指向realm的普通引用边。
 - **实现**：返回ptr=ctx。
 - **所有权 / 错误 / 调用**：名称沿用retain但没有计数或根注册；只有可达持有者实际追踪此边才保活。无分配，不消费host create-ref。
 
-### `RealmRef.clone` (`src/core/context.zig:1394`)
+### `RealmRef.clone` (`src/core/context.zig:1393`)
 
 - **签名**：`pub fn clone(self: RealmRef) RealmRef`。
 - **作用**：按值复制realm引用边。
 - **实现**：直接返回self。
 - **所有权 / 错误 / 调用**：没有引用计数增量或独立根；复制结果需要自己的可达持有者。空引用仍为空。
 
-### `RealmRef.borrow` (`src/core/context.zig:1398`)
+### `RealmRef.borrow` (`src/core/context.zig:1397`)
 
 - **签名**：`pub fn borrow(self: RealmRef) ?*RealmContext`。
 - **作用**：读取可选realm指针。
 - **实现**：返回ptr。
 - **所有权 / 错误 / 调用**：不验证对象存活或线程，不延长寿命；null只表示此引用为空。
 
-### `RealmRef.deinit` (`src/core/context.zig:1402`)
+### `RealmRef.deinit` (`src/core/context.zig:1401`)
 
 - **签名**：`pub fn deinit(self: *RealmRef) void`。
 - **作用**：清空该realm引用边。

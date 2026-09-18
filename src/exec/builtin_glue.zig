@@ -97,6 +97,8 @@ pub fn bigIntAsN(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    // The caller pair is part of the shared builtin-record argument shape; the
+    // coercions below open their own native environment, so neither is read.
     _ = caller_function;
     _ = caller_frame;
     const bits_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -249,7 +251,7 @@ pub fn bufferNativeRecord(
         return @as(?core.JSValue, try arrayBufferAccessor(ctx, receiver, accessor_name));
     }
     if (buffer_id_lookup.sharedArrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try sharedArrayBufferAccessor(ctx, receiver, accessor_name));
+        return @as(?core.JSValue, try sharedArrayBufferAccessor(receiver, accessor_name));
     }
     if (buffer_id_lookup.dataViewAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try dataViewAccessor(ctx, receiver, accessor_name));
@@ -372,6 +374,15 @@ pub fn dataViewSetCall(
     return core.typed_array.dataViewSet(ctx.runtime, receiver, method_id, call_args[0..]);
 }
 
+/// The two `core.typed_array.dataViewSet` kind ids whose element type is a
+/// BigInt (`setBigInt64` / `setBigUint64`). Derived from the record-id table
+/// instead of spelled as literals so a reorder of `DataViewSetMethod` cannot
+/// silently shift them.
+const data_view_set_kind_big_int64: u32 =
+    buffer_id_lookup.dataViewSetKindFromRecordId(@intFromEnum(method_ids.buffer.DataViewSetMethod.big_int64)).?;
+const data_view_set_kind_big_uint64: u32 =
+    buffer_id_lookup.dataViewSetKindFromRecordId(@intFromEnum(method_ids.buffer.DataViewSetMethod.big_uint64)).?;
+
 pub fn dataViewSetCoerceValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -380,7 +391,8 @@ pub fn dataViewSetCoerceValue(
     value: core.JSValue,
 ) !core.JSValue {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    if (method_id == 9 or method_id == 10) return primitive;
+    // BigInt64/BigUint64 skip ToNumber: `dataViewSet` runs ToBigInt itself.
+    if (method_id == data_view_set_kind_big_int64 or method_id == data_view_set_kind_big_uint64) return primitive;
     if (primitive.isBigInt()) return error.TypeError;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     return number_value;
@@ -625,6 +637,8 @@ pub fn callCollectionAdderFromVm(
 // Realm slot and native-method helpers (moved from the VM call runtime).
 
 pub fn functionConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    // Borrowed own-property read; `rt` is kept to match the sibling
+    // `*FromGlobal` realm-slot helpers its callers use side by side.
     _ = rt;
     if (global.getOwnDataObjectBorrowed(core.atom.ids.Function)) |constructor| return constructor;
     return null;
@@ -701,7 +715,14 @@ pub noinline fn defineStampedNativeDataMethod(
 /// Bytes-taking form for the one caller whose method name comes out of a table
 /// rather than a predefined-atom constant (`object_ops` CallSite prototype).
 pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
+    // Same protocol as `standard_globals.temporaryStringAtom` (TGC S3 §4
+    // class B): a name outside `predefined_atoms` interns to a bare id that
+    // the tracer cannot see, and it has to survive the two allocating calls
+    // below before the property table takes it over. Pin it for the window.
+    // Both helpers are no-ops for const/tagged-int ids.
     const atom_id = try rt.internAtom(name);
+    rt.atoms.pinForHost(atom_id);
+    defer rt.atoms.unpinForHost(atom_id);
     const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);

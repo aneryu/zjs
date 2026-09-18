@@ -161,7 +161,7 @@
 
 ## `tools/architecture/check_gc_slots.js`
 
-裸堆 GC 引用 lint（tracing-gc-design.md §5.2）。`src/core/**` 与 `src/bytecode.zig` 里存 `JSValue`/`*Object`/`*Shape` 等的字段必须打 `// gc-slot: heap|immutable|weak`，或在**只缩不增**的 `gc-slots-allowlist.json`。`--dump` 打出当前未打标字段 JSON。
+裸堆 GC 引用 lint（tracing-gc-design.md §5.2）。`src/core/**` 与 `src/bytecode.zig` 里存 `JSValue`/`*Object`/`*Shape` 等的字段必须打 `// gc-slot: heap|immutable|weak`，或在**只缩不增**的 `gc-slots-allowlist.json`。`--dump` 打出当前未打标字段 JSON。扫描集原先还有一条「若存在 `src/bytecode/` 目录则递归扫」的分支，仓内只有 `src/bytecode.zig` 没有同名目录，是死分支，已删。
 
 ### `toPosix` / `normalizeRepoPath` / `fail` / `walk` (`check_gc_slots.js:31–55`)
 
@@ -257,7 +257,7 @@ OOM 必须作为可捕获错误传播（eecf6c8），不得变成 `unreachable`/
 ### `findingsFor` (`tools/architecture/check_oom_panics.js:122`)
 
 - **签名**：`function findingsFor(source)`。
-- **作用**：按行出 finding。规则 B：`error.OutOfMemory => unreachable/@panic` 或同行把 OOM 配 `unreachable`。规则 C：含分配标记的 `catch unreachable/@panic`。
+- **作用**：按行出 finding。规则 B：`error.OutOfMemory => unreachable/@panic`，或同行既出现 `OutOfMemory` 又出现 `unreachable`/`@panic(`。规则 C：含分配标记的 `catch unreachable/@panic`。第二条分支原先尾随一个 `&& !line.includes('@panic(')`，正好抵消掉它自己的 `@panic\(` 备选，等价于「只认 unreachable」；单行 `if (... OutOfMemory ...) @panic("...")` 会漏检，该条件已删。
 - **实现**：先切掉 `//`；`alloc_marker_re` 认 `memory.`/`allocator.`/`alloc(`/`create(`/`dupe(`/`append(`/`toOwnedSlice`/`realloc`/`OutOfMemory`/`out of memory`（正则带 `i`，大小写不敏感）。
 - **所有权 / 错误 / 调用**：主循环。0 匹配 = stale；>1 = nonUnique；多条 allowlist 抢同一 finding = overlapping；0 owner = violation。
 
@@ -506,7 +506,7 @@ Allowlist JSON：`borrowed-atoms-allowlist.json`。
 
 - **签名**：`def main()`。
 - **作用**：`Popen` 用户命令，采样至结束，按 start 排序打印；默认丢掉 `< --min`（1s）的短帮手。退出码与子进程相同。
-- **实现**：`--all` 保留全部行。注释里提到可把相同 label 的分片折成 range，当前实现仍逐行打印。
+- **实现**：`--all` 保留全部行。每个进程一行、按 start 排序；相同 label 的分片**故意**不折成 range——分片各自的 start/dur 分布正是这张甘特要回答的「是否真并行」（原注释说要折叠，与实现不符，已改写）。
 - **所有权 / 错误 / 调用**：`mise run gate-timeline -- <step>`。
 
 ---
@@ -563,21 +563,21 @@ Allowlist JSON：`borrowed-atoms-allowlist.json`。
 
 从 `docs/roadmap/work-items.yaml` 生成 `docs/roadmap.md` 里三块 `<!-- BEGIN GENERATED -->`。
 
-### `load` (`tools/docs/render_roadmap.py:26`)
+### `load` (`tools/docs/render_roadmap.py:29`)
 
 - **签名**：`def load()`。
 - **作用**：YAML 加载 registry。需要 PyYAML。
 - **实现**：`yaml.safe_load`。
 - **所有权 / 错误 / 调用**：`main`。
 
-### `group_of` (`tools/docs/render_roadmap.py:32`)
+### `group_of` (`tools/docs/render_roadmap.py:35`)
 
 - **签名**：`def group_of(item_id)`。
-- **作用**：按 id 前缀分到治理/gates/性能/GC/序列化/fun 面/运行时；前缀都不匹配则返回「其他」（`render_id_list` 只遍历 `GROUPS`，「其他」不会出现在 ID 列表里）。
-- **实现**：`GROUPS` 元组。
+- **作用**：按 id 前缀分到治理/gates/性能/GC/序列化/fun 面/运行时；前缀都不匹配则返回模块级常量 `OTHER_GROUP`（「其他」）。
+- **实现**：`GROUPS` 元组 + `OTHER_GROUP` 兜底。
 - **所有权 / 错误 / 调用**：`render_id_list`。
 
-### `fmt_activation` (`tools/docs/render_roadmap.py:39`)
+### `fmt_activation` (`tools/docs/render_roadmap.py:42`)
 
 - **签名**：`def fmt_activation(act)`。
 - **作用**：把 `{any|all: [{item, verdict?, …}]}` 打成 `A=go | B.done` 这类字符串。
@@ -588,17 +588,17 @@ Allowlist JSON：`borrowed-atoms-allowlist.json`。
 
 - **签名**：`def render_id_list(items)` 等，返回 markdown fence 字符串。
 - **作用**：三块生成正文。
-- **实现**：按组/依赖/state 顺序。
+- **实现**：按组/依赖/state 顺序。`render_id_list` 遍历 `GROUPS` 的组名**再加** `OTHER_GROUP`：原先只遍历 `GROUPS`，未登记前缀的 item 会被静默吞掉（`roadmap_lint` 只核对 roadmap.md 正文，查不到这个漏项）。
 - **所有权 / 错误 / 调用**：`main` 经 `replace_section`。
 
-### `replace_section` (`tools/docs/render_roadmap.py:97`)
+### `replace_section` (`tools/docs/render_roadmap.py:104`)
 
 - **签名**：`def replace_section(text, name, body)`。
 - **作用**：替换 `BEGIN/END GENERATED: name` 之间。缺标记 `SystemExit`。
 - **实现**：`re.S` 非贪婪。
 - **所有权 / 错误 / 调用**：`main` 三次。
 
-### `main` (`tools/docs/render_roadmap.py:106`)
+### `main` (`tools/docs/render_roadmap.py:113`)
 
 - **签名**：`def main()`。
 - **作用**：`--check`（默认）段落后退 1；`--write` 就地改。
@@ -642,19 +642,19 @@ F0d：冻结字节码流上的裸访问（opcode-design.md 10.5）。状态扫�
 
 规则：R1 `emitByte/appendByte(op.X)`；R2 `== op.X` / `op.X =>`；R3 `readInt(..., code[`。
 
-### `scan` (`tools/lint/raw_access_gate.py:47`)
+### `scan` (`tools/lint/raw_access_gate.py:56`)
 
 - **签名**：`def scan()`。
 - **作用**：去注释后按规则计数 `{file: {rule: n}}`。
 - **实现**：`re.sub(r"//[^\n]*", "", text)`。
 - **所有权 / 错误 / 调用**：`main`。
 
-### `main` (`tools/lint/raw_access_gate.py:59`)
+### `main` (`tools/lint/raw_access_gate.py:68`)
 
 - **签名**：`def main()`。
 - **作用**：与 `raw_access_allowlist.json` 比：增加失败（退出 1）；减少（或条目已归零）打印 `note:` 以便同 commit 收紧。`--update-baseline` 重写表：既有条目的 `reason`/`removal` 原样保留，新条目填 `TODO`，计数归零的条目删掉。
 - **实现**：键 `file:rule`。
-- **所有权 / 错误 / 调用**：没有挂进 `build.zig`/`mise.toml`/CI 工作流（docstring 自称 CI gate），实际靠人在仓根手动跑。docstring 还写「用法错误退出 2」，但实现只返回 0（干净）/ 1（增加）。
+- **所有权 / 错误 / 调用**：挂在 `mise.toml` 的 `[tasks.lint-raw-access]`（`mise run lint-raw-access`）这个**手动**任务上——既**不**进 `build.zig` 的任何 gate 步骤，也不属于任何默认 lint 目标：它是全树状态扫描 + 手工基线，基线一旦漂移就会挡住所有合并，而这个工具的价值恰恰是报告漂移。今天它就是红的（`compiler/resolve_labels.zig` 的 R1/R2 高于允许数、`exec/vm_property.zig` 低于允许数），重新定基线是要评审的决定，不是机械动作——docstring 已如实写明。docstring 还写「用法错误退出 2」，但实现只返回 0（干净）/ 1（增加）。
 
 ---
 
@@ -666,8 +666,8 @@ F0d：冻结字节码流上的裸访问（opcode-design.md 10.5）。状态扫�
 | --- | --- |
 | `gate_smoke.sh` + `gate_smoke_check.py` | merge-gate 的 fixed-work smoke（普通 run + arena-audit stats run） |
 | `bench_v8/` | vendored Octane/V8 suite；`run_local.py` 诊断；`check_completes.py` 完成性门；`run_fixed_pmu.py` / `run_benchv8_compare.py` 测量机对比 |
-| `gc_stats_snapshot.py` / `gc_shape_snapshot.py` | Stage 0 GC 快照与 shape 钉 |
-| `stage0_screen.py` / `measure_fields.py` / `measurement_pinning.py` | 场锁、CPU pin、Stage 0 快筛 |
+| `gc_stats_snapshot.py` / `gc_shape_snapshot.py` | Stage 0 GC 快照与 shape 钉。`SCHEMA_VERSION` 现为 **10**：`--gc-stats` 停印 deferred-block-run 与 parked-drain 三行后，`blockHeap.deferredBlockRuns` / `doomed.parkedEntriesDrained` / `doomed.parkedDrainSlices` 登记进 `SCHEMA_REMOVED_LEAVES[10]`，冻结基线里的旧值不再被评分，也不会被当成「候选丢了一行」报错 |
+| `stage0_screen.py` / `measure_fields.py` / `measurement_pinning.py` | 场锁、CPU pin、Stage 0 快筛。`METRICS` 里的 `blockHeap.deferredBlockRuns`（deterministic 硬线）随该行退役一并删除 |
 | `classify_build_state.py` / `compare_symbol_disassembly.py` | 构建状态与符号反汇编 diff |
 | `run_runtime_profile.js` | `perf-*-profile` 的 runner |
 | `same_runtime/` | compile-once/execute-many；zjs 与 pinned qjs harness |

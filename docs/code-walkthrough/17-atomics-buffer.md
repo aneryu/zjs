@@ -392,7 +392,7 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 
 - **签名**：`pub fn atomicsRunAsyncWaiterCompletion( ctx: *core.JSContext, payload: *const jobs_mod.AtomicsWaiterPayload, ) core.errors.RuntimeError!void`。
 - **作用**：owner 线程跑一条 waitAsync 完成：在发布 Promise 之前的失败会把 FIFO 槽留着，成功才用 follow-up Promise job 吃掉预约。
-- **实现**：断言 realm/owner。已 settled 则 release 槽返回。按 completion 造 "ok"/"timed-out" 字符串，准备 Promise job。若已有 reaction callback 则不预写 result（留给 settlePendingPromiseReaction），否则写 result 且非 rejected。最后 `enqueueUnlinkedEntrySlot`。
+- **实现**：断言 realm/owner。已 settled 则 release 槽返回。按 completion 造 "ok"/"timed-out" 字符串，准备 Promise job。若已有 reaction callback 则不预写 result（留给 settlePendingPromiseReaction，字符串改从 reaction arg 槽传进去；函数里那条说要 free 它的 rc 时代注释已改实），否则写 result 且非 rejected。最后 `enqueueUnlinkedEntrySlot`。
 - **所有权 / 错误 / 调用**：调用方：`drainOnePendingJob`。字符串分配失败在发布前，槽不丢。
 
 ### `atomicsWaitAsync` (`src/exec/atomics_ops.zig:1169`)
@@ -441,14 +441,6 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 ## `src/exec/atomics_wait.zig` — 方法枚举与 isLockFree
 
 `StaticMethod` 是 Atomics 命名空间的 id 枚举（add=1 … xor=14）。`atomics_ops.atomicsCallForNativeRecord` 按它分支。`isLockFree` 对 1/2/4/8 字节返回 true。
-
-
-### `isLockFree` (`src/exec/atomics_wait.zig:28`)
-
-- **签名**：`pub fn isLockFree(size: usize) bool`。
-- **作用**：谓词：该字节宽度是否算 lock-free（1/2/4/8）。
-- **实现**：`size == 1 or size == 2 or size == 4 or size == 8`。
-- **所有权 / 错误 / 调用**：无：对字节宽度的纯谓词，不分配、无 error set。**树内无调用方**——`Atomics.isLockFree` 的实现 `atomics_ops.atomicsIsLockFree`（`src/exec/atomics_ops.zig:179`）先做 ToInt32 再就地写了同一个 `1/2/4/8` 判断，没有走这个 helper；本函数只剩 pub API 形态。
 
 
 ## `src/exec/buffer_ops.zig` — ArrayBuffer / DataView / TypedArray 记录
@@ -526,28 +518,6 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 - **实现**：`nativeCall` 恢复 `NativeCall`（失败 → TypeError），`callableRealm` 取 realm，再用 `switch (host_call.magic)` 把六个 id 翻回常量名字符串（未知 id → TypeError），最后带 realm、`output`、this、名字、args 和调用方 bytecode/frame 调 `array_ops.uint8ArrayCodecCall`——传 writer 与 caller frame 是因为 `check_options_object`（quickjs.c:59376）及 `alphabet` / `lastChunkHandling` / `omitPadding` 的读取会跑用户 getter。
 - **所有权 / 错误 / 调用**：this/args 借用，返回新建的 Uint8Array/字符串/结果对象（GC）。与 `bufferCall` 的差别正是它需要 realm 与 writer/caller-frame：`check_options_object` 与 `alphabet`/`lastChunkHandling`/`omitPadding` 的读取会跑用户 getter，因而会重入 JS，异常可能已挂 `ctx`。magic 不在六个 codec 之内、或 `array_ops.uint8ArrayCodecCall` 返回 `null` 时是裸 `error.TypeError`。没有直接调用方：经 `codecEntry(...)` 的 `genericMagicFunction(&uint8ArrayCodecCall)`（`src/exec/buffer_ops.zig:234`）分发。
 
-### `ArrayBuffer.byteLength` (`src/exec/buffer_ops.zig:291`)
-
-- **签名**：`pub fn byteLength(self: ArrayBuffer) usize`。
-- **作用**：legacy 窄 `ArrayBuffer` 结构的字节长度。
-- **实现**：`detached` 时报 0，否则 `bytes.len`。
-- **所有权 / 错误 / 调用**：无：读 legacy 窄结构体自己的字段（detached 时报 0），不分配、无 error set；这个 `ArrayBuffer` 结构体不持有 JS 堆对象，真正的存储在 `core.Object` 的 array-buffer 槽上。**树内无调用方**：整个 `ArrayBuffer` 结构体是保留的 pub 类型。
-
-### `ArrayBuffer.detach` (`src/exec/buffer_ops.zig:295`)
-
-- **签名**：`pub fn detach(self: *ArrayBuffer) void`。
-- **作用**：legacy 窄 `ArrayBuffer` 结构的 detach 标记。
-- **实现**：只置 `detached = true`，不动 `bytes`。
-- **所有权 / 错误 / 调用**：无：只把 legacy 结构体的 `detached` 置真，**不**释放 `bytes`（这个类型不拥有存储）、不通知 GC、不作废 typed array 视图——与引擎真正的 detach 路径无关。不分配、无 error set。**树内无调用方**。
-
-### `arrayBufferConstruct` (`src/exec/buffer_ops.zig:302`)
-
-- **签名**：`pub fn arrayBufferConstruct(rt: *core.JSRuntime, length_value: core.JSValue) !core.JSValue`。
-- **作用**：过渡期 `new_array_buffer` 字节码用的窄 ArrayBuffer 构造器。
-- **实现**：直接转调 `core.typed_array.arrayBufferConstruct(rt, length_value)`。
-- **所有权 / 错误 / 调用**：薄转发，自身不分配：`typed_array_core.arrayBufferConstruct` 新建的 ArrayBuffer 对象归 GC。错误（长度非法的裸 `error.RangeError`、OOM）全由被转发方产生。**树内无调用方**：为过渡期的 `new_array_buffer` 字节码保留的 pub API，现行构造路径走 `arrayBufferConstructArgs`。
-
-
 ## `src/exec/typed_array_construct.zig` — 读 maxByteLength 的构造参数
 
 `Get(options, "maxByteLength")` 可观察、可进用户代码，所以放在 exec 而不是 core。`bufferConstructArgs` 把 ArrayBuffer/SharedArrayBuffer 两条 98% 相同的路径收成一处。
@@ -576,6 +546,6 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 
 ## 覆盖核对
 
-- 清单函数数: 77（`src/exec/atomics_ops.zig` 60 + `src/exec/atomics_wait.zig` 1 + `src/exec/buffer_ops.zig` 13 + `src/exec/typed_array_construct.zig` 3）
-- 本文标题覆盖: 77
+- 清单函数数: 73（`src/exec/atomics_ops.zig` 60 + `src/exec/buffer_ops.zig` 10 + `src/exec/typed_array_construct.zig` 3）
+- 本文标题覆盖: 73
 - 未覆盖: 无

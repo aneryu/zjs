@@ -464,315 +464,315 @@ QuickJS `resolve_labels`（quickjs.c:34796）的端口：单次前向走 + 重�
 - **实现**：活 bind（ref>0）整组留下并返回；否则整组 dead_skipped。jump/probe −1 ref。bind_cursor 不得落后于 start。
 - **所有权 / 错误 / 调用**：goto 发出后、return 折叠后。
 
-### `shortSlotOp` (`src/compiler/resolve_labels.zig:1748`)
+### `shortSlotOp` (`src/compiler/resolve_labels.zig:1753`)
 
 - **签名**：`fn shortSlotOp(op_id: u8, idx: u16) ?u8`。
 - **作用**：手写短槽梯子（get_loc0–3、get_loc8…）。现为 decode `selectSlotShortForm` 的 baseline，comptime 逐 idx 互证。
 - **实现**：idx<4 用 base+idx；idx<256 仅 loc 族 *8。
-- **所有权 / 错误 / 调用**：写者已改用 derived selector；本函数保住断言。
+- **所有权 / 错误 / 调用**：写者已改用 derived selector，本函数**没有运行期调用方**，只在上面那个 `comptime` 块里逐 idx 与 `selectSlotShortForm` 互证；函数头注释已写明这一点（要删就两边一起删）。
 
-### `putShortCodeSize` (`src/compiler/resolve_labels.zig:1776`)
+### `putShortCodeSize` (`src/compiler/resolve_labels.zig:1781`)
 
 - **签名**：`fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32`。
 - **作用**：容量与发射用同一选择器，大小来自 form_row，没有第二架梯子。
 - **实现**：short 且有短形式则短 size，否则宽 size。
 - **所有权 / 错误 / 调用**：prologue 精确预留。
 
-### `specialObjectSize` (`src/compiler/resolve_labels.zig:1788`)
+### `specialObjectSize` (`src/compiler/resolve_labels.zig:1793`)
 
 - **签名**：`fn specialObjectSize(comptime layout: LayoutMode, slot: i32) Error!u32`。
 - **作用**：`special_object` + put_loc 短/宽 的字节数。
 - **实现**：2 + putShortCodeSize(put_loc, slot)。
 - **所有权 / 错误 / 调用**：`functionPrologueSize`。
 
-### `functionPrologueSize` (`src/compiler/resolve_labels.zig:1800`)
+### `functionPrologueSize` (`src/compiler/resolve_labels.zig:1805`)
 
 - **签名**：`fn functionPrologueSize(self: *const Resolver, comptime layout: LayoutMode) Error!u32`。
 - **作用**：与 `emitFunctionPrologue` 同一布局决策的精确字节数。
 - **实现**：home_object / this_active_func / new_target / this（派生 ctor 3 字节 set_loc_uninitialized）/ arguments / func_var / var_object / arg_var_object。
 - **所有权 / 错误 / 调用**：无 fd 返回 0。参数捕获故意不在此（zjs finalization）。
 
-### `putShortCode` (`src/compiler/resolve_labels.zig:1841`)
+### `putShortCode` (`src/compiler/resolve_labels.zig:1846`)
 
 - **签名**：`fn putShortCode( self: *Resolver, comptime layout: LayoutMode, op_id: u8, idx: u16, ) Error!void`。
 - **作用**：qjs:34737 + zjs call0..3 以外的槽缩短。call/tail_call 禁止走这里（payload 是 cache id 不是槽）。
 - **实现**：短形式：maybeFusePrev、append opcode、size==2 再 append idx 字节、noteFusionA。否则 opcode+u16。
 - **所有权 / 错误 / 调用**：prologue 与 copyDefault 槽族。
 
-### `nextCallSiteIndex` (`src/compiler/resolve_labels.zig:1879`)
+### `nextCallSiteIndex` (`src/compiler/resolve_labels.zig:1884`)
 
 - **签名**：`fn nextCallSiteIndex(self: *Resolver) u8`。
 - **作用**：按发射序分配 call cache_idx；满 255 后用 no_cache。
 - **实现**：`call_sites_emitted++`。
 - **所有权 / 错误 / 调用**：FunctionBytecode 得到 `min(sites,255)` 槽。
 
-### `callSiteCount` (`src/compiler/resolve_labels.zig:1889`)
+### `callSiteCount` (`src/compiler/resolve_labels.zig:1894`)
 
 - **签名**：`fn callSiteCount(self: *const Resolver) u16`。
 - **作用**：commit 时写入 `function.call_site_count`。
 - **实现**：min(emitted, 255)。
 - **所有权 / 错误 / 调用**：`*const` 只读计数，不分配、无 error set。唯一调用方是 commit（`src/compiler/resolve_labels.zig:3679`）写 `function.call_site_count`——这个数决定 FunctionBytecode 分配多少 W1 call-site 缓存槽，所以饱和到 255 意味着多出来的站点共用 `no_cache_idx` 而不是越界。注意 `src/tests/parser.zig:3508` 的 `child.callSiteCount()` 是 FunctionBytecode 上的同名读数（`src/bytecode.zig:4331`），不是本函数。
 
-### `nextPropSiteIndex` (`src/compiler/resolve_labels.zig:1896`)
+### `nextPropSiteIndex` (`src/compiler/resolve_labels.zig:1901`)
 
 - **签名**：`fn nextPropSiteIndex(self: *Resolver) u8`。
 - **作用**：W1 属性站点 cache_idx，同样 0..254 / 255=no_cache。
 - **实现**：`prop_sites_emitted++`。
 - **所有权 / 错误 / 调用**：get_field/get_field2/put_field 及拥有 atom 的融合形式。融合只改已走过本臂的 opcode 字节，站点不双计。
 
-### `propSiteCount` (`src/compiler/resolve_labels.zig:1906`)
+### `propSiteCount` (`src/compiler/resolve_labels.zig:1911`)
 
 - **签名**：`fn propSiteCount(self: *const Resolver) u16`。
 - **作用**：commit 写 `function.prop_site_count`。
 - **实现**：min(emitted, 255)。
 - **所有权 / 错误 / 调用**：同上：`*const` 只读、不分配、无 error set；唯一调用方 commit（`src/compiler/resolve_labels.zig:3680`）写 `function.prop_site_count`，决定 W1 属性缓存槽数，饱和值 255 即 `PropSiteCache.no_cache_idx`。
 
-### `putCallCode` (`src/compiler/resolve_labels.zig:1914`)
+### `putCallCode` (`src/compiler/resolve_labels.zig:1919`)
 
 - **签名**：`fn putCallCode( self: *Resolver, comptime layout: LayoutMode, op_id: u8, argc: u16, ) Error!void`。
 - **作用**：plain-call 族最终写者。短 `call0..3` 只带 cache 字节；宽形式 argc:u16 + idx:u8。
 - **实现**：assert call 或 tail_call。`selectSlotShortForm` 用 argc 选短形式。
 - **所有权 / 错误 / 调用**：TCO 折叠与 copyDefault `.call`。
 
-### `pushShortInt` (`src/compiler/resolve_labels.zig:1935`)
+### `pushShortInt` (`src/compiler/resolve_labels.zig:1940`)
 
 - **签名**：`fn pushShortInt( self: *Resolver, comptime layout: LayoutMode, value: i32, ) Error!void`。
 - **作用**：qjs:34715。plain 一律 push_i32。short 走 `selectPushIntForm`（含 zjs `push_minus1`），否则 i8/i16/i32。
 - **实现**：push_0/2 记 fusion A；push_i8 可与 add 融合。
 - **所有权 / 错误 / 调用**：walk 的 push_i32 臂。
 
-### `checkedSlotIndex` (`src/compiler/resolve_labels.zig:1973`)
+### `checkedSlotIndex` (`src/compiler/resolve_labels.zig:1978`)
 
 - **签名**：`fn checkedSlotIndex(value: i32) Error!u16`。
 - **作用**：fd 里的 i32 槽下标收成 u16。
 - **实现**：<0 或 >maxInt(u16) 失败。
 - **所有权 / 错误 / 调用**：prologue。
 
-### `emitSpecialObject` (`src/compiler/resolve_labels.zig:1979`)
+### `emitSpecialObject` (`src/compiler/resolve_labels.zig:1984`)
 
 - **签名**：`fn emitSpecialObject( self: *Resolver, comptime layout: LayoutMode, subtype: u8, slot: i32, ) Error!void`。
 - **作用**：`special_object` + put_loc 到给定槽。
 - **实现**：subtype 字节 + putShortCode。
 - **所有权 / 错误 / 调用**：home_object / current_function / new_target / var_object。
 
-### `emitFunctionPrologue` (`src/compiler/resolve_labels.zig:1992`)
+### `emitFunctionPrologue` (`src/compiler/resolve_labels.zig:1997`)
 
 - **签名**：`fn emitFunctionPrologue(self: *Resolver, comptime layout: LayoutMode) Error!void`。
 - **作用**：qjs:34833-34896，对齐 legacy emitFunctionPrologue。无 fd 则返回。
 - **实现**：派生 ctor：`set_loc_uninitialized`+u16（无短形式）。否则 `push_this` + put_loc（可融 push_this_put_loc0）。arguments：strict 或非简单形参用 unmapped subtype。
 - **所有权 / 错误 / 调用**：walk 第一条。参数捕获不在此。
 
-### `shortJumpOp` (`src/compiler/resolve_labels.zig:2059`)
+### `shortJumpOp` (`src/compiler/resolve_labels.zig:2064`)
 
 - **签名**：`fn shortJumpOp(op_id: u8) Error!u8`。
 - **作用**：宽条件/goto → 窄 8 位形式。
 - **实现**：`selectJumpForm(..., .narrow)`。comptime 断言 if_* 没有 16 位档。
 - **所有权 / 错误 / 调用**：`emitHasLabel`、`relaxJumps`。
 
-### `emitHasLabel` (`src/compiler/resolve_labels.zig:2065`)
+### `emitHasLabel` (`src/compiler/resolve_labels.zig:2070`)
 
 - **签名**：`fn emitHasLabel( self: *Resolver, comptime layout: LayoutMode, input_position: u32, initial_next: u32, op_id: u8, label_index: u32, ) Error!u32`。
 - **作用**：发出一条带标签的跳转。goto 先 skipDeadCode。short 下按估计/已知 diff 选 goto8/if_*8/goto16 或宽 5 字节。
 - **实现**：未绑定目标：占位 0 + addReloc。已绑定：立即写相对。前向估计 `bound_offset - input_position - 1`：<128 选 if_false8/if_true8/goto8，<32768 且是 goto 选 goto16。if_false8 可与前一条 lt/eq 融合。返回 position_next。
 - **所有权 / 错误 / 调用**：未 bound 且 addr unbound → 损坏。
 
-### `putFamily` (`src/compiler/resolve_labels.zig:2171`)
+### `putFamily` (`src/compiler/resolve_labels.zig:2176`)
 
 - **签名**：`fn putFamily(form: Form) ?SlotFamily`。
 - **作用**：put_loc/arg/var_ref/put_loc_check 对应的 get/put/set 三元组。
 - **实现**：switch。
 - **所有权 / 错误 / 调用**：dup-put-get / put-get 折叠。
 
-### `isShortSlotFamily` (`src/compiler/resolve_labels.zig:2189`)
+### `isShortSlotFamily` (`src/compiler/resolve_labels.zig:2194`)
 
 - **签名**：`fn isShortSlotFamily(form: Form) bool`。
 - **作用**：copyDefault 是否走 putShortCode。
 - **实现**：loc/arg/var_ref 的 get/put/set。
 - **所有权 / 错误 / 调用**：check 族不在此（走 copy 或 putFamily 折叠）。
 
-### `copyDefault` (`src/compiler/resolve_labels.zig:2196`)
+### `copyDefault` (`src/compiler/resolve_labels.zig:2201`)
 
 - **签名**：`fn copyDefault( self: *Resolver, comptime layout: LayoutMode, position: u32, instruction: Instruction, ) Error!void`。
 - **作用**：默认发射：call→putCallCode，短槽→putShortCode，否则 memcpy 并填 cache_idx，short 下 noteFusionA / maybeFusePrev。
 - **实现**：call_method 族 output[pc+3]；atom_cache_u8 族 output[pc+5]。
 - **所有权 / 错误 / 调用**：keep atom。
 
-### `emitRawInstruction` (`src/compiler/resolve_labels.zig:2255`)
+### `emitRawInstruction` (`src/compiler/resolve_labels.zig:2260`)
 
 - **签名**：`fn emitRawInstruction( self: *Resolver, position: u32, instruction: Instruction, ) Error!void`。
 - **作用**：不缩短、不融合，原样拷贝。
 - **实现**：attachSource + appendRaw + consume atom。
 - **所有权 / 错误 / 调用**：必须保持宽形式的指令。
 
-### `emitFinalCarrier` (`src/compiler/resolve_labels.zig:2273`)
+### `emitFinalCarrier` (`src/compiler/resolve_labels.zig:2278`)
 
 - **签名**：`fn emitFinalCarrier( self: *Resolver, position: u32, instruction: Instruction, comptime form: Form, ) Error!void`。
 - **作用**：C0 合同 3：降低流携带 form 的直接 id 直到这里；唯一选择最终编码的点，来自 `finalEncodingOf`（carrier+tag）。
 - **实现**：两字节。无容量侧孪生可漂移。
 - **所有权 / 错误 / 调用**：walkLateArm 的 lowered-direct 居民。
 
-### `handleGoto` (`src/compiler/resolve_labels.zig:2286`)
+### `handleGoto` (`src/compiler/resolve_labels.zig:2291`)
 
 - **签名**：`fn handleGoto( self: *Resolver, comptime layout: LayoutMode, input_position: u32, initial_next: u32, initial_label: u32, ) Error!u32`。
 - **作用**：goto：穿线到最终标签；下一指令已是该标签则变成 fallthrough；目标是 return/throw 则直接发终结；死 switch 蹦床则 skip 到 live 边界。
 - **实现**：`findJumpTarget`。否则 `emitHasLabel(goto)`。
 - **所有权 / 错误 / 调用**：常数测试真分支也复用。
 
-### `handleConstantTest` (`src/compiler/resolve_labels.zig:2323`)
+### `handleConstantTest` (`src/compiler/resolve_labels.zig:2328`)
 
 - **签名**：`fn handleConstantTest( self: *Resolver, comptime layout: LayoutMode, input_position: u32, value: bool, match: SeqMatch, ) Error!u32`。
 - **作用**：`push_true/false` + if_* → 条件成立当 goto，否则删边 −1 ref。
 - **实现**：`value == (branch == if_true)` 决定。
 - **所有权 / 错误 / 调用**：吸收 match 区间 source。
 
-### `emitDynEnvProbe` (`src/compiler/resolve_labels.zig:2345`)
+### `emitDynEnvProbe` (`src/compiler/resolve_labels.zig:2350`)
 
 - **签名**：`fn emitDynEnvProbe( self: *Resolver, position: u32, position_next: u32, op_id: u8, ) Error!void`。
 - **作用**：qjs:35099 atom_label 族（现统一 dyn_env_probe）：穿线 done 标签，写 atom + 相对/reloc + kind 字节。
 - **实现**：`findJumpTarget` 探针标签。操作数在 atom 之后。
 - **所有权 / 错误 / 调用**：keep 该指令 atom。
 
-### `walk` (`src/compiler/resolve_labels.zig:2387`)
+### `walk` (`src/compiler/resolve_labels.zig:2392`)
 
 - **签名**：`fn walk(self: *Resolver, comptime layout: LayoutMode) Error!void`。
 - **作用**：S4 主前向走：prologue，然后逐 S3 指令。
 - **实现**：每步 processBindsAt、absorbSources(pos+1)、decode。call/call_method 匹配 return→tail_*（严格 plain call 才 PTC；方法尾仍 push）。其余早期臂：goto、gosub/catch、if_true/if_false（穿线、反转、两臂共落一点折成 drop）、dyn_env_probe、drop+return_undef、null/undefined/push_true/push_false/push_i32/push_bigint_i32 的常数与比较折叠、push_const/fclosure 短形式、get_field→get_length、push_atom_value、to_propkey/set_name_computed 的 final carrier。其它进 `walkLateArm`。结束 processBindsAt(code_len)、吸收尾 source、游标耗尽、所有 first_reloc 必须空（前向 reloc 已在绑定点写完）。
 - **所有权 / 错误 / 调用**：`runImpl`。tail_call 留下随后 return 作共享 stub（H3）。
 
-### `walkLateArm` (`src/compiler/resolve_labels.zig:2867`)
+### `walkLateArm` (`src/compiler/resolve_labels.zig:2872`)
 
 - **签名**：`fn walkLateArm( self: *Resolver, comptime layout: LayoutMode, position: u32, instruction: Instruction, position_next: *u32, ) Error!void`。
 - **作用**：冷/长模式：insert2+put_field+drop 折成 put_field、dup+put_* 折成 set_*、get_loc 的 inc_loc/dec_loc/add_loc 族、get_arg/get_var_ref 槽缩短、put_* 家族的 put/set 折叠、post_inc/post_dec 的 store 折叠、typeof 对 `undefined`/`function` 的 ext0 测试，其余落 copyDefault。
 - **实现**：源码按 qjs 行号分臂（35352 起至 35587）。typeof 折叠用 `attachInputSourceRangeAt` 保持 legacy 源顺序。
 - **所有权 / 错误 / 调用**：`matchSeq` 内的 `hasBindInRange` 屏障挡住跨屏障 bind 的折叠；被吃掉区间的 atom 由 `consumeAtomsRange` 消费。
 
-### `relaxJumps` (`src/compiler/resolve_labels.zig:3234`)
+### `relaxJumps` (`src/compiler/resolve_labels.zig:3239`)
 
 - **签名**：`fn relaxJumps(self: *Resolver) Error!void`。
 - **作用**：qjs:35599-35673 有界跳转再压缩。故意保留 QuickJS 的二次尾巴移动。
 - **实现**：对每条 JumpSlot，若 diff 现进 i8/i16，改 opcode、memmove 尾巴、`output_len -= delta`，平移 addr[]、后续 jump.pos、source.pc（谓词都是 `> jump.pos`）。if_false8 还可把前一条 lt/eq 收成 cmp/eq_if_false8。有压缩则重写所有相对操作数。audit 计窗口内 source/label。
 - **所有权 / 错误 / 调用**：仅 `.short`。两数组独立平移，唯一分歧来源是事件落在被删字节严格内部。
 
-### `AnchorCoincidence.deinit` (`src/compiler/resolve_labels.zig:3363`)
+### `AnchorCoincidence.deinit` (`src/compiler/resolve_labels.zig:3368`)
 
 - **签名**：`fn deinit(self: *AnchorCoincidence, memory: *core.memory.MemoryAccount) void`。
 - **作用**：释放 relax 稳定性 bitset。
 - **实现**：len≠0 才 free。
 - **所有权 / 错误 / 调用**：`runImpl` defer。
 
-### `anchorAtAddress` (`src/compiler/resolve_labels.zig:3372`)
+### `anchorAtAddress` (`src/compiler/resolve_labels.zig:3377`)
 
 - **签名**：`fn anchorAtAddress(self: *const Resolver, pc: u32, group_cursor: *usize) bool`。
 - **作用**：pc 是否等于某活 alias 组的最终地址。`group_cursor` 随递增 pc 单调走，一次归并。
 - **实现**：组地址 unbound 或 < pc 则前进组。
 - **所有权 / 错误 / 调用**：coincidence 快照。
 
-### `captureAnchorCoincidence` (`src/compiler/resolve_labels.zig:3391`)
+### `captureAnchorCoincidence` (`src/compiler/resolve_labels.zig:3396`)
 
 - **签名**：`fn captureAnchorCoincidence(self: *const Resolver) Error!AnchorCoincidence`。
 - **作用**：relax **之前**哪些 source.pc 正好落在身份地址。
 - **实现**：每事件一 bit。非 audit 空结构。
 - **所有权 / 错误 / 调用**：OOM 失败。
 
-### `reportAnchorCoincidence` (`src/compiler/resolve_labels.zig:3407`)
+### `reportAnchorCoincidence` (`src/compiler/resolve_labels.zig:3412`)
 
 - **签名**：`fn reportAnchorCoincidence(self: *const Resolver, before: *const AnchorCoincidence) void`。
 - **作用**：relax 后再算一遍，记 lost/gained。
 - **实现**：`recordRelaxCoincidence`。
 - **所有权 / 错误 / 调用**：位置归属是否挺过压缩，测量而非假设。
 
-### `auditFinalBoundaryIdentity` (`src/compiler/resolve_labels.zig:3427`)
+### `auditFinalBoundaryIdentity` (`src/compiler/resolve_labels.zig:3432`)
 
 - **签名**：`fn auditFinalBoundaryIdentity(self: *const Resolver) Error!void`。
 - **作用**：产物→最终的证明：canonical 先比，地址只佐证。alias 不得分裂地址或活性；退休组不得仍被引用；JumpSlot 的 canonical 必须等于边界子系统；编码目标必须等于 addr[label]。顺带最终 source census 与 boundary hops。
 - **实现**：活组最终地址单调。`cross_subsystem_identity_split` 用 JumpSlot 记下的身份 vs 现槽 offset 的 canonical。
 - **所有权 / 错误 / 调用**：`cfg.audit_oracles`。
 
-### `isLabelAddress` (`src/compiler/resolve_labels.zig:3619`)
+### `isLabelAddress` (`src/compiler/resolve_labels.zig:3624`)
 
 - **签名**：`fn isLabelAddress(self: *const Resolver, pc: u32) bool`。
 - **作用**：该输出 PC 是否某标签最终地址（挡住 relax 时跨标签融合 lt→cmp_if_false8）。
 - **实现**：线性扫 addr[]。
 - **所有权 / 错误 / 调用**：`relaxJumps` 内。
 
-### `validateFinalSources` (`src/compiler/resolve_labels.zig:3626`)
+### `validateFinalSources` (`src/compiler/resolve_labels.zig:3631`)
 
 - **签名**：`fn validateFinalSources(self: *const Resolver) Error!void`。
 - **作用**：输出 source.pc < output_len 且非递减。
 - **实现**：packed 路径保留这步（源在融合码校验之前被消费）。
 - **所有权 / 错误 / 调用**：`validateFinalOutput` 或 packed 分支。
 
-### `validateFinalOutput` (`src/compiler/resolve_labels.zig:3638`)
+### `validateFinalOutput` (`src/compiler/resolve_labels.zig:3643`)
 
 - **签名**：`fn validateFinalOutput(self: *const Resolver) Error!void`。
 - **作用**：独立路径：最终码可按 form 走通，atom 与输出 ledger 锁步，再校验 source。
 - **实现**：`decodeInstruction` 看输出（最终域）。
 - **所有权 / 错误 / 调用**：非 packed `run`。
 
-### `installSourceLocsNoFail` (`src/compiler/resolve_labels.zig:3659`)
+### `installSourceLocsNoFail` (`src/compiler/resolve_labels.zig:3664`)
 
 - **签名**：`fn installSourceLocsNoFail( self: *Resolver, function: *bytecode.Bytecode, owned: []SourceLocSlot, owned_capacity: usize, ) void`。
 - **作用**：无分配替换 `function.source_loc_slots`，释放旧 backing。
 - **实现**：断言 owned.len≤capacity。
 - **所有权 / 错误 / 调用**：commit 最后一步，不可能失败。
 
-### `commit` (`src/compiler/resolve_labels.zig:3678`)
+### `commit` (`src/compiler/resolve_labels.zig:3683`)
 
 - **签名**：`fn commit(self: *Resolver) void`。
 - **作用**：唯一所有权转移点。全部无分配、无失败，故无半安装可逃逸。
 - **实现**：写 call/prop site 计数；`installCodeWithCapacity` / `installAtomOperandsWithCapacity` / `installSourceLocsNoFail`。resolver 字段掏空以免 defer deinit 双释。
 - **所有权 / 错误 / 调用**：`output_atoms_owned` 清回 false：atom 现归 Bytecode。
 
-### `runImpl` (`src/compiler/resolve_labels.zig:3709`)
+### `runImpl` (`src/compiler/resolve_labels.zig:3714`)
 
 - **签名**：`fn runImpl( comptime packed_finalize_validates_code: bool, comptime layout: LayoutMode, function: *bytecode.Bytecode, fd: ?*const bytecode.function_def.FunctionDef, product: *resolve_variables.ResolvedProduct, ) Error!void`。
 - **作用**：S4 编排。所有失败工作在 commit 之前完成。
 - **实现**：memory/atoms 一致。metadata；（非 packed）code 校验。initScratch→walk→releaseConsumedProduct→（short）coincidence+relaxJumps→audit→validate→commit。
 - **所有权 / 错误 / 调用**：fd 可选（测试可无完整 FunctionDef）。defer resolver.deinit。
 
-### `run` (`src/compiler/resolve_labels.zig:3765`)
+### `run` (`src/compiler/resolve_labels.zig:3770`)
 
 - **签名**：`pub fn run( comptime layout: LayoutMode, function: *bytecode.Bytecode, fd: ?*const bytecode.function_def.FunctionDef, product: *resolve_variables.ResolvedProduct, ) Error!void`。
 - **作用**：带自包含最终码证明的 S4。
 - **实现**：`runImpl(false, …)`。
 - **所有权 / 错误 / 调用**：`compileFunctionV2`、S4 单测。
 
-### `runForPackedFinalize` (`src/compiler/resolve_labels.zig:3777`)
+### `runForPackedFinalize` (`src/compiler/resolve_labels.zig:3782`)
 
 - **签名**：`pub fn runForPackedFinalize( comptime layout: LayoutMode, function: *bytecode.Bytecode, fd: ?*const bytecode.function_def.FunctionDef, product: *resolve_variables.ResolvedProduct, ) Error!void`。
 - **作用**：packed 变体：跳过完整码遍历，调用方必须在发布 FunctionBytecode 前做融合校验。
 - **实现**：`runImpl(true, …)`，仍 `validateFinalSources`。
 - **所有权 / 错误 / 调用**：`compileFunctionV2ForPackedFinalize`。
 
-### `ResolveLabelsTestHarness.init` (`src/compiler/resolve_labels.zig:3792`)
+### `ResolveLabelsTestHarness.init` (`src/compiler/resolve_labels.zig:3797`)
 
 - **签名**：`fn init(harness: *ResolveLabelsTestHarness, allocator: std.mem.Allocator) !void`。
 - **作用**：S4 单测：runtime + Bytecode + FunctionDef + Builder。
 - **实现**：同 S3 harness 形状。
 - **所有权 / 错误 / 调用**：先 `resolve_variables.run` 再本文件 `run`。
 
-### `ResolveLabelsTestHarness.deinit` (`src/compiler/resolve_labels.zig:3813`)
+### `ResolveLabelsTestHarness.deinit` (`src/compiler/resolve_labels.zig:3818`)
 
 - **签名**：`fn deinit(harness: *ResolveLabelsTestHarness) void`。
 - **作用**：fd / function / runtime。
 - **实现**：FunctionDef.deinit 拆 builder。
 - **所有权 / 错误 / 调用**：defer。
 
-### `ResolveLabelsTestHarness.input` (`src/compiler/resolve_labels.zig:3819`)
+### `ResolveLabelsTestHarness.input` (`src/compiler/resolve_labels.zig:3824`)
 
 - **签名**：`fn input(harness: *ResolveLabelsTestHarness) *builder.Builder`。
 - **作用**：phase-1 发射。
 - **实现**：unwrap v2_builder。
 - **所有权 / 错误 / 调用**：测试夹具：返回**借用**指针，`Builder` 本体由 harness 的 `fd.v2_builder` 持有并在 `init`（`src/compiler/resolve_labels.zig:3808`）用 `rt.memory.create` 分配、在 `fd.deinit` 里释放，调用方不得 destroy。`.?` 是断言：phase-1 builder 未安装就 panic，没有 error set。
 
-### `ResolveLabelsTestHarness.resolve` (`src/compiler/resolve_labels.zig:3823`)
+### `ResolveLabelsTestHarness.resolve` (`src/compiler/resolve_labels.zig:3828`)
 
 - **签名**：`fn resolve(harness: *ResolveLabelsTestHarness) !resolve_variables.ResolvedProduct`。
 - **作用**：只跑 S3，测试再手调 S4 `run(.short/.plain, …)`。
 - **实现**：`resolve_variables.run`。
 - **所有权 / 错误 / 调用**：调用方 defer product。
 
-### `resolveLabelsOomScript` (`src/compiler/resolve_labels.zig:5003`)
+### `resolveLabelsOomScript` (`src/compiler/resolve_labels.zig:5008`)
 
 - **签名**：`fn resolveLabelsOomScript(allocator: std.mem.Allocator) !void`。
 - **作用**：OOM 扫描：goto、30 条 push_i32、atom get_field、绑定，S3+S4 必须事务性。

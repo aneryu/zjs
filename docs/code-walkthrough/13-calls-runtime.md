@@ -117,98 +117,98 @@ VM 调用路由。操作数窗口借用直到 `popOwnedStackRegion`；`pushOwned
 - **实现**：无活动 invocation 或 ctx/global/output 不匹配 → false。`resolveInlineTargetInto`。
 - **所有权 / 错误 / 调用**：`callValueOrBytecodeSyncInternal`。
 
-### `runSyncInlineRouteMoved` (`src/exec/call_runtime.zig:505`)
+### `runSyncInlineRouteMoved` (`src/exec/call_runtime.zig:504`)
 
 - **签名**：`noinline fn runSyncInlineRouteMoved( comptime idle_machine: bool, invocation: *inline_calls.ActiveInvocation, target: *const inline_calls.InlineTarget, global: *core.Object, moved_values: []core.JSValue, out: *core.JSValue, ) HostError!void`。
 - **作用**：把已拥有的 `[receiver, callable, ...args]` 槽移进同一 Machine 的 `.native_boundary` 帧并跑到返回。
 - **实现**：`idle_machine` 用 `IdleBoundaryScope`（驻留宿主 invocation，跳过外层 dispatch 快照），否则 `NativeBoundaryScope`。`push` 后 `errdefer deinit`。`pushMovedCall(..., .method, .native_boundary, 0)`；`recordSameMachineSyncCall`；`runActiveInvocationUntilNativeBoundary`；`finish` 后 `takeNativeReturnInto(out)`。CallSite 按站点缓存不可变 target、按次选 Machine，所以本助手拿 invocation+target 而不是整条 `SyncInlineRoute`。
 - **所有权 / 错误 / 调用**：`moved_values` 所有权交给新帧。`runSyncInlineRouteOwnedCopy` / `OwnedArgsGeneral` 的收口。失败走 boundary `deinit`。
 
-### `runSyncInlineRouteCopiedArgs` (`src/exec/call_runtime.zig:536`)
+### `runSyncInlineRouteCopiedArgs` (`src/exec/call_runtime.zig:535`)
 
 - **签名**：`pub inline fn runSyncInlineRouteCopiedArgs( comptime fixed_argc: ?usize, comptime idle_machine: bool, invocation: *inline_calls.ActiveInvocation, target: *const inline_calls.InlineTarget, global: *core.Object, this_value: *const core.JSValue, args: []const core.JSValue, lean: ?*inline_calls.LeanFrame, out: *core.JSValue, ) HostError!void`。
 - **作用**：CallSite 热臂：拷参压 Entry，跑到 `.native_boundary`。
 - **实现**：断言 simple eligible。idle 用 `IdleBoundaryScope` 否则 `NativeBoundaryScope`。优先 `pushLeanEntry`；否则 `tryPushNativeBoundaryCopiedArgsFast` / `pushNativeBoundaryCopiedArgs`。`runPushedEntryUntilNativeBoundary`；`takeNativeReturnInto`。
 - **所有权 / 错误 / 调用**：lean `in_use` defer 清。resident rt 从 `machine.vm.rt` 一载。
 
-### `runSyncInlineRouteMovedArgs` (`src/exec/call_runtime.zig:579`)
+### `runSyncInlineRouteMovedArgs` (`src/exec/call_runtime.zig:578`)
 
 - **签名**：`noinline fn runSyncInlineRouteMovedArgs( invocation: *inline_calls.ActiveInvocation, target: *const inline_calls.InlineTarget, global: *core.Object, args: []core.JSValue, out: *core.JSValue, ) HostError!void`。
 - **作用**：simple 目标：把调用方已拥有的 argv **搬进** 可写帧（receiver/callable 仍借自还活着的原生算法）。
 - **实现**：断言 `nativeBoundarySimpleEligible`。只用 `NativeBoundaryScope`（无 idle 特化）。`tryPushNativeBoundaryMovedArgsFast` 命中即用，否则 `pushNativeBoundaryMovedArgs`。随后 `runPushedEntryUntilNativeBoundary` + `takeNativeReturnInto`。
 - **所有权 / 错误 / 调用**：`callOwnedArgsValueOrBytecodeSyncInternal` 的 simple 臂。失败不把 args 所有权交回（已尝试 push）。
 
-### `runSyncInlineRouteOwnedCopy` (`src/exec/call_runtime.zig:607`)
+### `runSyncInlineRouteOwnedCopy` (`src/exec/call_runtime.zig:606`)
 
 - **签名**：`pub noinline fn runSyncInlineRouteOwnedCopy( idle_machine: bool, invocation: *inline_calls.ActiveInvocation, target: *const inline_calls.InlineTarget, ctx: *core.JSContext, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, out: *core.JSValue, ) HostError!void`。
 - **作用**：拷一份 argv 再走 Moved：调用方仍拥有原切片。
 - **实现**：`OwnedArgList.init` 拷 receiver+callable+args；`defer deinit`。`idle_machine` 是运行时 bool，避免为 comptime 特化把本助手实例化两份；idle/active 篱笆仍特化在 `runSyncInlineRouteMoved`。
 - **所有权 / 错误 / 调用**：CallSite 非 simple 臂、`callValueOrBytecodeSyncInternal` 非 simple 臂。init 失败只释放已发布前缀。
 
-### `runSyncInlineRouteOwnedArgsGeneral` (`src/exec/call_runtime.zig:630`)
+### `runSyncInlineRouteOwnedArgsGeneral` (`src/exec/call_runtime.zig:629`)
 
 - **签名**：`noinline fn runSyncInlineRouteOwnedArgsGeneral( invocation: *inline_calls.ActiveInvocation, target: *const inline_calls.InlineTarget, ctx: *core.JSContext, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []core.JSValue, out: *core.JSValue, ) HostError!void`。
 - **作用**：非 simple 布局的 take-args 冷路径：剥夺调用方 argv，组装完整 owned 事务再 Moved。
 - **实现**：断言 **非** `nativeBoundarySimpleEligible`。`OwnedArgList.initTakeArgs` 后 `runSyncInlineRouteMoved(false, ...)`（总是活动篱笆）。
 - **所有权 / 错误 / 调用**：`callOwnedArgsValueOrBytecodeSyncInternal`。`initTakeArgs` 把源槽 `@memset` 成 undefined；回退路径不会走到这里（resolve 失败时调用方仍拥有 args）。
 
-### `callValueOrBytecodeSyncInternal` (`src/exec/call_runtime.zig:655`)
+### `callValueOrBytecodeSyncInternal` (`src/exec/call_runtime.zig:654`)
 
 - **签名**：`pub inline fn callValueOrBytecodeSyncInternal( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：原生算法必须同步拿到字节码回调结果时的显式边界。
 - **实现**：无论哪条路都 `pollInterrupt`。resolve 失败 → 根路径 `copy_argv=true`。simple → copied args；否则 owned copy。
 - **所有权 / 错误 / 调用**：输入须已根。Apply 终端用 inline 适配器；回调队列用 outlined 缝。
 
-### `callValueOrBytecodeSyncInternalOutlined` (`src/exec/call_runtime.zig:708`)
+### `callValueOrBytecodeSyncInternalOutlined` (`src/exec/call_runtime.zig:707`)
 
 - **签名**：`pub noinline fn callValueOrBytecodeSyncInternalOutlined( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：与上面同一条同步契约的循环回调适配器：把目标解析和回退 union 赶出周围原生算法的迭代体。
 - **实现**：一层转调 `callValueOrBytecodeSyncInternal`。注释区分：Apply 的单次终端调用留 inline 适配器；`forEach`/`map`/`JSON`/`iterator` 这类回调队列必须走这条 outlined 缝，否则一次 callback 站点会把 spill set 铺到整个循环。
 - **所有权 / 错误 / 调用**：`array_ops`/`object_ops`/`disposable_ops`/`coercion_ops` 把本符号别名为 `callValueOrBytecodeSyncInternal`。`iterator_ops`、`json_ops`、`collection_ops`、`promise_ops`、`string_ops`、`regexp_fastpath`、`error_stack_ops`、`object_builtin_ops`、`call.zig` 直接调用。输入须已根。
 
-### `callOwnedArgsValueOrBytecodeSyncInternal` (`src/exec/call_runtime.zig:736`)
+### `callOwnedArgsValueOrBytecodeSyncInternal` (`src/exec/call_runtime.zig:735`)
 
 - **签名**：`pub inline fn callOwnedArgsValueOrBytecodeSyncInternal( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：调用方提供已根 owned argv；simple 目标直接 move 进可写帧。
 - **实现**：先 `pollInterrupt`；resolve 失败 → 根路径 `copy_argv=true`。simple → `runSyncInlineRouteMovedArgs`；否则 `runSyncInlineRouteOwnedArgsGeneral`（`initTakeArgs`）。回退不剥夺调用方所有权。
 - **所有权 / 错误 / 调用**：`functionApplyArrayLike`、`reflect_ops` 的 `Reflect.apply`。
 
-### `collectionPrototypeMethodByName` (`src/exec/call_runtime.zig:788`)
+### `collectionPrototypeMethodByName` (`src/exec/call_runtime.zig:787`)
 
 - **签名**：`fn collectionPrototypeMethodByName( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, function_object: *core.Object, name: []const u8, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!?core.JSValue`。
 - **作用**：无烘焙 id 的 Map/Set 原型方法慢路。
 - **实现**：`collectionMethodOwnerClass` 无效 → null。keys/values/entries/forEach 限 Map|Set；差集等限 Set。set/get/has 有 id，不在此。
 - **所有权 / 错误 / 调用**：不匹配继续名字链。接收者合法性由记录 handler 抛。
 
-### `vmNativeCallableDispatch` (`src/exec/call_runtime.zig:836`)
+### `vmNativeCallableDispatch` (`src/exec/call_runtime.zig:835`)
 
 - **签名**：`fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispatch`。
 - **作用**：按 class 选 native 臂，避免热路径名字比较。
 - **实现**：bound；async resolve/reject → async_function_resume；c_function：nativeCallTarget / decode id / host kind / internal tag / name；c_function_data 类似无 resolved_record。
 - **所有权 / 错误 / 调用**：`callNativeCallableObject`。
 
-### `callInternalCallableByTag` (`src/exec/call_runtime.zig:867`)
+### `callInternalCallableByTag` (`src/exec/call_runtime.zig:866`)
 
 - **签名**：`pub fn callInternalCallableByTag( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, function_object: *core.Object, tag: core.host_function.InternalCallableTag, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!?core.JSValue`。
 - **作用**：Promise/async 合成函数。
 - **实现**：`.none` null。resolving / capability executor / combinator / finally / async resume / async generator resolve / from-sync wrap / unwrap / async disposable / arrayFromAsync / `%ThrowTypeError%`。
 - **所有权 / 错误 / 调用**：`call.zig` 的无 Realm 回退路径（`c_function_data` / async resume 臂）也调用本函数；promise resolving 与 capability executor 在那条路上另有本地前置分支。
 
-### `callRawFunctionBytecode` (`src/exec/call_runtime.zig:893`)
+### `callRawFunctionBytecode` (`src/exec/call_runtime.zig:892`)
 
 - **签名**：`noinline fn callRawFunctionBytecode( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：可调用值本身就是裸 `FunctionBytecode` 时的 Call 臂（无函数对象、无捕获）。
 - **实现**：`functionBytecodeFromValue(func)` 失败 `TypeError`。`new.target=undefined`，captures 空切片。class 直调拒绝是字节码入口的 `OP_check_ctor`，对齐 qjs `JS_CallInternal`；普通函数走同一条 undefined-new.target 路，FB 上不携带 class-syntax 事实。转 `callFunctionBytecodeModeStateAfterInterruptPoll`。
 - **所有权 / 错误 / 调用**：`callValueOrBytecodeDispatchAfterInterruptPoll` 在 `func.isFunctionBytecode()` 时。`copy_argv` 原样下传。
 
-### `callFunctionObjectBytecode` (`src/exec/call_runtime.zig:925`)
+### `callFunctionObjectBytecode` (`src/exec/call_runtime.zig:924`)
 
 - **签名**：`noinline fn callFunctionObjectBytecode( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, function_object: *core.Object, args: []const core.JSValue, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：四类 bytecode 函数对象的最终 Call 臂：从对象取 FB 与捕获。
 - **实现**：`functionBytecode()` 或再 `functionBytecodeFromValue` 失败 `TypeError`。Bound/Proxy 已在外层拆到这一臂。助手在 interrupt/stack preflight 期间保持本调用者视图；`zjs_vm` 只在那些检查之后才选 FB Realm。`OP_check_ctor` 仍在函数 Realm 拒绝 class 直调。`new.target=undefined`。
 - **所有权 / 错误 / 调用**：dispatch 对 `bytecode_function` / `generator_function` / `async_function` / `async_generator_function`。捕获切片借自对象。
 
-### `callNativeCallableObject` (`src/exec/call_runtime.zig:944`)
+### `callNativeCallableObject` (`src/exec/call_runtime.zig:943`)
 
 - **签名**：`noinline fn callNativeCallableObject( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, function_object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：c_function / data / bound / async resume / c_closure 的 class 分发：先记录/host/tag，名字链只做最后兼容。
@@ -221,84 +221,84 @@ VM 调用路由。操作数窗口借用直到 `popOwnedStackRegion`；`pushOwned
   - `.name_dispatch` 以及上面未命中：`finalCallableRealmView` 后 `callNativeCallableByName`。
 - **所有权 / 错误 / 调用**：dispatch 对 c_function/data/async_function_resolve/reject/c_closure/bound。记录失败必须先挂起 JS 异常再返回 Zig err。
 
-### `callValueOrBytecodeDispatch` (`src/exec/call_runtime.zig:1006`)
+### `callValueOrBytecodeDispatch` (`src/exec/call_runtime.zig:1005`)
 
 - **签名**：`fn callValueOrBytecodeDispatch( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：poll 后进分类。
 - **实现**：`pollInterrupt` + After。
 - **所有权 / 错误 / 调用**：Root 包装。
 
-### `callValueOrBytecodeDispatchAfterInterruptPoll` (`src/exec/call_runtime.zig:1021`)
+### `callValueOrBytecodeDispatchAfterInterruptPoll` (`src/exec/call_runtime.zig:1020`)
 
 - **签名**：`pub fn callValueOrBytecodeDispatchAfterInterruptPoll( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：权威 Call 分类（JS_CallInternal 形状）。
 - **实现**：裸 FB → `callRawFunctionBytecode`。对象：四类 bytecode → `callFunctionObjectBytecode`；callable proxy → `callProxyApply`；c_function/data/async resume/c_closure/bound → `callNativeCallableObject`。不可调用 `throwTypeErrorMessage("not a function")`。其余 `callValueWithThisGlobalsAndGlobal`。
 - **所有权 / 错误 / 调用**：CallSite generic、sync 回退。
 
-### `callNativeCallableByName` (`src/exec/call_runtime.zig:1068`)
+### `callNativeCallableByName` (`src/exec/call_runtime.zig:1067`)
 
 - **签名**：`noinline fn callNativeCallableByName( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, function_object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：没有稳定 native record / internal tag 的可调用对象的兼容名字分发；故意不与字节码共享调用帧。
 - **实现**：`nativeFunctionDispatchNameRef` 借 atom 支持的 ASCII 名（不每调用 `[]u8` 分配；URI 热路径会来数百万次）。空名 / 无可用名 → undefined。先精确 `eql`：`raw`、`sumPrecise`、DisposableStack / AsyncDisposableStack 方法、`callNativeFunctionRecord`、`collectionPrototypeMethodByName`。然后首字节 switch 走常见全局：`Array` 构造（须 `arrayBuiltinMarker()==.constructor`）、`BigInt`/`Number`/`Object`/`String`、`d`/`e` 的 URI id、`fromCharCode`。其余是约 48 条 `eql` 加若干探针的冷链（源码注释记的 ~95 是加首字节 switch 之前走到 URI 要过的检查数）：`get [Symbol.species]`、动态 Function 族、`parseInt`/`parseFloat`/`isNaN`/`isFinite`、`RegExp`（`NativeBacktraceScope` + `regExpFunctionCall`）、Error 构造、iterator `next`/`throw`/`return` 与 `@@iterator`/`@@asyncIterator`/`@@asyncDispose`、`apply`/`call`、`__proto__` 访问器、Array/TypedArray 方法族、`eval`（间接，Realm 取函数对象 `functionRealmGlobal`）、regexp 符号、DataView get/set、String 原型。链尽 `callValueWithThisGlobalsAndGlobal`。对齐 qjs：`JS_CallInternal` 按 class 进专用调用函数，C/native 不与字节码共帧。
 - **所有权 / 错误 / 调用**：`callNativeCallableObject` 的最后一臂。RegExp/Array Iterator 等仍要 `materializeRuntimeError`。`DisposableStack`/`AsyncDisposableStack` 当构造名直接 `TypeError`。
 
-### `Trigger.trigger` (`src/exec/call_runtime.zig:1454`)
+### `Trigger.trigger` (`src/exec/call_runtime.zig:1453`)
 
 - **签名**：`fn trigger(context: ?*anyopaque, size: usize) void`。
 - **作用**：`callValueOrBytecodeRoot` 根测试的 GC 探针。
 - **实现**：与 call.zig 测试 Trigger 相同：摘 hook、engine_active 收集、看 atom。
 - **所有权 / 错误 / 调用**：测试局部 struct 的方法，不分配；被安装成 `rt.memory.trigger_gc_fn` 后由分配路径经函数指针回调，不是直接调用方。进入后先把 hook 摘掉并 `defer` 还原以防重入，`tryRunObjectCycleRemovalWithValueRoots` 的错误被 `catch {}` 吞掉（探针只关心 atom 是否存活，不关心回收是否成功）。
 
-### `functionHasInstanceCall` (`src/exec/call_runtime.zig:1521`)
+### `functionHasInstanceCall` (`src/exec/call_runtime.zig:1520`)
 
 - **签名**：`pub fn functionHasInstanceCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`Function.prototype[Symbol.hasInstance]`。
 - **实现**：`ordinaryHasInstance` → boolean。
 - **所有权 / 错误 / 调用**：不分配、不建根：`args` 借用调用方窗口，返回的是立即 boolean。error set 是推断的（`ordinaryHasInstance` 的传播，含 `HostError` 与 OOM），由两个 native 包装层落成 JS 异常——`function_ops.zig:111` 的 exec-direct thunk 经 `hostResultToValue`，`function_ops.zig:166` 的 generic 体经调用它的 builtin dispatch。
 
-### `ordinaryHasInstance` (`src/exec/call_runtime.zig:1534`)
+### `ordinaryHasInstance` (`src/exec/call_runtime.zig:1533`)
 
 - **签名**：`pub fn ordinaryHasInstance( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor_value: core.JSValue, value: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !bool`。
 - **作用**：OrdinaryHasInstance。
 - **实现**：不可调用 false。bound 递归 target。`.prototype` 优先自有 data（避免 Descriptor）；否则 `getValueProperty`。原型链：非 proxy 直接 `getPrototype`（qjs `p->shape->proto` quickjs.c:8087），proxy / `%ThrowTypeError%` 走 trap。
 - **所有权 / 错误 / 调用**：prototype 非 object TypeError。
 
-### `functionCallCall` (`src/exec/call_runtime.zig:1588`)
+### `functionCallCall` (`src/exec/call_runtime.zig:1587`)
 
 - **签名**：`pub fn functionCallCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：`Function.prototype.call`。
 - **实现**：thisArg 默认 undefined；`argv[1..]` 已由外层 native 调用根住，不再拷 8 槽（对齐 `js_function_call` 直转 `JS_Call`）。
 - **所有权 / 错误 / 调用**：记录与名字慢路共享。
 
-### `functionApplyCall` (`src/exec/call_runtime.zig:1613`)
+### `functionApplyCall` (`src/exec/call_runtime.zig:1612`)
 
 - **签名**：`pub fn functionApplyCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：`Function.prototype.apply`（`js_function_apply` qjs:41213）。
 - **实现**：先 `isCallableValue`（check_function 在读 argv 前）。nullish 列表 → 空参 sync call。否则 `functionApplyArrayLike`。
 - **所有权 / 错误 / 调用**：bound/Proxy 与普通函数同一 call 腿。
 
-### `throwApplyTypeError` (`src/exec/call_runtime.zig:1645`)
+### `throwApplyTypeError` (`src/exec/call_runtime.zig:1644`)
 
 - **签名**：`noinline fn throwApplyTypeError(ctx: *core.JSContext, global: *core.Object, message: []const u8) HostError!core.JSValue`。
 - **作用**：apply 两条 TypeError 臂的 outlined 抛出：接收者不可调用、参数列表非对象。
 - **实现**：`createNamedError(..., "TypeError", message)` + `throwValue`，返回 `error.JSException`。两条文案对齐 qjs：`check_function` 的 `"not a function"`（qjs:41221 前），`build_arg_list` 的 `"not a object"`（qjs:41167，注意英文是 `a object`）。
 - **所有权 / 错误 / 调用**：`functionApplyCall`（非函数 this）、`functionApplyArrayLike`（非对象 list）。noinline 避免把错误构造拼进扁平 record 体。
 
-### `functionApplyArrayLike` (`src/exec/call_runtime.zig:1655`)
+### `functionApplyArrayLike` (`src/exec/call_runtime.zig:1654`)
 
 - **签名**：`noinline fn functionApplyArrayLike( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_arg: core.JSValue, this_value: core.JSValue, arg_array: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：apply 收到非 nullish 列表时才需要的 CreateListFromArrayLike 物化与 owned argv 事务（qjs `build_arg_list`，qjs:41159）。
 - **实现**：`arg_array` 非对象 → `throwApplyTypeError("not a object")`。`ownedArgsFromArrayLike` 建列表，`defer deinit`。空列表走 `callValueOrBytecodeSyncInternal`（拷贝契约、无参）。非空则 `ValueSliceRoot` 根住切片，再 `callOwnedArgsValueOrBytecodeSyncInternal`（simple 目标 move 进帧）。
 - **所有权 / 错误 / 调用**：`functionApplyCall` 的冷腿。outlined 是为了不把这段大状态留在扁平 `functionApplyCall` 热体里。根在 sync call 期间覆盖 argv。
 
-### `callBoundFunction` (`src/exec/call_runtime.zig:4602`)
+### `callBoundFunction` (`src/exec/call_runtime.zig:4600`)
 
 - **签名**：`pub fn callBoundFunction( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：VM 路径 bound：合并 args，this=boundThis，再 `callValueOrBytecodeRoot`。
 - **实现**：缺 target/this TypeError。
 - **所有权 / 错误 / 调用**：`callNativeCallableObject`。与 call.zig 版本不同：这里有 caller_function/frame 且走 Root。
 
-### `boundFunctionArgs` (`src/exec/call_runtime.zig:4618`)
+### `boundFunctionArgs` (`src/exec/call_runtime.zig:4616`)
 
 - **签名**：`pub fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) ![]core.JSValue`。
 - **作用**：`bound ++ extra` 新切片。

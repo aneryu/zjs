@@ -275,9 +275,9 @@ pub inline fn resolveInlineSpreadConstructorFunction(global: *core.Object, func:
 ///
 /// Arrow targets ARE eligible: their lexical `this` / `new.target` are
 /// ordinary closure cells, so call-target resolution has no arrow arm.
-pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
+pub inline fn resolveInlineTarget(global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     var target: InlineTarget = undefined;
-    if (!resolveInlineTargetInto(&target, ctx, global, receiver, func)) return null;
+    if (!resolveInlineTargetInto(&target, global, receiver, func)) return null;
     return target;
 }
 
@@ -285,12 +285,10 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
 /// Avoids materializing and then copying the 56-byte optional InlineTarget.
 pub inline fn resolveInlineTargetInto(
     target: *InlineTarget,
-    ctx: *core.JSContext,
     global: *core.Object,
     receiver: core.JSValue,
     func: core.JSValue,
 ) bool {
-    _ = ctx;
     const resolved = resolveInlineFunction(global, func) orelse return false;
     target.* = resolved.bind(receiver, func);
     return true;
@@ -326,8 +324,9 @@ pub const ReturnContinuation = struct {
     /// depth operand for `.for_of_next`, and zero for `.next`/`.to_boolean`.
     payload: u32,
 
+    /// Atoms are traced, not released, so dropping a `.proxy_get` payload is
+    /// just clearing the tag pair.
     pub fn deinit(self: *ReturnContinuation, _: *core.JSRuntime) void {
-        if (self.action == .proxy_get and self.payload != core.atom.null_atom) {}
         self.action = .next;
         self.payload = 0;
     }
@@ -635,9 +634,8 @@ pub const Entry = struct {
 
     /// Outline wrapper for the cold consumers of the empty-leaf epilogue
     /// (driver-side `.returned` / falloff completions). The hot in-handler
-    /// return arm uses `deinitEmptyLeafInline` directly so its non-zero
-    /// refcount leg and arena restore run without a bl/ret round trip, with
-    /// `destroyZeroRef` remaining the only (cold) call.
+    /// return arm uses `deinitEmptyLeafInline` directly so its arena-watermark
+    /// restore runs without a bl/ret round trip.
     noinline fn deinitEmptyLeaf(self: *Entry, ctx: *core.JSContext) void {
         self.deinitEmptyLeafInline(ctx.runtime);
     }
@@ -1563,13 +1561,13 @@ pub const Machine = struct {
             vm_call.commitInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         } else {
             vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
-                cleanupStackSource(self.ctx.runtime, source);
+                cleanupStackSource(source);
                 return err;
             };
         }
         errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         const entry = self.acquireSlot(global) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         // Generic calls own an ordinary `.next` continuation immediately.
@@ -2004,7 +2002,7 @@ pub const Machine = struct {
         // off-window source region directly, matching the general path's
         // `.full` cleanup without temporarily republishing it to the GC view.
         errdefer if (!move_args) {
-            cleanupStackSource(rt, source);
+            cleanupStackSource(source);
         };
 
         // alloca_size (quickjs.c:17834-17836): optional padded args | locals |
@@ -2356,12 +2354,12 @@ pub const Machine = struct {
             false,
         );
         vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         const entry = self.acquireSlot(global) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         entry.return_action = .next;
@@ -2408,8 +2406,8 @@ pub const Machine = struct {
         // full-region cleanup `cleanupStackSource` performs for the general
         // setup's failure arm.
         errdefer {
-            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
-            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+            freeSourceSlot(&region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(&region_start[0]);
         }
         const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, false);
         try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
@@ -2466,10 +2464,10 @@ pub const Machine = struct {
             var index: usize = argc;
             while (index > 0) {
                 index -= 1;
-                freeSourceSlot(rt, &region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
+                freeSourceSlot(&region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
             }
-            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
-            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+            freeSourceSlot(&region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(&region_start[0]);
         }
         const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, argc, false);
         try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
@@ -2523,8 +2521,8 @@ pub const Machine = struct {
         // already retreated its logical operand top, so these slots must be
         // released when depth/Entry acquisition fails.
         errdefer {
-            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
-            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+            freeSourceSlot(&region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(&region_start[0]);
         }
         const planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, false);
         try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
@@ -3108,7 +3106,7 @@ pub const Machine = struct {
         }
 
         var cleanup_source: SourceCleanupMode = if (sourceHasStackRegion(source)) .full else .none;
-        errdefer cleanupSource(rt, source, cleanup_source);
+        errdefer cleanupSource(source, cleanup_source);
 
         // Bind the frame values INLINE — qjs's JS_CallInternal sets cur_func /
         // this / new_target directly rather than threading a 14-field
@@ -3180,7 +3178,6 @@ pub const Machine = struct {
             try entry.frame.initArgumentsBorrowedSlots(
                 &rt.memory,
                 sourceArgs(source),
-                true,
                 need_original_snapshot,
                 frame_windows,
             );
@@ -3190,18 +3187,17 @@ pub const Machine = struct {
                 &rt.memory,
                 &rt.vm_stack,
                 sourceArgs(source),
-                true,
                 need_original_snapshot,
                 frame_windows,
             );
         }
-        cleanupSource(rt, source, cleanup_source);
+        cleanupSource(source, cleanup_source);
         cleanup_source = .none;
 
         if (frame_windows.open_var_refs) |open_refs| {
             try entry.frame.installOpenVarRefSlots(open_refs);
         } else if (open_var_ref_count != 0) {
-            try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
+            try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack);
         }
         if (borrow_var_refs) {
             // Alias the closure's captures (mutable slice; no merge replaced it).
@@ -3353,30 +3349,32 @@ pub const Machine = struct {
         non_args,
     };
 
-    fn cleanupSource(rt: *core.JSRuntime, source: ArgsSource, mode: SourceCleanupMode) void {
+    fn cleanupSource(source: ArgsSource, mode: SourceCleanupMode) void {
         switch (mode) {
             .none => {},
-            .full => cleanupStackSource(rt, source),
-            .non_args => cleanupStackSourcePreserveArgs(rt, source),
+            .full => cleanupStackSource(source),
+            .non_args => cleanupStackSourcePreserveArgs(source),
         }
     }
 
-    fn cleanupStackSource(rt: *core.JSRuntime, source: ArgsSource) void {
+    fn cleanupStackSource(source: ArgsSource) void {
         if (source.metadata.moved) return;
         var index = source.valueCount();
         while (index > 0) {
             index -= 1;
-            freeSourceSlot(rt, &source.values[index]);
+            freeSourceSlot(&source.values[index]);
         }
     }
 
-    fn cleanupStackSourcePreserveArgs(rt: *core.JSRuntime, source: ArgsSource) void {
+    fn cleanupStackSourcePreserveArgs(source: ArgsSource) void {
         if (source.metadata.moved) return;
-        if (source.metadata.has_receiver) freeSourceSlot(rt, &source.values[0]);
-        freeSourceSlot(rt, &source.values[@intFromBool(source.metadata.has_receiver)]);
+        if (source.metadata.has_receiver) freeSourceSlot(&source.values[0]);
+        freeSourceSlot(&source.values[@intFromBool(source.metadata.has_receiver)]);
     }
 
-    inline fn freeSourceSlot(_: *core.JSRuntime, slot: *core.JSValue) void {
+    /// Retire a consumed source slot. Under the tracing GC this is only the
+    /// trace-edge drop: the window stays addressable, the value does not.
+    inline fn freeSourceSlot(slot: *core.JSValue) void {
         slot.* = core.JSValue.undefinedValue();
     }
 
@@ -3544,12 +3542,12 @@ pub const Machine = struct {
             false,
         );
         vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         const entry = self.acquireSlot(global) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         entry.return_action = .constructor;
@@ -3635,12 +3633,12 @@ pub const Machine = struct {
             false,
         );
         vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         const entry = self.acquireSlot(global) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
+            cleanupStackSource(source);
             return err;
         };
         entry.return_action = .constructor;
@@ -5006,10 +5004,9 @@ pub const Machine = struct {
         std.debug.assert(dying.frame.function.arg_count == 0);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(dying.frame.function));
-        // Inline epilogue: the hot leg is an rc decrement plus the arena
-        // watermark restore; keeping it in the return handler removes the
-        // only bl/ret on the empty-leaf return path (destroyZeroRef stays
-        // outline behind the rc==0 branch).
+        // Inline epilogue: the hot leg is just the arena watermark restore;
+        // keeping it in the return handler removes the only bl/ret on the
+        // empty-leaf return path.
         dying.deinitEmptyLeafInline(rt);
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;

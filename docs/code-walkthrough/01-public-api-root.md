@@ -114,7 +114,7 @@
 
 - **签名**：`pub fn appendRawString(runtime_ptr: *JSRuntime, out: *std.ArrayList(u8), v: Value) !void`。
 - **作用**：将字符串内容编码为 UTF-8 字节追加；孤立代理项采用 WTF-8，不是直接复制内部 Latin1/UTF-16 原始单元。
-- **实现**：转发 value_ops.appendRawString → core.string.appendValueUtf8；取 asStringBody，无 body 直接返回，否则 ensureFlat 后编码 Latin1 或 UTF-16。此路径没有先以 isString 拒绝非字符串，asStringBody 支持的符号 body 也可能进入编码。
+- **实现**：转发 value_ops.appendRawString → core.string.appendValueUtf8；取 asStringBody，无 body 直接返回，否则按 body 的 Latin1 或 UTF-16 表示编码（String 恒为 flat，没有展平步骤）。此路径没有先以 isString 拒绝非字符串，asStringBody 支持的符号 body 也可能进入编码。
 - **所有权 / 错误 / 调用**：不做用户级 ToString；追加所用 allocator 是 runtime.memory.allocator，已有 out backing 须与之匹配。失败可能留下已追加的前缀，不提供事务回滚。
 
 ### `value.appendString` (`src/root.zig:103`)

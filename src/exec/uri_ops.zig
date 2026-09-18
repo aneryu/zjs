@@ -289,7 +289,6 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
         if (try stringInputValue(input)) |string_value| {
             if (stringDataFromValue(string_value)) |string_data| {
                 if (!stringDataContainsPercent(string_data)) return string_value;
-                try string_data.ensureFlat(rt);
                 switch (string_data.resolveData()) {
                     // The stack-buffer fast path is ASCII-only; any non-ASCII
                     // unit routes to the faithful qjs js_global_decodeURI walk
@@ -328,7 +327,6 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
         // Coerced (non-string) inputs decode through the same faithful
         // unit-level walk over the real string content.
         const coerced = try core.string.String.createUtf8(rt, bytes.items);
-        try coerced.ensureFlat(rt);
         return switch (coerced.resolveData()) {
             .latin1 => |latin1| decodeUriUnits(ctx, global, latin1, 1, mode == 4),
             .utf16 => |units| decodeUriUnits(ctx, global, uriUtf16Bytes(units), 2, mode == 4),
@@ -358,7 +356,6 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
 /// Larger strings spill to an `ArrayList`.
 fn decodeStringDataFast(ctx: *core.JSContext, global: ?*core.Object, string_value: *core.string.String, component: bool) HostError!?core.JSValue {
     const rt = ctx.runtime;
-    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| return try decodeAsciiBytes(ctx, global, bytes, component),
         .utf16 => |units| {
@@ -493,7 +490,6 @@ fn stringDataFromValue(value: core.JSValue) ?*core.string.String {
 fn encodeStringValue(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(u8), value: core.JSValue, component: bool) HostError!void {
     const rt = ctx.runtime;
     const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try encodeCodepoint(rt, out, byte, component);
@@ -743,7 +739,6 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
 
 fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
         .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),

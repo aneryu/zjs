@@ -1151,6 +1151,12 @@ fn outputHelper(
 // js_atod
 // ============================================================
 
+/// Faithful port of QuickJS `js_atod`. The only production caller is `parseNumber`
+/// (radix 10, flags 0); the lexer and value formatter run their own parsers. The
+/// `JS_ATOD_ACCEPT_UNDERSCORES` / `ACCEPT_BIN_OCT` / `ACCEPT_LEGACY_OCTAL` /
+/// `INT_ONLY` branches and the non-decimal radix paths are therefore only exercised
+/// by unit tests; they are kept so the port stays line-for-line comparable with
+/// upstream and so embedders can reuse the full parser.
 fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp_mem: *JSATODTempMem) f64 {
     var mptr: [*]u64 = &tmp_mem.mem;
     const tmp0 = dtoaMalloc(Mpb(DBIGNUM_LEN_MAX), &mptr);
@@ -1237,10 +1243,6 @@ fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32,
     // skip leading zeros
     while (p.len > 0) {
         if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and (flags & JS_ATOD_INT_ONLY) == 0) {
-            if (@as(i32, p[0]) == sep) {
-                pnext.* = p_start.ptr;
-                return std.math.nan(f64);
-            }
             if (dot_pos >= 0) break;
             dot_pos = pos;
             p = p[1..];
@@ -1256,15 +1258,11 @@ fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32,
 
     while (p.len > 0) {
         if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and (flags & JS_ATOD_INT_ONLY) == 0) {
-            if (@as(i32, p[0]) == sep) {
-                pnext.* = p_start.ptr;
-                return std.math.nan(f64);
-            }
             if (dot_pos >= 0) break;
             dot_pos = pos;
             p = p[1..];
         }
-        if (p.len > 0 and @as(i32, p[0]) == sep and p.ptr != p_start.ptr and toDigit(p[1]) < radix)
+        if (p.len > 1 and @as(i32, p[0]) == sep and p.ptr != p_start.ptr and toDigit(p[1]) < radix)
             p = p[1..];
 
         if (p.len == 0) break;
@@ -1487,4 +1485,15 @@ test "dtoa functionality" {
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("12.5", try formatNumber(&buf, n));
     try std.testing.expect(std.math.isPositiveInf(try parseNumber("+Infinity")));
+}
+
+test "atod underscore separator stops at end of input" {
+    // Regression: the significant-digit loop used to read `p[1]` after seeing the
+    // separator without checking that a second byte exists, so a trailing `_` went
+    // out of bounds once JS_ATOD_ACCEPT_UNDERSCORES was enabled.
+    var tmp_mem: JSATODTempMem = undefined;
+    var parsed_end: ?[*]const u8 = null;
+    const v = jsAtodImpl("1_", &parsed_end, 10, JS_ATOD_ACCEPT_UNDERSCORES, &tmp_mem);
+    try std.testing.expectEqual(@as(f64, 1), v);
+    try std.testing.expectEqual(@as(usize, 1), @intFromPtr(parsed_end.?) - @intFromPtr("1_".ptr));
 }

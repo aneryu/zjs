@@ -216,207 +216,193 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 ### `dumpPerfJson` (`src/cli/zjs.zig:628`)
 
 - **签名**：`fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?*const zjs.OpcodeProfile, timings: PerfJsonTimings) !void`。
-- **作用**：`--perf-json` 把计时、内存、可选 opcode/IC 打到 **stderr**。
-- **实现**：对象：`file`、metrics、`opcode_profile_enabled`、有 profile 则 opcode_profile + ic。flush。
+- **作用**：`--perf-json` 把计时、内存、可选 opcode profile 打到 **stderr**。
+- **实现**：对象：`file`、metrics、`opcode_profile_enabled`、有 profile 则 opcode_profile。flush。IC 段已删：`OpcodeProfile` 的 `ic_*` 五个数组在引擎里没有任何写点，输出的永远是占位串或 0。
 - **所有权 / 错误 / 调用**：不污染脚本 stdout。`main`。
 
-### `dumpPerfJsonMetrics` (`src/cli/zjs.zig:649`)
+### `dumpPerfJsonMetrics` (`src/cli/zjs.zig:647`)
 
 - **签名**：`fn dumpPerfJsonMetrics(stderr: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage, timings: PerfJsonTimings) !void`。
 - **作用**：JSON 计时与 memory 子对象。
 - **实现**：`writeCounterLine` 串 `total_ns`…`jobs_ns` 与 allocation 计数。`finalize_ns` 恒 `null`，`parse_ns_includes_finalize: true`（解析阶段含 finalize）。
 - **所有权 / 错误 / 调用**：不分配。唯一调用方 `dumpPerfJson`；本文件的单测「zjs perf JSON metrics preserve populated fields」（`src/cli/zjs.zig:1934`）逐字段钉住它的输出并验证写失败。
 
-### `dumpPerfJsonOpcodeProfile` (`src/cli/zjs.zig:672`)
+### `dumpPerfJsonOpcodeProfile` (`src/cli/zjs.zig:686`)
 
 - **签名**：`fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void`。
 - **作用**：非零 opcode 行的 JSON 数组。
-- **实现**：收 `OpcodeProfileRow`，按 nanos/count/opcode 排。profile 构建里 nanos/dups/allocations 等打 `"not instrumented"`。
-- **所有权 / 错误 / 调用**：`ensureOpcodeProfileNames` 先激活一次以填名字表。
+- **实现**：收 `OpcodeProfileRow`，按 nanos/count/opcode 排。`measured_ns` / `value_dups` / `global_lookups` / `call_frames` 与每行的 `nanos`/`avg_ns`/`slow` 在 profile 构建里打 `"not instrumented"`——这些字段在那条路径上没有写点（tail-call 派发器只调 `noteDispatch` 计数，不能跨 `always_tail` 计时）。`allocations` 不在此列：`JSRuntime.setOpcodeProfile` 把分配器的计数器指向 `alloc_count`，所以它在任何构建下都是真数字，现在无条件打印。
+- **所有权 / 错误 / 调用**：`ensureOpcodeProfileNames` 先激活一次以填名字表。分支条件已从 `zjs.opcode_profile_build_enabled` 改成本文件的具名常量 `profile_counters_uninstrumented`（同值，但名字说明的是「这些计数器没有写点」而不是「这是 profile 构建」；`false` 臂只被文件末尾的单测驱动，那里手工喂计数器）。
 
-### `dumpPerfJsonIc` (`src/cli/zjs.zig:732`)
-
-- **签名**：`fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void`。
-- **作用**：IC hit/miss/invalidate/promote 汇总与 per-opcode 数组。
-- **实现**：profile 构建输出字符串占位；否则 `writeJsonU64Array`。
-- **所有权 / 错误 / 调用**：`dumpPerfJson`。`OpcodeProfile` 的 `ic_hit` / `ic_miss` / `ic_invalidate` / `ic_promote_*` 数组在引擎里没有写点，所以非 profile 构建下这些数也恒为 0。
-
-### `writeJsonU64Array` (`src/cli/zjs.zig:767`)
-
-- **签名**：`fn writeJsonU64Array(output: *std.Io.Writer, values: *const [zjs.OpcodeProfile.opcode_count]u64) !void`。
-- **作用**：打 JSON 数组。
-- **实现**：`[` 逗号分隔 `{d}` `]`。
-- **所有权 / 错误 / 调用**：IC 五个数组。
-
-### `commandPerfFile` (`src/cli/zjs.zig:776`)
+### `commandPerfFile` (`src/cli/zjs.zig:745`)
 
 - **签名**：`fn commandPerfFile(command: Command) []const u8`。
 - **作用**：perf JSON 的 `file` 字段。
 - **实现**：eval → `"<eval>"`；file → 路径。
 - **所有权 / 错误 / 调用**：借用。
 
-### `writeJsonString` (`src/cli/zjs.zig:783`)
+### `writeJsonString` (`src/cli/zjs.zig:752`)
 
 - **签名**：`fn writeJsonString(output: *std.Io.Writer, bytes: []const u8) !void`。
 - **作用**：JSON 字符串转义。
 - **实现**：`"` `\` `\n\r\t`；`<0x20` 用 `\u00XX`；其余原样。
 - **所有权 / 错误 / 调用**：文件名、opcode 名。
 
-### `dumpGcSpaceStats` (`src/cli/zjs.zig:813`)
+### `dumpGcSpaceStats` (`src/cli/zjs.zig:782`)
 
 - **签名**：`fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void`。
 - **作用**：分配直方图 p50/p95/p99、small 覆盖、large 计数。
 - **实现**：读 `space_histogram`。只打印有写点的字段。
 - **所有权 / 错误 / 调用**：`--gc-stats`。
 
-### `dumpGcBlockCensus` (`src/cli/zjs.zig:837`)
+### `dumpGcBlockCensus` (`src/cli/zjs.zig:806`)
 
 - **签名**：`fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void`。
 - **作用**：TGC S4-f：每 size-class 的 block 占用。纯退出时 walk，不在分配热路径。
 - **实现**：`censusBlocks()`，列 blocks/cells/allocated/occ_x1000/empty/lt10/lt50/ge50/young/decommitted/active/hot/free，再打 total。
 - **所有权 / 错误 / 调用**：`--gc-block-census`（蕴含 gc-stats）。
 
-### `writeCounterLine` (`src/cli/zjs.zig:898`)
+### `writeCounterLine` (`src/cli/zjs.zig:867`)
 
 - **签名**：`noinline fn writeCounterLine(writer: *std.Io.Writer, parts: []const struct { []const u8, u64 }, suffix: []const u8) !void`。
 - **作用**：GC 面板共用的整数行格式化：把 `(label, u64)` 片段串成一行再加后缀，供 `gc_stats_snapshot.py` 解析。
 - **实现**：对 `parts` 逐段 `writer.print("{s}{d}", .{label, value})`，再 `writeAll(suffix)`。outlined 是为了在冷诊断行之间共享格式化，同时让每条调用点的 label/value/suffix 仍显式写出。
 - **所有权 / 错误 / 调用**：不分配。写失败上抛。`dumpGcBlockCensus` / `dumpGcGenerationStats` / `writeDoomedStateLine` 等。
 
-### `dumpGcGenerationStats` (`src/cli/zjs.zig:906`)
+### `dumpGcGenerationStats` (`src/cli/zjs.zig:875`)
 
 - **签名**：`fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Registry) !void`。
 - **作用**：分代计数、minor 暂停分位、barrier、增量 major。行形冻结给 `gc_stats_snapshot.py`。
 - **实现**：多行 `writeCounterLine`。`remembered without young` 是写屏障过火的观察点。`verify_minor` 关则打 unavailable。
 - **所有权 / 错误 / 调用**：`--gc-stats`。单测钉填充快照。
 
-### `dumpGcBlockHeapStats` (`src/cli/zjs.zig:1035`)
+### `dumpGcBlockHeapStats` (`src/cli/zjs.zig:1002`)
 
 - **签名**：`fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void`。
 - **作用**：superblock 提交/热复用/decommit/trim、析构计数。
 - **实现**：`plain-object destructor calls` 必须为 0（无 payload 的普通对象不该进析构）。
 - **所有权 / 错误 / 调用**：`--gc-stats`。
 
-### `dumpGcPhaseTotals` (`src/cli/zjs.zig:1095`)
+### `dumpGcPhaseTotals` (`src/cli/zjs.zig:1061`)
 
 - **签名**：`fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void`。
 - **作用**：增量 STW 子阶段 ns 与 begin/finish 对账残差。
 - **实现**：八字段主行保持给解析器；finish-init/tail 在对账行。
 - **所有权 / 错误 / 调用**：`--gc-stats`。
 
-### `dumpGcMarkFootprint` (`src/cli/zjs.zig:1136`)
+### `dumpGcMarkFootprint` (`src/cli/zjs.zig:1102`)
 
 - **签名**：`fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void`。
 - **作用**：`--gc-mark-footprint` 的 marked-set/storage 普查。未开普查时明确说没跑，避免全 0 被读成「什么都没标」。
 - **实现**：按 GcKind、MarkTraceClass、MarkStorageComponent、inline 上限槽打印。string 含 rope。storage = property+array+payload。
 - **所有权 / 错误 / 调用**：开普查会在每次 final remark 走整堆，Splay 分数会动。
 
-### `dumpGcStats` (`src/cli/zjs.zig:1221`)
+### `dumpGcStats` (`src/cli/zjs.zig:1187`)
 
 - **签名**：`fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engine.core.gc.Registry) !void`。
 - **作用**：收集次数、释放对象、live/peak、external 计价、weak/finalizer 队列。
 - **实现**：external 与 allocation_debt 分行，避免把 pacing 计数当 live。
 - **所有权 / 错误 / 调用**：`--gc-stats`。
 
-### `dumpAtomAuditStats` (`src/cli/zjs.zig:1262`)
+### `dumpAtomAuditStats` (`src/cli/zjs.zig:1228`)
 
 - **签名**：`fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void`。
 - **作用**：TGC S3 atom 边审计。
 - **实现**：`stale-edge` 必须 0；`shell-edge` 合法（WeakRef shell）。
 - **所有权 / 错误 / 调用**：`--gc-stats`。
 
-### `dumpGcDoomedState` (`src/cli/zjs.zig:1270`)
+### `dumpGcDoomedState` (`src/cli/zjs.zig:1236`)
 
 - **签名**：`fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void`。
 - **作用**：打印 doomed 队列快照，layer 为 `"endpoint"` 或 `"settled"`。
 - **实现**：`doomedStateSnapshot` + `writeDoomedStateLine`。
 - **所有权 / 错误 / 调用**：`--gc-gate-settle` 在 settle 前后各打一次。
 
-### `writeDoomedStateLine` (`src/cli/zjs.zig:1274`)
+### `writeDoomedStateLine` (`src/cli/zjs.zig:1240`)
 
 - **签名**：`fn writeDoomedStateLine( writer: *std.Io.Writer, layer: []const u8, state: engine.core.gc_trace_stw.DoomedStateSnapshot, ) !void`。
 - **作用**：固定字段顺序的 doomed 行。
 - **实现**：bool 打 true/false，计数经 `writeCounterLine`。单测钉混合 bool 与写失败。
 - **所有权 / 错误 / 调用**：`dumpGcDoomedState`。
 
-### `dumpGcPauses` (`src/cli/zjs.zig:1306`)
+### `dumpGcPauses` (`src/cli/zjs.zig:1272`)
 
 - **签名**：`fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) !void`。
 - **作用**：只报 **major** 暂停分位。空分布打 `major pauses none`，绝不打全 0。
 - **实现**：minors 另有 generation 行。混在一起会让 p50 变成 minor。
 - **所有权 / 错误 / 调用**：`--gc-stats`。
 
-### `dumpOpcodeProfile` (`src/cli/zjs.zig:1322`)
+### `dumpOpcodeProfile` (`src/cli/zjs.zig:1288`)
 
 - **签名**：`fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void`。
 - **作用**：人类可读 opcode 表（默认前 40；`ZJS_PROFILE_ALL=1` 打全部执行过的）。
-- **实现**：排序同 JSON。额外打印 `using` 子形式（D12：禁止聚合成一行）和 SemanticFamily rollup（生成聚合，不替代 per-form）。
+- **实现**：排序同 JSON。`not instrumented` 的判定与 `dumpPerfJsonOpcodeProfile` 共用 `profile_counters_uninstrumented`；`allocations` 改为无条件打真值，五行 `ic *` 已随 `ic_*` 计数一起删除。额外打印 `using` 子形式（D12：禁止聚合成一行）和 SemanticFamily rollup（生成聚合，不替代 per-form）。
 - **所有权 / 错误 / 调用**：`--profile-opcodes`。`getenv` 读 `ZJS_PROFILE_ALL`。
 
-### `setupV2OracleReportExitDump` (`src/cli/zjs.zig:1432`)
+### `setupV2OracleReportExitDump` (`src/cli/zjs.zig:1387`)
 
 - **签名**：`fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void`。
 - **作用**：若编译开了 oracle report 且环境变量 `ZJS_V2_ORACLE_REPORT` 非空非 `"0"`，注册 `atexit`。
 - **实现**：comptime 关掉则空。`atexit(writeV2OracleReportAtExit)`。
 - **所有权 / 错误 / 调用**：`main` 最先。atexit 返回值忽略。
 
-### `writeV2OracleReportAtExit` (`src/cli/zjs.zig:1439`)
+### `writeV2OracleReportAtExit` (`src/cli/zjs.zig:1394`)
 
 - **签名**：`fn writeV2OracleReportAtExit() callconv(.c) void`。
 - **作用**：进程退出时打编译器 oracle 报告。
 - **实现**：1 KiB 栈缓冲 `formatOracleReport`；空则回；否则 `debug.print`。
 - **所有权 / 错误 / 调用**：C atexit。不分配。
 
-### `opcodeProfileRowLessThan` (`src/cli/zjs.zig:1447`)
+### `opcodeProfileRowLessThan` (`src/cli/zjs.zig:1402`)
 
 - **签名**：`fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool`。
 - **作用**：按 nanos 降序、count 降序、opcode 升序。
 - **实现**：三键比较。
 - **所有权 / 错误 / 调用**：heap sort 回调。
 
-### `ensureOpcodeProfileNames` (`src/cli/zjs.zig:1453`)
+### `ensureOpcodeProfileNames` (`src/cli/zjs.zig:1408`)
 
 - **签名**：`fn ensureOpcodeProfileNames() void`。
 - **作用**：激活一次 opcode 名字表（即使当前没挂 profile）。
 - **实现**：`activateOpcodeProfile(null)` 再恢复 previous。
 - **所有权 / 错误 / 调用**：dump 前。
 
-### `takePendingRejectionOrException` (`src/cli/zjs.zig:1458`)
+### `takePendingRejectionOrException` (`src/cli/zjs.zig:1413`)
 
 - **签名**：`fn takePendingRejectionOrException(runtime: *Runtime) zjs.JSValue`。
 - **作用**：取出下一条待报的异常/rejection。
 - **实现**：`context.takePendingException()`（rejection 也走这条队列）。
 - **所有权 / 错误 / 调用**：调用方拥有返回值，打印后不再根上。
 
-### `printEvaluationError` (`src/cli/zjs.zig:1462`)
+### `printEvaluationError` (`src/cli/zjs.zig:1417`)
 
 - **签名**：`fn printEvaluationError(io: std.Io, runtime: *Runtime, err: anyerror) !void`。
 - **作用**：求值失败时打异常或 Zig error 名。
 - **实现**：有 exception/rejection 则 `printExceptionValue`；否则 `zjs: evaluation failed: {errorName}`。
 - **所有权 / 错误 / 调用**：include/eval catch。`exit(1)` 之前。
 
-### `printExceptionValue` (`src/cli/zjs.zig:1475`)
+### `printExceptionValue` (`src/cli/zjs.zig:1430`)
 
 - **签名**：`fn printExceptionValue(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSValue) !bool`。
 - **作用**：对象异常打 `formatException` + 可选 stack。
 - **实现**：非对象返回 false。空 header 打 `Error\n`。`formatExceptionStack` 若在取栈时又抛，clear 后当无栈。flush。
 - **所有权 / 错误 / 调用**：header/stack 用 runtime allocator，defer free。
 
-### `printUnhandledRejectionTo` (`src/cli/zjs.zig:1509`)
+### `printUnhandledRejectionTo` (`src/cli/zjs.zig:1464`)
 
 - **签名**：`fn printUnhandledRejectionTo(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSValue) !void`。
 - **作用**：一条「Possibly unhandled promise rejection:」报告。
 - **实现**：int/bool/undefined/null/string/object 分支；对象走 `printExceptionValue`。循环必须复用同一 writer。
 - **所有权 / 错误 / 调用**：对齐 qjs `js_std_promise_rejection_check`。
 
-### `printTypeErrorNotFunction` (`src/cli/zjs.zig:1530`)
+### `printTypeErrorNotFunction` (`src/cli/zjs.zig:1485`)
 
 - **签名**：`fn printTypeErrorNotFunction(io: std.Io, command: Command) !void`。
 - **作用**：eval 返回 `error.TypeError` 且 context 无异常时的固定文案（对照 qjs 某条报错形）。
 - **实现**：`TypeError: not a function\n    at <anonymous> ({path}:7:20)\n\n`。
 - **所有权 / 错误 / 调用**：仅这条冷路径。path 为文件或 `"<eval>"`。
 
-### `initOpcodeProfile` (`src/cli/zjs.zig:2024`)
+### `initOpcodeProfile` (`src/cli/zjs.zig:1973`)
 
 - **签名**：`fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void`。
 - **作用**：零初始化 profile，避免 18 KiB `.rodata` 的 `OpcodeProfile{}` 拷贝。
@@ -427,6 +413,6 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 
 ## 覆盖核对
 
-- 清单函数数: 53（`src/cli/cli_process.zig` 3 + `src/cli/zjs.zig` 50）
-- 本文标题覆盖: 53
+- 清单函数数: 51（`src/cli/cli_process.zig` 3 + `src/cli/zjs.zig` 48）
+- 本文标题覆盖: 51
 - 未覆盖: 无

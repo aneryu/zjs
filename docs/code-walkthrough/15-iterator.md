@@ -23,7 +23,7 @@
 - `IteratorZipRecord`：`{iterator, next}`。
 - `IteratorZipCompletion`：保存「原错误 + 已 take 的 JS 异常」，close 完再 restore，避免 close 覆盖 pending。
 - `IteratorZipHelperKind`：zip / zip_keyed。
-- `IteratorStep` / `IteratorStepResult` / `IteratorValueDone`：`{value, done}` 与带 result 对象的变体。
+- `IteratorStep` / `IteratorStepResult` / `IteratorValueDone`：`{value, done}` 与带 result 对象的变体（`IteratorStepResult` 只在 done 步填 `value`，见 `iteratorStepResult`）。
 - `IteratorPredicateKind`：every / find / for_each / some。
 - `IteratorHelperKind`：map=1 … zip_keyed=8，存在 helper 对象的 `iteratorKindSlot`。
 - `IteratorWrapKind`：Iterator.from 包装器的 next vs return。

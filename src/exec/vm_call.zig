@@ -564,7 +564,7 @@ pub noinline fn callMethod(
             const region_base = stack.len() - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
-            if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
+            if (inline_calls.resolveInlineTarget(global, receiver, method)) |target| {
                 req_out.* = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method };
                 return .inline_call;
             }
@@ -777,7 +777,7 @@ pub noinline fn apply(
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
 
-    if (inline_calls.resolveInlineTarget(ctx, global, this_value, func)) |target| {
+    if (inline_calls.resolveInlineTarget(global, this_value, func)) |target| {
         const final_len = try std.math.add(usize, region_base + 2, apply_args.len);
         const current_len = stack.len();
         if (final_len > current_len) {

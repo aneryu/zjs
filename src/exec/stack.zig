@@ -217,11 +217,10 @@ pub const Stack = struct {
         self.top_ptr += 1;
     }
 
-    pub fn pushOwned(self: *Stack, value: JSValue) !void {
-        try self.reserveAdditional(1);
-        self.top_ptr[0] = value;
-        self.top_ptr += 1;
-    }
+    /// Documentary alias of `push`: after the tracing-GC switch there is no
+    /// ownership transfer left to distinguish, so the call sites that still say
+    /// "this value is owned" run the same code.
+    pub const pushOwned = push;
 
     pub fn pushAssumeCapacity(self: *Stack, value: JSValue) void {
         std.debug.assert(self.len() < self.capacity);
@@ -229,11 +228,8 @@ pub const Stack = struct {
         self.top_ptr += 1;
     }
 
-    pub fn pushOwnedAssumeCapacity(self: *Stack, value: JSValue) void {
-        std.debug.assert(self.len() < self.capacity);
-        self.top_ptr[0] = value;
-        self.top_ptr += 1;
-    }
+    /// Documentary alias of `pushAssumeCapacity`; see `pushOwned`.
+    pub const pushOwnedAssumeCapacity = pushAssumeCapacity;
 
     pub fn pop(self: *Stack) !JSValue {
         if (self.top_ptr == self.values) return error.StackUnderflow;
@@ -246,10 +242,8 @@ pub const Stack = struct {
         return (self.top_ptr - 1)[0];
     }
 
-    pub fn peekBorrowed(self: Stack) ?JSValue {
-        if (self.top_ptr == self.values) return null;
-        return (self.top_ptr - 1)[0];
-    }
+    /// Documentary alias of `peek`; see `pushOwned`.
+    pub const peekBorrowed = peek;
 
     pub fn reserveAdditional(self: *Stack, additional: usize) !void {
         const live_len = self.len();

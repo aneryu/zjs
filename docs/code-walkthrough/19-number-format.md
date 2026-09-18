@@ -350,70 +350,70 @@ QuickJS `dtoa.c` / `dtoa.h` 的 Zig 移植。上游名字原样保留（`mpb*`�
 - **实现**：强制指数或 `E<=-6` 或 `E>E_max`：`outputDigits` 在第一位后插点，radix 10 用 `e`、2 幂小 shift 用 `p`（指数改 bit）、否则 `@`。`E<=0` 写 `0.`+前导零。否则整数部分 + 尾零。
 - **所有权 / 错误 / 调用**：长度相对 `buf_start`。
 
-### `jsAtodImpl` (`src/libs/number_format.zig:1154`)
+### `jsAtodImpl` (`src/libs/number_format.zig:1160`)
 
 - **签名**：`fn jsAtodImpl(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp_mem: *JSATODTempMem) f64`。
 - **作用**：字符串 → f64，对齐 `js_atod`。失败时返回 NaN 并把 `pnext` 退回 `p_start`（符号之后的起点），表示一个字符都没消费。
 - **实现**：可选符号。前缀 `0x/0o/0b`、遗留八进制（遇到 8/9 则退回十进制）。`Infinity`。然后按 `digits_per_limb` 攒 `cur_limb` 再 `mpbMul1Base`；超过 `atod_max_digits_table` 的 digit 只推进 `pos`（进 `expn_offset`）并 OR 进 `extra_digits` 当 sticky。小数点、`e/p/@` 指数（指数位数溢出记 `expn_overflow`，直接给 ±Inf 或 0）。`INT_ONLY` 不吃小数点与指数。数值组装分两臂：radix 是 2 的幂时用硬界 `expn1 >= 1024 + radix_bits` / `expn1 <= -1075` 提前判溢出，再 `roundToD(-expn)`；否则查 `max_exponent`/`min_exponent` 表判溢出，再 `mulPowRoundToD`；两臂都以 `buildFloat64` 收尾。`finishAtod` 贴符号并写 `pnext`。
-- **所有权 / 错误 / 调用**：不抛 Zig error；`parseNumber` 用 `pnext` 是否吃完整串判断。
+- **所有权 / 错误 / 调用**：不抛 Zig error；`parseNumber` 用 `pnext` 是否吃完整串判断。生产里唯一的调用方就是 `parseNumber`（radix 10、flags 0），`ACCEPT_UNDERSCORES` / `ACCEPT_BIN_OCT` / `ACCEPT_LEGACY_OCTAL` / `INT_ONLY` 与非 10 radix 的臂只被单测驱动，函数头注释已写明保留理由（忠实移植 + 嵌入者复用）。两处上游残留已清理：有效数字循环里跳过分隔符时补了 `p.len > 1` 守卫（与 1248/1330 对齐，否则打开 `ACCEPT_UNDERSCORES` 后 `"1_"` 会越界读 `p[1]`），以及两处外层已确定 `p[0] == '.'`、内层再判 `p[0] == sep` 的死 NaN 分支（`sep` 只可能是 `'_'` 或 256）已删。
 
-### `buildFloat64` (`src/libs/number_format.zig:1398`)
+### `buildFloat64` (`src/libs/number_format.zig:1396`)
 
 - **签名**：`fn buildFloat64(m: u64, e: i32) u64`。
 - **作用**：mantissa+指数 → IEEE 位（无符号位）。
 - **实现**：m=0 → 0；`e>1024` Inf；`e<-1073` 0；次正规右移；否则 `(e+1022)<<52 | (m & 52bit)`。
 - **所有权 / 错误 / 调用**：`jsAtodImpl` 尾。
 
-### `finishAtod` (`src/libs/number_format.zig:1408`)
+### `finishAtod` (`src/libs/number_format.zig:1406`)
 
 - **签名**：`fn finishAtod(a: u64, is_neg: i32, p: []const u8, pnext: *?[*]const u8) f64`。
 - **作用**：贴符号位、记录结束指针。
 - **实现**：`a |= is_neg<<63`；`pnext.* = p.ptr`。
 - **所有权 / 错误 / 调用**：atod 唯一出口之一。
 
-### `parseNumber` (`src/libs/number_format.zig:1419`)
+### `parseNumber` (`src/libs/number_format.zig:1417`)
 
 - **签名**：`pub fn parseNumber(bytes: []const u8) !f64`。
 - **作用**：引擎用的严格十进制解析：必须吃完整串。
 - **实现**：字面 `"NaN"` 直接 NaN。否则 `jsAtodImpl(..., 10, 0)`；`pnext` 对不上或结果 NaN → `InvalidCharacter`。
 - **所有权 / 错误 / 调用**：栈上 `JSATODTempMem`。`Number("12.5")` 等。`+Infinity` 由 atod 认。
 
-### `formatNumber` (`src/libs/number_format.zig:1433`)
+### `formatNumber` (`src/libs/number_format.zig:1431`)
 
 - **签名**：`pub fn formatNumber(buf: []u8, value: f64) ![]const u8`。
 - **作用**：默认 `ToString` 十进制。
 - **实现**：NaN/±Inf 返回静态切片。否则 FREE+EXP_AUTO 的 `jsDtoaImpl`。
 - **所有权 / 错误 / 调用**：返回 `buf[0..len]`。缓冲不够会越界——调用方应用 `radixMaxLen(10,…)`。
 
-### `formatInt32` (`src/libs/number_format.zig:1443`)
+### `formatInt32` (`src/libs/number_format.zig:1441`)
 
 - **签名**：`pub fn formatInt32(buf: []u8, value: i32) []const u8`。
 - **作用**：int32 十进制。
 - **实现**：`i32toaImpl`。
 - **所有权 / 错误 / 调用**：无 error。`buf` 至少 12 字节。
 
-### `formatInt64` (`src/libs/number_format.zig:1448`)
+### `formatInt64` (`src/libs/number_format.zig:1446`)
 
 - **签名**：`pub fn formatInt64(buf: []u8, value: i64) []const u8`。
 - **作用**：int64 十进制。
 - **实现**：`i64toaImpl`。
 - **所有权 / 错误 / 调用**：`buf` 至少 21 字节。
 
-### `radixMaxLen` (`src/libs/number_format.zig:1457`)
+### `radixMaxLen` (`src/libs/number_format.zig:1455`)
 
 - **签名**：`pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, flags: i32) !usize`。
 - **作用**：`formatRadix` 写入上限（含一点余量）。
 - **实现**：`jsDtoaMaxLenImpl+1`；负长度 `InvalidRadix`。
 - **所有权 / 错误 / 调用**：radix 2 非规格化会过千字节，不能猜。
 
-### `formatRadix` (`src/libs/number_format.zig:1466`)
+### `formatRadix` (`src/libs/number_format.zig:1464`)
 
 - **签名**：`pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, flags: i32) ![]const u8`。
 - **作用**：radix 2–36 的 `Number.prototype.toString`。
 - **实现**：缓冲 < `radixMaxLen` → `NoSpaceLeft`。`jsDtoaImpl`；`len>=buf.len` 再拒一次。
 - **所有权 / 错误 / 调用**：digit 生成与十进制同一套 js_dtoa。
 
-### `formatDtoaChecked` (`src/libs/number_format.zig:1474`)
+### `formatDtoaChecked` (`src/libs/number_format.zig:1472`)
 
 - **签名**：`pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]const u8`。
 - **作用**：带长度检查的十进制 dtoa（toFixed 等）。

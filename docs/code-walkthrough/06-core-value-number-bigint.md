@@ -13,63 +13,63 @@
 - **实现**：string输入先转换radix，再asStringBody；Latin1直接解析。其他情况用unwrap_wrappers=true追加文本，再转换radix，trimJsWhitespace后交给字节解析器。
 - **所有权 / 错误 / 调用**：UTF16字符串经过第一段radix转换后还会走回退再次转换radix。转换不运行完整用户ToString/ToNumber；临时列表defer释放，分配错误传播，rope展开可GC后panic。UTF8去空白后仍是字节，不是整段已解码码元。
 
-### `parseFloatValue` (`src/core/number.zig:40`)
+### `parseFloatValue` (`src/core/number.zig:39`)
 
 - **签名**：`pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64`。
 - **作用**：执行浮点前缀解析的core入口。
 - **实现**：string展开后Latin1直接解析；其他输入用bare appendValueString拆包装并输出文本，trimJsWhitespace后解析。
 - **所有权 / 错误 / 调用**：不调用用户toString/valueOf；Symbol按默认unsupported策略产生对象标签，通常解析为NaN，而不是在此显式TypeError。临时存储释放，转码错误传播。
 
-### `parseIntLatin1Bytes` (`src/core/number.zig:56`)
+### `parseIntLatin1Bytes` (`src/core/number.zig:54`)
 
 - **签名**：`pub fn parseIntLatin1Bytes(source: []const u8, initial_radix: i32) f64`。
 - **作用**：按radix解析Latin1文本的最长有效整数前缀。
 - **实现**：去前导空白和可选符号；radix0默认10，只识别0x切到16，显式16也剥0x；非0且不在2..36为NaN。逐ASCII数字/字母扫描至非法digit，u128累积溢出后改f64；十进制溢出后尝试parseFloat已消耗部分。
 - **所有权 / 错误 / 调用**：零消耗返回NaN；只有已消耗数字且结果为零、符号为负才返回负零。超u128的非十进制路径逐步舍入，十进制重解析失败保留此前累计值；无分配，不要求吃完整输入。
 
-### `parseFloatLatin1Bytes` (`src/core/number.zig:109`)
+### `parseFloatLatin1Bytes` (`src/core/number.zig:107`)
 
 - **签名**：`pub fn parseFloatLatin1Bytes(source: []const u8) f64`。
 - **作用**：扫描浮点十进制或Infinity前缀。
 - **实现**：无前导空白先试完整简单十进制；否则去前导空白和可选符号，Infinity前缀直接返回无穷；扫描整数、小数和指数，指数无数字则退到e之前，再尝试简单解析及std.parseFloat。
 - **所有权 / 错误 / 调用**：Infinity后允许剩余字符，空串/没有任何数字为NaN；不是Number式完整字符串解析，0x等文本会只消耗十进制前缀。无分配。
 
-### `parseSimpleDecimalFloat` (`src/core/number.zig:144`)
+### `parseSimpleDecimalFloat` (`src/core/number.zig:142`)
 
 - **签名**：`fn parseSimpleDecimalFloat(text: []const u8) ?f64`。
 - **作用**：尝试解析完整、无指数且最多15个数字的十进制文本。
 - **实现**：可选符号，累计整数与小数数字，scale记录小数位；尝试第16个数字时返回null，至少一数字且无剩余字符才成功，保留负零。
 - **所有权 / 错误 / 调用**：计数包括前导零和小数数字，不是15个有效数字。可接受.5和1.，不接受空白/指数/后缀；null表示外层需回退，无分配。
 
-### `numberValue` (`src/core/number.zig:178`)
+### `numberValue` (`src/core/number.zig:176`)
 
 - **签名**：`pub fn numberValue(value: core.JSValue) ?f64`。
 - **作用**：提取已有Number原语。
 - **实现**：int32转f64，float64返回载荷，其他null。
 - **所有权 / 错误 / 调用**：不拆Number对象或BigInt，不验证数值有限性；NaN/Infinity原样保留。
 
-### `toNumber` (`src/core/number.zig:184`)
+### `toNumber` (`src/core/number.zig:182`)
 
 - **签名**：`pub fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64`。
 - **作用**：执行core层有限的数值转换回退。
 - **实现**：Number直接返回，bool为0/1，null为0，undefined为NaN；其余通过unwrap_wrappers=true的bare文本转换，再parseJsNumber。
 - **所有权 / 错误 / 调用**：不是完整规范ToNumber：不调用用户valueOf/toString，不显式拒绝BigInt（可十进制文本转数），Symbol默认文本回退通常为NaN。分配/回退错误传播，临时列表defer释放。
 
-### `jsWhitespacePrefixLen` (`src/core/number.zig:201`)
+### `jsWhitespacePrefixLen` (`src/core/number.zig:199`)
 
 - **签名**：`fn jsWhitespacePrefixLen(bytes: []const u8) ?usize`。
 - **作用**：识别Latin1输入开头一个空白码元。
 - **实现**：空输入null，首字节09..0D、20或A0返回1，否则null。
 - **所有权 / 错误 / 调用**：只读一个字节，不识别多字节UTF8空白；与value_format中同名helper不同。
 
-### `toInt32` (`src/core/number.zig:209`)
+### `toInt32` (`src/core/number.zig:207`)
 
 - **签名**：`fn toInt32(number: f64) i32`。
 - **作用**：把f64按32位模数归约为有符号整数。
 - **实现**：零/NaN/无穷为0；floor(abs)模2^32，负数非零余数反向环绕，再将≥2^31部分减2^32后转换。
 - **所有权 / 错误 / 调用**：用于radix，不分配；按截断整数的模数处理，而非饱和截断到i32边界。
 
-### `trimLeadingJsWhitespace` (`src/core/number.zig:218`)
+### `trimLeadingJsWhitespace` (`src/core/number.zig:216`)
 
 - **签名**：`fn trimLeadingJsWhitespace(source: []const u8) []const u8`。
 - **作用**：借用剥去Latin1前导空白后的后缀。
@@ -293,52 +293,52 @@ GC 管理的堆 BigInt，桥接 `JSValue` 与 `libs/bigint.zig`。头注释对�
 
 - **签名**：`pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void`。
 - **作用**：将可取得的字符串body追加为带引号JSON文本。
-- **实现**：对局部value建立rootValues帧并activate/deactivate；asStringBody无结果时写空字符串，否则ensureFlat后按Latin1/UTF16分路。
+- **实现**：对局部value建立rootValues帧并activate/deactivate；asStringBody无结果时写空字符串，否则直接按 body 的 Latin1/UTF16 表示分路（String 恒为 flat，无需展平步骤）。
 - **所有权 / 错误 / 调用**：asStringBody也接受Symbol body，不能把该helper当作完整JSON.stringify的类型过滤；rope取body可分配并在展开失败时panic。缓冲区扩容错误传播，失败保留已追加前缀；root帧行为遵循运行时配置。
 
-### `appendJsonAtomName` (`src/core/json.zig:54`)
+### `appendJsonAtomName` (`src/core/json.zig:53`)
 
 - **签名**：`pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void`。
 - **作用**：将atom名字追加为带引号JSON属性键。
 - **实现**：tagged-int用10字节栈缓冲转十进制；普通名字缺失按空串。合法WTF8但非合法UTF8时逐码点处理，代理码点各自写成\uXXXX，其他码点走ASCII转义或UTF8；其余走逐字节转义。
 - **所有权 / 错误 / 调用**：不将WTF8中的相邻高低代理码点合并；无效WTF8也落入字节路径，不会由此拒绝。借用atom名字且不自行创建atom根，调用方保证寿命；扩容失败不回滚。
 
-### `appendEscapedJsonString` (`src/core/json.zig:85`)
+### `appendEscapedJsonString` (`src/core/json.zig:84`)
 
 - **签名**：`pub fn appendEscapedJsonString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void`。
 - **作用**：给ASCII/UTF8来源字节添加JSON引号与控制字符转义。
 - **实现**：追加双引号，逐字节调用appendEscapedJsonByte，再追加结束双引号。
 - **所有权 / 错误 / 调用**：高字节原样复制，不验证UTF8；合法编码由调用方保证。使用runtime allocator扩容，失败可留下未闭合前缀。
 
-### `appendEscapedJsonLatin1String` (`src/core/json.zig:93`)
+### `appendEscapedJsonLatin1String` (`src/core/json.zig:92`)
 
 - **签名**：`fn appendEscapedJsonLatin1String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void`。
 - **作用**：将Latin1码元转成带引号的UTF8 JSON文本。
 - **实现**：ASCII交给byte转义，0x80..0xff作为码点编码为两字节UTF8；首尾加引号。
 - **所有权 / 错误 / 调用**：借用输入，不追加NUL；分配错误传播，输出不回滚。
 
-### `appendEscapedJsonUtf16String` (`src/core/json.zig:105`)
+### `appendEscapedJsonUtf16String` (`src/core/json.zig:104`)
 
 - **签名**：`fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void`。
 - **作用**：将UTF16码元转成带引号的JSON文本。
 - **实现**：有效代理对合成码点输出四字节UTF8；落单高/低代理写\uXXXX；ASCII转义，其他BMP码元输出UTF8。
 - **所有权 / 错误 / 调用**：U+2028/U+2029不额外转义。借用输入，不追加NUL；分配失败可保留部分转义或UTF8序列。
 
-### `appendEscapedJsonByte` (`src/core/json.zig:131`)
+### `appendEscapedJsonByte` (`src/core/json.zig:130`)
 
 - **签名**：`fn appendEscapedJsonByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void`。
 - **作用**：追加单字节的JSON转义。
 - **实现**：双引号、反斜杠与退格/制表/换行/换页/回车使用短转义；其余0x00..0x1f写\u00xx，其他字节原样追加。
 - **所有权 / 错误 / 调用**：本身不包引号，斜杠不转义，高字节不转码。扩容错误传播。
 
-### `appendEscapedJsonUnit` (`src/core/json.zig:145`)
+### `appendEscapedJsonUnit` (`src/core/json.zig:144`)
 
 - **签名**：`fn appendEscapedJsonUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: anytype) !void`。
 - **作用**：追加反斜杠u及十六进制码元。
 - **实现**：转u64后使用hexPad最小宽度4，字母小写，再依次追加\u与数字。
 - **所有权 / 错误 / 调用**：当前调用为u8/u16，因此恰好四位；泛型接口本身不把大于0xffff的值截成四位。扩容失败可能只写入前缀。
 
-### `appendUtf8CodePoint` (`src/core/json.zig:152`)
+### `appendUtf8CodePoint` (`src/core/json.zig:151`)
 
 - **签名**：`fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void`。
 - **作用**：使用runtime allocator追加码点编码字节。

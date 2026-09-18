@@ -171,11 +171,12 @@ pub fn countJobArgs(ctx: *core.JSContext, args: []const core.JSValue) core.JSVal
 //     ...
 //
 // `endSharedTest` clears the pending exception slot, drains the
-// job queue, drops the global lexical environment (let / const
-// declarations from the previous test), and marks any user-added
-// global properties (`var x = ...`, `function f() {}`, ...) as
-// deleted so the next test sees a clean global beyond
-// `installHostGlobals`. Tests that mutate built-in objects (e.g.
+// job queue, nulls out `context.lexicals` (dropping the previous
+// test's let / const declarations), and then rebuilds the global's
+// property array and shape layout from the baseline snapshot taken
+// after `installHostGlobals` -- which is what removes any user-added
+// global (`var x = ...`, `function f() {}`, ...) rather than a
+// per-property delete pass. Tests that mutate built-in objects (e.g.
 // `Promise.resolve = ...`) or rely on freshly built closures
 // referencing the previous test's eval scope still need a fresh
 // `helpers.TestEngine.init` per call; the shared-engine pattern is
@@ -191,8 +192,8 @@ pub fn countJobArgs(ctx: *core.JSContext, args: []const core.JSValue) core.JSVal
 // continue to be leak-checked the usual way.
 //
 // Process exit (atexit, registered on first `sharedTestEngine()`)
-// restores the baseline, releases the snapshot's extra retains, then
-// destroys only the host-owned main context and the runtime. Leftover
+// frees the baseline snapshot's storage, then destroys only the
+// host-owned main context and the runtime. Leftover
 // `$262.createRealm()` children are cycle-collected there. Do not walk
 // `context_head` and `JSContext.destroy` them.
 
@@ -550,9 +551,6 @@ pub fn sharedTestEngine() *TestEngine {
             for (g.shape_ref.props()[0..g.shape_ref.prop_count], 0..) |prop, idx| {
                 shared_engine_baseline_shape_props.?[idx] = prop;
                 shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
-                if (prop.atom_id != core.atom.null_atom) {
-                    _ = prop.atom_id;
-                }
             }
         }
         _ = eng.runtime.runObjectCycleRemoval();
@@ -576,23 +574,23 @@ fn sharedEngineProcessTeardown() callconv(.c) void {
     deinitSharedTestEngine();
 }
 
-/// Process-exit teardown for the shared engine. Restores the baseline so
-/// extra globals drop, releases the snapshot's extra realm retains, then
-/// destroys only the host-owned main context. Leftover createRealm cycles
-/// are collected by `JSRuntime.deinit`; extra `JSContext.destroy` on those
-/// children is the undercount that trips `visitRealm`.
+/// Process-exit teardown for the shared engine. Frees the baseline snapshot's
+/// page-allocator storage, then destroys only the host-owned main context.
+/// Leftover createRealm cycles are collected by `JSRuntime.deinit`; extra
+/// `JSContext.destroy` on those children is the undercount that trips
+/// `visitRealm`.
 pub fn deinitSharedTestEngine() void {
     const eng = if (shared_engine_storage) |*e| e else return;
-    // Last `endSharedTest` already restored the baseline. Releasing the
-    // snapshot drops its untraced extra retains (auto_init on the context,
-    // data dups, var_ref value extras) so cycle GC can collect the host realm.
-    releaseSharedEngineBaselineSnapshot(eng.runtime);
+    // Last `endSharedTest` already restored the baseline; the snapshot itself
+    // is now only page-allocator storage (var refs, properties, shape props),
+    // so releasing it just frees those arrays before the engine goes away.
+    releaseSharedEngineBaselineSnapshot();
     var owned = eng.*;
     shared_engine_storage = null;
     owned.deinit();
 }
 
-fn releaseSharedEngineBaselineSnapshot(_: *core.JSRuntime) void {
+fn releaseSharedEngineBaselineSnapshot() void {
     if (shared_engine_baseline_var_refs) |var_refs| {
         std.heap.page_allocator.free(var_refs);
         shared_engine_baseline_var_refs = null;
@@ -602,7 +600,6 @@ fn releaseSharedEngineBaselineSnapshot(_: *core.JSRuntime) void {
         shared_engine_baseline_properties = null;
     }
     if (shared_engine_baseline_shape_props) |baseline_shape_props| {
-        for (baseline_shape_props) |_| {}
         std.heap.page_allocator.free(baseline_shape_props);
         shared_engine_baseline_shape_props = null;
     }
@@ -696,9 +693,7 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
         // Reset global lexical bindings (let / const) so the next
         // test can re-declare any name without triggering a
         // redeclaration SyntaxError.
-        if (eng.context.lexicals) |_| {
-            eng.context.lexicals = null;
-        }
+        eng.context.lexicals = null;
         // Suppress allocation-triggered GC for the whole property restore.
         // Restoring slots and shape flags is a multi-step swap that passes
         // through transient states where a slot's arm and the live shape's

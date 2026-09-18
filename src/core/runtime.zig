@@ -1735,7 +1735,6 @@ pub const JSRuntime = struct {
         const backtrace_capacity = self.backtrace_capacity;
         self.backtrace_frames = &.{};
         self.backtrace_capacity = 0;
-        for (backtrace_frames) |_| {}
         if (backtrace_capacity != 0) {
             self.memory.free(context_mod.BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
         }
@@ -3781,12 +3780,6 @@ pub const JSRuntime = struct {
         self.gc.reportExternalAllocUntracked(bytes);
     }
 
-    /// Legacy raw live-ledger decrement. Releasing a tracked allocation must
-    /// use the `ExternalMemoryToken` returned by `reportExternalAlloc`.
-    pub fn reportExternalFree(self: *JSRuntime, bytes: usize) void {
-        self.gc.reportExternalFree(bytes);
-    }
-
     pub fn reportExternalFreeUntracked(self: *JSRuntime, bytes: usize) void {
         self.gc.reportExternalFreeUntracked(bytes);
     }
@@ -4144,8 +4137,9 @@ pub const JSRuntime = struct {
         return created;
     }
 
-    /// Return a borrowed cached string for a two-code-unit sequence. Callers
-    /// that return the value must `dup` it, matching `singleByteString`.
+    /// Return a borrowed cached string for a two-code-unit sequence. The cache
+    /// slot is a root, so -- as with `singleByteString` -- returning the value
+    /// takes no per-caller retain.
     pub fn recentTwoUnitString(self: *JSRuntime, first: u16, second: u16) !*string.String {
         if (self.recent_two_unit_string) |cached| {
             if (cached.first == first and cached.second == second) return cached.string;
@@ -4160,8 +4154,8 @@ pub const JSRuntime = struct {
         return created;
     }
 
-    /// Return a borrowed cached string for a recently materialized atom.
-    /// Callers that return the value must `dup` it.
+    /// Return a borrowed cached string for a recently materialized atom. The
+    /// cache slot is a root; there is no per-caller retain to take.
     pub fn recentAtomString(self: *JSRuntime, atom_id: atom.Atom, bytes: []const u8) !*string.String {
         for (self.recent_atom_strings) |slot| {
             if (slot) |cached| {
@@ -4182,15 +4176,15 @@ pub const JSRuntime = struct {
         return created;
     }
 
-    /// Return a borrowed cached uppercase `%XX` string for a byte. Callers
-    /// that return the value must `dup` it.
+    /// Return a borrowed cached decimal string ("0".."255") for a byte. The
+    /// cache slot is a root; there is no per-caller retain to take.
     pub fn smallIntString(self: *JSRuntime, value: u8) !*string.String {
         if (self.small_int_strings[value]) |s| return s;
         var buf: [4]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
         const s = try string.String.createLatin1(self, text);
-        // The cache owns the string's initial reference and releases it in
-        // JSRuntime.destroy; callers receive a borrowed pointer.
+        // The slot roots the string for the runtime's lifetime and is simply
+        // nulled at teardown; callers receive a borrowed pointer.
         self.small_int_strings[value] = s;
         return s;
     }

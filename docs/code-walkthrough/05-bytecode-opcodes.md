@@ -269,15 +269,15 @@
 - **所有权 / 错误 / 调用**：按值收 `Ledger` 的纯加法，不分配、无 error set。只在 comptime 用：`bytecode.zig:953` 断言账本覆盖整个 8 位 id 空间、`:2684` 断言总数没漂到 256 以外。
 
 
-### `opcode.physical.aliasOf` (`src/bytecode.zig:1027`)
+### `opcode.physical.aliasOf` (`src/bytecode.zig:1032`)
 
 - **签名**：`pub fn aliasOf(op_id: u8) ?@import("opcode_logical.zig").LogicalOpcode`。
 - **作用**：可执行别名：direct id 仍解码但编码器已改写 carrier。
 - **实现**：扫 `executable_aliases`（当前空：C0/C1-1 窗口已关）。
-- **所有权 / 错误 / 调用**：`inline for` 扫 `executable_aliases`（当前为空表），返回按值的可选 form，不分配、无 error set。树内唯一非测试调用点是 `bytecode.zig:2095`——comptime 指纹哈希把别名一并折进 `fingerprint`；另有 `:2646`/`:2662` 两处「窗口已关」的单测。空表意味着今天它恒返回 null。
+- **所有权 / 错误 / 调用**：`inline for` 扫 `executable_aliases`（当前为空表），返回按值的可选 form，不分配、无 error set。空表意味着今天它恒返回 null，但函数与表都**保留**：comptime join 的 late-encoding / lowered-direct 两条不变量各遍历一次 `executable_aliases`，decode 指纹哈希又把别名折进 `fingerprint`，删掉会同时改指纹并丢两条不变量——源码注释已写明这一点。另有两处「窗口已关」的单测。
 
 
-### `opcode.decode.loweredDirectIdOf` (`src/bytecode.zig:1512`)
+### `opcode.decode.loweredDirectIdOf` (`src/bytecode.zig:1517`)
 
 - **签名**：`pub fn loweredDirectIdOf(comptime value: u16) ?u8`。
 - **作用**：carrier-plane form 的 lowered-direct 物理字节，没有则 null。
@@ -285,7 +285,7 @@
 - **所有权 / 错误 / 调用**：编译期。
 
 
-### `opcode.decode.nameEncodedOperand` (`src/bytecode.zig:1618`)
+### `opcode.decode.nameEncodedOperand` (`src/bytecode.zig:1623`)
 
 - **签名**：`fn nameEncodedOperand(name: []const u8) ?i33`。
 - **作用**：从 opcode 名抽出 burned-in 立即数（`get_loc2`→2，`push_minus1`→-1）。
@@ -293,7 +293,7 @@
 - **所有权 / 错误 / 调用**：comptime 与 layout_table 交叉核对，防止 legacy_embedded 写错 base_value。
 
 
-### `opcode.decode.FormRow.isClaimed` (`src/bytecode.zig:1675`)
+### `opcode.decode.FormRow.isClaimed` (`src/bytecode.zig:1680`)
 
 - **签名**：`pub inline fn isClaimed(self: FormRow) bool`。
 - **作用**：flags 的 claimed 位。
@@ -301,7 +301,7 @@
 - **所有权 / 错误 / 调用**：headerAt 拒绝未占用 id。
 
 
-### `opcode.decode.FormRow.isDynamic` (`src/bytecode.zig:1678`)
+### `opcode.decode.FormRow.isDynamic` (`src/bytecode.zig:1683`)
 
 - **签名**：`pub inline fn isDynamic(self: FormRow) bool`。
 - **作用**：该 form 的栈效应是否动态。
@@ -309,7 +309,7 @@
 - **所有权 / 错误 / 调用**：stackEffect 快路径。
 
 
-### `opcode.decode.FormRow.hasAtom` (`src/bytecode.zig:1681`)
+### `opcode.decode.FormRow.hasAtom` (`src/bytecode.zig:1686`)
 
 - **签名**：`pub inline fn hasAtom(self: FormRow) bool`。
 - **作用**：是否有 atom 操作数（且在 payload 偏移 0）。
@@ -317,7 +317,7 @@
 - **所有权 / 错误 / 调用**：parser 域的 ledger 消歧直接测这一位（`headerAtParser` 写 `trow.flags & FormRow.atom_bit`，`bytecode.zig:1894`），访问器本身的调用方是 `compiler/cfg.zig` 的 comptime 对账（`:890`、`:898`、`:910`）与 `:1610` 的 `TempInstruction` 重建。
 
 
-### `opcode.decode.FormRow.hasLabel` (`src/bytecode.zig:1684`)
+### `opcode.decode.FormRow.hasLabel` (`src/bytecode.zig:1689`)
 
 - **签名**：`pub inline fn hasLabel(self: FormRow) bool`。
 - **作用**：是否有 label 操作数。
@@ -325,15 +325,7 @@
 - **所有权 / 错误 / 调用**：唯一调用方 `compiler/cfg.zig:1611`（用同一行重建 `TempInstruction.has_label`）；label_bit 的「整类拒绝」用途走的是 `Header.hasLabel`（`resolve_labels.zig:372`）。
 
 
-### `opcode.decode.FormRow.indexWidth` (`src/bytecode.zig:1687`)
-
-- **签名**：`pub inline fn indexWidth(self: FormRow) u8`。
-- **作用**：前导索引操作数宽度 0/1/2。
-- **实现**：flags>>3 & 3。
-- **所有权 / 错误 / 调用**：FormRow 这一支今天没有调用方；缩短匹配器读 pc+1 走的是同名的 `Header.indexWidth`（`resolve_labels.zig:1156`、`:1252`），位段定义共用。
-
-
-### `opcode.decode.domainRowFor` (`src/bytecode.zig:1781`)
+### `opcode.decode.domainRowFor` (`src/bytecode.zig:1783`)
 
 - **签名**：`fn domainRowFor(index: u16, reject: bool) DomainRow`。
 - **作用**：把 FormRow 收成 DomainRow；reject 或未 claimed 则 size=0。
@@ -341,7 +333,7 @@
 - **所有权 / 错误 / 调用**：生成 phase1/parser 物理-id 表。
 
 
-### `opcode.decode.headerAtParser` (`src/bytecode.zig:1875`)
+### `opcode.decode.headerAtParser` (`src/bytecode.zig:1877`)
 
 - **签名**：`pub inline fn headerAtParser( code: []const u8, atoms_ledger: []const u32, pc: u32, atom_index: u32, ) Error!Header`。
 - **作用**：parser 混合流解码：overlap 字节可能是 temp 也可能是已选短指令，用 atom ledger 消歧。
@@ -349,7 +341,7 @@
 - **所有权 / 错误 / 调用**：不分配。Builder/CFG 走混合流时用，签名比 `headerAt` 多 ledger。
 
 
-### `opcode.decode.headerAtPhase1` (`src/bytecode.zig:1918`)
+### `opcode.decode.headerAtPhase1` (`src/bytecode.zig:1920`)
 
 - **签名**：`pub inline fn headerAtPhase1( code: []const u8, atoms_ledger: []const u32, pc: u32, atom_index: u32, ) Error!Header`。
 - **作用**：严格 phase-1：overlap 永远是 temp；带 atom 的指令必须匹配 ledger 游标。
@@ -357,7 +349,7 @@
 - **所有权 / 错误 / 调用**：匹配成功即授权调用方消费该 ledger 项。
 
 
-### `opcode.decode.shortSelectionOf` (`src/bytecode.zig:1953`)
+### `opcode.decode.shortSelectionOf` (`src/bytecode.zig:1955`)
 
 - **签名**：`pub fn shortSelectionOf(comptime wide: logical.LogicalOpcode) ShortSelection`。
 - **作用**：comptime：某 wide form 的缩短阶梯（burned 0..3 与 u8 变体）。
@@ -365,7 +357,7 @@
 - **所有权 / 错误 / 调用**：resolve_labels 容量预计算与发射共用 `short_selection_table`。
 
 
-### `opcode.decode.selectJumpForm` (`src/bytecode.zig:2041`)
+### `opcode.decode.selectJumpForm` (`src/bytecode.zig:2043`)
 
 - **签名**：`pub inline fn selectJumpForm( wide: logical.LogicalOpcode, rung: enum { narrow, medium }, ) ?logical.LogicalOpcode`。
 - **作用**：跳转放松：同一 family 的 1 字节或 2 字节 label 形式。
@@ -373,7 +365,7 @@
 - **所有权 / 错误 / 调用**：inline。
 
 
-### `opcode.decode.selectPushIntForm` (`src/bytecode.zig:2072`)
+### `opcode.decode.selectPushIntForm` (`src/bytecode.zig:2074`)
 
 - **签名**：`pub inline fn selectPushIntForm(value: i32) ?logical.LogicalOpcode`。
 - **作用**：小整数 push：值为 -1..7 时选 burned 形式。
@@ -381,7 +373,7 @@
 - **所有权 / 错误 / 调用**：inline。
 
 
-### `opcode.decode.finalEncodingOf` (`src/bytecode.zig:2118`)
+### `opcode.decode.finalEncodingOf` (`src/bytecode.zig:2120`)
 
 - **签名**：`pub fn finalEncodingOf(comptime form: logical.LogicalOpcode) Encoding`。
 - **作用**：最终写手的唯一答案：direct id 还是 `{carrier, tag}`。
@@ -389,7 +381,7 @@
 - **所有权 / 错误 / 调用**：comptime per form，容量侧与发射侧不得各写一套。
 
 
-### `opcode.decode.selectSlotShortForm` (`src/bytecode.zig:2152`)
+### `opcode.decode.selectSlotShortForm` (`src/bytecode.zig:2154`)
 
 - **签名**：`pub inline fn selectSlotShortForm( wide: logical.LogicalOpcode, idx: u16, ) ?logical.LogicalOpcode`。
 - **作用**：槽/argc 缩短：idx<4 用 burned，<256 用 byte，否则保持 wide。
@@ -397,7 +389,7 @@
 - **所有权 / 错误 / 调用**：inline。与 `sizeOfForm` 组成合同 3 的单一计划。
 
 
-### `opcode.decode.sizeOfForm` (`src/bytecode.zig:2169`)
+### `opcode.decode.sizeOfForm` (`src/bytecode.zig:2171`)
 
 - **签名**：`pub inline fn sizeOfForm(comptime form: logical.LogicalOpcode) u8`。
 - **作用**：静态已知 form 的指令总长。
@@ -405,15 +397,7 @@
 - **所有权 / 错误 / 调用**：运行时匹配器用它算 next_pc。
 
 
-### `opcode.decode.burnedOperandOf` (`src/bytecode.zig:2179`)
-
-- **签名**：`pub inline fn burnedOperandOf( comptime form: logical.LogicalOpcode, comptime index: usize, ) comptime_int`。
-- **作用**：burned-in 槽的声明值（`get_loc0` 的槽是 0）。
-- **实现**：layout_table 上 offset==null 的 fixed。payload 槽 compileError。
-- **所有权 / 错误 / 调用**：全 comptime：不分配、不产生运行时代码，越界/操作数不是烧录值都是 `@compileError` 而不是 error。**树内目前没有调用方**（只有 `tools/lint/raw_access_allowlist.json` 的理由文本提到它），它与 `sizeOfForm` 是给运行时匹配器替换硬编码常量准备的接口。
-
-
-### `opcode.decode.operandOffsetOf` (`src/bytecode.zig:2206`)
+### `opcode.decode.operandOffsetOf` (`src/bytecode.zig:2188`)
 
 - **签名**：`pub inline fn operandOffsetOf( comptime form: logical.LogicalOpcode, comptime index: usize, comptime T: type, ) u8`。
 - **作用**：操作数相对 opcode 字节的偏移，并核对 T 的宽度。
@@ -421,7 +405,7 @@
 - **所有权 / 错误 / 调用**：全 comptime：不分配，宽度不符/操作数被烧录进 id 都是 `@compileError`。调用方 `compiler/resolve_labels.zig:270`、`:272`、`:282`，用来把 `goto` / `dyn_env_probe` 的 label 偏移从声明里导出来而不是写死。
 
 
-### `opcode.decode.layoutOf` (`src/bytecode.zig:2231`)
+### `opcode.decode.layoutOf` (`src/bytecode.zig:2213`)
 
 - **签名**：`pub fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout`。
 - **作用**：返回 form 的 `OperandLayout` 指针。
@@ -429,7 +413,7 @@
 - **所有权 / 错误 / 调用**：返回指向 comptime `layout_table` 的借用指针，不分配、无 error set；表项为 null 时是 `.?` unreachable（调用方必须先确认 form 有行）。调用方 `Header.layout`（`bytecode.zig:2299`），间接服务 `operandAt`、`targetOfLabel`、`validateKnownInstruction`、`printOperandsFromLayout`。
 
 
-### `opcode.decode.Header.hasAtom` (`src/bytecode.zig:2256`)
+### `opcode.decode.Header.hasAtom` (`src/bytecode.zig:2238`)
 
 - **签名**：`pub inline fn hasAtom(self: Header) bool`。
 - **作用**：Header 是否带 atom。
@@ -437,7 +421,7 @@
 - **所有权 / 错误 / 调用**：8 字节 Header 的访问器。
 
 
-### `opcode.decode.Header.hasLabel` (`src/bytecode.zig:2259`)
+### `opcode.decode.Header.hasLabel` (`src/bytecode.zig:2241`)
 
 - **签名**：`pub inline fn hasLabel(self: Header) bool`。
 - **作用**：Header 是否带 label。
@@ -445,7 +429,7 @@
 - **所有权 / 错误 / 调用**：读 Header 自带的 flags 字节，不分配、无 error set、不二次查表。调用方 `compiler/resolve_labels.zig:372`（拒绝未承认的 label 族）与 `compiler/cfg.zig:728`（`tempFromHeader`）。
 
 
-### `opcode.decode.Header.isLowered` (`src/bytecode.zig:2265`)
+### `opcode.decode.Header.isLowered` (`src/bytecode.zig:2247`)
 
 - **签名**：`pub inline fn isLowered(self: Header) bool`。
 - **作用**：是否 compiler-only（enum ≥300）。
@@ -453,7 +437,7 @@
 - **所有权 / 错误 / 调用**：纯比较（form 值 ≥300），不分配、无 error set。唯一调用方 `compiler/cfg.zig:726`（`tempFromHeader` 填 `is_temp`）。
 
 
-### `opcode.decode.Header.indexWidth` (`src/bytecode.zig:2269`)
+### `opcode.decode.Header.indexWidth` (`src/bytecode.zig:2251`)
 
 - **签名**：`pub inline fn indexWidth(self: Header) u8`。
 - **作用**：前导索引宽度。
@@ -461,7 +445,7 @@
 - **所有权 / 错误 / 调用**：从 flags 位段取 0/1/2，不分配、无 error set；返回 0 时调用方报 `error.InvalidBytecode`。调用方 `compiler/resolve_labels.zig:1156`（`readIndex`）、`:1252`（模式匹配复用同一个已解码 Header）。
 
 
-### `opcode.decode.Header.payload_pc` (`src/bytecode.zig:2273`)
+### `opcode.decode.Header.payload_pc` (`src/bytecode.zig:2255`)
 
 - **签名**：`pub inline fn payload_pc(self: Header) u32`。
 - **作用**：第一条操作数字节的 pc。
@@ -469,7 +453,7 @@
 - **所有权 / 错误 / 调用**：一次加法，不分配、无 error set；不做 pc 越界检查（由 `headerAt` 保证）。调用方 `operandAt`（`bytecode.zig:2390`）与 `targetOfLabel`（`:2466`）。
 
 
-### `opcode.decode.Header.next_pc` (`src/bytecode.zig:2277`)
+### `opcode.decode.Header.next_pc` (`src/bytecode.zig:2259`)
 
 - **签名**：`pub inline fn next_pc(self: Header) u32`。
 - **作用**：下一条指令 pc。
@@ -477,23 +461,7 @@
 - **所有权 / 错误 / 调用**：一次加法，不分配、无 error set。调用方 `pipeline_stack_size.compute`（`bytecode.zig:9829`）、`scanSmallInlineEligible`（`:12126`）、`classifyAsyncExecution`（`:12156`）、`dump.dumpArtifact`（`:12328`）。
 
 
-### `opcode.decode.Header.canonical` (`src/bytecode.zig:2283`)
-
-- **签名**：`pub inline fn canonical(self: Header) bool`。
-- **作用**：是否规范编码。今日恒 true（别名从未发射）。
-- **实现**：`_ = self; return true`。F0c 引入别名后才有意义。
-- **所有权 / 错误 / 调用**：当前恒返回 true（别名从不发射），不分配、无 error set。**生产代码无调用方**，唯一引用在 `bytecode.zig:2526` 的测试；按注释它要等 F0c 引入别名后才有实义。
-
-
-### `opcode.decode.Header.family` (`src/bytecode.zig:2294`)
-
-- **签名**：`pub inline fn family(self: Header) logical.SemanticFamily`。
-- **作用**：派生 SemanticFamily。
-- **实现**：`logical.familyOf`，故意做成访问器以免 decode 循环每次付 263 臂 switch。
-- **所有权 / 错误 / 调用**：调 `logical.familyOf`（263 臂 switch），不分配、无 error set。**树内完全没有调用方**（含测试）：Header 把 family 做成访问器而不是字段正是为了不在解码时付这个代价。
-
-
-### `opcode.decode.Header.layout` (`src/bytecode.zig:2298`)
+### `opcode.decode.Header.layout` (`src/bytecode.zig:2269`)
 
 - **签名**：`pub inline fn layout(self: Header) *const OperandLayout`。
 - **作用**：操作数布局。
@@ -501,7 +469,7 @@
 - **所有权 / 错误 / 调用**：转发给 `layoutOf`，返回借用指针，不分配、无 error set。调用方 `operandAt`（`bytecode.zig:2387`）、`targetOfLabel`（`:2461`）、`pipeline_stack_size.validateKnownInstruction`（`:9709`）、`dump.printOperandsFromLayout`（`:12350`）。
 
 
-### `opcode.decode.headerAt` (`src/bytecode.zig:2351`)
+### `opcode.decode.headerAt` (`src/bytecode.zig:2322`)
 
 - **签名**：`pub fn headerAt(comptime domain: Domain, code: []const u8, pc: u32) Error!Header`。
 - **作用**：按 Domain 解码一条指令：final / s3 / lowered。
@@ -509,7 +477,7 @@
 - **所有权 / 错误 / 调用**：`Error = InvalidOpcode | BytecodeOverflow`。stack-size、validator、dump、inline 扫描共用。
 
 
-### `opcode.decode.operandAt` (`src/bytecode.zig:2386`)
+### `opcode.decode.operandAt` (`src/bytecode.zig:2357`)
 
 - **签名**：`pub fn operandAt(h: Header, code: []const u8, index: usize, comptime T: type) Error!T`。
 - **作用**：读第 index 个操作数；burned 槽还原声明值。
@@ -517,7 +485,7 @@
 - **所有权 / 错误 / 调用**：调用方给 T。
 
 
-### `opcode.decode.dynamicShape` (`src/bytecode.zig:2417`)
+### `opcode.decode.dynamicShape` (`src/bytecode.zig:2388`)
 
 - **签名**：`fn dynamicShape(form: logical.LogicalOpcode) ?logical.DynamicStack.Shape`。
 - **作用**：form 的动态栈形状，常数则 null。
@@ -525,7 +493,7 @@
 - **所有权 / 错误 / 调用**：comptime 表的一次下标读，不分配、无 error set。`decode` 私有，唯一调用方 `bytecode.zig:2428`（`stackEffect` 的动态臂）；`SparseDecodeTestOracle.dynamicShape`（`:12464`）是拿来对账的另一份同名实现，不是调用方。
 
 
-### `opcode.decode.stackEffect` (`src/bytecode.zig:2425`)
+### `opcode.decode.stackEffect` (`src/bytecode.zig:2396`)
 
 - **签名**：`pub fn stackEffect(h: Header, code: []const u8) Error!StackEffect`。
 - **作用**：fall-through 栈效应。动态 form 求声明表达式。
@@ -533,7 +501,7 @@
 - **所有权 / 错误 / 调用**：非法 flags → InvalidOpcode。
 
 
-### `opcode.decode.targetOfLabel` (`src/bytecode.zig:2460`)
+### `opcode.decode.targetOfLabel` (`src/bytecode.zig:2431`)
 
 - **签名**：`pub fn targetOfLabel(h: Header, code: []const u8, index: usize) Error!u32`。
 - **作用**：把 label 操作数解成绝对目标 pc。
@@ -541,7 +509,7 @@
 - **所有权 / 错误 / 调用**：取代每个手写站点重复的相对跳转算术。
 
 
-### `opcode.decode.matchesFormAt` (`src/bytecode.zig:2474`)
+### `opcode.decode.matchesFormAt` (`src/bytecode.zig:2445`)
 
 - **签名**：`pub inline fn matchesFormAt(code: []const u8, pc: u32, form: logical.LogicalOpcode) bool`。
 - **作用**：热路径：一条字节比较是否 direct form。
@@ -610,6 +578,6 @@
 
 ## 覆盖核对
 
-- 清单函数数（本文件分组）: 71（`src/bytecode.zig` 64 + `src/opcode_logical.zig` 7）
-- 本文标题覆盖: 71
+- 清单函数数（本文件分组）: 67（`src/bytecode.zig` 60 + `src/opcode_logical.zig` 7）
+- 本文标题覆盖: 67
 - 未覆盖: 无

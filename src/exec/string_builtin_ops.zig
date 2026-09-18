@@ -719,23 +719,6 @@ fn thisObject(value: core.JSValue) ?*core.Object {
     return core.Object.fromHeader(header);
 }
 
-pub fn charAt(bytes: []const u8, index: usize) []const u8 {
-    if (index >= bytes.len) return "";
-    return bytes[index .. index + 1];
-}
-
-pub fn toUpperAscii(buf: []u8, bytes: []const u8) []u8 {
-    const n = @min(buf.len, bytes.len);
-    for (bytes[0..n], 0..) |byte, i| buf[i] = unicode.toUpperAscii(byte);
-    return buf[0..n];
-}
-
-/// QuickJS source map: narrow String wrapper constructor used by transitional
-/// `new_string_object` bytecode.
-pub fn construct(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    return constructWithPrototype(rt, args, null);
-}
-
 pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
     defer rooted_args_buffer.deinit(rt);
@@ -762,7 +745,6 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
     else
         try createStringValue(rt, "");
     const data = stringValueFromReceiver(data_value) orelse return error.TypeError;
-    try data.ensureFlat(rt);
 
     const object = try core.Object.create(rt, core.class.ids.string, prototype);
     object_value = object.value();
@@ -832,60 +814,6 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: 
     return iteratorResult(rt, global, out.value(), false);
 }
 
-/// Legacy primitive-only String.fromCharCode helper used by transitional bytecode.
-/// JS-visible native calls use the VM shared helper so object coercion and
-/// abrupt completion propagation match QuickJS.
-pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len == 2) {
-        const first_code = args[0].asInt32() orelse return error.TypeError;
-        const second_code = args[1].asInt32() orelse return error.TypeError;
-        const first: u16 = @intCast(@as(u32, @bitCast(first_code)) & 0xffff);
-        const second: u16 = @intCast(@as(u32, @bitCast(second_code)) & 0xffff);
-        const cached = try rt.recentTwoUnitString(first, second);
-        return cached.value();
-    }
-    if (args.len == 1) {
-        const code = args[0].asInt32() orelse return error.TypeError;
-        const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-        if (unit <= 0xff) return (try rt.singleByteString(@intCast(unit))).value();
-    }
-
-    // Most call sites pass 1-2 code points (notably the `String.fromCharCode(H, L)`
-    // surrogate-pair pattern that drives URI sweeps), so keep the
-    // working buffer on the stack.
-    var stack_buf: [16]u16 = undefined;
-    var heap_buf: []u16 = &.{};
-    defer if (heap_buf.len != 0) rt.memory.free(u16, heap_buf);
-    const units: []u16 = if (args.len <= stack_buf.len)
-        stack_buf[0..args.len]
-    else blk: {
-        heap_buf = try rt.memory.alloc(u16, args.len);
-        break :blk heap_buf;
-    };
-    for (args, 0..) |value, i| {
-        const code = value.asInt32() orelse return error.TypeError;
-        units[i] = @intCast(@as(u32, @bitCast(code)) & 0xffff);
-    }
-    const string = try core.string.String.createUtf16(rt, units);
-    return string.value();
-}
-
-pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
-    for (args) |value| {
-        if (value.isSymbol()) return error.TypeError;
-        const number = try value_ops.toIntegerOrInfinity(rt, value);
-        if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
-            return error.RangeError;
-        }
-        const code_point: u32 = @intFromFloat(number);
-        try unicode.appendUtf16CodePoint(rt.memory.allocator, &units, @intCast(code_point));
-    }
-    const string = try core.string.String.createUtf16(rt, units.items);
-    return string.value();
-}
-
 /// QuickJS source map: narrow charAt helper used by transitional
 /// `string_char_at` bytecode.
 pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: core.JSValue) !core.JSValue {
@@ -931,62 +859,22 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
     defer bytes.deinit(rt.memory.allocator);
     try appendStringReceiverBytes(rt, &bytes, receiver);
 
+    // Every id handled above returns before this point, so the remaining
+    // reachable set is exactly the bodies that still live in this file. The
+    // concat / AnnexB-html / substr ids never arrive: their records dispatch
+    // to `string_ops` (`stringConcat` / `stringHtmlMethod` / `stringSubstr`),
+    // and `encodePrototypeMethodId` has no record for the html and substr ids
+    // at all, so `callStringBody` rejects them before this switch.
     return switch (id) {
-        1 => unreachable,
-        2 => unreachable,
-        3 => unreachable,
-        4 => unreachable,
-        5 => unreachable,
-        6 => unreachable,
-        7 => unreachable,
-        8 => unreachable,
-        9 => {
-            if (args.len != 0) return error.TypeError;
-            return createStringValue(rt, bytes.items);
-        },
-        10 => concat(rt, bytes.items, args),
-        11 => htmlWithAttribute(rt, bytes.items, "a", "name", args),
-        12 => htmlWrap(rt, bytes.items, "big"),
-        13 => htmlWrap(rt, bytes.items, "blink"),
-        14 => htmlWrap(rt, bytes.items, "b"),
-        15 => htmlWrap(rt, bytes.items, "tt"),
-        16 => htmlWithAttribute(rt, bytes.items, "font", "color", args),
-        17 => htmlWithAttribute(rt, bytes.items, "font", "size", args),
-        18 => htmlWrap(rt, bytes.items, "i"),
-        19 => htmlWithAttribute(rt, bytes.items, "a", "href", args),
-        20 => htmlWrap(rt, bytes.items, "small"),
-        21 => unreachable,
-        22 => unreachable,
-        23 => htmlWrap(rt, bytes.items, "strike"),
-        24 => htmlWrap(rt, bytes.items, "sub"),
-        25 => substr(rt, bytes.items, args),
-        26 => htmlWrap(rt, bytes.items, "sup"),
-        legacy_split_method_id => unreachable,
-        28 => unreachable,
-        29 => unreachable,
-        30 => unreachable,
-        31 => unreachable,
-        32 => unreachable,
-        33 => repeat(rt, bytes.items, args),
         34 => pad(rt, bytes.items, args, .start),
         35 => pad(rt, bytes.items, args, .end),
         36 => localeCompare(rt, bytes.items, args),
         legacy_normalize_method_id => normalize(rt, bytes.items, args),
-        38 => unreachable,
-        39 => unreachable,
         legacy_search_method_id => search(rt, bytes.items, args),
         legacy_match_method_id => match(rt, bytes.items, args),
         legacy_replace_all_method_id => replaceAll(rt, bytes.items, args),
         else => error.TypeError,
     };
-}
-
-fn concat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.appendSlice(rt.memory.allocator, bytes);
-    for (args) |arg| try appendValueString(rt, &out, arg);
-    return createStringValue(rt, out.items);
 }
 
 fn substring(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
@@ -1023,7 +911,6 @@ fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !co
 }
 
 fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode: TrimMode) !core.JSValue {
-    try string_value.ensureFlat(rt);
     var start: usize = 0;
     var end = string_value.len();
     if (mode == .start or mode == .both) {
@@ -1038,24 +925,41 @@ fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode:
     }
 }
 
+/// ToString the receiver for the non-string arms below. Reachable because
+/// `call_runtime`'s name-dispatch fallback forwards primitives (number,
+/// boolean, bigint, …) verbatim into `callStringBody`, i.e. without the
+/// `stringPrototypeMethod` coercion.
+fn coercedReceiverStringValue(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return createStringValue(rt, bytes.items);
+}
+
 fn isWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         return core.JSValue.boolean(isWellFormedString(string_value));
     }
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try appendStringReceiverBytes(rt, &bytes, receiver);
-    return core.JSValue.boolean(true);
+    // Scan the coerced text rather than assuming ToString() is well-formed.
+    // No allocation happens between here and the scan, so the fresh string
+    // needs no root frame.
+    const coerced = try coercedReceiverStringValue(rt, receiver);
+    const string_value = stringValueFromReceiver(coerced) orelse return error.TypeError;
+    return core.JSValue.boolean(isWellFormedString(string_value));
 }
 
 fn toWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         return toWellFormedString(rt, string_value);
     }
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try appendStringReceiverBytes(rt, &bytes, receiver);
-    return createStringValue(rt, bytes.items);
+    var coerced = try coercedReceiverStringValue(rt, receiver);
+    // `toWellFormedString` allocates, so the coerced string must stay rooted.
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &coerced }};
+    var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+    const string_value = stringValueFromReceiver(coerced) orelse return error.TypeError;
+    return toWellFormedString(rt, string_value);
 }
 
 fn isWellFormedString(string_value: *core.string.String) bool {
@@ -1074,7 +978,6 @@ fn isWellFormedString(string_value: *core.string.String) bool {
 }
 
 fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue {
-    try string_value.ensureFlat(rt);
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
@@ -1105,20 +1008,6 @@ fn isHighSurrogateUnit(unit: u16) bool {
 
 fn isLowSurrogateUnit(unit: u16) bool {
     return unicode.isLowSurrogateUnit(unit);
-}
-
-fn substr(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 1 or args.len > 2) return error.TypeError;
-    var start = try stringInteger(rt, args[0]);
-    const len_i64: i64 = if (args.len >= 2 and !args[1].isUndefined()) blk: {
-        const raw = try stringInteger(rt, args[1]);
-        break :blk if (raw <= 0) 0 else raw;
-    } else @intCast(bytes.len);
-    const total: i64 = @intCast(bytes.len);
-    if (start < 0) start = @max(total + start, 0);
-    start = @min(start, total);
-    const end = @min(start + len_i64, total);
-    return createStringValue(rt, bytes[@intCast(start)..@intCast(end)]);
 }
 
 /// Mirrors the non-RegExp core of QuickJS `js_string_split`
@@ -1209,7 +1098,6 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
     defer root_frame.deactivate(rt);
 
     if (stringValueFromReceiver(rooted_receiver)) |string_value| {
-        try string_value.ensureFlat(rt);
         const out = try core.Object.createArray(rt, null);
         out_value = out.value();
 
@@ -1379,100 +1267,6 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
     const string = try core.string.String.createUtf16(rt, &units);
     const value = string.value();
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
-}
-
-inline fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue {
-    return htmlTagged(rt, bytes, tag, null, &.{});
-}
-
-inline fn htmlWithAttribute(
-    rt: *core.JSRuntime,
-    bytes: []const u8,
-    tag: []const u8,
-    attr: []const u8,
-    args: []const core.JSValue,
-) !core.JSValue {
-    return htmlTagged(rt, bytes, tag, attr, args);
-}
-
-/// Leftover Annex B HTML document wrap. The two copies were 1898 / 3761 B
-/// leftover walks of the same `<tag>…</tag>` skeleton; comptime identity is
-/// only whether an optional `attr="…"` is inserted. Take that at runtime.
-/// Does not fold wrap through the attribute helper (that would inject
-/// `attr="undefined"`).
-noinline fn htmlTagged(
-    rt: *core.JSRuntime,
-    bytes: []const u8,
-    tag: []const u8,
-    attr: ?[]const u8,
-    args: []const core.JSValue,
-) !core.JSValue {
-    var attr_bytes = std.ArrayList(u8).empty;
-    defer attr_bytes.deinit(rt.memory.allocator);
-    if (attr != null) {
-        if (args.len > 1) return error.TypeError;
-        if (args.len >= 1)
-            try appendValueString(rt, &attr_bytes, args[0])
-        else
-            try attr_bytes.appendSlice(rt.memory.allocator, "undefined");
-    }
-
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.append(rt.memory.allocator, '<');
-    try out.appendSlice(rt.memory.allocator, tag);
-    if (attr) |attr_name| {
-        try out.append(rt.memory.allocator, ' ');
-        try out.appendSlice(rt.memory.allocator, attr_name);
-        try out.appendSlice(rt.memory.allocator, "=\"");
-        try appendEscapedHtmlAttribute(rt, &out, attr_bytes.items);
-        try out.appendSlice(rt.memory.allocator, "\">");
-    } else {
-        try out.append(rt.memory.allocator, '>');
-    }
-    try out.appendSlice(rt.memory.allocator, bytes);
-    try out.appendSlice(rt.memory.allocator, "</");
-    try out.appendSlice(rt.memory.allocator, tag);
-    try out.append(rt.memory.allocator, '>');
-    return createStringValue(rt, out.items);
-}
-
-fn appendEscapedHtmlAttribute(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8) !void {
-    for (bytes) |byte| {
-        if (byte == '"') {
-            try out.appendSlice(rt.memory.allocator, "&quot;");
-        } else {
-            try out.append(rt.memory.allocator, byte);
-        }
-    }
-}
-
-test "html wrap leftover optional attribute shares the document wrap" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const wrap = try htmlWrap(rt, "x", "big");
-    try std.testing.expect(wrap.asStringBody().?.eqlBytes("<big>x</big>"));
-
-    const empty = try htmlWrap(rt, "", "i");
-    try std.testing.expect(empty.asStringBody().?.eqlBytes("<i></i>"));
-
-    const quoted = try core.string.String.createUtf8(rt, "a\"b");
-    const attr = try htmlWithAttribute(rt, "x", "a", "name", &.{quoted.value()});
-    try std.testing.expect(attr.asStringBody().?.eqlBytes("<a name=\"a&quot;b\">x</a>"));
-
-    const missing = try htmlWithAttribute(rt, "x", "font", "color", &.{});
-    try std.testing.expect(missing.asStringBody().?.eqlBytes("<font color=\"undefined\">x</font>"));
-
-    const number_attr = try htmlWithAttribute(rt, "x", "font", "size", &.{core.JSValue.int32(7)});
-    try std.testing.expect(number_attr.asStringBody().?.eqlBytes("<font size=\"7\">x</font>"));
-
-    const extra_a = try core.string.String.createUtf8(rt, "a");
-    const extra_b = try core.string.String.createUtf8(rt, "b");
-    try std.testing.expectError(
-        error.TypeError,
-        htmlWithAttribute(rt, "x", "a", "href", &.{ extra_a.value(), extra_b.value() }),
-    );
 }
 
 fn trimStartAscii(bytes: []const u8) []const u8 {
@@ -1850,7 +1644,6 @@ fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
     // RangeError "invalid string length". Both messages are attached by the
     // string_ops dispatch wrapper (error.RangeError / error.InvalidLength).
     if (count < 0 or count > 2147483647) return error.RangeError;
-    try string_value.ensureFlat(rt);
     const unit_len = string_value.len();
     if (unit_len == 0 or count == 0) return createStringValue(rt, "");
     const repeat_count: usize = @intCast(count);

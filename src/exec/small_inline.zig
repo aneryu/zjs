@@ -33,7 +33,9 @@ pub const max_pc_map: usize = 64;
 pub var probe_prep: u64 = 0;
 pub var probe_take: u64 = 0;
 
-pub fn writeProbeFile() void {
+/// Print the inline-prep/take counters to stderr when `ZJS_INLINE_PROBE` is
+/// set. Writes no file.
+pub fn printProbe() void {
     // std.posix.getenv does not exist under zig 0.16 with libc linked;
     // std.c.getenv is the supported spelling (same fix as grok f32749f6).
     const raw = std.c.getenv("ZJS_INLINE_PROBE") orelse return;
@@ -216,8 +218,6 @@ fn setBorrowedRealm(fb: *FunctionBytecode, realm: ?*core.JSContext) void {
 pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
     const state = callerStateMut(fb) orelse return;
     setCallerState(fb, null);
-    var i: u8 = 0;
-    while (i < state.inlined_len) : (i += 1) {}
     setBorrowedRealm(fb, null);
     rt.memory.destroy(CallerState, state);
 }
@@ -227,10 +227,11 @@ fn destroyCallerStateOpaque(rt: *JSRuntime, fb_ptr: *anyopaque) void {
     destroyCallerState(rt, fb);
 }
 
-/// TGC S3 §2.2 edge H, the mirror of `destroyCallerState`'s atom releases:
-/// report the same ids to the tracer while the FunctionBytecode is being
-/// traced. Registered next to `small_inline_destroy` so a runtime that never
-/// built a CallerState pays nothing.
+/// TGC S3 §2.2 edge H: report the atom ids an `InlinedSite` holds to the
+/// tracer while the FunctionBytecode is being traced. (`destroyCallerState`
+/// has no mirror release — the tracer owns these edges outright.) Registered
+/// next to `small_inline_destroy` so a runtime that never built a CallerState
+/// pays nothing.
 fn traceCallerStateAtoms(
     rt: *JSRuntime,
     fb_ptr: *anyopaque,
@@ -759,7 +760,6 @@ fn rewriteBody(
 
     var starts: [max_code]usize = undefined;
     var start_len: usize = 0;
-    const src_start = pc;
     while (pc < src.len) {
         const size: usize = bytecode.opcode.sizeOf(src[pc]);
         if (size == 0 or pc + size > src.len) return null;
@@ -911,7 +911,6 @@ fn rewriteBody(
         }
         recordMap(&out, map_from, src_pc);
         emitted = si + 1;
-        _ = src_start;
     }
     old_to_new[src.len] = @intCast(out.len);
 

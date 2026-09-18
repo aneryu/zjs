@@ -233,11 +233,12 @@ fn runRegexp(allocator: std.mem.Allocator, iterations: usize, warmup: usize) !Be
     const bytecode = try regexp.compile(allocator, pattern, "");
     defer allocator.free(bytecode);
 
-    const alloc_count = regexp.allocCount(bytecode);
+    const compiled = regexp.Compiled{ .bytecode = bytecode };
+    const alloc_count = compiled.allocCount();
     if (alloc_count > regexp.small_exec_slots) return error.RegexpCaptureSlotsTooLarge;
     var capture_storage: [regexp.small_exec_slots]usize = undefined;
     const capture_slots = capture_storage[0..alloc_count];
-    const capture_count = regexp.captureCount(bytecode);
+    const capture_count = compiled.captureCount();
 
     const warmup_checksum = try regexpLoop(
         allocator,

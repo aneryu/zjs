@@ -388,7 +388,6 @@ pub const Frame = struct {
         account: *memory.MemoryAccount,
         arena: ?*runtime.VmStackArena,
         args: []const JSValue,
-        use_inline_storage: bool,
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
@@ -396,13 +395,13 @@ pub const Frame = struct {
 
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, windows.args);
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, windows.args);
             if (frame_arg_count > args.len) @memset(owned_args[args.len..], JSValue.undefinedValue());
             for (args, 0..) |arg, idx| owned_args[idx] = arg;
             self.args = owned_args;
         }
 
-        try self.initOriginalArgsSnapshot(account, args, use_inline_storage, need_original_snapshot, windows.original_args);
+        try self.initOriginalArgsSnapshot(account, args, need_original_snapshot, windows.original_args);
     }
 
     /// Move already-owned argument values (extracted from a torn-down
@@ -415,21 +414,20 @@ pub const Frame = struct {
         account: *memory.MemoryAccount,
         arena: ?*runtime.VmStackArena,
         args: []JSValue,
-        use_inline_storage: bool,
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
         self.actual_arg_count = @intCast(args.len);
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, windows.args);
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, windows.args);
             @memset(owned_args[args.len..], JSValue.undefinedValue());
             @memcpy(owned_args[0..args.len], args);
             @memset(args, JSValue.undefinedValue());
             self.args = owned_args;
         }
         if (args.len > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, self.args[0..args.len], use_inline_storage, true, windows.original_args);
+            try self.initOriginalArgsSnapshot(account, self.args[0..args.len], true, windows.original_args);
         }
     }
 
@@ -442,14 +440,13 @@ pub const Frame = struct {
         self: *Frame,
         account: *memory.MemoryAccount,
         args: []JSValue,
-        use_inline_storage: bool,
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
         self.actual_arg_count = @intCast(args.len);
         std.debug.assert(args.len >= @as(usize, @intCast(self.function.arg_count)));
         if (args.len > 0 and need_original_snapshot) {
-            try self.initOriginalArgsSnapshot(account, args, use_inline_storage, true, windows.original_args);
+            try self.initOriginalArgsSnapshot(account, args, true, windows.original_args);
         }
         self.args = args;
     }
@@ -459,7 +456,6 @@ pub const Frame = struct {
         account: *memory.MemoryAccount,
         arena: ?*runtime.VmStackArena,
         frame_arg_count: usize,
-        use_inline_storage: bool,
         window: ?[]JSValue,
     ) ![]JSValue {
         if (window) |values| {
@@ -469,7 +465,6 @@ pub const Frame = struct {
         if (arena) |stack_arena| {
             if (stack_arena.carve(account, frame_arg_count)) |arg_window| return arg_window;
         }
-        _ = use_inline_storage;
         return try self.allocOwnedStorage(account, frame_arg_count);
     }
 
@@ -477,7 +472,6 @@ pub const Frame = struct {
         self: *Frame,
         account: *memory.MemoryAccount,
         args: []const JSValue,
-        use_inline_storage: bool,
         need_original_snapshot: bool,
         window: ?[]JSValue,
     ) !void {
@@ -490,7 +484,6 @@ pub const Frame = struct {
             std.debug.assert(values.len == args.len);
             break :blk values;
         } else blk: {
-            _ = use_inline_storage;
             break :blk try self.allocOwnedStorage(account, args.len);
         };
         for (args, 0..) |arg, idx| original_args[idx] = arg;
@@ -643,7 +636,6 @@ pub const Frame = struct {
         self: *Frame,
         account: *memory.MemoryAccount,
         arena: ?*runtime.VmStackArena,
-        use_inline_storage: bool,
     ) !void {
         const count = self.function.openVarRefCount();
         if (self.open_var_refs.len != 0) {
@@ -651,7 +643,6 @@ pub const Frame = struct {
             return;
         }
         if (count == 0) return;
-        _ = use_inline_storage;
         const slots = blk: {
             if (arena) |stack_arena| {
                 if (stack_arena.carveTyped(account, ?*core.VarRef, count)) |window| break :blk window;
@@ -665,6 +656,10 @@ pub const Frame = struct {
         self.open_var_refs = slots;
     }
 
+    /// Test-only: production frames are pre-sized by the FunctionBytecode, so
+    /// nothing on the exec path grows a locals window. Kept (with
+    /// `growLocalsCapacity`) as the fixture entry point that the frame-storage
+    /// unit tests use to build and mutate synthetic frames.
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, index: usize, value: JSValue) !void {
         try growLocalsCapacity(account, self, index);
         self.locals[index] = value;
@@ -722,15 +717,13 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     // Legacy/synthetic bytecode may still request a sparse index; normal parser
     // output sizes var_refs once during frame construction like qjs.
     const old_len = frame.var_refs.len;
-    const borrowed_cells = frame.ownership.var_refs == .borrowed;
-    for (frame.var_refs, 0..) |cell, i| {
-        next[i] = if (borrowed_cells) cell else cell;
-    }
-    var filled: usize = old_len;
-    errdefer {
-        if (borrowed_cells) {}
-    }
-    while (filled < next_len) : (filled += 1) {
+    for (frame.var_refs, 0..) |cell, i| next[i] = cell;
+    // No rollback on a mid-loop failure: the cells created so far are already
+    // registered with the tracing GC and become plain unreachable garbage (the
+    // frame keeps its old `var_refs` until the whole growth succeeds). Freeing
+    // them by hand here would double-free them at the next sweep. Same
+    // discipline as `vm_call.initFrameVarRefs`'s creation loop.
+    for (old_len..next_len) |filled| {
         next[filled] = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
     }
     frame.var_refs = next;
@@ -740,6 +733,7 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     if (old_storage.len != 0 and old_storage_ownership == .owned) ctx.runtime.memory.free(core.JSValue, old_storage);
 }
 
+/// Test-only; see `Frame.setLocal`, its sole caller.
 fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize) !void {
     if (idx < frame.locals.len) return;
     const next_len = try std.math.add(usize, idx, 1);

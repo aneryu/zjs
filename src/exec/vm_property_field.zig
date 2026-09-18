@@ -196,7 +196,7 @@ pub noinline fn field(
             stack.setLen(top_index);
             const obj = receiver;
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
+                try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
@@ -228,7 +228,7 @@ pub noinline fn field(
                 return .done;
             }
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
+                try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
@@ -236,7 +236,6 @@ pub noinline fn field(
         },
         op.put_field => {
             const value = try stack.pop();
-            var value_consumed = false;
             const obj = try stack.pop();
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
             // Single-walk cold put (qjs OP_put_field's slow path is ONE call
@@ -256,15 +255,12 @@ pub noinline fn field(
                 // or rolled-back OOM) leaves it with the defer. The resolver
                 // below is still `!T` and consumes on its own OOM.
                 switch (receiver.setOrDefineOwnDataPropertyForPutFieldOwned(ctx.runtime, atom_id, value)) {
-                    .done => {
-                        value_consumed = true;
-                        return .done;
-                    },
+                    .done => return .done,
                     .slow => {},
                 }
             }
             _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-                try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
+                try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };

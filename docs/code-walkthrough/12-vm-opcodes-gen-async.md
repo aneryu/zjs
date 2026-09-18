@@ -136,35 +136,35 @@
 - **实现**：`opcode_pc = pc-1`。expanded：pop result_object，stop 则 save 在 **当前 pc**（即紧随的 `dup` 字节处），标 yield_star_suspended，返回该对象；否则（无 generator 或不 stop）压 `[undefined, 0]`。非展开：已存 iterator 则复用并可能 pop next_arg；否则 pop iterable → `iteratorForValue`。`iteratorStepResult`。done：清 stored iterator，push value，`.continue_loop`。否则 stop 则存 iterator、save 在 **opcode_pc**（下次再进 yield_star），返回 step.result；非 stop 压 undefined。
 - **所有权 / 错误 / 调用**：iterator 活在 generator payload。可再入 next。
 
-### `awaitValue` (`src/exec/vm_gen_async.zig:592`)
+### `awaitValue` (`src/exec/vm_gen_async.zig:590`)
 
 - **签名**：`pub noinline fn awaitValue( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, generator: ?*core.Object, suspend_on_module_await: bool, stop_on_yield: bool, catch_target: *?usize, ) HostError!Result`。
 - **作用**：服务 `op.await`。
 - **实现**：`awaitValueRaw` catch `handleAwaitError`。
 - **所有权 / 错误 / 调用**：分发。`suspend_on_module_await` / `stop_on_yield` 来自 L0。
 
-### `awaitValueRaw` (`src/exec/vm_gen_async.zig:612`)
+### `awaitValueRaw` (`src/exec/vm_gen_async.zig:610`)
 
 - **签名**：`fn awaitValueRaw( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, generator: ?*core.Object, suspend_on_module_await: bool, stop_on_yield: bool, catch_target: ?usize, ) HostError!Result`。
 - **作用**：await 体：raw 挂起 vs thenable vs Promise 结算。
 - **实现**：`awaitSuspendMode`。pop awaited。`.raw`：`suspendAwaitValue`（true）或把值压回 continue。非 Promise 对象：`awaitThenableValue` 或原值；`.settled` 才 suspend。Promise：`settlePendingPromiseReaction`；settled 且未完成则 `drainPendingPromiseJobs`；仍 pending 则 `awaitPendingPromise`。rejected → throw。否则 suspend 或 push 结果。
 - **所有权 / 错误 / 调用**：Promise 结果借自内部槽再 push。
 
-### `suspendAwaitValue` (`src/exec/vm_gen_async.zig:664`)
+### `suspendAwaitValue` (`src/exec/vm_gen_async.zig:662`)
 
 - **签名**：`fn suspendAwaitValue( ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object, suspend_on_await: bool, value: core.JSValue, catch_target: ?usize, ) !?Result`。
 - **作用**：把 await 变成 generator 挂起。
 - **实现**：开关关或无 generator → null。save，`suspend_kind=await_op`，started/just_yielded，`return_value=value`。
 - **所有权 / 错误 / 调用**：value 交给上层 Promise 反应。
 
-### `awaitSuspendMode` (`src/exec/vm_gen_async.zig:682`)
+### `awaitSuspendMode` (`src/exec/vm_gen_async.zig:680`)
 
 - **签名**：`fn awaitSuspendMode(function: *const bytecode.FunctionBytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode`。
 - **作用**：选 raw / none。
 - **实现**：模块或 async 函数且 `suspend_on_module_await` → raw。async 且 `stop_on_yield`（async generator 体）→ raw。否则 none。
 - **所有权 / 错误 / 调用**：队列机在 `async_generator.zig` 经 promise 反应恢复。
 
-### `closeIteratorForPendingError` (`src/exec/vm_gen_async.zig:693`)
+### `closeIteratorForPendingError` (`src/exec/vm_gen_async.zig:691`)
 
 - **签名**：`fn closeIteratorForPendingError( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, ) !void`。
 - **作用**：unwind 时关掉栈顶 for-of 迭代器；**for-await-of** 在 `iterator_get_value_done` 前的 await 拒绝**不得**从 unwind 关（qjs 16713 关掉 catch offset；只有 AsyncFromSyncIterator 反应关）。

@@ -55,7 +55,7 @@ pub const PromiseReactionPayload = struct {
 /// The common Job.realm preserves the registration context's interrupt poll.
 pub const AsyncResumePayload = struct {
     continuation: core.JSValue, // gc-slot: immutable; Job.initAsyncResume seals it before FIFO publication.
-    value: core.JSValue, // gc-slot: immutable; Job.traceChildEdges roots it until dequeue/deinit.
+    value: core.JSValue, // gc-slot: immutable; Job.traceRoots roots it until dequeue/deinit.
 };
 
 pub const PromiseThenablePhase = enum {
@@ -454,7 +454,6 @@ pub const Queue = struct {
         self.jobs = &.{};
         self.capacity = 0;
         self.head = 0;
-        self.reserved_entries = 0;
         for (jobs) |*job| job.deinit();
         if (capacity != 0) self.memory.free(Job, block[0..capacity]);
     }
@@ -857,9 +856,8 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 }
 
 // D1a size pins (2026-07-31): removing the obsolete symbol-root protocol
-// state must not silently regress. D1a's before-values were Job=128
-// Generic=96 Promise=24 Reaction=40 Thenable=104 DynImport=96
-// Finalization=40.
+// state must not silently regress. The current pins are the `pins` tuple
+// below; the D1a before-values it replaced are history, not live numbers.
 comptime {
     std.debug.assert(@sizeOf(core.JSValue) == 16);
     const pins = .{ 128, 96, 16, 40, 104, 88, 32 };

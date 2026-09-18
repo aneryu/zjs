@@ -4100,7 +4100,6 @@ test "original-args cold-state OOM does not retain copied references" {
     const result = exec_frame.initArgumentsBorrowedSlots(
         &rt.memory,
         &source_args,
-        false,
         true,
         .{ .original_args = &original_args },
     );
@@ -7238,7 +7237,6 @@ test "suspended generators retain one resident execution owner across resumes" {
     const generator = try property_ops.expectObject(value);
     const generator_function = generator.generatorFunctionBytecode() orelse return error.TypeError;
     try std.testing.expect(inline_calls.resolveInlineTarget(
-        js.context,
         global,
         core.JSValue.undefinedValue(),
         generator_function,
@@ -8680,11 +8678,11 @@ test "vm collection constructors use registered prototype methods" {
 test "finite number formatting keeps simple decimal fast path semantics" {
     var buffer: [64]u8 = undefined;
 
-    try std.testing.expectEqualStrings("12.5", try engine.exec.value_ops.formatFiniteNumber(&buffer, 12.5));
-    try std.testing.expectEqualStrings("-12.5", try engine.exec.value_ops.formatFiniteNumber(&buffer, -12.5));
-    try std.testing.expectEqualStrings("1", try engine.exec.value_ops.formatFiniteNumber(&buffer, 1.0));
-    try std.testing.expectEqualStrings("0.1", try engine.exec.value_ops.formatFiniteNumber(&buffer, 0.1));
-    try std.testing.expectEqualStrings("1e+21", try engine.exec.value_ops.formatFiniteNumber(&buffer, 1e21));
+    try std.testing.expectEqualStrings("12.5", try engine.core.value_format.formatFiniteNumber(&buffer, 12.5));
+    try std.testing.expectEqualStrings("-12.5", try engine.core.value_format.formatFiniteNumber(&buffer, -12.5));
+    try std.testing.expectEqualStrings("1", try engine.core.value_format.formatFiniteNumber(&buffer, 1.0));
+    try std.testing.expectEqualStrings("0.1", try engine.core.value_format.formatFiniteNumber(&buffer, 0.1));
+    try std.testing.expectEqualStrings("1e+21", try engine.core.value_format.formatFiniteNumber(&buffer, 1e21));
 }
 
 // ================== engine_smoke.zig ==================
@@ -10373,7 +10371,7 @@ test "module import-meta and eval-exception cycles are released by runtime cycle
     const module_name = try rt.internAtom("gc-module-payload-cycle.mjs");
     const back_key = try rt.internAtom("module");
     var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer pending.deinit(rt);
+    defer pending.deinit();
     const prepared = try ctx.modules.prepareFreshTarget(module_name, &pending);
     const record = prepared.record();
     const import_meta = try core.Object.create(rt, core.class.ids.object, null);
@@ -11845,7 +11843,7 @@ test "dynamic import loader mutates only the enqueue Realm registry after public
             const self: *@This() = @ptrCast(@alignCast(userdata orelse return error.ModuleNotFound));
             const name = ctx.runtime.internAtom("w1e-enqueue-realm-record") catch return error.OutOfMemory;
             var pending = core.module.PendingDefinition.init(&ctx.runtime.memory, &ctx.runtime.atoms);
-            defer pending.deinit(ctx.runtime);
+            defer pending.deinit();
             _ = ctx.modules.prepareFreshTarget(name, &pending) catch return error.OutOfMemory;
             self.saw_expected_realm = ctx == self.expected;
             self.active_registry_has_record = ctx.modules.find(name) != null;
@@ -23385,4 +23383,44 @@ test "print writes top-level strings raw including latin1 high bytes" {
     ,
         "ascii É { s: \"É\" }\n",
     );
+}
+
+test "all-cold fused pushes keep their leftover opcode" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // `(a | 0)` compiles to `push_0` + `or` and `(b >> 2)` to `push_2` + `sar`;
+    // resolve_labels fuses each pair's first half into a ONE-byte fused opcode
+    // whose handler re-enters the leftover `or` / `sar`.
+    _ = try js.eval(
+        \\globalThis.__coldFusedPushes = function (a, b) { return (a | 0) + (b >> 2); };
+    );
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__coldFusedPushes");
+    const function_value = try global.getProperty(key);
+    const function_object = try property_ops.expectObject(function_value);
+    const stored_bytecode = function_object.functionBytecode() orelse return error.InvalidFunctionBytecode;
+    const function = engine.exec.call_runtime.functionBytecodeFromValue(stored_bytecode) orelse
+        return error.InvalidFunctionBytecode;
+
+    var stack = engine.exec.stack.Stack.init(&js.runtime.memory, js.context.stackLimit());
+    defer stack.deinit(js.runtime);
+
+    // A `stop_before_pc` past the last instruction never fires, but it does pin
+    // the L0 frame to the ALL-COLD dispatch table, which is the only route that
+    // reaches `op_push_0_or_cold` / `op_push_2_sar_cold`. Both fused opcodes are
+    // one byte, so `Vm.publish` already parks `frame.pc` on the leftover
+    // `or` / `sar`; an extra `frame.pc += 1` in those handlers would skip it and
+    // strand the pushed `0` / `2` on the operand stack.
+    const result = try engine.exec.zjs_vm.runWithCallEnv(.{
+        .ctx = js.context,
+        .stack = &stack,
+        .function = function,
+        .initial_this_value = global.value(),
+        .args = &.{ core.JSValue.int32(5), core.JSValue.int32(24) },
+        .global = global,
+        .current_function_value = function_value,
+        .stop_before_pc = function.byteCode().len + 1,
+    });
+    try std.testing.expectEqual(@as(?i32, 11), result.asInt32());
 }

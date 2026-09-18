@@ -8,8 +8,11 @@
 //! depth 2, strings cut at 1000 characters, 100 items per container,
 //! enumerable properties only, no `raw_dump`.
 //!
-//! Cold path: only the CLI output builtins reach it. No allocation except
-//! the BigInt decimal text.
+//! Cold path: only the CLI output builtins reach it. Allocation is limited to
+//! the BigInt decimal text and, for an Error receiver, whatever
+//! `error_stack_ops.errorStackGetter` materializes (a freshly built `stack`
+//! string, and a re-entrant `Error.prepareStackTrace` call when the host
+//! installed one).
 
 const std = @import("std");
 const core = @import("../core/root.zig");
@@ -59,13 +62,6 @@ const State = struct {
 
 fn makeState(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer) State {
     return .{ .rt = ctx.runtime, .ctx = ctx, .global = global, .output = output, .writer = writer };
-}
-
-/// Entry point for one non-string `print` argument (`JS_PrintValue`,
-/// quickjs.c:14440, with the default options).
-pub fn printValue(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer, value: core.JSValue) Error!void {
-    var state = makeState(ctx, global, output, writer);
-    try printValueRec(&state, value);
 }
 
 /// One `print` / `console.log` argument (`js_print`, quickjs-libc.c:4063):
@@ -174,7 +170,6 @@ fn unitsOfString(body: *const core.string.String) Units {
 /// `max_string_length` with the `... N more characters` tail.
 fn printString(s: *State, value: core.JSValue) Error!void {
     const body = value.asStringBody() orelse return s.puts("<invalid string tag>");
-    body.ensureFlat(s.rt) catch return error.OutOfMemory;
     const units = unitsOfString(body);
     const total = units.len();
     const shown = @min(total, default_max_string_length);
@@ -190,7 +185,6 @@ fn printString(s: *State, value: core.JSValue) Error!void {
 /// `js_print_raw_string` (quickjs.c:13831): the string text as-is.
 fn printRawString(s: *State, value: core.JSValue) Error!void {
     const body = value.asStringBody() orelse return;
-    body.ensureFlat(s.rt) catch return error.OutOfMemory;
     switch (body.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
@@ -334,7 +328,6 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
     const source_value = object.regexpSource();
     if (bytecode.len == 0 or source_value == null) return s.puts("[uninitialized_regexp]");
     const body = source_value.?.asStringBody() orelse return s.puts("[uninitialized_regexp]");
-    body.ensureFlat(s.rt) catch return error.OutOfMemory;
     const units = unitsOfString(body);
     const n = units.len();
     try s.putc('/');
@@ -427,7 +420,6 @@ fn printError(s: *State, object: *const core.Object) Error!void {
     if (stack_value) |stack| {
         try s.putc('\n');
         const body = stack.asStringBody() orelse return;
-        body.ensureFlat(s.rt) catch return error.OutOfMemory;
         const units = unitsOfString(body);
         var len = units.len();
         if (len > 0 and units.at(len - 1) == '\n') len -= 1;

@@ -1,5 +1,15 @@
 //! ECMAScript regular-expression compiler and QuickJS `libregexp.c`-style backtracking bytecode executor.
 //! Patterns and inputs are borrowed; `Compiled` owns bytecode, and scratch storage owns only inline-buffer overflow.
+//!
+//! Two execution faces are exported. The `trusted*` family assumes a header the
+//! engine itself produced and is what the VM, the builtins and the benchmarks
+//! run. The checked family -- `exec`, `execWithOptions`,
+//! `execIntoMatchWithOptions` and `ExecStatus` -- validates the header first and
+//! reports `error.BytecodeCorrupt` instead of trusting it. It has **no in-tree
+//! caller**: it is re-exported through `src/exec/regexp_adapter.zig` purely as
+//! the safe entry point for embedders and fuzzers handing us bytecode of
+//! unknown provenance. Keep it compiling and keep its error arms honest even
+//! though nothing in this repository drives them.
 const std = @import("std");
 const array_list_erased = @import("../core/array_list_erased.zig");
 const sort_erased = @import("../core/sort_erased.zig");
@@ -353,10 +363,6 @@ fn captureCountFromBytecode(bytecode: []const u8) usize {
     return bytecode[re_header_capture_count];
 }
 
-pub fn captureCount(bytecode: []const u8) usize {
-    return captureCountFromBytecode(bytecode);
-}
-
 fn registerCountFromBytecode(bytecode: []const u8) usize {
     if (bytecode.len <= re_header_register_count) return 0;
     return bytecode[re_header_register_count];
@@ -364,10 +370,6 @@ fn registerCountFromBytecode(bytecode: []const u8) usize {
 
 fn allocCountFromBytecode(bytecode: []const u8) usize {
     return captureCountFromBytecode(bytecode) * 2 + registerCountFromBytecode(bytecode);
-}
-
-pub fn allocCount(bytecode: []const u8) usize {
-    return allocCountFromBytecode(bytecode);
 }
 
 pub fn getFlags(bytecode: []const u8) u16 {
@@ -446,7 +448,7 @@ pub fn compilePatternWithFlagBitsAndOptions(
     return .{ .bytecode = try compileWithFlagBitsAndOptions(allocator, pattern, re_flags, options) };
 }
 
-pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
+fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
     return regexp_properties.isSupportedUnicodePropertyExpression(name);
 }
 
@@ -2040,14 +2042,14 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u
     return value;
 }
 
-pub fn isRegExpGroupNameStart(cp: u21) bool {
+fn isRegExpGroupNameStart(cp: u21) bool {
     if (cp == '$' or cp == '_') return true;
     if (unicode.isAsciiAlphaCodePoint(cp)) return true;
     if (isInvalidRegExpGroupNameStart(cp)) return false;
     return cp > 0x7f;
 }
 
-pub fn isRegExpGroupNameContinue(cp: u21) bool {
+fn isRegExpGroupNameContinue(cp: u21) bool {
     if (isInvalidRegExpGroupNameContinue(cp)) return false;
     if (cp == 0x104a4) return true;
     if (isRegExpGroupNameStart(cp)) return true;
@@ -2064,7 +2066,7 @@ fn isInvalidRegExpGroupNameStart(cp: u21) bool {
     };
 }
 
-pub fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
+fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
     if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
@@ -2248,9 +2250,12 @@ const REParseState = struct {
 
         const needle_u16 = std.mem.readInt(u16, code[first_atom + 1 ..][0..2], .little);
         if (needle_u16 > 0xff) return;
+        // Only the two bytes of the `any` + `goto_` pair change: `scan_until_char8`
+        // takes the literal as its operand and keeps the same instruction width,
+        // so the -11 branch displacement at `prelude + 7` (already asserted above)
+        // stays valid and is deliberately left untouched.
         code[prelude + 5] = opByte(.scan_until_char8);
         code[prelude + 6] = @intCast(needle_u16);
-        std.mem.writeInt(u32, code[prelude + 7 ..][0..4], @bitCast(@as(i32, -11)), .little);
     }
 
     //--- top-level parse dispatch ---
@@ -4032,7 +4037,7 @@ fn isUnicodeSetsReservedClassByte(byte: u8, hyphen_is_reserved: bool) bool {
     };
 }
 
-pub fn isUnicodeSetsReservedDoublePunctuator(first: u8, second: u8) bool {
+fn isUnicodeSetsReservedDoublePunctuator(first: u8, second: u8) bool {
     if (first != second) return false;
     return switch (first) {
         '&', '!', '#', '$', '%', '*', '+', ',', '.', ':', ';', '<', '=', '>', '?', '@', '`', '~', '^' => true,

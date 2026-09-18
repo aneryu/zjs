@@ -182,25 +182,25 @@ Zig 0.16 的 `std.ArrayList(T).append` / `toOwnedSlice` 可能随元素类型产
 
 `Slot`：`name: atom.Atom`，`value: JSValue`。
 
-### `getByName` (`src/core/global_slots.zig:19`)
+### `getByName` (`src/core/global_slots.zig:20`)
 
 - **签名**：`pub fn getByName(rt: *runtime.JSRuntime, slots: []const Slot, name: []const u8) !value.JSValue`。
 - **作用**：按名字查询调用方持有的槽数组。
 - **实现**：先rt.internAtom(name)，再以所得atom调用getByAtom。
 - **所有权 / 错误 / 调用**：查找也可能新建atom及分配失败；不修改槽数组。返回JSValue位拷贝，不retain或自动注册根；槽名、槽值和返回值跨GC的可达性由上层负责。
 
-### `getByAtom` (`src/core/global_slots.zig:26`)
+### `getByAtom` (`src/core/global_slots.zig:27`)
 
 - **签名**：`pub fn getByAtom(slots: []const Slot, atom_id: atom.Atom) value.JSValue`。
 - **作用**：按atom身份线性查找第一个匹配槽。
 - **实现**：比较slot.name == atom_id，命中返回slot.value，否则返回undefinedValue。
 - **所有权 / 错误 / 调用**：不检查atom是否存活或属于同一runtime，也不intern。缺失与槽内本来为undefined不可区分；重复名字只读第一项，无分配。
 
-### `setExistingByName` (`src/core/global_slots.zig:33`)
+### `setExistingByName` (`src/core/global_slots.zig:34`)
 
 - **签名**：`pub fn setExistingByName(rt: *runtime.JSRuntime, slots: []Slot, name: []const u8, next_value: value.JSValue) !void`。
 - **作用**：按名字替换第一个已存在槽的值。
-- **实现**：intern名字后逐项扫描，命中直接位拷贝next_value并返回；未命中报TypeError，不创建槽。
+- **实现**：intern名字后逐项扫描，命中直接把 next_value 位拷贝进槽并返回（旧的 `const duplicated` 中转已删）；未命中报TypeError，不创建槽。
 - **所有权 / 错误 / 调用**：intern失败或未命中不改槽，但查找可改变atom表。没有retain/free、根注册或写屏障；调用方保护输入在intern期间以及写入后所需的存活窗口。TypeError在此不附消息。
 
 ## `src/core/profile.zig` — 线程局部 opcode / 引擎操作计数
@@ -214,175 +214,133 @@ Zig 0.16 的 `std.ArrayList(T).append` / `toOwnedSlice` 可能随元素类型产
 - `threadlocal opcode_name_provider`、`threadlocal active_profile`
 - `OpcodeProfile` 字段：`count`/`nanos`/`slow_count`/`ic_*` 各 256；`ext0_sub_count` 有256项，为carrier子tag另记次数，当前VM在ext0分发时使用pc[1]索引；标量为value_dup_count、value_free_count、prop_lookup_count、global_lookup_count、alloc_count、call_frame_count，均默认0。pending_op默认no_pending_op=0xffff，pending_start_ns默认0；保留结算接口，但当前VM计数入口不打开时间区间。所有计数数组默认0，无原子同步
 
-### `OpcodeProfile.recordOpcode` (`src/core/profile.zig:47`)
+### `OpcodeProfile.recordOpcode` (`src/core/profile.zig:42`)
 
 - **签名**：`pub fn recordOpcode(self: *OpcodeProfile, opcode: u8, elapsed_nanos: u64) void`。
 - **作用**：记录一次opcode及给定时间增量。
 - **实现**：count[opcode]与nanos[opcode]分别饱和相加。
 - **所有权 / 错误 / 调用**：不读取时钟，不设置pending字段；时间来自调用方。计数不是原子操作，共享profile需要外部同步。
 
-### `OpcodeProfile.noteDispatch` (`src/core/profile.zig:55`)
+### `OpcodeProfile.noteDispatch` (`src/core/profile.zig:50`)
 
 - **签名**：`pub fn noteDispatch(self: *OpcodeProfile, opcode: u8) void`。
 - **作用**：只记录一次opcode分发。
 - **实现**：count[opcode]饱和加1，不访问nanos。
 - **所有权 / 错误 / 调用**：已有nanos保持原值，不会清零；当前VM分发调用该入口计次数，不在这里打开待计时间区间。
 
-### `OpcodeProfile.noteCarrierSub` (`src/core/profile.zig:59`)
+### `OpcodeProfile.noteCarrierSub` (`src/core/profile.zig:54`)
 
 - **签名**：`pub fn noteCarrierSub(self: *OpcodeProfile, sub: u8) void`。
 - **作用**：记录一个carrier子tag的次数。
 - **实现**：ext0_sub_count[sub]饱和加1。
 - **所有权 / 错误 / 调用**：数组为256项，所有u8索引均有效；不验证该tag是否已定义，也不增加物理opcode计数，外层分别调用。
 
-### `OpcodeProfile.flushPendingDispatch` (`src/core/profile.zig:64`)
+### `OpcodeProfile.flushPendingDispatch` (`src/core/profile.zig:59`)
 
 - **签名**：`pub fn flushPendingDispatch(self: *OpcodeProfile) void`。
 - **作用**：结算调用方留下的一个待计时间区间。
 - **实现**：pending_op为ffff直接返回；否则以nowNanos()-|pending_start_ns调用recordOpcode，再将pending_op置ffff。
 - **所有权 / 错误 / 调用**：该操作同时增加count和nanos，不能将同一分发重复计数。有效pending_op必须可转u8；不清pending_start_ns。当前VM的noteDispatch不设置pending，因此通常无待结算区间。
 
-### `OpcodeProfile.recordAlloc` (`src/core/profile.zig:70`)
+### `OpcodeProfile.recordAlloc` (`src/core/profile.zig:65`)
 
 - **签名**：`pub fn recordAlloc(self: *OpcodeProfile) void`。
 - **作用**：显式增加分配事件计数。
 - **实现**：alloc_count饱和加1。
 - **所有权 / 错误 / 调用**：不执行分配或测量字节数；runtime另可将memory.profile_alloc_count指向该字段，由分配账户直接计数。
 
-### `OpcodeProfile.recordValueDup` (`src/core/profile.zig:74`)
+### `OpcodeProfile.recordValueDup` (`src/core/profile.zig:69`)
 
 - **签名**：`pub fn recordValueDup(self: *OpcodeProfile) void`。
 - **作用**：显式增加名为dup的诊断计数。
 - **实现**：value_dup_count饱和加1。
 - **所有权 / 错误 / 调用**：本方法不复制值、不retain；次数取决于插桩调用，不能证明当前GC采用引用计数。
 
-### `OpcodeProfile.recordValueFree` (`src/core/profile.zig:78`)
+### `OpcodeProfile.recordValueFree` (`src/core/profile.zig:73`)
 
 - **签名**：`pub fn recordValueFree(self: *OpcodeProfile) void`。
 - **作用**：显式增加名为free的诊断计数。
 - **实现**：value_free_count饱和加1。
 - **所有权 / 错误 / 调用**：不释放值；本文件无同名模块级转发，计数依赖外层显式调用。
 
-### `OpcodeProfile.recordPropLookup` (`src/core/profile.zig:82`)
+### `OpcodeProfile.recordPropLookup` (`src/core/profile.zig:77`)
 
 - **签名**：`pub fn recordPropLookup(self: *OpcodeProfile, is_global: bool) void`。
 - **作用**：记录属性查找并可同时归为全局查找。
 - **实现**：prop_lookup_count饱和加1，is_global时global_lookup_count也饱和加1。
 - **所有权 / 错误 / 调用**：不执行查找，两类计数存在重叠，不能简单相加视为互斥事件总数。
 
-### `OpcodeProfile.recordGlobalLookup` (`src/core/profile.zig:87`)
+### `OpcodeProfile.recordGlobalLookup` (`src/core/profile.zig:82`)
 
 - **签名**：`pub fn recordGlobalLookup(self: *OpcodeProfile) void`。
 - **作用**：单独增加全局查找计数。
 - **实现**：global_lookup_count饱和加1，不动prop_lookup_count。
 - **所有权 / 错误 / 调用**：不执行查找，也不核实是否已经由recordPropLookup计过。
 
-### `OpcodeProfile.opcodeName` (`src/core/profile.zig:91`)
+### `OpcodeProfile.opcodeName` (`src/core/profile.zig:86`)
 
 - **签名**：`pub fn opcodeName(opcode: u8) []const u8`。
 - **作用**：查询当前线程安装的opcode名字提供器。
 - **实现**：provider非null则调用并返回其切片，否则返回静态unknown字符串。
 - **所有权 / 错误 / 调用**：无self参数；返回切片不复制，寿命由provider保证，接口并不强制为静态字符串。没有错误返回通道。
 
-### `OpcodeProfile.totalOpcodeCount` (`src/core/profile.zig:96`)
+### `OpcodeProfile.totalOpcodeCount` (`src/core/profile.zig:91`)
 
 - **签名**：`pub fn totalOpcodeCount(self: OpcodeProfile) u64`。
 - **作用**：汇总物理opcode次数数组。
 - **实现**：遍历256项count，以饱和加法求和。
 - **所有权 / 错误 / 调用**：不包含ext0_sub_count，避免重复累计carrier子计数；按值读取，不清空或flush pending。
 
-### `OpcodeProfile.totalOpcodeNanos` (`src/core/profile.zig:102`)
+### `OpcodeProfile.totalOpcodeNanos` (`src/core/profile.zig:97`)
 
 - **签名**：`pub fn totalOpcodeNanos(self: OpcodeProfile) u64`。
 - **作用**：汇总已写入的opcode纳秒数组。
 - **实现**：遍历256项nanos，以饱和加法求和。
 - **所有权 / 错误 / 调用**：不读取当前时钟或flush pending；计次数路径不自动生成时间数据，零不能说明执行没有耗时。
 
-### `OpcodeProfile.totalIcHit` (`src/core/profile.zig:108`)
-
-- **签名**：`pub fn totalIcHit(self: OpcodeProfile) u64`。
-- **作用**：汇总IC命中计数。
-- **实现**：将ic_hit数组传给totalCounter饱和求和。
-- **所有权 / 错误 / 调用**：仅读取插桩数据，不执行IC操作；零计数不能推断相关机制不存在，不重置计数或结算pending。
-
-### `OpcodeProfile.totalIcMiss` (`src/core/profile.zig:112`)
-
-- **签名**：`pub fn totalIcMiss(self: OpcodeProfile) u64`。
-- **作用**：汇总IC未命中计数。
-- **实现**：将ic_miss数组传给totalCounter饱和求和。
-- **所有权 / 错误 / 调用**：仅读取插桩数据，不执行IC操作；零计数不能推断相关机制不存在，不重置计数或结算pending。
-
-### `OpcodeProfile.totalIcInvalidate` (`src/core/profile.zig:116`)
-
-- **签名**：`pub fn totalIcInvalidate(self: OpcodeProfile) u64`。
-- **作用**：汇总IC失效计数。
-- **实现**：将ic_invalidate数组传给totalCounter饱和求和。
-- **所有权 / 错误 / 调用**：仅读取插桩数据，不执行IC操作；零计数不能推断相关机制不存在，不重置计数或结算pending。
-
-### `OpcodeProfile.totalIcPromotePoly` (`src/core/profile.zig:120`)
-
-- **签名**：`pub fn totalIcPromotePoly(self: OpcodeProfile) u64`。
-- **作用**：汇总IC升多态计数。
-- **实现**：将ic_promote_poly数组传给totalCounter饱和求和。
-- **所有权 / 错误 / 调用**：仅读取插桩数据，不执行IC操作；零计数不能推断相关机制不存在，不重置计数或结算pending。
-
-### `OpcodeProfile.totalIcPromoteMega` (`src/core/profile.zig:124`)
-
-- **签名**：`pub fn totalIcPromoteMega(self: OpcodeProfile) u64`。
-- **作用**：汇总IC升超多态计数。
-- **实现**：将ic_promote_mega数组传给totalCounter饱和求和。
-- **所有权 / 错误 / 调用**：仅读取插桩数据，不执行IC操作；零计数不能推断相关机制不存在，不重置计数或结算pending。
-
-### `setOpcodeNameProvider` (`src/core/profile.zig:129`)
+### `setOpcodeNameProvider` (`src/core/profile.zig:105`)
 
 - **签名**：`pub fn setOpcodeNameProvider(provider: ?OpcodeNameProvider) void`。
 - **作用**：设置或清除当前线程的名字提供器。
 - **实现**：直接写threadlocal opcode_name_provider。
 - **所有权 / 错误 / 调用**：不返回旧回调，也不影响其它线程；null使opcodeName返回unknown。
 
-### `totalCounter` (`src/core/profile.zig:133`)
-
-- **签名**：`fn totalCounter(counter: [max_opcode_count]u64) u64`。
-- **作用**：对256个u64计数饱和求和。
-- **实现**：从零开始遍历，以+|累计。
-- **所有权 / 错误 / 调用**：按值接收数组，不修改原数据；总和溢出封顶而非绕回。
-
-### `activate` (`src/core/profile.zig:141`)
+### `activate` (`src/core/profile.zig:111`)
 
 - **签名**：`pub fn activate(profile: ?*OpcodeProfile) ?*OpcodeProfile`。
 - **作用**：替换当前线程的剖析目标并返回旧指针。
 - **实现**：保存active_profile，写入profile后返回旧值；null可停用TLS转发。
 - **所有权 / 错误 / 调用**：只借用指针，不清计数、不flush pending、不设置Runtime.opcode_profile或内存账户。嵌套作用域由调用方保存并恢复旧值，profile须保持存活。
 
-### `active` (`src/core/profile.zig:147`)
+### `active` (`src/core/profile.zig:117`)
 
 - **签名**：`pub fn active() ?*OpcodeProfile`。
 - **作用**：读取当前线程的剖析目标。
 - **实现**：直接返回active_profile。
 - **所有权 / 错误 / 调用**：返回借用可变指针，不创建快照或延长寿命；TLS指针本身不使被指向profile自动线程安全。
 
-### `recordValueDup` (`src/core/profile.zig:151`)
+### `recordValueDup` (`src/core/profile.zig:121`)
 
 - **签名**：`pub fn recordValueDup() void`。
 - **作用**：向当前线程目标转发一次dup诊断事件。
 - **实现**：active_profile非null则调用其recordValueDup，否则空操作。
 - **所有权 / 错误 / 调用**：不做值操作，不访问Runtime.opcode_profile；依赖TLS显式activate。
 
-### `recordPropLookup` (`src/core/profile.zig:155`)
+### `recordPropLookup` (`src/core/profile.zig:125`)
 
 - **签名**：`pub fn recordPropLookup(is_global: bool) void`。
 - **作用**：向当前线程目标转发属性查找事件。
 - **实现**：active_profile非null则传递is_global到方法版，否则空操作。
 - **所有权 / 错误 / 调用**：不执行查找；与方法版是不同函数身份，不能靠同名正文视为相互覆盖。
 
-### `recordGlobalLookup` (`src/core/profile.zig:159`)
+### `recordGlobalLookup` (`src/core/profile.zig:129`)
 
 - **签名**：`pub fn recordGlobalLookup() void`。
 - **作用**：向当前线程目标转发全局查找事件。
 - **实现**：active_profile非null则调用方法版，否则空操作。
 - **所有权 / 错误 / 调用**：只改目标诊断计数，不执行查找或GC操作。
 
-### `nowNanos` (`src/core/profile.zig:163`)
+### `nowNanos` (`src/core/profile.zig:133`)
 
 - **签名**：`pub fn nowNanos() u64`。
 - **作用**：取得平台单调时钟的纳秒读数。
@@ -391,6 +349,6 @@ Zig 0.16 的 `std.ArrayList(T).append` / `toOwnedSlice` 可能随元素类型产
 
 ## 覆盖核对
 
-- 清单函数数: 48（`src/core/array_list_erased.zig` 7 + `src/core/bulk_memory.zig` 1 + `src/core/global_slots.zig` 3 + `src/core/list.zig` 7 + `src/core/profile.zig` 25 + `src/core/sort_erased.zig` 5）
-- 本文标题覆盖: 48
+- 清单函数数: 42（`src/core/array_list_erased.zig` 7 + `src/core/bulk_memory.zig` 1 + `src/core/global_slots.zig` 3 + `src/core/list.zig` 7 + `src/core/profile.zig` 19 + `src/core/sort_erased.zig` 5）
+- 本文标题覆盖: 42
 - 未覆盖: 无

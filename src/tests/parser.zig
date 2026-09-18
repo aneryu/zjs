@@ -65,7 +65,9 @@ const LexerTestEnv = struct {
     }
 };
 
-fn freeAndDrain(lx: *QjsLexer, tok: *t.Token) void {
+/// Free a token's owned payload. A thin wrapper so `defer` sites read
+/// `freeToken(&lx, &tok)` in argument order rather than as a method call.
+fn freeToken(lx: *QjsLexer, tok: *t.Token) void {
     lx.freeToken(tok);
 }
 
@@ -127,7 +129,7 @@ test "F1.5: every keyword token maps to its predefined atom" {
     inline for (cases) |c| {
         var lx = env.lexer(c[0]);
         var tok = try lx.next();
-        defer freeAndDrain(&lx, &tok);
+        defer freeToken(&lx, &tok);
         try std.testing.expectEqual(@as(t.TokenKind, c[1]), tok.val);
         const ka = t.keywordAtom(c[1]);
         try std.testing.expectEqual(tok.payload.ident.atom, ka);
@@ -142,7 +144,7 @@ test "F1: of remains an identifier in ordinary lexing" {
 
     var lx = env.lexer("of");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
 
     try std.testing.expectEqual(t.TOK_IDENT, tok.val);
     const name = env.rt.atoms.name(tok.payload.ident.atom).?;
@@ -186,11 +188,11 @@ test "F1: punctuators use raw ASCII for single-character tokens" {
     var lx = env.lexer("(){};,:");
     inline for ("(){};,:") |ch| {
         var tok = try lx.next();
-        defer freeAndDrain(&lx, &tok);
+        defer freeToken(&lx, &tok);
         try std.testing.expectEqual(@as(t.TokenKind, ch), tok.val);
     }
     var eof = try lx.next();
-    defer freeAndDrain(&lx, &eof);
+    defer freeToken(&lx, &eof);
     try std.testing.expectEqual(t.TOK_EOF, eof.val);
 }
 
@@ -227,7 +229,7 @@ test "F1: multi-character operator sequences land on TOK_* values" {
     for (cases) |c| {
         var lx = env.lexer(c.src);
         var tok = try lx.next();
-        defer freeAndDrain(&lx, &tok);
+        defer freeToken(&lx, &tok);
         try std.testing.expectEqual(c.val, tok.val);
     }
 }
@@ -254,7 +256,7 @@ test "F1.2: numeric literals (decimal, hex, octal, binary, exponent, separators)
     for (cases) |c| {
         var lx = env.lexer(c.src);
         var tok = try lx.next();
-        defer freeAndDrain(&lx, &tok);
+        defer freeToken(&lx, &tok);
         try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
         try std.testing.expect(!tok.payload.num.is_bigint);
         try std.testing.expectApproxEqAbs(c.expected, tok.payload.num.value, 1e-9);
@@ -309,7 +311,7 @@ test "F1.2: numeric literals have no 128-byte length cap" {
     for (cases) |c| {
         var lx = env.lexer(c.src);
         var tok = try lx.next();
-        defer freeAndDrain(&lx, &tok);
+        defer freeToken(&lx, &tok);
         try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
         try std.testing.expect(!tok.payload.num.is_bigint);
         if (std.math.isInf(c.expected)) {
@@ -326,7 +328,7 @@ test "F1.2: bigint suffix records is_bigint and source text" {
 
     var lx = env.lexer("9007199254740993n");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
     try std.testing.expect(tok.payload.num.is_bigint);
     try std.testing.expectEqualStrings("9007199254740993", tok.payload.num.bigint_text);
@@ -338,7 +340,7 @@ test "F1.2: string escapes (basic, hex, unicode short and braced, surrogate pair
 
     var lx = env.lexer("\"a\\nb\\tc\\x41\\u0041\\u{1F600}\"");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_STRING, tok.val);
     // a\nb\tcAA<U+1F600>  — last cp encodes to F0 9F 98 80
     const want = "a\nb\tcAA\xF0\x9F\x98\x80";
@@ -352,7 +354,7 @@ test "M3.1 F4: string lexer preserves lone surrogate escapes as code units" {
 
     var lx = env.lexer("\"\\uD800\"");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_STRING, tok.val);
     try std.testing.expectEqualStrings("\xED\xA0\x80", tok.payload.str.bytes);
 }
@@ -363,7 +365,7 @@ test "F1.2: line continuation in string and \\0 NUL escape" {
 
     var lx = env.lexer("'foo\\\nbar\\0z'");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_STRING, tok.val);
     const want = "foobar\x00z";
     try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
@@ -385,17 +387,17 @@ test "G1/P0: template legacy octal escapes mark cooked value invalid" {
 
     var zero_digit = env.lexer("`\\00`");
     var zero_digit_tok = try zero_digit.next();
-    defer freeAndDrain(&zero_digit, &zero_digit_tok);
+    defer freeToken(&zero_digit, &zero_digit_tok);
     try std.testing.expect(zero_digit_tok.payload.str.cooked_invalid);
 
     var non_zero = env.lexer("`\\1`");
     var non_zero_tok = try non_zero.next();
-    defer freeAndDrain(&non_zero, &non_zero_tok);
+    defer freeToken(&non_zero, &non_zero_tok);
     try std.testing.expect(non_zero_tok.payload.str.cooked_invalid);
 
     var eight = env.lexer("`\\8`");
     var eight_tok = try eight.next();
-    defer freeAndDrain(&eight, &eight_tok);
+    defer freeToken(&eight, &eight_tok);
     try std.testing.expect(eight_tok.payload.str.cooked_invalid);
 }
 
@@ -405,28 +407,28 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
 
     var lx = env.lexer("`a${1}b${2}c`");
     var head = try lx.next();
-    defer freeAndDrain(&lx, &head);
+    defer freeToken(&lx, &head);
     try std.testing.expectEqual(t.TOK_TEMPLATE, head.val);
     try std.testing.expectEqual(t.TemplatePart.head, head.payload.str.template.?);
     try std.testing.expectEqualStrings("a", head.payload.str.bytes);
 
     // Substitution: parser would consume `1` and `}`. Skip the number here.
     var num1 = try lx.next();
-    defer freeAndDrain(&lx, &num1);
+    defer freeToken(&lx, &num1);
     try std.testing.expectEqual(t.TOK_NUMBER, num1.val);
 
     // After the parser sees the closing `}`, it asks for the next part.
     var middle = try lx.nextTemplatePart();
-    defer freeAndDrain(&lx, &middle);
+    defer freeToken(&lx, &middle);
     try std.testing.expectEqual(t.TemplatePart.middle, middle.payload.str.template.?);
     try std.testing.expectEqualStrings("b", middle.payload.str.bytes);
 
     var num2 = try lx.next();
-    defer freeAndDrain(&lx, &num2);
+    defer freeToken(&lx, &num2);
     try std.testing.expectEqual(t.TOK_NUMBER, num2.val);
 
     var tail = try lx.nextTemplatePart();
-    defer freeAndDrain(&lx, &tail);
+    defer freeToken(&lx, &tail);
     try std.testing.expectEqual(t.TemplatePart.tail, tail.payload.str.template.?);
     try std.testing.expectEqualStrings("c", tail.payload.str.bytes);
 }
@@ -436,7 +438,7 @@ test "F1.2: no-substitution template" {
     defer env.deinit();
     var lx = env.lexer("`hello`");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TemplatePart.no_substitution, tok.payload.str.template.?);
     try std.testing.expectEqualStrings("hello", tok.payload.str.bytes);
     try std.testing.expectEqualStrings("hello", tok.payload.str.raw_bytes);
@@ -448,7 +450,7 @@ test "G1/P0: template token keeps raw escape bytes" {
 
     var lx = env.lexer("`\\n`");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TemplatePart.no_substitution, tok.payload.str.template.?);
     try std.testing.expectEqualStrings("\n", tok.payload.str.bytes);
     try std.testing.expectEqualStrings("\\n", tok.payload.str.raw_bytes);
@@ -460,7 +462,7 @@ test "G1/P0: template token normalizes raw CR line terminators" {
 
     var lx = env.lexer("`\r\n\r`");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TemplatePart.no_substitution, tok.payload.str.template.?);
     try std.testing.expectEqualStrings("\n\n", tok.payload.str.bytes);
     try std.testing.expectEqualStrings("\n\n", tok.payload.str.raw_bytes);
@@ -474,7 +476,7 @@ test "F1.2: regex literal exposes pattern and flags" {
     // parser would call this once it knew the / starts a regex.
     var lx = env.lexer("/a[bc]\\/d/gi");
     var tok = try lx.rescanRegexp(0);
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
     try std.testing.expectEqualStrings("a[bc]\\/d", tok.payload.regexp.pattern);
     try std.testing.expectEqualStrings("gi", tok.payload.regexp.flags);
@@ -486,11 +488,11 @@ test "F1.2: regex literal may begin with equals after slash rescan" {
 
     var lx = env.lexer("/=/g");
     var div_assign = try lx.next();
-    defer freeAndDrain(&lx, &div_assign);
+    defer freeToken(&lx, &div_assign);
     try std.testing.expectEqual(t.TOK_DIV_ASSIGN, div_assign.val);
 
     var tok = try lx.rescanRegexp(lx.mark_pos);
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
     try std.testing.expectEqualStrings("=", tok.payload.regexp.pattern);
     try std.testing.expectEqualStrings("g", tok.payload.regexp.flags);
@@ -504,7 +506,7 @@ test "F1.3: private name keeps the # prefix in the atom" {
 
     var lx = env.lexer("#secret");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_PRIVATE_NAME, tok.val);
     try std.testing.expectEqualStrings("#secret", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
@@ -515,7 +517,7 @@ test "F1.3: unicode escape inside identifier is decoded into the atom" {
 
     var lx = env.lexer("\\u0061sync");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_IDENT, tok.val);
     try std.testing.expect(tok.payload.ident.has_escape);
     try std.testing.expectEqualStrings("async", env.rt.atoms.name(tok.payload.ident.atom).?);
@@ -527,7 +529,7 @@ test "F1.3: escaped keyword spelling is treated as identifier (per spec)" {
 
     var lx = env.lexer("\\u0069f"); // \u0069f = "if"
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_IDENT, tok.val); // not TOK_IF
     try std.testing.expectEqualStrings("if", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
@@ -538,7 +540,7 @@ test "F1.3: raw Unicode identifier start accepts ID_Start and rejects emoji" {
 
     var good = env.lexer("\xCF\x80");
     var good_tok = try good.next();
-    defer freeAndDrain(&good, &good_tok);
+    defer freeToken(&good, &good_tok);
     try std.testing.expectEqual(t.TOK_IDENT, good_tok.val);
     try std.testing.expectEqualStrings("\xCF\x80", env.rt.atoms.name(good_tok.payload.ident.atom).?);
 
@@ -554,15 +556,15 @@ test "F1.4: got_lf is true after a LineTerminator and false otherwise" {
 
     var lx = env.lexer("a b\nc");
     var a = try lx.next();
-    defer freeAndDrain(&lx, &a);
+    defer freeToken(&lx, &a);
     try std.testing.expect(!lx.got_lf);
 
     var b = try lx.next();
-    defer freeAndDrain(&lx, &b);
+    defer freeToken(&lx, &b);
     try std.testing.expect(!lx.got_lf);
 
     var c = try lx.next();
-    defer freeAndDrain(&lx, &c);
+    defer freeToken(&lx, &c);
     try std.testing.expect(lx.got_lf);
 }
 
@@ -572,12 +574,12 @@ test "F1.4: line_num and col_num are 1-based" {
 
     var lx = env.lexer("a\n  b");
     var a = try lx.next();
-    defer freeAndDrain(&lx, &a);
+    defer freeToken(&lx, &a);
     try std.testing.expectEqual(@as(u32, 1), a.line_num);
     try std.testing.expectEqual(@as(u32, 1), a.col_num);
 
     var b = try lx.next();
-    defer freeAndDrain(&lx, &b);
+    defer freeToken(&lx, &b);
     try std.testing.expectEqual(@as(u32, 2), b.line_num);
     try std.testing.expectEqual(@as(u32, 3), b.col_num);
 }
@@ -605,7 +607,7 @@ test "F1: end-to-end lex of a small program" {
     };
     for (expected) |want| {
         var tok = try lx.next();
-        defer freeAndDrain(&lx, &tok);
+        defer freeToken(&lx, &tok);
         try std.testing.expectEqual(want, tok.val);
     }
 }
@@ -617,21 +619,21 @@ test "F1: HTML comments are stripped in script mode but rejected in module mode"
     {
         var lx = env.lexer("a <!-- comment\nb");
         var a = try lx.next();
-        defer freeAndDrain(&lx, &a);
+        defer freeToken(&lx, &a);
         try std.testing.expectEqual(t.TOK_IDENT, a.val);
         var b = try lx.next();
-        defer freeAndDrain(&lx, &b);
+        defer freeToken(&lx, &b);
         try std.testing.expectEqual(t.TOK_IDENT, b.val);
     }
     {
         var lx = env.lexer("a <!-- comment\nb");
         lx.is_module = true;
         var a = try lx.next();
-        defer freeAndDrain(&lx, &a);
+        defer freeToken(&lx, &a);
         try std.testing.expectEqual(t.TOK_IDENT, a.val);
         // In module mode `<` is a punctuator, so the next token is `<`.
         var lt = try lx.next();
-        defer freeAndDrain(&lx, &lt);
+        defer freeToken(&lx, &lt);
         try std.testing.expectEqual(@as(t.TokenKind, '<'), lt.val);
     }
 }
@@ -642,7 +644,7 @@ test "F1: hashbang at start of file is skipped, but not later" {
 
     var lx = env.lexer("#!/usr/bin/env zjs\n42");
     var tok = try lx.next();
-    defer freeAndDrain(&lx, &tok);
+    defer freeToken(&lx, &tok);
     try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
 }
 
@@ -706,6 +708,47 @@ test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
     }
 }
 
+test "F1: TypeScript erasure survives an unbalanced ')' in constructor params" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    // `markClassAndTypeModifiers` counts constructor-parameter parens. The
+    // eraser runs before parsing, so a stray `)` must saturate at zero instead
+    // of underflowing; the malformed text is reported by the parser later.
+    const src = "class C { constructor()) {} }";
+    var lex = env.lexer(src);
+    defer lex.deinit();
+    try lex.enableTypeScript();
+
+    var tok = try lex.next();
+    defer freeToken(&lex, &tok);
+    try std.testing.expectEqual(t.TOK_CLASS, tok.val);
+}
+
+test "F1: `class <` erasure does not depend on the class keyword being first" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    // `looksLikeTypeParameterStart` refuses a `<` directly after `class`. That
+    // verdict must be the same whether or not `class` opens the file.
+    const sources = [_][]const u8{ "class <T> {}", ";class <T> {}" };
+    var seen: [2]i32 = undefined;
+    for (sources, 0..) |src, i| {
+        var lex = env.lexer(src);
+        defer lex.deinit();
+        try lex.enableTypeScript();
+
+        var tok = try lex.next();
+        defer freeToken(&lex, &tok);
+        while (tok.val != t.TOK_CLASS) {
+            tok = try lex.next();
+        }
+        tok = try lex.next();
+        seen[i] = tok.val;
+    }
+    try std.testing.expectEqual(seen[1], seen[0]);
+}
+
 test "F1: Lexer enableTypeScript strips variable and function TypeScript annotations dynamically" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
@@ -722,7 +765,7 @@ test "F1: Lexer enableTypeScript strips variable and function TypeScript annotat
     // The lexer should skip all TS type parts and only emit clean JS tokens.
     // e.g. "const", "x", "=", "42", ";", etc.
     var tok = try lex.next();
-    defer freeAndDrain(&lex, &tok);
+    defer freeToken(&lex, &tok);
     try std.testing.expectEqual(t.TOK_CONST, tok.val);
 
     tok = try lex.next();
@@ -2489,7 +2532,7 @@ test "F4: numeric discard in comma removes pure left and keeps right" {
     try expectOpcodeSequence(fn_bc.code, &.{op.push_2});
 }
 
-test "F4: member access a.b emits get_var + get_field" {
+test "F4: member access a.b emits get_var_field + get_field" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a.b");
@@ -5966,7 +6009,14 @@ test "F7: paired private accessor shares one instance brand prologue" {
 
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcodeRecursive(&fn_bc, op.set_home_object);
-    try expectOpcodeRecursive(&fn_bc, op.add_brand);
+    // "shares ONE prologue" is the claim under test, and a presence check
+    // passes even if each accessor brands separately. This class has exactly
+    // two legitimate `add_brand` sites: the prototype brand that
+    // `emitClassPrivateBrands` writes into the top-level class code, and the
+    // dormant instance-brand prologue in the fields-init child function. A
+    // per-accessor brand would make it three.
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.add_brand));
+    try std.testing.expectEqual(@as(usize, 2), countOpcodeRecursive(&fn_bc, op.add_brand));
 }
 
 test "F7: private name in uses scope temp before resolver" {
@@ -6449,7 +6499,7 @@ test "F8: export from" {
     try expectModuleIndirectExport(&env, record, 1, 0, "y", "y");
 }
 
-test "F8: export var" {
+test "F8: export const" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export const x = 1");
@@ -6794,7 +6844,7 @@ fn fdLabelOffset(fd: *const engine.bytecode.FunctionDef, label_index: u32) u32 {
 fn publishPhase1Stream(function: *engine.bytecode.Bytecode, state: *ParseState) !void {
     const b = state.function_def.v2_builder orelse return;
     try function.setCode(b.code[0..b.code_len]);
-    for (b.atom_operands[0..b.atom_len]) |atom_id| try function.retainAtomOperand(atom_id);
+    for (b.atom_operands[0..b.atom_len]) |atom_id| try function.appendAtomOperand(atom_id);
     for (b.source_slots[0..b.source_len]) |slot| {
         try function.appendSourceLoc(slot.temp_offset, slot.line, slot.col);
     }
@@ -12997,12 +13047,12 @@ test "bytecode constants retain values through Phase 4 structures" {
 
 // F1 — QuickJS-aligned lexer tests (separate file)
 
-// Cut A pin: the parser's O(1) FlowTailSummary must stay equivalent to the
-// legacy full scans on every construct that mutates label operands or the
-// code tail. The Debug build's `flowSummary` oracle re-derives the summary
-// by scan on every query, so compiling these snippets IS the assertion; the
+// Cut A pin: every construct that mutates label operands or the code tail
+// must keep compiling. The incrementally-maintained `FlowTailSummary` and its
+// Debug re-derivation oracle are gone (the v2 builder answers the tail
+// queries directly), so compiling these snippets IS the assertion; the
 // explicit checks only pin that each compile kept succeeding.
-test "flow-tail summary: label/patch/move/truncate corpus compiles under the Debug oracle" {
+test "label/patch/move/truncate corpus keeps compiling after a flow-tail rewrite" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const cases = [_][]const u8{
@@ -13647,15 +13697,10 @@ pub const phase_ownership = struct {
         pub fn sampleB1(self: *Window) !Snapshot {
             self.b1_reloc_created = builderRelocCount(&self.state.function_def);
             self.b1_source_created = builderSourceCount(&self.state.function_def);
-            return self.sample(.phase1, null);
+            return self.sample(.phase1);
         }
 
-        pub fn sampleNext(self: *Window, phase: CodePhase, previous: *const Snapshot) !Snapshot {
-            return self.sample(phase, previous);
-        }
-
-        fn sample(self: *Window, phase: CodePhase, previous: ?*const Snapshot) !Snapshot {
-            _ = previous;
+        pub fn sample(self: *Window, phase: CodePhase) !Snapshot {
             const code_census = switch (phase) {
                 // Before lowering the relocation population lives in the
                 // Builder, not in any byte stream.
@@ -13856,7 +13901,7 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
         defer window.deinit();
 
         var b1 = try window.sampleB1();
-        var before_discard = try window.sampleNext(.phase1, &b1);
+        var before_discard = try window.sample(.phase1);
         try std.testing.expect(std.meta.eql(b1, before_discard));
 
         // Parsing publishes no FunctionBytecode in any mode: the only producer
@@ -13875,7 +13920,7 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
         try phase_ownership.expectB1(b1);
 
         window.discardTemporaries();
-        var b4 = try window.sampleNext(.phase1, &before_discard);
+        var b4 = try window.sample(.phase1);
         const committed = b4.builder.owned;
         phase_ownership.setBuilderCommitted(&b1, committed);
         phase_ownership.setBuilderCommitted(&before_discard, committed);
@@ -13901,7 +13946,7 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
         phase_ownership.dump(shape.*, "parse-only", "B4-artifact-only", b4);
 
         window.releaseArtifact();
-        var terminal = try window.sampleNext(.phase1, &b4);
+        var terminal = try window.sample(.phase1);
         phase_ownership.setBuilderCommitted(&terminal, 0);
         try phase_ownership.expectTerminal(terminal);
         phase_ownership.dump(shape.*, "parse-only", "terminal", terminal);

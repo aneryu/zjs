@@ -187,10 +187,6 @@ pub const CallSite = struct {
     /// copies it with 64-bit loads, and a window LLVM had assembled through
     /// q registers (or left as a mem-to-mem copy of a sret temporary) misses
     /// store-to-load forwarding on every element.
-    pub inline fn call0(self: *CallSite) HostError!JSValue {
-        return self.callFixed(0, &.{});
-    }
-
     pub inline fn call1(self: *CallSite, a0: JSValue) HostError!JSValue {
         var args: [1]JSValue = undefined;
         pinnedStore(&args[0], a0);

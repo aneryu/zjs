@@ -548,14 +548,12 @@ fn yieldStarRaw(
     var iterator_value: core.JSValue = undefined;
     var using_stored_iterator = false;
     var next_arg = core.JSValue.undefinedValue();
-    var next_arg_needs_free = false;
     if (generator) |generator_object| {
         if (generator_object.generatorYieldStarIterator()) |stored| {
             iterator_value = stored;
             using_stored_iterator = true;
             if (generator_object.generatorStarted() and stack.len() > 0) {
                 next_arg = try stack.pop();
-                next_arg_needs_free = true;
             }
         } else {
             const iterable = try stack.pop();

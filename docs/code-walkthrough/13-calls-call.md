@@ -671,119 +671,105 @@
 - **实现**：utf16 单位 > max 拒绝。
 - **所有权 / 错误 / 调用**：调用方 deinit。
 
-### `throwInvalidCharacter` (`src/exec/call.zig:2234`)
+### `throwInvalidCharacter` (`src/exec/call.zig:2233`)
 
 - **签名**：`fn throwInvalidCharacter(ctx: *core.JSContext, global: ?*core.Object, message: []const u8) !core.JSValue`。
 - **作用**：挂 DOMException InvalidCharacterError。
 - **实现**：`throwValue` + `error.InvalidCharacterError`。
 - **所有权 / 错误 / 调用**：建好 DOMException 值后 `ctx.throwValue` 把它变成 pending 异常，然后**总是**返回 `error.InvalidCharacterError`（返回类型里的 `JSValue` 不会真的产生）。没有可用 global 时退成 `error.TypeError`。不留长期分配。调用方 `call.zig:2183`、`2196`、`2201`（btoa/atob 的三个非法输入点）。
 
-### `createDOMExceptionValue` (`src/exec/call.zig:2241`)
+### `createDOMExceptionValue` (`src/exec/call.zig:2240`)
 
 - **签名**：`fn createDOMExceptionValue(ctx: *core.JSContext, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue`。
 - **作用**：尽量用全局 DOMException.prototype，否则 named Error。
 - **实现**：`constructDOMExceptionObject`。
 - **所有权 / 错误 / 调用**：返回 owned 的异常对象值；`message`/`name` 先各建一个 owned 字符串再交给 `constructDOMExceptionObject`（它接手）。全局上没有可用的 `DOMException` 构造器或原型时降级为 `exception_ops.createNamedError`，保证总能造出错误对象。原型是借用读。唯一调用方 `throwInvalidCharacter`（`call.zig:2236`）。
 
-### `globalQueueMicrotask` (`src/exec/call.zig:2254`)
+### `globalQueueMicrotask` (`src/exec/call.zig:2253`)
 
 - **签名**：`fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`queueMicrotask(cb)`。
 - **实现**：不可调用 TypeError 消息；`enqueuePendingMicrotask`。
 - **所有权 / 错误 / 调用**：不分配 JS 值；`enqueuePendingMicrotask` 把 `callback` 存进运行时的微任务队列（队列接手其存活责任，直到被执行）。参数不可调用时先 `throwTypeErrorMessage` 写 pending 异常再以错误返回。没有 global → `error.TypeError`。唯一调用方 `callHostGlobalNativeFunctionRecord` 的 `queueMicrotask` 臂（`call.zig:878`）。
 
-### `globalGc` (`src/exec/call.zig:2262`)
+### `globalGc` (`src/exec/call.zig:2261`)
 
 - **签名**：`fn globalGc(ctx: *core.JSContext) core.JSValue`。
 - **作用**：zjs `gc()` 助手。
 - **实现**：`runObjectCycleRemoval`，返回 undefined。
 - **所有权 / 错误 / 调用**：直接跑一次 `runObjectCycleRemoval` 并丢弃返回的回收计数，返回 undefined；不分配、不抛（签名里没有 error set），这是调试用的 `gc()` 全局。唯一调用方 `callHostGlobalNativeFunctionRecord` 的 `gc` 臂（`call.zig:879`）。
 
-### `materializeMappedArgumentsDescriptorValue` (`src/exec/call.zig:2267`)
+### `materializeMappedArgumentsDescriptorValue` (`src/exec/call.zig:2266`)
 
 - **签名**：`fn materializeMappedArgumentsDescriptorValue( rt: *core.JSRuntime, object: *core.Object, key: core.Atom, desc: *core.Descriptor, ) void`。
 - **作用**：mapped arguments 的 data 描述符值来自 var_ref 细胞。
 - **实现**：非 mapped / 非下标 / 无细胞则不动。
 - **所有权 / 错误 / 调用**：getOwnPropertyDescriptor。
 
-### `materializeMappedArgumentsDescriptorValueForVm` (`src/exec/call.zig:2283`)
+### `materializeMappedArgumentsDescriptorValueForVm` (`src/exec/call.zig:2282`)
 
 - **签名**：`pub fn materializeMappedArgumentsDescriptorValueForVm( rt: *core.JSRuntime, object: *core.Object, key: core.Atom, desc: *core.Descriptor, ) !void`。
 - **作用**：VM 包装，永不失败。
 - **实现**：调上一函数。
 - **所有权 / 错误 / 调用**：就地改调用方栈上的 `desc`：把 mapped arguments 的 VarRef cell 当前值填进 `desc.value` 并置 `value_present`，值是借用（不 retain、不建根）。包装的 `!void` 只为统一 VM 侧调用形状，内层 `materializeMappedArgumentsDescriptorValue` 实际不会失败。调用方 4 处：`src/binding/context.zig:553`、`src/exec/object_builtin_ops.zig:1162`/`1217`、`src/exec/object_ops.zig:3352`。
 
-### `descriptorFromObjectBare` (`src/exec/call.zig:2292`)
+### `descriptorFromObjectBare` (`src/exec/call.zig:2291`)
 
-- **签名**：`pub fn descriptorFromObjectBare(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor`。
+- **签名**：`pub fn descriptorFromObjectBare(object: *core.Object) !core.Descriptor`。
 - **作用**：无 Realm 的 ToPropertyDescriptor。
-- **实现**：有 get/set → accessor；有 value/writable → data；否则 generic。bool 缺省 null。
+- **实现**：有 get/set → accessor；有 value/writable → data；否则 generic。bool 缺省 null。四次存在性判定与两次取值直接调 `object.hasProperty` / `object.getProperty`（原先经 `expectedHas`/`expectedValue` 两个只为吞掉一个未用 `rt` 首参而存在的转发函数，已删；本函数与 `optionalBoolProperty` 的 `rt` 形参也一并删除）。
 - **所有权 / 错误 / 调用**：defineProperty。
 
-### `descriptorObject` (`src/exec/call.zig:2324`)
+### `descriptorObject` (`src/exec/call.zig:2323`)
 
 - **签名**：`fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue`。
 - **作用**：FromPropertyDescriptor。
 - **实现**：root value/getter/setter。
 - **所有权 / 错误 / 调用**：测试 GC。
 
-### `expectedHas` (`src/exec/call.zig:2379`)
+### `optionalBoolProperty` (`src/exec/call.zig:2378`)
 
-- **签名**：`fn expectedHas(_: *core.JSRuntime, object: *core.Object, key: core.Atom) !bool`。
-- **作用**：`hasProperty`。
-- **实现**：忽略 rt。
-- **所有权 / 错误 / 调用**：薄包装，`rt` 参数用 `_:` 丢弃（只为与同族签名对齐）；`hasProperty` 不走 proxy trap、不分配。调用方是 `descriptorFromObjectBare` 的四次存在性检查（`call.zig:2293`-`2296`）与 `optionalBoolProperty`（`2388`）；`src/cli/run_test262_host.zig` 里的同名函数是另一个实现。
-
-### `expectedValue` (`src/exec/call.zig:2383`)
-
-- **签名**：`fn expectedValue(_: *core.JSRuntime, object: *core.Object, key: core.Atom) !core.JSValue`。
-- **作用**：`getProperty`。
-- **实现**：无。
-- **所有权 / 错误 / 调用**：薄包装，`rt` 用 `_:` 丢弃；返回属性槽里的值（借用，可能来自 getter 因而重入 JS），错误为 `PropertyReadError`。调用方 `descriptorFromObjectBare`（`call.zig:2300`、`2301`、`2311`）与 `optionalBoolProperty`（`2389`）。
-
-### `optionalBoolProperty` (`src/exec/call.zig:2387`)
-
-- **签名**：`fn optionalBoolProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom) !?bool`。
+- **签名**：`fn optionalBoolProperty(object: *core.Object, key: core.Atom) !?bool`。
 - **作用**：缺席 null；非 bool 当 false。
-- **实现**：无。
+- **实现**：`object.hasProperty(key)` 为假返回 null，否则 `object.getProperty(key)` 后 `asBool() orelse false`。
 - **所有权 / 错误 / 调用**：不分配；缺属性返回 `null`（区别于 `false`），非 boolean 值一律当 `false`——描述符三态语义就落在这里。错误来自两次属性访问。调用方 `descriptorFromObjectBare` 的 `enumerable`/`configurable`/`writable` 三处（`call.zig:2297`、`2298`、`2316`）。
 
-### `definePropertiesFromObject` (`src/exec/call.zig:2393`)
+### `definePropertiesFromObject` (`src/exec/call.zig:2384`)
 
 - **签名**：`fn definePropertiesFromObject(rt: *core.JSRuntime, object: *core.Object, properties_value: core.JSValue) !void`。
 - **作用**：无 trap 的 `Object.defineProperties`。
 - **实现**：ownKeys；undefined 描述符跳过。
 - **所有权 / 错误 / 调用**：`ownKeys` 新分配的键数组用 `defer core.Object.freeKeys` 释放；描述符里的值由目标对象的属性表接手。`defineOwnProperty` 的失败归一成 `error.TypeError`（`IncompatibleDescriptor`/`NotExtensible`/`ReadOnly`）与 `error.RangeError`（`InvalidLength`）；值为 undefined 的键被跳过。调用方 `call.zig:996`（`Object.create` 的第二参）与 `1156`（`Object.defineProperties` 的裸运行时臂）。
 
-### `atomFromPropertyKey` (`src/exec/call.zig:2410`)
+### `atomFromPropertyKey` (`src/exec/call.zig:2401`)
 
 - **签名**：`fn atomFromPropertyKey(rt: *core.JSRuntime, value: core.JSValue) HostError!core.Atom`。
 - **作用**：ToPropertyKey atom。
 - **实现**：`propertyKeyAtom` via hostResult。
 - **所有权 / 错误 / 调用**：`propertyKeyAtom` 可能 intern 一个新 atom，归 `AtomTable` 持有，调用方不释放。`hostResult` 把内层的宽错误集收窄成 `HostError`（ToString/ToPropertyKey 的失败按原样保留）。调用方是本文件多个按键取值的内建臂（`call.zig:1025`、`1082`、`1143` 等 7 处，含定义处共 8 个引用点）。
 
-### `defineBoolProperty` (`src/exec/call.zig:2414`)
+### `defineBoolProperty` (`src/exec/call.zig:2405`)
 
 - **签名**：`fn defineBoolProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: bool) !void`。
 - **作用**：布尔数据属性。
 - **实现**：`defineObjectProperty`。
 - **所有权 / 错误 / 调用**：转 `defineObjectProperty` 写一个可写/可枚举/可配置的 boolean 数据属性；写的是立即值，不涉及所有权转移或屏障。error set 为属性定义错误。调用方是描述符对象构造的三处（`call.zig:2346`-`2348`，`writable`/`enumerable`/`configurable`）。
 
-### `errorNameMatchesConstructor` (`src/exec/call.zig:2420`)
+### `errorNameMatchesConstructor` (`src/exec/call.zig:2411`)
 
 - **签名**：`pub fn errorNameMatchesConstructor(err: anytype, constructor_name: []const u8) bool`。
 - **作用**：`assert.throws` 把 Zig error 名对上构造器名。
 - **实现**：Type/Syntax/Range/Eval/Reference。
 - **所有权 / 错误 / 调用**：`assertThrows`。
 
-### `isFunctionClass` (`src/exec/call.zig:2429`)
+### `isFunctionClass` (`src/exec/call.zig:2420`)
 
 - **签名**：`fn isFunctionClass(class_id: core.ClassId) bool`。
 - **作用**：toString/callable 用的函数 class 集。
 - **实现**：含四类 bytecode 与 c_closure。
 - **所有权 / 错误 / 调用**：测试四类。
 
-### `evalGlobalScriptSource` (`src/exec/call.zig:2463`)
+### `evalGlobalScriptSource` (`src/exec/call.zig:2454`)
 
 - **签名**：`pub fn evalGlobalScriptSource( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, source: []const u8, filename: []const u8, ) !core.JSValue`。
 - **作用**：`$262.evalScript` / 嵌入 `evalScript`：在指定 global 上跑 script。
@@ -792,5 +778,5 @@
 
 ## 覆盖核对
 
-- 清单函数数: 111
+- 清单函数数: 109
 - 未覆盖: 无

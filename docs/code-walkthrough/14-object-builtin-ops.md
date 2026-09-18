@@ -120,196 +120,189 @@
 - **实现**：长度不等 TypeError。`RootedValueCopies` + `ValueRootFrame`。`Object.create`；逐个 `defineOwnProperty` data W/E/C=true。单测验证 function bytecode 值在 GC 阈值 0 时仍活着。
 - **所有权 / 错误 / 调用**：返回对象 owned。值在 define 期间由 root frame 钉住。
 
-### `entryArrayValue` (`src/exec/object_builtin_ops.zig:423`)
-
-- **签名**：`fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !core.JSValue`。
-- **作用**：造 `[keyString, value]` 二元数组（`Object.entries` 元素）。
-- **实现**：把 `value` 放进局部并 root。`createArray`；下标 0 为 atom 字符串，下标 1 为 rooted value。
-- **所有权 / 错误 / 调用**：core `ownEntriesArray` 已迁走；本函数留给 GC 单测。
-
-### `objectIsPrototypeOf` (`src/exec/object_builtin_ops.zig:480`)
+### `objectIsPrototypeOf` (`src/exec/object_builtin_ops.zig:431`)
 
 - **签名**：`pub fn objectIsPrototypeOf( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !core.JSValue`。
 - **作用**：`Object.prototype.isPrototypeOf`。
 - **实现**：无参 → false。`args[0]` 非对象 → false。`this` 非对象 TypeError。沿 `objectGetPrototypeOfStep` 走链（Proxy 可观察），命中 `this_object` → true。
 - **所有权 / 错误 / 调用**：GetPrototypeOf trap 可抛。
 
-### `objectValueOfCall` (`src/exec/object_builtin_ops.zig:499`)
+### `objectValueOfCall` (`src/exec/object_builtin_ops.zig:450`)
 
 - **签名**：`pub fn objectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue`。
 - **作用**：`Object.prototype.valueOf`：ToObject。
 - **实现**：nullish TypeError；已是对象原样返回；否则 `primitiveObjectForAccess`。
 - **所有权 / 错误 / 调用**：装箱对象 owned。
 
-### `objectCreateCall` (`src/exec/object_builtin_ops.zig:505`)
+### `objectCreateCall` (`src/exec/object_builtin_ops.zig:456`)
 
 - **签名**：`pub fn objectCreateCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.create(proto, properties?)`。
 - **实现**：无参 TypeError。proto 为 null → 无原型；否则必须是对象，否则 `"not a prototype"`。`Object.create`；第二参非 undefined 则 `definePropertiesOnTarget`。
 - **所有权 / 错误 / 调用**：失败 `errdefer` destroy。返回实例。
 
-### `objectAssignCall` (`src/exec/object_builtin_ops.zig:526`)
+### `objectAssignCall` (`src/exec/object_builtin_ops.zig:477`)
 
 - **签名**：`pub fn objectAssignCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.assign(target, ...sources)`。
 - **实现**：无参 TypeError；target nullish → 带消息 TypeError。非对象则装箱。每个 source：nullish 跳过；否则 ToObject，`objectRestOwnKeys`。普通源走 `objectAssignEnumOnly`（qjs `JS_GPN_ENUM_ONLY` 单次走查，`quickjs.c:40654→16920`）；Proxy/exotic 走 `objectAssignKeys`（每键 gopd trap）。
 - **所有权 / 错误 / 调用**：返回 target。keys 切片 `freeKeys`。
 
-### `assignSourceIsOrdinary` (`src/exec/object_builtin_ops.zig:574`)
+### `assignSourceIsOrdinary` (`src/exec/object_builtin_ops.zig:525`)
 
 - **签名**：`fn assignSourceIsOrdinary(source: *core.Object) bool`。
 - **作用**：源能否保持 ENUM_ONLY（enumerable 直接读 shape）。
 - **实现**：有 proxy target / exotic / `module_ns` / TypedArray → 假。对照 qjs `!p->is_exotic || !em->get_own_property_names`（`quickjs.c:16920-16927`）。
 - **所有权 / 错误 / 调用**：假则走描述符路径，trap 顺序与 qjs ~ENUM_ONLY 分支一致。
 
-### `objectAssignEnumOnly` (`src/exec/object_builtin_ops.zig:597`)
+### `objectAssignEnumOnly` (`src/exec/object_builtin_ops.zig:548`)
 
 - **签名**：`fn objectAssignEnumOnly( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, target_value: core.JSValue, source_value: core.JSValue, source: *core.Object, own_keys: []const core.Atom, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !void`。
 - **作用**：普通源的 CopyDataProperties：先快照 enumerable，再 Get+Set，**不再** 每键复查。
 - **实现**：分配 `[]bool` 快照 `ownPropertyEnumerable`。对仍为真的键 `getValueProperty` 然后 `setValuePropertyStrict`。快照是 load-bearing：前面键的 getter 可能改后面键的可枚举性，qjs 仍拷贝因为键已在 ENUM_ONLY 列表里。这与 `Object.keys` 每键复查不同（`quickjs.c:40400`）。
 - **所有权 / 错误 / 调用**：快照缓冲 defer free。
 
-### `objectAssignKeys` (`src/exec/object_builtin_ops.zig:624`)
+### `objectAssignKeys` (`src/exec/object_builtin_ops.zig:575`)
 
 - **签名**：`pub fn objectAssignKeys( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, target_value: core.JSValue, source_value: core.JSValue, source: *core.Object, own_keys: []const core.Atom, symbol_pass: ?bool, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !void`。
 - **作用**：exotic/Proxy 源：每键 gopd，只拷 enumerable。
 - **实现**：可选 `symbol_pass` 过滤。`objectRestOwnPropertyDescriptor` miss 跳过；`enumerable != true` 跳过；否则 Get+严格 Set。
 - **所有权 / 错误 / 调用**：`symbol_pass = null` 表示一次遍历全部键（assign 用）。
 
-### `objectHasOwnCall` (`src/exec/object_builtin_ops.zig:648`)
+### `objectHasOwnCall` (`src/exec/object_builtin_ops.zig:599`)
 
 - **签名**：`pub fn objectHasOwnCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.hasOwn(O, P)`。
 - **实现**：无参 `null`；O nullish TypeError；ToObject；ToPropertyKey；`proxyAwareExistsOwnProperty`（qjs `JS_GetOwnPropertyInternal(ctx, NULL, p, atom)`，`quickjs.c:8854`：不建描述符、不 dup、推迟 auto-init；Proxy 仍走完整 gopd trap）。
 - **所有权 / 错误 / 调用**：返回布尔。
 
-### `objectHasOwnPropertyDirect` (`src/exec/object_builtin_ops.zig:678`)
+### `objectHasOwnPropertyDirect` (`src/exec/object_builtin_ops.zig:629`)
 
 - **签名**：`fn objectHasOwnPropertyDirect( ctx: *core.JSContext, this_value: core.JSValue, argv: [*]const core.JSValue, argc: u32, _: *const core.NativeEntry, _: ?*core.Object, ) callconv(.c) core.JSValue`。
 - **作用**：`Object.prototype.hasOwnProperty` 的 exec-direct 热腿。
 - **实现**：`this` 已是对象且首参 `propertyKeyAtomIfReady` 有 atom → 同一 `proxyAwareExistsOwnProperty`（含 TypedArray/Proxy）。否则 `objectHasOwnPropertyHost`。错误经 `hostErrorToValue`。
 - **所有权 / 错误 / 调用**：挂在 `internal_entries[].managed`。不跑 ToPropertyKey intern。
 
-### `objectHasOwnPropertyHost` (`src/exec/object_builtin_ops.zig:714`)
+### `objectHasOwnPropertyHost` (`src/exec/object_builtin_ops.zig:665`)
 
 - **签名**：`fn objectHasOwnPropertyHost( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) HostError!core.JSValue`。
 - **作用**：direct 失败后的完整 `hasOwnProperty`。
 - **实现**：转 `objectPrototypeOwnPropertyCall`，id 为 `has_own_property`；`null` → TypeError。
 - **所有权 / 错误 / 调用**：装箱、ToPropertyKey、nullish this。
 
-### `objectPrototypeOwnPropertyCall` (`src/exec/object_builtin_ops.zig:747`)
+### `objectPrototypeOwnPropertyCall` (`src/exec/object_builtin_ops.zig:698`)
 
 - **签名**：`pub fn objectPrototypeOwnPropertyCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, method_id: u32, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`hasOwnProperty` 与 `propertyIsEnumerable` 共用。
 - **实现**：其它 id → `null`。ToPropertyKey；this nullish TypeError；ToObject。hasOwnProperty → `proxyAwareExistsOwnProperty`；propertyIsEnumerable → 完整描述符的 `enumerable` 位，没有描述符则 false。
 - **所有权 / 错误 / 调用**：enumerable 必须物化描述符（qjs `js_object_propertyIsEnumerable`）。
 
-### `objectPrototypeDefineAccessorCall` (`src/exec/object_builtin_ops.zig:778`)
+### `objectPrototypeDefineAccessorCall` (`src/exec/object_builtin_ops.zig:729`)
 
 - **签名**：`pub fn objectPrototypeDefineAccessorCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, getter: bool, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`__defineGetter__` / `__defineSetter__`。
 - **实现**：this nullish TypeError；ToObject；accessor 必须可调用；ToPropertyKey。描述符 kind=accessor，E/C=true，只填 getter 或 setter。Proxy → `proxyDefineOwnProperty`；否则 `defineOwnProperty`。不兼容/不可扩展/只读 → TypeError；InvalidLength → RangeError；`defined == false` TypeError。返回 undefined。
 - **所有权 / 错误 / 调用**：Annex B。
 
-### `objectPrototypeLookupAccessorCall` (`src/exec/object_builtin_ops.zig:827`)
+### `objectPrototypeLookupAccessorCall` (`src/exec/object_builtin_ops.zig:778`)
 
 - **签名**：`pub fn objectPrototypeLookupAccessorCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, getter: bool, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`__lookupGetter__` / `__lookupSetter__`：沿原型链找第一个 accessor。
 - **实现**：ToObject + ToPropertyKey。循环 `objectRestOwnPropertyDescriptor`：命中非 accessor → undefined；accessor 返回 get 或 set（未 present 则 undefined）。miss 则 `objectGetPrototypeOfStep`。
 - **所有权 / 错误 / 调用**：Proxy 每层 gopd/getPrototypeOf 可观察。
 
-### `objectFromEntriesCall` (`src/exec/object_builtin_ops.zig:854`)
+### `objectFromEntriesCall` (`src/exec/object_builtin_ops.zig:805`)
 
 - **签名**：`pub fn objectFromEntriesCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.fromEntries(iterable)`。
 - **实现**：无参 TypeError。新对象以 `%Object.prototype%` 为原型。`iteratorForValue`。每步：非对象 entry 则 close+TypeError；读 `0`/`1`、ToPropertyKey、`createDataPropertyOrThrow`；任一步失败 close iterator。
 - **所有权 / 错误 / 调用**：`IteratorClose` 在 abrupt 路径。
 
-### `objectGroupByCall` (`src/exec/object_builtin_ops.zig:896`)
+### `objectGroupByCall` (`src/exec/object_builtin_ops.zig:847`)
 
 - **签名**：`pub fn objectGroupByCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.groupBy(items, callback)`。
 - **实现**：需要 callback 且可调用。新对象 **无原型**（null proto，spec）。迭代；index ≥ MAX_SAFE_INTEGER close+TypeError。`CallSite` 调 callback`(value, index)`；ToPropertyKey；`appendObjectGroupByValue`。
 - **所有权 / 错误 / 调用**：callback 抛错要 close iterator。
 
-### `objectAddEntriesStepValue` (`src/exec/object_builtin_ops.zig:950`)
+### `objectAddEntriesStepValue` (`src/exec/object_builtin_ops.zig:901`)
 
 - **签名**：`fn objectAddEntriesStepValue( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, iterator_value: core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !ObjectIteratorStepValue`。
 - **作用**：IteratorStep 的值级实现：调 `next`，读 `done`/`value`。
 - **实现**：iterator 必须是对象。`cachedIteratorNext` 或 Get `next`。不可调用 TypeError。`callValueOrBytecodeRoot`。结果对象读 `done`；真则 `{ undefined, done: true }`。读 `value` 失败则 close。不按 class 分发。
 - **所有权 / 错误 / 调用**：fromEntries / groupBy 共用。
 
-### `objectSetIntegrityCall` (`src/exec/object_builtin_ops.zig:982`)
+### `objectSetIntegrityCall` (`src/exec/object_builtin_ops.zig:933`)
 
 - **签名**：`pub fn objectSetIntegrityCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, level: IntegrityLevel, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.seal` / `Object.freeze`。
 - **实现**：非对象原样返回。freeze + TypedArray 背后是可调整 buffer → TypeError。先 `objectPreventExtensionsCall`。ownKeys；sealed 只把 configurable=false；frozen 对 data 再 writable=false。Proxy 走 `proxyDefineOwnProperty`。
 - **所有权 / 错误 / 调用**：返回原 target。
 
-### `objectTestIntegrityCall` (`src/exec/object_builtin_ops.zig:1033`)
+### `objectTestIntegrityCall` (`src/exec/object_builtin_ops.zig:984`)
 
 - **签名**：`pub fn objectTestIntegrityCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, level: IntegrityLevel, ) !?core.JSValue`。
 - **作用**：`isSealed` / `isFrozen`。
 - **实现**：非对象 → true。qjs `js_object_isSealed`（`quickjs.c:40717`）**先** walk ownKeys+gopd（可配置/可写立刻 false），**最后** 才 IsExtensible——与 spec TestIntegrityLevel 顺序相反，zjs 跟 qjs。
 - **所有权 / 错误 / 调用**：`objectIsExtensibleForIntegrity`。
 
-### `objectIsExtensibleForIntegrity` (`src/exec/object_builtin_ops.zig:1056`)
+### `objectIsExtensibleForIntegrity` (`src/exec/object_builtin_ops.zig:1007`)
 
 - **签名**：`pub fn objectIsExtensibleForIntegrity( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, object: *core.Object, ) !bool`。
 - **作用**：完整性测试用的 IsExtensible，Proxy 走 trap + invariant。
 - **实现**：无 proxy → `object.isExtensible()`。否则 Get handler.isExtensible；缺 trap 用 target 标志；调用后必须与 target.isExtensible() 一致否则 TypeError。
 - **所有权 / 错误 / 调用**：这里 **不** 递归 `proxyAwareIsExtensible`（与 qjs 测完整性时的 trap 集合对齐）。
 
-### `appendObjectGroupByValue` (`src/exec/object_builtin_ops.zig:1076`)
+### `appendObjectGroupByValue` (`src/exec/object_builtin_ops.zig:1027`)
 
 - **签名**：`pub fn appendObjectGroupByValue( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, out_value: core.JSValue, out: *core.Object, key: core.Atom, value: core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !void`。
 - **作用**：把 value 推进 `out[key]` 数组；没有则新建数组并 CreateDataPropertyOrThrow。
 - **实现**：Get 失败当 undefined。undefined → `createArray` + 定义到 out。再把 value 定义到 `arrayLength()` 下标。单测：out 不可扩展时 TypeError，且半成品 group 只释放一次。
 - **所有权 / 错误 / 调用**：define 失败由调用方/err 路径回收。
 
-### `objectPreventExtensionsCall` (`src/exec/object_builtin_ops.zig:1129`)
+### `objectPreventExtensionsCall` (`src/exec/object_builtin_ops.zig:1080`)
 
 - **签名**：`pub fn objectPreventExtensionsCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.preventExtensions`。
 - **实现**：非对象原样返回。Proxy → `proxyAwarePreventExtensions`，假则 TypeError。否则 `object.preventExtensions()`。返回 target。
 - **所有权 / 错误 / 调用**：不抛的失败只出现在 Proxy trap 返回假。
 
-### `getOwnPropertyDescriptorCall` (`src/exec/object_builtin_ops.zig:1147`)
+### `getOwnPropertyDescriptorCall` (`src/exec/object_builtin_ops.zig:1098`)
 
 - **签名**：`pub fn getOwnPropertyDescriptorCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.getOwnPropertyDescriptor`。
 - **实现**：无参 `null`；nullish TypeError；ToObject；ToPropertyKey；`proxyAwareOwnPropertyDescriptor`；mapped arguments 再 `materializeMappedArgumentsDescriptorValueForVm`；`descriptorObjectFromDescriptor`。没有描述符 → undefined。
 - **所有权 / 错误 / 调用**：返回描述符对象或 undefined。
 
-### `objectGetPrototypeOfCall` (`src/exec/object_builtin_ops.zig:1167`)
+### `objectGetPrototypeOfCall` (`src/exec/object_builtin_ops.zig:1118`)
 
 - **签名**：`pub fn objectGetPrototypeOfCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.getPrototypeOf`。
 - **实现**：无参 `null`；nullish `"not an object"`；ToObject。若对象是 `Object.prototype.isPrototypeOf` 那条 native record（C 函数），返回 `%Function.prototype%`（历史：把该方法当函数原型查询）。否则 `objectGetPrototypeOfValue`。
 - **所有权 / 错误 / 调用**：`objectPrototypeMethodFunctionPrototype` 是窄特判。
 
-### `objectPrototypeMethodFunctionPrototype` (`src/exec/object_builtin_ops.zig:1183`)
+### `objectPrototypeMethodFunctionPrototype` (`src/exec/object_builtin_ops.zig:1134`)
 
 - **签名**：`pub fn objectPrototypeMethodFunctionPrototype( ctx: *core.JSContext, global: *core.Object, object: *core.Object, ) !?*core.Object`。
 - **作用**：识别「这是 Object.prototype 上的 isPrototypeOf native」并给出 Function.prototype。
 - **实现**：须 `c_function` 且 `isObjectPrototypeNativeRecord(..., is_prototype_of)`。
 - **所有权 / 错误 / 调用**：给 GetPrototypeOf 的兼容臂。
 
-### `isObjectPrototypeNativeRecord` (`src/exec/object_builtin_ops.zig:1193`)
+### `isObjectPrototypeNativeRecord` (`src/exec/object_builtin_ops.zig:1144`)
 
 - **签名**：`pub fn isObjectPrototypeNativeRecord(object: *core.Object, id: u32) bool`。
 - **作用**：native builtin id 是否为 `.object` 域的给定方法。
 - **实现**：`decodeNativeBuiltinId`；domain==object 且 id 匹配。
 - **所有权 / 错误 / 调用**：只读 `object.nativeFunctionId()` 解码，不分配、不建根、无 error set；`object` 是借用指针，非原生函数或跨域一律 false（保守方向：只会放弃快路径）。调用方 `src/exec/object_builtin_ops.zig:1189`，用来确认拿到的确实是内建的 `Object.prototype.isPrototypeOf` 而不是被覆写过的同名函数，之后才敢返回 realm 的 Function.prototype 走快路径。
 
-### `getOwnPropertyDescriptorsCall` (`src/exec/object_builtin_ops.zig:1198`)
+### `getOwnPropertyDescriptorsCall` (`src/exec/object_builtin_ops.zig:1149`)
 
 - **签名**：`pub fn getOwnPropertyDescriptorsCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`Object.getOwnPropertyDescriptors`。
 - **实现**：ToObject；ownKeys；新对象挂 Object.prototype；每键 gopd，mapped args 物化 value，`descriptorObjectFromDescriptor`，CreateDataPropertyOrThrow 到结果对象。
 - **所有权 / 错误 / 调用**：缺描述符的键跳过。
 
-### `objectOwnPropertyKeysCall` (`src/exec/object_builtin_ops.zig:1234`)
+### `objectOwnPropertyKeysCall` (`src/exec/object_builtin_ops.zig:1185`)
 
 - **签名**：`pub inline fn objectOwnPropertyKeysCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, filter: OwnPropertyKeyFilter, caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame, ) !?core.JSValue`。
 - **作用**：`getOwnPropertyNames` / `getOwnPropertySymbols`。
@@ -318,6 +311,6 @@
 
 ## 覆盖核对
 
-- 清单函数数: 42
-- 本文标题覆盖: 42
+- 清单函数数: 41
+- 本文标题覆盖: 41
 - 未覆盖: 无

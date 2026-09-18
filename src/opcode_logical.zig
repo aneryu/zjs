@@ -1084,7 +1084,7 @@ pub fn operandTemplate(fmt: Format) ?[]const Operand {
 
 pub const OperandOverride = struct { form: LogicalOpcode, operands: []const Operand };
 
-/// The eighteen forms whose operand kind does not follow from the format.
+/// The thirteen forms whose operand kind does not follow from the format.
 /// Every kind here was read out of the implementation rather than inferred
 /// from the name -- the recurring failure in this work has been treating a
 /// name as a design.

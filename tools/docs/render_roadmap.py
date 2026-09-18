@@ -22,6 +22,9 @@ GROUPS = [
     ("运行时/进程", ("RT-", "PROC-", "VM-WEAK",)),
 ]
 
+# Catch-all for ids whose prefix is not registered in GROUPS above.
+OTHER_GROUP = "其他"
+
 
 def load():
     import yaml  # type: ignore
@@ -33,7 +36,7 @@ def group_of(item_id):
     for name, prefixes in GROUPS:
         if any(item_id.startswith(p) for p in prefixes):
             return name
-    return "其他"
+    return OTHER_GROUP
 
 
 def fmt_activation(act):
@@ -58,7 +61,11 @@ def fmt_activation(act):
 
 def render_id_list(items):
     lines = ["```"]
-    for name, _ in GROUPS:
+    # GROUPS first, in declaration order, then whatever group_of() could not
+    # place. Iterating GROUPS alone silently dropped every item with an
+    # unregistered prefix from the generated ID-LIST, and roadmap_lint only
+    # cross-checks roadmap.md's prose, so the omission was invisible.
+    for name in [g[0] for g in GROUPS] + [OTHER_GROUP]:
         ids = [it["id"] for it in items if group_of(it["id"]) == name]
         if not ids:
             continue

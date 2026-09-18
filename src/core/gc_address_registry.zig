@@ -88,11 +88,6 @@ pub const Table = struct {
     /// is not a churn pattern that degenerates.
     arenas: std.AutoHashMapUnmanaged(usize, void) = .empty,
 
-    /// An arena base failed to enter `arenas` and has not been recovered.
-    ///
-    /// Sticky. While set, some live objects may be unresolvable from a
-    /// conservative candidate, so sweeping is unsound; the collector marks
-    /// only. See `noteArenaCreated`.
     /// The collector's block heap, for resolving candidates into its cells.
     /// Installed by `serveObjectCells`; null until then (and forever in
     /// builds without the block heap), which every block arm treats as "no
@@ -133,6 +128,12 @@ pub const Table = struct {
     /// triggered, so almost nothing was ever freed, the maps barely churned,
     /// and the compaction was pure overhead against a disease that had not yet
     /// appeared. Fixing the collection policy is what exposed this.
+    ///
+    /// The two high bits are the incompleteness flags (`arenas_incomplete_bit`
+    /// / `occupants_incomplete_bit`): a base that failed to enter its table and
+    /// was not recovered. Sticky. While set, some live objects may be
+    /// unresolvable from a conservative candidate, so sweeping is unsound and
+    /// the collector marks only. See `noteArenaCreated`.
     removes_since_rehash: usize = 0,
 
     pub inline fn arenasIncomplete(self: *const Table) bool {

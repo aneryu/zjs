@@ -38,63 +38,28 @@
 
 枚举：`GC`（含组 `LC/L/M/N/S/P/Z/C`）、`Script`、`Prop`（含内部 `*1` 残差与公共名）、`SequenceProp`（Basic_Emoji…RGI_Emoji）。
 
-### `GC.index` (`src/libs/unicode/data.zig:2412`)
-
-- **签名**：`pub fn index(self: @This()) usize`。
-- **作用**：枚举判别值当表下标。
-- **实现**：`@intFromEnum(self)`。
-- **所有权 / 错误 / 调用**：目前无调用方，`names.gcBit` / `gcMaskByIndex` 直接写 `@intFromEnum`。
-
-### `GC.count` (`src/libs/unicode/data.zig:2416`)
+### `GC.count` (`src/libs/unicode/data.zig:2412`)
 
 - **签名**：`pub fn count() usize`。
 - **作用**：GC 标签个数，给 comptime 名字表校验。
 - **实现**：`@typeInfo(@This()).@"enum".fields.len`。
 - **所有权 / 错误 / 调用**：`names.zig` 的 `countNameGroupsComptime` 比较。
 
-### `Script.index` (`src/libs/unicode/data.zig:2644`)
-
-- **签名**：`pub fn index(self: @This()) usize`。
-- **作用**：Script 下标。
-- **实现**：`@intFromEnum`。
-- **所有权 / 错误 / 调用**：目前无调用方，`scriptRanges` / `unicodeScript` 直接写 `@intFromEnum`。
-
-### `Script.count` (`src/libs/unicode/data.zig:2648`)
+### `Script.count` (`src/libs/unicode/data.zig:2640`)
 
 - **签名**：`pub fn count() usize`。
 - **作用**：Script 个数。
 - **实现**：枚举字段数。
 - **所有权 / 错误 / 调用**：名字表 comptime 断言。
 
-### `Prop.index` (`src/libs/unicode/data.zig:2899`)
-
-- **签名**：`pub fn index(self: @This()) usize`。
-- **作用**：Prop 下标。
-- **实现**：`@intFromEnum`。
-- **所有权 / 错误 / 调用**：目前无调用方，`propTable` 直接写 `@intFromEnum`。
-
-### `Prop.count` (`src/libs/unicode/data.zig:2903`)
-
-- **签名**：`pub fn count() usize`。
-- **作用**：Prop 个数（含内部残差）。
-- **实现**：枚举字段数。
-- **所有权 / 错误 / 调用**：公共名范围用 `prop_public_*` 而不是本 count。
-
-### `SequenceProp.index` (`src/libs/unicode/data.zig:2992`)
-
-- **签名**：`pub fn index(self: @This()) usize`。
-- **作用**：序列属性下标。
-- **实现**：`@intFromEnum`。
-- **所有权 / 错误 / 调用**：目前无调用方，`sequenceProp1` 直接写 `@intFromEnum`。
-
-### `SequenceProp.count` (`src/libs/unicode/data.zig:2996`)
+### `SequenceProp.count` (`src/libs/unicode/data.zig:2976`)
 
 - **签名**：`pub fn count() usize`。
 - **作用**：序列属性个数。
 - **实现**：枚举字段数。
 - **所有权 / 错误 / 调用**：`names.zig` 文件级 comptime 块拿它比 `unicode_sequence_prop_name_table` 的组数，并传给 `validateNameTable` 作越界上界。
 
-### `propTable` (`src/libs/unicode/data.zig:3027`)
+### `propTable` (`src/libs/unicode/data.zig:3007`)
 
 - **签名**：`pub fn propTable(prop: Prop) ?[]const u8`。
 - **作用**：有独立 RLE 表则返回切片，否则 null（派生属性或无表名）。
@@ -1113,6 +1078,6 @@ ASCII 谓词给 lexer/parser/regexp；非 ASCII 标识符走 `ID_Start`/`ID_Cont
 
 ## 覆盖核对
 
-- 清单函数数: 149（`src/libs/unicode.zig` 114 + `src/libs/unicode/data.zig` 9 + `src/libs/unicode/names.zig` 15 + `src/libs/unicode/properties.zig` 2 + `src/libs/unicode/regexp_properties.zig` 9）
-- 本文标题覆盖: 149
+- 清单函数数: 144（`src/libs/unicode.zig` 114 + `src/libs/unicode/data.zig` 4 + `src/libs/unicode/names.zig` 15 + `src/libs/unicode/properties.zig` 2 + `src/libs/unicode/regexp_properties.zig` 9）
+- 本文标题覆盖: 144
 - 未覆盖: 无

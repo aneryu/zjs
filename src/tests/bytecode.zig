@@ -97,12 +97,11 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
     try std.testing.expect(rt.atoms.name(owned_symbol) == null);
 }
 
-test "function bytecode owns code constants module and debug metadata" {
+test "function bytecode owns code constants and module metadata" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("compiled");
-    const filename = try rt.internAtom("input.js");
     const local = try rt.internAtom("x");
     const dep = try rt.internAtom("dep.mjs");
 
@@ -130,11 +129,6 @@ test "function bytecode owns code constants module and debug metadata" {
     try std.testing.expectEqual(@as(usize, 1), mod_record.star_exports.len);
     try std.testing.expectEqual(@as(usize, 1), mod_record.import_attributes.len);
     try std.testing.expect(mod_record.has_top_level_await);
-
-    const dbg = function_bc.ensureDebug(filename);
-    try dbg.add(.{ .pc = 0, .line = 1 });
-    try dbg.add(.{ .pc = 3, .line = 2 });
-    try std.testing.expectEqual(@as(?u32, 2), dbg.lineForPc(4));
 }
 
 test "script or module metadata owns each bytecode transfer" {
@@ -1675,7 +1669,6 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     try std.testing.expectEqual(@as(i32, 99), fb.cpoolSlice()[0].asInt32().?);
     try std.testing.expectEqual(@as(i32, 7), fb.lineNum());
     try std.testing.expectEqual(@as(i32, 3), fb.colNum());
-    try std.testing.expect(fb.pc2lineLen() > 0);
     try std.testing.expect(fb.pc2lineBuf().len >= 2);
     try std.testing.expectEqualSlices(u8, &.{ 6, 2 }, fb.pc2lineBuf()[0..2]);
     try std.testing.expect(!@hasField(bytecode.function_bytecode.DebugInfo, "line_num"));
@@ -3030,8 +3023,8 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     const bytes_with_both_generations = rt.memory.allocated_bytes;
     const count_with_both_generations = rt.memory.allocation_count;
 
-    bc.installCode(fresh_code);
-    bc.installAtomOperands(fresh_atoms);
+    bc.installCodeWithCapacity(fresh_code, fresh_code.len);
+    bc.installAtomOperandsWithCapacity(fresh_atoms, fresh_atoms.len);
 
     const carried_code_charge = core.memory.MemoryAccount.accountedSizeForRequest(16 * @sizeOf(u8), .@"1");
     const carried_atom_charge = core.memory.MemoryAccount.accountedSizeForRequest(8 * @sizeOf(core.atom.Atom), std.mem.Alignment.of(core.atom.Atom));
@@ -3097,7 +3090,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
             &window.state.function_def,
             .{ .realm = realm },
         );
-        var b3 = try window.sampleNext(.final, &b1);
+        var b3 = try window.sample(.final);
         // Finalization moves ownership under published FunctionBytecodes,
         // which the census does not descend into. TGC S3-c retired the atom
         // ledger that measured that residual, so what remains checkable here
@@ -3112,7 +3105,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         }
 
         window.discardTemporaries();
-        var b4 = try window.sampleNext(.final, &b3);
+        var b4 = try window.sample(.final);
         const committed = b4.builder.owned;
         ownership.setBuilderCommitted(&b1, committed);
         ownership.setBuilderCommitted(&b3, committed);
@@ -3134,7 +3127,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         // artifact release that orphans them. Under the tracer that teardown is
         // this collection, and only after it does the atom table balance.
         helpers.reclaimNow(rt);
-        var terminal = try window.sampleNext(.final, &b4);
+        var terminal = try window.sample(.final);
         ownership.setBuilderCommitted(&terminal, 0);
         try ownership.expectTerminal(terminal);
         ownership.dump(shape.*, "compile-only", "terminal", terminal);

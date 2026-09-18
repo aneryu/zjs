@@ -280,8 +280,9 @@ pub const Queue = struct {
         self.pool.failBackingAllocationsForTest(count);
     }
 
-    pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
-        _ = allocator;
+    /// The pool frees through the backing allocator it bound on first use,
+    /// so tearing the queue down takes no allocator argument.
+    pub fn deinit(self: *Queue) void {
         self.reset();
         self.pool.deinit();
         self.* = .{};

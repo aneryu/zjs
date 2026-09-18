@@ -143,6 +143,9 @@ pub fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object,
 }
 
 pub fn constructorPrototypeFromGlobalAtom(rt: *core.JSRuntime, global: *core.Object, constructor_atom: core.Atom) ?*core.Object {
+    // Borrowed reads only, so no runtime is needed; `rt` stays for uniformity
+    // with the rest of the `*PrototypeFromGlobal*` family, whose callers hold
+    // it anyway.
     _ = rt;
     if (global.getOwnDataObjectBorrowed(constructor_atom)) |constructor| {
         if (constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
@@ -330,8 +333,8 @@ fn bytecodeFunctionPrototypeForRealm(
     const prototype = switch (kind) {
         .normal => functionPrototypeFromGlobal(ctx.runtime, global) orelse return error.InvalidBuiltinRegistry,
         .generator => (try generatorFunctionPrototypeFromGlobal(ctx.runtime, global)) orelse return error.InvalidBuiltinRegistry,
-        .async => (try asyncFunctionPrototypeFromGlobal(ctx.runtime, global)) orelse return error.InvalidBuiltinRegistry,
-        .async_generator => (try asyncGeneratorFunctionPrototypeFromGlobal(ctx.runtime, global)) orelse return error.InvalidBuiltinRegistry,
+        .async => try asyncFunctionPrototypeFromGlobal(ctx.runtime, global),
+        .async_generator => try asyncGeneratorFunctionPrototypeFromGlobal(ctx.runtime, global),
     };
     try realm.setClassPrototype(class_id, prototype);
     return prototype;
@@ -732,7 +735,7 @@ pub fn aggregateErrorConstructWithPrototype(
     const errors_array_value = errors_array.value();
     try defineDataPropertyByAtom(rt, instance, core.atom.ids.errors, errors_array_value, true, false, true);
 
-    try captureErrorStack(ctx, output, global, instance);
+    try captureErrorStack(ctx, global, instance);
 
     return instance_value;
 }
@@ -825,7 +828,7 @@ pub fn suppressedErrorConstructWithPrototype(
     const suppressed_value = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
     try defineDataPropertyByAtom(rt, instance, core.atom.ids.suppressed, suppressed_value, true, false, true);
 
-    try captureErrorStack(ctx, output, global, instance);
+    try captureErrorStack(ctx, global, instance);
 
     return instance_value;
 }
@@ -874,6 +877,9 @@ pub fn disposableStackConstructWithPrototype(
     global: *core.Object,
     prototype: ?*core.Object,
 ) !core.JSValue {
+    // `prototype` is already resolved from new.target by the caller, so the
+    // realm global is not consulted; the parameter keeps this in shape with the
+    // other `*ConstructWithPrototype` entry points the construct paths select.
     _ = global;
     const stack = try core.Object.create(ctx.runtime, core.class.ids.disposable_stack, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, stack.gcHeader());
@@ -931,7 +937,7 @@ pub fn errorConstructWithPrototype(
         }
     }
 
-    try captureErrorStack(ctx, output, global, instance);
+    try captureErrorStack(ctx, global, instance);
 
     return instance_value;
 }
@@ -1385,6 +1391,8 @@ pub fn throwPrimitivePrototypeTypeError(
 }
 
 pub fn getNumberPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Object) ?u32 {
+    // Pure decode of the function object's native-builtin id; `rt` is kept to
+    // match the sibling `get*PrototypeMethodId` probes the VM calls uniformly.
     _ = rt;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (native_ref.domain != .number) return null;
@@ -1429,6 +1437,9 @@ pub fn numberPrototypeMethod(
 }
 
 pub fn primitivePrototypeThisValue(rt: *core.JSRuntime, value: core.JSValue, class_tag: i32) !core.JSValue {
+    // Tag checks and a borrowed payload read; `rt` is kept because both call
+    // sites (this file and number_ops) hand it through the same way.
+    _ = rt;
     if (class_tag == 1 and value.isNumber()) return value;
     if (class_tag == 2 and value.asBool() != null) return value;
     if (class_tag == 3 and value.isBigInt()) return value;
@@ -1445,9 +1456,7 @@ pub fn primitivePrototypeThisValue(rt: *core.JSRuntime, value: core.JSValue, cla
         else => false,
     };
     if (!matches) return error.TypeError;
-    if (class_tag == 5) return (object.objectData() orelse return error.TypeError);
-    _ = rt;
-    return (object.objectData() orelse return error.TypeError);
+    return object.objectData() orelse error.TypeError;
 }
 
 pub fn defineErrorStackDataProperty(
@@ -1738,8 +1747,12 @@ pub fn createDataPropertyOrThrow(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    // CreateDataProperty takes no receiver; `receiver_value` is the already
+    // boxed `object` that the VM / Object.* call sites hold, kept so they do
+    // not have to re-box. Neither leg below reads it.
+    _ = receiver_value;
     if (object.proxyTarget() != null) {
-        try proxyCreateDataPropertyOrThrow(ctx, output, global, receiver_value, object, atom_id, value, caller_function, caller_frame);
+        try proxyCreateDataPropertyOrThrow(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
         return;
     }
     try createArrayDataOrTypedArrayElement(ctx.runtime, object, atom_id, value);
@@ -2514,7 +2527,7 @@ pub fn getValueProperty(
         }
         if (!object.hasExoticMethods()) {
             if (object.isArray()) {
-                if (atom_id == core.atom.ids.length) return value_ops.length(rt, value);
+                if (atom_id == core.atom.ids.length) return value_ops.length(value);
                 if (core.atom.isTaggedInt(atom_id)) {
                     const index = core.atom.atomToUInt32(atom_id);
                     if (object.getDenseArrayElementValue(index)) |element| return element;
@@ -2606,7 +2619,7 @@ noinline fn getValuePropertyNonObject(
     const rt = ctx.runtime;
     if (rt.atoms.mightBePrivate(atom_id) and rt.atoms.kind(atom_id) == .private) return error.TypeError;
     if (value.isString()) {
-        if (atom_id == core.atom.ids.length) return value_ops.length(rt, value);
+        if (atom_id == core.atom.ids.length) return value_ops.length(value);
         if (try getStringIndexValue(rt, value, atom_id)) |indexed| return indexed;
         return getPrimitiveProperty(ctx, output, global, value, atom_id, caller_function, caller_frame);
     }
@@ -2748,6 +2761,22 @@ pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) 
     return null;
 }
 
+/// `[[Get]]` with an explicit receiver (`super.x`, `Reflect.get(t, k, r)`):
+/// qjs `JS_GetPropertyInternal(ctx, obj, prop, this_obj, ...)` (quickjs.c:8268)
+/// threads `this_obj` through ONE shape/prototype walk, so an accessor found at
+/// any depth is invoked on the receiver rather than on the holder.
+///
+/// zjs splits that into a descriptor walk here plus `getValueProperty` as the
+/// tail. KNOWN COST: on a complete miss the same prototype chain is walked
+/// twice, i.e. O(2 x chain) for `super.missing` and for a Proxy with no `get`
+/// trap. The second pass is not redundant -- it is what supplies the entry-only
+/// cases the descriptor walk cannot express (a private-name atom, and the
+/// legacy `caller`/`arguments` compatibility properties on a function target) --
+/// but it is deliberately kept as a whole re-entry rather than as a hand-picked
+/// subset, because `getValueProperty` is the single authority on the order of
+/// those entry checks against the ordinary walk. Note also that the tail passes
+/// `target_value`, not `receiver_value`: anything it resolves is by definition
+/// something the receiver-aware walk above already declined.
 pub fn getValuePropertyWithReceiver(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2773,6 +2802,8 @@ pub fn getValuePropertyWithReceiver(
             }
         }
     }
+    // Miss: re-enter the general resolver for the entry-only cases (see the
+    // doc comment above for why this second chain walk is intentional).
     return getValueProperty(ctx, output, global, target_value, atom_id, caller_function, caller_frame);
 }
 
@@ -2793,7 +2824,6 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
         try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
         const string_value = rooted_primitive.asStringBody() orelse return error.TypeError;
-        try string_value.ensureFlat(rt);
         var index: u32 = 0;
         while (index < string_value.len()) : (index += 1) {
             try defineStringWrapperIndexProperty(rt, object, index, string_value.codeUnitAt(index));
@@ -3251,7 +3281,7 @@ pub fn objectSetPrototypeOfCall(
     else
         objectFromValue(args[1]) orelse return error.TypeError;
     const object = objectFromValue(args[0]) orelse return args[0];
-    if (object.proxyTarget() == null and objectHasImmutablePrototype(ctx.runtime, object) and object.getPrototype() != prototype) return error.TypeError;
+    if (object.proxyTarget() == null and objectHasImmutablePrototype(object) and object.getPrototype() != prototype) return error.TypeError;
     if (object.proxyTarget() != null) {
         if (!try proxyAwareSetPrototypeOf(ctx, output, global, object, prototype, caller_function, caller_frame)) return error.TypeError;
         return args[0];
@@ -3282,7 +3312,7 @@ pub fn reflectSetPrototypeOfCall(
         null
     else
         objectFromValue(args[1]) orelse return error.TypeError;
-    if (object.proxyTarget() == null and objectHasImmutablePrototype(ctx.runtime, object) and object.getPrototype() != prototype) return core.JSValue.boolean(false);
+    if (object.proxyTarget() == null and objectHasImmutablePrototype(object) and object.getPrototype() != prototype) return core.JSValue.boolean(false);
     if (object.proxyTarget() != null) {
         return core.JSValue.boolean(try proxyAwareSetPrototypeOf(ctx, output, global, object, prototype, caller_function, caller_frame));
     }
@@ -3318,8 +3348,7 @@ pub fn reflectConstructPrototypeVm(
     return OwnedPrototype.fromObject(null);
 }
 
-pub fn objectHasImmutablePrototype(rt: *core.JSRuntime, object: *core.Object) bool {
-    _ = rt;
+fn objectHasImmutablePrototype(object: *core.Object) bool {
     return object.hasImmutablePrototype();
 }
 
@@ -3728,6 +3757,10 @@ pub fn hasValueProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!bool {
+    // `receiver` only keeps this in shape with the get/set/delete family:
+    // [[HasProperty]] takes no receiver (the trap gets `target`, and the
+    // ordinary walk never reads one). Kept so cross-file call sites in
+    // array_ops / reflect_ops stay uniform across the four operations.
     _ = receiver;
     const target_value = object.proxyTarget() orelse return ordinaryHasValueProperty(ctx, output, global, object, atom_id, false, caller_function, caller_frame);
     const target = try property_ops.expectObject(target_value);
@@ -3810,6 +3843,8 @@ pub fn deleteValueProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
+    // Same as `hasValueProperty`: [[Delete]] takes no receiver, the parameter
+    // only keeps the four property operations call-compatible.
     _ = receiver;
     const target_value = object.proxyTarget() orelse {
         return object.deleteProperty(ctx.runtime, atom_id);
@@ -4137,8 +4172,11 @@ pub noinline fn defineClass(
     frame.pc += 5;
     var ctor_source = try stack.pop();
     var parent_value = try stack.pop();
-    var saved_class_binding = core.JSValue.undefinedValue();
-    var saved_class_binding_active = false;
+    // The `extends` form pops one slot too many when the superclass operand
+    // is the placeholder `undefined`: the real superclass sits underneath it.
+    // Nothing is "saved" here -- the slot we owe the stack back is always
+    // exactly that `undefined` -- so track only whether we owe it.
+    var owes_placeholder_class_binding = false;
     var superclass_value = core.JSValue.undefinedValue();
     var superclass_value_active = false;
     var ctor = core.JSValue.undefinedValue();
@@ -4149,7 +4187,6 @@ pub noinline fn defineClass(
     var root_frame = core.runtime.rootValues(.{
         &ctor_source,
         &parent_value,
-        &saved_class_binding,
         &superclass_value,
         &ctor,
         &computed_key,
@@ -4165,8 +4202,7 @@ pub noinline fn defineClass(
         superclass_value_active = true;
         parent_value = core.JSValue.undefinedValue();
         if (superclass_value.isUndefined() and stack.len() > 0) {
-            saved_class_binding = superclass_value;
-            saved_class_binding_active = true;
+            owes_placeholder_class_binding = true;
             superclass_value = try stack.pop();
         }
         if (!(superclass_value.isObject() or superclass_value.isNull())) {
@@ -4217,8 +4253,8 @@ pub noinline fn defineClass(
     try proto.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(ctor_object.value(), true, false, true));
     try ctor_object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(proto_value, false, false, false));
     try ctor_object.setFunctionHomeObject(ctx.runtime, proto);
-    if (saved_class_binding_active) {
-        try stack.push(saved_class_binding);
+    if (owes_placeholder_class_binding) {
+        try stack.push(core.JSValue.undefinedValue());
     }
     try stack.push(ctor);
     try stack.push(proto_value);
@@ -4473,11 +4509,10 @@ pub inline fn proxySetTrapForErrorStackSetter(
     return proxySetWithTrap(ctx, output, global, receiver_value, receiver, stack_key, value, caller_function, caller_frame, .error_stack);
 }
 
-pub fn proxyCreateDataPropertyOrThrow(
+fn proxyCreateDataPropertyOrThrow(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver_value: core.JSValue,
     proxy: *core.Object,
     atom_id: core.Atom,
     value: core.JSValue,
@@ -4507,7 +4542,6 @@ pub fn proxyCreateDataPropertyOrThrow(
     try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.configurable, core.JSValue.boolean(true));
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     if (!value_ops.isTruthy(result)) return error.TypeError;
-    _ = receiver_value;
 }
 
 pub fn validateProxyOwnKeysResult(
@@ -4590,7 +4624,7 @@ pub fn proxyAwareOwnPropertyDescriptor(
     }
     const desc_object = property_ops.expectObject(desc_value) catch return error.TypeError;
     const result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
-    const complete_desc = try completeProxyDescriptor(ctx.runtime, result_desc);
+    const complete_desc = try completeProxyDescriptor(result_desc);
     if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, complete_desc)) return error.TypeError;
     if (complete_desc.configurable == false) {
         if (target_desc) |item| {
@@ -4748,8 +4782,7 @@ pub fn proxyAwareSetPrototypeOf(
     return true;
 }
 
-pub fn completeProxyDescriptor(rt: *core.JSRuntime, desc: core.Descriptor) !core.Descriptor {
-    _ = rt;
+fn completeProxyDescriptor(desc: core.Descriptor) !core.Descriptor {
     return switch (desc.kind) {
         .generic, .data => core.Descriptor.data(
             if (desc.value_present) desc.value else core.JSValue.undefinedValue(),
@@ -4811,6 +4844,9 @@ pub fn callProxyApply(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    // `proxy_value` is unused: everything this needs comes off `proxy`. It
+    // stays in the signature because both call sites (call.zig,
+    // call_runtime.zig) already hold the boxed callee.
     _ = proxy_value;
     // Materialize the revoked-proxy TypeError here so it carries the
     // current realm's constructor (the caller frame's `global`), not the
@@ -5037,6 +5073,9 @@ pub fn proxyDefineValueForReflectSet(
     try defineValueProperty(ctx.runtime, desc_object, core.atom.ids.value, rooted_value);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, define, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     if (!valueTruthy(result)) return error.TypeError;
+    // CreateDataProperty on the proxy passes `target` to the trap; the
+    // Reflect.set receiver plays no part. The parameter is kept for the
+    // array_ops call site's symmetry with the ordinary define path.
     _ = receiver_value;
 }
 

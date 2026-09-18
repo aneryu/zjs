@@ -67,11 +67,9 @@ pub fn forOfStart(
         return error.TypeError;
     }
     const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
-    var owns_iterator_value = true;
     _ = try property_ops.expectObject(iterator_value);
     if (is_async) {
         const wrapper = try createAsyncFromSyncIterator(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
-        owns_iterator_value = false;
         const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty);
         try pushForAwaitRecord(ctx, stack, wrapper, next_method);
         return;
@@ -79,7 +77,6 @@ pub fn forOfStart(
 
     const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty);
     try stack.pushOwned(iterator_value);
-    owns_iterator_value = false;
     errdefer {
         _ = stack.pop() catch null;
     }
@@ -158,13 +155,11 @@ pub fn createAsyncFromSyncIterator(
     const rt = ctx.runtime;
     var rooted_sync_iterator = sync_iterator;
     var rooted_next_method = core.JSValue.undefinedValue();
-    var owns_next_method = false;
     var root_frame = core.runtime.rootValues(.{ &rooted_sync_iterator, &rooted_next_method });
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
     rooted_next_method = try iteratorNextMethod(ctx, output, global, rooted_sync_iterator, function, frame, getValueProperty);
-    owns_next_method = true;
 
     const wrapper = try core.Object.create(rt, core.class.ids.async_from_sync_iterator, null);
     errdefer core.Object.destroyFromHeader(rt, wrapper.gcHeader());
@@ -516,7 +511,7 @@ pub fn forOfNext(
     const depth = function.byteCode()[frame.pc];
     frame.pc += 1;
     const iterator_index = try forOfIteratorIndex(stack, depth);
-    errdefer forof_ops.abandonForOfIteratorAtIndex(ctx.runtime, stack, iterator_index);
+    errdefer forof_ops.abandonForOfIteratorAtIndex(stack, iterator_index);
     if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
     if (try fastMapSetForOfNext(ctx, stack, iterator_index)) return;
     if (try fastGeneratorForOfNext(ctx, output, global, stack, iterator_index)) return;
@@ -559,7 +554,7 @@ pub fn finishForOfNextResult(
     next_result: core.JSValue,
 ) !void {
     const iterator_index = try forOfIteratorIndex(stack, depth);
-    errdefer forof_ops.abandonForOfIteratorAtIndex(ctx.runtime, stack, iterator_index);
+    errdefer forof_ops.abandonForOfIteratorAtIndex(stack, iterator_index);
 
     const next_object = objectFromValue(next_result) orelse return error.TypeError;
     const done_value = try iteratorResultProperty(
@@ -1417,14 +1412,12 @@ pub fn iteratorConcatCall(
     for (args, 0..) |item, index| {
         var rooted_item = item;
         var rooted_iterator_method = core.JSValue.undefinedValue();
-        var owns_iterator_method = false;
         var loop_root_frame = core.runtime.rootValues(.{ &rooted_item, &rooted_iterator_method });
         loop_root_frame.activate(ctx.runtime);
         defer loop_root_frame.deactivate(ctx.runtime);
 
         _ = property_ops.expectObject(rooted_item) catch return error.TypeError;
         rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
-        owns_iterator_method = true;
         if (rooted_iterator_method.isUndefined() or rooted_iterator_method.isNull() or !isCallableValue(rooted_iterator_method)) return error.TypeError;
         try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2)), rooted_item);
         try records.setProperty(ctx.runtime, core.atom.atomFromUInt32(@intCast(index * 2 + 1)), rooted_iterator_method);
@@ -2489,7 +2482,7 @@ fn iteratorCreateLimitHelper(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = objectFromValue(receiver) orelse return error.TypeError;
-    const limit = iteratorLimitArgument(ctx, output, global, receiver, args) catch |err| {
+    const limit = iteratorLimitArgument(ctx, output, global, args) catch |err| {
         return iteratorCloseWithCompletionAndPropagate(ctx, output, global, receiver, err, caller_function, caller_frame);
     };
     return try iteratorCreateHelper(ctx, output, global, receiver, kind, core.JSValue.undefinedValue(), limit, caller_function, caller_frame, object_ops.getValueProperty);
@@ -2499,10 +2492,8 @@ fn iteratorLimitArgument(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.JSValue,
     args: []const core.JSValue,
 ) !usize {
-    _ = receiver;
     const limit_arg = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     const primitive = if (limit_arg.isObject())
         try coercion_ops.toPrimitiveForNumber(ctx, output, global, limit_arg)
@@ -2532,7 +2523,6 @@ fn iteratorCreateHelper(
     var rooted_receiver = receiver;
     var rooted_callback = callback;
     var rooted_next_method = core.JSValue.undefinedValue();
-    var owns_next_method = false;
     var root_frame = core.runtime.rootValues(.{
         &rooted_receiver,
         &rooted_callback,
@@ -2544,7 +2534,6 @@ fn iteratorCreateHelper(
     const iterator = objectFromValue(rooted_receiver) orelse return error.TypeError;
     const next_key = core.atom.ids.next;
     rooted_next_method = try getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
-    owns_next_method = true;
 
     const prototype = try iteratorHelperPrototype(ctx.runtime, global);
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
@@ -3168,6 +3157,10 @@ pub fn iteratorStepResult(
     const done_key = core.atom.predefinedId("done", .string).?;
     const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
     const is_done = coercion_ops.valueTruthy(done);
+    // Unlike IteratorStepValue, the `yield*` caller only needs `value` on the
+    // done step (it becomes the delegation's completion value); the not-done
+    // step forwards the whole result object via `.result`, so reading `value`
+    // there would be an extra observable Get.
     const value = if (is_done) blk: {
         const value_key = core.atom.predefinedId("value", .string).?;
         break :blk try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null);

@@ -66,7 +66,6 @@ pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const 
 
 pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
     const string_object = string_value.asStringBody() orelse return null;
-    try string_object.ensureFlat(rt);
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {

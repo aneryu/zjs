@@ -22,12 +22,6 @@ pub const ThrowResult = enum {
     handled,
 };
 
-pub const ThrowError = error{
-    SyntaxError,
-    ReferenceError,
-    TypeError,
-};
-
 pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
     // qjs OP_return is an ownership MOVE off the operand stack, never a dup:
@@ -124,16 +118,6 @@ pub noinline fn throwTop(
     }
     _ = ctx.throwValue(value);
     return error.JSException;
-}
-
-pub fn throwError(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) ThrowError {
-    const error_type = function.byteCode()[frame.pc + 4];
-    frame.pc += 5;
-    return switch (error_type) {
-        1 => error.SyntaxError,
-        2, 3, 5 => error.ReferenceError,
-        else => error.TypeError,
-    };
 }
 
 fn createAtomError(

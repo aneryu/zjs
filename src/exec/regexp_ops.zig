@@ -41,11 +41,6 @@ pub const AccessorMethod = core.host_function.builtin_method_ids.regexp.Accessor
 
 pub const LegacyAccessorMethod = core.host_function.builtin_method_ids.regexp.LegacyAccessorMethod;
 
-pub fn staticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "escape")) return @intFromEnum(StaticMethod.escape);
-    return null;
-}
-
 pub fn prototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "toString")) return @intFromEnum(PrototypeMethod.to_string);
     if (std.mem.eql(u8, name, "test")) return @intFromEnum(PrototypeMethod.test_);
@@ -363,7 +358,7 @@ fn regexpSourceAccessorCall(
         defer prototype.deinit(native_ctx.runtime);
         if (receiver == prototype.object()) return createStringValue(native_ctx.runtime, "(?:)");
     }
-    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, active_global, function_object.value());
+    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, function_object.value());
     return error.TypeError;
 }
 
@@ -392,7 +387,7 @@ fn regexpFlagAccessorCall(
         defer prototype.deinit(native_ctx.runtime);
         if (receiver == prototype.object()) return core.JSValue.undefinedValue();
     }
-    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, active_global, function_object.value());
+    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, function_object.value());
     return error.TypeError;
 }
 
@@ -454,12 +449,6 @@ fn regexpSymbolSplitCall(
         host_call.caller_function,
         host_call.caller_frame,
     )) orelse error.TypeError;
-}
-
-/// QuickJS source map: narrow RegExp constructor payload used by transitional
-/// `new_regexp` bytecode.
-pub fn construct(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue) !core.JSValue {
-    return constructWithPrototype(rt, pattern, flags, null);
 }
 
 pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
@@ -640,19 +629,6 @@ fn regexpObjectFromValue(value: core.JSValue) ?*core.Object {
     return if (object.class_id == core.class.ids.regexp) object else null;
 }
 
-/// QuickJS source map: selected RegExp.prototype methods currently covered by
-/// smoke and parser lowering. Matching is still owned by libs/regexp.zig.
-pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, arg: ?core.JSValue) !core.JSValue {
-    _ = arg;
-    const object = try expectRegExpObject(object_value);
-    return switch (method) {
-        1 => try toString(rt, object),
-        2 => core.JSValue.boolean(true),
-        3 => core.JSValue.nullValue(),
-        else => error.TypeError,
-    };
-}
-
 pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u8) !core.JSValue {
     const object = try expectRegExpObject(object_value);
     if (std.mem.eql(u8, name, "source")) {
@@ -735,7 +711,6 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
 
-    try input.ensureFlat(rt);
     switch (input.resolveData()) {
         .latin1 => |bytes| {
             for (bytes, 0..) |byte, index| try appendEscapedCodeUnit(rt, &buffer, byte, index == 0);

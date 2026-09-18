@@ -7,6 +7,8 @@ pub const usage =
     "  -e <file>                use a known-errors file\n" ++
     "  -u                       update the known-errors file from failures\n" ++
     "  -m                       run selected tests as modules\n" ++
+    "  -v                       report each failing test\n" ++
+    "  -vv                      report every test as it runs\n" ++
     "  -t <n>                   run up to <n> tests in parallel\n" ++
     "  -T <ms>                  per-test timeout in milliseconds\n" ++
     "  -R <dir>                 emit test262-failures.log, test262-buckets.json,\n" ++

@@ -2301,7 +2301,9 @@ pub fn namespace(comptime token: type) type {
                     if (textEql(txt, "(")) {
                         paren_depth += 1;
                     } else if (textEql(txt, ")")) {
-                        paren_depth -= 1;
+                        // Saturating: the eraser runs before parsing, so malformed TS
+                        // input may carry unbalanced `)`. Match the other depth counters.
+                        paren_depth -|= 1;
                         if (paren_depth == 0) {
                             in_constructor_params = false;
                         }
@@ -2647,7 +2649,7 @@ pub fn namespace(comptime token: type) type {
             const is_call_or_expr = textEql(prev, ")") or textEql(prev, "]") or prev_kind == .number or prev_kind == .string or prev_kind == .regexp;
             if (is_call_or_expr) return false;
 
-            if (lt_idx >= 2 and textEql(prev, "class")) return false;
+            if (textEql(prev, "class")) return false;
             return true;
         }
 

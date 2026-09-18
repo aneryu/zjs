@@ -87,157 +87,157 @@
 
 - **签名**：`fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool`。
 - **作用**：把 `value` 存进指定 index 的可写 data 槽。
-- **实现**：忽略 `rt`。`writableDataSlotAt` 失败 → `false`。`Private_brand` 或任一侧 `requiresRefCount` 时仍直接 `slot.value.* = value`（两臂现在同构，历史 rc 快路径已无语义差）。返回 `true`。
-- **所有权 / 错误 / 调用**：调用方保证 `value` 生命周期。`Private_brand` 不能走「丢旧值」捷径的历史注释仍保留在条件里。
+- **实现**：`writableDataSlotAt` 失败 → `false`，否则 `slot.value.* = value` 并返回 `true`。原先按 `Private_brand` / `requiresRefCount` 分的两臂在 tracing GC 下逐字同构，已折成一句。
+- **所有权 / 错误 / 调用**：调用方保证 `value` 生命周期。`rt` 形参不被读取（已发布对象的就地覆写不需要运行时钩子），保留是为了与本文件其余 `set*At` 写入者同形，函数头注释已写明。
 
-### `ordinaryDataPropertyLookup` (`src/exec/property_direct.zig:173`)
+### `ordinaryDataPropertyLookup` (`src/exec/property_direct.zig:172`)
 
 - **签名**：`pub fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup`。
 - **作用**：沿原型链分类 ordinary data/getter/proxy/undefined，全程不调用户代码。
 - **实现**：private → `.slow`。非对象 → `.slow`。循环：有 `proxyTarget` → `.proxy`；`hasExoticMethods` → `.slow`；Array 的 length/下标 → `.slow`；非 object/global 且非 native object → `.slow`。`findProperty` 命中：data → `.value`，accessor → `.getter`（只取 getter 值，不调用），var_ref/auto_init → `.slow`。miss 则下一原型；无原型时 Array 仍 `.slow`，否则 `.undefined`。
 - **所有权 / 错误 / 调用**：borrowed。Proxy 接收者返回对象指针给调用方去走 trap。`getProxyProperty` 用它的值臂跳过完整 Get。
 
-### `ordinaryDataPropertyValueOrUndefinedForFastPath` (`src/exec/property_direct.zig:197`)
+### `ordinaryDataPropertyValueOrUndefinedForFastPath` (`src/exec/property_direct.zig:196`)
 
 - **签名**：`pub fn ordinaryDataPropertyValueOrUndefinedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue`。
 - **作用**：把 lookup 收成「值或 undefined」；getter/proxy/slow 返回 `null`。
 - **实现**：switch lookup。`.undefined` 变成 `undefinedValue()`，与「必须慢路径」的 `null` 区分。
 - **所有权 / 错误 / 调用**：`getProxyProperty` 读 handler.`get` 与 target 数据时用。
 
-### `declaredGlobalVarDataBorrowedLookup` (`src/exec/property_direct.zig:205`)
+### `declaredGlobalVarDataBorrowedLookup` (`src/exec/property_direct.zig:204`)
 
 - **签名**：`fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const bytecode.FunctionBytecode, atom_id: core.Atom) ?BorrowedGlobalDataLookup`。
 - **作用**：仅当该 atom 是函数的 `global_decl` 闭包变量时，读全局 own data。
 - **实现**：扫 `function.closureVar()`，`closureType() == .global_decl` 且 `var_name == atom_id` 才 `globalOwnDataPropertyBorrowedLookup`。
 - **所有权 / 错误 / 调用**：避免把偶然同名的全局属性当「已声明 var」写穿。
 
-### `globalOwnDataPropertyBorrowedLookup` (`src/exec/property_direct.zig:213`)
+### `globalOwnDataPropertyBorrowedLookup` (`src/exec/property_direct.zig:212`)
 
 - **签名**：`fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom) ?BorrowedGlobalDataLookup`。
 - **作用**：线性扫全局 shape，找非删除、非访问器的 data 槽。
 - **实现**：exotic → `null`。`shapeProps` 上匹配 atom；accessor 或 `kind != .data` → `null`。
 - **所有权 / 错误 / 调用**：borrowed。全局对象属性少，线性扫可接受。
 
-### `globalOwnDataPropertyValue` (`src/exec/property_direct.zig:225`)
+### `globalOwnDataPropertyValue` (`src/exec/property_direct.zig:224`)
 
 - **签名**：`pub fn globalOwnDataPropertyValue(global: *core.Object, atom_id: core.Atom) ?core.JSValue`。
 - **作用**：公开入口：全局 own data 的 borrowed 值。
 - **实现**：lookup 失败 `null`，否则 `lookup.value`。
 - **所有权 / 错误 / 调用**：不抛。
 
-### `globalOwnDataPropertyBorrowedAt` (`src/exec/property_direct.zig:230`)
+### `globalOwnDataPropertyBorrowedAt` (`src/exec/property_direct.zig:229`)
 
 - **签名**：`fn globalOwnDataPropertyBorrowedAt(global: *core.Object, index: usize, atom_id: core.Atom) ?core.JSValue`。
 - **作用**：按已解析 index 再确认槽仍是该 atom 的 data。
 - **实现**：`dataSlotAt` 后读 `slot.value.*`。
 - **所有权 / 错误 / 调用**：shape 变化后 index 失效则 `null`。
 
-### `globalOwnWritableDataPropertyLookup` (`src/exec/property_direct.zig:235`)
+### `globalOwnWritableDataPropertyLookup` (`src/exec/property_direct.zig:234`)
 
 - **签名**：`fn globalOwnWritableDataPropertyLookup(global: *core.Object, atom_id: core.Atom) ?WritableGlobalDataStore`。
 - **作用**：全局 own data 且 writable 的存储描述。
 - **实现**：borrowed lookup + `globalWritableDataPropertyLookupAt`。
 - **所有权 / 错误 / 调用**：只读数据返回 `null`（单测覆盖）。
 
-### `globalDataPropertyLookupForFastPath` (`src/exec/property_direct.zig:240`)
+### `globalDataPropertyLookupForFastPath` (`src/exec/property_direct.zig:239`)
 
 - **签名**：`fn globalDataPropertyLookupForFastPath( rt: *core.JSRuntime, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?BorrowedGlobalDataLookup`。
 - **作用**：全局读快路径的 lookup 入口。
-- **实现**：转 `installableGlobalDataPropertyLookup`。`site_pc` 现被忽略（无 profile IC）。
+- **实现**：转 `installableGlobalDataPropertyLookup`。`site_pc` 现被忽略（无 profile IC）。`…NoProfile` 现在是本函数的一行别名。
 - **所有权 / 错误 / 调用**：给 `ValueForFastPath` 用。
 
-### `globalDataPropertyValueForFastPath` (`src/exec/property_direct.zig:250`)
+### `globalDataPropertyValueForFastPath` (`src/exec/property_direct.zig:249`)
 
 - **签名**：`pub fn globalDataPropertyValueForFastPath( rt: *core.JSRuntime, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?core.JSValue`。
 - **作用**：VM 全局读快路径：声明 var 或 own data。
 - **实现**：lookup 后返回 borrowed 值。
 - **所有权 / 错误 / 调用**：`null` 时 opcode 走完整全局 Get。
 
-### `globalDataPropertyLookupForFastPathNoProfile` (`src/exec/property_direct.zig:261`)
+### `globalDataPropertyLookupForFastPathNoProfile` (`src/exec/property_direct.zig:263`)
 
-- **签名**：`fn globalDataPropertyLookupForFastPathNoProfile( rt: *core.JSRuntime, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?BorrowedGlobalDataLookup`。
-- **作用**：与带 profile 的 lookup 同体，保留无 profile 调用点。
-- **实现**：同样 `installableGlobalDataPropertyLookup`。
-- **所有权 / 错误 / 调用**：两套入口是历史分叉，行为现已对齐。
+- **签名**：`const globalDataPropertyLookupForFastPathNoProfile = globalDataPropertyLookupForFastPath;`。
+- **作用**：站点 profile 搬出本文件后两套 lookup 已完全同体，这里保留第二个名字，让两个 `globalDataPropertyValueForFastPath*` 入口仍可区分。
+- **实现**：无独立函数体（一行别名，原先逐字重复的实现已删）。
+- **所有权 / 错误 / 调用**：完全等同被别名者。
 
-### `globalDataPropertyValueForFastPathNoProfile` (`src/exec/property_direct.zig:271`)
+### `globalDataPropertyValueForFastPathNoProfile` (`src/exec/property_direct.zig:265`)
 
 - **签名**：`pub fn globalDataPropertyValueForFastPathNoProfile( rt: *core.JSRuntime, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?core.JSValue`。
 - **作用**：无 profile 的全局读快路径值。
 - **实现**：lookup → value。
 - **所有权 / 错误 / 调用**：同 `ForFastPath`。
 
-### `globalWritableDataStoreIndexForFastPath` (`src/exec/property_direct.zig:282`)
+### `globalWritableDataStoreIndexForFastPath` (`src/exec/property_direct.zig:276`)
 
 - **签名**：`fn globalWritableDataStoreIndexForFastPath( rt: *core.JSRuntime, lexicals: ?*core.Object, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?usize`。
 - **作用**：可写全局槽的 index，供调用方自己写。
 - **实现**：`globalWritableDataStoreLookupForFastPath` 的 `.index`。
 - **所有权 / 错误 / 调用**：词法环境已有同名绑定则 `null`（不能写穿全局）。
 
-### `globalWritableDataStoreLookupForFastPath` (`src/exec/property_direct.zig:294`)
+### `globalWritableDataStoreLookupForFastPath` (`src/exec/property_direct.zig:288`)
 
 - **签名**：`fn globalWritableDataStoreLookupForFastPath( rt: *core.JSRuntime, lexicals: ?*core.Object, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?WritableGlobalDataStore`。
 - **作用**：解析「可以把这个名字当全局可写 data 写」的槽。
 - **实现**：忽略 `rt`/`site_pc`。`lexicals.hasOwnProperty(atom_id)` → `null`。优先 `declaredGlobalVarDataBorrowedLookup`，否则任意全局 own data；再要求 writable。
 - **所有权 / 错误 / 调用**：shadow 在词法对象上时快路径拒绝，避免跳过 TDZ/const。
 
-### `setGlobalWritableDataStoreForFastPathOwned` (`src/exec/property_direct.zig:314`)
+### `setGlobalWritableDataStoreForFastPathOwned` (`src/exec/property_direct.zig:308`)
 
 - **签名**：`pub fn setGlobalWritableDataStoreForFastPathOwned( rt: *core.JSRuntime, lexicals: ?*core.Object, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, new_value: core.JSValue, ) bool`。
 - **作用**：owned 语义的全局可写 data 快写。
 - **实现**：lookup 失败 `false`；否则 `setGlobalOwnWritableDataPropertyAtOwned`。
 - **所有权 / 错误 / 调用**：`true` 表示已接收 `new_value`；`false` 时调用方仍拥有该值。
 
-### `setGlobalWritableDataStoreLookupOwned` (`src/exec/property_direct.zig:327`)
+### `setGlobalWritableDataStoreLookupOwned` (`src/exec/property_direct.zig:321`)
 
 - **签名**：`fn setGlobalWritableDataStoreLookupOwned( rt: *core.JSRuntime, global: *core.Object, lookup: WritableGlobalDataStore, atom_id: core.Atom, new_value: core.JSValue, ) bool`。
 - **作用**：已有 `WritableGlobalDataStore` 时的 owned 写。
 - **实现**：转 `setGlobalOwnWritableDataPropertyAtOwned`。
 - **所有权 / 错误 / 调用**：单测覆盖。
 
-### `setGlobalDataPropertyLookup` (`src/exec/property_direct.zig:337`)
+### `setGlobalDataPropertyLookup` (`src/exec/property_direct.zig:331`)
 
 - **签名**：`fn setGlobalDataPropertyLookup( rt: *core.JSRuntime, global: *core.Object, lookup: BorrowedGlobalDataLookup, atom_id: core.Atom, new_value: core.JSValue, ) bool`。
 - **作用**：已有 borrowed lookup 的全局写（非 Owned 名字，实现仍走同一写函数）。
 - **实现**：`setGlobalOwnWritableDataPropertyAt`。
 - **所有权 / 错误 / 调用**：只读槽返回 `false` 且不写。
 
-### `installableGlobalDataPropertyLookup` (`src/exec/property_direct.zig:347`)
+### `installableGlobalDataPropertyLookup` (`src/exec/property_direct.zig:341`)
 
 - **签名**：`fn installableGlobalDataPropertyLookup( rt: *core.JSRuntime, global: *core.Object, function: *const bytecode.FunctionBytecode, site_pc: usize, atom_id: core.Atom, ) ?BorrowedGlobalDataLookup`。
 - **作用**：全局读：先声明 var，再任意 own data。
-- **实现**：忽略 `rt`/`site_pc`。`declaredGlobalVarDataBorrowedLookup` 优先。
+- **实现**：`rt`/`site_pc` 形参不被读取（站点 profile 已不在本文件）。`declaredGlobalVarDataBorrowedLookup` 优先。
 - **所有权 / 错误 / 调用**：两套 ForFastPath lookup 的共同实现。
 
-### `setGlobalOwnWritableDataPropertyAt` (`src/exec/property_direct.zig:362`)
+### `setGlobalOwnWritableDataPropertyAt` (`src/exec/property_direct.zig:356`)
 
 - **签名**：`fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool`。
 - **作用**：按 index 写全局可写 data，并打分代屏障。
 - **实现**：`writableDataSlotAt` 失败 → `false`。`slot.entry.slot = .{ .data = new_value }`，然后 `rt.gc.generationalBarrier(global.gcHeader(), new_value.cycleMarkHeader())`。
 - **所有权 / 错误 / 调用**：注释：更新已有全局 var 是堆存储，全局长寿，新值是 minor 看不见的 old-to-young 边。
 
-### `setGlobalOwnWritableDataPropertyAtOwned` (`src/exec/property_direct.zig:372`)
+### `setGlobalOwnWritableDataPropertyAtOwned` (`src/exec/property_direct.zig:368`)
 
-- **签名**：`fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool`。
-- **作用**：与上一函数同体的 owned 入口。
-- **实现**：同样写槽 + barrier。
-- **所有权 / 错误 / 调用**：名字区分调用方是否已转移 `new_value`；实现不再 dup/free。
+- **签名**：`const setGlobalOwnWritableDataPropertyAtOwned = setGlobalOwnWritableDataPropertyAt;`。
+- **作用**：`Owned` 是 rc 时代的遗名——tracing GC 下调用方没有引用要交出，它就是借用版写入者本身。
+- **实现**：无独立函数体（一行别名，原先逐字重复的实现已删）。
+- **所有权 / 错误 / 调用**：完全等同被别名者（写槽 + generational barrier）。
 
-### `writableDataSlotAt` (`src/exec/property_direct.zig:379`)
+### `writableDataSlotAt` (`src/exec/property_direct.zig:370`)
 
 - **签名**：`fn writableDataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot`。
 - **作用**：确认 index 处是该 atom 的 **可写** data 槽。
 - **实现**：`dataSlotAt` 后检查 `propFlagsAt(index).writable`。
 - **所有权 / 错误 / 调用**：只读 / accessor 返回 `null`。
 
-### `globalWritableDataPropertyLookupAt` (`src/exec/property_direct.zig:385`)
+### `globalWritableDataPropertyLookupAt` (`src/exec/property_direct.zig:376`)
 
 - **签名**：`fn globalWritableDataPropertyLookupAt(global: *core.Object, index: usize, atom_id: core.Atom) ?WritableGlobalDataStore`。
 - **作用**：把可写槽收成 `WritableGlobalDataStore`。
 - **实现**：`writableDataSlotAt` → `{ .index, .value = slot.value.* }`。
 - **所有权 / 错误 / 调用**：值 borrowed。
 
-### `dataSlotAt` (`src/exec/property_direct.zig:390`)
+### `dataSlotAt` (`src/exec/property_direct.zig:381`)
 
 - **签名**：`fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot`。
 - **作用**：底层槽校验：非 exotic、index 在范围内、atom 匹配、未删除、kind 为 data。
@@ -246,6 +246,6 @@
 
 ## 覆盖核对
 
-- 清单函数数: 32
-- 本文标题覆盖: 32
+- 清单函数数: 30
+- 本文标题覆盖: 32（含 2 条清单外的内嵌辅助函数标题）
 - 未覆盖: 无

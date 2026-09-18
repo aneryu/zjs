@@ -334,4 +334,3 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
-pub const dummy = {};

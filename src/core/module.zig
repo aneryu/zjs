@@ -182,7 +182,7 @@ pub const PendingDefinition = struct {
 
     /// Release an unconsumed definition. Every owner is detached first so value
     /// destruction may safely re-enter GC/registry tracing.
-    pub fn deinit(self: *PendingDefinition, _: anytype) void {
+    pub fn deinit(self: *PendingDefinition) void {
         const requests = self.requests;
         const imports = self.imports;
         const exports = self.exports;
@@ -200,14 +200,11 @@ pub const PendingDefinition = struct {
         self.synthetic_kind = .none;
         self.has_top_level_await = false;
 
-        for (imports) |_| {}
         for (exports) |*entry| {
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        for (indirect_exports) |_| {}
-        for (import_attributes) |_| {}
 
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
@@ -446,7 +443,7 @@ pub const ModuleRecord = struct {
 
     /// Detach and release the definition during finalization. Loaded records are
     /// never reset in place for a new generation.
-    fn clearForDestroy(self: *ModuleRecord, _: anytype) void {
+    fn clearForDestroy(self: *ModuleRecord) void {
         const requests = self.requests;
         const imports = self.imports;
         const exports = self.exports;
@@ -473,14 +470,11 @@ pub const ModuleRecord = struct {
         self.resetLinkTransientNoFail();
         self.eval_exception = null;
 
-        for (imports) |_| {}
         for (exports) |*entry| {
             if (entry.retained_cell) |cell| {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        for (indirect_exports) |_| {}
-        for (import_attributes) |_| {}
         if (requests.len != 0) self.memory.free(RequestEntry, requests);
         if (imports.len != 0) self.memory.free(ImportEntry, imports);
         if (exports.len != 0) self.memory.free(ExportEntry, exports);
@@ -489,12 +483,17 @@ pub const ModuleRecord = struct {
         if (import_attributes.len != 0) self.memory.free(ImportAttributeEntry, import_attributes);
     }
 
+    /// `rt` is unused: the destroy-by-kind dispatch (`gc.zig`,
+    /// `gc_trace_stw.zig`) calls every kind's destructor with the same
+    /// (runtime, header) shape, and a module frees only through its own
+    /// `MemoryAccount`.
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
+        _ = rt;
         const self: *ModuleRecord = @alignCast(@fieldParentPtr("header", header));
         if (self.registry) |registry| registry.unlink(self);
 
         self.module_name = atom.null_atom;
-        self.clearForDestroy(rt);
+        self.clearForDestroy();
 
         // TGC S4-e spec 2.5: no Pass-B deferral.
         self.memory.destroy(ModuleRecord, self);
@@ -663,7 +662,8 @@ pub const ModuleRecord = struct {
         return cell;
     }
 
-    pub fn clearRetainedExportCellNoFail(self: *ModuleRecord, _: anytype, export_index: u32) void {
+    /// Clearing the cell is a plain store under the tracing collector.
+    pub fn clearRetainedExportCellNoFail(self: *ModuleRecord, export_index: u32) void {
         const entry = &self.exports[@intCast(export_index)];
         const owned = entry.retained_cell orelse return;
         std.debug.assert(VarRef.fromValue(owned) != null);

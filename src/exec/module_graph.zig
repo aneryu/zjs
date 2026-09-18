@@ -915,7 +915,7 @@ pub fn evalFileModuleGraphWithOutput(
             continue;
         }
         const dep_step = try startPreloadedFileModuleStep(runtime, context, output, path);
-        try handleModuleEvalStep(context, allocator, &continuations, dep_step, path, false);
+        try appendModuleEvalStepRetainingOnError(context, allocator, &continuations, dep_step, path, false);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
     var result = core.JSValue.undefinedValue();
@@ -924,7 +924,7 @@ pub fn evalFileModuleGraphWithOutput(
             try enqueueDeferredModuleStart(context, allocator, &continuations, normalized_filename, true);
         } else {
             const root_step = try startPreloadedFileModuleStep(runtime, context, output, normalized_filename);
-            try handleModuleEvalStep(context, allocator, &continuations, root_step, normalized_filename, true);
+            try appendModuleEvalStepRetainingOnError(context, allocator, &continuations, root_step, normalized_filename, true);
         }
         result = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
     }
@@ -1013,7 +1013,7 @@ pub fn evalFileModuleGraphWithHostHooks(
             continue;
         }
         const dep_step = try startPreloadedFileModuleStep(runtime, context, output, path);
-        try handleModuleEvalStep(context, allocator, &continuations, dep_step, path, false);
+        try appendModuleEvalStepRetainingOnError(context, allocator, &continuations, dep_step, path, false);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
 
@@ -1023,7 +1023,7 @@ pub fn evalFileModuleGraphWithHostHooks(
             try enqueueDeferredModuleStart(context, allocator, &continuations, filename, true);
         } else {
             const root_step = try startPreloadedFileModuleStep(runtime, context, output, filename);
-            try handleModuleEvalStep(context, allocator, &continuations, root_step, filename, true);
+            try appendModuleEvalStepRetainingOnError(context, allocator, &continuations, root_step, filename, true);
         }
         result = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
     }
@@ -1145,24 +1145,6 @@ fn startPreloadedFileModuleStep(
         return error.JSException;
     }
     return evalPreloadedFileModuleStep(runtime, context, output, filename, null, null);
-}
-
-fn handleModuleEvalStep(
-    context: *core.JSContext,
-    allocator: std.mem.Allocator,
-    continuations: *std.ArrayList(ModuleContinuation),
-    step: ModuleEvalStep,
-    filename: []const u8,
-    keep_result: bool,
-) !void {
-    try appendModuleEvalStepRetainingOnError(
-        context,
-        allocator,
-        continuations,
-        step,
-        filename,
-        keep_result,
-    );
 }
 
 /// Append a freshly-produced evaluation step, transferring its JSValue
@@ -1406,15 +1388,9 @@ fn drainOneScheduledModuleWork(
         try prepareModuleContinuationAwait(runtime, output, continuations, continuation);
     }
 
-    const ready_index = nextReadyModuleContinuation(continuations);
-    if (ready_index) |index| {
-        const continuation = continuations.items[index];
-        if (continuation.completed) {
-            if (try drainOneModuleContinuation(runtime, output, allocator, continuations, index)) |value| {
-                return .{ .value = value };
-            }
-            return .progressed;
-        }
+    // `nextReadyModuleContinuation` already accepts both the completed and the
+    // merely-ready continuation; both are drained the same way.
+    if (nextReadyModuleContinuation(continuations)) |index| {
         if (try drainOneModuleContinuation(runtime, output, allocator, continuations, index)) |value| {
             return .{ .value = value };
         }
@@ -1880,7 +1856,7 @@ fn evalDynamicImportModule(
             continue;
         }
         const step = try startPreloadedFileModuleStep(runtime, context, output, path);
-        try handleModuleEvalStep(context, allocator, continuations, step, path, false);
+        try appendModuleEvalStepRetainingOnError(context, allocator, continuations, step, path, false);
         if (context.hasException()) return error.JSException;
     }
 
@@ -1978,7 +1954,7 @@ fn evalDynamicImportModuleWithHostHooks(
             for (preload_postorder.items) |path| allocator.free(path);
             preload_postorder.deinit(allocator);
         }
-        try preloadFileModuleGraphWithHostHooksMode(allocator, runtime, context, host_hooks, module_source, resolved.path, &preload_postorder, true);
+        try preloadFileModuleGraphWithHostHooks(allocator, runtime, context, host_hooks, module_source, resolved.path, &preload_postorder);
     }
 
     const resolved_record = context.modules.find(resolved_atom) orelse return error.ModuleNotFound;
@@ -2015,7 +1991,7 @@ fn evalDynamicImportModuleWithHostHooks(
         try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
 
         const step = try startPreloadedFileModuleStep(runtime, context, output, path);
-        try handleModuleEvalStep(context, allocator, &continuations, step, path, false);
+        try appendModuleEvalStepRetainingOnError(context, allocator, &continuations, step, path, false);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
 
@@ -2092,6 +2068,10 @@ fn rebuildPendingModuleEvalPostorder(
     );
 }
 
+/// Skipping already-loaded modules is not a caller-selectable mode: it falls
+/// out of the "record with resolved requests returns early" check in
+/// `preloadFileModuleGraphWithHostHooksInner`, so every entry point behaves the
+/// same way.
 fn preloadFileModuleGraphWithHostHooks(
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
@@ -2100,19 +2080,6 @@ fn preloadFileModuleGraphWithHostHooks(
     root_source: []const u8,
     root_path: []const u8,
     postorder: *std.ArrayList([]const u8),
-) !void {
-    try preloadFileModuleGraphWithHostHooksMode(allocator, runtime, context, host_hooks, root_source, root_path, postorder, false);
-}
-
-fn preloadFileModuleGraphWithHostHooksMode(
-    allocator: std.mem.Allocator,
-    runtime: *core.JSRuntime,
-    context: *core.JSContext,
-    host_hooks: HostHooks,
-    root_source: []const u8,
-    root_path: []const u8,
-    postorder: *std.ArrayList([]const u8),
-    skip_existing: bool,
 ) !void {
     var seen = std.ArrayList([]const u8).empty;
     defer {
@@ -2128,7 +2095,6 @@ fn preloadFileModuleGraphWithHostHooksMode(
         root_path,
         &seen,
         postorder,
-        skip_existing,
     );
 }
 
@@ -2176,9 +2142,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
     path: []const u8,
     seen: *std.ArrayList([]const u8),
     postorder: *std.ArrayList([]const u8),
-    skip_existing: bool,
 ) !void {
-    _ = skip_existing;
     if (trackedPathContains(seen, path)) return;
     const owned_path = try allocator.dupe(u8, path);
     var seen_owns_path = false;
@@ -2312,7 +2276,6 @@ fn preloadFileModuleGraphWithHostHooksInner(
                 resolved.path,
                 seen,
                 postorder,
-                true,
             );
         }
 

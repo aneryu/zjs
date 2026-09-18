@@ -1,8 +1,9 @@
 //! Name-based access to caller-owned arrays of global-style atom/value slots.
 //!
 //! The containing realm/runtime structure owns slot-name atoms and stored
-//! JSValues. Reads return a retained value; replacement retains the new value
-//! before releasing the old one and never takes ownership of the lookup name.
+//! JSValues, and the tracer keeps them alive: reads hand back a borrowed value
+//! and replacement is a plain bit copy over the old one, with no ownership
+//! taken of the lookup name.
 //! This mirrors QuickJS global variable cells (`JSVarRef`/global var table)
 //! without owning the table itself. Higher layers may use this core helper;
 //! it imports core only and never parser/exec/runtime/binding.
@@ -34,8 +35,7 @@ pub fn setExistingByName(rt: *runtime.JSRuntime, slots: []Slot, name: []const u8
     const atom_id = try rt.internAtom(name);
     for (slots) |*slot| {
         if (slot.name == atom_id) {
-            const duplicated = next_value;
-            slot.value = duplicated;
+            slot.value = next_value;
             return;
         }
     }

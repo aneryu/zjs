@@ -186,610 +186,540 @@
 - **实现**：`value.isObject()` 过滤后 `refHeader()`，再 `core.Object.fromHeader`。
 - **所有权 / 错误 / 调用**：无：纯 tag 检查，返回借用的 `*Object`（不加引用、不建根）。唯一调用方 `stringCall:656`。
 
-### `charAt` (`src/exec/string_builtin_ops.zig:722`)
-
-- **签名**：`pub fn charAt(bytes: []const u8, index: usize) []const u8`。
-- **作用**：字节缓冲版 charAt：按字节下标取单字节子切片。
-- **实现**：`index >= bytes.len` 返回 `""`，否则返回 `bytes[index .. index + 1]`。
-- **所有权 / 错误 / 调用**：返回的是借用自入参的切片，`bytes` 失效后不得再用；无分配、无错误。
-
-### `toUpperAscii` (`src/exec/string_builtin_ops.zig:727`)
-
-- **签名**：`pub fn toUpperAscii(buf: []u8, bytes: []const u8) []u8`。
-- **作用**：把字节缓冲逐字节做 ASCII 大写映射（不涉及 Unicode 特例）。
-- **实现**：`n = @min(buf.len, bytes.len)` 先截断，逐字节 `unicode.toUpperAscii` 写入 `buf`，返回 `buf[0..n]`。
-- **所有权 / 错误 / 调用**：写调用方给的 `buf` 并返回它的前缀切片（借用，随 `buf` 失效），不分配、无 error。树内无调用方：`pub` 遗留 API（逐字节被调用的是 `unicode.toUpperAscii`）。
-
-### `construct` (`src/exec/string_builtin_ops.zig:735`)
-
-- **签名**：`pub fn construct(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue`。
-- **作用**：过渡 `new_string_object` 字节码用的窄 String 包装构造。
-- **实现**：转发 `constructWithPrototype(rt, args, null)`（原型传 null）。
-- **所有权 / 错误 / 调用**：只是 `constructWithPrototype(rt, args, null)` 的转发，所有权与错误全同下条。树内无调用方：`stringCall` 的 construct 腿直接调 `constructWithPrototype`，本函数留给 `new_string_object` 过渡字节码与嵌入方。
-
-### `constructWithPrototype` (`src/exec/string_builtin_ops.zig:739`)
+### `constructWithPrototype` (`src/exec/string_builtin_ops.zig:722`)
 
 - **签名**：`pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue`。
 - **作用**：分配并初始化对应的 JS 对象或数组。
-- **实现**：先把参数拷进 `ValueRootBuffer`，和 `data_value` / `object_value` 一起挂进 `ValueRootFrame`。首参是 Symbol 返回 TypeError；有参数时经 `stringValueFromSearchArgument` 转字符串，否则用空串，再 `ensureFlat`。随后创建 `class.ids.string` 对象、写入 `objectDataSlot`，逐码元调用 `defineStringIndexUnitProperty` 定义索引属性，最后用 `defineReadonlyIntProperty` 定义只读 `length`。
-- **所有权 / 错误 / 调用**：本文件建根最密的一条：`ValueRootBuffer.initCopy` 复制并钉住 `args`，`data_value` / `object_value` 进 `ValueRootFrame`，覆盖每次建串、建对象、定义属性的分配点。返回新建的 String 包装对象；内部串写进 `objectDataSlot`，逐码元属性由 `defineStringIndexUnitProperty` 新建单码元串并交给对象持有，`length` 是不可写不可枚举不可配置。`errdefer` 只把 `object_value` 置回 undefined（失败时让新对象变垃圾，不显式销毁）。错误：Symbol 参数或内部值取不到字符串体 → 裸 `error.TypeError`。调用方：`stringCall:670`（`new String(...)` 的 construct 腿）、`construct:736`、`src/tests/exec.zig:5093`。
+- **实现**：先把参数拷进 `ValueRootBuffer`，和 `data_value` / `object_value` 一起挂进 `ValueRootFrame`。首参是 Symbol 返回 TypeError；有参数时经 `stringValueFromSearchArgument` 转字符串，否则用空串。随后创建 `class.ids.string` 对象、写入 `objectDataSlot`，逐码元调用 `defineStringIndexUnitProperty` 定义索引属性，最后用 `defineReadonlyIntProperty` 定义只读 `length`。
+- **所有权 / 错误 / 调用**：本文件建根最密的一条：`ValueRootBuffer.initCopy` 复制并钉住 `args`，`data_value` / `object_value` 进 `ValueRootFrame`，覆盖每次建串、建对象、定义属性的分配点。返回新建的 String 包装对象；内部串写进 `objectDataSlot`，逐码元属性由 `defineStringIndexUnitProperty` 新建单码元串并交给对象持有，`length` 是不可写不可枚举不可配置。`errdefer` 只把 `object_value` 置回 undefined（失败时让新对象变垃圾，不显式销毁）。错误：Symbol 参数或内部值取不到字符串体 → 裸 `error.TypeError`。调用方：`stringCall`（`new String(...)` 的 construct 腿）与 `src/tests/exec.zig:5093`（同名的零参 `construct` 壳已删）。
 
-### `stringIteratorNext` (`src/exec/string_builtin_ops.zig:793`)
+### `stringIteratorNext` (`src/exec/string_builtin_ops.zig:775`)
 
 - **签名**：`pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue) !core.JSValue`。
 - **作用**：String Iterator 的 `next`：按码点（含代理对）推进并产出结果对象。
 - **实现**：接收者必须是 `string_iterator` 类对象；target 槽为空直接返回 done 结果，target 非字符串返回 TypeError。下标到达串长时返回 done 结果并清空 target 槽。否则读当前码元：`< 0x100` 取 runtime 的共享单字节串并前进 1（对应 qjs `js_new_string_char` 的窄臂，quickjs.c:3953-3962）；高代理且后继是低代理时取两码元 `createUtf16` 并前进 2；其余单码元 `createUtf16` 并前进 1。
 - **所有权 / 错误 / 调用**：返回 `iteratorResult` 新建的 `{value, done}` 对象；`value` 是 runtime 共享单字节串（`rt.singleByteString`）或新建 UTF-16 串，随即交给结果对象持有。副作用落在迭代器对象上：推进 `iteratorIndexSlot`，done 时 `clearOptionalValueSlot` 断掉对 target 的边（屏障在 slot helper 内）。错误：接收者非对象 / 非 string_iterator / target 非字符串 → 裸 `error.TypeError`。唯一调用方 `stringCall:658`（`PrototypeMethod.iterator_next`）。
 
-### `fromCharCode` (`src/exec/string_builtin_ops.zig:838`)
-
-- **签名**：`pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue`。
-- **作用**：过渡字节码用的 primitive-only `String.fromCharCode`；JS 可见调用走 VM 共享实现，以保留对象强制与异常传播。
-- **实现**：参数必须已是 int32，否则 TypeError（这里不做 ToNumber）。两参数走 `rt.recentTwoUnitString` 缓存（`fromCharCode(H, L)` 代理对模式）；单参数且低 16 位 ≤ 0xff 走 `rt.singleByteString`；其余情况参数数 ≤16 时用 16 项栈缓冲、更多才 `rt.memory.alloc` 堆缓冲，逐参数取低 16 位后 `String.createUtf16`。
-- **所有权 / 错误 / 调用**：`pub` 遗留原语，树内无调用方（JS 可见路径走 `string_ops.stringFromCharCode`）。≤16 个参数用栈缓冲，超出才 `rt.memory.alloc` 并 defer free；返回 runtime 的单字节 / 双单元缓存串或新建 UTF-16 串。参数不是 int32 就返回裸 `error.TypeError`——它刻意不做可观察 ToNumber，这正是它服务不了 JS 调用的原因。
-
-### `fromCodePoint` (`src/exec/string_builtin_ops.zig:873`)
-
-- **签名**：`pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue`。
-- **作用**：`String.fromCodePoint` 的 runtime 级实现：把码点参数编码成 UTF-16 串。
-- **实现**：逐参数：Symbol 返回 TypeError；`value_ops.toIntegerOrInfinity` 后 NaN / 非有限 / 负数 / 大于 0x10FFFF / 非整数都返回 RangeError；合法码点经 `unicode.appendUtf16CodePoint` 追加进 `units`，最后 `String.createUtf16`。
-- **所有权 / 错误 / 调用**：`pub` 遗留原语，树内无调用方。`units` 是运行时 allocator 的 ArrayList，defer deinit；返回新建 UTF-16 串。错误：Symbol 参数 → 裸 `error.TypeError`，越界/非整数码点 → 裸 `error.RangeError`（挂 "invalid code point" 消息的是 `string_ops.stringFromCodePoint`）。
-
-### `charAtValue` (`src/exec/string_builtin_ops.zig:891`)
+### `charAtValue` (`src/exec/string_builtin_ops.zig:819`)
 
 - **签名**：`pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: core.JSValue) !core.JSValue`。
 - **作用**：过渡 `string_char_at` 字节码用的窄 charAt。
 - **实现**：先 `stringInteger` 取整数下标。接收者是字符串或 String 包装对象时按码元读：越界返回空串，否则 `codeUnitStringValue`；其余接收者经 `appendStringReceiverBytes` 展成 UTF-8 字节后按字节取单字节子串，越界同样是空串。
 - **所有权 / 错误 / 调用**：字符串腿返回 runtime 共享单码元串或空串，非字符串腿先把接收者 ToString 进临时字节缓冲（defer deinit）再建串；两条腿的返回值都归调用方。错误来自 `stringInteger`（BigInt → 裸 TypeError）与 `appendStringReceiverBytes`（null/undefined 接收者 → 裸 `error.TypeError`）。唯一调用方 `stringCall:694`，也就是 `string_ops.callStringCharAtBody` 经记录表落到的那条腿。
 
-### `methodCall` (`src/exec/string_builtin_ops.zig:909`)
+### `methodCall` (`src/exec/string_builtin_ops.zig:837`)
 
 - **签名**：`pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []const core.JSValue) !core.JSValue`。
 - **作用**：按 method id 分发到本文件的过渡或完整实现。
-- **实现**：先用一串 `if (id == …)` 把有码元级实现的方法分派到各自的 `*Receiver` 体（charCodeAt、codePointAt、trim/trimStart/trimEnd、大小写、substring、indexOf、includes/startsWith/endsWith、at、split、repeat、lastIndexOf、slice、isWellFormed、toWellFormed）；其余 id 先经 `appendStringReceiverBytes` 把接收者展成 UTF-8 字节，再 `switch` 到字节版实现（id 9 的 toString 要求无参数否则 TypeError、concat、Annex B html 系列、substr、repeat、pad、localeCompare、normalize、search、match、replaceAll）。前面已处理的 id 在 `switch` 里写成 `unreachable`，未知 id 返回 TypeError。
-- **所有权 / 错误 / 调用**：自身不分配：id 命中就转发给对应的 `*Receiver` 实现；只有落到尾部 switch 的 AnnexB / pad / normalize 等 id 才先用 `appendStringReceiverBytes` 把接收者 ToString 进临时字节缓冲（defer deinit）。未覆盖的 id 返回裸 `error.TypeError`。唯一调用方 `stringCall:696`（`func_obj == null and global == null` 腿），即 `string_ops.callStringBody` 的落点。
+- **实现**：先用一串 `if (id == …)` 把有码元级实现的方法分派到各自的 `*Receiver` 体（charCodeAt、codePointAt、trim/trimStart/trimEnd、大小写、substring、indexOf、includes/startsWith/endsWith、at、split、repeat、lastIndexOf、slice、isWellFormed、toWellFormed）；其余 id 先经 `appendStringReceiverBytes` 把接收者展成 UTF-8 字节，再 `switch` 到字节版实现。尾部 switch 现在只剩真正到得了的七条臂：pad（34/35）、localeCompare（36）、normalize、search、match、replaceAll——它们由 `call_runtime` 的按名字回退腿经 `callStringBody` 送进来。concat / AnnexB html / substr / id 9 那批旧臂已删：live 实现分别是 `string_ops` 的 `stringConcat` / `stringHtmlMethod` / `stringSubstr`，而且 `encodePrototypeMethodId` 对 html 与 substr 根本没有 record，`callStringBody` 在进到这里之前就返回 TypeError。未知 id 返回 TypeError。
+- **所有权 / 错误 / 调用**：自身不分配：id 命中就转发给对应的 `*Receiver` 实现；只有落到尾部 switch 的 pad / localeCompare / normalize / search / match / replaceAll 才先用 `appendStringReceiverBytes` 把接收者 ToString 进临时字节缓冲（defer deinit）。未覆盖的 id 返回裸 `error.TypeError`。唯一调用方 `stringCall:696`（`func_obj == null and global == null` 腿），即 `string_ops.callStringBody` 的落点。
 
-### `concat` (`src/exec/string_builtin_ops.zig:984`)
-
-- **签名**：`fn concat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
-- **作用**：字节版 `String.prototype.concat`：接收者字节后依次追加各参数的字符串表示。
-- **实现**：把 `bytes` 拷进 `out`，逐参数 `appendValueString`，最后 `createStringValue`；`out` 在返回前 `deinit`。
-- **所有权 / 错误 / 调用**：`out` 临时 ArrayList defer deinit，返回 `createStringValue` 新建的串；参数经 `appendValueString`（`unwrap_wrappers = true`）转字节，可能抛 `AppendStringError`。唯一调用方 `methodCall` 的 id 10 分支。
-
-### `substring` (`src/exec/string_builtin_ops.zig:992`)
+### `substring` (`src/exec/string_builtin_ops.zig:880`)
 
 - **签名**：`fn substring(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.substring`。
 - **实现**：`stringSubstringRange` 规范化区间后切 `bytes` 建新串。
 - **所有权 / 错误 / 调用**：返回新建串；`bytes` 是调用方临时缓冲的借用切片，本函数不持有。唯一调用方 `substringReceiver:1007` 的非字符串接收者回退。
 
-### `substringReceiver` (`src/exec/string_builtin_ops.zig:997`)
+### `substringReceiver` (`src/exec/string_builtin_ops.zig:885`)
 
 - **签名**：`fn substringReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`substring` 的码元级实现：字符串 / String 包装接收者直接用 `String.createSlice` 共享底层数据。
 - **实现**：取到 `*String` 时用 `stringSubstringRange(string_value.len(), args)` 得到 `[start, end)` 并 `createSlice`；其余接收者展成 UTF-8 字节后转字节版 `substring`。
 - **所有权 / 错误 / 调用**：字符串腿的 `String.createSlice` 是**拷贝**成独立新串（不共享父串 payload），返回值归调用方；非字符串腿的字节缓冲 defer deinit。错误来自 `stringSubstringRange` 里的 `stringInteger`（BigInt → 裸 TypeError）与 `appendStringReceiverBytes`。唯一调用方 `methodCall`（id 1）。
 
-### `trimReceiver` (`src/exec/string_builtin_ops.zig:1010`)
+### `trimReceiver` (`src/exec/string_builtin_ops.zig:898`)
 
 - **签名**：`fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !core.JSValue`。
 - **作用**：`trim` / `trimStart` / `trimEnd` 的接收者入口（由 `mode` 区分）。
 - **实现**：字符串 / String 包装接收者走码元级 `trimStringValue`；其余接收者展成 UTF-8 字节，按 mode 用 `trimStartAscii` / `trimEndAscii` / `std.mem.trim(u8, …, " \t\r\n")` 裁剪后建串。
 - **所有权 / 错误 / 调用**：两条腿都返回新建串（字符串腿经 `trimStringValue`，字节腿 `createStringValue`）；字节缓冲 defer deinit，`trimStartAscii`/`mem.trim` 的结果只是它的子切片。唯一调用方 `methodCall`（id 8 / 21 / 22）。
 
-### `trimStringValue` (`src/exec/string_builtin_ops.zig:1025`)
+### `trimStringValue` (`src/exec/string_builtin_ops.zig:913`)
 
 - **签名**：`fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode: TrimMode) !core.JSValue`。
 - **作用**：码元级空白裁剪。
-- **实现**：先 `ensureFlat`；按 mode 用 `isTrimCodeUnit`（ECMA 空白 + 行终止符）从头推进 `start`、从尾回退 `end`；再按 `resolveData()` 分别用 `createLatin1SliceValue` 或 `String.createUtf16` 建结果串。
-- **所有权 / 错误 / 调用**：`ensureFlat` 会就地展平接收者（对 rope 的可见副作用）；随后的 `resolveData()` 切片只在建串前使用——`createLatin1SliceValue` / `String.createUtf16` 是分配点，切完即用。返回新建串。唯一调用方 `trimReceiver:1012`。
+- **实现**：按 mode 用 `isTrimCodeUnit`（ECMA 空白 + 行终止符）从头推进 `start`、从尾回退 `end`；再按 `resolveData()` 分别用 `createLatin1SliceValue` 或 `String.createUtf16` 建结果串。
+- **所有权 / 错误 / 调用**：`resolveData()` 切片只在建串前使用——`createLatin1SliceValue` / `String.createUtf16` 是分配点，切完即用。返回新建串。唯一调用方 `trimReceiver:1012`。
 
-### `isWellFormedReceiver` (`src/exec/string_builtin_ops.zig:1041`)
+### `isWellFormedReceiver` (`src/exec/string_builtin_ops.zig:939`)
 
 - **签名**：`fn isWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue`。
 - **作用**：`String.prototype.isWellFormed` 的接收者入口。
-- **实现**：字符串 / String 包装接收者走 `isWellFormedString`；其余接收者先 `appendStringReceiverBytes` 触发强制转换（null / undefined 在此抛 TypeError），然后恒返回 `true`。
-- **所有权 / 错误 / 调用**：返回布尔立即数，不分配；非字符串腿仍跑一遍 `appendStringReceiverBytes`（借此复用它的 null/undefined → 裸 `error.TypeError` 检查），缓冲 defer deinit 后直接返回 true。唯一调用方 `methodCall`（id 38）。
+- **实现**：字符串 / String 包装接收者走 `isWellFormedString`；其余接收者经 `coercedReceiverStringValue` 做一次 ToString（null / undefined 在此抛 TypeError），再对结果串跑同一个 `isWellFormedString` 扫描——旧实现在这条腿上恒返回 `true`，把 ToString 的结果算成必然良构，已改正。
+- **所有权 / 错误 / 调用**：返回布尔立即数。非字符串腿会新建一个强转串（字节缓冲 defer deinit），扫描过程不分配，所以那个新串不需要 root frame。null / undefined 接收者 → 裸 `error.TypeError`。唯一调用方 `methodCall`（id 38）；那条腿确实可达——`call_runtime` 的按名字回退把 number / boolean / bigint 之类的原始接收者直接送进 `callStringBody`。
 
-### `toWellFormedReceiver` (`src/exec/string_builtin_ops.zig:1051`)
+### `toWellFormedReceiver` (`src/exec/string_builtin_ops.zig:951`)
 
 - **签名**：`fn toWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue`。
 - **作用**：`String.prototype.toWellFormed` 的接收者入口。
-- **实现**：字符串 / String 包装接收者走 `toWellFormedString`；其余接收者展成 UTF-8 字节后原样建串。
-- **所有权 / 错误 / 调用**：两条腿都返回新建串（字符串腿经 `toWellFormedString`，字节腿把缓冲原样建串），缓冲 defer deinit。唯一调用方 `methodCall`（id 39）。
+- **实现**：字符串 / String 包装接收者走 `toWellFormedString`；其余接收者经 `coercedReceiverStringValue` 做一次 ToString，再把结果串交给同一个 `toWellFormedString`（旧实现直接原样建串，不做 U+FFFD 替换，已改正）。
+- **所有权 / 错误 / 调用**：两条腿都返回新建串。非字符串腿的中间强转串会被挂进一个 `ValueRootFrame` 再交给 `toWellFormedString`——后者要分配，中途可能触发 GC。字节缓冲 defer deinit。唯一调用方 `methodCall`（id 39）。
 
-### `isWellFormedString` (`src/exec/string_builtin_ops.zig:1061`)
+### `isWellFormedString` (`src/exec/string_builtin_ops.zig:965`)
 
 - **签名**：`fn isWellFormedString(string_value: *core.string.String) bool`。
 - **作用**：判断串里没有孤立代理。
 - **实现**：逐码元扫描：高代理必须紧跟低代理（成对则跳 2），出现孤立高代理或孤立低代理返回 `false`，走完返回 `true`。
 - **所有权 / 错误 / 调用**：无：只读遍历借用的 `*String`，不分配、无 error。唯一调用方 `isWellFormedReceiver:1043`。
 
-### `toWellFormedString` (`src/exec/string_builtin_ops.zig:1076`)
+### `toWellFormedString` (`src/exec/string_builtin_ops.zig:980`)
 
 - **签名**：`fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue`。
 - **作用**：把孤立代理替换成 U+FFFD 的副本。
-- **实现**：`ensureFlat` 后按串长预留 `units`；成对代理原样复制并跳 2，孤立高代理或孤立低代理写 0xFFFD，其余码元原样追加；最后 `String.createUtf16`。
-- **所有权 / 错误 / 调用**：`ensureFlat` 就地展平接收者；`units` 临时 ArrayList 预留容量后 defer deinit；返回新建 UTF-16 串。唯一调用方 `toWellFormedReceiver:1053`。
+- **实现**：按串长预留 `units`；成对代理原样复制并跳 2，孤立高代理或孤立低代理写 0xFFFD，其余码元原样追加；最后 `String.createUtf16`。
+- **所有权 / 错误 / 调用**：`units` 临时 ArrayList 预留容量后 defer deinit；返回新建 UTF-16 串。唯一调用方 `toWellFormedReceiver:1053`。
 
-### `isHighSurrogateUnit` (`src/exec/string_builtin_ops.zig:1102`)
+### `isHighSurrogateUnit` (`src/exec/string_builtin_ops.zig:1005`)
 
 - **签名**：`fn isHighSurrogateUnit(unit: u16) bool`。
 - **作用**：码元是否是高代理（转 `unicode` 库）。
 - **实现**：薄封装，主体转发到 `unicode.isHighSurrogateUnit`。
 - **所有权 / 错误 / 调用**：无：转发 `unicode` 的纯谓词，不分配无 error。本文件的码点扫描都经它（`stringPrimitiveIndexRead`、`stringCodePointAtLeaf`、`stringIteratorNext` 等 9 处）。
 
-### `isLowSurrogateUnit` (`src/exec/string_builtin_ops.zig:1106`)
+### `isLowSurrogateUnit` (`src/exec/string_builtin_ops.zig:1009`)
 
 - **签名**：`fn isLowSurrogateUnit(unit: u16) bool`。
 - **作用**：码元是否是低代理（转 `unicode` 库）。
 - **实现**：薄封装，主体转发到 `unicode.isLowSurrogateUnit`。
 - **所有权 / 错误 / 调用**：无：转发 `unicode` 的纯谓词，不分配无 error。调用点 11 处：除与 `isHighSurrogateUnit` 配对的 9 处外，`isWellFormedString:1070` 与 `toWellFormedString:1096` 还单独用它检出孤立低代理。
 
-### `substr` (`src/exec/string_builtin_ops.zig:1110`)
-
-- **签名**：`fn substr(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
-- **作用**：Annex B `String.prototype.substr` 的字节版。
-- **实现**：参数个数不在 1-2 返回 TypeError；`start` 为负时按 `bytes.len + start` 回绕并钳到 0、再钳到串长；第二参数缺省或 undefined 时长度取到末尾，`<= 0` 取 0；`end = @min(start + len, total)` 后切片建串。
-- **所有权 / 错误 / 调用**：返回新建串，`bytes` 借用调用方缓冲。错误：参数个数不是 1-2 → 裸 `error.TypeError`；`stringInteger` 的转换可抛。唯一调用方 `methodCall`（id 25）。
-
-### `split` (`src/exec/string_builtin_ops.zig:1127`)
+### `split` (`src/exec/string_builtin_ops.zig:1016`)
 
 - **签名**：`fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.split`（非 RegExp 核心）。
 - **实现**：参数与结果数组都挂进 `ValueRootFrame`。`limit` 由 `toUint32Limit` 取，缺省 `maxInt(u32)`，为 0 直接返回空数组；分隔符缺省或 undefined 时整串作为唯一元素；空分隔符按字节逐个切分；否则 `std.mem.indexOfPos` 逐段切，循环受 `limit` 约束，未到 limit 时补上最后一段。QuickJS 坐标：quickjs.c:45749-45836。
 - **所有权 / 错误 / 调用**：建根覆盖整段：`ValueRootBuffer` 钉住 args、`out_value` 进 `ValueRootFrame`，因为每个 `defineStringElement` 都是「建串 + 定义属性」两个分配点。返回新建数组，元素串在 `defineValueElement` 里把所有权让渡给数组；`errdefer` 只把 `out_value` 置回 undefined。`sep` 字节缓冲 defer deinit。唯一调用方 `splitReceiver:1257` 的非字符串接收者回退（另有本文件 test）。
 
-### `splitReceiver` (`src/exec/string_builtin_ops.zig:1189`)
+### `splitReceiver` (`src/exec/string_builtin_ops.zig:1078`)
 
 - **签名**：`fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`split` 的码元级实现：避免 UTF-8 往返，结果元素是共享底层数据的切片串。
-- **实现**：接收者、参数、结果、分隔符都挂进 `ValueRootFrame`。字符串 / String 包装接收者：`ensureFlat` 后建数组，`limit` 规则同 `split`（0 返回空数组、缺省分隔符时整串一项）；分隔符经 `stringValueFromSearchArgument` 转串，空分隔符按码元逐个 `codeUnitStringValue`，否则 `stringIndexOfUnits` 定位并用 `defineStringSliceElement` 建共享切片，未到 limit 时补尾段。其余接收者展成字节转 `split`。
-- **所有权 / 错误 / 调用**：接收者、args、`out_value`、`sep_value` 全挂 `ValueRootFrame`（每个 `defineStringSliceElement` 都建新串）；`ensureFlat` 就地展平接收者。返回新建数组，元素串由数组持有。错误：分隔符 ToString 后取不到字符串体 → 裸 `error.TypeError`；`toUint32Limit` 的转换可抛。唯一调用方 `methodCall`（id 27），非字符串接收者转 `split`。
+- **实现**：接收者、参数、结果、分隔符都挂进 `ValueRootFrame`。字符串 / String 包装接收者：建数组，`limit` 规则同 `split`（0 返回空数组、缺省分隔符时整串一项）；分隔符经 `stringValueFromSearchArgument` 转串，空分隔符按码元逐个 `codeUnitStringValue`，否则 `stringIndexOfUnits` 定位并用 `defineStringSliceElement` 建共享切片，未到 limit 时补尾段。其余接收者展成字节转 `split`。
+- **所有权 / 错误 / 调用**：接收者、args、`out_value`、`sep_value` 全挂 `ValueRootFrame`（每个 `defineStringSliceElement` 都建新串）。返回新建数组，元素串由数组持有。错误：分隔符 ToString 后取不到字符串体 → 裸 `error.TypeError`；`toUint32Limit` 的转换可抛。唯一调用方 `methodCall`（id 27），非字符串接收者转 `split`。
 
-### `search` (`src/exec/string_builtin_ops.zig:1260`)
+### `search` (`src/exec/string_builtin_ops.zig:1148`)
 
 - **签名**：`fn search(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：过渡的字节版 `String.prototype.search`：把参数当普通字符串做子串查找，返回下标或 -1（不编译 RegExp；RegExp 语义在 `string_ops.stringSearch`）。
 - **实现**：参数缺省为 undefined，经 `appendValueString` 取字符串表示作 needle，`std.mem.indexOf` 命中返回下标，否则 -1。
 - **所有权 / 错误 / 调用**：返回 int32 立即数，不分配；`needle` 临时缓冲 defer deinit。唯一调用方 `methodCall`（`legacy_search_method_id`）。
 
-### `match` (`src/exec/string_builtin_ops.zig:1269`)
+### `match` (`src/exec/string_builtin_ops.zig:1157`)
 
 - **签名**：`fn match(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：过渡的字节版 `String.prototype.match`：按普通子串查找构造匹配结果数组（不编译 RegExp；RegExp 语义在 `string_ops.stringMatch`）。
 - **实现**：参数与结果都挂进 `ValueRootFrame`。参数的字符串表示作 needle，`std.mem.indexOf` 未命中返回 `null`；命中则建数组，0 号元素是命中的子串，再用 `defineIntProperty` 定义 `index`，并以 `Descriptor.data(input, true, false, true)`（可写、不可枚举、可配置）定义 `input`。
 - **所有权 / 错误 / 调用**：args 与 `out_value` / `input` 挂 `ValueRootFrame`；返回新建数组，元素串、`index` 与 `input`（整串的新拷贝）都由数组持有。未命中直接返回 JS null，不建数组。`needle` 缓冲 defer deinit。唯一调用方 `methodCall`（`legacy_match_method_id`），另有本文件 test。
 
-### `replaceAll` (`src/exec/string_builtin_ops.zig:1305`)
+### `replaceAll` (`src/exec/string_builtin_ops.zig:1193`)
 
 - **签名**：`fn replaceAll(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.replaceAll`（搜索值按普通字符串处理）。
 - **实现**：search 与 replacement 都取字符串表示。search 为空串时先写一份 replacement，再在每个字节后各插一份；否则 `std.mem.indexOfPos` 循环拼接命中之间的片段与 replacement，最后补上尾段，再 `createStringValue`。
 - **所有权 / 错误 / 调用**：三个临时 ArrayList（search / replacement / out）全部 defer deinit，返回新建串。唯一调用方 `methodCall`（`legacy_replace_all_method_id`）。
 
-### `defineStringElement` (`src/exec/string_builtin_ops.zig:1337`)
+### `defineStringElement` (`src/exec/string_builtin_ops.zig:1225`)
 
 - **签名**：`fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void`。
 - **作用**：把一段 UTF-8 字节建成字符串写进结果数组的第 `index` 个索引位；`String.prototype.split` 的纯字节路径（`split`）和 `String.prototype.match` 的结果数组第 0 项都由它填。
 - **实现**：先把 `object.value()` 放进单槽 `ValueRootFrame` 并 `activate`（`defer deactivate`）——此时数组还只被本函数的局部变量持有，而下一步 `createStringValue` 会分配、可能触发 GC。建串成功后转给 `defineValueElement` 落属性。
 - **所有权 / 错误 / 调用**：新串归 `object` 所有（写进属性后由数组这条边保活）；root frame 只覆盖建串窗口。错误只可能来自分配（`OutOfMemory` / `StringTooLong`）与 `defineOwnProperty`。调用方：`split`（三处分支）、`match`。
 
-### `defineStringSliceElement` (`src/exec/string_builtin_ops.zig:1352`)
+### `defineStringSliceElement` (`src/exec/string_builtin_ops.zig:1240`)
 
 - **签名**：`fn defineStringSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u32, string_value: *core.string.String, start: usize, slice_len: usize) !void`。
 - **作用**：从源 `String` 上切 `[start, start + slice_len)` 建新串并写进结果数组第 `index` 位；`splitReceiver`（split 的 UTF-16 感知路径）用它产出各分段和「无分隔符」时的整串副本。
 - **实现**：`rootValues(.{&object_value})` 钉住数组后 `activate` / `defer deactivate`，再 `String.createSlice(rt, string_value, start, slice_len)`。`createSlice`（`src/core/string.zig:887`）按父串的 latin1 / utf16 存储原样切一段重建，不经 UTF-8 转码，`slice_len == 0` 时返回空 ASCII 串——这是它相对 `defineStringElement` 的价值：split 分段不必先把整串拍成字节。建好的串再交 `defineValueElement`。
 - **所有权 / 错误 / 调用**：源 `string_value` 只读借用，切片是新分配的独立串，定义进数组后由数组持有。调用方只有 `splitReceiver`。
 
-### `defineValueElement` (`src/exec/string_builtin_ops.zig:1362`)
+### `defineValueElement` (`src/exec/string_builtin_ops.zig:1250`)
 
 - **签名**：`fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void`。
 - **作用**：三个 `define*Element` 的公共尾巴——把已经建好的值按数字索引定义成 split / match 结果数组的一个元素。
 - **实现**：object 与 value 一起进两槽 `rootValues` root frame（`defineOwnProperty` 可能扩容元素存储、换 shape，从而触发 GC，两边都得钉住），然后 `object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), Descriptor.data(rooted_value, true, true, true))`：writable / enumerable / configurable 全真，即 CreateDataPropertyOrThrow 的属性形状（与 String 包装对象那种不可写索引属性相反，见 `defineStringIndexUnitProperty`）。
 - **所有权 / 错误 / 调用**：调用方把 value 的所有权让渡给 `object`。调用方：`defineStringElement`、`defineStringSliceElement`、`splitReceiver` 里逐码元的分支。
 
-### `defineStringIndexUnitProperty` (`src/exec/string_builtin_ops.zig:1372`)
+### `defineStringIndexUnitProperty` (`src/exec/string_builtin_ops.zig:1260`)
 
 - **签名**：`fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void`。
 - **作用**：给 String 包装对象定义一个码元索引属性。
 - **实现**：把 object 挂进 root frame，单码元经 `String.createUtf16` 建串，用 `atom.atomFromUInt32(index)` 定义 `Descriptor.data(value, false, true, false)`：不可写、可枚举、不可配置，符合 String exotic 索引属性。
 - **所有权 / 错误 / 调用**：把新建的单码元 UTF-16 串（这里**不**走 `rt.singleByteString` 共享表）定义成不可写不可配置的下标属性，值随即由对象持有；root frame 只钉 `object`，覆盖建串这个分配点。唯一调用方 `constructWithPrototype:776`。
 
-### `htmlWrap` (`src/exec/string_builtin_ops.zig:1384`)
-
-- **签名**：`inline fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue`。
-- **作用**：Annex B 里无属性的 HTML 包装（`<tag>str</tag>`，如 `String.prototype.bold`）。
-- **实现**：薄封装，主体转发到 `htmlTagged`。
-- **所有权 / 错误 / 调用**：无自身所有权：以 `attr = null` 转发 `htmlTagged`，返回值与错误全由它决定。调用方：`methodCall` 的无属性 AnnexB id（12-15、18、20、23、24、26）与本文件 test。
-
-### `htmlWithAttribute` (`src/exec/string_builtin_ops.zig:1388`)
-
-- **签名**：`inline fn htmlWithAttribute( rt: *core.JSRuntime, bytes: []const u8, tag: []const u8, attr: []const u8, args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：Annex B 里带属性的 HTML 包装（`<tag attr="arg">str</tag>`，如 `String.prototype.anchor` / `link`）。
-- **实现**：`inline`，直接 `htmlTagged(rt, bytes, tag, attr, args)`。与 `htmlWrap` 的唯一差别是 `attr` 非空，于是 `htmlTagged` 会把第一个参数转成字符串当属性值（没有参数时用字面量 `"undefined"`，多于一个参数是 `error.TypeError`），插成 `attr="..."`，其中的 `"` 由 `appendEscapedHtmlAttribute` 换成 `&quot;`；两个包装共用一条外联走法，不再各留一份 `<tag>…</tag>` 骨架。
-- **所有权 / 错误 / 调用**：无自身所有权：带 `attr` 转发 `htmlTagged`。调用方：`methodCall` 的带属性 AnnexB id（11 anchor、16/17 fontcolor/fontsize、19 link）与本文件 test。
-
-### `htmlTagged` (`src/exec/string_builtin_ops.zig:1403`)
-
-- **签名**：`noinline fn htmlTagged( rt: *core.JSRuntime, bytes: []const u8, tag: []const u8, attr: ?[]const u8, args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：Annex B HTML 包装的共用实现：拼 `<tag>…</tag>`，可选插入 `attr="…"`（`"` 转 `&quot;`）。
-- **实现**：有 `attr` 时：`args.len > 1` → TypeError；有 `args[0]` 则 `appendValueString`，否则写字面 `"undefined"`（所以不能把无属性包装折叠进属性 helper，否则会注入 `attr="undefined"`）。然后拼 `<tag`，有属性则 ` attr="` + `appendEscapedHtmlAttribute` + `">`，否则 `>`；再 `bytes`、`</tag>`。`createStringValue` 交出结果。outlined leftover：`htmlWrap` / `htmlWithAttribute` 两个 `inline` 包装只传是否带 attr。
-- **所有权 / 错误 / 调用**：`attr_bytes` / `out` 两个临时 ArrayList defer deinit，返回 `createStringValue` 新建的串；属性值经 `appendValueString` 转字节，`&quot;` 转义就地由 `appendEscapedHtmlAttribute` 做。错误：带属性形态给了多于 1 个参数 → 裸 `error.TypeError`。调用方：`htmlWrap`、`htmlWithAttribute`。
-
-### `appendEscapedHtmlAttribute` (`src/exec/string_builtin_ops.zig:1440`)
-
-- **签名**：`fn appendEscapedHtmlAttribute(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8) !void`。
-- **作用**：把属性值字节追加到输出缓冲，并把 `"` 转义成 `&quot;`。
-- **实现**：逐字节：`"` 写 `&quot;`，其余原样 `append`。
-- **所有权 / 错误 / 调用**：只往调用方的 `out` 追加，不分配独立缓冲、不返回值；唯一错误是 ArrayList 扩容的 `OutOfMemory`。唯一调用方 `htmlTagged:1428`。
-
-### `trimStartAscii` (`src/exec/string_builtin_ops.zig:1478`)
+### `trimStartAscii` (`src/exec/string_builtin_ops.zig:1272`)
 
 - **签名**：`fn trimStartAscii(bytes: []const u8) []const u8`。
 - **作用**：跳过开头的 ASCII 空白，返回借用的子切片。
 - **实现**：`while (start < bytes.len and isAsciiTrim(bytes[start]))` 推进后返回 `bytes[start..]`。
 - **所有权 / 错误 / 调用**：无：返回入参 `bytes` 的子切片（借用，随调用方缓冲失效），不分配无 error。唯一调用方 `trimReceiver:1018`。
 
-### `trimEndAscii` (`src/exec/string_builtin_ops.zig:1484`)
+### `trimEndAscii` (`src/exec/string_builtin_ops.zig:1278`)
 
 - **签名**：`fn trimEndAscii(bytes: []const u8) []const u8`。
 - **作用**：去掉结尾的 ASCII 空白，返回借用的子切片。
 - **实现**：`while (end > 0 and isAsciiTrim(bytes[end - 1]))` 回退后返回 `bytes[0..end]`。
 - **所有权 / 错误 / 调用**：无：同上，返回 `bytes` 的前缀借用切片。唯一调用方 `trimReceiver:1019`。
 
-### `isAsciiTrim` (`src/exec/string_builtin_ops.zig:1490`)
+### `isAsciiTrim` (`src/exec/string_builtin_ops.zig:1284`)
 
 - **签名**：`fn isAsciiTrim(byte: u8) bool`。
 - **作用**：字节级空白谓词。
 - **实现**：只认空格、`\t`、`\r`、`\n` 四个字节；码元路径用的是覆盖面更广的 `isTrimCodeUnit`。
 - **所有权 / 错误 / 调用**：无：纯谓词，不分配无 error。调用方 `trimStartAscii` / `trimEndAscii`。
 
-### `codePointAtResolved` (`src/exec/string_builtin_ops.zig:1494`)
+### `codePointAtResolved` (`src/exec/string_builtin_ops.zig:1288`)
 
 - **签名**：`fn codePointAtResolved(data: core.string.String.ResolvedData, len: usize, index: usize) CodePointSpan`。
 - **作用**：在已解析的 latin1 / utf16 切片上取一个码点及其码元区间。
 - **实现**：`latin1` 分支每个字节就是一个码点（latin1 码元不可能是代理），span 是 `[index, index+1)`；`utf16` 分支在高代理且下一个是低代理时算 `0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)` 并返回 `[index, index+2)`，否则返回单码元 span。
 - **所有权 / 错误 / 调用**：无：只读已解析的 `ResolvedData` 视图（借用自字符串体），返回的 `CodePointSpan` 全是标量。唯一调用方 `unicodeCaseOwnedString:1546`——那里的前提正是循环内不建串，切片才始终有效。
 
-### `unicodeCaseReceiver` (`src/exec/string_builtin_ops.zig:1513`)
+### `unicodeCaseReceiver` (`src/exec/string_builtin_ops.zig:1307`)
 
 - **签名**：`fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue`。
 - **作用**：`toLowerCase` / `toUpperCase` 的接收者入口。
 - **实现**：先 `toStringValueForMethod` 把接收者转成字符串值，再交 `unicodeCaseOwnedString`。
 - **所有权 / 错误 / 调用**：`toStringValueForMethod` 交回的可能是借用（字符串接收者 / 包装对象内部值）也可能是新建串，随后按 `Owned` 约定转交 `unicodeCaseOwnedString`，本函数不再持有。调用方：`stringCaseCall:621` 的引擎内部腿、`methodCall`（id 2 / 3）。
 
-### `unicodeCaseOwnedString` (`src/exec/string_builtin_ops.zig:1518`)
+### `unicodeCaseOwnedString` (`src/exec/string_builtin_ops.zig:1312`)
 
 - **签名**：`fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower: bool) !core.JSValue`。
 - **作用**：Unicode 大小写映射本体（含希腊 Σ 词尾 ς 规则）。
 - **实现**：取 `asStringBody`（拿不到返回 TypeError），`resolveData()` 只解析一次；长度为 0 直接返回入参。latin1 源先试 `String.createAsciiCaseMapped` 的纯 ASCII 快路径。其余逐码点走 `codePointAtResolved`：`to_lower` 且码点是 Σ(0x03A3) 且 `isFinalSigma` 时映射成 ς(0x03C2)，否则 `unicode.caseConvert`；输出先攒在 latin1 缓冲，一旦出现 > 0xFF 的码点就把已有内容搬进 `wide` 并改走 UTF-16（`appendUtf16CodePoint`）；最后按是否 widen 用 `String.createUtf16` 或 `String.createLatin1` 建串。
 - **所有权 / 错误 / 调用**：按文件头 `Owned` 约定消费入参：空串与全 ASCII 无变化的情形把 `primitive` 原样交回（不新建），其余返回新建串。`string_value.resolveData()` 的切片在整个转换循环里被借用，而 `latin1` / `wide` 只是 allocator 上的临时 ArrayList（不是建串分配点），直到最后一次 `createUtf16` / `createLatin1` 才落盘，所以切片不会中途失效；两个缓冲 defer deinit。入参取不到字符串体 → 裸 `error.TypeError`。调用方：`stringCaseCall:640`、`unicodeCaseReceiver:1515`。
 
-### `toStringValueForMethod` (`src/exec/string_builtin_ops.zig:1578`)
+### `toStringValueForMethod` (`src/exec/string_builtin_ops.zig:1372`)
 
 - **签名**：`fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue`。
 - **作用**：方法内部用的 ToString：尽量返回已有的字符串值，避免多余拷贝。
 - **实现**：字符串直返；String 包装对象返回内部 `objectData()`（缺失则 TypeError）；其它对象经 `appendValueString` 展成字节再建串；null / undefined 返回 TypeError；其余原始值同样展字节建串。
 - **所有权 / 错误 / 调用**：字符串接收者与 String 包装的内部值是**借用返回**（不新建、不加引用），其余分支把接收者 ToString 进临时字节缓冲（defer deinit）后返回新建串。null/undefined 接收者、包装对象没有内部数据 → 裸 `error.TypeError`。唯一调用方 `unicodeCaseReceiver:1514`。
 
-### `singleCaseMapping` (`src/exec/string_builtin_ops.zig:1598`)
+### `singleCaseMapping` (`src/exec/string_builtin_ops.zig:1392`)
 
 - **签名**：`fn singleCaseMapping(cp: u21) unicode.CaseMapping`。
 - **作用**：造一个只含单个码点的 `unicode.CaseMapping`（Σ→ς 这种定点映射用）。
 - **实现**：`len = 1`、`codepoints[0] = cp`，其余槽保持 undefined。
 - **所有权 / 错误 / 调用**：无：在栈上造一个单码点 `CaseMapping` 按值返回，不分配无 error。唯一调用方 `unicodeCaseOwnedString` 的 final-sigma 分支（:1552）。
 
-### `codePointAtStringIndex` (`src/exec/string_builtin_ops.zig:1610`)
+### `codePointAtStringIndex` (`src/exec/string_builtin_ops.zig:1404`)
 
 - **签名**：`fn codePointAtStringIndex(string_value: *const core.string.String, index: usize) CodePointSpan`。
 - **作用**：从给定下标**向后**读一个完整码点（成对的代理对合并，否则就是单码元），并给出它的起止下标。
 - **实现**：读 `index` 处的码元；若它是高代理且 `index + 1` 仍在串内、且下一个是低代理，就 `unicode.codePointFromSurrogatePair` 合成码点并给出 `end = index + 2`。其余情况按单码元返回，`end = index + 1`。返回的 `CodePointSpan` 同时带起止下标，调用方据此推进游标。
 - **所有权 / 错误 / 调用**：无：只读借用的 `*const String`，返回标量 span；下标越界由调用方保证。唯一调用方 `isFinalSigma:1652`。
 
-### `codePointBeforeStringIndex` (`src/exec/string_builtin_ops.zig:1622`)
+### `codePointBeforeStringIndex` (`src/exec/string_builtin_ops.zig:1416`)
 
 - **签名**：`fn codePointBeforeStringIndex(string_value: *const core.string.String, end: usize) ?CodePointSpan`。
 - **作用**：从给定下标**向前**读一个完整码点（低代理在前时回看一格合并），`end == 0` 返回 `null`。
 - **实现**：`end == 0` 返回 `null`。取 `end - 1` 处的码元；若它是低代理且前面还有一格、且那一格是高代理，就合成码点并把 `start` 退到 `end - 2`。其余按单码元返回。与 `codePointAtStringIndex` 镜像，供 `isFinalSigma` 向前扫描词尾 Σ 的上下文使用（树内没有别的反向遍历用它）。
 - **所有权 / 错误 / 调用**：无：只读借用的 `*const String`，`end == 0` 返回 `null` 而不是越界。唯一调用方 `isFinalSigma:1643`。
 
-### `appendUtf16CodePoint` (`src/exec/string_builtin_ops.zig:1636`)
+### `appendUtf16CodePoint` (`src/exec/string_builtin_ops.zig:1430`)
 
 - **签名**：`fn appendUtf16CodePoint(rt: *core.JSRuntime, units: *std.ArrayList(u16), cp: u21) !void`。
 - **作用**：把码点、字符串或值追加到缓冲。
 - **实现**：薄封装，主体转发到 `unicode.appendUtf16CodePoint`。
 - **所有权 / 错误 / 调用**：无自身所有权：把 `rt.memory.allocator` 交给 `unicode.appendUtf16CodePoint`，往调用方的 `units` 追加，唯一错误是扩容 `OutOfMemory`。唯一调用方 `unicodeCaseOwnedString:1566`。
 
-### `isFinalSigma` (`src/exec/string_builtin_ops.zig:1640`)
+### `isFinalSigma` (`src/exec/string_builtin_ops.zig:1434`)
 
 - **签名**：`fn isFinalSigma(string_value: *const core.string.String, sigma_start: usize, after_sigma: usize) bool`。
 - **作用**：判断某个 Σ 是否处于词尾（决定映射成 ς 还是 σ）。
 - **实现**：先向前用 `codePointBeforeStringIndex` 跳过 case-ignorable 码点：必须先遇到 cased 码点，遇到非 cased 或走到串头返回 `false`。再向后用 `codePointAtStringIndex` 跳过 case-ignorable：遇到 cased 返回 `false`，走到串尾返回 `true`。
 - **所有权 / 错误 / 调用**：无：只读扫描借用的 `*const String`，不分配无 error。唯一调用方 `unicodeCaseOwnedString:1551`（仅 to_lower 且码点为 Σ 时才进）。
 
-### `indexOf` (`src/exec/string_builtin_ops.zig:1660`)
+### `indexOf` (`src/exec/string_builtin_ops.zig:1454`)
 
 - **签名**：`fn indexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.indexOf`。
 - **实现**：参数个数不在 1-2 返回 TypeError；needle 取 args[0] 的字符串表示；有第二参数时经 `stringSearchStart` 规范起点；`std.mem.indexOfPos` 命中返回下标，否则 -1。
 - **所有权 / 错误 / 调用**：返回 int32 立即数；`needle` 临时缓冲 defer deinit。错误：参数个数不是 1-2 → 裸 `error.TypeError`，`stringSearchStart` 的转换可抛。唯一调用方 `indexOfReceiver:1682` 的字节回退腿。
 
-### `indexOfReceiver` (`src/exec/string_builtin_ops.zig:1670`)
+### `indexOfReceiver` (`src/exec/string_builtin_ops.zig:1464`)
 
 - **签名**：`fn indexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`indexOf` 的码元级实现。
 - **实现**：字符串 / String 包装接收者：needle 经 `stringValueFromSearchArgument`（取不到串体则 TypeError），起点经 `stringSearchStart`，用 `stringIndexOfUnits` 查，未命中返回 -1；其余接收者展成 UTF-8 字节后转字节版 `indexOf`（参数个数检查也在那边）。
 - **所有权 / 错误 / 调用**：字符串腿几乎全是借用：`stringValueFromSearchArgument` 对字符串参数直接交回原值（非字符串才新建串），`stringIndexOfUnits` 只读两个体的 `resolveData()` 切片，返回 int32 立即数。这条腿不建根——`stringSearchStart` 走的是裸 runtime 的 `toIntegerOrInfinity`，不会回调用户代码。错误同 `indexOf`。唯一调用方 `methodCall`（id 4）。
 
-### `lastIndexOf` (`src/exec/string_builtin_ops.zig:1685`)
+### `lastIndexOf` (`src/exec/string_builtin_ops.zig:1479`)
 
 - **签名**：`fn lastIndexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.lastIndexOf`。
 - **实现**：参数个数不在 1-2 返回 TypeError；默认起点是 `bytes.len - needle.len`（needle 更长则 0），第二参数非 undefined 时经 `stringLastSearchStart` 规范；空 needle 直接返回起点，needle 比串长返回 -1；否则从 `@min(start, default_start)` 起倒序逐位 `std.mem.eql` 比较，命中返回下标，走完返回 -1。
 - **所有权 / 错误 / 调用**：返回 int32 立即数；`needle` 缓冲 defer deinit。错误：参数个数不是 1-2 → 裸 `error.TypeError`，`stringLastSearchStart` 的转换可抛。唯一调用方 `lastIndexOfReceiver:1735` 的字节回退腿。
 
-### `lastIndexOfReceiver` (`src/exec/string_builtin_ops.zig:1709`)
+### `lastIndexOfReceiver` (`src/exec/string_builtin_ops.zig:1503`)
 
 - **签名**：`fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`lastIndexOf` 的码元级实现。
 - **实现**：字符串 / String 包装接收者：needle 经 `stringValueFromSearchArgument`；空 needle 返回规范化后的起点（默认取串长）；needle 比串长返回 -1；否则默认起点取 `len - needle.len()`，第二参数非 undefined 时经 `stringLastSearchStart` 规范，再交 `stringLastIndexOfUnits`。其余接收者展成字节走 `lastIndexOf`。
 - **所有权 / 错误 / 调用**：与 `indexOfReceiver` 同形：needle 为字符串时借用原值，比较只读 `resolveData()` 切片，返回 int32 立即数，不建根。唯一调用方 `methodCall`（id 28）。
 
-### `charCodeAtReceiver` (`src/exec/string_builtin_ops.zig:1738`)
+### `charCodeAtReceiver` (`src/exec/string_builtin_ops.zig:1532`)
 
 - **签名**：`fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`charCodeAt` 的接收者版：接收者必须是字符串或 String 包装对象。
 - **实现**：`stringPrimitiveValue` 取字符串原始值（否则 TypeError），`stringInteger` 取下标（缺省 0）；越界返回 NaN（`JSValue.float64`），否则返回码元 int32。
 - **所有权 / 错误 / 调用**：返回立即数（码元或 NaN），不分配；接收者不是字符串/String 包装时由 `stringPrimitiveValue` 返回裸 `error.TypeError`（函数体内不直接 return error），`stringInteger` 的转换可抛。唯一调用方 `methodCall`（id 29）。
 
-### `codePointAtReceiver` (`src/exec/string_builtin_ops.zig:1745`)
+### `codePointAtReceiver` (`src/exec/string_builtin_ops.zig:1539`)
 
 - **签名**：`fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`codePointAt` 的接收者版：命中高代理且后继是低代理时合成码点。
 - **实现**：`stringPrimitiveValue` 取字符串原始值，`stringInteger` 取下标（缺省 0）；越界返回 undefined；读码元后若是高代理且后一个是低代理则 `unicode.codePointFromSurrogatePair` 合成，否则返回该码元。
 - **所有权 / 错误 / 调用**：返回立即数（码点 int32 或 undefined），不分配；`stringPrimitiveValue` 交回的是借用的接收者/包装内部值。错误同 `charCodeAtReceiver`。唯一调用方 `methodCall`（id 31）。
 
-### `at` (`src/exec/string_builtin_ops.zig:1760`)
+### `at` (`src/exec/string_builtin_ops.zig:1554`)
 
 - **签名**：`fn at(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.at`（支持负下标）。
 - **实现**：`stringInteger` 取相对下标（缺省 0），负值按 `len + relative` 回绕；落在 `[0, len)` 外返回 undefined，否则返回单字节子串。
 - **所有权 / 错误 / 调用**：返回新建串或 undefined 立即数；`bytes` 借用调用方缓冲。唯一调用方 `atReceiver:1780` 的字节回退腿。
 
-### `atReceiver` (`src/exec/string_builtin_ops.zig:1768`)
+### `atReceiver` (`src/exec/string_builtin_ops.zig:1562`)
 
 - **签名**：`fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`at` 的码元级实现。
 - **实现**：字符串 / String 包装接收者按码元取：负下标回绕，越界返回 undefined，命中走 `codeUnitStringValue`；其余接收者展成字节走字节版 `at`。
 - **所有权 / 错误 / 调用**：字符串腿经 `codeUnitStringValue` 返回 runtime 共享单字节串或新建 UTF-16 串；字节腿缓冲 defer deinit 后转 `at`。唯一调用方 `methodCall`（id 30）。
 
-### `slice` (`src/exec/string_builtin_ops.zig:1783`)
+### `slice` (`src/exec/string_builtin_ops.zig:1577`)
 
 - **签名**：`fn slice(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.slice`。
 - **实现**：起止经 `stringInteger`（`end` 缺省或 undefined 时取串长）；负值按 `len + x` 回绕并钳到 0，正值钳到 `len`；`end < start` 时取 `end = start`（空串）；最后切片建串。
 - **所有权 / 错误 / 调用**：返回新建串，`bytes` 借用调用方缓冲；区间夹紧在本函数内做（不复用 `stringSliceRange`）。唯一调用方 `sliceReceiver:1803` 的字节回退腿。
 
-### `sliceReceiver` (`src/exec/string_builtin_ops.zig:1793`)
+### `sliceReceiver` (`src/exec/string_builtin_ops.zig:1587`)
 
 - **签名**：`fn sliceReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`slice` 的码元级实现：用 `String.createSlice` 共享底层数据。
 - **实现**：字符串 / String 包装接收者经 `stringSliceRange` 得区间后 `createSlice`；其余接收者展成字节走字节版 `slice`。
 - **所有权 / 错误 / 调用**：字符串腿的 `String.createSlice` 拷贝成独立新串归调用方；字节腿缓冲 defer deinit。错误来自 `stringSliceRange` 的 `stringInteger` 与 `appendStringReceiverBytes`。唯一调用方 `methodCall`（id 32）。
 
-### `stringSubstringRange` (`src/exec/string_builtin_ops.zig:1811`)
+### `stringSubstringRange` (`src/exec/string_builtin_ops.zig:1605`)
 
 - **签名**：`fn stringSubstringRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange`。
 - **作用**：`substring` 的区间规范化。
 - **实现**：两端各经 `stringInteger`（`end` 缺省或 undefined 时取长度），各自钳进 `[0, len]`，再返回 `{ .start = @min(start, end), .end = @max(start, end) }`——即两端会互换以保证 `start <= end`。
 - **所有权 / 错误 / 调用**：无：只算区间标量，不分配不建根；唯一 error 来自 `stringInteger`（BigInt → 裸 `error.TypeError`）。调用方：`substring:993`、`substringReceiver:999`。
 
-### `stringSliceRange` (`src/exec/string_builtin_ops.zig:1820`)
+### `stringSliceRange` (`src/exec/string_builtin_ops.zig:1614`)
 
 - **签名**：`fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange`。
 - **作用**：`slice` 的区间规范化。
 - **实现**：两端经 `stringInteger` 后，负值按 `len + x` 回绕并钳到 0、正值钳到 `len`；`end < start` 时收成空区间（`end = start`，不互换）。
 - **所有权 / 错误 / 调用**：无：同上，区别是负下标回绕而不是夹到 0 后再排序。唯一调用方 `sliceReceiver:1795`。
 
-### `repeatReceiver` (`src/exec/string_builtin_ops.zig:1839`)
+### `repeatReceiver` (`src/exec/string_builtin_ops.zig:1633`)
 
 - **签名**：`fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`repeat` 的 resolve-once 实现：借用接收者已展平的码元，按 `count * unit_len` 一次预分配。
-- **实现**：非字符串 / 包装接收者展成字节回退字节版 `repeat`。`count` 经 `stringInteger`，落在 `[0, 2^31-1]` 之外返回 RangeError；`ensureFlat` 后码元数或 count 为 0 返回空串；`total` 由 `std.math.mul` 算（溢出即报错），超过 `core.string.max_length` 返回 InvalidLength；latin1 与 utf16 各自分配临时缓冲逐段 `@memcpy` 平铺后建串。QuickJS 坐标：quickjs.c:46371。
-- **所有权 / 错误 / 调用**：`ensureFlat` 就地展平接收者；结果缓冲是 `rt.memory.allocator.alloc` 的原始内存（defer free），memcpy 完再建串，新串归调用方。错误：count 越界 → 裸 `error.RangeError`，总长超 `max_length` → 裸 `error.InvalidLength`；消息由 `string_ops.stringNumericArgsMethod:3839` / `stringPrototypeMethod:2054` 的 catch 补成 "invalid repeat count" / "invalid string length"——`InvalidLength` 不在 `runtimeErrorInfo` 表里，少了这层就会退化成 `Error: InvalidLength`。唯一调用方 `methodCall`（id 33）。
+- **实现**：非字符串 / 包装接收者展成字节回退字节版 `repeat`。`count` 经 `stringInteger`，落在 `[0, 2^31-1]` 之外返回 RangeError；码元数或 count 为 0 返回空串；`total` 由 `std.math.mul` 算（溢出即报错），超过 `core.string.max_length` 返回 InvalidLength；latin1 与 utf16 各自分配临时缓冲逐段 `@memcpy` 平铺后建串。QuickJS 坐标：quickjs.c:46371。
+- **所有权 / 错误 / 调用**：结果缓冲是 `rt.memory.allocator.alloc` 的原始内存（defer free），memcpy 完再建串，新串归调用方。错误：count 越界 → 裸 `error.RangeError`，总长超 `max_length` → 裸 `error.InvalidLength`；消息由 `string_ops.stringNumericArgsMethod:3839` / `stringPrototypeMethod:2054` 的 catch 补成 "invalid repeat count" / "invalid string length"——`InvalidLength` 不在 `runtimeErrorInfo` 表里，少了这层就会退化成 `Error: InvalidLength`。唯一调用方 `methodCall`（id 33）。
 
-### `repeat` (`src/exec/string_builtin_ops.zig:1877`)
+### `repeat` (`src/exec/string_builtin_ops.zig:1670`)
 
 - **签名**：`fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：字节版 `String.prototype.repeat`。
 - **实现**：`count` 经 `stringInteger`，落在 `[0, 2^31-1]` 之外返回 RangeError（与 `repeatReceiver` 同一套 qjs 检查）；空串或 count 为 0 返回空串；`total` 由 `std.math.mul` 算，超过 `core.string.max_length` 返回 InvalidLength；否则分配 `total` 字节逐段 `@memcpy` 后建串。QuickJS 坐标：quickjs.c:46371。
 - **所有权 / 错误 / 调用**：与 `repeatReceiver` 同一套错误与缓冲约定（原始 `alloc` + defer free，返回新建串）。唯一调用方 `repeatReceiver:1844` 的非字符串接收者回退——`methodCall` 尾部 switch 的 `33` 分支被前面 `id == 33` 的早退拦住，永远走不到。
 
-### `pad` (`src/exec/string_builtin_ops.zig:1894`)
+### `pad` (`src/exec/string_builtin_ops.zig:1687`)
 
 - **签名**：`fn pad(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, side: PadSide) !core.JSValue`。
 - **作用**：字节版 `padStart` / `padEnd`（由 `side` 区分）。
 - **实现**：目标长度经 `stringInteger`，不大于当前字节长度时直接返回原串；填充串缺省为一个空格，显式给出的空串同样返回原串；否则分配 `target_len` 字节，按 side 用 `fill.items[index % fill.items.len]` 循环填充，另一侧 `@memcpy` 原文。
 - **所有权 / 错误 / 调用**：`fill` 临时 ArrayList 与 `out` 原始缓冲都在返回前释放，返回新建串；`target_len <= bytes.len` 或填充串为空时把源字节原样建串返回。唯一调用方 `methodCall` 的 id 34 / 35 分支（JS 可见的 padStart/padEnd 实际走 exec 的 `string_ops.stringPad`）。
 
-### `localeCompare` (`src/exec/string_builtin_ops.zig:1925`)
+### `localeCompare` (`src/exec/string_builtin_ops.zig:1718`)
 
 - **签名**：`fn localeCompare(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`localeCompare` 的过渡实现：按字节序比较，不接 ICU / locale。
 - **实现**：参数（缺省 undefined）取字符串表示后 `std.mem.order`，映射成 -1 / 0 / 1。
 - **所有权 / 错误 / 调用**：返回 int32 立即数；`other` 缓冲 defer deinit。唯一调用方 `methodCall`（id 36）。
 
-### `normalize` (`src/exec/string_builtin_ops.zig:1938`)
+### `normalize` (`src/exec/string_builtin_ops.zig:1731`)
 
 - **签名**：`fn normalize(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`String.prototype.normalize` 的过渡实现：只校验 form 参数，不做实际规范化。
 - **实现**：有非 undefined 的 form 参数时必须是 `NFC` / `NFD` / `NFKC` / `NFKD` 之一，否则 RangeError；随后把接收者字节原样建串返回。
 - **所有权 / 错误 / 调用**：返回把 `bytes` 原样建回的新串（不做真正规范化）；`form` 缓冲 defer deinit；未知 form → 裸 `error.RangeError`（挂 "bad normalization form" 消息的是 `string_ops.stringNormalize`）。唯一调用方 `methodCall`（`legacy_normalize_method_id`）。
 
-### `contains` (`src/exec/string_builtin_ops.zig:1953`)
+### `contains` (`src/exec/string_builtin_ops.zig:1746`)
 
 - **签名**：`fn contains(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue`。
 - **作用**：`includes` / `startsWith` / `endsWith` 的字节版（由 `mode` 区分）。
 - **实现**：参数个数不在 1-2 返回 TypeError；needle 取字符串表示，位置参数经 `stringSearchStart`。contains 用 `std.mem.indexOfPos`；starts 用 `std.mem.startsWith(bytes[pos..])`；ends 的终点取显式位置参数（非 undefined 时）或串长，needle 比终点长直接 false，否则比较结尾等长片段。
 - **所有权 / 错误 / 调用**：返回布尔立即数；`needle` 缓冲 defer deinit；参数个数不是 1-2 → 裸 `error.TypeError`。唯一调用方 `containsReceiver:1991` 的字节回退腿。
 
-### `containsReceiver` (`src/exec/string_builtin_ops.zig:1971`)
+### `containsReceiver` (`src/exec/string_builtin_ops.zig:1764`)
 
 - **签名**：`fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue`。
 - **作用**：`includes` / `startsWith` / `endsWith` 的码元级实现。
 - **实现**：字符串 / String 包装接收者：needle 经 `stringValueFromSearchArgument`（取不到串体 TypeError），位置经 `stringSearchStart`；contains 用 `stringIndexOfUnits`，starts 用 `stringMatchesAtUnits(…, pos)`，ends 取终点（显式位置或串长）后比 `end - needle.len()` 处。其余接收者展成字节走字节版 `contains`（参数个数检查在那边）。
 - **所有权 / 错误 / 调用**：字符串腿只借用两个字符串体的 `resolveData()` 切片比较，返回布尔立即数，不分配不建根；needle 是字符串时 `stringValueFromSearchArgument` 直接交回原值。唯一调用方 `methodCall`（id 5 / 6 / 7）。
 
-### `appendStringReceiverBytes` (`src/exec/string_builtin_ops.zig:1994`)
+### `appendStringReceiverBytes` (`src/exec/string_builtin_ops.zig:1787`)
 
 - **签名**：`fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), target: core.JSValue) !void`。
 - **作用**：把字符串方法接收者转换并追加到字节缓冲。
 - **实现**：字符串直接走 `core.string.appendValueUtf8`；String 包装对象取内部值，其他非 null/undefined 值走本文件的 `appendValueString`。null/undefined 或缺少包装内部值返回 TypeError。
 - **所有权 / 错误 / 调用**：不返回 JSValue、不分配自己的缓冲：只借用 `target` 并往调用方的 `buffer` 追加（缓冲的 defer deinit 归调用方）。错误：`target` 是 null/undefined、或 String 包装对象取不到 `objectData()` → 裸 `error.TypeError`（这也是各 `*Receiver` 复用它做 null/undefined 校验的原因），其余是 `AppendStringError`（ToString 与 ArrayList 扩容）的透传。调用方是本文件所有非字符串接收者的字节回退腿，共 13 处（`charAtValue:900`、`methodCall:932`、`substringReceiver:1006`、`trimReceiver:1016`、`isWellFormedReceiver:1047`、`toWellFormedReceiver:1057`、`splitReceiver:1256`、`indexOfReceiver:1681`、`lastIndexOfReceiver:1734`、`atReceiver:1779`、`sliceReceiver:1802`、`repeatReceiver:1843`、`containsReceiver:1990`）。
 
-### `stringValueFromSearchArgument` (`src/exec/string_builtin_ops.zig:2015`)
+### `stringValueFromSearchArgument` (`src/exec/string_builtin_ops.zig:1808`)
 
 - **签名**：`fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue`。
 - **作用**：搜索 / 分隔参数的 ToString：已是字符串就原样返回，否则展成字节再建串。
 - **实现**：`value.isString()` 直返；否则 `appendValueString` 展成 UTF-8 字节后 `createStringValue`。
 - **所有权 / 错误 / 调用**：字符串入参是借用返回（同一个值），其它分支把它 ToString 进临时缓冲（defer deinit）后返回新建串。调用方：`constructWithPrototype:761`、`splitReceiver:1227`、`indexOfReceiver:1672` 等 5 处。
 
-### `stringMatchesAtResolved` (`src/exec/string_builtin_ops.zig:2023`)
+### `stringMatchesAtResolved` (`src/exec/string_builtin_ops.zig:1816`)
 
 - **签名**：`fn stringMatchesAtResolved( haystack: core.string.String.ResolvedData, needle: core.string.String.ResolvedData, hlen: usize, nlen: usize, start: usize, ) bool`。
 - **作用**：在两个已解析的码元切片上做定点比较。
 - **实现**：`start > hlen` 或 `nlen > hlen - start` 返回 `false`；否则逐码元用 `resolvedUnitAt` 比较，全等返回 `true`。
 - **所有权 / 错误 / 调用**：无：只比较两个借用视图，不分配无 error；起点越界由开头的 `start > hlen` 判断兜住。调用方：`stringMatchesAtUnits`、`stringLastIndexOfUnits:2092`。
 
-### `stringMatchesAtUnits` (`src/exec/string_builtin_ops.zig:2041`)
+### `stringMatchesAtUnits` (`src/exec/string_builtin_ops.zig:1834`)
 
 - **签名**：`fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) bool`。
 - **作用**：`startsWith` / `endsWith` 的一次性 resolve 包装。
 - **实现**：把两串各 `resolveData()` 一次（把 slice/rope 父链遍历提出逐字符循环）后转 `stringMatchesAtResolved`。
 - **所有权 / 错误 / 调用**：无：把两个字符串体 `resolveData()` 成扁平切片再交给 `stringMatchesAtResolved`，不分配无 error。唯一调用方 `containsReceiver`（starts / ends 两臂）。
 
-### `resolvedUnitAt` (`src/exec/string_builtin_ops.zig:2045`)
+### `resolvedUnitAt` (`src/exec/string_builtin_ops.zig:1838`)
 
 - **签名**：`inline fn resolvedUnitAt(data: core.string.String.ResolvedData, i: usize) u16`。
 - **作用**：从已解析的 latin1 / utf16 切片取第 i 个码元。
 - **实现**：`switch` 两个分支：latin1 取字节（零扩展成 u16），utf16 直接取码元。
 - **所有权 / 错误 / 调用**：无：对借用视图的一次索引，不分配无 error，边界由调用方保证。调用方：`stringMatchesAtResolved`、`stringIndexOfUnits`、`stringLastIndexOfUnits`。
 
-### `stringIndexOfUnits` (`src/exec/string_builtin_ops.zig:2052`)
+### `stringIndexOfUnits` (`src/exec/string_builtin_ops.zig:1845`)
 
 - **签名**：`fn stringIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize`。
 - **作用**：码元级 indexOf：两串各 resolve 一次 + 首码元跳过。
 - **实现**：`start > hlen` 返回 `null`；空 needle 返回 `start`；`nlen > hlen - start` 返回 `null`。随后把两串各 `resolveData()` 一次，从 `start` 扫到 `hlen - nlen`，首码元不等直接跳过，相等再逐码元比；循环里不分配，解析出的切片全程有效。QuickJS 坐标：quickjs.c:45553。
 - **所有权 / 错误 / 调用**：返回下标不涉及所有权；两个 `resolveData()` 切片在整个扫描循环里被借用，而循环内没有任何分配，所以切片全程有效（源码注释点明了这一点）。调用方：`splitReceiver:1243`、`indexOfReceiver:1675`、`containsReceiver:1977`。
 
-### `stringLastIndexOfUnits` (`src/exec/string_builtin_ops.zig:2077`)
+### `stringLastIndexOfUnits` (`src/exec/string_builtin_ops.zig:1870`)
 
 - **签名**：`fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize`。
 - **作用**：码元级 lastIndexOf：两串各 resolve 一次 + 首码元跳过。
 - **实现**：空 needle 返回 `@min(start, hlen)`；needle 比串长返回 `null`；否则两串各 `resolveData()` 一次，从 `@min(start, hlen - nlen)` 倒序扫描，首码元命中后再用 `stringMatchesAtResolved` 全比。
 - **所有权 / 错误 / 调用**：同上：解析一次两个扁平切片，循环内零分配，返回下标。唯一调用方 `lastIndexOfReceiver:1728`。
 
-### `codeUnitStringValue` (`src/exec/string_builtin_ops.zig:2100`)
+### `codeUnitStringValue` (`src/exec/string_builtin_ops.zig:1893`)
 
 - **签名**：`fn codeUnitStringValue(rt: *core.JSRuntime, unit: u16) !core.JSValue`。
 - **作用**：单码元结果串（`charAt` / `at` / 包装对象索引读用）。
 - **实现**：`unit < 0x100` 时取 runtime 的共享单字节串（零分配，对应 qjs `js_new_string_char` 的窄臂），否则 `String.createUtf16` 建单码元串。
 - **所有权 / 错误 / 调用**：`< 0x100` 返回 runtime 单字节串表的**共享**项（`rt.singleByteString`，runtime 拥有，调用方不释放、不得改写），否则返回新建 UTF-16 串。调用方：`stringPrimitiveIndexRead:323`、`charAtValue:895`、`atReceiver:1774` 等 4 处。
 
-### `createLatin1SliceValue` (`src/exec/string_builtin_ops.zig:2105`)
+### `createLatin1SliceValue` (`src/exec/string_builtin_ops.zig:1898`)
 
 - **签名**：`fn createLatin1SliceValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue`。
 - **作用**：由 latin1 字节建一个新的字符串值。
 - **实现**：`String.createLatin1(rt, bytes)` 后取 `.value()`。
 - **所有权 / 错误 / 调用**：把借用的 latin1 切片**拷贝**成新串返回（`String.createLatin1` 不共享入参内存）。调用方：`trimStringValue:1036`、`repeatReceiver:1865`。
 
-### `stringPrimitiveValue` (`src/exec/string_builtin_ops.zig:2110`)
+### `stringPrimitiveValue` (`src/exec/string_builtin_ops.zig:1903`)
 
 - **签名**：`fn stringPrimitiveValue(value: core.JSValue) !core.JSValue`。
 - **作用**：取接收者的字符串原始值：字符串直返，String 包装对象取内部值，其余 TypeError。
 - **实现**：`value.isString()` 直返；否则 `expectObject` 后要求 `class_id == class.ids.string`，取 `objectData()`，缺失同样 TypeError。
 - **所有权 / 错误 / 调用**：返回借用值（接收者自身或 String 包装的内部数据），不新建、不加引用。非字符串且非 String 包装 → 裸 `error.TypeError`。调用方：`charCodeAtReceiver:1739`、`codePointAtReceiver:1746`。
 
-### `stringValueFromReceiver` (`src/exec/string_builtin_ops.zig:2117`)
+### `stringValueFromReceiver` (`src/exec/string_builtin_ops.zig:1910`)
 
 - **签名**：`pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String`。
 - **作用**：取接收者的 `*String` 体：只有字符串和 String 包装对象有值，其余返回 `null`。
 - **实现**：`stringValueFromReceiverRaw` 后取 `asStringBody()`。
 - **所有权 / 错误 / 调用**：返回借用的 `*String`（不加引用、不建根）；`null` 表示调用方该走非字符串接收者的回退腿。调用方：本文件 10 个 `*Receiver` 实现（substring/trim/isWellFormed/toWellFormed/split/indexOf/lastIndexOf/slice/repeat/contains）与 `constructWithPrototype:764`，另有本文件 test。
 
-### `stringValueFromReceiverRaw` (`src/exec/string_builtin_ops.zig:2122`)
+### `stringValueFromReceiverRaw` (`src/exec/string_builtin_ops.zig:1915`)
 
 - **签名**：`fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue`。
 - **作用**：同 `stringValueFromReceiver`，但返回未取串体的 `JSValue`。
 - **实现**：字符串直返；对象必须 `expectObject` 成功且 `class_id == class.ids.string` 并有 `objectData()`，否则返回 `null`；其余标签一律 `null`。
 - **所有权 / 错误 / 调用**：返回借用的 `JSValue`（接收者自身或包装对象的 `objectData()`），不新增引用。调用方：`charAtValue:893`、`atReceiver:1769`、`stringValueFromReceiver:2118`。
 
-### `iteratorResult` (`src/exec/string_builtin_ops.zig:2135`)
+### `iteratorResult` (`src/exec/string_builtin_ops.zig:1928`)
 
 - **签名**：`fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue`。
 - **作用**：建 `{ value, done }` 迭代结果对象的自有包装。
 - **实现**：转发 `iterator_ops.createIteratorResult`。
 - **所有权 / 错误 / 调用**：按文件内注释的单 owner 约定：调用方把 `value` 的所有权交给它，结果对象持有该值并归调用方。唯一调用方 `stringIteratorNext`（五处：`:796`/`:800` 两条 done 分支与 `:816`/`:825`/`:832` 三条非 done 分支），另有本文件的 GC 根测试（`:2157`）。
 
-### `defineIntProperty` (`src/exec/string_builtin_ops.zig:2215`)
+### `defineIntProperty` (`src/exec/string_builtin_ops.zig:2008`)
 
 - **签名**：`fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void`。
 - **作用**：在对象上定义可写 / 可枚举 / 可配置的整数数据属性（如 match 结果的 `index`）。
 - **实现**：把 object 放进单槽 root frame 并 `activate` / `defer deactivate`（`defineOwnProperty` 可能扩容换 shape 触发 GC），然后 `defineOwnProperty(rt, key, Descriptor.data(JSValue.int32(value), true, true, true))`：writable / enumerable / configurable 三真，即 CreateDataProperty 的形状。
 - **所有权 / 错误 / 调用**：root frame 只钉 `object`（值是 int32 立即数，无需建根），属性写完由对象持有。唯一调用方 `match:1298`（`index` 属性）。
 
-### `defineReadonlyIntProperty` (`src/exec/string_builtin_ops.zig:2224`)
+### `defineReadonlyIntProperty` (`src/exec/string_builtin_ops.zig:2017`)
 
 - **签名**：`fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void`。
 - **作用**：在对象上定义不可写 / 不可枚举 / 不可配置的整数数据属性（String 包装对象的 `length`）。
 - **实现**：与 `defineIntProperty` 只差描述符标志：`Descriptor.data(JSValue.int32(value), false, false, false)`，不可写 / 不可枚举 / 不可配置——String 包装对象的 `length` 就是这种 exotic 形状。root frame 的用法相同。
 - **所有权 / 错误 / 调用**：同 `defineIntProperty`，但描述符是不可写/不可枚举/不可配置。唯一调用方 `constructWithPrototype:778`（String 包装的 `length`）。
 
-### `stringSearchStart` (`src/exec/string_builtin_ops.zig:2233`)
+### `stringSearchStart` (`src/exec/string_builtin_ops.zig:2026`)
 
 - **签名**：`fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize`。
 - **作用**：把搜索起点参数规范成 `[0, length]` 内的下标。
 - **实现**：`value_ops.toIntegerOrInfinity` 后：NaN 或 `<= 0` 返回 0；`+∞` 返回 `length`；截断值 `>= length` 返回 `length`；否则 `@intFromFloat`。
 - **所有权 / 错误 / 调用**：无：走裸 runtime 的 `value_ops.toIntegerOrInfinity`（不会回调用户代码），返回夹到 `[0, length]` 的下标；BigInt 参数 → 裸 `error.TypeError`。调用方：`indexOf`、`indexOfReceiver`、`contains`、`containsReceiver`。
 
-### `stringLastSearchStart` (`src/exec/string_builtin_ops.zig:2242`)
+### `stringLastSearchStart` (`src/exec/string_builtin_ops.zig:2035`)
 
 - **签名**：`fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.JSValue) !usize`。
 - **作用**：把 `lastIndexOf` 的起点参数规范到 `[0, default_start]`。
 - **实现**：`value_ops.toIntegerOrInfinity` 后：NaN 或 `+∞` 返回 `default_start`；`<= 0` 返回 0；截断值 `>= default_start` 返回 `default_start`；否则 `@intFromFloat`。
 - **所有权 / 错误 / 调用**：无：同上，区别是 NaN / +Inf 都回到 `default_start`。调用方：`lastIndexOf:1693` 一处与 `lastIndexOfReceiver:1716`/`:1725` 两处。
 
-### `toUint32Limit` (`src/exec/string_builtin_ops.zig:2252`)
+### `toUint32Limit` (`src/exec/string_builtin_ops.zig:2045`)
 
 - **签名**：`fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32`。
 - **作用**：`split` 的 `limit` 参数 ToUint32。
 - **实现**：BigInt 或 Symbol 返回 TypeError；`value_ops.toIntegerOrInfinity` 后 NaN / 非有限 / 0 都返回 0；否则向零取整再对 `4294967296.0` 取模。
 - **所有权 / 错误 / 调用**：无分配；BigInt / Symbol → 裸 `error.TypeError`，其余经裸 runtime 的 `toIntegerOrInfinity` 取模到 u32。调用方：`split:1152`、`splitReceiver:1217`（split 的 limit 参数）。
 
-### `stringInteger` (`src/exec/string_builtin_ops.zig:2261`)
+### `stringInteger` (`src/exec/string_builtin_ops.zig:2054`)
 
 - **签名**：`fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64`。
 - **作用**：字符串方法用的 ToIntegerOrInfinity：返回饱和到 i64 的整数下标。
 - **实现**：int32 立即数直返；否则 `value_ops.toIntegerOrInfinity`，NaN 返回 0，`+∞` / `-∞` 饱和到 `maxInt(i64)` / `minInt(i64)`，其余向零取整后 `@intFromFloat`。
 - **所有权 / 错误 / 调用**：无分配、不建根；int32 直返，其余走裸 runtime 的 `toIntegerOrInfinity`（BigInt → 裸 `error.TypeError`），±Inf 饱和到 i64 边界。本文件所有取数值参数的实现都用它（16 处）。
 
-### `isTrimCodeUnit` (`src/exec/string_builtin_ops.zig:2272`)
+### `isTrimCodeUnit` (`src/exec/string_builtin_ops.zig:2065`)
 
 - **签名**：`fn isTrimCodeUnit(unit: u16) bool`。
 - **作用**：码元级空白谓词：ECMA 空白或行终止符。
 - **实现**：薄封装，主体转发到 `unicode.isEcmaWhitespaceOrLineTerminatorUnit`。
 - **所有权 / 错误 / 调用**：无：转发 `unicode.isEcmaWhitespaceOrLineTerminatorUnit` 的纯谓词。唯一调用方 `trimStringValue`。
 
-### `appendValueString` (`src/exec/string_builtin_ops.zig:2277`)
+### `appendValueString` (`src/exec/string_builtin_ops.zig:2070`)
 
 - **签名**：`fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void`。
 - **作用**：把给定值的字符串表示追加到调用方的字节缓冲。
 - **实现**：转发到 `core.value_string.appendValueString`，启用 `.unwrap_wrappers = true`；`std.ArrayList(u8)` 是参数类型，不是运行时调用。
 - **所有权 / 错误 / 调用**：借用输入值并修改调用方的 buffer，不返回 `JSValue`。转换或扩容错误通过 `AppendStringError` 传播；缓冲的清理由调用方负责。
 
+### `coercedReceiverStringValue` (`src/exec/string_builtin_ops.zig:932`)
+
+- **签名**：`fn coercedReceiverStringValue(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue`。
+- **作用**：为 `isWellFormed`/`toWellFormed` 的非字符串接收者做 ToString，返回新建的字符串值（本轮新增，替代原来「展开字节却不看结果」的写法）。
+- **实现**：临时 `ArrayList(u8)` 收 `appendStringReceiverBytes` 的输出（null/undefined 在其中抛 TypeError），再 `createStringValue` 建串；`defer` 释放临时缓冲。
+- **所有权 / 错误 / 调用**：返回值是新分配的 GC 字符串，调用方随后立即读取其数据；错误为 OOM 或接收者不可 ToString 的 TypeError（已挂 pending）。调用方：同文件 `isWellFormedReceiver`、`toWellFormedReceiver` 的非字符串臂（经 `call_runtime` 名字分派回退可达）。
+
 ## 覆盖核对
 
-- 清单函数数: 111
-- 本文标题覆盖: 111
+- 清单函数数: 101
+- 本文标题覆盖: 101
 - 未覆盖: 无

@@ -103,7 +103,9 @@ pub fn JSString(comptime Value: type) type {
             return self.js_value;
         }
 
-        pub fn units(self: Self) ?Units {
+        /// Total: `resolveData` answers latin1 or utf16 for every string body,
+        /// so there is no "no units" case to represent.
+        pub fn units(self: Self) Units {
             return switch (self.ptr.resolveData()) {
                 .latin1 => |latin1| .{ .latin1 = latin1 },
                 .utf16 => |utf16| .{ .utf16 = utf16 },
@@ -215,7 +217,7 @@ test "JSValue.asString views latin1 units without allocation" {
 
     const view = value.asString().?;
     try std.testing.expectEqual(value, view.value());
-    try std.testing.expectEqualStrings("hello", view.units().?.latin1);
+    try std.testing.expectEqualStrings("hello", view.units().latin1);
 
     const utf8 = try view.toOwnedUtf8(std.testing.allocator);
     defer std.testing.allocator.free(utf8);
@@ -235,8 +237,8 @@ test "JSString.units views an eager substring copy" {
     const slice = try core.string.String.createSlice(rt, parent, "prefix-".len, "needle".len);
     const slice_value = slice.value();
 
-    const parent_units = parent_value.asString().?.units().?.latin1;
-    const slice_units = slice_value.asString().?.units().?.latin1;
+    const parent_units = parent_value.asString().?.units().latin1;
+    const slice_units = slice_value.asString().?.units().latin1;
     try std.testing.expectEqualStrings("needle", slice_units);
     try std.testing.expect(slice_units.ptr != parent_units.ptr + "prefix-".len);
 
@@ -283,7 +285,7 @@ test "JSString.Utf8 borrows latin1 ascii without allocation" {
     const value = str.value();
 
     const view = value.asString().?;
-    const units = view.units().?.latin1;
+    const units = view.units().latin1;
     var utf8 = try view.toUtf8(std.testing.allocator);
     defer utf8.deinit();
 
@@ -301,7 +303,7 @@ test "JSString.Utf8 transcodes latin1 non-ascii through scratch allocator" {
     const value = str.value();
 
     const view = value.asString().?;
-    try std.testing.expectEqual(@as(u8, 0xe9), view.units().?.latin1[0]);
+    try std.testing.expectEqual(@as(u8, 0xe9), view.units().latin1[0]);
     var utf8 = try view.toUtf8(std.testing.allocator);
     defer utf8.deinit();
 

@@ -202,7 +202,7 @@ pub fn strictNotEqual(a: core.JSValue, b: core.JSValue) core.JSValue {
     return core.JSValue.boolean(!valuesEqual(a, b));
 }
 
-pub fn length(_: *core.JSRuntime, value: core.JSValue) !core.JSValue {
+pub fn length(value: core.JSValue) !core.JSValue {
     if (value.isString()) {
         // Rope-aware: read the length off the (possibly unmaterialized) string
         // WITHOUT flattening. qjs stores the length in the rope node
@@ -302,42 +302,6 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     return core.JSValue.int32(out);
 }
 
-pub fn typeOf(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    const name: []const u8 = if (value.isBigInt())
-        "bigint"
-    else if (value.isNumber())
-        "number"
-    else if (value.isBool())
-        "boolean"
-    else if (value.isString())
-        "string"
-    else if (value.isUndefined())
-        "undefined"
-    else if (isHTMLDDA(value))
-        "undefined"
-    else if (value.isSymbol())
-        "symbol"
-    else if (value.isNull())
-        "object"
-    else if (value.isFunctionBytecode())
-        "function"
-    else if (isFunctionObject(value) or proxyTargetIsFunction(value))
-        "function"
-    else
-        "object";
-    return createStringValue(rt, name);
-}
-
-pub fn logical(op: u8, a: core.JSValue, b: core.JSValue) core.JSValue {
-    const out = switch (op) {
-        bytecode.opcode.op.@"and" => if (isTruthy(a)) b else a,
-        bytecode.opcode.op.@"or" => if (isTruthy(a)) a else b,
-        bytecode.opcode.op.is_undefined_or_null => if (a.isNull() or a.isUndefined()) b else a,
-        else => unreachable,
-    };
-    return out;
-}
-
 pub fn toStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (try primitiveToStringValueFast(rt, value)) |fast| return fast;
     var buffer = std.ArrayList(u8).empty;
@@ -399,7 +363,6 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isNull()) return core.JSValue.int32(0);
     if (value.isString()) {
         const str = stringObject(value).?;
-        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| {
                 if (fastStringToInt32(bytes)) |val| return core.JSValue.int32(val);
@@ -509,7 +472,7 @@ pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {
     return big.valueRef();
 }
 
-pub fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue {
+fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue {
     var owned = value;
     errdefer owned.deinit();
     if (owned.toI64()) |val| {
@@ -666,10 +629,6 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
 /// shares.
 pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     return core.string.appendValueUtf8(rt, buffer, value);
-}
-
-pub fn formatFiniteNumber(buffer: []u8, value: f64) ![]const u8 {
-    return core.value_format.formatFiniteNumber(buffer, value);
 }
 
 pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8 {

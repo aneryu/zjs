@@ -466,15 +466,12 @@ noinline fn stringReplaceCore(
         try toStringForAnnexB(ctx, output, global, replacement_input, caller_function, caller_frame);
 
     const sp = source_value.asStringBody() orelse return error.TypeError;
-    try sp.ensureFlat(ctx.runtime);
     const sp_data = sp.resolveData();
     const searchp = search_value.asStringBody() orelse return error.TypeError;
-    try searchp.ensureFlat(ctx.runtime);
     const search_data = searchp.resolveData();
     const search_len = search_data.len();
     const rep_data: ?core.string.String.ResolvedData = if (functional_replace) null else blk: {
         const rp = replacement_text.asStringBody() orelse return error.TypeError;
-        try rp.ensureFlat(ctx.runtime);
         break :blk rp.resolveData();
     };
 
@@ -499,9 +496,9 @@ noinline fn stringReplaceCore(
         if (functional_replace) {
             const call_result = try replacement_call.?.call(&.{ search_value, core.JSValue.int32(@intCast(pos)), source_value });
             const repl_str = try toStringForAnnexB(ctx, output, global, call_result, caller_function, caller_frame);
-            try b.appendStringValue(ctx.runtime, repl_str);
+            try b.appendStringValue(repl_str);
         } else {
-            try appendSubstitutionStringSearch(&b, ctx.runtime, search_value, sp_data, pos, search_len, rep_data.?);
+            try appendSubstitutionStringSearch(&b, search_value, sp_data, pos, search_len, rep_data.?);
         }
 
         end_of_last_match = pos + search_len;
@@ -560,7 +557,6 @@ fn stringIndexOfData(
 /// `$<name>` take the norep path verbatim and only $$ $& $` $' substitute.
 fn appendSubstitutionStringSearch(
     b: *StringBuffer,
-    rt: *core.JSRuntime,
     matched_value: core.JSValue,
     sp_data: core.string.String.ResolvedData,
     position: usize,
@@ -580,7 +576,7 @@ fn appendSubstitutionStringSearch(
         if (c == '$') {
             try b.putc8('$');
         } else if (c == '&') {
-            try b.appendStringValue(rt, matched_value);
+            try b.appendStringValue(matched_value);
         } else if (c == '`') {
             try b.appendUnits(sp_data, 0, position);
         } else if (c == '\'') {
@@ -1104,7 +1100,6 @@ pub fn regExpSymbolSplitGeneric(
     // just as QuickJS keeps `strp` for the complete split loop; copying every
     // code unit up front adds work and also widens Latin-1 inputs to UTF-16.
     const string_body = string_value.asStringBody() orelse return error.TypeError;
-    try string_body.ensureFlat(ctx.runtime);
     const input_len = string_body.len();
 
     const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
@@ -1480,11 +1475,9 @@ pub fn regExpReplaceFast(
     // js_regexp_replace works directly on the flat string bodies (str->u.str8/
     // str16 + string_buffer); no per-call UTF-16 copies of source/replacement.
     const sp = string_value.asStringBody() orelse return null;
-    try sp.ensureFlat(ctx.runtime);
     const sp_data = sp.resolveData();
     const source_len = sp_data.len();
     const rp = replacement_string.asStringBody() orelse return null;
-    try rp.ensureFlat(ctx.runtime);
     const rep_data = rp.resolveData();
 
     const alloc_count = compiled.allocCount();
@@ -1565,7 +1558,6 @@ pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), val
         for (bytes.items) |byte| try out.append(rt.memory.allocator, byte);
         return;
     };
-    try string_object.ensureFlat(rt);
     switch (string_object.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
         .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
@@ -2354,14 +2346,6 @@ pub fn stringSplitBuiltinArray(
     return result;
 }
 
-pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
-    return unicode_lib.codePointFromSurrogatePair(high, low);
-}
-
-pub fn surrogatePairFromCodePoint(code_point: u21) unicode_lib.SurrogatePair {
-    return unicode_lib.surrogatePairFromCodePoint(code_point);
-}
-
 pub const RegExpMatch = struct {
     index: usize,
     len: usize,
@@ -2433,9 +2417,7 @@ pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index:
 
 pub fn defineSplitValueElementOwned(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     const atom_id = core.atom.atomFromUInt32(index);
-    const appended = object.appendDenseArrayDefineIndexOwned(rt, index, atom_id, value) catch |err| {
-        return err;
-    };
+    const appended = try object.appendDenseArrayDefineIndexOwned(rt, index, atom_id, value);
     if (appended) return;
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
 }
@@ -2482,7 +2464,7 @@ pub noinline fn createRegExpMatchArrayFromValue(
     try updateRegExpLegacyStaticsForMatch(rt, global, input_value, found, input_len);
 
     if (has_indices) {
-        const indices = try createRegExpIndicesArray(rt, global, &.{}, found);
+        const indices = try createRegExpIndicesArray(rt, global, found);
         const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
         try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
     }
@@ -2617,8 +2599,7 @@ pub fn updateRegExpLegacyStaticsForMatch(rt: *core.JSRuntime, global: *core.Obje
         if (capture.undefined) continue;
         const value = try stringSliceValue(rt, input_value, capture.start, capture.len);
         if (capture_index < legacy_capture_values.len) legacy_capture_values[capture_index] = value;
-        const next_last_capture = value;
-        last_capture_value = next_last_capture;
+        last_capture_value = value;
     }
 
     try updateRegExpLegacyStaticsForMatchValues(rt, global, input_value, found, input_len, matched, &legacy_capture_values, last_capture_value);
@@ -2707,7 +2688,6 @@ pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, 
     const slice_len = slice_end - slice_start;
     if (slice_start == 0 and slice_len == input_len) return value;
     if (slice_len == 0) return (try rt.emptyString()).value();
-    try string_value.ensureFlat(rt);
     if (slice_len == 1) {
         const unit = string_value.codeUnitAt(slice_start);
         if (unit < 0x100) return (try rt.singleByteString(@intCast(unit))).value();
@@ -3525,14 +3505,6 @@ pub fn isAsciiDigitUnit(unit: u16) bool {
     return unicode_lib.isAsciiDigitUnit(unit);
 }
 
-pub fn isAsciiDigitByte(byte: u8) bool {
-    return unicode_lib.isAsciiDigitByte(byte);
-}
-
-pub fn isAsciiWordUnit(unit: u16) bool {
-    return unicode_lib.isAsciiWordUnit(unit);
-}
-
 pub fn isHighSurrogateUnit(unit: u16) bool {
     return unicode_lib.isHighSurrogateUnit(unit);
 }
@@ -3588,9 +3560,8 @@ const StringBuffer = struct {
     }
 
     /// string_buffer_concat_value: append every code unit of a string value.
-    fn appendStringValue(self: *StringBuffer, rt: *core.JSRuntime, value: core.JSValue) !void {
+    fn appendStringValue(self: *StringBuffer, value: core.JSValue) !void {
         const body = value.asStringBody() orelse return error.TypeError;
-        try body.ensureFlat(rt);
         const data = body.resolveData();
         try self.appendUnits(data, 0, data.len());
     }
@@ -3671,7 +3642,6 @@ pub fn stringPad(
     // copy of the whole source — qjs reads p->len from the JSString directly,
     // quickjs.c:46313-46314).
     const source = string_value.asStringBody() orelse return error.TypeError;
-    try source.ensureFlat(ctx.runtime);
     const source_data = source.resolveData();
     const source_len = source_data.len();
 
@@ -3684,7 +3654,6 @@ pub fn stringPad(
     } else try value_ops.createStringValue(ctx.runtime, " ");
 
     const fill = fill_value.asStringBody() orelse return error.TypeError;
-    try fill.ensureFlat(ctx.runtime);
     const fill_data = fill.resolveData();
     const fill_len = fill_data.len();
     if (fill_len == 0) return string_value;
@@ -3846,7 +3815,6 @@ pub fn stringNumericArgsMethod(
 fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
     if (!string_value.isString() or args.len > 2) return null;
     const string = string_value.asStringBody() orelse return null;
-    try string.ensureFlat(rt);
     const bytes = switch (string.resolveData()) {
         .latin1 => |latin1| latin1,
         .utf16 => return null,
@@ -3870,6 +3838,10 @@ fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
     return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
 }
 
+/// `output` / `global` are unused: the receiver and both arguments are already
+/// coerced by `stringNumericArgsMethod`, so nothing here is observable. They
+/// stay in the signature to keep this body ABI-identical to its sibling AnnexB
+/// bodies (`stringPad`, `stringHtmlMethod`, `stringNormalize`, …).
 pub fn stringSubstr(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

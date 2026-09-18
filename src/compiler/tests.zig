@@ -39,6 +39,7 @@ const V2Parse = struct {
         h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
         errdefer h.function.deinit(h.rt);
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
+        errdefer h.lex.deinit();
         h.state = try P.ParseState.init(&h.lex, &h.function);
         // Scope events (enter_scope/leave_scope) belong to the un-migrated
         // scope group; the S2-G1 harness parses without phase-1 temp scope
@@ -61,6 +62,7 @@ const V2Parse = struct {
 
     fn deinit(h: *V2Parse) void {
         h.state.deinit(h.rt);
+        h.lex.deinit();
         h.function.deinit(h.rt);
         h.rt.destroy();
     }
@@ -1921,7 +1923,7 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(i64, 9), b.last_opcode_pos);
-    // truncateTail drops the removed getter's source marker; null reuses offset 1.
+    // The rewind drops the removed getter's source marker; null reuses offset 1.
     try expectSourceOffsets(b, &.{ 0, 1 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);

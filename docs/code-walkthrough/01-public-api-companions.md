@@ -33,7 +33,7 @@
 
 - **签名**：`pub fn printSmallInlineProbe() void`。
 - **作用**：按环境开关输出 small-inline 探测计数，供内部 CLI 使用。
-- **实现**：调用 exec.small_inline.writeProbeFile；当前助手仅在 ZJS_INLINE_PROBE 存在且非空时通过 std.debug.print 输出 prep、take 和整数百分比，不将变量内容当作文件路径，也不写独立探测文件。公共 embedder root 不导出此名。
+- **实现**：调用 exec.small_inline.printProbe；当前助手仅在 ZJS_INLINE_PROBE 存在且非空时通过 std.debug.print 输出 prep、take 和整数百分比，不将变量内容当作文件路径，也不写独立探测文件。公共 embedder root 不导出此名。
 - **所有权 / 错误 / 调用**：本包装只转发，不返回 I/O 错误；是否启用、写往何处及失败处理由 exec 助手决定，不能由这个 void 包装推断所有写入都成功。
 
 ---

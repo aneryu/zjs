@@ -121,10 +121,6 @@ pub const ExtentIdentityAuthority = struct {
         return self.records.getPtr(base);
     }
 
-    fn recordMut(self: *ExtentIdentityAuthority, base: usize) ?*ExtentIdentityRecord {
-        return self.records.getPtr(base);
-    }
-
     pub fn handle(self: *const ExtentIdentityAuthority, base: usize) ?AllocationHandle {
         const entry = self.record(base) orelse return null;
         return .{ .base = base, .generation = entry.generation };

@@ -351,14 +351,14 @@ payload 在对象 class `disposable_stack` / `async_disposable_stack` 上。每�
 - **实现**：resolve 槽空则 return（幂等）。`promiseResolveCapability` 后 `clearDisposableStackAsyncCapability`。
 - **所有权 / 错误 / 调用**：`Continue` 空栈无 pending error。
 
-### `asyncDisposableStackRejectStored` (`src/exec/disposable_ops.zig:686`)
+### `asyncDisposableStackRejectStored` (`src/exec/disposable_ops.zig:685`)
 
 - **签名**：`pub fn asyncDisposableStackRejectStored( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *core.Object, reason: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !void`。
 - **作用**：拆栈失败：调存着的 reject，清 capability。
 - **实现**：对称于 resolve。
 - **所有权 / 错误 / 调用**：`ContinueOrReject` 与空栈 pending error。
 
-### `asyncIteratorAsyncDispose` (`src/exec/disposable_ops.zig:701`)
+### `asyncIteratorAsyncDispose` (`src/exec/disposable_ops.zig:699`)
 
 - **签名**：`pub fn asyncIteratorAsyncDispose( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：`%AsyncIteratorPrototype%[Symbol.asyncDispose]`：对 receiver 调 `return()`，结果包成 Promise。

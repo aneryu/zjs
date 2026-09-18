@@ -171,7 +171,6 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "DisposableStack")) return try disposableStackConstructWithPrototype(ctx, global, prototype.object());
     if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try asyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
     if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
-    if (std.mem.eql(u8, name, "DataView")) return try core.typed_array.dataViewConstruct(ctx.runtime, args, prototype.object());
     if (construct_mod.typedArrayElement(name)) |element| {
         const function_object = object_ops.objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
         return try construct_mod.constructTypedArrayValue(ctx.runtime, function_object, prototype.object(), element, args);

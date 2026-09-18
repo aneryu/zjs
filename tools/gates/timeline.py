@@ -99,7 +99,10 @@ def main():
         if not ns.all and dur < ns.min:
             continue
         rowsout.append((first[pid], dur, labels[pid]))
-    # Collapse identical labels that overlap (the 8 test shards) into a range.
+    # One row per process, in start order. Identical overlapping labels (the 8
+    # test shards) are printed as separate rows on purpose: their individual
+    # start/duration spread is what tells you whether the shards actually ran
+    # concurrently, which is the question this gantt exists to answer.
     for start, dur, lab in rowsout:
         print(f"{start:7.1f} {dur:7.1f}  {lab}")
     sys.exit(proc.returncode)

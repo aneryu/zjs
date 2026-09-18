@@ -137,8 +137,9 @@ const NoRecordReason = enum {
     /// qjs keeps `js_global_eval` out of the fast dispatch path the same way.
     direct_eval,
     /// `.host` native-builtin domain. `internal_builtins.table` deliberately
-    /// leaves `domains[host]` empty (internal_builtins.zig:8-9), so these ids
-    /// decode but never resolve; they dispatch through
+    /// assigns no record table to `domains[host]` (the `build:` block lists
+    /// every other domain and skips this one; its coverage test skips it too),
+    /// so these ids decode but never resolve; they dispatch through
     /// `call.callHostGlobalNativeFunctionRecord` instead. Not a name cascade.
     host_domain_switch,
     /// Dispatched by `typed_array_builtin_marker`, not by record id
@@ -946,25 +947,9 @@ fn bootstrapPropertyRealm(rt: *core.JSRuntime, target: *core.Object, explicit_gl
     return rt.contextForGlobalIncludingConstructing(target) orelse error.InvalidBuiltinRegistry;
 }
 
-pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, method: Method) !void {
-    const realm = try bootstrapPropertyRealm(rt, target, null);
-    const value = try core.function.nativeFunction(realm, method.name, method.length);
-    // Without this the function object carries no native record, so
-    // `nativeMethodFastDispatch` rejects it and every call walks the
-    // `callNativeCallableByName` name cascade instead.
-    if (method.native_builtin_id != 0) {
-        expectObjectAssumeBootstrap(value).setNativeBuiltinIdAndRecord(rt, method.native_builtin_id);
-    }
-    try defineData(rt, target, method.name, value, method_flags);
-}
-
-pub fn defineNativeMethods(rt: *core.JSRuntime, target: *core.Object, methods: []const Method) !void {
-    for (methods) |method| try defineNativeMethod(rt, target, method);
-}
-
-/// Fast-path variant of `defineNativeMethods` for builtin install
-/// paths. Caller must guarantee `target` is a freshly built ordinary
-/// object and that no method name in `methods` already exists on it
+/// Bulk builtin-install path for a `Method[]` table. Caller must guarantee
+/// `target` is a freshly built ordinary object and that no method name in
+/// `methods` already exists on it
 /// (the standard `Method[]` tables in this file always satisfy this:
 /// each entry name is unique within its slice). See
 /// `Object.defineOwnPropertyAssumingNew` for the precondition list.
@@ -1060,7 +1045,7 @@ fn createNamespaceObject(rt: *core.JSRuntime, global: *core.Object, methods: []c
     const namespace = try core.Object.createWithOwnPropertyCapacity(
         rt,
         core.class.ids.object,
-        objectPrototypeFromGlobal(rt, global),
+        objectPrototypeFromGlobal(global),
         methods.len + extra_property_count,
     );
     // Namespace is freshly created and method-table entries are unique
@@ -1116,7 +1101,7 @@ fn createJsonNamespaceObject(rt: *core.JSRuntime, global: *core.Object) !*core.O
     const namespace = try core.Object.createWithOwnPropertyCapacity(
         rt,
         core.class.ids.object,
-        objectPrototypeFromGlobal(rt, global),
+        objectPrototypeFromGlobal(global),
         json_methods.len + namespace_to_string_tag_property_count,
     );
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
@@ -1129,8 +1114,7 @@ fn createJsonNamespaceObject(rt: *core.JSRuntime, global: *core.Object) !*core.O
     return namespace;
 }
 
-fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    _ = rt;
+fn objectPrototypeFromGlobal(global: *core.Object) ?*core.Object {
     const object_atom = core.atom.predefinedId("Object", .string).?;
     if (global.getOwnDataObjectBorrowed(object_atom)) |object_ctor| {
         if (object_ctor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
@@ -1439,8 +1423,7 @@ fn installedConstructor(constructors: []const ?*core.Object, kind: ConstructorKi
     return constructors[@intFromEnum(kind)];
 }
 
-fn constructorPrototypeObject(rt: *core.JSRuntime, ctor: *core.Object) ?*core.Object {
-    _ = rt;
+fn constructorPrototypeObject(ctor: *core.Object) ?*core.Object {
     if (ctor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     return null;
 }
@@ -1504,13 +1487,13 @@ fn installStandardConstructorWithPrototype(
         null
     else if (isNativeErrorSubclassKind(kind) or kind == .dom_exception) blk: {
         const error_ctor = installedConstructor(constructors, .error_) orelse return error.InvalidBuiltinRegistry;
-        break :blk constructorPrototypeObject(rt, error_ctor) orelse return error.InvalidBuiltinRegistry;
+        break :blk constructorPrototypeObject(error_ctor) orelse return error.InvalidBuiltinRegistry;
     } else if (isConcreteTypedArrayKind(kind)) blk: {
         const typed_array_ctor = installedConstructor(constructors, .typed_array) orelse return error.InvalidBuiltinRegistry;
-        break :blk constructorPrototypeObject(rt, typed_array_ctor) orelse return error.InvalidBuiltinRegistry;
+        break :blk constructorPrototypeObject(typed_array_ctor) orelse return error.InvalidBuiltinRegistry;
     } else blk: {
         const object_ctor = installedConstructor(constructors, .object) orelse return error.InvalidBuiltinRegistry;
-        break :blk constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
+        break :blk constructorPrototypeObject(object_ctor) orelse return error.InvalidBuiltinRegistry;
     };
 
     const constructor_value = try defineConstructor(
@@ -1530,12 +1513,12 @@ fn installStandardConstructorWithPrototype(
 
     if (constructorClassPrototypeId(kind)) |class_id| {
         const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
-        const prototype = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+        const prototype = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
         try realm.setClassPrototype(class_id, prototype);
     }
     if (nativeErrorKind(kind)) |error_kind| {
         const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
-        const prototype = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+        const prototype = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
         realm.setNativeErrorPrototype(error_kind, prototype);
     }
 
@@ -1544,25 +1527,25 @@ fn installStandardConstructorWithPrototype(
     if (!constructorStaticMethodsBeforePrototype(kind)) try defineNativeMethodsAssumingNew(rt, constructor, static_methods);
     switch (kind) {
         .object => {
-            const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const object_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .object_prototype, object_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
         },
         .symbol => {
-            const symbol_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const symbol_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .symbol_prototype, symbol_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
             try installSymbolExtras(rt, global, constructor);
         },
         .boolean => {
-            const boolean_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const boolean_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .boolean_prototype, boolean_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id));
         },
         .proxy => {},
         .array => {
             (try constructor.arrayBuiltinMarkerSlot(rt)).* = .constructor;
-            const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const array_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .array_prototype, array_proto.value());
             try installArrayPrototypeSymbols(rt, global, constructor);
             const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return error.InvalidBuiltinRegistry;
@@ -1570,17 +1553,17 @@ fn installStandardConstructorWithPrototype(
             try global.setCachedRealmValue(rt, .array_prototype_values, values);
         },
         .string => {
-            const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const string_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .string_prototype, string_proto.value());
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.ConstructorMethod.call)));
             try installStringPrototypeAliases(rt, global, constructor);
         },
         .number => {
-            const number_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const number_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .number_prototype, number_proto.value());
         },
         .bigint => {
-            const bigint_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const bigint_proto = constructorPrototypeObject(constructor) orelse return error.InvalidBuiltinRegistry;
             try global.setCachedRealmValue(rt, .bigint_prototype, bigint_proto.value());
         },
         .regexp => {
@@ -1599,7 +1582,7 @@ fn installStandardConstructorWithPrototype(
         },
         .function => {
             try installFunctionPrototypeExtras(rt, global, constructor);
-            try global.setCachedFunctionProto(rt, constructorPrototypeObject(rt, constructor));
+            try global.setCachedFunctionProto(rt, constructorPrototypeObject(constructor));
         },
         .array_buffer => {
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_ops.ConstructorMethod.array_buffer)));
@@ -1740,7 +1723,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try installStandardConstructors(rt, global, &installed_constructors);
     try finalizeStandardConstructorGraph(rt, global, &installed_constructors);
     const object_ctor = installedConstructor(&installed_constructors, .object) orelse return error.InvalidBuiltinRegistry;
-    const object_proto = constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
+    const object_proto = constructorPrototypeObject(object_ctor) orelse return error.InvalidBuiltinRegistry;
     try global.setPrototype(rt, object_proto);
 
     try defineLazyNamespace(rt, global, core.atom.ids.Math, .math_namespace);
@@ -1756,8 +1739,8 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try defineGlobalLazyMethods(rt, global, global_function_methods[2..]);
     const array_ctor = installedConstructor(&installed_constructors, .array) orelse return error.InvalidBuiltinRegistry;
     const regexp_ctor = installedConstructor(&installed_constructors, .regexp) orelse return error.InvalidBuiltinRegistry;
-    const array_proto = constructorPrototypeObject(rt, array_ctor) orelse return error.InvalidBuiltinRegistry;
-    const regexp_proto = constructorPrototypeObject(rt, regexp_ctor) orelse return error.InvalidBuiltinRegistry;
+    const array_proto = constructorPrototypeObject(array_ctor) orelse return error.InvalidBuiltinRegistry;
+    const regexp_proto = constructorPrototypeObject(regexp_ctor) orelse return error.InvalidBuiltinRegistry;
     const ctx = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
     try ctx.initializeInitialShapes(object_proto, array_proto, regexp_proto);
     // Publish only after the intrinsic graph and realm-owned initial shapes are
@@ -1808,7 +1791,7 @@ fn numberConstantValue(name: []const u8) ?core.JSValue {
 
 fn finalizeStandardConstructorGraph(rt: *core.JSRuntime, global: *core.Object, constructors: []const ?*core.Object) !void {
     const object_ctor = installedConstructor(constructors, .object) orelse return error.InvalidBuiltinRegistry;
-    const object_proto = constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
+    const object_proto = constructorPrototypeObject(object_ctor) orelse return error.InvalidBuiltinRegistry;
     object_proto.markImmutablePrototype();
     try installTypedArrayIntrinsicExtras(rt, global, constructors);
 }
@@ -1816,7 +1799,7 @@ fn finalizeStandardConstructorGraph(rt: *core.JSRuntime, global: *core.Object, c
 fn installTypedArrayIntrinsicExtras(rt: *core.JSRuntime, global: *core.Object, constructors: []const ?*core.Object) !void {
     const typed_array_ctor = installedConstructor(constructors, .typed_array) orelse return;
     try installTypedArraySpecies(rt, typed_array_ctor);
-    const proto = constructorPrototypeObject(rt, typed_array_ctor) orelse return;
+    const proto = constructorPrototypeObject(typed_array_ctor) orelse return;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 8);
     const to_string_atom = core.atom.predefinedId("toString", .string).?;
     const array_proto_value = global.cachedRealmValue(rt, .array_prototype) orelse return error.InvalidBuiltinRegistry;
@@ -1979,7 +1962,7 @@ fn installTypedArrayElementSize(rt: *core.JSRuntime, ctor: *core.Object, size: i
     if (!ctor.hasOwnProperty(bytes_key)) {
         try installTypedArrayConstructorElementSize(rt, ctor, size);
     }
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
     try defineDataAtomAssumingNew(rt, proto, bytes_key, core.JSValue.int32(size), Flags{ .writable = false, .enumerable = false, .configurable = false });
 }
@@ -2000,7 +1983,7 @@ fn installUint8ArrayCodecExtras(rt: *core.JSRuntime, global: *core.Object, ctor:
         try installUint8ArrayConstructorCodecExtras(rt, ctor);
     }
 
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try defineNativeMethodsAssumingNewWithRealm(rt, proto, &uint8_array_prototype_codec_methods, global);
 }
 
@@ -2660,7 +2643,7 @@ const atomics_methods = preparedMethods([_]Method{
 // (nothing referenced it) and it was removed.
 
 fn installSymbolExtras(rt: *core.JSRuntime, global: *core.Object, symbol_ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, symbol_ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(symbol_ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 3);
 
     const description_key = core.atom.predefinedId("description", .string).?;
@@ -2698,7 +2681,7 @@ fn defineWellKnownSymbol(rt: *core.JSRuntime, symbol_ctor: *core.Object, name: [
 }
 
 fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 1);
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 2);
@@ -2823,7 +2806,7 @@ noinline fn installBufferConstructorExtras(
         try defineLazyNativeGetterAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), accessor_flags);
     }
 
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + accessors.len + 1);
     for (accessors) |accessor| {
         if (predefined_atoms) {
@@ -2865,7 +2848,7 @@ noinline fn installOnePrototypeAutoInit(
     flags: core.property.Flags,
     info: *const core.property.AutoInit,
 ) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
     try proto.defineAutoInitPropertyFromDescriptor(rt, atom_id, flags, global, info);
 }
@@ -2893,7 +2876,7 @@ inline fn installFunctionPrototypeExtras(rt: *core.JSRuntime, global: *core.Obje
 }
 
 fn installErrorPrototypeExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 1);
 
     const stack_key = core.atom.ids.stack;
@@ -2914,7 +2897,7 @@ fn installPromiseExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.O
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.InvalidBuiltinRegistry;
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 1);
     try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), Flags{ .writable = false, .enumerable = false, .configurable = true });
-    try global.setCachedPromiseProto(rt, constructorPrototypeObject(rt, ctor));
+    try global.setCachedPromiseProto(rt, constructorPrototypeObject(ctor));
     // Mirror qjs ctx->promise_ctor (JS_AddIntrinsicPromise quickjs.c:54663):
     // the realm retains the intrinsic constructor so await / the default
     // species never depend on the mutable globalThis.Promise binding.
@@ -2922,7 +2905,7 @@ fn installPromiseExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.O
 }
 
 fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 4);
 
@@ -2958,7 +2941,7 @@ fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.
 }
 
 fn installStringPrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 4);
     try defineDataAtom(rt, proto, core.atom.ids.length, core.JSValue.int32(0), Flags{ .writable = false, .enumerable = false, .configurable = true });
     try installNativeMethodAlias(rt, proto, "trimStart", "trimLeft");
@@ -2989,7 +2972,7 @@ fn installNavigator(rt: *core.JSRuntime, global: *core.Object) !void {
 }
 
 fn installRegExpExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 21);
 
     const escape_key = core.atom.ids.escape;
@@ -3083,7 +3066,8 @@ fn defineRegExpLegacyAccessor(
     flags: Flags,
 ) !void {
     const realm_global = ctor.nativeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
-    const key = try rt.internAtom(name);
+    const key = try temporaryStringAtom(rt, name);
+    defer freeTemporaryStringAtom(rt, key);
     const getter_id = core.function.nativeBuiltinId(.regexp, @intFromEnum(getter_method));
     if (setter_method) |method| {
         try defineLazyNativeAccessorPairAtom(
@@ -3113,7 +3097,7 @@ fn installNativeMethodAlias(rt: *core.JSRuntime, proto: *core.Object, target: []
 fn installCollectionExtras(rt: *core.JSRuntime, global: *core.Object, name: []const u8, ctor: *core.Object) !void {
     if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) try installCollectionSpecies(rt, ctor);
     if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) {
-        const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+        const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
         try defineCollectionPrototypeMethodsAssumingNew(rt, global, proto, name);
     }
     try installCollectionPrototypeSymbols(rt, global, name, ctor);
@@ -3132,7 +3116,7 @@ fn installTypedArraySpecies(rt: *core.JSRuntime, ctor: *core.Object) !void {
 }
 
 fn installCollectionPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, name: []const u8, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     const extra_count: usize = if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) 2 else 1;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + extra_count);
 
@@ -3156,7 +3140,7 @@ fn installNamespaceToStringTag(rt: *core.JSRuntime, global: *core.Object, namesp
 }
 
 fn installPrototypeToStringTag(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8, ctor: *core.Object) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try defineStringConstantAtomAssumingNewWithRealm(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_name, Flags{ .writable = false, .enumerable = false, .configurable = true }, global);
 }
 
@@ -3199,7 +3183,7 @@ noinline fn installDisposableStackCtorExtras(
     alias_to: core.Atom,
     tag: []const u8,
 ) !void {
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 3);
     try defineLazyNativeGetterAtomWithRealmAndMetadata(
         rt,
@@ -3216,7 +3200,7 @@ noinline fn installDisposableStackCtorExtras(
 
 fn installDOMExceptionExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     try installPrototypeToStringTag(rt, global, "DOMException", ctor);
-    const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const proto = constructorPrototypeObject(ctor) orelse return error.InvalidBuiltinRegistry;
     const flags = Flags{ .writable = false, .enumerable = true, .configurable = false };
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + dom_exception_constants.len);
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + dom_exception_constants.len);
@@ -3272,8 +3256,7 @@ pub const Intrinsics = struct {
         return .{ .context = context, .global = global };
     }
 
-    pub fn deinit(self: *Intrinsics, rt: *core.JSRuntime) void {
-        _ = rt;
+    pub fn deinit(self: *Intrinsics) void {
         self.context.destroy();
     }
 };
@@ -3495,7 +3478,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
-    defer intrinsics.deinit(rt);
+    defer intrinsics.deinit();
 
     for (standard_global_domains) |name| {
         const atom_id = try rt.internAtom(name);
@@ -3536,7 +3519,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
-    defer intrinsics.deinit(rt);
+    defer intrinsics.deinit();
 
     const Expected = struct {
         owner: []const u8,
@@ -3581,7 +3564,7 @@ test "bootstrap aliases retain exact native identity and records" {
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
-    defer intrinsics.deinit(rt);
+    defer intrinsics.deinit();
 
     const array_value = try getNamedPropertyForTest(rt, intrinsics.global, "Array");
     const array = expectObjectAssumeBootstrap(array_value);
@@ -3666,7 +3649,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
-    defer intrinsics.deinit(rt);
+    defer intrinsics.deinit();
 
     const string_proto_value = try getConstructorPrototypeForTest(rt, intrinsics.global, "String");
     const string_proto = expectObjectAssumeBootstrap(string_proto_value);
@@ -3817,7 +3800,7 @@ test "lazy builtin namespaces remain AUTOINIT after Realm bootstrap" {
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
-    defer intrinsics.deinit(rt);
+    defer intrinsics.deinit();
 
     for ([_][]const u8{ "Math", "Reflect", "Atomics" }) |name| {
         const atom_id = try temporaryStringAtom(rt, name);

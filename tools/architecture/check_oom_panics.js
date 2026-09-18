@@ -128,8 +128,13 @@ function findingsFor(source) {
     const commentStart = rawLine.indexOf('//');
     const line = commentStart === -1 ? rawLine : rawLine.slice(0, commentStart);
     const lineno = lineIndex + 1;
+    // The second disjunct catches the forms the first misses: `OutOfMemory`
+    // named anywhere on a line that also swallows it. It used to end in
+    // `&& !line.includes('@panic(')`, which cancelled its own `@panic\(`
+    // alternative and left the rule meaning "unreachable only"; a single-line
+    // `if (... OutOfMemory ...) @panic("...")` slipped straight through.
     if (/error\.OutOfMemory\s*=>\s*(unreachable|@panic)/.test(line) ||
-        (line.includes('OutOfMemory') && /(\bunreachable\b|@panic\()/.test(line) && !line.includes('@panic('))) {
+        (line.includes('OutOfMemory') && /(\bunreachable\b|@panic\()/.test(line))) {
       findings.push({ source, lineno, pattern: 'oom-discard', rule: 'B: error.OutOfMemory must propagate, not become unreachable/@panic', text: rawLine.trim() });
     }
     if (/catch\s+(unreachable|@panic)/.test(line) && alloc_marker_re.test(line)) {

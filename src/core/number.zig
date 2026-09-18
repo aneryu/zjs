@@ -16,7 +16,6 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
     if (input.isString()) {
         const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
         const str = input.asStringBody().?;
-        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseIntLatin1Bytes(bytes, radix),
             .utf16 => {},
@@ -40,7 +39,6 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
 pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     if (input.isString()) {
         const str = input.asStringBody().?;
-        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseFloatLatin1Bytes(bytes),
             .utf16 => {},

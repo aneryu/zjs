@@ -681,31 +681,16 @@ fn upperBoundBindOffset(binds: []const BindEntry, input_offset: u32) usize {
 }
 
 /// The canonical identity of one semantic boundary: the alias-group
-/// representative, i.e. the LOWEST label index bound at the same input offset.
+/// representative, i.e. the LOWEST label index bound at `input_offset`.
 /// `binds` is sorted by (input_offset, label_index), so the representative is
-/// the first entry of the offset's contiguous run.
+/// the first entry of the offset's contiguous run; the bisection keeps
+/// per-reference work logarithmic.
 ///
-/// RULING: `LabelId A != LabelId B` is acceptable when
-/// `canonicalBoundaryIdentity(A) == canonicalBoundaryIdentity(B)` (same-
-/// subsystem alias coalescing). What must fail is one semantic boundary whose
-/// subsystems disagree on the CANONICAL identity — same final address is not a
-/// defence, so no comparison in this file may use an address.
-///
-/// O(binds): the primary sort key is input_offset, so the label's own row can
-/// only be found by scanning. Callers that already hold the label slot (every
-/// audit walk does) must use `canonicalIdentityAtOffset(binds,
-/// slot.bound_offset)` instead — `validateBindIndex` proves the two agree, and
-/// the bisection keeps per-reference work logarithmic.
-pub fn canonicalBoundaryIdentity(binds: []const BindEntry, label_index: u32) ?u32 {
-    // The primary sort key is input_offset, not label_index, so first locate
-    // the label's row; the representative lookup itself is the offset bisection
-    // shared with canonicalIdentityAtOffset.
-    const input_offset = for (binds) |entry| {
-        if (entry.label_index == label_index) break entry.input_offset;
-    } else return null;
-    return canonicalIdentityAtOffset(binds, input_offset);
-}
-
+/// RULING: `LabelId A != LabelId B` is acceptable when the two canonicalize to
+/// the same identity (same-subsystem alias coalescing). What must fail is one
+/// semantic boundary whose subsystems disagree on the CANONICAL identity —
+/// same final address is not a defence, so no comparison in this file may use
+/// an address.
 pub fn canonicalIdentityAtOffset(binds: []const BindEntry, input_offset: u32) ?u32 {
     const first = lowerBoundBindOffset(binds, input_offset);
     if (first >= binds.len or binds[first].input_offset != input_offset) return null;
@@ -3765,9 +3750,9 @@ test "compiler.cfg: canonical identity collapses aliases but not boundaries" {
         .{ .bound_offset = 19, .flags = .{ .bound = true } },
     };
 
-    const first = canonicalBoundaryIdentity(&binds, 0).?;
-    const alias = canonicalBoundaryIdentity(&binds, 1).?;
-    const distinct = canonicalBoundaryIdentity(&binds, 2).?;
+    const first = canonicalIdentityAtOffset(&binds, binds[0].input_offset).?;
+    const alias = canonicalIdentityAtOffset(&binds, binds[1].input_offset).?;
+    const distinct = canonicalIdentityAtOffset(&binds, binds[2].input_offset).?;
     try std.testing.expectEqual(first, alias);
     try std.testing.expect(first != distinct);
     // Same later address is not a defence: input-coordinate canonical

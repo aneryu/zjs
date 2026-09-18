@@ -1142,7 +1142,7 @@ pub fn callObjectStatic(
         const object = try expectObjectArg(args[0]);
         const key = try atomFromPropertyKey(rt, args[1]);
         const desc_object = try expectObjectArg(args[2]);
-        const desc = try descriptorFromObjectBare(rt, desc_object);
+        const desc = try descriptorFromObjectBare(desc_object);
         object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             error.InvalidLength => return error.RangeError,
@@ -2212,7 +2212,6 @@ fn stringToLatin1Bytes(rt: *core.JSRuntime, value: core.JSValue, max_unit: u16) 
     const string_value = value.asStringBody() orelse return error.TypeError;
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(rt.memory.allocator);
-    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
@@ -2289,16 +2288,16 @@ pub fn materializeMappedArgumentsDescriptorValueForVm(
     materializeMappedArgumentsDescriptorValue(rt, object, key, desc);
 }
 
-pub fn descriptorFromObjectBare(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
-    const has_get = try expectedHas(rt, object, core.atom.ids.get);
-    const has_set = try expectedHas(rt, object, core.atom.ids.set);
-    const has_value = try expectedHas(rt, object, core.atom.ids.value);
-    const has_writable = try expectedHas(rt, object, core.atom.ids.writable);
-    const enumerable = try optionalBoolProperty(rt, object, core.atom.ids.enumerable);
-    const configurable = try optionalBoolProperty(rt, object, core.atom.ids.configurable);
+pub fn descriptorFromObjectBare(object: *core.Object) !core.Descriptor {
+    const has_get = object.hasProperty(core.atom.ids.get);
+    const has_set = object.hasProperty(core.atom.ids.set);
+    const has_value = object.hasProperty(core.atom.ids.value);
+    const has_writable = object.hasProperty(core.atom.ids.writable);
+    const enumerable = try optionalBoolProperty(object, core.atom.ids.enumerable);
+    const configurable = try optionalBoolProperty(object, core.atom.ids.configurable);
     if (has_get or has_set) {
-        const getter = if (has_get) try expectedValue(rt, object, core.atom.ids.get) else core.JSValue.undefinedValue();
-        const setter = if (has_set) try expectedValue(rt, object, core.atom.ids.set) else core.JSValue.undefinedValue();
+        const getter = if (has_get) try object.getProperty(core.atom.ids.get) else core.JSValue.undefinedValue();
+        const setter = if (has_set) try object.getProperty(core.atom.ids.set) else core.JSValue.undefinedValue();
         return .{
             .kind = .accessor,
             .getter = getter,
@@ -2308,12 +2307,12 @@ pub fn descriptorFromObjectBare(rt: *core.JSRuntime, object: *core.Object) !core
         };
     }
     if (has_value or has_writable) {
-        const value = if (has_value) try expectedValue(rt, object, core.atom.ids.value) else core.JSValue.undefinedValue();
+        const value = if (has_value) try object.getProperty(core.atom.ids.value) else core.JSValue.undefinedValue();
         return .{
             .kind = .data,
             .value = value,
             .value_present = has_value,
-            .writable = try optionalBoolProperty(rt, object, core.atom.ids.writable),
+            .writable = try optionalBoolProperty(object, core.atom.ids.writable),
             .enumerable = enumerable,
             .configurable = configurable,
         };
@@ -2376,17 +2375,9 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn expectedHas(_: *core.JSRuntime, object: *core.Object, key: core.Atom) !bool {
-    return object.hasProperty(key);
-}
-
-fn expectedValue(_: *core.JSRuntime, object: *core.Object, key: core.Atom) !core.JSValue {
-    return try object.getProperty(key);
-}
-
-fn optionalBoolProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom) !?bool {
-    if (!try expectedHas(rt, object, key)) return null;
-    const value = try expectedValue(rt, object, key);
+fn optionalBoolProperty(object: *core.Object, key: core.Atom) !?bool {
+    if (!object.hasProperty(key)) return null;
+    const value = try object.getProperty(key);
     return value.asBool() orelse false;
 }
 
@@ -2398,7 +2389,7 @@ fn definePropertiesFromObject(rt: *core.JSRuntime, object: *core.Object, propert
         const desc_value = try properties.getProperty(key);
         if (desc_value.isUndefined()) continue;
         const desc_object = try expectObjectArg(desc_value);
-        const desc = try descriptorFromObjectBare(rt, desc_object);
+        const desc = try descriptorFromObjectBare(desc_object);
         object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             error.InvalidLength => return error.RangeError,

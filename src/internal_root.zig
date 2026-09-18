@@ -63,7 +63,7 @@ pub const config_signature = @import("config_signature.zig");
 /// Internal CLI probe. The public embedder root does not export this.
 /// Named for what it does (print to stderr); the exec helper is unchanged.
 pub fn printSmallInlineProbe() void {
-    exec.small_inline.writeProbeFile();
+    exec.small_inline.printProbe();
 }
 
 test {

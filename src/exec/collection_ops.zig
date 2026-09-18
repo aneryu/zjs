@@ -315,17 +315,7 @@ pub fn methodCallWithCallbackHost(
     host: CallbackHost,
 ) !core.JSValue {
     const object = try expectObject(object_value);
-    return methodCallResolved(rt, null, globalObjectFromGlobals(rt, host.globals), object, method, args, host);
-}
-
-pub fn methodCallWithContext(
-    ctx: *core.JSContext,
-    object_value: core.JSValue,
-    method: u32,
-    args: []const core.JSValue,
-    globals: []globals_mod.Slot,
-) !core.JSValue {
-    return methodCallWithContextAndHost(ctx, object_value, method, args, .{ .globals = globals });
+    return methodCallResolved(rt, null, globalObjectFromGlobals(host.globals), object, method, args, host);
 }
 
 pub fn methodCallWithContextAndHost(
@@ -336,18 +326,7 @@ pub fn methodCallWithContextAndHost(
     host: CallbackHost,
 ) !core.JSValue {
     const object = try expectObject(object_value);
-    return methodCallResolved(ctx.runtime, ctx, globalObjectFromGlobals(ctx.runtime, host.globals), object, method, args, host);
-}
-
-pub fn methodCallWithGlobal(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    object_value: core.JSValue,
-    method: u32,
-    args: []const core.JSValue,
-    globals: []globals_mod.Slot,
-) !core.JSValue {
-    return methodCallWithGlobalAndHost(ctx, global, object_value, method, args, .{ .globals = globals });
+    return methodCallResolved(ctx.runtime, ctx, globalObjectFromGlobals(host.globals), object, method, args, host);
 }
 
 pub fn methodCallWithGlobalAndHost(
@@ -436,7 +415,7 @@ fn methodCallResolved(
         9 => {
             return collectionIterator(rt, ctx, global, object, .key_value);
         },
-        10 => return collectionForEach(rt, object, args, host),
+        10 => return collectionForEach(object, args, host),
         11 => {
             const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return mapGetOrInsert(rt, object, key, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
@@ -713,7 +692,7 @@ fn objectPrototypeFromGlobal(global: *core.Object) ?*core.Object {
     return object_ctor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
-fn globalObjectFromGlobals(_: *core.JSRuntime, globals: []const globals_mod.Slot) ?*core.Object {
+fn globalObjectFromGlobals(globals: []const globals_mod.Slot) ?*core.Object {
     const global_value = globals_mod.getByAtom(globals, core.atom.ids.globalThis);
     return expectObject(global_value) catch null;
 }
@@ -859,7 +838,6 @@ fn collectionSize(object: *core.Object) !core.JSValue {
 }
 
 fn collectionForEach(
-    _: *core.JSRuntime,
     object: *core.Object,
     args: []const core.JSValue,
     host: CallbackHost,
@@ -878,8 +856,11 @@ fn collectionForEach(
         const entry = object.collectionEntriesSlot().*[index];
         index += 1;
         if (!entry.active) continue;
-        // "must duplicate in case the record is deleted" (quickjs.c:52322): the
-        // callback can delete this entry, which frees the stored key/value.
+        // "must duplicate in case the record is deleted" (quickjs.c:52322):
+        // the callback can delete this entry. Under the tracing GC the copy is
+        // not a retain, it is the read-before-callback that keeps the pair
+        // stable -- the entry slot itself may be cleared while the callback
+        // runs, and `callback_args` is what keeps the values reachable.
         const key = entry.key;
         const value = if (object.class_id == core.class.ids.set) key else entry.value;
         var callback_args = [_]core.JSValue{ value, key, object.value() };
@@ -1039,7 +1020,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other);
+    const other_record = try setLikeRecord(other);
     // These arms walk the receiver's entry array while calling into the
     // set-like `has`/`keys` methods, i.e. across arbitrary user code that may
     // delete from the receiver. Same contract as js_map_forEach's record lock
@@ -1134,7 +1115,7 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other);
+    const other_record = try setLikeRecord(other);
     // Same entry-array lock as `setComposition`: `setLikeHas` runs user code.
     object.retainCollectionCursor();
     defer object.releaseCollectionCursor();
@@ -1176,13 +1157,13 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     }
 }
 
-fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object) !SetLikeRecord {
-    const size = try setLikeSize(rt, object);
-    try validateSetLikeMethods(rt, object);
+fn setLikeRecord(object: *core.Object) !SetLikeRecord {
+    const size = try setLikeSize(object);
+    try validateSetLikeMethods(object);
     return .{ .object = object, .size = size };
 }
 
-fn setLikeSize(_: *core.JSRuntime, object: *core.Object) !usize {
+fn setLikeSize(object: *core.Object) !usize {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return strongSize(object);
     const size_value = try object.getProperty(core.atom.predefinedId("size", .string).?);
     const size = size_value.asInt32() orelse return error.TypeError;
@@ -1190,7 +1171,7 @@ fn setLikeSize(_: *core.JSRuntime, object: *core.Object) !usize {
     return @intCast(size);
 }
 
-fn validateSetLikeMethods(_: *core.JSRuntime, object: *core.Object) !void {
+fn validateSetLikeMethods(object: *core.Object) !void {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return;
 
     const has_key = core.atom.ids.has;
@@ -1383,7 +1364,6 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
 }
 
 fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
-    try string_object.ensureFlat(rt);
     const first = string_object.codeUnitAt(index.*);
     index.* += 1;
     if (unicode.isHighSurrogateUnit(first) and index.* < string_object.len()) {

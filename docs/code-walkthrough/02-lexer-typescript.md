@@ -182,388 +182,388 @@
 
 - **签名**：`fn markClassAndTypeModifiers( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦 `public/private/protected/readonly/override/abstract`，但构造器参数属性保留。
-- **实现**：见到 `constructor (` 进入参数层，`paren_depth` 计顶层参数。顶层参数（`paren_depth == 1`）里的 `public/private/protected/readonly` `continue` 不擦——它们留在源里作为构造器参数属性，由 parser 在 `is_typescript` 且函数是 class constructor 时用 `isParameterModifier`（`parser.zig:2779`）识别并消费。`abstract class` 只擦 `abstract`。其它位置 `modifierCanAppearsHere` 为真才擦。
+- **实现**：见到 `constructor (` 进入参数层，`paren_depth` 计顶层参数（`)` 用饱和减 `-|=`：擦除跑在 parse 之前，畸形 TS 文本里多余的 `)` 不能让计数下溢 panic）。顶层参数（`paren_depth == 1`）里的 `public/private/protected/readonly` `continue` 不擦——它们留在源里作为构造器参数属性，由 parser 在 `is_typescript` 且函数是 class constructor 时用 `isParameterModifier`（`parser.zig:2779`）识别并消费。`abstract class` 只擦 `abstract`。其它位置 `modifierCanAppearsHere` 为真才擦。
 - **所有权 / 错误 / 调用**：OOM。不擦 `static`/`async`（那是 JS）。
 
-### `modifierCanAppearsHere` (`src/lexer.zig:2331`)
+### `modifierCanAppearsHere` (`src/lexer.zig:2333`)
 
 - **签名**：`fn modifierCanAppearsHere(src: []const u8, tokens: []const TSToken, idx: usize) bool`。
 - **作用**：避免把表达式里的同名 ident 当修饰符。
 - **实现**：下一 token 是 `(` `:` `=` `;` → false（调用/标注/赋值）。上一 token 须是 `{` `(` `,` `;`，或文件开头。
 - **所有权 / 错误 / 调用**：`markClassAndTypeModifiers`。
 
-### `isTsModifier` (`src/lexer.zig:2341`)
+### `isTsModifier` (`src/lexer.zig:2343`)
 
 - **签名**：`fn isTsModifier(txt: []const u8) bool`。
 - **作用**：是否 TS 修饰符拼写。
 - **实现**：`public private protected readonly override abstract`。
 - **所有权 / 错误 / 调用**：类成员与参数扫描。
 
-### `findImplementsClassBrace` (`src/lexer.zig:2346`)
+### `findImplementsClassBrace` (`src/lexer.zig:2348`)
 
 - **签名**：`fn findImplementsClassBrace(src: []const u8, tokens: []const TSToken, start_idx: usize) ?usize`。
 - **作用**：从 `implements` 之后找到类体 `{`。
 - **实现**：前进直到 `{`。遇到 `;` `}` 或声明/控制关键字（`const let var function class interface if while for return`）返回 null。
 - **所有权 / 错误 / 调用**：`markImplementsClauses`。不跟踪泛型深度——`implements Array<T>` 的 `<` 不当界。
 
-### `markImplementsClauses` (`src/lexer.zig:2368`)
+### `markImplementsClauses` (`src/lexer.zig:2370`)
 
 - **签名**：`fn markImplementsClauses( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦 `implements A, B` 直到类体 `{` 之前。
 - **实现**：每个 `implements` 找 brace，区间 `[implements.start, brace.start)`，然后 `i = brace_idx - 1` 避免重复。
 - **所有权 / 错误 / 调用**：留下 `class C {`。`extends` 不在这里（那是 JS）。
 
-### `markFunctionOverloadSignatures` (`src/lexer.zig:2383`)
+### `markFunctionOverloadSignatures` (`src/lexer.zig:2385`)
 
 - **签名**：`fn markFunctionOverloadSignatures( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦以 `;` 结束的函数重载签名（可带 `export default async`），再处理类方法重载。
 - **实现**：找 `function`，向左吸收 `async`（须与 `function` 同行）、再 `default`、再 `export`（后两个不查换行）。跳可选 `*`、名字、可选 `<...>`、`(params)`。若 `:` 返回类型则必须落到 `;`；否则必须 `;`。有 `{` 的实现不擦。最后调 `markClassMethodOverloadSignatures`。
 - **所有权 / 错误 / 调用**：实现函数留下。OOM。
 
-### `markClassMethodOverloadSignatures` (`src/lexer.zig:2441`)
+### `markClassMethodOverloadSignatures` (`src/lexer.zig:2443`)
 
 - **签名**：`fn markClassMethodOverloadSignatures( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：类体里无函数体、且后面有同名带体方法的签名擦掉。
 - **实现**：每个 `class` 找 body `{`…`}`。成员循环：跳 `;`，`parseClassMethodSignature`；`!has_body` 且 `hasFollowingClassMethodImplementation` 则标整段。
 - **所有权 / 错误 / 调用**：单条抽象方法（后面无实现）不擦，留给 JS 当语法错或后续路径。
 
-### `findClassBodyOpen` (`src/lexer.zig:2474`)
+### `findClassBodyOpen` (`src/lexer.zig:2476`)
 
 - **签名**：`fn findClassBodyOpen(src: []const u8, tokens: []const TSToken, class_idx: usize) ?usize`。
 - **作用**：`class` 后第一个「顶层」`{`（泛型/heritage 的括号不算）。
 - **实现**：跟踪 `<>()[]{}` 深度。`>` 用 `consumeTypeAngleClosers`（`>>` 可关两层）。四层都 0 的 `{` 即类体。顶层 `;` → null。
 - **所有权 / 错误 / 调用**：方法 overload、`braceBelongsToClass`。
 
-### `skipClassMemberSeparators` (`src/lexer.zig:2510`)
+### `skipClassMemberSeparators` (`src/lexer.zig:2512`)
 
 - **签名**：`fn skipClassMemberSeparators(src: []const u8, tokens: []const TSToken, start_idx: usize, class_close_idx: usize) usize`。
 - **作用**：跳过成员间的 `;`。
 - **实现**：`while token == ";" and i < close`。
 - **所有权 / 错误 / 调用**：类成员扫描。
 
-### `parseClassMethodSignature` (`src/lexer.zig:2516`)
+### `parseClassMethodSignature` (`src/lexer.zig:2518`)
 
 - **签名**：`fn parseClassMethodSignature(src: []const u8, tokens: []const TSToken, member_start: usize, class_close_idx: usize) ?ClassMethodSignature`。
 - **作用**：从成员起点解析「修饰符* `*`? name 类型参数? (params) 返回类型? `;`|`{body}`」。
 - **实现**：吃 `isClassMethodModifierAt`。可选 `*`。名字必须 ident。可选 `<...>`；`(` 必须存在并 `findMatchingForward` 匹配到 `)`。可选 `: type`。`;` → `has_body=false`；`{` 匹配到 `}` → `has_body=true`。对不上返回 null（字段、构造器参数属性等）。
 - **所有权 / 错误 / 调用**：不处理计算名 `[x]()`、字符串名。
 
-### `isClassMethodModifierAt` (`src/lexer.zig:2565`)
+### `isClassMethodModifierAt` (`src/lexer.zig:2567`)
 
 - **签名**：`fn isClassMethodModifierAt(src: []const u8, tokens: []const TSToken, idx: usize) bool`。
 - **作用**：类方法前的修饰符，不含 `static()` / `async()` 这种名字。
 - **实现**：`isTsModifier` 或（`static`/`async` 且下一 token 不是 `(`）。
 - **所有权 / 错误 / 调用**：`parseClassMethodSignature`。
 
-### `hasFollowingClassMethodImplementation` (`src/lexer.zig:2574`)
+### `hasFollowingClassMethodImplementation` (`src/lexer.zig:2576`)
 
 - **签名**：`fn hasFollowingClassMethodImplementation(src: []const u8, tokens: []const TSToken, name_idx: usize, start_idx: usize, class_close_idx: usize) bool`。
 - **作用**：后面是否还有同名、带体的方法。
 - **实现**：继续 parse 签名；名字 `sameTokenText` 不同则 false；`has_body` 则 true；无体则继续找。
 - **所有权 / 错误 / 调用**：连续 overload 只擦无体的那些。
 
-### `sameTokenText` (`src/lexer.zig:2588`)
+### `sameTokenText` (`src/lexer.zig:2590`)
 
 - **签名**：`fn sameTokenText(src: []const u8, a: TSToken, b: TSToken) bool`。
 - **作用**：两 token 源文本相等。
 - **实现**：`textEql(a.text, b.text)`。
 - **所有权 / 错误 / 调用**：方法名比较。
 
-### `nextClassMemberStart` (`src/lexer.zig:2592`)
+### `nextClassMemberStart` (`src/lexer.zig:2594`)
 
 - **签名**：`fn nextClassMemberStart(src: []const u8, tokens: []const TSToken, start_idx: usize, class_close_idx: usize) usize`。
 - **作用**：当前成员解析失败时，跳到下一成员。
 - **实现**：跟踪 `()[]{}`。顶层 `{` 视为方法/静态块，跳到匹配 `}` 后。顶层 `;` 下一 token。`}` 且 brace 已 0 则到 class close。
 - **所有权 / 错误 / 调用**：字段初始化器里的 `;` 在深度 0 才会停。
 
-### `markTypeParameters` (`src/lexer.zig:2626`)
+### `markTypeParameters` (`src/lexer.zig:2628`)
 
 - **签名**：`fn markTypeParameters( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦 `fn f<T>()` / `Foo<T>` 这类类型参数列表。
 - **实现**：每个 `<` 若 `looksLikeTypeParameterStart` 且 `findTypeAngleEnd` 成功，标 `[<, >]`（`end` 可在 `>>` 中间）。
 - **所有权 / 错误 / 调用**：比较运算 `<` 因 `isValidTypeParameterList` 失败而留下。
 
-### `looksLikeTypeParameterStart` (`src/lexer.zig:2643`)
+### `looksLikeTypeParameterStart` (`src/lexer.zig:2645`)
 
 - **签名**：`fn looksLikeTypeParameterStart(src: []const u8, tokens: []const TSToken, lt_idx: usize) bool`。
 - **作用**：`<` 是否可能是类型参数而非小于号。
-- **实现**：`lt_idx==0` false。prev 是 `)` `]` / number / string / regexp → 比较或泛型调用的结束，false。`prev == "class"` 且 `lt_idx>=2` 也 false（只挡 `class <` 直接相邻；`class C<T>` 的 prev 是 ident `C`，仍 true）。
+- **实现**：`lt_idx==0` false。prev 是 `)` `]` / number / string / regexp → 比较或泛型调用的结束，false。`prev == "class"` 也 false（只挡 `class <` 直接相邻；`class C<T>` 的 prev 是 ident `C`，仍 true）。原来这条还附带一个 `lt_idx >= 2`，使得 `class` 恰好是文件首 token 时挡不住，判定要看 `class` 在不在文件开头——没有对应语义，已删。
 - **所有权 / 错误 / 调用**：`markTypeParameters`。
 
-### `markTypeAnnotations` (`src/lexer.zig:2654`)
+### `markTypeAnnotations` (`src/lexer.zig:2656`)
 
 - **签名**：`fn markTypeAnnotations( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦 `: Type` 以及可选的 `?`（`x?: T` 的 `?` 一并去掉）。
 - **实现**：每个 `:` 经 `isTypeAnnotationColon`。`stop_arrow` 当上一 token 是 `)`（返回类型遇到 `=>` 要停，以免吃掉箭头）。起点若上一 token 是 `?` 则从 `?` 开始。
 - **所有权 / 错误 / 调用**：对象字面量 `: expr` 被 `isTypeAnnotationColon` 拒绝。
 
-### `isTypeAnnotationColon` (`src/lexer.zig:2671`)
+### `isTypeAnnotationColon` (`src/lexer.zig:2673`)
 
 - **签名**：`fn isTypeAnnotationColon(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool`。
 - **作用**：这个 `:` 是类型标注而不是对象字段或三元。
 - **实现**：`hasUnmatchedTernaryQuestionBefore` → false。上一有效 token（跳过 `?`）若是 `)` → 返回类型，true。否则 `findEnclosingOpen`：`(` 则 `isParameterList`；`{` 若类体则 `classFieldSegmentAllowsType`，否则 `isVariableDeclarationType`；无包围则变量声明类型。
 - **所有权 / 错误 / 调用**：`a ? b : c` 被 ternary 检查挡住。
 
-### `isParameterList` (`src/lexer.zig:2699`)
+### `isParameterList` (`src/lexer.zig:2701`)
 
 - **签名**：`fn isParameterList(src: []const u8, tokens: []const TSToken, open_idx: usize) bool`。
 - **作用**：`(` 是否函数/方法/箭头形参表。
 - **实现**：匹配 `)`。主人 `parameterListOwnerIndex`。控制关键字 `if/for/...` false。`function`/`constructor` true。`function ident (` true。ident 后 `{`/`=>` true。ident 或主人后 `:` 则看返回类型是否落到 `{`/`=>`。`)` 后直接 `=>` true。
 - **所有权 / 错误 / 调用**：调用表达式 `(x): T` 很少过这些条件。
 
-### `parameterListOwnerIndex` (`src/lexer.zig:2716`)
+### `parameterListOwnerIndex` (`src/lexer.zig:2718`)
 
 - **签名**：`fn parameterListOwnerIndex(src: []const u8, tokens: []const TSToken, open_idx: usize) ?usize`。
 - **作用**：`(` 前的名字或 `function`，跳过 `>` 关闭的类型参数。
 - **实现**：`open_idx-1`；若该 token 以 `>` 开头，`findTypeAngleStartBackward` 再取 `<` 前一个。
 - **所有权 / 错误 / 调用**：`f<T>(` 的 owner 是 `f`。
 
-### `findTypeAngleStartBackward` (`src/lexer.zig:2727`)
+### `findTypeAngleStartBackward` (`src/lexer.zig:2729`)
 
 - **签名**：`fn findTypeAngleStartBackward(src: []const u8, tokens: []const TSToken, gt_idx: usize) ?usize`。
 - **作用**：从 `>`/`>>` 回退到匹配的 `<`。
 - **实现**：`depth = leadingGreaterCount`。回退时再遇 `>` 加深，遇 `<` 减；depth 到 1 的 `<` 即起点。
 - **所有权 / 错误 / 调用**：`parameterListOwnerIndex`。
 
-### `leadingGreaterCount` (`src/lexer.zig:2744`)
+### `leadingGreaterCount` (`src/lexer.zig:2746`)
 
 - **签名**：`fn leadingGreaterCount(txt: []const u8) usize`。
 - **作用**：token 前导 `>` 个数（`>` `>>` `>>>` `>>=`…）。
 - **实现**：数前缀 `>`。
 - **所有权 / 错误 / 调用**：角度括号深度。
 
-### `returnTypeAfterParameterListLeadsToBody` (`src/lexer.zig:2750`)
+### `returnTypeAfterParameterListLeadsToBody` (`src/lexer.zig:2752`)
 
 - **签名**：`fn returnTypeAfterParameterListLeadsToBody(src: []const u8, tokens: []const TSToken, close_idx: usize) bool`。
 - **作用**：`) : Type {` 或 `) : Type =>` 才把 `(` 当参数表。
 - **实现**：下一 token 必须 `:`，`findTypeEnd(..., true)` 后是 `{` 或 `=>`。
 - **所有权 / 错误 / 调用**：`isParameterList`。
 
-### `isControlKeyword` (`src/lexer.zig:2756`)
+### `isControlKeyword` (`src/lexer.zig:2758`)
 
 - **签名**：`fn isControlKeyword(txt: []const u8) bool`。
 - **作用**：`if for while switch with catch` 的 `(` 不是参数表。
 - **实现**：六词 `textEql`。
 - **所有权 / 错误 / 调用**：`isParameterList`。
 
-### `isVariableDeclarationKeyword` (`src/lexer.zig:2761`)
+### `isVariableDeclarationKeyword` (`src/lexer.zig:2763`)
 
 - **签名**：`fn isVariableDeclarationKeyword(txt: []const u8) bool`。
 - **作用**：`let`/`const`/`var`。
 - **实现**：三词比较。
 - **所有权 / 错误 / 调用**：`isVariableDeclarationType`。
 
-### `isVariableDeclarationType` (`src/lexer.zig:2765`)
+### `isVariableDeclarationType` (`src/lexer.zig:2767`)
 
 - **签名**：`fn isVariableDeclarationType(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool`。
 - **作用**：`let x: T` / `const {a}: T` 的 `:`，而不是对象字面量。
 - **实现**：回退找语句起点（顶层 `;` 或未匹配的开界）。正向扫：见到声明关键字；记下最近的逗号/声明后位置。再从该位置扫到 `:`，深度 0 的 `=` 则 false（已是初始化器）。必须 `saw_decl`。
 - **所有权 / 错误 / 调用**：解构 `let {a: b}` 的 `:`：回退时遇到未匹配的 `{` 就把语句起点定在其后，`let` 落在窗口外，`saw_decl` 为假 → false。类字段走 `classFieldSegmentAllowsType` 另一条路。
 
-### `classFieldSegmentAllowsType` (`src/lexer.zig:2858`)
+### `classFieldSegmentAllowsType` (`src/lexer.zig:2860`)
 
 - **签名**：`fn classFieldSegmentAllowsType(src: []const u8, tokens: []const TSToken, class_open_idx: usize, colon_idx: usize) bool`。
 - **作用**：类字段 `x: T` 允许擦类型；`x = y: z` 这种段内已有 `=` 则不许。
 - **实现**：从 `colon` 回退到最近 `;` `{` `}` 作为段起点，再正向看是否有 `=`。
 - **所有权 / 错误 / 调用**：`isTypeAnnotationColon` 在类体 `{` 内。
 
-### `markTypeAssertions` (`src/lexer.zig:2875`)
+### `markTypeAssertions` (`src/lexer.zig:2877`)
 
 - **签名**：`fn markTypeAssertions( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦 `expr as T` / `expr satisfies T`。
 - **实现**：跳过 import/export 语句里的 `as`（`import x as y`）。`isTypeAssertionOperator` 确认左是表达式结束、右不是分隔符。`findTypeAssertionEnd` 定右界。
 - **所有权 / 错误 / 调用**：`as const` 仍被当成类型断言擦掉（`const` 当类型 token 吃到 delimiter）。
 
-### `markNonNullAssertions` (`src/lexer.zig:2892`)
+### `markNonNullAssertions` (`src/lexer.zig:2894`)
 
 - **签名**：`fn markNonNullAssertions( allocator: std.mem.Allocator, src: []const u8, tokens: []const TSToken, ranges: *std.ArrayList(Range), ) !void`。
 - **作用**：擦后缀 `!`（`x!`）。
 - **实现**：`!` 的 prev 是 ident/number/string/`)`/`]`，next 不是 `=`/`==`/`===`（避免 `!=`）。只标 `!` 自身。
 - **所有权 / 错误 / 调用**：逻辑非 `!x` 的 prev 不是表达式结束。
 
-### `isTypeAssertionOperator` (`src/lexer.zig:2911`)
+### `isTypeAssertionOperator` (`src/lexer.zig:2913`)
 
 - **签名**：`fn isTypeAssertionOperator(src: []const u8, tokens: []const TSToken, idx: usize) bool`。
 - **作用**：`as`/`satisfies` 是否类型断言算符。
 - **实现**：`previousTokenCanEndExpression`。next 不能是 `:` `,` `;` `)` `}` `=`。
 - **所有权 / 错误 / 调用**：`markTypeAssertions`。
 
-### `previousTokenCanEndExpression` (`src/lexer.zig:2923`)
+### `previousTokenCanEndExpression` (`src/lexer.zig:2925`)
 
 - **签名**：`fn previousTokenCanEndExpression(src: []const u8, prev_token: TSToken) bool`。
 - **作用**：prev 能否结束一个表达式。
 - **实现**：ident 走 `identifierCanEndExpression`；字面量 true；punct 仅 `)` `]` `}`。
 - **所有权 / 错误 / 调用**：`as` 左边。
 
-### `identifierCanEndExpression` (`src/lexer.zig:2934`)
+### `identifierCanEndExpression` (`src/lexer.zig:2936`)
 
 - **签名**：`fn identifierCanEndExpression(txt: []const u8) bool`。
 - **作用**：排除不能出现在表达式末尾的关键字。
 - **实现**：不是 `const let var function class return throw case delete typeof void new in instanceof yield await`。
 - **所有权 / 错误 / 调用**：`foo as T` 的 `foo` 通过；`return as` 不通过。
 
-### `findTypeEnd` (`src/lexer.zig:2948`)
+### `findTypeEnd` (`src/lexer.zig:2950`)
 
 - **签名**：`fn findTypeEnd(src: []const u8, tokens: []const TSToken, start_idx: usize, stop_arrow: bool) ?TypeScanEnd`。
 - **作用**：从类型起点扫到类型结束（逗号/分号/等号/闭界，可选 `=>`）。
 - **实现**：跟踪 `()[]{}<>`。深度 0 的闭界返回该 token 的 `start`（类型不含闭界）。起始 `{` 当作对象类型吃进去；非起始且四层都 0 的 `{` 当语句体，停在 `{` 前。`>` 用 `consumeTypeAngleClosers`，可能在 `>>` 中切开。
 - **所有权 / 错误 / 调用**：标注、返回类型。EOF 返回 null，调用方用 `src.len`。
 
-### `findTypeAssertionEnd` (`src/lexer.zig:2985`)
+### `findTypeAssertionEnd` (`src/lexer.zig:2987`)
 
 - **签名**：`fn findTypeAssertionEnd(src: []const u8, tokens: []const TSToken, start_idx: usize) ?TypeScanEnd`。
 - **作用**：`as`/`satisfies` 右侧类型的结束，比 `findTypeEnd` 多认表达式分隔符。
 - **实现**：同样深度计数。深度 0 且 `isExpressionDelimiter`（含 `||` `&&` `+` `==` 等）则停。
 - **所有权 / 错误 / 调用**：`x as T && y` 在 `&&` 前停。
 
-### `isExpressionDelimiter` (`src/lexer.zig:3015`)
+### `isExpressionDelimiter` (`src/lexer.zig:3017`)
 
 - **签名**：`fn isExpressionDelimiter(txt: []const u8) bool`。
 - **作用**：断言类型不能跨越的算符。
 - **实现**：`,` `;` `:` `?` `}` `=>` 逻辑/算术/比较/`=`。
 - **所有权 / 错误 / 调用**：`findTypeAssertionEnd`。不含 `.`（`as Foo.Bar` 继续）。
 
-### `isValidTypeParameterList` (`src/lexer.zig:3024`)
+### `isValidTypeParameterList` (`src/lexer.zig:3026`)
 
 - **签名**：`fn isValidTypeParameterList(src: []const u8, tokens: []const TSToken, start: usize, end: usize) bool`。
 - **作用**：`< ... >` 是否像类型参数而不是 `<` 比较。
 - **实现**：内部禁止 `&& || ?? == != === !== * / % instanceof ++ --` 及一批语句关键字。闭合后下一 token：ident 只允许 `extends implements as satisfies`；否则须 `typeParameterListCanBeFollowedBy`；number/string/regexp 禁止。
 - **所有权 / 错误 / 调用**：`findTypeAngleEnd` 在深度归零时检查。
 
-### `typeParameterListCanBeFollowedBy` (`src/lexer.zig:3064`)
+### `typeParameterListCanBeFollowedBy` (`src/lexer.zig:3066`)
 
 - **签名**：`fn typeParameterListCanBeFollowedBy(txt: []const u8) bool`。
 - **作用**：`>` 后合法的 punct：`( { [ , => = : ; ) ] | & . ? !`。
 - **实现**：一串 `textEql`。
 - **所有权 / 错误 / 调用**：`f<T>(`、`T | U`、`x!` 等。
 
-### `findTypeAngleEnd` (`src/lexer.zig:3072`)
+### `findTypeAngleEnd` (`src/lexer.zig:3074`)
 
 - **签名**：`fn findTypeAngleEnd(src: []const u8, tokens: []const TSToken, lt_idx: usize) ?TypeScanEnd`。
 - **作用**：从 `<` 找到匹配 `>`，并验证是类型参数表。
 - **实现**：`depth` 从 0，遇 `<` +1。嵌套 `()[]{}`。在 depth==1 时未匹配的 `)` `]` `}` 或 `;` → null。`>` 序列把 depth 减到 0 后要求 paren/bracket/brace 为 0 且 `isValidTypeParameterList`。
 - **所有权 / 错误 / 调用**：类型参数、方法签名、`parameterListOwnerIndex` 的前向对应物。
 
-### `startsWithGreater` (`src/lexer.zig:3112`)
+### `startsWithGreater` (`src/lexer.zig:3114`)
 
 - **签名**：`fn startsWithGreater(txt: []const u8) bool`。
 - **作用**：token 是否以 `>` 开头（含 `>>` `>=`）。
 - **实现**：`txt.len>0 and txt[0]=='>'`。
 - **所有权 / 错误 / 调用**：角度括号关闭。
 
-### `consumeTypeAngleClosers` (`src/lexer.zig:3116`)
+### `consumeTypeAngleClosers` (`src/lexer.zig:3118`)
 
 - **签名**：`fn consumeTypeAngleClosers(txt: []const u8, token_start: usize, depth: *usize) ?usize`。
 - **作用**：把 `>>` 拆成两个 `>` 来关泛型；depth 到 0 时返回切开点的源偏移。
 - **实现**：每吃一个 `>` 且 `depth>0` 就 `depth-=1`；减到 0 返回 `token_start+consumed+1`。没把 depth 吃到 0 返回 null。
 - **所有权 / 错误 / 调用**：`A<B<C>>` 的 `>>` 一个 punct token。
 
-### `findStatementEnd` (`src/lexer.zig:3127`)
+### `findStatementEnd` (`src/lexer.zig:3129`)
 
 - **签名**：`fn findStatementEnd(src: []const u8, tokens: []const TSToken, start_idx: usize) usize`。
 - **作用**：从语句起点估结束偏移。
 - **实现**：`()[]{}` 深度。深度 0 的 `;` 或 `}` 结束。深度 0 且与下一 token 有换行、且当前 token 不 `continuesAcrossLine` 则结束（ASI 近似）。否则 `src.len`。
 - **所有权 / 错误 / 调用**：type-only 语句、declare。
 
-### `continuesAcrossLine` (`src/lexer.zig:3148`)
+### `continuesAcrossLine` (`src/lexer.zig:3150`)
 
 - **签名**：`fn continuesAcrossLine(txt: []const u8) bool`。
 - **作用**：这些 token 后的换行不断句。
 - **实现**：`,` `=` `|` `&` `?` `:` `extends` `(` `{` `[`。
 - **所有权 / 错误 / 调用**：`findStatementEnd`。
 
-### `findMatchingForward` (`src/lexer.zig:3154`)
+### `findMatchingForward` (`src/lexer.zig:3156`)
 
 - **签名**：`fn findMatchingForward(src: []const u8, tokens: []const TSToken, open_idx: usize, open_text: []const u8, close_text: []const u8) ?usize`。
 - **作用**：括号匹配，返回闭合 token 下标。
 - **实现**：从 `open_idx` 计 depth，同文 open +1、close -1，到 0 返回。不处理字符串（已是独立 token）。
 - **所有权 / 错误 / 调用**：各类 mark。文本必须精确 `(` / `{` 等。
 
-### `findEnclosingOpen` (`src/lexer.zig:3169`)
+### `findEnclosingOpen` (`src/lexer.zig:3171`)
 
 - **签名**：`fn findEnclosingOpen(src: []const u8, tokens: []const TSToken, idx: usize) ?usize`。
 - **作用**：回退找包围 `idx` 的最近未闭合 `(` `[` `{`。
 - **实现**：反向计 `) ] }` 加深、开界在对应深度 0 时返回。
 - **所有权 / 错误 / 调用**：`isTypeAnnotationColon`、import/export 内的 `as`。
 
-### `braceBelongsToClass` (`src/lexer.zig:3191`)
+### `braceBelongsToClass` (`src/lexer.zig:3193`)
 
 - **签名**：`fn braceBelongsToClass(src: []const u8, tokens: []const TSToken, open_idx: usize) bool`。
 - **作用**：这个 `{` 是否某 `class` 的类体。
 - **实现**：回退找 `class`，`findClassBodyOpen` 结果须等于 `open_idx`。遇 `;` 停 false。
 - **所有权 / 错误 / 调用**：类字段类型 vs 对象类型字面量。
 
-### `hasUnmatchedTernaryQuestionBefore` (`src/lexer.zig:3204`)
+### `hasUnmatchedTernaryQuestionBefore` (`src/lexer.zig:3206`)
 
 - **签名**：`fn hasUnmatchedTernaryQuestionBefore(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool`。
 - **作用**：`:` 是否三元的冒号。
 - **实现**：若上一 token 已是 `?`（`x?: T`）返回 false。否则回退，深度 0 的 `?` true；`;` `,` 或未匹配开界停下 false。
 - **所有权 / 错误 / 调用**：`isTypeAnnotationColon` 第一道闸。
 
-### `insideImportOrExportStatement` (`src/lexer.zig:3231`)
+### `insideImportOrExportStatement` (`src/lexer.zig:3233`)
 
 - **签名**：`fn insideImportOrExportStatement(src: []const u8, tokens: []const TSToken, idx: usize) bool`。
 - **作用**：避免把 `import { a as b }` 的 `as` 当类型断言。
 - **实现**：回退到上一 `;` 当语句起点。语句内到 `idx` 前若有 `=` 则 false（赋值）。有 `import` true。有 `export`：`findEnclosingOpen` 一旦有结果就以「该开界是 `{` 且在本句内」直接定论（是 `(`/`[` 就 false）；只有完全没有包围开界时才回头看句内有无 `*`/`from`。
 - **所有权 / 错误 / 调用**：`markTypeAssertions`。
 
-### `isStatementStart` (`src/lexer.zig:3266`)
+### `isStatementStart` (`src/lexer.zig:3268`)
 
 - **签名**：`fn isStatementStart(src: []const u8, tokens: []const TSToken, idx: usize) bool`。
 - **作用**：token 是否像语句开头（`interface`/`type` 才擦）。
 - **实现**：`idx==0` 或 prev 是 `;` `{` `}`。
 - **所有权 / 错误 / 调用**：`markTypeOnlyStatements`。方法里的 `interface` ident 不擦。
 
-### `findTokenBeforeOffset` (`src/lexer.zig:3272`)
+### `findTokenBeforeOffset` (`src/lexer.zig:3274`)
 
 - **签名**：`fn findTokenBeforeOffset(src: []const u8, tokens: []const TSToken, start_idx: usize, end_offset: usize, needle: []const u8) ?usize`。
 - **作用**：在 `[start_idx, end_offset)` 源范围内找文本等于 `needle` 的 token。
 - **实现**：`tokens[i].start < end_offset` 且文本相等。
 - **所有权 / 错误 / 调用**：`markMixedTypeSpecifiers` 找 `{`。
 
-### `hasLineBreakBetween` (`src/lexer.zig:3280`)
+### `hasLineBreakBetween` (`src/lexer.zig:3282`)
 
 - **签名**：`fn hasLineBreakBetween(src: []const u8, start: usize, end: usize) bool`。
 - **作用**：两偏移之间是否有 CR/LF。
 - **实现**：扫字节。不认 LS/PS。
 - **所有权 / 错误 / 调用**：ASI 近似、`async function` 同行检查。
 
-### `addRange` (`src/lexer.zig:3288`)
+### `addRange` (`src/lexer.zig:3290`)
 
 - **签名**：`fn addRange(ranges: *std.ArrayList(Range), allocator: std.mem.Allocator, start: usize, end: usize) !void`。
 - **作用**：追加半开区间；空区间丢弃。
 - **实现**：`end<=start` return。`array_list_erased.append`。
 - **所有权 / 错误 / 调用**：所有 mark*。OOM。尚未合并。
 
-### `rangeLessThan` (`src/lexer.zig:3293`)
+### `rangeLessThan` (`src/lexer.zig:3295`)
 
 - **签名**：`fn rangeLessThan(_: void, a: Range, b: Range) bool`。
 - **作用**：按 `start` 排序。
 - **实现**：`a.start < b.start`。
 - **所有权 / 错误 / 调用**：`sort_erased.heap` 在 `markTypeRanges`。
 
-### `tokenTextEql` (`src/lexer.zig:3297`)
+### `tokenTextEql` (`src/lexer.zig:3299`)
 
 - **签名**：`fn tokenTextEql(src: []const u8, tokens: []const TSToken, idx: usize, expected: []const u8) bool`。
 - **作用**：带越界保护的 token 文本比较。
 - **实现**：`idx < len and textEql(tokens[idx].text(src), expected)`。
 - **所有权 / 错误 / 调用**：前瞻 `i+1` 不必每次检查长度。
 
-### `textEql` (`src/lexer.zig:3301`)
+### `textEql` (`src/lexer.zig:3303`)
 
 - **签名**：`fn textEql(a: []const u8, b: []const u8) bool`。
 - **作用**：擦除器字符串相等。
 - **实现**：`std.mem.eql(u8, a, b)`。
 - **所有权 / 错误 / 调用**：所有关键字/punct 比较。大小写敏感。
 
-### `tsIsIdentStart` (`src/lexer.zig:3305`)
+### `tsIsIdentStart` (`src/lexer.zig:3307`)
 
 - **签名**：`fn tsIsIdentStart(c: u8) bool`。
 - **作用**：粗 ident 起点：ASCII start 或任意非 ASCII 字节。
 - **实现**：不解码 UTF-8。非 ASCII 整段会被 `tsIsIdentContinue` 吃进同一个 ident。
 - **所有权 / 错误 / 调用**：比正式 lexer 宽，擦除宁多勿少。
 
-### `tsIsIdentContinue` (`src/lexer.zig:3309`)
+### `tsIsIdentContinue` (`src/lexer.zig:3311`)
 
 - **签名**：`fn tsIsIdentContinue(c: u8) bool`。
 - **作用**：粗 ident 续：start 或 ASCII 数字。

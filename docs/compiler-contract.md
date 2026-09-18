@@ -159,10 +159,10 @@ errors and split marker'd vs `NoSource` emission: `emitterJump`/`emitterOp`
 etc. add a source event at the current token first; the `NoSource` twins do
 not; `emitterOpAt` pins one opcode to an explicit source event (assignment /
 update operators); `emitterRetargetLabel` wraps `Builder.retargetLabelRefs`. The
-former `v2_available and s.emit_v2` runtime gates and the anti-legacy asserts
-in the `appendBytesNoSource` family are gone with the legacy compiler; the
-Builder path is the only emission path, and the `appendBytesNoSource` family
-survives as the parser-phase append funnel with flow-tail bookkeeping.
+former `v2_available and s.emit_v2` runtime gates are gone with the legacy
+compiler, and so is the whole `appendBytesNoSource` raw-byte family (together
+with the incrementally-maintained flow-tail summary it fed): the Builder path
+is the only emission path.
 
 ## 3. Frame-level identity carriers
 

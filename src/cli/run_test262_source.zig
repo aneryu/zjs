@@ -268,7 +268,7 @@ pub fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *Har
     }
 
     var includes_len: usize = 0;
-    const include_async_harness = needsAsyncHarness(metadata, test_source) and !metadata.includes.contains(async_harness);
+    const include_async_harness = needsAsyncHarness(metadata) and !metadata.includes.contains(async_harness);
     if (include_async_harness) {
         if (try harness_cache.get(async_harness)) |bytes| includes_len += bytes.len + 1;
     }
@@ -307,8 +307,7 @@ pub fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *Har
     return out[0..offset];
 }
 
-fn needsAsyncHarness(metadata: TestMetadata, test_source: []const u8) bool {
-    _ = test_source;
+fn needsAsyncHarness(metadata: TestMetadata) bool {
     return metadata.hasFlag("async");
 }
 

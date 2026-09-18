@@ -38,27 +38,6 @@ const globalDataPropertyValueForFastPath = property_direct.globalDataPropertyVal
 
 pub const Step = enum { done, continue_loop };
 
-const FieldAtom = struct {
-    atom: core.Atom,
-    next_pc: usize,
-};
-
-pub fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?FieldAtom {
-    comptime {
-        // Callers pass get_field-family ops; the hard-coded stride is only
-        // sound while the whole family is atom-sized.
-        for ([_]Form{ .get_field, .get_field2, .put_field }) |f| {
-            if (bytecode.opcode.decode.sizeOfForm(f) != 5)
-                @compileError("decodeFieldAtom stride is stale for " ++ @tagName(f));
-        }
-    }
-    if (pc + 5 > code.len or code[pc] != expected_op) return null;
-    return .{
-        .atom = readInt(u32, code[pc + 1 ..][0..4]),
-        .next_pc = pc + 5,
-    };
-}
-
 pub fn globalVarAtom(function: *const bytecode.FunctionBytecode, idx: u16) ?core.Atom {
     if (idx < function.closureVar().len) return function.closureVar()[idx].var_name;
     if (idx >= function.varRefNamesLen()) return null;
@@ -85,7 +64,7 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
     site_pc: usize,
     atom_id: core.Atom,
 ) ?core.JSValue {
-    if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, global)) return null;
+    if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame)) return null;
     if (functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
     if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |_| {
         return null;
@@ -121,11 +100,9 @@ pub fn canUseInstalledGlobalDataIc(
     function: *const bytecode.FunctionBytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
-    global: *const core.Object,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    _ = global;
     if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
     }
@@ -248,6 +225,3 @@ pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: 
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
-fn readInt(comptime T: type, bytes: []const u8) T {
-    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
-}

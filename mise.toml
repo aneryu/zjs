@@ -98,6 +98,17 @@ git worktree prune
 du -sh .zig-cache
 """
 
+# Advisory, manual-only: a whole-tree state scan against a hand-maintained
+# baseline, so it is neither a `zig build` gate step nor part of any default
+# lint target -- a drifting baseline must report drift, not block merges.
+# `raw_access_gate.py` freezes opcode-design.md 10.5's raw-stream-access
+# population against tools/lint/raw_access_allowlist.json; that baseline has
+# drifted (see the tool's header), so the task exits non-zero today. Run it
+# deliberately: `mise run lint-raw-access`.
+[tasks.lint-raw-access]
+description = "Advisory raw bytecode-stream access baseline scan (manual; currently red)"
+run = "python3 tools/lint/raw_access_gate.py"
+
 [tasks.worktree-init]
 description = "Reuse the main worktree's test262 checkout from a linked worktree"
 run = '"$MISE_TASK_DIR/tools/worktree_init.sh"'

@@ -160,12 +160,11 @@ fn setOwnDataPropertyLookup(rt: *core.JSRuntime, object: *core.Object, lookup: B
 }
 
 fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool {
+    // `rt` is unused: under the tracing GC an in-place slot overwrite on an
+    // already-published object needs no runtime hook. Kept so this stays
+    // signature-compatible with the other `set*At` writers in this file.
     _ = rt;
     const slot = writableDataSlotAt(object, index, atom_id) orelse return false;
-    if (atom_id != core.atom.ids.Private_brand and !slot.value.requiresRefCount() and !value.requiresRefCount()) {
-        slot.value.* = value;
-        return true;
-    }
     slot.value.* = value;
     return true;
 }
@@ -258,15 +257,10 @@ pub fn globalDataPropertyValueForFastPath(
     return lookup.value;
 }
 
-fn globalDataPropertyLookupForFastPathNoProfile(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    site_pc: usize,
-    atom_id: core.Atom,
-) ?BorrowedGlobalDataLookup {
-    return installableGlobalDataPropertyLookup(rt, global, function, site_pc, atom_id);
-}
+/// The profiled and unprofiled global lookups became the same call once the
+/// site profile moved out of this file; keep the second name as an alias so
+/// the two `globalDataPropertyValueForFastPath*` entry points stay distinct.
+const globalDataPropertyLookupForFastPathNoProfile = globalDataPropertyLookupForFastPath;
 
 pub fn globalDataPropertyValueForFastPathNoProfile(
     rt: *core.JSRuntime,
@@ -369,12 +363,9 @@ fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object,
     return true;
 }
 
-fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool {
-    const slot = writableDataSlotAt(global, index, atom_id) orelse return false;
-    slot.entry.slot = .{ .data = new_value };
-    rt.gc.generationalBarrier(global.gcHeader(), new_value.cycleMarkHeader());
-    return true;
-}
+/// `Owned` is historical: under the tracing GC the caller hands over no
+/// reference, so this is literally the borrowed writer.
+const setGlobalOwnWritableDataPropertyAtOwned = setGlobalOwnWritableDataPropertyAt;
 
 fn writableDataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot {
     const slot = dataSlotAt(object, index, atom_id) orelse return null;

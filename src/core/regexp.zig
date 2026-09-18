@@ -9,9 +9,10 @@
 //! in core so every exec client shares the same neutral representation.
 //!
 //! The class-range parsing primitives (`readClassRangeAtom` / `ClassRangeAtom` /
-//! `consumeUnicodePropertyEscape` / `isCharacterClassEscape`) are shared with the
-//! RegExp pattern validators that stay in `exec/regexp_ops.zig`; that module
-//! re-exports them so the validation cluster keeps a single source of truth here.
+//! `consumeUnicodePropertyEscape` / `isCharacterClassEscape`) are `pub` so the
+//! RegExp pattern validators in `exec/regexp_ops.zig` can adopt them; today only
+//! `classMatchesUtf16Unit` is actually re-exported there, and the parsing
+//! primitives have no caller outside this module and its tests.
 
 const std = @import("std");
 
@@ -166,7 +167,7 @@ pub fn readClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom {
     return .{ .kind = .single, .value = escaped };
 }
 
-fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: usize, digit_count: usize) ?ClassRangeAtom {
+fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: usize, digit_count: usize) ClassRangeAtom {
     var scan = index.* + prefix_len;
     if (scan + digit_count > pattern.len) {
         index.* += prefix_len;
@@ -186,7 +187,7 @@ fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: us
     return .{ .kind = .single, .value = value };
 }
 
-fn readUnicodeClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom {
+fn readUnicodeClassRangeAtom(pattern: []const u8, index: *usize) ClassRangeAtom {
     if (index.* + 2 < pattern.len and pattern[index.* + 2] == '{') {
         var scan = index.* + 3;
         var value: u32 = 0;

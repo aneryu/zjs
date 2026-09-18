@@ -25,11 +25,6 @@ pub const OpcodeProfile = struct {
     ext0_sub_count: [256]u64 = @splat(0),
     nanos: [max_opcode_count]u64 = @splat(0),
     slow_count: [max_opcode_count]u64 = @splat(0),
-    ic_hit: [max_opcode_count]u64 = @splat(0),
-    ic_miss: [max_opcode_count]u64 = @splat(0),
-    ic_invalidate: [max_opcode_count]u64 = @splat(0),
-    ic_promote_poly: [max_opcode_count]u64 = @splat(0),
-    ic_promote_mega: [max_opcode_count]u64 = @splat(0),
     value_dup_count: u64 = 0,
     value_free_count: u64 = 0,
     prop_lookup_count: u64 = 0,
@@ -105,35 +100,10 @@ pub const OpcodeProfile = struct {
         return total;
     }
 
-    pub fn totalIcHit(self: OpcodeProfile) u64 {
-        return totalCounter(self.ic_hit);
-    }
-
-    pub fn totalIcMiss(self: OpcodeProfile) u64 {
-        return totalCounter(self.ic_miss);
-    }
-
-    pub fn totalIcInvalidate(self: OpcodeProfile) u64 {
-        return totalCounter(self.ic_invalidate);
-    }
-
-    pub fn totalIcPromotePoly(self: OpcodeProfile) u64 {
-        return totalCounter(self.ic_promote_poly);
-    }
-
-    pub fn totalIcPromoteMega(self: OpcodeProfile) u64 {
-        return totalCounter(self.ic_promote_mega);
-    }
 };
 
 pub fn setOpcodeNameProvider(provider: ?OpcodeNameProvider) void {
     opcode_name_provider = provider;
-}
-
-fn totalCounter(counter: [max_opcode_count]u64) u64 {
-    var total: u64 = 0;
-    for (counter) |value| total +|= value;
-    return total;
 }
 
 threadlocal var active_profile: ?*OpcodeProfile = null;

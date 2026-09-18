@@ -377,12 +377,13 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
     return obj.value();
 }
 
-pub fn typedArrayConstructFullBuffer(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue {
-    return typedArrayConstructFullBufferOwned(rt, element_size, kind, buffer_value, buffer, prototype);
-}
+/// Borrowed-value spelling of `typedArrayConstructFullBufferOwned`, kept for
+/// callers that never had a buffer reference to hand over. There is no
+/// behavioural difference under the tracing GC -- the "owned" leg does not
+/// consume anything -- so this is the same function.
+pub const typedArrayConstructFullBuffer = typedArrayConstructFullBufferOwned;
 
 pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue {
-    var owned_buffer_value = buffer_value;
     if (element_size == 0) return error.TypeError;
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (buffer.arrayBufferMaxByteLength() != null) return error.TypeError;
@@ -393,9 +394,7 @@ pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kin
 
     const obj = try createTypedArrayInstance(rt, kind, prototype);
     errdefer Object.destroyFromHeader(rt, obj.gcHeader());
-    const view_buffer = owned_buffer_value;
-    owned_buffer_value = JSValue.undefinedValue();
-    try obj.initTypedArrayView(rt, view_buffer, 0, element_size, @intCast(length), kind);
+    try obj.initTypedArrayView(rt, buffer_value, 0, element_size, @intCast(length), kind);
     return obj.value();
 }
 
@@ -843,7 +842,8 @@ fn numberValue(value: JSValue) ?f64 {
 }
 
 fn numberToUint32(number: f64) u32 {
-    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
+    // `isFinite` is already false for NaN, so no separate NaN test is needed.
+    if (!std.math.isFinite(number)) return 0;
     const two32 = 4294967296.0;
     var modulo = @mod(@trunc(number), two32);
     if (modulo < 0) modulo += two32;

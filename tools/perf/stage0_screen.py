@@ -58,7 +58,6 @@ REQUIRED_BASELINE_FILES = (
 METRICS: tuple[tuple[str, str, str], ...] = (
     ("blockHeap.hotReusePublished", "hot reuse published", "phase-sensitive"),
     ("blockHeap.reopened", "reopened", "phase-sensitive"),
-    ("blockHeap.deferredBlockRuns", "deferred block runs", "deterministic"),
     ("cycles.majorCompleted", "major collections", "phase-sensitive"),
     ("cycles.minor", "minor collections", "deterministic"),
     ("pauseNs.minor.total", "minor STW total", "phase-sensitive"),

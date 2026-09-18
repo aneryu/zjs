@@ -159,166 +159,166 @@
 
 ### `Frame.initArguments` (`src/exec/frame.zig:386`)
 
-- **签名**：`pub fn initArguments( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, args: []const JSValue, use_inline_storage: bool, need_original_snapshot: bool, windows: FrameStorageWindows, ) !void`。
+- **签名**：`pub fn initArguments( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, args: []const JSValue, need_original_snapshot: bool, windows: FrameStorageWindows, ) !void`。
 - **作用**：按 argc 填 args（不足补 undefined）并按需快照 original_args。
 - **实现**：先记 `actual_arg_count = args.len`；`frame_arg_count = max(args.len, function.arg_count)`，非 0 则 `allocArgsSlice` 拿窗口，超出实参的尾槽 `@memset(undefined)`，再逐个复制实参并挂到 `self.args`；最后 `initOriginalArgsSnapshot` 按需做快照。
 - **所有权 / 错误 / 调用**：错误：error union，来自 `allocArgsSlice` 与 `initOriginalArgsSnapshot` 的分配。所有权：实参窗口优先用 `windows.args` 给的预切窗口、其次 arena、最后堆（`allocOwnedStorage`，记为帧自有）；多出的形参槽 `@memset` 成 undefined，实参逐个复制进来——源 `args` 仍归调用方。调用：唯一调用方 `src/exec/zjs_vm.zig:690`。
 
-### `Frame.initArgumentsMoved` (`src/exec/frame.zig:413`)
+### `Frame.initArgumentsMoved` (`src/exec/frame.zig:412`)
 
-- **签名**：`pub fn initArgumentsMoved( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, args: []JSValue, use_inline_storage: bool, need_original_snapshot: bool, windows: FrameStorageWindows, ) !void`。
+- **签名**：`pub fn initArgumentsMoved( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, args: []JSValue, need_original_snapshot: bool, windows: FrameStorageWindows, ) !void`。
 - **作用**：尾调用复用：把已有槽 move 进帧，源槽写成 undefined。
 - **实现**：同 `initArguments` 算 `frame_arg_count`，`allocArgsSlice` 后补 undefined 尾槽、`@memcpy` 实参、再把源 `args` 整段 `@memset(undefined)`（值的所有权转移，不做 refcount）；需要快照时用**已搬进帧的** `self.args[0..args.len]` 做 `initOriginalArgsSnapshot`。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 源切片的 backing 仍归调用方，帧只接管其中的值。 调用：唯一调用方 `inline_calls.setupInlineEntry`（`:3189`），即 `canBorrowSourceArgs` 为假（需要补形参槽，或源槽已标记 moved）的那一臂。
 
-### `Frame.initArgumentsBorrowedSlots` (`src/exec/frame.zig:441`)
+### `Frame.initArgumentsBorrowedSlots` (`src/exec/frame.zig:439`)
 
-- **签名**：`pub fn initArgumentsBorrowedSlots( self: *Frame, account: *memory.MemoryAccount, args: []JSValue, use_inline_storage: bool, need_original_snapshot: bool, windows: FrameStorageWindows, ) !void`。
+- **签名**：`pub fn initArgumentsBorrowedSlots( self: *Frame, account: *memory.MemoryAccount, args: []JSValue, need_original_snapshot: bool, windows: FrameStorageWindows, ) !void`。
 - **作用**：栈上 JS→JS 且无需补参：直接借用 argv 切片（qjs `arg_buf = argv`）。
 - **实现**：记 `actual_arg_count`，断言 `args.len >= function.arg_count`（借用前提：不需要补形参槽），需要时先做 original-args 快照，最后把 `self.args` 直接指向调用方的槽。源 backing 必须活到帧拆除；帧释放值但不释放 backing。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：唯一调用方 `inline_calls.setupInlineEntry`（`:3180`），即 `canBorrowSourceArgs` 为真（argc ≥ `arg_count` 且源槽未 moved）的那一臂。
 
-### `Frame.allocArgsSlice` (`src/exec/frame.zig:457`)
+### `Frame.allocArgsSlice` (`src/exec/frame.zig:454`)
 
-- **签名**：`fn allocArgsSlice( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, frame_arg_count: usize, use_inline_storage: bool, window: ?[]JSValue, ) ![]JSValue`。
+- **签名**：`fn allocArgsSlice( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, frame_arg_count: usize, window: ?[]JSValue, ) ![]JSValue`。
 - **作用**：优先用预切窗口/arena，否则 `allocOwnedStorage`。
-- **实现**：给了 `window` 就断言长度相符后直接用；否则有 arena 就 `arena.carve`；都不成才 `allocOwnedStorage` 拿自有 heap 段。`use_inline_storage` 参数当前被 `_ =` 忽略。
-- **所有权 / 错误 / 调用**：错误：error union，来自 `allocOwnedStorage`。所有权：三级回退——调用方给了窗口就直接用（断言长度相符，所有权仍在调用方）；否则试 `VmStackArena.carve`（成批回收）；都不行才 `allocOwnedStorage` 让帧自己持有并在 deinit 释放。`use_inline_storage` 形参当前被丢弃（`_ =`）。调用：本文件 `:399`（`initArguments`）与 `:425`。
+- **实现**：给了 `window` 就断言长度相符后直接用；否则有 arena 就 `arena.carve`；都不成才 `allocOwnedStorage` 拿自有 heap 段。
+- **所有权 / 错误 / 调用**：错误：error union，来自 `allocOwnedStorage`。所有权：三级回退——调用方给了窗口就直接用（断言长度相符，所有权仍在调用方）；否则试 `VmStackArena.carve`（成批回收）；都不行才 `allocOwnedStorage` 让帧自己持有并在 deinit 释放。（原先整条 `initArguments*` → `allocArgsSlice`/`initOriginalArgsSnapshot` 链上传的 `use_inline_storage` 实参在这三个函数里都只被 `_ =` 丢弃，已整链删参；`vm_call.initFrameLocals`/`initFrameVarRefs` 上的同名形参仍是活的。）调用：本文件 `:399`（`initArguments`）与 `:425`。
 
-### `Frame.initOriginalArgsSnapshot` (`src/exec/frame.zig:476`)
+### `Frame.initOriginalArgsSnapshot` (`src/exec/frame.zig:471`)
 
-- **签名**：`fn initOriginalArgsSnapshot( self: *Frame, account: *memory.MemoryAccount, args: []const JSValue, use_inline_storage: bool, need_original_snapshot: bool, window: ?[]JSValue, ) !void`。
+- **签名**：`fn initOriginalArgsSnapshot( self: *Frame, account: *memory.MemoryAccount, args: []const JSValue, need_original_snapshot: bool, window: ?[]JSValue, ) !void`。
 - **作用**：先 ensureCold 再复制；分配失败不得动源槽。
-- **实现**：`args` 为空或不需要快照就直接返回；否则先 `ensureCold`（先立好析构 owner，再复制引用），窗口给了就断言长度相符、没给就 `allocOwnedStorage`，逐个复制后写 `cold.original_args`。`use_inline_storage` 被忽略。
+- **实现**：`args` 为空或不需要快照就直接返回；否则先 `ensureCold`（先立好析构 owner，再复制引用），窗口给了就断言长度相符、没给就 `allocOwnedStorage`，逐个复制后写 `cold.original_args`。
 - **所有权 / 错误 / 调用**：错误：error union，来自 `ensureCold` 与快照窗口的分配。所有权：`args.len == 0` 或不需要快照时直接返回；否则先 `ensureCold` 再把 `original_args` 存进 `FrameCold`（优先用预切窗口，否则帧自有存储），内容是调用前实参的副本。调用：本文件三处——`initArguments`（`src/exec/frame.zig:405`）、`initArgumentsMoved`（`:432`，传已搬进帧的 `self.args`）、`initArgumentsBorrowedSlots`（`:452`，传借用前的源槽）。
 
-### `Frame.installOwnedStorage` (`src/exec/frame.zig:500`)
+### `Frame.installOwnedStorage` (`src/exec/frame.zig:493`)
 
 - **签名**：`pub fn installOwnedStorage(self: *Frame, storage: []JSValue) void`。
 - **作用**：挂上自有 backing 并标 `ownership.storage=.owned`。
 - **实现**：断言当前还是 `.borrowed`，写 `storage_values`；只有 `storage.len != 0` 才标成 `.owned`（空切片保持 `.borrowed`）。
 - **所有权 / 错误 / 调用**：错误：无（`assert` 要求此前 storage 还是 borrowed）。所有权：这一步把整块 backing 的释放义务转给 Frame——只有非空切片才置 `.owned`，`deinit`/`releaseOwnedStorage` 据此 `account.free`。调用：本文件 `:520`（`allocOwnedStorage`）、`src/exec/inline_calls.zig:3165`，以及 `src/exec/zjs_vm.zig:664`、`:676`（arena 切不动改堆时）。
 
-### `Frame.installResidentStorage` (`src/exec/frame.zig:506`)
+### `Frame.installResidentStorage` (`src/exec/frame.zig:499`)
 
 - **签名**：`pub fn installResidentStorage(self: *Frame, storage: []JSValue) void`。
 - **作用**：挂上驻留 backing，所有权仍 borrowed。
 - **实现**：断言当前是 `.borrowed`，只写 `storage_values`，不改 `ownership.storage`——backing 归 `GeneratorExecutionState` 或预切它的调用方。
 - **所有权 / 错误 / 调用**：错误：无（同样 `assert` 前置 borrowed）。所有权：与 `installOwnedStorage` 相反——只记下窗口指针、**不**改 `ownership.storage`，因为驻留 storage 归 `GeneratorExecutionState`，帧 pop 时不得释放。调用：`src/exec/zjs_vm.zig:630`、`:642`。
 
-### `Frame.allocOwnedStorage` (`src/exec/frame.zig:511`)
+### `Frame.allocOwnedStorage` (`src/exec/frame.zig:504`)
 
 - **签名**：`pub fn allocOwnedStorage(self: *Frame, account: *memory.MemoryAccount, count: usize) ![]JSValue`。
 - **作用**：heap 分配并 install；已有 owned 存储则拒绝以免泄漏第二块。
 - **实现**：先 `account.alloc(JSValue, count)` 分配。随后一道防重检查：如果本帧已经持有一块自有 storage（`ownership.storage == .owned` 且 `storage_values.len != 0`），就把刚分配的这块 `free` 掉并返回 `error.OutOfMemory`——注释说明不接收预切窗口的动态增长路径本来就罕见，与其悄悄泄漏第二块 backing，不如把所有权规则摆明。检查通过才 `installOwnedStorage(values)` 装上并返回切片。
 - **所有权 / 错误 / 调用**：错误：`error.OutOfMemory`——分配成功但发现帧已经持有一块 owned storage 时，会把刚拿到的内存 free 掉再返回 OOM（防止泄漏旧块）。所有权：分配自 `MemoryAccount`，随即 `installOwnedStorage` 把释放义务记到帧上。调用：`src/exec/vm_call.zig:278`、`:389`，本文件 `:473`（实参窗口）、`:494`（original_args 快照）、`:661`（open var-ref 槽）。
 
-### `Frame.deinit` (`src/exec/frame.zig:524`)
+### `Frame.deinit` (`src/exec/frame.zig:517`)
 
 - **签名**：`pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void`。
 - **作用**：通用（非内联调用）路径上的 Frame 拆除：把两个调用绑定写回 undefined，再归还自有存储与冷盒。
 - **实现**：把 `this_value` / `current_function` 写回 undefined，`releaseOwnedStorage`（关 open cell、清窗口、清 `original_args`、free owned backing），最后 `freeCold` 销毁冷盒。
 - **所有权 / 错误 / 调用**：所有权：释放本 Frame 自有的存储切片（`ownership.storage == .owned` 时）与冷盒，并关闭仍开着的 var-ref cell；借用的窗口不动。 错误：无。 调用：`zjs_vm.zig:482` 入口帧出口的 `defer`（驻留空壳除外）、`inline_calls.zig:3082` 通用 push 中途失败的 `errdefer`，以及 `frame.zig:685` 本文件单测的 `defer`；内联调用帧的常规拆除走的是 `deinitInlineCall`，不是这里。
 
-### `Frame.deinitInlineCall` (`src/exec/frame.zig:534`)
+### `Frame.deinitInlineCall` (`src/exec/frame.zig:527`)
 
 - **签名**：`pub inline fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void`。
 - **作用**：同机返回热路径：关 open var-ref、freeCold、owned storage free。
 - **实现**：三条带守卫的动作，顺序固定：`open_var_refs.len != 0` 时 `closeOpenVarRefs(rt)` 把逃逸变量搬进堆 cell；`cold != null` 时 `freeCold(account)` 释放冷盒；`ownership.storage == .owned and storage_values.len != 0` 时 `account.free(JSValue, storage_values)` 归还自有 slab。arena 借用的窗口不在这里还——那是 Entry 侧 `vm_stack.restore(arena_mark)` 的事。
 - **所有权 / 错误 / 调用**：错误：无。所有权：内联调用帧的三步收尾——先 `closeOpenVarRefs` 把逃逸绑定搬进堆 cell，再 `freeCold` 释放 `FrameCold`，最后只有 storage 真是 `.owned` 且非空才 `account.free`（arena 窗口留给 watermark 回滚）。调用：`src/exec/inline_calls.zig:808`（`deinitConstructorReturned` 的非 simple 臂）与 `:823`（`deinitGeneralResources`）。
 
-### `Frame.releaseOwnedStorage` (`src/exec/frame.zig:540`)
+### `Frame.releaseOwnedStorage` (`src/exec/frame.zig:533`)
 
 - **签名**：`pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void`。
 - **作用**：关 open var-ref、清空窗口、free owned backing。
 - **实现**：先 `closeOpenVarRefs`，记下 `storage_values` 与其 ownership，然后把 locals/args/var_refs/open_var_refs/storage_values 全清空、`ownership.var_refs` 复位成 `.owned`、`ownership.storage` 复位成 `.borrowed`；有冷盒就 `releaseColdStorage` 丢掉指向该 backing 的 `original_args`（保留冷盒与其 new-target 绑定）；最后只有原来是 `.owned` 且非空才 `account.free`。
 - **所有权 / 错误 / 调用**：错误：无。所有权：比 `deinitInlineCall` 更彻底——先关 open var-ref，再把 locals/args/var_refs/open_var_refs/storage 全部清成空切片并把 `ownership.storage` 退回 `.borrowed`（便于帧被复用），cold 走 `releaseColdStorage`，最后才 free 取下来的旧 owned 块。调用：`src/exec/vm_call.zig:268` 的 `errdefer`（storage 未转移时回滚）与本文件 `:530`。
 
-### `Frame.closeOpenVarRefs` (`src/exec/frame.zig:560`)
+### `Frame.closeOpenVarRefs` (`src/exec/frame.zig:553`)
 
 - **签名**：`pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void`。
 - **作用**：把 open 表交给 `open_bindings.Table.closeAll`。
 - **实现**：把 `self.open_var_refs` 这段槽包成 `open_bindings_mod.Table{ .cells = ... }`，调它的 `closeAll(rt)`。真正的关闭语义（把仍被闭包引用的槽提升成堆 cell、其余置空）在 open-bindings 模块里，`Frame` 这边只负责提供槽窗口。`rt` 形参声明成 `anytype`，因此 frame.zig 在类型上不依赖 runtime 模块。
 - **所有权 / 错误 / 调用**：错误：无。所有权：把 `open_var_refs` 包成 `open_bindings.Table` 后 `closeAll(rt)`——逃逸的绑定被提升成堆 `VarRef` cell（所有权转给闭包），槽本身仍归帧窗口。调用：本文件 `:535`、`:541`，以及 `src/exec/inline_calls.zig:742`、`:757`、`:805` 三处 simple teardown。
 
-### `Frame.captureLocal` (`src/exec/frame.zig:570`)
+### `Frame.captureLocal` (`src/exec/frame.zig:563`)
 
 - **签名**：`pub fn captureLocal(self: *Frame, rt: anytype, local_idx: usize) !*core.VarRef`。
 - **作用**：为某个 local 槽建或复用 open `VarRef`（qjs get_var_ref；参数槽走 `captureArg`）。
 - **实现**：对齐 qjs `get_var_ref`（quickjs.c:16997-17039）：断言 `local_idx` 在 `locals`/`varDefs()` 范围内，Debug/Safe 下若该槽已是 cell 则 `error.InvalidBytecode`；用 `localOpenBindingIndex(local_idx).?` 取 open 槽号，越出窗口返回 `error.InvalidBytecode`；已有 cell 就（Debug/Safe 校验 `is_open` 与 `pvalue == &locals[i]` 后）复用，否则 `VarRef.createOpen(rt, &locals[local_idx])` 并按 varDef 抄 `is_const`/`is_lexical`/`is_function_name`，登记回 open 槽。
 - **所有权 / 错误 / 调用**：错误：error union；新 cell 登记在帧的 open 表里，由 `closeOpenVarRefs` 关闭。 调用：同 `captureArg`（`object_ops.zig` / `vm_property_ref.zig` / `eval_ops.zig`）。
 
-### `Frame.captureArg` (`src/exec/frame.zig:598`)
+### `Frame.captureArg` (`src/exec/frame.zig:591`)
 
 - **签名**：`pub fn captureArg(self: *Frame, rt: anytype, arg_idx: usize) !*core.VarRef`。
 - **作用**：为参数槽建/复用 open VarRef，对齐 get_var_ref。
 - **实现**：与 `captureLocal` 同形：断言 `arg_idx < args.len`，Debug/Safe 下若该槽已是 cell 则 `error.InvalidBytecode`；用 `argOpenBindingIndex(arg_idx).?` 定位 open 槽，越出窗口返回 `error.InvalidBytecode`；已有 cell 就（Debug/Safe 校验 `is_open` 与 `pvalue` 指向 `args[i]` 后）复用，否则 `VarRef.createOpen(rt, &args[arg_idx])` 并登记。参数 cell 不带 const/lexical 标志。
 - **所有权 / 错误 / 调用**：错误：error union；cell 归 open 表，`closeOpenVarRefs` 统一收口。 调用：闭包 capture 填充与 mapped-arguments 构造（`object_ops.zig`）、`make_var_ref` 一类引用 opcode（`vm_property_ref.zig`）、直接 eval 的外层帧捕获（`eval_ops.zig`）。
 
-### `Frame.closeLocalBinding` (`src/exec/frame.zig:619`)
+### `Frame.closeLocalBinding` (`src/exec/frame.zig:612`)
 
 - **签名**：`pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void`。
 - **作用**：按 local 的 open binding index 关闭对应 cell。
 - **实现**：`local_idx` 越出 `locals` 或 `varDefs()` 即 `error.InvalidBytecode`；该 local 没有 open binding index 则什么都不做直接返回；否则把 `open_var_refs` 包成 `open_bindings.Table` 调 `close(rt, binding_idx)`。
 - **所有权 / 错误 / 调用**：错误：`error.InvalidBytecode`（局部索引越界）或 `Table.close` 的错误；局部没有对应 open binding 时直接返回。所有权：关闭单个绑定，把值搬进堆 cell。调用：`src/exec/vm_property_locals.zig:111` 与 `:271`（`close_loc` 语义的两处）。
 
-### `Frame.closeParameterEnvironmentVarRefs` (`src/exec/frame.zig:628`)
+### `Frame.closeParameterEnvironmentVarRefs` (`src/exec/frame.zig:621`)
 
 - **签名**：`pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) !void`。
 - **作用**：generator 体边界关闭参数环境别名，保留指向驻留 args 的别名。
 - **实现**：把 `open_var_refs` 包成 `open_bindings.Table`，遍历 `function.varDefs()`，跳过未被捕获的，其余按 `vd.var_ref_idx` 逐个 `table.close(rt, ...)`。只关 varDef 侧（局部/参数环境别名），指向驻留 args backing 的别名不在这张表里。
 - **所有权 / 错误 / 调用**：错误：error union。 调用：`vm_gen_async.zig` 在 generator 尚未 started 时于函数体边界调用一次。
 
-### `Frame.installOpenVarRefSlots` (`src/exec/frame.zig:636`)
+### `Frame.installOpenVarRefSlots` (`src/exec/frame.zig:629`)
 
 - **签名**：`pub fn installOpenVarRefSlots(self: *Frame, slots: []?*core.VarRef) !void`。
 - **作用**：安装预切 open 窗口并 memset null。
 - **实现**：`slots.len` 与 `function.openVarRefCount()` 不等即 `error.InvalidBytecode`；否则挂上窗口并整段 `@memset(null)`。
 - **所有权 / 错误 / 调用**：错误：`error.InvalidBytecode`——传入槽数与 `function.openVarRefCount()` 不符即拒绝。所有权：槽窗口由调用方（arena 预切或 slab 分区）提供，帧只借用；`@memset(null)` 保证收集器看到的是确定值。调用：`src/exec/zjs_vm.zig:691` 与 `src/exec/inline_calls.zig:3202`。
 
-### `Frame.ensureOpenVarRefSlots` (`src/exec/frame.zig:642`)
+### `Frame.ensureOpenVarRefSlots` (`src/exec/frame.zig:635`)
 
-- **签名**：`pub fn ensureOpenVarRefSlots( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, use_inline_storage: bool, ) !void`。
+- **签名**：`pub fn ensureOpenVarRefSlots( self: *Frame, account: *memory.MemoryAccount, arena: ?*runtime.VmStackArena, ) !void`。
 - **作用**：没有窗口则 arena/heap 切 `?*VarRef` 槽。
-- **实现**：已有窗口时长度必须等于 `openVarRefCount()`，否则 `error.InvalidBytecode`（相等则直接返回）；`count == 0` 直接返回；否则优先 `arena.carveTyped(?*VarRef, count)`，失败就按字节数算 JSValue 槽走 `allocOwnedStorage` 再 `bytesAsSlice` 重解释；最后 `@memset(null)` 并挂上。`use_inline_storage` 被忽略。
+- **实现**：已有窗口时长度必须等于 `openVarRefCount()`，否则 `error.InvalidBytecode`（相等则直接返回）；`count == 0` 直接返回；否则优先 `arena.carveTyped(?*VarRef, count)`，失败就按字节数算 JSValue 槽走 `allocOwnedStorage` 再 `bytesAsSlice` 重解释；最后 `@memset(null)` 并挂上。
 - **所有权 / 错误 / 调用**：错误：`error.InvalidBytecode`（已装的槽数不符）或分配/算术溢出错误。所有权：已有槽就复用；否则优先 `VmStackArena.carveTyped`（借用、成批回收），失败才按字节数折算成 `JSValue` 槽从 `allocOwnedStorage` 要（帧自有，deinit 释放）；两条路都 `@memset(null)`。调用：`src/exec/zjs_vm.zig:691` 一线与 `src/exec/inline_calls.zig:3204`。
 
-### `Frame.setLocal` (`src/exec/frame.zig:668`)
+### `Frame.setLocal` (`src/exec/frame.zig:663`)
 
 - **签名**：`pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, index: usize, value: JSValue) !void`。
-- **作用**：必要时 `growLocalsCapacity` 后写入。
-- **实现**：两行：`growLocalsCapacity(account, self, index)` 先保证 `locals` 长到能容纳 `index`（可能触发分配，失败沿 error union 上抛），随后 `self.locals[index] = value`。这条路径只服务于需要动态扩 locals 的冷场景，正常建帧时 locals 窗口在 slab 上一次切好。
+- **作用**：必要时 `growLocalsCapacity` 后写入。**test-only**（见下）。
+- **实现**：两行：`growLocalsCapacity(account, self, index)` 先保证 `locals` 长到能容纳 `index`（可能触发分配，失败沿 error union 上抛），随后 `self.locals[index] = value`。这条路径只服务于需要动态扩 locals 的合成帧，正常建帧时 locals 窗口按 FunctionBytecode 在 slab 上一次切好；源码里已标注为 test-only。
 - **所有权 / 错误 / 调用**：错误：error union（`growLocalsCapacity` 的 OOM / `InvalidBytecode`）。 调用：生产代码里没有调用方；只有 frame.zig 自带的 "Frame setLocal preserves inline locals while growing" 这类合成/夹具用例走它。
 
-### `ensureVarRefsCapacity` (`src/exec/frame.zig:697`)
+### `ensureVarRefsCapacity` (`src/exec/frame.zig:692`)
 
 - **签名**：`pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void`。
 - **作用**：合成字节码稀疏增长 var_refs；与其它窗口共享的 owned slab 拒绝增长。
-- **实现**：`idx` 已在范围内直接返回。若当前 owned slab 不止装着 var_refs（`!ownedStorageContainsOnlyVarRefs`）就拒绝增长，返回 `error.InvalidBytecode`——共享 slab 上换掉一段会让其它窗口悬空。否则按 `next_len` 个指针槽算出 JSValue 槽数、`alloc`（`errdefer` free）、`bytesAsSlice` 成新 `[]*VarRef`，拷回旧 cell，空位用 `VarRef.createClosed(undefined)` 填满（槽契约是「每槽都是活 cell」），再改写 `var_refs`/`storage_values`/两个 ownership，最后释放旧 owned storage。
+- **实现**：`idx` 已在范围内直接返回。若当前 owned slab 不止装着 var_refs（`!ownedStorageContainsOnlyVarRefs`）就拒绝增长，返回 `error.InvalidBytecode`——共享 slab 上换掉一段会让其它窗口悬空。否则按 `next_len` 个指针槽算出 JSValue 槽数、`alloc`（`errdefer` free）、`bytesAsSlice` 成新 `[]*VarRef`，拷回旧 cell（原来这条拷贝写成 `if (borrowed_cells) cell else cell` 的死条件，已折叠），空位用 `VarRef.createClosed(undefined)` 填满（槽契约是「每槽都是活 cell」），再改写 `var_refs`/`storage_values`/两个 ownership，最后释放旧 owned storage。填充循环**没有**回滚 errdefer（原来那个空 errdefer 已删）：中途失败时 `frame.var_refs` 仍是旧窗口，已建好的 cell 已登记进 tracing GC，是普通不可达垃圾，手工销毁反而会与下一次 sweep 二次释放——与 `vm_call.initFrameVarRefs` 的建 cell 循环同一纪律。
 - **所有权 / 错误 / 调用**：错误：error union。 分配：`ctx.runtime.memory`；新 backing 记在 `storage_values` 上，由 Frame 析构释放。 调用：闭包 capture 填充（`object_ops.zig:418`）、`call_runtime.zig:3154`/`:3283` 的 var-ref 路径、`vm_property_ref.zig:170`（`make_var_ref_ref`），以及 `slot_ops.zig:134`/`:203`/`:265` 三处 var-ref 读写前的按需扩容——都只在合成/legacy 字节码的稀疏索引下才真正增长。
 
-### `growLocalsCapacity` (`src/exec/frame.zig:743`)
+### `growLocalsCapacity` (`src/exec/frame.zig:737`)
 
 - **签名**：`fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize) !void`。
 - **作用**：仅在尚无 open cell 时允许扩 locals（地址必须对 open 稳定）。
 - **实现**：`idx` 已在范围内直接返回。owned slab 若不止装着 locals（`!ownedStorageContainsOnlyLocals`）就 `error.InvalidBytecode`；再用 `open_bindings.Table.hasOpen()` 检查——已经有 open cell 就不许搬 locals（cell 的 `pvalue` 指着旧地址），同样 `error.InvalidBytecode`，而且这道检查排在分配之前。然后 `alloc`（`errdefer` free）、拷旧值、尾部填 undefined，改写 `locals`/`storage_values`/ownership，最后释放旧 owned storage。
 - **所有权 / 错误 / 调用**：错误：error union。 分配：`MemoryAccount`；新 backing 即 `storage_values`。 调用：只有 `Frame.setLocal`（合成/夹具帧）。
 
-### `ownedStorageContainsOnlyLocals` (`src/exec/frame.zig:771`)
+### `ownedStorageContainsOnlyLocals` (`src/exec/frame.zig:765`)
 
 - **签名**：`fn ownedStorageContainsOnlyLocals(frame: *const Frame) bool`。
 - **作用**：owned backing 是否就是 locals 这一段。
 - **实现**：storage 或 locals 为空、起址不同、长度不等都返回 false；再用 `sliceOverlapsStorage` 确认 args / `originalArgs()` / var_refs / open_var_refs 都不落在这块 storage 里，全不重叠才为 true。
 - **所有权 / 错误 / 调用**：错误：无。所有权：判定谓词——旧 owned 块是否**只**装着 locals（指针与长度都和 `frame.locals` 重合，且 args/original_args/var_refs/open_var_refs 都不落在这块里），据此决定换窗口时能否安全 free 旧块。调用：唯一调用方 `src/exec/frame.zig:748`。
 
-### `ownedStorageContainsOnlyVarRefs` (`src/exec/frame.zig:782`)
+### `ownedStorageContainsOnlyVarRefs` (`src/exec/frame.zig:776`)
 
 - **签名**：`fn ownedStorageContainsOnlyVarRefs(frame: *const Frame) bool`。
 - **作用**：owned backing 是否就是 var_refs 指针尾。
 - **实现**：storage 或 var_refs 为空、起址不同都返回 false；storage 槽数必须正好等于指针字节数向上取整出的 JSValue 槽数；再用 `sliceOverlapsStorage` 确认 locals / args / `originalArgs()` / open_var_refs 都不在这块里。
 - **所有权 / 错误 / 调用**：错误：无（算术溢出用 `catch return false` 保守处理）。所有权：与上一条对称——旧 owned 块是否只装着 `var_refs` 指针数组（长度按指针字节折算成值槽比对）。调用：唯一调用方 `src/exec/frame.zig:707`。
 
-### `sliceOverlapsStorage` (`src/exec/frame.zig:795`)
+### `sliceOverlapsStorage` (`src/exec/frame.zig:789`)
 
 - **签名**：`fn sliceOverlapsStorage(comptime T: type, values: []const T, storage: []const JSValue) bool`。
 - **作用**：两段是否字节重叠。
@@ -466,14 +466,14 @@
 - **实现**：三行：`reserveAdditional(1)` 先确保有一格（可能扩容或撞 `stackLimit` 报 `error.StackOverflow`），然后 `top_ptr[0] = value` 写入、`top_ptr += 1` 推进。
 - **所有权 / 错误 / 调用**：错误：`error.OutOfMemory`/超限——`reserveAdditional(1)` 在需要扩容时向 `MemoryAccount` 要或撞 `stackLimit`。所有权：按「借用值」语义压栈（当前实现与 `pushOwned` 同构，因为 VM 值不计引用计数）。调用：`src/exec/` 下约 40 处，如 `src/exec/vm_property_locals.zig:126`、`src/exec/iterator_ops.zig:86`、`src/exec/object_ops.zig:3908`；`gc.zig` 等处的 `push` 是别的容器。
 
-### `Stack.pushOwned` (`src/exec/stack.zig:220`)
+### `Stack.pushOwned` (`src/exec/stack.zig:223`)
 
-- **签名**：`pub fn pushOwned(self: *Stack, value: JSValue) !void`。
-- **作用**：与 `push` 相同（所有权语义由调用方保证）。
-- **实现**：与 `push` 逐字相同（`reserveAdditional(1)` → 写 `top_ptr[0]` → `top_ptr += 1`）。之所以并存两个名字，是因为 VM 值不计引用计数，所有权只是调用侧的约定，用不同的函数名把这个约定记录在调用点上。
-- **所有权 / 错误 / 调用**：错误：同 `push`，来自 `reserveAdditional`。所有权：语义上压入一个「已归栈所有」的新值（如刚算出的结果），实现与 `push` 相同。调用：`src/exec/vm_arith.zig:71`、`:111`、`:138` 等算术结果回压点，以及 `src/exec/iterator_ops.zig:81`、`:91` 等，共 70 余处。
+- **签名**：`pub const pushOwned = push;`（即 `pub fn pushOwned(self: *Stack, value: JSValue) !void`）。
+- **作用**：`push` 的记号性别名。
+- **实现**：一行别名，**不是**第二个函数体。tracing GC 之后 VM 值不计引用计数，「借用/自有」在实现上没有任何差别，两个名字只把调用点的约定写进代码；此前的逐字复制已折叠成别名。
+- **所有权 / 错误 / 调用**：错误：同 `push`，来自 `reserveAdditional`。所有权：语义上压入一个「已归栈所有」的新值（如刚算出的结果），运行时行为与 `push` 完全一致。调用：`src/exec/vm_arith.zig:71`、`:111`、`:138` 等算术结果回压点，以及 `src/exec/iterator_ops.zig:81`、`:91` 等，共 70 余处。
 
-### `Stack.pushAssumeCapacity` (`src/exec/stack.zig:226`)
+### `Stack.pushAssumeCapacity` (`src/exec/stack.zig:225`)
 
 - **签名**：`pub fn pushAssumeCapacity(self: *Stack, value: JSValue) void`。
 - **作用**：已保证容量时写入。
@@ -482,47 +482,47 @@
 
 ### `Stack.pushOwnedAssumeCapacity` (`src/exec/stack.zig:232`)
 
-- **签名**：`pub fn pushOwnedAssumeCapacity(self: *Stack, value: JSValue) void`。
-- **作用**：已保证容量的 owned 写入。
-- **实现**：与 `pushAssumeCapacity` 逐字相同（断言 `len() < capacity` 后写入并推进 top）；名字只标记调用方交出的是自有引用。
+- **签名**：`pub const pushOwnedAssumeCapacity = pushAssumeCapacity;`（即 `pub fn pushOwnedAssumeCapacity(self: *Stack, value: JSValue) void`）。
+- **作用**：`pushAssumeCapacity` 的记号性别名（已保证容量的 owned 写入）。
+- **实现**：一行别名；理由同 `pushOwned`。
 - **所有权 / 错误 / 调用**：错误：无——`assert(len() < capacity)` 要求调用方（建帧时按 `stack_size + 1` 预留）已保证容量。所有权：同 `pushOwned`，但省掉扩容检查，是热路径版本。调用：`src/exec/` 下 142 处，如 `src/exec/iterator_ops.zig:421`、`src/exec/inline_calls.zig:5086`、`:5092`（返回值回压）。
 
-### `Stack.pop` (`src/exec/stack.zig:238`)
+### `Stack.pop` (`src/exec/stack.zig:234`)
 
 - **签名**：`pub fn pop(self: *Stack) !JSValue`。
 - **作用**：弹出一层。
 - **实现**：`top_ptr == values` 表示空栈，返回 `error.StackUnderflow`；否则 `top_ptr -= 1` 再读 `top_ptr[0]` 返回。刻意**不**把弹出的槽写成 undefined——值的所有权随返回值移交调用方，而该槽位于活前缀之上，下一次 push 会覆盖它。
 - **所有权 / 错误 / 调用**：错误：`error.StackUnderflow`（空栈）。所有权：值交给调用方，槽不清空——`top_ptr` 退一格即可，收集器只看活前缀。调用：`src/exec/` 下约 189 处操作数出栈，如 `src/exec/vm_property_field.zig:67`、`:238`；`src/core/` 的同名命中属别的容器。
 
-### `Stack.peek` (`src/exec/stack.zig:244`)
+### `Stack.peek` (`src/exec/stack.zig:240`)
 
 - **签名**：`pub fn peek(self: Stack) ?JSValue`。
 - **作用**：看栈顶，空则 null。
 - **实现**：`top_ptr == values` 返回 null，否则读 `(top_ptr - 1)[0]`。不改 `top_ptr`，值仍归栈所有。注意形参是 `self: Stack`（按值），所以这是一个纯读访问器。
 - **所有权 / 错误 / 调用**：错误：无；空栈返回 null（调用方通常翻成 `error.StackUnderflow`）。所有权：返回栈顶值的副本，槽仍在栈上。调用：`src/exec/` 下 11 处，如 `src/exec/object_ops.zig:4279`、`src/exec/vm_literal.zig:216`（`json_ops.zig` 里的同名命中是 JSON 解析自己的栈）。
 
-### `Stack.peekBorrowed` (`src/exec/stack.zig:249`)
+### `Stack.peekBorrowed` (`src/exec/stack.zig:246`)
 
-- **签名**：`pub fn peekBorrowed(self: Stack) ?JSValue`。
-- **作用**：同 peek（借用语义）。
-- **实现**：与 `peek` 逐字相同：空栈返回 null，否则返回 `(top_ptr - 1)[0]`。名字上的 `Borrowed` 只是提醒调用方不得把这个值当成额外一份所有权转交出去。
-- **所有权 / 错误 / 调用**：错误：无；空栈返回 null。所有权：与 `peek` 实现相同，命名上强调返回值是借用的——调用方不得把它当作额外一份所有权交出去。调用：`src/exec/vm_literal.zig:149`、`src/exec/iterator_ops.zig:343`、`src/exec/vm_call.zig:890`、`src/exec/vm_value.zig:272`、`src/exec/slot_ops.zig:71`、`:118`。
+- **签名**：`pub const peekBorrowed = peek;`（即 `pub fn peekBorrowed(self: Stack) ?JSValue`）。
+- **作用**：`peek` 的记号性别名（借用语义）。
+- **实现**：一行别名；名字上的 `Borrowed` 只是提醒调用方不得把这个值当成额外一份所有权转交出去。
+- **所有权 / 错误 / 调用**：错误：无；空栈返回 null。所有权：与 `peek` 行为相同，命名上强调返回值是借用的。调用：`src/exec/vm_literal.zig:149`、`src/exec/iterator_ops.zig:343`、`src/exec/vm_call.zig:890`、`src/exec/vm_value.zig:272`、`src/exec/slot_ops.zig:71`、`:118`。
 
-### `Stack.reserveAdditional` (`src/exec/stack.zig:254`)
+### `Stack.reserveAdditional` (`src/exec/stack.zig:248`)
 
 - **签名**：`pub fn reserveAdditional(self: *Stack, additional: usize) !void`。
 - **作用**：检查 limit 后 `reserveCapacityUpTo`。
 - **实现**：先算 `live_len = len()` 与 `stack_limit = stackLimit()`。溢出判断写成 `live_len > stack_limit or additional > stack_limit - live_len`——用减法而不是 `live_len + additional > stack_limit`，避免加法本身溢出；命中返回 `error.StackOverflow`。通过后 `reserveCapacityUpTo(live_len + additional, stack_limit)` 去实际扩容（倍增，上限夹到 `stack_limit`）。
 - **所有权 / 错误 / 调用**：错误：`error.StackOverflow`（`live_len + additional` 超过 `policy.limit`）或 `reserveCapacityUpTo` 的分配错误。所有权：本身不分配，扩容与旧 backing 的释放都在 `reserveCapacityUpTo` 里。调用：`src/exec/` 下 31 处压栈前预留，如 `src/exec/iterator_ops.zig:281`、`:537`。
 
-### `Stack.reserveFrameCapacity` (`src/exec/stack.zig:262`)
+### `Stack.reserveFrameCapacity` (`src/exec/stack.zig:256`)
 
 - **签名**：`pub fn reserveFrameCapacity(self: *Stack, frame_stack_size: usize) !void`。
 - **作用**：为整帧 stack_size+1 预留。
 - **实现**：`frame_stack_size > stackLimit()` 直接 `error.StackOverflow`；否则 `reserveCapacityUpTo(frame_stack_size + 1, frame_stack_size + 1)`——两个参数相同，意思是「恰好扩到这个帧声明需要的容量，一格不多」。容量取 `frame_stack_size + 1`，与建帧路径里 `function.stack_size + 1` 的口径一致。
 - **所有权 / 错误 / 调用**：错误：`error.StackOverflow`（帧要的槽数就超过上限）或分配错误。所有权：按 `frame_stack_size + 1` 精确预留（多出的 1 槽是 qjs 同款的余量），不做 2 倍增长。调用：唯一调用方 `src/exec/zjs_vm.zig:803`（入口帧建栈）。
 
-### `Stack.reserveCapacityUpTo` (`src/exec/stack.zig:267`)
+### `Stack.reserveCapacityUpTo` (`src/exec/stack.zig:261`)
 
 - **签名**：`fn reserveCapacityUpTo(self: *Stack, needed: usize, max_capacity: usize) !void`。
 - **作用**：倍增 heap 缓冲；从 arena/resident 长出则变成自有 heap。
@@ -530,6 +530,6 @@
 - **所有权 / 错误 / 调用**：错误：`error.StackOverflow`（翻倍到 `max_capacity` 仍不够）或 `memory.alloc` 的 OOM（带 `errdefer free`）。所有权：新 backing 从 `MemoryAccount` 分配，活值 `@memcpy` 过去；关键在于旧块**只有**在它既不是 arena 窗口也不是驻留窗口时才 `free`（那两种 backing 归 arena/generator 所有），同时把两个 policy 位清掉，表示这块栈从此自持。调用：本文件 `:259`（`reserveAdditional`）与 `:264`（`reserveFrameCapacity`）。
 ## 覆盖核对
 
-- 清单函数数: 72（`src/exec/frame.zig` 43 + `src/exec/stack.zig` 29）
-- 本文标题覆盖: 72
+- 清单函数数: 69（`src/exec/frame.zig` 43 + `src/exec/stack.zig` 26）
+- 本文标题覆盖: 72（含 3 条清单外的内嵌辅助函数标题）
 - 未覆盖: 无

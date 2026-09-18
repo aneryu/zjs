@@ -15,7 +15,7 @@
   - `Iterator`：`new_target === constructor` → TypeError（抽象）；否则 `GetPrototypeFromConstructor`（`reflectConstructPrototypeVm`）后 `Object.create` 普通对象。
   - `Function` / `AsyncFunction` / `GeneratorFunction` / `AsyncGeneratorFunction` → `constructDynamicFunctionFromSource`，kind 对应。
   - `ArrayBuffer` / `SharedArrayBuffer`：`typedArrayConstructToIndex` + `arrayBufferMaxByteLengthOption`，再 length construct。
-  - `DataView`：`dataViewConstructorArgs` 后 `dataViewConstructWithPrototype`。文件后部另有一段 DataView 走 `core.typed_array.dataViewConstruct`，因前面已 return，实际不可达。
+  - `DataView`：`dataViewConstructorArgs` 后 `dataViewConstructWithPrototype`。（文件后部原先还有一条走 `core.typed_array.dataViewConstruct` 的同名分支，因这里已无条件 return 而不可达，已删除。）
   - `RegExp` → `regExpConstructCall`。
   - `Promise` → `constructPromiseBuiltinSuperNativeVm`（见下）。
   - 其余先解析 `new_target.prototype` 到 `OwnedPrototype`（`defer deinit`）：
@@ -26,14 +26,14 @@
   - 未识别 → `null`（调用方改走普通 construct）。
 - **所有权 / 错误 / 调用**：返回 owned 实例。`prototype` handle 必须活到 `create` 保留原型之后。`null` 与 error 不同：`null` 表示「这不是我们认的内建」。WeakRef 目标须 `canBeHeldWeakly`；FinalizationRegistry 回调须可调用。
 
-### `constructPromiseBuiltinSuperNativeVm` (`src/exec/class_init_ops.zig:188`)
+### `constructPromiseBuiltinSuperNativeVm` (`src/exec/class_init_ops.zig:187`)
 
 - **签名**：`fn constructPromiseBuiltinSuperNativeVm( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, function_object: *core.Object, new_target: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：带不同 `new.target` 的 Promise 构造必须走可观察的 VM `[[Get]]` 取 `newTarget.prototype`。
 - **实现**：注释：直接 Promise 助手可以读普通 intrinsic data；`Reflect.construct` 与 derived `super()` 必须在 Promise native 帧仍活动时跑 accessor/Proxy。`preflightCFunctionCall`；`NativeBacktraceScope` push/defer；体内 `constructPromiseBuiltinSuperInScope`，错误经 `materializeRuntimeError`。
 - **所有权 / 错误 / 调用**：backtrace 与 realm 错误物化必须在 native 作用域内。
 
-### `constructPromiseBuiltinSuperInScope` (`src/exec/class_init_ops.zig:209`)
+### `constructPromiseBuiltinSuperInScope` (`src/exec/class_init_ops.zig:208`)
 
 - **签名**：`fn constructPromiseBuiltinSuperInScope( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, new_target: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：在已推 native 栈的前提下：校验 executor，取原型，调 `promiseConstructWithPrototype`。

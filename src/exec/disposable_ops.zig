@@ -677,8 +677,7 @@ pub fn asyncDisposableStackResolveStored(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const resolve_value = (stack.disposableStackAsyncResolveSlot().*) orelse return;
-    const resolve = resolve_value;
+    const resolve = (stack.disposableStackAsyncResolveSlot().*) orelse return;
     try promiseResolveCapability(ctx, output, global, resolve, value, caller_function, caller_frame);
     stack.clearDisposableStackAsyncCapability(ctx.runtime);
 }
@@ -692,8 +691,7 @@ pub fn asyncDisposableStackRejectStored(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const reject_value = (stack.disposableStackAsyncRejectSlot().*) orelse return;
-    const reject = reject_value;
+    const reject = (stack.disposableStackAsyncRejectSlot().*) orelse return;
     try promiseRejectCapability(ctx, output, global, reject, reason, caller_function, caller_frame);
     stack.clearDisposableStackAsyncCapability(ctx.runtime);
 }

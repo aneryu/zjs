@@ -1745,6 +1745,11 @@ const Resolver = struct {
         }
     }
 
+    /// Comptime-only baseline for the block above. It has no run-time caller:
+    /// the writer selects short forms through
+    /// `opcode.decode.selectSlotShortForm`, and this hand-written ladder exists
+    /// solely so that choice is cross-checked at compile time. Keep both in
+    /// sync, or delete them together.
     fn shortSlotOp(op_id: u8, idx: u16) ?u8 {
         if (idx < 4) {
             const base: ?u8 = switch (op_id) {

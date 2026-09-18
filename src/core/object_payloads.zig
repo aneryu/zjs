@@ -1190,8 +1190,9 @@ pub const FunctionPayload = struct {
 
     pub fn traceNativeRealm(self: *FunctionPayload, visitor: anytype) !void {
         try callVisitRealm(visitor, &self.native.realm.ptr);
-        // TGC S3 §2.2 edge F: the dispatch name is an owned atom id
-        // (`destroyNative` frees it).
+        // TGC S3 §2.2 edge F: the dispatch name is an atom id this payload
+        // names (`destroyNative` only writes the field back to
+        // `atom.null_atom`; there is no atom release any more).
         try atom.callVisitAtom(visitor, self.native.native_dispatch_name);
     }
 

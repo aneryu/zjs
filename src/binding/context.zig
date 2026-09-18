@@ -797,9 +797,13 @@ pub const JSContext = struct {
 
             if (name_opt) |name| {
                 if (msg_opt) |msg| {
-                    defer allocator.free(name);
-                    defer allocator.free(msg);
-                    return try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, msg });
+                    // Single release path: the two `errdefer`s above own `name`
+                    // and `msg` until `allocPrint` succeeds, so the frees below
+                    // only run once the error path can no longer fire.
+                    const joined = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, msg });
+                    allocator.free(name);
+                    allocator.free(msg);
+                    return joined;
                 }
                 return name;
             } else if (msg_opt) |msg| {
@@ -858,7 +862,7 @@ test "JSContext.toString performs ECMAScript ToString instead of tag assertion" 
     try std.testing.expect(object.asString() == null);
 
     const converted = try wrapper.toString(object);
-    try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().?.latin1);
+    try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().latin1);
 }
 
 /// A resolved native -> JS call target for embedders that call one function

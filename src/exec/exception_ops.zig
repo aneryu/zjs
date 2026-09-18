@@ -95,6 +95,10 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
     const message_value = try value_ops.createStringValue(ctx.runtime, message);
     try defineNonEnumValueProperty(ctx.runtime, object, core.atom.ids.message, message_value);
     try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
+    // No own `name` property: it lives on `prototype`, which the caller has
+    // already selected for exactly this name (same rule as
+    // `errorConstructWithPrototype`). `name` is kept so the call sites stay
+    // self-documenting about which error they are building.
     _ = name;
     return error_value;
 }
@@ -354,6 +358,11 @@ pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, messag
 }
 
 /// Throw an `InternalError` with `message` (mirrors QuickJS `JS_ThrowInternalError`).
+///
+/// The returned sentinel is deliberately `error.StackOverflow`, not an
+/// `InternalError`-shaped one: every caller is a stack/recursion budget guard
+/// (`vm_call`, `inline_calls`, `builtin_dispatch`), and that is the sentinel
+/// their unwind paths match on. The thrown JS value is the InternalError.
 pub fn throwInternalErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
     const error_value = try createNamedError(ctx, global, "InternalError", message);
     _ = ctx.throwValue(error_value);
@@ -449,7 +458,7 @@ pub fn callSiteMethodById(object: *core.Object, id: core.function.HostGlobalMeth
     };
 }
 
-pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
+fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
     const function_object = objectFromValue(current_function_value) orelse return fallback;
     const name_desc = (try function_object.getOwnProperty(ctx.runtime, core.atom.ids.name)) orelse return core.atom.ids.empty_string;
     if (name_desc.kind != .data or !name_desc.value.isString()) return core.atom.ids.empty_string;
@@ -758,7 +767,11 @@ fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, key: co
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, false, true));
 }
 
+/// Last-resort TDZ throw for the paths that have no realm (or whose error
+/// construction itself failed): park the bare `ReferenceError` atom id in the
+/// exception slot so the boundary that owns a realm can materialize the real
+/// error object by name.
 fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
-    const reference_error_atom: u32 = 209;
+    const reference_error_atom = comptime core.atom.predefinedId("ReferenceError", .string).?;
     _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom)));
 }

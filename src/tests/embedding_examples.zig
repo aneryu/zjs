@@ -32,17 +32,6 @@ const InterruptBudget = struct {
     }
 };
 
-fn testFixturePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return std.fs.path.resolve(allocator, &.{ "../..", path }),
-        else => return err,
-    };
-    file.close(io);
-    return allocator.dupe(u8, path);
-}
-
 test "embedding cookbook basic script eval example compiles and runs" {
     const allocator = std.testing.allocator;
     const rt = try zjs.JSRuntime.create(allocator);

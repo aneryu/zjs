@@ -209,7 +209,7 @@
 
 - **签名**：`fn publishNativeFunctionMetadataWork( rt: *JSRuntime, function_object: *Object, name: []const u8, length: i32, ) !void`。
 - **作用**：安装函数length/name并保存dispatch atom。
-- **实现**：先定义length为不可写不可枚举可配置的int32；名字为空用emptyString，ASCII用createAscii，否则createUtf8，同属性标志定义name。最后intern名字、shadeAtomIfMarking并写nativeDispatchNameSlot。
+- **实现**：先定义length为不可写不可枚举可配置的int32；名字为空用emptyString，ASCII用createAscii，否则createUtf8，随后无条件取其 value（两支相同的死分支已折叠），同属性标志定义name。最后intern名字、shadeAtomIfMarking并写nativeDispatchNameSlot。
 - **所有权 / 错误 / 调用**：前两属性用AssumingNew要求调用方保证新槽；失败可能已安装length/name，不回滚。name_value没有单独本地根帧，不能扩大包装根帧的覆盖范围；length不校验非负，dispatch写入不解析entry。
 
 ### `nativeDataFunctionWithPrototype` (`src/core/function.zig:215`)
@@ -313,245 +313,245 @@
 - **实现**：constructor、constructor_magic、constructor_or_func、constructor_or_func_magic 为 true；generic、getter/setter 和浮点叶子等其余协议为 false。
 - **所有权 / 错误 / 调用**：不检查函数对象或 InternalEntry 的 managed 覆盖项；这只是对 cproto 的纯分类。
 
-### `builtin_method_id_lookup.string.staticMethodId` (`src/core/host_function.zig:827`)
+### `builtin_method_id_lookup.string.staticMethodId` (`src/core/host_function.zig:828`)
 
 - **签名**：`pub fn staticMethodId(name: []const u8) ?u32`。
 - **作用**：将 String 静态方法名转换为域内记录 ID。
 - **实现**：逐字节精确匹配 fromCharCode、fromCodePoint、raw 并返回相应 StaticMethod 值；其余名称返回 null。
 - **所有权 / 错误 / 调用**：纯映射，无分配或运行时表查询；返回的不是包含 NativeBuiltinDomain 编码的完整 ID。
 
-### `builtin_method_id_lookup.string.prototypeMethodId` (`src/core/host_function.zig:834`)
+### `builtin_method_id_lookup.string.prototypeMethodId` (`src/core/host_function.zig:835`)
 
 - **签名**：`pub fn prototypeMethodId(name: []const u8) ?u32`。
 - **作用**：把支持的 String 原型方法名映射到域内记录 ID。
 - **实现**：显式名称比较链；toLocaleUpperCase 与 toUpperCase 共用 ID，toLocaleLowerCase 与 toLowerCase 共用 ID。未列出的名称（包括 substr、trimLeft、trimRight）返回 null。
 - **所有权 / 错误 / 调用**：区分大小写且不做规范化；识别名称不保证对象上的当前属性仍指向该内建函数。
 
-### `builtin_method_id_lookup.string.decodePrototypeMethodId` (`src/core/host_function.zig:870`)
+### `builtin_method_id_lookup.string.decodePrototypeMethodId` (`src/core/host_function.zig:871`)
 
 - **签名**：`pub fn decodePrototypeMethodId(id: u32) ?u32`。
 - **作用**：把字符串域的记录 ID 转为遗留分发编号。
 - **实现**：显式 switch，而非统一加减偏移；charAt 为 0、concat 为 10、trimStart/End 为 21/22、split 为 27、normalize 为 37、search/match/replaceAll/matchAll/replace 为 40–44，其余已列方法按分支转换，未列返回 null。
 - **所有权 / 错误 / 调用**：输入是域内记录编号；输出 0 是有效结果，不能当作无匹配。无 VM 调用或表注册检查。
 
-### `builtin_method_id_lookup.string.encodePrototypeMethodId` (`src/core/host_function.zig:915`)
+### `builtin_method_id_lookup.string.encodePrototypeMethodId` (`src/core/host_function.zig:918`)
 
 - **签名**：`pub fn encodePrototypeMethodId(decoded: u32) ?u32`。
 - **作用**：把支持的遗留字符串方法编号转换回域内记录 ID。
 - **实现**：对 decode 中列出的编号作反向 switch；包括 padStart/End 的 34/35、localeCompare 的 36、normalize 的 37 和 search 的 40。未列编号如 substr 的 25 返回 null。
 - **所有权 / 错误 / 调用**：两函数在所列映射上互逆；源码旧注释把 pad/normalize/locale/search 描述为无记录，已与当前分支不符，应以 switch 为准。不验证记录是否已安装。
 
-### `builtin_method_id_lookup.array.decodePrototypeMethodId` (`src/core/host_function.zig:955`)
+### `builtin_method_id_lookup.array.decodePrototypeMethodId` (`src/core/host_function.zig:958`)
 
 - **签名**：`pub fn decodePrototypeMethodId(id: u32) ?u32`。
 - **作用**：将部分 Array 原型记录编号转换为遗留分发编号。
 - **实现**：filter/reduce 对应 1/2；some/every 对应 4/5；indexOf、includes、lastIndexOf、at、slice、splice、reverse、push、pop、concat、sort、values、keys、entries 依次对应 6–19。其他记录返回 null。
 - **所有权 / 错误 / 调用**：这是部分映射，map、reduceRight、forEach 等枚举成员也可能返回 null；不能用它判断一个数组内建是否存在或可调用。
 
-### `builtin_method_id_lookup.collection.constructorId` (`src/core/host_function.zig:1001`)
+### `builtin_method_id_lookup.collection.constructorId` (`src/core/host_function.zig:1004`)
 
 - **签名**：`pub fn constructorId(name: []const u8) ?u32`。
 - **作用**：把构造名称映射到 ConstructorKind 的整数值。
 - **实现**：精确匹配 Map、Set、WeakMap、WeakSet，依次返回 1–4，其他名称返回 null。
 - **所有权 / 错误 / 调用**：只检查借用的名称字节，不验证函数对象；返回的 kind 不是构造记录 ID，也不是 ClassId。
 
-### `builtin_method_id_lookup.collection.constructIdForKind` (`src/core/host_function.zig:1012`)
+### `builtin_method_id_lookup.collection.constructIdForKind` (`src/core/host_function.zig:1015`)
 
 - **签名**：`pub fn constructIdForKind(kind: u32) ?u32`。
 - **作用**：将集合构造 kind 转成域内构造记录 ID。
 - **实现**：1、2、3、4 分别映射为 construct_map=200、construct_set=201、construct_weak_map=202、construct_weak_set=203；其他 u32 返回 null。
 - **所有权 / 错误 / 调用**：纯转换，不构造对象，不查询已安装函数；构建完整 native builtin 引用还需要 collection 域。
 
-### `builtin_method_id_lookup.collection.prototypeMethodId` (`src/core/host_function.zig:1046`)
+### `builtin_method_id_lookup.collection.prototypeMethodId` (`src/core/host_function.zig:1049`)
 
 - **签名**：`pub fn prototypeMethodId(name: []const u8) ?u32`。
 - **作用**：查集合方法的域内记录编号。
 - **实现**：线性查 prototype_method_ids；set/get/has/delete/clear/add/keys/values/entries/forEach/getOrInsert/getOrInsertComputed/next/get size 依次为 1–14；difference/intersection/isDisjointFrom/isSubsetOf/isSupersetOf/symmetricDifference/union 为 15–21。
 - **所有权 / 错误 / 调用**：精确匹配，size 必须写成 get size；未知名称返回 null。此表不按接收者 class 过滤，也不读对象属性。
 
-### `builtin_method_id_lookup.collection.legacyBasePrototypeMethodId` (`src/core/host_function.zig:1050`)
+### `builtin_method_id_lookup.collection.legacyBasePrototypeMethodId` (`src/core/host_function.zig:1053`)
 
 - **签名**：`fn legacyBasePrototypeMethodId(id: u32) ?u32`。
 - **作用**：筛出遗留基本集合方法编号。
 - **实现**：set 至 getOrInsertComputed 的十二个枚举值（1–12）原样返回；next、size、集合运算及其他编号返回 null。
 - **所有权 / 错误 / 调用**：不改变编号，不访问运行时，是 legacyClosureMethodId 的内部过滤器。
 
-### `builtin_method_id_lookup.collection.legacyClosureMethodId` (`src/core/host_function.zig:1069`)
+### `builtin_method_id_lookup.collection.legacyClosureMethodId` (`src/core/host_function.zig:1072`)
 
 - **签名**：`pub fn legacyClosureMethodId(name: []const u8) ?u32`。
 - **作用**：将名称映射为遗留闭包支持的集合方法编号。
 - **实现**：先 prototypeMethodId 查表，再接受基本方法 1–12；否则仅允许 iterator_next=13，其余返回 null。
 - **所有权 / 错误 / 调用**：get size 和集合代数方法虽能在名称表中找到，也会在这里被排除；不创建闭包或验证接收者。
 
-### `builtin_method_id_lookup.collection.fastPrototypeMethodIdForClass` (`src/core/host_function.zig:1078`)
+### `builtin_method_id_lookup.collection.fastPrototypeMethodIdForClass` (`src/core/host_function.zig:1081`)
 
 - **签名**：`pub fn fastPrototypeMethodIdForClass(class_id: ClassId, name: []const u8) ?u32`。
 - **作用**：按 class 和方法名筛选集合快路径候选编号。
 - **实现**：Map/WeakMap 只接受 set/get/has/delete；Set/WeakSet 只接受 add/has/delete；其他 class 或名称返回 null。各组内部先查名称表，再过滤 ID。
 - **所有权 / 错误 / 调用**：不查实例、原型或当前属性是否被覆盖；返回非 null 仅表示 class/name 组合满足此处条件，外围仍负责快路径其他前提。
 
-### `builtin_method_id_lookup.date.staticMethodId` (`src/core/host_function.zig:1110`)
+### `builtin_method_id_lookup.date.staticMethodId` (`src/core/host_function.zig:1113`)
 
 - **签名**：`pub fn staticMethodId(name: []const u8) ?u32`。
 - **作用**：将 Date 静态方法名映射为域内编号。
 - **实现**：UTC、parse、now 分别返回 1、2、3；逐字节区分大小写，其他名称返回 null。
 - **所有权 / 错误 / 调用**：纯名称匹配，不执行日期解析或读取时钟。
 
-### `builtin_method_id_lookup.date.decodePrototypeMethodId` (`src/core/host_function.zig:1122`)
+### `builtin_method_id_lookup.date.decodePrototypeMethodId` (`src/core/host_function.zig:1125`)
 
 - **签名**：`pub fn decodePrototypeMethodId(id: u32) ?u32`。
 - **作用**：将支持的 Date 原型记录 ID 转成遗留编号。
 - **实现**：显式 switch 对应 101–134 → 1–34，getTime 到 toTimeString；其他编号返回 null，包括 to_primitive=135、内部 captured setter 136/137、构造 100 和静态 1–3。
 - **所有权 / 错误 / 调用**：并非所有 PrototypeMethod 枚举都可解码；不执行方法，也不判断某编号是否在运行时安装。
 
-### `builtin_method_id_lookup.date.encodePrototypeMethodId` (`src/core/host_function.zig:1167`)
+### `builtin_method_id_lookup.date.encodePrototypeMethodId` (`src/core/host_function.zig:1170`)
 
 - **签名**：`pub fn encodePrototypeMethodId(decoded: u32) ?u32`。
 - **作用**：把遗留 Date 方法编号转换回域内记录 ID。
 - **实现**：显式 switch 对应 1–34 → 101–134，与 decode 的已定义映射互逆；0、35 及其他值返回 null。
 - **所有权 / 错误 / 调用**：只返回整数，不包含域编码或对象状态；不产生 to_primitive 或 captured setter 的记录编号。
 
-### `builtin_method_id_lookup.buffer.dataViewGetMethodId` (`src/core/host_function.zig:1216`)
+### `builtin_method_id_lookup.buffer.dataViewGetMethodId` (`src/core/host_function.zig:1219`)
 
 - **签名**：`pub fn dataViewGetMethodId(name: []const u8) ?u32`。
 - **作用**：查 DataView 的 get 方法记录 ID。
 - **实现**：委托 dataViewGetOrSetMethodId(name, false)，支持 getInt8 至 getBigUint64 的十一种后缀，返回 301–311。
 - **所有权 / 错误 / 调用**：包含 getFloat16；set 前缀、未知后缀或大小写不符返回 null，无分配。
 
-### `builtin_method_id_lookup.buffer.dataViewSetMethodId` (`src/core/host_function.zig:1220`)
+### `builtin_method_id_lookup.buffer.dataViewSetMethodId` (`src/core/host_function.zig:1223`)
 
 - **签名**：`pub fn dataViewSetMethodId(name: []const u8) ?u32`。
 - **作用**：查 DataView 的 set 方法记录 ID。
 - **实现**：委托 dataViewGetOrSetMethodId(name, true)，接受十一种 set 方法，返回相应 get ID 加 20，即 321–331。
 - **所有权 / 错误 / 调用**：包含 setFloat16；get 前缀或未知名称返回 null，不执行写操作。
 
-### `builtin_method_id_lookup.buffer.dataViewGetOrSetMethodId` (`src/core/host_function.zig:1228`)
+### `builtin_method_id_lookup.buffer.dataViewGetOrSetMethodId` (`src/core/host_function.zig:1231`)
 
 - **签名**：`noinline fn dataViewGetOrSetMethodId(name: []const u8, is_set: bool) ?u32`。
 - **作用**：统一解析 DataView get/set 方法名。
 - **实现**：少于三个字节返回 null；前三字节须等于 is_set 指定的 set 或 get。后缀 Int8/Uint8/Int16/Uint16/Int32/Uint32/Float16/Float32/Float64/BigInt64/BigUint64 依次取 get ID 301–311；set 分支再加两枚举首项差值 20。
 - **所有权 / 错误 / 调用**：仅 get 或 set 的空后缀也返回 null；精确比较且不分配。该偏移依赖当前枚举排列，不是由任意两个枚举自动建立映射。
 
-### `builtin_method_id_lookup.buffer.arrayBufferAccessorMethodId` (`src/core/host_function.zig:1265`)
+### `builtin_method_id_lookup.buffer.arrayBufferAccessorMethodId` (`src/core/host_function.zig:1268`)
 
 - **签名**：`pub fn arrayBufferAccessorMethodId(name: []const u8) ?u32`。
 - **作用**：将访问器属性名映射为域内记录 ID。
 - **实现**：`byteLength`=401、`detached`=402、`maxByteLength`=403、`resizable`=404、`immutable`=405；按名称逐字节匹配，其他名称返回 null。
 - **所有权 / 错误 / 调用**：名称是属性名，不带 get 前缀；不调用 getter、不验证接收者或 buffer 状态。
 
-### `builtin_method_id_lookup.buffer.sharedArrayBufferAccessorMethodId` (`src/core/host_function.zig:1274`)
+### `builtin_method_id_lookup.buffer.sharedArrayBufferAccessorMethodId` (`src/core/host_function.zig:1277`)
 
 - **签名**：`pub fn sharedArrayBufferAccessorMethodId(name: []const u8) ?u32`。
 - **作用**：将访问器属性名映射为域内记录 ID。
 - **实现**：`byteLength`=421、`maxByteLength`=422、`growable`=423；按名称逐字节匹配，其他名称返回 null。
 - **所有权 / 错误 / 调用**：名称是属性名，不带 get 前缀；不调用 getter、不验证接收者或 buffer 状态。
 
-### `builtin_method_id_lookup.buffer.dataViewAccessorMethodId` (`src/core/host_function.zig:1281`)
+### `builtin_method_id_lookup.buffer.dataViewAccessorMethodId` (`src/core/host_function.zig:1284`)
 
 - **签名**：`pub fn dataViewAccessorMethodId(name: []const u8) ?u32`。
 - **作用**：将访问器属性名映射为域内记录 ID。
 - **实现**：`buffer`=441、`byteLength`=442、`byteOffset`=443；按名称逐字节匹配，其他名称返回 null。
 - **所有权 / 错误 / 调用**：名称是属性名，不带 get 前缀；不调用 getter、不验证接收者或 buffer 状态。
 
-### `builtin_method_id_lookup.buffer.typedArrayAccessorMethodId` (`src/core/host_function.zig:1288`)
+### `builtin_method_id_lookup.buffer.typedArrayAccessorMethodId` (`src/core/host_function.zig:1291`)
 
 - **签名**：`pub fn typedArrayAccessorMethodId(name: []const u8) ?u32`。
 - **作用**：将访问器属性名映射为域内记录 ID。
 - **实现**：`buffer`=461、`byteLength`=462、`byteOffset`=463、`length`=464、`[Symbol.toStringTag]`=465；按名称逐字节匹配，其他名称返回 null。
 - **所有权 / 错误 / 调用**：名称是属性名，不带 get 前缀；不调用 getter、不验证接收者或 buffer 状态。这里的 [Symbol.toStringTag] 是字面字符串，不是 JS Symbol 值。
 
-### `builtin_method_id_lookup.buffer.dataViewGetKindFromRecordId` (`src/core/host_function.zig:1297`)
+### `builtin_method_id_lookup.buffer.dataViewGetKindFromRecordId` (`src/core/host_function.zig:1300`)
 
 - **签名**：`pub fn dataViewGetKindFromRecordId(id: u32) ?u32`。
 - **作用**：把 DataView get 记录 ID 转为其元素类型选择编号。
 - **实现**：301–306（Int8 至 Uint32）依次对应 1–6；Float16=307 对应 11，Float32/Float64/BigInt64/BigUint64=308–311 对应 7–10；其他 ID 返回 null。
 - **所有权 / 错误 / 调用**：类型选择编号不是字节宽度，也不能按记录 ID 简单相减；get 与 set 只接受各自的记录范围，不做 buffer 越界、detach 或字节序检查。
 
-### `builtin_method_id_lookup.buffer.dataViewSetKindFromRecordId` (`src/core/host_function.zig:1314`)
+### `builtin_method_id_lookup.buffer.dataViewSetKindFromRecordId` (`src/core/host_function.zig:1317`)
 
 - **签名**：`pub fn dataViewSetKindFromRecordId(id: u32) ?u32`。
 - **作用**：把 DataView set 记录 ID 转为其元素类型选择编号。
 - **实现**：321–326（Int8 至 Uint32）依次对应 1–6；Float16=327 对应 11，Float32/Float64/BigInt64/BigUint64=328–331 对应 7–10；其他 ID 返回 null。
 - **所有权 / 错误 / 调用**：类型选择编号不是字节宽度，也不能按记录 ID 简单相减；get 与 set 只接受各自的记录范围，不做 buffer 越界、detach 或字节序检查。
 
-### `builtin_method_id_lookup.buffer.arrayBufferAccessorNameFromRecordId` (`src/core/host_function.zig:1331`)
+### `builtin_method_id_lookup.buffer.arrayBufferAccessorNameFromRecordId` (`src/core/host_function.zig:1334`)
 
 - **签名**：`pub fn arrayBufferAccessorNameFromRecordId(id: u32) ?[]const u8`。
 - **作用**：将访问器记录 ID 转回属性名称。
 - **实现**：switch 反向映射 `byteLength`=401、`detached`=402、`maxByteLength`=403、`resizable`=404、`immutable`=405；其他编号返回 null。
 - **所有权 / 错误 / 调用**：返回静态字符串的借用 slice，无分配、无需释放；不会查询对象当前属性。
 
-### `builtin_method_id_lookup.buffer.sharedArrayBufferAccessorNameFromRecordId` (`src/core/host_function.zig:1342`)
+### `builtin_method_id_lookup.buffer.sharedArrayBufferAccessorNameFromRecordId` (`src/core/host_function.zig:1345`)
 
 - **签名**：`pub fn sharedArrayBufferAccessorNameFromRecordId(id: u32) ?[]const u8`。
 - **作用**：将访问器记录 ID 转回属性名称。
 - **实现**：switch 反向映射 `byteLength`=421、`maxByteLength`=422、`growable`=423；其他编号返回 null。
 - **所有权 / 错误 / 调用**：返回静态字符串的借用 slice，无分配、无需释放；不会查询对象当前属性。
 
-### `builtin_method_id_lookup.buffer.dataViewAccessorNameFromRecordId` (`src/core/host_function.zig:1351`)
+### `builtin_method_id_lookup.buffer.dataViewAccessorNameFromRecordId` (`src/core/host_function.zig:1354`)
 
 - **签名**：`pub fn dataViewAccessorNameFromRecordId(id: u32) ?[]const u8`。
 - **作用**：将访问器记录 ID 转回属性名称。
 - **实现**：switch 反向映射 `buffer`=441、`byteLength`=442、`byteOffset`=443；其他编号返回 null。
 - **所有权 / 错误 / 调用**：返回静态字符串的借用 slice，无分配、无需释放；不会查询对象当前属性。
 
-### `builtin_method_id_lookup.buffer.typedArrayAccessorNameFromRecordId` (`src/core/host_function.zig:1360`)
+### `builtin_method_id_lookup.buffer.typedArrayAccessorNameFromRecordId` (`src/core/host_function.zig:1363`)
 
 - **签名**：`pub fn typedArrayAccessorNameFromRecordId(id: u32) ?[]const u8`。
 - **作用**：将访问器记录 ID 转回属性名称。
 - **实现**：switch 反向映射 `buffer`=461、`byteLength`=462、`byteOffset`=463、`length`=464、`[Symbol.toStringTag]`=465；其他编号返回 null。
 - **所有权 / 错误 / 调用**：返回静态字符串的借用 slice，无分配、无需释放；不会查询对象当前属性。
 
-### `builtin_method_id_lookup.regexp.accessorMethodId` (`src/core/host_function.zig:1396`)
+### `builtin_method_id_lookup.regexp.accessorMethodId` (`src/core/host_function.zig:1399`)
 
 - **签名**：`pub fn accessorMethodId(name: []const u8) ?u32`。
 - **作用**：把 RegExp 访问器属性名映射为域内记录 ID。
 - **实现**：线性查静态表：source/flags/global/ignoreCase/multiline/dotAll/unicode/sticky/hasIndices/unicodeSets 依次为 201–210；无匹配返回 null。
 - **所有权 / 错误 / 调用**：精确匹配属性名，不接受 get 前缀；不读取正则对象或执行 getter。
 
-### `builtin_method_id_lookup.regexp.accessorNameFromId` (`src/core/host_function.zig:1400`)
+### `builtin_method_id_lookup.regexp.accessorNameFromId` (`src/core/host_function.zig:1403`)
 
 - **签名**：`pub fn accessorNameFromId(id: u32) ?[]const u8`。
 - **作用**：将 RegExp 访问器记录编号转回名称。
 - **实现**：switch 对 201–210 返回 source 至 unicodeSets 的对应名字，其他编号返回 null。
 - **所有权 / 错误 / 调用**：返回静态字符串借用，不分配；与 accessorMethodId 的十个表项互逆，不包含 legacy accessor。
 
-### `builtin_method_id_lookup.regexp.accessorNameFromGetterName` (`src/core/host_function.zig:1416`)
+### `builtin_method_id_lookup.regexp.accessorNameFromGetterName` (`src/core/host_function.zig:1419`)
 
 - **签名**：`pub fn accessorNameFromGetterName(name: []const u8) ?[]const u8`。
 - **作用**：从规范形式的 getter 名得到访问器属性名。
 - **实现**：先 accessorIdFromGetterName 检查前缀并查 ID，失败返回 null；成功再 accessorNameFromId 返回静态属性名称。
 - **所有权 / 错误 / 调用**：返回值不是输入字符串的借用子串；无分配、不调用 getter。
 
-### `builtin_method_id_lookup.regexp.accessorIdFromGetterName` (`src/core/host_function.zig:1422`)
+### `builtin_method_id_lookup.regexp.accessorIdFromGetterName` (`src/core/host_function.zig:1425`)
 
 - **签名**：`pub fn accessorIdFromGetterName(name: []const u8) ?u32`。
 - **作用**：解析 get <accessor> 形式的函数名。
 - **实现**：必须以精确的 get 加一个空格开头，然后将剩余全部字节交给 accessorMethodId；前缀不符或属性名未知返回 null。
 - **所有权 / 错误 / 调用**：不 trim 空白、不接受大小写变体；get 末尾没有有效名称或含额外空白也不匹配。
 
-### `builtin_method_id_lookup.regexp.legacyAccessorMethodFromId` (`src/core/host_function.zig:1427`)
+### `builtin_method_id_lookup.regexp.legacyAccessorMethodFromId` (`src/core/host_function.zig:1430`)
 
 - **签名**：`pub fn legacyAccessorMethodFromId(id: u32) ?LegacyAccessorMethod`。
 - **作用**：把已知整数 ID 转成 LegacyAccessorMethod 枚举。
 - **实现**：接受 301–306 的 input getter/setter、lastMatch、lastParen、leftContext、rightContext，以及 311–319 的九个 capture getter；其他值包括中间空洞返回 null。
 - **所有权 / 错误 / 调用**：显式 switch 避免将任意整数强转为枚举；不读取或设置 legacy RegExp 状态。
 
-### `builtin_method_id_lookup.regexp.legacyCaptureIndex` (`src/core/host_function.zig:1448`)
+### `builtin_method_id_lookup.regexp.legacyCaptureIndex` (`src/core/host_function.zig:1451`)
 
 - **签名**：`pub fn legacyCaptureIndex(method: LegacyAccessorMethod) ?usize`。
 - **作用**：将九个 capture getter 枚举映射为零基索引。
 - **实现**：get_capture_1 至 get_capture_9 分别返回 0–8；input、lastMatch 等其他合法枚举值返回 null。
 - **所有权 / 错误 / 调用**：0 是有效 capture 索引；本函数不检查实际匹配是否有对应捕获组。
 
-### `builtin_method_id_lookup.uri.methodId` (`src/core/host_function.zig:1469`)
+### `builtin_method_id_lookup.uri.methodId` (`src/core/host_function.zig:1472`)
 
 - **签名**：`pub fn methodId(name: []const u8) ?u32`。
 - **作用**：将 URI 全局函数名映射成模式编号。
 - **实现**：encodeURI、encodeURIComponent、decodeURI、decodeURIComponent 分别返回 1、2、3、4；其他名称返回 null。
 - **所有权 / 错误 / 调用**：仅区分大小写的名称比较，不执行编码、解码或 URI 校验，也不核验当前全局绑定。
 
-### `genericMagicHandler` (`src/core/host_function.zig:1536`)
+### `genericMagicHandler` (`src/core/host_function.zig:1539`)
 
 - **签名**：`pub fn genericMagicHandler(entry: InternalEntry) ?NativeGenericMagicFn`。
 - **作用**：从声明记录的 native_function 联合体中提取 generic_magic 回调。

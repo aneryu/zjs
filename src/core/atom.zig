@@ -1018,11 +1018,10 @@ pub const DynamicAtom = struct {
     id: Atom,
     bytes: []u8,
     /// Lazily materialized runtime string for this atom (string kind only).
-    /// The table owns one reference; the string's `atom_id` is a weak
-    /// back-pointer (it does not hold an atom reference), so there is no
-    /// rc cycle: the cached string cannot die while it sits in the table,
-    /// and when the atom's ref count reaches zero the table clears the
-    /// back-pointer and releases its string reference.
+    /// The table roots it (the tracer reaches it through this slot) and the
+    /// string's `atom_id` is a weak back-pointer, so the cached string cannot
+    /// die while it sits here; when `sweepDead` retires the entry it clears
+    /// the back-pointer and drops this slot.
     str: ?*string.String = null,
     /// Link in the table's free-slot list, only meaningful while the entry
     /// is dead (`occupied == false`). `no_free_slot` terminates the list.
@@ -2223,10 +2222,10 @@ pub const AtomTable = struct {
         if (bytes.len != 0) @memcpy(owned, bytes);
 
         // Reuse a dead slot when one is available. A slot only enters the
-        // free list once its ref count reached zero, so rebinding its id
-        // cannot retarget a live holder; the recycled id behaves exactly
-        // like a fresh one. Without recycling the table (and the id
-        // space) grows monotonically under intern/free churn.
+        // free list once a major proved the entry unreachable (`sweepDead`),
+        // so rebinding its id cannot retarget a live holder; the recycled id
+        // behaves exactly like a fresh one. Without recycling the table (and
+        // the id space) grows monotonically under intern churn.
         if (self.free_slot_head != no_free_slot) {
             const idx = self.free_slot_head;
             const entry = &self.entries[idx];
@@ -2683,12 +2682,7 @@ pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
     if (list.len != 0) rt.memory.free(Atom, list);
 }
 
-pub fn appendOwnedAtom(rt: *JSRuntime, keys: *[]Atom, atom_id: Atom) !void {
-    const next = try rt.memory.alloc(Atom, keys.*.len + 1);
-    errdefer rt.memory.free(Atom, next);
-    @memcpy(next[0..keys.*.len], keys.*);
-    next[keys.*.len] = atom_id;
-    const old = keys.*;
-    keys.* = next;
-    if (old.len != 0) rt.memory.free(Atom, old);
-}
+/// Alias for the call sites that still name the "owned" form. Atoms carry no
+/// per-reference count under the tracing collector, so appending an owned atom
+/// and appending a borrowed one were already the same byte-for-byte routine.
+pub const appendOwnedAtom = appendAtom;

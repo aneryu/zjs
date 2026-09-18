@@ -70,9 +70,12 @@ pub fn toBoolean(value: JSValue) bool {
     return true;
 }
 
+/// `toBoolean` runs this on every value, including the VarRef cell wrappers
+/// that share the object tag, so it carries the same `kind == .object`
+/// re-check as `objectFromValue` rather than trusting the tag alone: without
+/// it a cell wrapper would reach `Object.fromHeader` and be read through a
+/// misaligned `@fieldParentPtr`.
 pub fn isHTMLDDA(value: JSValue) bool {
-    if (!value.isObject()) return false;
-    const header = value.refHeader() orelse return false;
-    const object_value = object.Object.fromHeader(header);
+    const object_value = objectFromValue(value) orelse return false;
     return object_value.flags.is_html_dda;
 }

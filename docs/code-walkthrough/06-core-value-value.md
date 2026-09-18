@@ -600,14 +600,14 @@
 - **签名**：`pub fn toBoolean(value: JSValue) bool`。
 - **作用**：按内部值类别计算布尔结果。
 - **实现**：先isHTMLDDA；undefined/null为false；布尔原值，int非0、float非0且非NaN为true；BigInt调用isZeroBigInt，无法解码时回退true；String通过asStringBody取长度，缺body为false，其余值true。
-- **所有权 / 错误 / 调用**：不运行用户valueOf；rope字符串可能flatten，不能笼统说无分配。前置需合法表达式值，内部uninitialized等哨兵会落到true，object-tag VarRef也不应传入isHTMLDDA路径。
+- **所有权 / 错误 / 调用**：不运行用户valueOf；rope字符串可能flatten，不能笼统说无分配。前置需合法表达式值，内部uninitialized等哨兵会落到true；object-tag 的 VarRef 包装现在由 isHTMLDDA 自身的 kind 复核挡住，落到最后的 true。
 
-### `isHTMLDDA` (`src/core/value_semantics.zig:73`)
+### `isHTMLDDA` (`src/core/value_semantics.zig:78`)
 
 - **签名**：`pub fn isHTMLDDA(value: JSValue) bool`。
 - **作用**：读取对象的is_html_dda标志。
-- **实现**：非object tag或无refHeader返回false；其余直接Object.fromHeader并读取flag。
-- **所有权 / 错误 / 调用**：不复核GC kind，不是objectFromValue的等价安全守卫；传入VarRef包装等内部object-tag值违反前提。无用户属性读取或HTML对象名称识别。
+- **实现**：转调 objectFromValue（object tag + refHeader + `kind == .object` 三重判定），拿不到对象返回 false，其余读取 flags.is_html_dda。
+- **所有权 / 错误 / 调用**：与 objectFromValue 同样复核 GC kind，因此共享 object tag 的 VarRef cell 包装会被判为 false 而不是错位 `@fieldParentPtr`；这条守卫是必需的，因为 toBoolean 对任何值的第一步就是调用它。无用户属性读取或HTML对象名称识别。
 
 ## `src/core/value_format.zig`
 

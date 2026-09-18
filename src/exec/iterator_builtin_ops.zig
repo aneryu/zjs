@@ -13,11 +13,6 @@ const exceptions = @import("exceptions.zig");
 
 const HostError = exceptions.HostError;
 
-pub const Result = struct {
-    value_index: usize,
-    done: bool,
-};
-
 pub const AccessorMethod = core.host_function.builtin_method_ids.iterator.AccessorMethod;
 pub const StaticMethod = core.host_function.builtin_method_ids.iterator.StaticMethod;
 pub const PrototypeMethod = core.host_function.builtin_method_ids.iterator.PrototypeMethod;
@@ -44,13 +39,6 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "drop")) return @intFromEnum(PrototypeMethod.drop);
     if (std.mem.eql(u8, name, "flatMap")) return @intFromEnum(PrototypeMethod.flat_map);
     return null;
-}
-
-pub fn next(index: *usize, length: usize) Result {
-    if (index.* >= length) return .{ .value_index = index.*, .done = true };
-    const current = index.*;
-    index.* += 1;
-    return .{ .value_index = current, .done = false };
 }
 
 /// Declaration + dispatch table for the `.iterator` native-builtin domain

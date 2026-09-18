@@ -87,7 +87,7 @@ FORBIDDEN_CPUS = frozenset((*range(5, 10), *range(15, 20)))
 # Snapshot schema version, stamped on every captured artifact.  Bump it in the
 # same change that adds or removes a JSON leaf, and record the leaves in
 # `SCHEMA_ADDED_LEAVES` / `SCHEMA_REMOVED_LEAVES` below.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Leaves that a schema version is the first to guarantee.
 #
@@ -128,6 +128,14 @@ SCHEMA_ADDED_LEAVES: dict[int, tuple[str, ...]] = {
 # every earlier version.  The baseline's value for such a leaf is not scored:
 # there is nothing to score it against, and the row is gone on purpose.
 SCHEMA_REMOVED_LEAVES: dict[int, tuple[str, ...]] = {
+    10: (
+        # The three counters the `--gc-stats` panel stopped printing when the
+        # deferred-block-run and parked-drain machinery was retired: nothing
+        # increments them any more, so the rows were reporting a constant 0.
+        "blockHeap.deferredBlockRuns",
+        "doomed.parkedEntriesDrained",
+        "doomed.parkedDrainSlices",
+    ),
     9: (
         # TGC S5-a: the last refcounting-era rows.  `zeroRefDrains` had no
         # writer and printed a literal 0; `refcountRemovedHeaders` was
@@ -344,7 +352,7 @@ def parse_gc_stats(text: str) -> dict:
     )
     block_reuse = one_match(
         text,
-        r"^gc: block heap deferred block runs (?P<deferred_block_runs>\d+), hot reuse published (?P<hot_reuse_published>\d+), reopened (?P<reopened>\d+), bitmap reclaimed cells (?P<bitmap_reclaimed_cells>\d+)$",
+        r"^gc: block heap hot reuse published (?P<hot_reuse_published>\d+), reopened (?P<reopened>\d+), bitmap reclaimed cells (?P<bitmap_reclaimed_cells>\d+)$",
         "block reuse",
     )
     thresholds = one_match(
@@ -404,7 +412,7 @@ def parse_gc_stats(text: str) -> dict:
     )
     doomed = one_match(
         text,
-        r"^gc: incremental doomed condemned headers (?P<condemned_headers>\d+), destroyed counted objects (?P<destroyed_objects>\d+), parked entries drained (?P<parked_entries_drained>\d+), parked-drain slices (?P<parked_drain_slices>\d+)$",
+        r"^gc: incremental doomed condemned headers (?P<condemned_headers>\d+), destroyed counted objects (?P<destroyed_objects>\d+)$",
         "doomed",
     )
     minor_stw = one_match(
@@ -750,7 +758,6 @@ def parse_gc_stats(text: str) -> dict:
             "maxDecommitBatch": decommit["max_batch"],
             "trimAttempts": trim["attempts"],
             "trimSuccesses": trim["successes"],
-            "deferredBlockRuns": block_reuse["deferred_block_runs"],
             "hotReusePublished": block_reuse["hot_reuse_published"],
             "reopened": block_reuse["reopened"],
             "bitmapReclaimedCells": block_reuse["bitmap_reclaimed_cells"],
@@ -829,8 +836,6 @@ def parse_gc_stats(text: str) -> dict:
         "doomed": {
             "condemnedHeaders": doomed["condemned_headers"],
             "destroyedCountedObjects": doomed["destroyed_objects"],
-            "parkedEntriesDrained": doomed["parked_entries_drained"],
-            "parkedDrainSlices": doomed["parked_drain_slices"],
         },
         "marking": {
             "clearMarksNonBlockHeaders": phase_work["clear_marks_nonblock_headers"],

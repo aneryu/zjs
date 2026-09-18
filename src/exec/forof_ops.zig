@@ -1,7 +1,6 @@
 //! for-in/for-of iterator records, pending-error iterator close paths and VM iterator helpers.
 
 const core = @import("../core/root.zig");
-const frame_mod = @import("frame.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
@@ -311,32 +310,11 @@ pub fn closeStackTopForOfIteratorForPendingError(
     global: *core.Object,
     stack: *stack_mod.Stack,
 ) !void {
-    return closeStackTopForOfIteratorForPendingErrorInternal(ctx, output, global, stack, null);
-}
-
-pub fn closeStackTopForOfIteratorForPendingErrorWithFrame(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *const frame_mod.Frame,
-) !void {
-    return closeStackTopForOfIteratorForPendingErrorInternal(ctx, output, global, stack, frame);
-}
-
-pub fn closeStackTopForOfIteratorForPendingErrorInternal(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: ?*const frame_mod.Frame,
-) !void {
     // QuickJS uncatchable interruptions skip the catch-offset/iterator-close
     // stack scan entirely. In particular, do not take/rethrow the pending
     // InternalError here: that would clear its uncatchable execution flag and
     // allow an outer catch/finally to consume it.
     if (ctx.exceptionIsUncatchable()) return;
-    _ = frame;
     // The pending exception is taken and re-thrown unchanged below, so its
     // category has to survive the round trip: `takeException` and `throwValue`
     // both reset the exception flags. Uncatchability dodges this by returning
@@ -406,17 +384,21 @@ pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
 /// every IteratorNext abrupt completion. That prevents IteratorClose from
 /// calling `return()` on the iterator whose `next`/result access just failed,
 /// while leaving any enclosing iterator records available for normal unwind.
-pub fn abandonForOfIteratorAtIndex(_: *core.JSRuntime, stack: *stack_mod.Stack, index: usize) void {
+pub fn abandonForOfIteratorAtIndex(stack: *stack_mod.Stack, index: usize) void {
     std.debug.assert(isForOfRecordAt(stack, index));
     stack.values[index] = core.JSValue.undefinedValue();
 }
 
-pub fn abandonForOfIteratorAtDepth(rt: *core.JSRuntime, stack: *stack_mod.Stack, depth: u8) !void {
+/// The `*JSRuntime` is unused (abandoning is a pure stack-slot overwrite under
+/// tracing GC); it stays in the signature so the VM unwind call sites in
+/// `tailcall_dispatch` / `inline_calls` keep their uniform `(vm.ctx.runtime,
+/// stack, depth)` shape.
+pub fn abandonForOfIteratorAtDepth(_: *core.JSRuntime, stack: *stack_mod.Stack, depth: u8) !void {
     const required = @as(usize, depth) + 3;
     if (stack.len() < required) return error.InvalidBytecode;
     const index = stack.len() - required;
     if (!isForOfRecordAt(stack, index)) return error.InvalidBytecode;
-    abandonForOfIteratorAtIndex(rt, stack, index);
+    abandonForOfIteratorAtIndex(stack, index);
 }
 
 pub fn hasCatchMarkerAboveForOfRecord(stack: *const stack_mod.Stack, record_index: usize) bool {

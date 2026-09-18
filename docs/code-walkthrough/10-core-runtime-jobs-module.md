@@ -148,241 +148,241 @@ comptime断言JSValue为16字节，还钉了 Generic=96、Promise=16、Reaction=
 
 - **签名**：`pub fn deinit(self: *Queue) void`。
 - **作用**：清理当前活窗口内任务并释放其backing。
-- **实现**：清reserved_entries，断言没有unlinked claim；保存窗口/容量/块起点，先将队列置空，再逐Job.deinit，最后按原capacity释放块。
+- **实现**：清reserved_entries（仅函数首行一次），断言没有unlinked claim；保存窗口/容量/块起点，先将队列置空，再逐Job.deinit，最后按原capacity释放块。
 - **所有权 / 错误 / 调用**：不处理已出队任务，不逐项释放废弃槽中的旧位拷贝。回调在队列已清空后运行；若destroyer重入入队，新队列不属于保存的旧窗口。账户指针仍保留，普通空队列可再次deinit。
 
-### `Queue.blockStart` (`src/core/jobs.zig:462`)
+### `Queue.blockStart` (`src/core/jobs.zig:461`)
 
 - **签名**：`fn blockStart(self: *const Queue) [*]Job`。
 - **作用**：从当前活窗口恢复backing起始指针。
 - **实现**：jobs.ptr减head个Job。
 - **所有权 / 错误 / 调用**：依赖窗口与偏移一致；不验证容量或返回可独立拥有的分配，空队列结果不可解引用。
 
-### `Queue.reclaimDrainedPrefix` (`src/core/jobs.zig:469`)
+### `Queue.reclaimDrainedPrefix` (`src/core/jobs.zig:468`)
 
 - **签名**：`fn reclaimDrainedPrefix(self: *Queue) void`。
 - **作用**：把活窗口移到保留头槽之后以复用前缀。
 - **实现**：floor=unlinked_head_slots；head等于floor则不动，否则copyForwards复制活Job到block[floor..]，更新jobs与head。
 - **所有权 / 错误 / 调用**：无分配，重叠复制保持任务次序，但使指向旧槽的指针失效。复制是逻辑移动，不应清理遗留副本；floor保留的是容量额度，不是固定物理地址。
 
-### `Queue.enqueue` (`src/core/jobs.zig:479`)
+### `Queue.enqueue` (`src/core/jobs.zig:478`)
 
 - **签名**：`pub fn enqueue(self: *Queue, job: Job) !void`。
 - **作用**：将已构造的Job追加到队列。
 - **实现**：ensureAdditionalCapacity(1)成功后enqueuePrepared。
 - **所有权 / 错误 / 调用**：失败不调用job.deinit，任务仍由调用方负责。成功后逻辑持有权转入队列，不应再销毁原位拷贝；分配期间调用方须保护输入Job的GC边。
 
-### `Queue.ensureAdditionalCapacity` (`src/core/jobs.zig:484`)
+### `Queue.ensureAdditionalCapacity` (`src/core/jobs.zig:483`)
 
 - **签名**：`fn ensureAdditionalCapacity(self: *Queue, additional: usize) !void`。
 - **作用**：为活任务、已有尾部预留与新增条目准备空间。
 - **实现**：ensureCapacity(jobs.len + reserved_entries + additional)。
 - **所有权 / 错误 / 调用**：这里的普通usize加法不是checked算术，不能将所有整数溢出概括为OOM；有效调用量须可表示。此函数不增加预留计数。
 
-### `Queue.ensureCapacity` (`src/core/jobs.zig:488`)
+### `Queue.ensureCapacity` (`src/core/jobs.zig:487`)
 
 - **签名**：`pub fn ensureCapacity(self: *Queue, min_capacity: usize) !void`。
 - **作用**：保证活窗口起点之后至少有min_capacity个槽位。
 - **实现**：已有capacity-head足够则返回。前缀回收后能满足且reclaimable>=活长度或reclaimable*2>=capacity时移动窗口；否则从4或旧容量两倍开始倍增，分配新块，将活项复制到floor偏移，再更新并释放旧块。
 - **所有权 / 错误 / 调用**：min_capacity是含现有活项的总窗口容量，不是新增数。分配失败保留旧队列；增长算术不是溢出转OOM接口。扩容/回收使旧元素指针失效，保留unlinked额度但不复制其旧物理槽；运行中任务须由外层持有。
 
-### `Queue.reserveEntries` (`src/core/jobs.zig:521`)
+### `Queue.reserveEntries` (`src/core/jobs.zig:520`)
 
 - **签名**：`pub fn reserveEntries(self: *Queue, count: usize) !void`。
 - **作用**：为尚未提交的事务保留尾部槽额度。
 - **实现**：count为0直接返回；ensureCapacity(len+reserved+count)成功后reserved_entries加count。
 - **所有权 / 错误 / 调用**：失败不增加计数；预留不是任务、不含payload根，也不占FIFO位置。重入普通入队必须避让额度，提交时才确定任务次序。
 
-### `Queue.releaseReservedEntries` (`src/core/jobs.zig:527`)
+### `Queue.releaseReservedEntries` (`src/core/jobs.zig:526`)
 
 - **签名**：`pub fn releaseReservedEntries(self: *Queue, count: usize) void`。
 - **作用**：撤销指定数量的尾部预留额度。
 - **实现**：count超过现有值则清0，否则相减。
 - **所有权 / 错误 / 调用**：无分配、无错误；多释放被钳为0而非拒绝，不验证事务身份，也不销毁任务。
 
-### `Queue.reserveUnlinkedEntrySlot` (`src/core/jobs.zig:540`)
+### `Queue.reserveUnlinkedEntrySlot` (`src/core/jobs.zig:539`)
 
 - **签名**：`pub fn reserveUnlinkedEntrySlot(self: *Queue) void`。
 - **作用**：为刚出队的可重试任务保留一个头部槽额度。
 - **实现**：断言head>unlinked_head_slots后加1。
 - **所有权 / 错误 / 调用**：应在takeFirst后、任何可能回收前缀的操作前调用；额度本身不保持出队Job可达。无分配，与reserved_entries为不同额度。
 
-### `Queue.releaseUnlinkedEntrySlot` (`src/core/jobs.zig:546`)
+### `Queue.releaseUnlinkedEntrySlot` (`src/core/jobs.zig:545`)
 
 - **签名**：`pub fn releaseUnlinkedEntrySlot(self: *Queue) void`。
 - **作用**：放弃一个头部保留额度。
 - **实现**：断言额度非0，再减1。
 - **所有权 / 错误 / 调用**：不重新入队、不销毁出队Job、不回收前缀；完成任务且不再需要该槽时可直接释放，成功并不一律要求enqueueUnlinkedEntrySlot。
 
-### `Queue.enqueueUnlinkedEntrySlot` (`src/core/jobs.zig:555`)
+### `Queue.enqueueUnlinkedEntrySlot` (`src/core/jobs.zig:554`)
 
 - **签名**：`pub fn enqueueUnlinkedEntrySlot(self: *Queue, job: Job) void`。
 - **作用**：用一个头部保留额度在队尾提交任务。
 - **实现**：先减unlinked；若head+len+reserved恰好等于capacity，则回收前缀，再append。
 - **所有权 / 错误 / 调用**：无分配，但回收可移动整个活窗口，单次不是恒定时间。保持尾部预留不被挤占，任务放到当前尾部而非原头部，成功后由队列清理。
 
-### `Queue.enqueuePrepared` (`src/core/jobs.zig:568`)
+### `Queue.enqueuePrepared` (`src/core/jobs.zig:567`)
 
 - **签名**：`pub fn enqueuePrepared(self: *Queue, job: Job) void`。
 - **作用**：利用未被预留的可用尾槽提交任务。
 - **实现**：断言head+len+reserved<capacity，再append。
 - **所有权 / 错误 / 调用**：不分配，也不消耗reserved_entries；与enqueueReserved不同。要求此前已经保证额外容量，成功后任务由队列持有。
 
-### `Queue.enqueueReserved` (`src/core/jobs.zig:574`)
+### `Queue.enqueueReserved` (`src/core/jobs.zig:573`)
 
 - **签名**：`pub fn enqueueReserved(self: *Queue, job: Job) void`。
 - **作用**：消耗一个尾部预留额度并提交任务。
 - **实现**：断言reserved非0，减1，再断言物理尾槽可用并append。
 - **所有权 / 错误 / 调用**：不分配，不检查预留归属；调用方须保证预留协议有效。保留的是容量而非先到先得的位置，提交时追加到尾部。
 
-### `Queue.append` (`src/core/jobs.zig:581`)
+### `Queue.append` (`src/core/jobs.zig:580`)
 
 - **签名**：`fn append(self: *Queue, job: Job) void`。
 - **作用**：扩展活窗口一项并写入Job。
 - **实现**：断言head+len<capacity，延长jobs切片并在旧len处赋值。
 - **所有权 / 错误 / 调用**：不分配、不执行任务或GC屏障；只检查物理槽，预留额度约束由外层提交函数维护。
 
-### `Queue.enqueueFunc` (`src/core/jobs.zig:588`)
+### `Queue.enqueueFunc` (`src/core/jobs.zig:587`)
 
 - **签名**：`pub fn enqueueFunc(self: *Queue, context: *core.JSContext, func: Func, args: []const core.JSValue) !void`。
 - **作用**：准备容量并构造、提交generic任务。
 - **实现**：先ensureAdditionalCapacity(1)，再Job.init及enqueuePrepared。
 - **所有权 / 错误 / 调用**：参数超过5仍可能先扩容，故TooManyJobArgs不保证backing未变；OOM可先于参数错误。没有提交半条任务；当前Job.init成功后无可失败步骤，errdefer不用于正常清理。
 
-### `Queue.enqueuePromise` (`src/core/jobs.zig:595`)
+### `Queue.enqueuePromise` (`src/core/jobs.zig:594`)
 
 - **签名**：`pub fn enqueuePromise(self: *Queue, context: *core.JSContext, value: core.JSValue) !void`。
 - **作用**：准备容量并追加promise条目。
 - **实现**：ensureAdditionalCapacity(1)后initPromise，再enqueuePrepared。
 - **所有权 / 错误 / 调用**：失败发生在构造前，不消费输入或执行Promise；调用方保护输入跨分配窗口，成功后由队列traceRoots访问。
 
-### `Queue.enqueueOwnedPromiseObjectPrepared` (`src/core/jobs.zig:601`)
+### `Queue.enqueueOwnedPromiseObjectPrepared` (`src/core/jobs.zig:600`)
 
 - **签名**：`pub fn enqueueOwnedPromiseObjectPrepared(self: *Queue, context: *core.JSContext, value: core.JSValue) void`。
 - **作用**：用已预留的尾槽提交对象promise条目。
 - **实现**：调用initOwnedPromiseObject后enqueueReserved。
 - **所有权 / 错误 / 调用**：名字虽为Prepared，实际消耗reserved_entries。无分配，要求对象tag及至少一个尾部预留；不验证Promise品牌。
 
-### `Queue.preparePromiseReaction` (`src/core/jobs.zig:605`)
+### `Queue.preparePromiseReaction` (`src/core/jobs.zig:604`)
 
 - **签名**：`pub fn preparePromiseReaction( self: *Queue, context: *core.JSContext, reaction: core.JSValue, value: core.JSValue, rejected: bool, ) Job`。
 - **作用**：只构造reaction条目供后续提交。
 - **实现**：忽略self，返回Job.initPromiseReaction。
 - **所有权 / 错误 / 调用**：不扩容、不预留、不入队、不注册根；返回任务在提交前由调用方保护。
 
-### `Queue.enqueuePromiseReaction` (`src/core/jobs.zig:616`)
+### `Queue.enqueuePromiseReaction` (`src/core/jobs.zig:615`)
 
 - **签名**：`pub fn enqueuePromiseReaction( self: *Queue, context: *core.JSContext, reaction: core.JSValue, value: core.JSValue, rejected: bool, ) !void`。
 - **作用**：准备容量并追加reaction任务。
 - **实现**：ensureAdditionalCapacity(1)后initPromiseReaction，再enqueuePrepared。
 - **所有权 / 错误 / 调用**：OOM不发布任务；无用户回调或reaction执行，phase默认invoke。输入在准备分配期间由调用方保护。
 
-### `Queue.enqueuePromiseThenable` (`src/core/jobs.zig:627`)
+### `Queue.enqueuePromiseThenable` (`src/core/jobs.zig:626`)
 
 - **签名**：`pub fn enqueuePromiseThenable( self: *Queue, context: *core.JSContext, target: core.JSValue, thenable: core.JSValue, then_function: core.JSValue, ) !void`。
 - **作用**：准备容量并追加thenable任务。
 - **实现**：ensureAdditionalCapacity(1)后initPromiseThenable，再enqueuePrepared。
 - **所有权 / 错误 / 调用**：OOM不发布任务；并不在此创建resolving对或调用then，输入根责任仍在外层。
 
-### `Queue.enqueueDynamicImport` (`src/core/jobs.zig:638`)
+### `Queue.enqueueDynamicImport` (`src/core/jobs.zig:637`)
 
 - **签名**：`pub fn enqueueDynamicImport( self: *Queue, context: *core.JSContext, runner: DynamicImportPayload.Runner, resolve: core.JSValue, reject: core.JSValue, basename: core.JSValue, specifier: core.JSValue, attributes: core.JSValue, ) !void`。
 - **作用**：准备容量并追加带runner的导入任务。
 - **实现**：ensureAdditionalCapacity(1)后initDynamicImport，再enqueuePrepared。
 - **所有权 / 错误 / 调用**：不调用runner、不加载模块；OOM时没有新条目，五个输入值跨分配需由外层保护。
 
-### `Queue.enqueueAtomicsWaiter` (`src/core/jobs.zig:652`)
+### `Queue.enqueueAtomicsWaiter` (`src/core/jobs.zig:651`)
 
 - **签名**：`pub fn enqueueAtomicsWaiter( self: *Queue, context: *core.JSContext, waiter: *anyopaque, promise: core.JSValue, runner: AtomicsWaiterPayload.Runner, destroyer: AtomicsWaiterPayload.Destroyer, ) !void`。
 - **作用**：准备容量并接管waiter完成任务。
 - **实现**：ensureAdditionalCapacity(1)成功才构造并提交AtomicsWaiter Job。
 - **所有权 / 错误 / 调用**：OOM发生在接管前，不调用destroyer，waiter仍由调用方清理。成功后Job.deinit负责一次destroyer调用；本函数无跨线程同步。
 
-### `Queue.enqueueFinalization` (`src/core/jobs.zig:664`)
+### `Queue.enqueueFinalization` (`src/core/jobs.zig:663`)
 
 - **签名**：`pub fn enqueueFinalization( self: *Queue, realm: *core.JSContext, callback: core.JSValue, held_value: core.JSValue, ) !void`。
 - **作用**：准备容量并追加最终化回调条目。
 - **实现**：ensureAdditionalCapacity(1)后initFinalization，再enqueuePrepared。
 - **所有权 / 错误 / 调用**：不调用清理回调；OOM不发布任务，callback/held_value及realm需跨准备窗口保持可达。
 
-### `Queue.hasJobs` (`src/core/jobs.zig:674`)
+### `Queue.hasJobs` (`src/core/jobs.zig:673`)
 
 - **签名**：`pub fn hasJobs(self: Queue) bool`。
 - **作用**：判断活窗口是否非空。
 - **实现**：返回jobs.len!=0。
 - **所有权 / 错误 / 调用**：不计未提交预留或已出队的运行中任务，不能表示所有异步工作均已结束。
 
-### `Queue.takeFirst` (`src/core/jobs.zig:680`)
+### `Queue.takeFirst` (`src/core/jobs.zig:679`)
 
 - **签名**：`pub fn takeFirst(self: *Queue) ?Job`。
 - **作用**：从FIFO头摘出一个任务并移交给调用方。
 - **实现**：空窗口返回null，否则复制首项、窗口前移一格、head加1。
 - **所有权 / 错误 / 调用**：O(1)，不分配、不清旧物理槽、不销毁任务；窗口为空也不立即重置head。出队后不再由Queue.traceRoots访问，调用方需保护并最终清理或重新提交。
 
-### `Queue.takeAt` (`src/core/jobs.zig:694`)
+### `Queue.takeAt` (`src/core/jobs.zig:693`)
 
 - **签名**：`pub fn takeAt(self: *Queue, index: usize) Job`。
 - **作用**：移交指定索引任务并从活窗口删除。
 - **实现**：断言索引有效；0委托takeFirst，否则copyForwards左移后续项并缩短窗口。
 - **所有权 / 错误 / 调用**：保持其他任务相对次序，中间删除成本随后续项数增长；非0分支不增加head，不能据此宣称新获头部保留额度。不清尾部废弃副本，调用方承担任务清理。
 
-### `Queue.prependReserved` (`src/core/jobs.zig:710`)
+### `Queue.prependReserved` (`src/core/jobs.zig:709`)
 
 - **签名**：`pub fn prependReserved(self: *Queue, job: Job) void`。
 - **作用**：用头部保留额度把任务重新放到FIFO首位。
 - **实现**：断言unlinked非0并减1，断言head非0并减1；窗口起点左移一项、长度加1，写入job。
 - **所有权 / 错误 / 调用**：无分配、O(1)，要求之前已保留头槽；不消费reserved_entries。成功后任务重新由队列追踪，原调用方不得重复清理。
 
-### `Queue.firstIndexOfKind` (`src/core/jobs.zig:720`)
+### `Queue.firstIndexOfKind` (`src/core/jobs.zig:719`)
 
 - **签名**：`pub fn firstIndexOfKind(self: Queue, kind: Kind) ?usize`。
 - **作用**：查询活窗口中第一个指定tag的索引。
 - **实现**：线性扫描activeTag(job.payload)，匹配即返回索引，无匹配返回null。
 - **所有权 / 错误 / 调用**：索引相对当前jobs窗口，不是backing绝对位置；不包含运行中任务或未提交预留。后续队列变化可使索引失效。
 
-### `Queue.countKind` (`src/core/jobs.zig:727`)
+### `Queue.countKind` (`src/core/jobs.zig:726`)
 
 - **签名**：`pub fn countKind(self: Queue, kind: Kind) usize`。
 - **作用**：统计活窗口内指定tag的条目数。
 - **实现**：逐项匹配payload活动tag，累加usize。
 - **所有权 / 错误 / 调用**：无分配，不计已出队任务或预留，也不验证payload内容。
 
-### `Queue.traceRoots` (`src/core/jobs.zig:735`)
+### `Queue.traceRoots` (`src/core/jobs.zig:734`)
 
 - **签名**：`pub fn traceRoots(self: *Queue, visitor: anytype) !void`。
 - **作用**：追踪当前活窗口内每个Job的边。
 - **实现**：按FIFO顺序逐Job.traceRoots，visitor错误立即传播。
 - **所有权 / 错误 / 调用**：不扫描已废弃槽、预留空槽或出队任务；错误可能发生在部分访问之后。visitor不得使当前遍历窗口失效。
 
-### `runGenericOneForTest` (`src/core/jobs.zig:744`)
+### `runGenericOneForTest` (`src/core/jobs.zig:743`)
 
 - **签名**：`fn runGenericOneForTest(queue: *Queue) RunOneStatus`。
 - **作用**：测试辅助：取出一条 generic、跑、deinit，报告 empty/success/exception。
 - **实现**：`takeFirst`，断言 generic，`job.run()`，看 `isException()`。
 - **所有权 / 错误 / 调用**：仅本文件 tests。FIFO 在异常后保留尾部。
 
-### `TestJob.fail` (`src/core/jobs.zig:760`)
+### `TestJob.fail` (`src/core/jobs.zig:759`)
 
 - **签名**：`fn fail(ctx: *core.JSContext, _: []const core.JSValue) core.JSValue`。
 - **作用**：generic job 抛 int32 91。
 - **实现**：`ctx.throwValue(JSValue.int32(91))`。
 - **所有权 / 错误 / 调用**：`Queue runOne reports three states...` 测试。
 
-### `TestJob.succeed` (`src/core/jobs.zig:764`)
+### `TestJob.succeed` (`src/core/jobs.zig:763`)
 
 - **签名**：`fn succeed(_: *core.JSContext, _: []const core.JSValue) core.JSValue`。
 - **作用**：返回 int32 7。
 - **实现**：直接返回。
 - **所有权 / 错误 / 调用**：同上测试，证明异常后 FIFO 仍跑后续成功 job。
 
-### `TestJob.append` (`src/core/jobs.zig:818`)
+### `TestJob.append` (`src/core/jobs.zig:817`)
 
 - **签名**：`fn append(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue`。
 - **作用**：往 `args[0]` 数组 dense append `args[1]`。
 - **实现**：`Object.expect`，`appendDenseArrayDefineIndex`；失败 throw 负 int。
 - **所有权 / 错误 / 调用**：FIFO 顺序测试。
 
-### `TestJob.appendAndEnqueue` (`src/core/jobs.zig:831`)
+### `TestJob.appendAndEnqueue` (`src/core/jobs.zig:830`)
 
 - **签名**：`fn appendAndEnqueue(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue`。
 - **作用**：先 append 1，再 enqueue 一个 append 3 的后继 job。
@@ -470,229 +470,229 @@ QuickJS 对照：`JSModuleDef`（quickjs.c:888-936）。可达realm通过Registr
 
 ### `PendingDefinition.deinit` (`src/core/module.zig:185`)
 
-- **签名**：`pub fn deinit(self: *PendingDefinition, _: anytype) void`。
+- **签名**：`pub fn deinit(self: *PendingDefinition) void`。
 - **作用**：拆掉待发表定义的值边并释放六个元数据数组。
-- **实现**：保存六个旧切片，将切片、func_obj、synthetic_kind、TLA重置；仅断言已有retained_cell为VarRef，再按非空切片释放数组。
-- **所有权 / 错误 / 调用**：忽略第二参数；没有提取或显式释放旧func_obj、atom、VarRef，也不销毁请求目标。不是旧RC逐值free流程；清空后的重复deinit无数组可释放，memory/atoms仍保留。
+- **实现**：保存六个旧切片，将切片、func_obj、synthetic_kind、TLA重置；仅断言已有retained_cell为VarRef（imports/indirect_exports/import_attributes 上的空遍历已删），再按非空切片释放数组。
+- **所有权 / 错误 / 调用**：没有提取或显式释放旧func_obj、atom、VarRef，也不销毁请求目标。不是旧RC逐值free流程；清空后的重复deinit无数组可释放，memory/atoms仍保留。
 
-### `PendingDefinition.addRequest` (`src/core/module.zig:220`)
+### `PendingDefinition.addRequest` (`src/core/module.zig:217`)
 
 - **签名**：`pub fn addRequest(self: *PendingDefinition, module_name: atom.Atom) !u32`。
 - **作用**：追加一个module尚为null的请求并返回新索引。
 - **实现**：先将当前requests.len转换u32，失败报ModuleMetadataOverflow；noteHolderStore名字后append。
 - **所有权 / 错误 / 调用**：不去重、不解析目标。noteHolderStore含编译scope记录/mark屏障而非retain；后续分配失败保持旧切片，但此前atom记录/着色不回滚。
 
-### `PendingDefinition.addImport` (`src/core/module.zig:227`)
+### `PendingDefinition.addImport` (`src/core/module.zig:224`)
 
 - **签名**：`pub fn addImport( self: *PendingDefinition, request_index: u32, import_name: atom.Atom, local_name: atom.Atom, var_idx: u16, is_namespace: bool, ) !void`。
 - **作用**：追加指定请求的导入元数据。
 - **实现**：先验证request_index，分别noteHolderStore import_name/local_name，再append含var_idx/is_namespace的条目。
 - **所有权 / 错误 / 调用**：只校验请求下标，不检查重复本地名、closure槽是否存在或atom语义；OOM保持旧切片但不回滚已发生atom屏障，元数据输入由外层保证。
 
-### `PendingDefinition.addExport` (`src/core/module.zig:247`)
+### `PendingDefinition.addExport` (`src/core/module.zig:244`)
 
 - **签名**：`pub fn addExport( self: *PendingDefinition, export_name: atom.Atom, local_name: atom.Atom, var_idx: u16, ) !void`。
 - **作用**：追加本地导出定位器。
 - **实现**：当前exports.len大于u32最大才报ModuleMetadataOverflow；记录两个atom后append，retained_cell默认null。
 - **所有权 / 错误 / 调用**：等于u32最大仍允许追加该索引。不会检查导出重名或var_idx有效性，也不在此创建VarRef；分配失败保留原数组。
 
-### `PendingDefinition.addIndirectExport` (`src/core/module.zig:263`)
+### `PendingDefinition.addIndirectExport` (`src/core/module.zig:260`)
 
 - **签名**：`pub fn addIndirectExport( self: *PendingDefinition, request_index: u32, export_name: atom.Atom, import_name: atom.Atom, is_namespace: bool, ) !void`。
 - **作用**：追加具名间接导出或namespace间接导出。
 - **实现**：先校验request_index，再检查当前indirect_exports.len是否大于u32最大；记录名字后append所有字段。
 - **所有权 / 错误 / 调用**：is_namespace直接保存，不在此解析目标或创建namespace/cell；与star_exports表分开。非法下标先于数量检查报错；OOM保留旧数组。
 
-### `PendingDefinition.addStarExport` (`src/core/module.zig:282`)
+### `PendingDefinition.addStarExport` (`src/core/module.zig:279`)
 
 - **签名**：`pub fn addStarExport(self: *PendingDefinition, request_index: u32) !void`。
 - **作用**：追加一个star导出的请求索引。
 - **实现**：validateRequestIndex成功后append StarExportEntry。
 - **所有权 / 错误 / 调用**：不记录额外atom、不去重、不解析导出，也不在此检查歧义；失败不追加条目。
 
-### `PendingDefinition.addImportAttribute` (`src/core/module.zig:287`)
+### `PendingDefinition.addImportAttribute` (`src/core/module.zig:284`)
 
 - **签名**：`pub fn addImportAttribute( self: *PendingDefinition, request_index: u32, key: atom.Atom, value: atom.Atom, ) !void`。
 - **作用**：追加关联请求的属性键值atom。
 - **实现**：先验证请求下标，再noteHolderStore key/value并append。
 - **所有权 / 错误 / 调用**：不检查重复键、type是否受支持或值内容，验证留给外层；分配失败保持旧数组但不撤回atom记录/着色。
 
-### `PendingDefinition.funcObjectValue` (`src/core/module.zig:305`)
+### `PendingDefinition.funcObjectValue` (`src/core/module.zig:302`)
 
 - **签名**：`pub fn funcObjectValue(self: *const PendingDefinition) value_mod.JSValue`。
 - **作用**：读取当前保存的函数或字节码值。
 - **实现**：返回func_obj的位拷贝。
 - **所有权 / 错误 / 调用**：不清槽、不做typed解码、不建立新根；空定义可返回undefined，跨GC的返回值保护由调用方负责。
 
-### `PendingDefinition.adoptFuncObjectValueNoFail` (`src/core/module.zig:312`)
+### `PendingDefinition.adoptFuncObjectValueNoFail` (`src/core/module.zig:309`)
 
 - **签名**：`pub fn adoptFuncObjectValueNoFail(self: *PendingDefinition, next: value_mod.JSValue) void`。
 - **作用**：向空func_obj槽写入非undefined值。
 - **实现**：断言旧槽undefined且next非undefined后直接赋值。
 - **所有权 / 错误 / 调用**：不验证值是否FunctionBytecode或函数，不注册根、不分配；NoFail表示无错误返回，违反断言仍可失败。
 
-### `PendingDefinition.takeFuncObjectValueNoFail` (`src/core/module.zig:318`)
+### `PendingDefinition.takeFuncObjectValueNoFail` (`src/core/module.zig:315`)
 
 - **签名**：`pub fn takeFuncObjectValueNoFail(self: *PendingDefinition) value_mod.JSValue`。
 - **作用**：取出func_obj并清空原槽。
 - **实现**：保存位拷贝，将func_obj写undefined，再返回。
 - **所有权 / 错误 / 调用**：允许原槽已为空，此时返回undefined；不分配、不建立返回值根，调用方接手后续可达性责任。
 
-### `PendingDefinition.validateRequestIndex` (`src/core/module.zig:324`)
+### `PendingDefinition.validateRequestIndex` (`src/core/module.zig:321`)
 
 - **签名**：`fn validateRequestIndex(self: *const PendingDefinition, request_index: u32) !void`。
 - **作用**：检查请求索引是否在当前数组内。
 - **实现**：转usize后与requests.len比较，越界报InvalidModuleRequestIndex。
 - **所有权 / 错误 / 调用**：不检查RequestEntry.module已解析或属于哪个registry；不变更状态、不分配。
 
-### `ModuleRecord.prepare` (`src/core/module.zig:396`)
+### `ModuleRecord.prepare` (`src/core/module.zig:393`)
 
 - **签名**：`fn prepare(self: *ModuleRecord, account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) void`。
 - **作用**：在新记录存储上写入空壳默认值。
 - **实现**：整结构赋值，只指定memory、atoms及noteHolderStore(name)，其他字段按默认初始化。
 - **所有权 / 错误 / 调用**：不分配、不发表到GC或registry；只能用于新记录，覆盖已拥有数组的记录不会自动释放旧存储。atom记录/mark屏障不等于模块根注册。
 
-### `ModuleRecord.replaceDefinitionNoFail` (`src/core/module.zig:408`)
+### `ModuleRecord.replaceDefinitionNoFail` (`src/core/module.zig:405`)
 
 - **签名**：`pub fn replaceDefinitionNoFail(self: *ModuleRecord, pending: *PendingDefinition) void`。
 - **作用**：将pending定义移动到新鲜、未加入registry的记录。
 - **实现**：断言账户/atom表一致、目标未安装/未解析且数组和函数/namespace槽为空；pending请求目标及retained_cell必须空。转移六数组、func_obj、synthetic/TLA，标记definition_installed，再重置pending。
 - **所有权 / 错误 / 调用**：无分配，不深拷贝、链接或解析请求，不发表namespace，也不在此登记GC。保持record身份及其他默认状态；不是允许覆盖已加载世代的更新接口。pending保留memory/atoms供复用或deinit。
 
-### `ModuleRecord.clearForDestroy` (`src/core/module.zig:449`)
+### `ModuleRecord.clearForDestroy` (`src/core/module.zig:446`)
 
-- **签名**：`fn clearForDestroy(self: *ModuleRecord, _: anytype) void`。
+- **签名**：`fn clearForDestroy(self: *ModuleRecord) void`。
 - **作用**：清除定义边和状态并释放元数据数组。
-- **实现**：保存六数组，清安装/解析标记、status、数组、func/ns/meta/exception、synthetic/TLA和链接瞬时字段；断言retained_cell类型后释放非空数组。
-- **所有权 / 错误 / 调用**：忽略runtime参数，不显式销毁JSValue/atom/VarRef或请求目标；不清module_name、registry关系或namespace resolver，外围destroyFromHeader处理摘链和名称。仅供终结，不是新世代重载接口。
+- **实现**：保存六数组，清安装/解析标记、status、数组、func/ns/meta/exception、synthetic/TLA和链接瞬时字段；断言retained_cell类型后释放非空数组（imports/indirect_exports/import_attributes 上的空遍历已删）。
+- **所有权 / 错误 / 调用**：已去掉从不使用的 runtime 形参（唯一调用方 destroyFromHeader 相应不再传），不显式销毁JSValue/atom/VarRef或请求目标；不清module_name、registry关系或namespace resolver，外围destroyFromHeader处理摘链和名称。仅供终结，不是新世代重载接口。
 
-### `ModuleRecord.destroyFromHeader` (`src/core/module.zig:492`)
+### `ModuleRecord.destroyFromHeader` (`src/core/module.zig:490`)
 
 - **签名**：`pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void`。
 - **作用**：销毁header对应的模块记录及其元数据存储。
-- **实现**：还原ModuleRecord指针，有registry则unlink；名称置null_atom，clearForDestroy后memory.destroy记录。
-- **所有权 / 错误 / 调用**：不在此从GC登记链摘除header，调用方须满足收集器销毁协议。rt仅传给实际忽略它的clearForDestroy；不延迟释放到第二遍，也不递归销毁依赖模块。
+- **实现**：还原ModuleRecord指针，有registry则unlink；名称置null_atom，clearForDestroy()后memory.destroy记录。
+- **所有权 / 错误 / 调用**：不在此从GC登记链摘除header，调用方须满足收集器销毁协议。`rt` 现在在函数内被显式忽略——它只为了让 destroy-by-kind 分派对所有 kind 保持同一 (runtime, header) 形状；不延迟释放到第二遍，也不递归销毁依赖模块。
 
-### `ModuleRecord.traceChildEdgesFallible` (`src/core/module.zig:503`)
+### `ModuleRecord.traceChildEdgesFallible` (`src/core/module.zig:502`)
 
 - **签名**：`pub inline fn traceChildEdgesFallible(self: *ModuleRecord, rt: anytype, visitor: anytype) !void`。
 - **作用**：向visitor枚举值边与名字atom边。
 - **实现**：先访问retained_cell、func_obj、module_ns、可选meta/exception；再访问module_name、requests名字、imports双名、exports双名、indirect双名、attributes键值。star只有索引，不产生atom访问。
 - **所有权 / 错误 / 调用**：忽略rt；不访问request.module、registry链、link_stack_prev或namespace owner回调。visitValue和visitAtom分别可缺省为不操作；visitor错误立即传播，已访问边不回滚。
 
-### `ModuleRecord.Helper.callVisitValue` (`src/core/module.zig:506`)
+### `ModuleRecord.Helper.callVisitValue` (`src/core/module.zig:505`)
 
 - **签名**：`inline fn callVisitValue(vis: anytype, value: *value_mod.JSValue) !void`。
 - **作用**：适配可选的值访问方法。
 - **实现**：编译期剥一层指针检查visitValue声明；若返回error union则try，否则直接调用；没有声明就不调用。
 - **所有权 / 错误 / 调用**：传入可变JSValue槽地址；没有visitValue不报错，不能把该helper本身当作已完成值追踪的证明。回调错误向上传播。
 
-### `ModuleRecord.traceChildEdgesNoFail` (`src/core/module.zig:554`)
+### `ModuleRecord.traceChildEdgesNoFail` (`src/core/module.zig:553`)
 
 - **签名**：`pub inline fn traceChildEdgesNoFail(self: *ModuleRecord, rt: anytype, visitor: anytype) void`。
 - **作用**：在visitor保证不失败时调用同一边遍历。
 - **实现**：调用Fallible版并catch unreachable。
 - **所有权 / 错误 / 调用**：不吞掉错误或继续遍历；若visitor真的失败则违反unreachable前提，不能当作容错包装。
 
-### `ModuleRecord.setStatus` (`src/core/module.zig:558`)
+### `ModuleRecord.setStatus` (`src/core/module.zig:557`)
 
 - **签名**：`pub fn setStatus(self: *ModuleRecord, status: Status) void`。
 - **作用**：直接写入模块状态枚举。
 - **实现**：self.status=status。
 - **所有权 / 错误 / 调用**：不验证转移顺序，不同时更新请求标志、exception或链接瞬时字段；状态机协议由外层执行器维护。
 
-### `ModuleRecord.setEvalException` (`src/core/module.zig:565`)
+### `ModuleRecord.setEvalException` (`src/core/module.zig:564`)
 
 - **签名**：`pub fn setEvalException(self: *ModuleRecord, rt: anytype, value: value_mod.JSValue) void`。
 - **作用**：保存求值异常值并执行owner到child的GC屏障。
 - **实现**：直接覆盖eval_exception，再调用rt.gc.generationalBarrier(header,value.cycleMarkHeader())。
 - **所有权 / 错误 / 调用**：不将status改成errored，不抛出异常、不显式释放旧值，也不要求旧槽为空；传入runtime须与记录匹配。
 
-### `ModuleRecord.request` (`src/core/module.zig:570`)
+### `ModuleRecord.request` (`src/core/module.zig:569`)
 
 - **签名**：`pub fn request(self: *ModuleRecord, request_index: u32) ?*RequestEntry`。
 - **作用**：借用指定请求条目的可变指针。
 - **实现**：索引超过requests.len返回null，否则返回对应元素地址。
 - **所有权 / 错误 / 调用**：只验证边界，不验证module已解析；数组销毁后指针失效。返回可变指针不自动落实写边协议，调用方不得绕过已解析图的不变式。
 
-### `ModuleRecord.requestsResolved` (`src/core/module.zig:575`)
+### `ModuleRecord.requestsResolved` (`src/core/module.zig:574`)
 
 - **签名**：`pub fn requestsResolved(self: *const ModuleRecord) bool`。
 - **作用**：读取请求完备标志。
 - **实现**：直接返回requests_resolved。
 - **所有权 / 错误 / 调用**：不重新遍历或验证依赖；标志只在调用方遵守安装/标记协议时代表图完备。
 
-### `ModuleRecord.markRequestsResolvedNoFail` (`src/core/module.zig:582`)
+### `ModuleRecord.markRequestsResolvedNoFail` (`src/core/module.zig:581`)
 
 - **签名**：`pub fn markRequestsResolvedNoFail(self: *ModuleRecord) void`。
 - **作用**：标记所有请求安装完毕。
 - **实现**：断言自身已入registry及每条module非null，然后置requests_resolved=true。
 - **所有权 / 错误 / 调用**：空请求数组也可标记；重复调用允许。不逐项验证依赖registry、definition_installed或status；标记后禁止改边依赖setter断言及外层纪律。
 
-### `ModuleRecord.setRequestModuleNoFail` (`src/core/module.zig:590`)
+### `ModuleRecord.setRequestModuleNoFail` (`src/core/module.zig:589`)
 
 - **签名**：`pub fn setRequestModuleNoFail(self: *ModuleRecord, request_index: u32, dependency: *ModuleRecord) void`。
 - **作用**：向尚未填充的请求槽写入借用依赖。
 - **实现**：request越界走unreachable；断言自身有registry、依赖同registry、尚未requests_resolved且槽为空，再写指针。
 - **所有权 / 错误 / 调用**：无分配、不retain、不执行GC屏障。仅供解析准备阶段一次写入；关闭安全检查不会提供错误返回，调用方必须满足约束。
 
-### `ModuleRecord.funcObjectValue` (`src/core/module.zig:600`)
+### `ModuleRecord.funcObjectValue` (`src/core/module.zig:599`)
 
 - **签名**：`pub fn funcObjectValue(self: *const ModuleRecord) value_mod.JSValue`。
 - **作用**：读取当前函数或字节码槽。
 - **实现**：返回func_obj位拷贝。
 - **所有权 / 错误 / 调用**：不清槽或解码品牌、不建立新根；可能为undefined，返回值跨GC需由调用方保护。
 
-### `ModuleRecord.adoptFuncObjectValueNoFail` (`src/core/module.zig:606`)
+### `ModuleRecord.adoptFuncObjectValueNoFail` (`src/core/module.zig:605`)
 
 - **签名**：`pub fn adoptFuncObjectValueNoFail(self: *ModuleRecord, rt: anytype, next: value_mod.JSValue) void`。
 - **作用**：将非undefined值写入空函数槽并执行GC屏障。
 - **实现**：断言旧func_obj为空且next非undefined，赋值后调用generationalBarrier。
 - **所有权 / 错误 / 调用**：不验证FunctionBytecode或函数品牌，不分配；完成具体字节码到函数转换的是外层，不是本setter。
 
-### `ModuleRecord.takeFuncObjectValueNoFail` (`src/core/module.zig:615`)
+### `ModuleRecord.takeFuncObjectValueNoFail` (`src/core/module.zig:614`)
 
 - **签名**：`pub fn takeFuncObjectValueNoFail(self: *ModuleRecord) value_mod.JSValue`。
 - **作用**：移出函数槽的当前值。
 - **实现**：复制func_obj，将原槽写undefined并返回。
 - **所有权 / 错误 / 调用**：允许返回undefined；不销毁值或建立返回根，调用方承担转移期间可达性责任。
 
-### `ModuleRecord.moduleNamespaceValue` (`src/core/module.zig:621`)
+### `ModuleRecord.moduleNamespaceValue` (`src/core/module.zig:620`)
 
 - **签名**：`pub fn moduleNamespaceValue(self: *const ModuleRecord) value_mod.JSValue`。
 - **作用**：读取namespace槽。
 - **实现**：返回module_ns位拷贝，未发布时为undefined。
 - **所有权 / 错误 / 调用**：不构造或解析namespace、不清槽或增加根；调用方保证记录和返回值寿命。
 
-### `ModuleRecord.publishModuleNamespaceNoFail` (`src/core/module.zig:626`)
+### `ModuleRecord.publishModuleNamespaceNoFail` (`src/core/module.zig:625`)
 
 - **签名**：`pub fn publishModuleNamespaceNoFail(self: *ModuleRecord, rt: anytype, owned: value_mod.JSValue) void`。
 - **作用**：把已构造的对象写到空namespace槽。
 - **实现**：断言槽undefined且输入为对象，赋值后调用generationalBarrier。
 - **所有权 / 错误 / 调用**：只检查对象tag，不检验namespace品牌、构造完整性、链接状态或resolver是否已安装；这些是调用方前提，无分配。
 
-### `ModuleRecord.namespaceAutoInitOwner` (`src/core/module.zig:633`)
+### `ModuleRecord.namespaceAutoInitOwner` (`src/core/module.zig:632`)
 
 - **签名**：`pub fn namespaceAutoInitOwner(self: *const ModuleRecord) *const module_auto_init.AutoInitModuleOwner`。
 - **作用**：借用记录内唯一的namespace自动初始化owner。
 - **实现**：返回namespace_auto_init_owner字段地址。
 - **所有权 / 错误 / 调用**：地址寿命绑定ModuleRecord，不创建独立owner或GC根；默认resolver报InvalidBuiltinRegistry，调用方在发布前安装实际resolver。
 
-### `ModuleRecord.setNamespaceAutoInitResolverNoFail` (`src/core/module.zig:637`)
+### `ModuleRecord.setNamespaceAutoInitResolverNoFail` (`src/core/module.zig:636`)
 
 - **签名**：`pub fn setNamespaceAutoInitResolverNoFail( self: *ModuleRecord, resolve: @FieldType(module_auto_init.AutoInitModuleOwner, "resolve"), ) void`。
 - **作用**：在namespace发布前替换初始resolver。
 - **实现**：断言namespace槽空且当前resolver等于unresolvedModuleAutoInit，再赋函数指针。
 - **所有权 / 错误 / 调用**：不是不可变once token：若传入的仍是stub，之后检查仍可通过。无分配，不自动创建属性或延长模块寿命。
 
-### `ModuleRecord.publishRetainedExportCellNoFail` (`src/core/module.zig:648`)
+### `ModuleRecord.publishRetainedExportCellNoFail` (`src/core/module.zig:647`)
 
 - **签名**：`pub fn publishRetainedExportCellNoFail( self: *ModuleRecord, export_index: u32, owned_cell: value_mod.JSValue, ) void`。
 - **作用**：向本地导出条目安装一个VarRef值边。
 - **实现**：直接索引exports，断言retained_cell为空且输入可解码VarRef，再位拷贝赋值。
 - **所有权 / 错误 / 调用**：无错误返回，索引须有效；不增加引用计数，也不保证该cell没有其他持有者。本setter没有rt参数或显式generationalBarrier，追踪由记录边遍历完成。
 
-### `ModuleRecord.retainedExportCellValue` (`src/core/module.zig:660`)
+### `ModuleRecord.retainedExportCellValue` (`src/core/module.zig:659`)
 
 - **签名**：`pub fn retainedExportCellValue(self: *const ModuleRecord, export_index: u32) ?value_mod.JSValue`。
 - **作用**：读取导出条目的可选VarRef值。
@@ -701,10 +701,10 @@ QuickJS 对照：`JSModuleDef`（quickjs.c:888-936）。可达realm通过Registr
 
 ### `ModuleRecord.clearRetainedExportCellNoFail` (`src/core/module.zig:666`)
 
-- **签名**：`pub fn clearRetainedExportCellNoFail(self: *ModuleRecord, _: anytype, export_index: u32) void`。
+- **签名**：`pub fn clearRetainedExportCellNoFail(self: *ModuleRecord, export_index: u32) void`。
 - **作用**：移除指定导出条目的cell边。
 - **实现**：直接索引；已null则返回，否则断言VarRef后置null。
-- **所有权 / 错误 / 调用**：忽略runtime参数，不销毁VarRef；合法索引上的重复清除可行，但并非所有输入都有无失败保证。
+- **所有权 / 错误 / 调用**：不销毁VarRef；合法索引上的重复清除可行，但并非所有输入都有无失败保证。
 
 ### `ModuleRecord.resetLinkTransientNoFail` (`src/core/module.zig:673`)
 

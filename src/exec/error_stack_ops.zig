@@ -25,8 +25,7 @@ const defineDataPropertyByAtom = object_ops.defineDataPropertyByAtom;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
 
-pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
-    _ = output;
+pub fn captureErrorStack(ctx: *core.JSContext, global: *core.Object, instance: *core.Object) !void {
     const sites = try buildCallSiteArray(ctx, global, null);
     try instance.setErrorStackSites(ctx.runtime, sites);
 }
@@ -38,13 +37,13 @@ pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
 /// inside `JS_ThrowError2`).
 pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
     const object = property_ops.expectObject(value) catch return;
-    try captureErrorStack(ctx, null, global, object);
+    try captureErrorStack(ctx, global, object);
 }
 
 pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip_name: ?[]const u8) !core.JSValue {
     if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
 
-    if (try errorPrepareStackTrace(ctx.runtime, global)) |prepare| {
+    if (try errorPrepareStackTrace(global)) |prepare| {
         const sites = try buildCallSiteArray(ctx, global, skip_name);
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
@@ -71,7 +70,7 @@ pub fn formatCapturedErrorStackValue(
 ) !core.JSValue {
     if (ctx.runtime.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
 
-    if (try errorPrepareStackTrace(ctx.runtime, global)) |prepare| {
+    if (try errorPrepareStackTrace(global)) |prepare| {
         const sites_arg = sites_value;
         ctx.runtime.formatting_error_stack = true;
         defer ctx.runtime.formatting_error_stack = false;
@@ -142,7 +141,7 @@ fn defineParseErrorSurface(
     try instance.setErrorStack(rt, stack_value);
 }
 
-pub fn errorPrepareStackTrace(_: *core.JSRuntime, global: *core.Object) !?core.JSValue {
+fn errorPrepareStackTrace(global: *core.Object) !?core.JSValue {
     const error_key = core.atom.ids.Error;
     const error_value = try global.getProperty(error_key);
     const error_object = property_ops.expectObject(error_value) catch return null;
@@ -320,7 +319,7 @@ pub fn errorStackSetter(
     }
 }
 
-pub fn isErrorStackSetterValue(value: core.JSValue) bool {
+fn isErrorStackSetterValue(value: core.JSValue) bool {
     const object = object_ops.objectFromValue(value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
     return native_ref.domain == .error_object and native_ref.id == @intFromEnum(method_ids.error_object.PrototypeMethod.stack_setter);

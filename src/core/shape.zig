@@ -1,7 +1,8 @@
-//! Refcounted object shapes, property metadata, hash chains, and transitions.
+//! Object shapes, property metadata, hash chains, and transitions.
 //!
-//! Objects retain a `Shape`; the Runtime shape registry owns hashed transition
-//! identities and clones shared shapes before mutation. The extern header and
+//! An object names its `Shape` by pointer and the tracer keeps it alive; the
+//! Runtime shape registry owns hashed transition identities and clones shared
+//! shapes before mutation. The extern header and
 //! inline FAM order (properties before buckets) are codegen- and GC-load-
 //! bearing; deletion compaction preserves insertion order. QuickJS source map:
 //! `JSShapeProperty`/`JSShape` at quickjs.c:968-987 and FAM sizing near
@@ -123,8 +124,7 @@ pub const ShapeColdState = extern struct {
     deleted_prop_count: u32 = 0,
 };
 
-inline fn initialOwnership(is_hashed: bool) ShapeOwnership {
-    _ = is_hashed;
+inline fn initialOwnership() ShapeOwnership {
     return .{};
 }
 
@@ -294,14 +294,6 @@ pub const Shape = extern struct {
         const old = self.deletedPropCount();
         std.debug.assert(old + 1 < @as(u32, no_property_index));
         self.cold_state.deleted_prop_count = @intCast(old + 1);
-    }
-
-    pub fn sameTransition(self: *const Shape, other: *const Shape) bool {
-        if (self.proto != other.proto or self.prop_count != other.prop_count) return false;
-        for (self.props()[0..self.prop_count], other.props()[0..other.prop_count]) |a, b| {
-            if (a.atom_id != b.atom_id or a.flags != b.flags) return false;
-        }
-        return true;
     }
 
     pub fn hasPropertyHash(self: *const Shape) bool {
@@ -786,7 +778,7 @@ pub const Registry = struct {
         new_shape.* = .{
             .header = .{},
             .trace_list_previous = initialTraceListState(old.isHashed()),
-            .ownership = initialOwnership(old.isHashed()),
+            .ownership = initialOwnership(),
             .hash = old.hash,
             .prop_hash_mask = if (new_bucket_count == 0) no_property_hash else @as(u32, @intCast(new_bucket_count - 1)),
             .prop_size = new_prop_size,
@@ -948,7 +940,7 @@ pub const Registry = struct {
         new_shape.* = .{
             .header = .{},
             .trace_list_previous = initialTraceListState(false),
-            .ownership = initialOwnership(false),
+            .ownership = initialOwnership(),
             .hash = old.hash,
             .prop_hash_mask = @intCast(new_bucket_count - 1),
             .prop_size = new_prop_size,
@@ -1038,7 +1030,7 @@ pub const Registry = struct {
         new_shape.* = .{
             .header = .{},
             .trace_list_previous = initialTraceListState(old.isHashed()),
-            .ownership = initialOwnership(old.isHashed()),
+            .ownership = initialOwnership(),
             .hash = baseline_hash,
             .prop_hash_mask = if (bucket_count == 0) no_property_hash else @as(u32, @intCast(bucket_count - 1)),
             .prop_size = @intCast(target_capacity),
@@ -1058,7 +1050,6 @@ pub const Registry = struct {
                 .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
             };
         }
-        errdefer self.freePropertyAtoms(new_shape.props()[0..baseline_props.len]);
         if (new_shape.hasPropertyHash()) {
             for (new_shape.props()[0..new_shape.prop_count], 0..) |*prop, index| {
                 prop.hash_next = no_property_index;
@@ -1077,9 +1068,8 @@ pub const Registry = struct {
         self.gc_registry.addInitializedShape(&new_shape.header, new_shape.accountedAllocationSize());
         if (new_shape.isHashed()) self.insertShapeHash(new_shape);
 
-        // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
-        const old_prop_count = old.prop_count;
-        for (old.props()[0..old_prop_count]) |_| {}
+        // Discard the OLD layout's block. Its property atoms need no teardown:
+        // the atom table is not refcounted from shapes any more.
         self.memory.destroyWithFam(Shape, old, old_fam_bytes);
 
         shape_ptr.* = new_shape;
@@ -1164,11 +1154,9 @@ pub const Registry = struct {
         const fam_bytes = accounted - @sizeOf(Shape);
         self.gc_registry.unlinkObjectWithBytes(&shape.header, accounted);
         self.unlink(shape);
-        // Prop atoms stay valid until freed below; the inline storage lives in
-        // the single block freed last (qjs js_free_shape0 releases atoms +
-        // proto, then the one allocation).
-        const prop_count = shape.prop_count;
-        for (shape.props()[0..prop_count]) |_| {}
+        // qjs js_free_shape0 releases the prop atoms + proto before the single
+        // allocation; here the atoms are not owned by the shape and the proto
+        // is a traced edge, so only the block goes.
         self.memory.destroyWithFam(Shape, shape, fam_bytes);
     }
 
@@ -1213,7 +1201,6 @@ pub const Registry = struct {
                 .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.noteHolderStore(prop.atom_id),
             };
         }
-        errdefer self.freePropertyAtoms(shape.props()[0..shape.prop_count]);
         if (shape.hasPropertyHash()) {
             for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
                 prop.hash_next = no_property_index;
@@ -1255,10 +1242,6 @@ pub const Registry = struct {
         // so linking is infallible and the shape/value-storage commit is atomic.
         std.debug.assert(@as(usize, shape.prop_count) + @as(usize, shape.deletedPropCount()) <= shape.bucketCount());
         if (shape.hasPropertyHash()) self.linkPropertyHash(shape, index);
-    }
-
-    fn freePropertyAtoms(_: *Registry, props: []const Property) void {
-        for (props) |_| {}
     }
 
     fn rebuildPropertyHash(self: *Registry, shape_ptr: **Shape, bucket_count: usize) !void {

@@ -23,7 +23,7 @@
 - `SortEntryRootWindow`：sort scratch 里的 JSValue 对 conservative 扫描不可见，必须做成精确根。
 - `Uint8ArrayBase64Alphabet` / `Uint8ArrayBase64LastChunkHandling` / `Uint8ArrayCodecProgress`：base64/hex。
 - `DenseArrayElementFastResult`（`miss` / `handled` / `out_of_memory`）与 `DenseArrayOverwriteFastResult`（`miss` / `handled` / `append_candidate`）：`OP_put_array_el` 的 C ABI 三态，避免 Zig error-union sret。
-- `ValueSliceRoot` / `CellSliceRoot`：把 `[]JSValue` / `[]*VarRef` 挂上 `ValueRootFrame`。
+- `ValueSliceRoot`：把 `[]JSValue` 挂上 `ValueRootFrame`（同族的 `CellSliceRoot` 全树无调用方，已删）。
 - `OwnedArrayLikeArgs`：`empty` / `arena` / `heap` 三种 backing；`deinit` 按 LIFO 释放。
 - `FastApplyArgs`：`.values` 或 mapped-arguments `.cells`。洞、Proxy、改写 `length` 不能走这条。
 - `Base64Chunk`：编解码块。

@@ -166,129 +166,122 @@
 
 - **签名**：`fn typedArraySourceValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue`。
 - **作用**：若是原语包装则拆箱。
-- **实现**：`primitiveWrapperStoredValue orelse value`。
+- **实现**：`coercion_ops.primitiveWrapperStoredValue(rt, value) orelse value`。（本文件原来另有一份与 `coercion_ops` 逐字相同的 `primitiveWrapperStoredValue` 私有副本，已删，改直接调 exec 内的那一份。）
 - **所有权 / 错误 / 调用**：不分配：命中包装对象时返回的是 `objectData` 里的借用值，否则原样返回入参；`rt` 只为签名统一而带。实际不会失败（error set 由 `!` 推断为空集）。调用方是两个需要拆箱的拷贝臂 `construct.zig:666`、`732`。
 
-### `primitiveWrapperStoredValue` (`src/exec/construct.zig:749`)
-
-- **签名**：`fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue`。
-- **作用**：Number/Boolean/BigInt/Symbol 对象的 `objectData`。
-- **实现**：其它 class null。String 不拆。
-- **所有权 / 错误 / 调用**：只读 class 判定 + `objectData` 借用读，不分配、不抛，`rt` 被 `_ =` 丢弃。唯一调用方是本文件的 `typedArraySourceValue`（`construct.zig:746`）；`src/exec/json_ops.zig:2432` 用的是 `coercion_ops` 里的同名函数，不是这一个。
-
-### `constructFunctionValue` (`src/exec/construct.zig:763`)
+### `constructFunctionValue` (`src/exec/construct.zig:749`)
 
 - **签名**：`fn constructFunctionValue(rt: *core.JSRuntime) !core.JSValue`。
 - **作用**：无源码的 Function 构造回退：合成闭包 kind 13（返回 undefined）。
 - **实现**：`closure_mod.create(rt, 13, 0, 0, 0)`。完整 `new Function(src)` 在 `function_ops`。
 - **所有权 / 错误 / 调用**：无 Realm 路径。
 
-### `constructCollectionValue` (`src/exec/construct.zig:767`)
+### `constructCollectionValue` (`src/exec/construct.zig:753`)
 
 - **签名**：`fn constructCollectionValue( ctx: *core.JSContext, kind: u32, prototype: ?*core.Object, args: []const core.JSValue, globals: []globals_mod.Slot, ) !core.JSValue`。
 - **作用**：空集合 + 可选可迭代填充。
 - **实现**：kind 1/3（Map/WeakMap）用 `set` 且 entry 必须是 array；否则 `add`。原生 adder 只走 record；否则先 `c_closure` 再 record。非 array 源走 iterator。
 - **所有权 / 错误 / 调用**：null/undefined 源跳过填充。
 
-### `constructCollectionFromIterator` (`src/exec/construct.zig:816`)
+### `constructCollectionFromIterator` (`src/exec/construct.zig:802`)
 
 - **签名**：`fn constructCollectionFromIterator( ctx: *core.JSContext, collection_value: core.JSValue, kind: u32, iterable_value: core.JSValue, adder: core.JSValue, adder_name: []const u8, globals: []globals_mod.Slot, ) !void`。
 - **作用**：GetIterator 后逐步 add/set；失败 `closeIterator`。
 - **实现**：`Symbol.iterator` 必须可调用。`done`/`value` 经 getter。Map 条目必须是 object。
 - **所有权 / 错误 / 调用**：中途错误关 iterator。
 
-### `callCollectionAdder` (`src/exec/construct.zig:880`)
+### `callCollectionAdder` (`src/exec/construct.zig:866`)
 
 - **签名**：`fn callCollectionAdder( ctx: *core.JSContext, collection_value: core.JSValue, adder: core.JSValue, adder_name: []const u8, args: []const core.JSValue, globals: []globals_mod.Slot, ) !void`。
 - **作用**：原生 adder 或闭包 + 再跑原生（夹具与真 Set 双写）。
 - **实现**：`set`→id 1，`add`→id 6。
 - **所有权 / 错误 / 调用**：自身不分配、不建根：`args` 与 `globals` 都借用调用方的栈窗口。错误原样上抛（`TypeError` 来自 adder 不可调用或 class 不符），由两个调用方 `construct.zig:866`、`872` 用 `catch` 接住并先 `closeIterator` 再重抛，保证迭代器被关闭。
 
-### `closeIterator` (`src/exec/construct.zig:899`)
+### `closeIterator` (`src/exec/construct.zig:885`)
 
 - **签名**：`fn closeIterator(ctx: *core.JSContext, iterator: *core.Object, globals: []globals_mod.Slot) !void`。
 - **作用**：IteratorClose：调 `return` 若可调用。
 - **实现**：`return` 失败吞掉（关迭代器本身失败不覆盖原错误）。
 - **所有权 / 错误 / 调用**：不分配。`iterator.getProperty(return)` 的错误用 `try` 上抛，但 `return` 方法自身的调用结果被 `catch return` 吞掉——IteratorClose 失败不能盖住触发它的原错误。调用方是集合构造里的 6 处错误清理点（`construct.zig:848`、`854`、`858` 等）。
 
-### `getPropertyWithGetter` (`src/exec/construct.zig:906`)
+### `getPropertyWithGetter` (`src/exec/construct.zig:892`)
 
 - **签名**：`fn getPropertyWithGetter(ctx: *core.JSContext, object: *core.Object, key: core.Atom, globals: []globals_mod.Slot) !core.JSValue`。
 - **作用**：沿原型链读，accessor 则调 getter。
 - **实现**：无描述符 undefined。
 - **所有权 / 错误 / 调用**：iterator `done`/`value`。
 
-### `callClosureWithThis` (`src/exec/construct.zig:922`)
+### `callClosureWithThis` (`src/exec/construct.zig:908`)
 
 - **签名**：`fn callClosureWithThis( ctx: *core.JSContext, callable: core.JSValue, this_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot, ) !core.JSValue`。
 - **作用**：集合构造里调 iterator/adder。
 - **实现**：`c_function` 按名查 `legacyClosureMethodId` 走 record；`c_closure` 走 `closure_mod.callWithThis`；其它 TypeError。
 - **所有权 / 错误 / 调用**：名字分配 defer free。
 
-### `nativeFunctionName` (`src/exec/construct.zig:954`)
+### `nativeFunctionName` (`src/exec/construct.zig:940`)
 
 - **签名**：`fn nativeFunctionName(rt: *core.JSRuntime, function_object: *core.Object) ![]u8`。
 - **作用**：分配一份可见/dispatch 名。
 - **实现**：`nativeFunctionNameValue(..., true)` + `appendRawString` + `toOwnedSlice`。
 - **所有权 / 错误 / 调用**：调用方 free。
 
-### `nativeFunctionNameValue` (`src/exec/construct.zig:962`)
+### `nativeFunctionNameValue` (`src/exec/construct.zig:948`)
 
 - **签名**：`fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, prefer_dispatch_name: bool) !core.JSValue`。
 - **作用**：dispatch atom 或 `name` 属性。
 - **实现**：prefer 时 `nativeDispatchName` → `toStringValue`。非 string `TypeError`。
 - **所有权 / 错误 / 调用**：返回的字符串 JSValue 可能是 `atoms.toStringValue` 新建的堆值（也可能是 `name` 属性槽里的借用值），函数不建根；三个调用方都是拿到就立刻 `appendRawString` 拷成字节：`nativeFunctionName`（`construct.zig:955`）、`isNativeCollectionAdder`（`982`，错误 `catch return false`）、`constructorName`（`1017`，错误 `catch return null`）。`name` 不是字符串 → `error.TypeError`。
 
-### `isNativeCollectionAdder` (`src/exec/construct.zig:977`)
+### `isNativeCollectionAdder` (`src/exec/construct.zig:963`)
 
 - **签名**：`fn isNativeCollectionAdder(rt: *core.JSRuntime, value: core.JSValue, expected: []const u8) bool`。
 - **作用**：是否名为 `set`/`add` 的 `c_function`。
 - **实现**：读名失败当 false。
 - **所有权 / 错误 / 调用**：临时 buffer。
 
-### `getCollectionAdder` (`src/exec/construct.zig:989`)
+### `getCollectionAdder` (`src/exec/construct.zig:975`)
 
 - **签名**：`fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []const u8) !core.JSValue`。
 - **作用**：沿链取 adder；accessor 则 `closure_mod.call` getter。
 - **实现**：找不到 undefined。
 - **所有权 / 错误 / 调用**：`internAtom` 的 atom 归 `AtomTable`，调用方不释放；返回值是描述符槽里的借用值，或 accessor getter 的返回值（那一路经 `closure_mod.call`，其错误原样重抛）。找不到返回 undefined，由唯一调用方 `construct.zig:780` 接着用 `isCallableObject` 判 `TypeError`。
 
-### `expectStringValue` (`src/exec/construct.zig:1009`)
+### `expectStringValue` (`src/exec/construct.zig:995`)
 
 - **签名**：`fn expectStringValue(rt: *core.JSRuntime, expected: []const u8, value: core.JSValue) !void`。
 - **作用**：测试：原始字符串相等。
 - **实现**：`appendRawString` + `expectEqualStrings`。
 - **所有权 / 错误 / 调用**：测试断言：本地 `ArrayList` 以 `defer deinit` 释放，不产生长期所有权；失败经 `std.testing` 的 error 上抛。调用方是本文件三处 GC 测试（`construct.zig:325`、`384`、`387`）；`src/tests/oom.zig` 里的同名函数是另一个实现。
 
-### `constructorName` (`src/exec/construct.zig:1016`)
+### `constructorName` (`src/exec/construct.zig:1002`)
 
 - **签名**：`fn constructorName(rt: *core.JSRuntime, constructor: *core.Object) !?[]u8`。
 - **作用**：构造器名字节；失败 null 而非抛。
 - **实现**：owned slice。
 - **所有权 / 错误 / 调用**：`constructValue` defer free。
 
-### `isCallableObject` (`src/exec/construct.zig:1024`)
+### `isCallableObject` (`src/exec/construct.zig:1010`)
 
 - **签名**：`fn isCallableObject(value: core.JSValue) bool`。
 - **作用**：c_function / data / async resume / c_closure / bytecode / bound。
 - **实现**：header + class。
 - **所有权 / 错误 / 调用**：纯 header + class_id 判定，不分配、不抛、不 retain。调用方 6 处，都在本文件：`construct.zig:174`（FinalizationRegistry 的 cleanup 回调参数）、`781`（adder）、`829`/`836`（iterator/next 方法）、`902`（`closeIterator` 的 `return`）、`1102`（constructability 测试）。
 
-### `isConstructibleBytecodeFunctionObject` (`src/exec/construct.zig:1036`)
+### `isConstructibleBytecodeFunctionObject` (`src/exec/construct.zig:1022`)
 
 - **签名**：`fn isConstructibleBytecodeFunctionObject(object: *const core.Object) bool`。
 - **作用**：仅 `bytecode_function` 且 `hasPrototype` 且 `functionKind==normal`。
 - **实现**：generator/async/async_generator 一律 false。
 - **所有权 / 错误 / 调用**：`expectConstructor`。
 
-### `expectConstructor` (`src/exec/construct.zig:1050`)
+### `expectConstructor` (`src/exec/construct.zig:1036`)
 
 - **签名**：`fn expectConstructor(value: core.JSValue) !*core.Object`。
 - **作用**：`[[Construct]]` 门。
 - **实现**：bytecode 类走 `isConstructibleBytecodeFunctionObject`；另允许 c_function / bound / c_closure。
 - **所有权 / 错误 / 调用**：箭头（无 prototype）TypeError。
 
-### `Fixture.create` (`src/exec/construct.zig:1078`)
+### `Fixture.create` (`src/exec/construct.zig:1064`)
 
 - **签名**：`fn create(runtime: *core.JSRuntime, case: Case) !*core.Object`。
 - **作用**：按 class/func_kind/has_prototype 造 FB 函数对象。
@@ -297,5 +290,5 @@
 
 ## 覆盖核对
 
-- 清单函数数: 41
+- 清单函数数: 40
 - 未覆盖: 无

@@ -1271,7 +1271,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     return condemned;
 }
 
-/// Destruction order for the morgue (qjs `gc_free_cycles`'s five passes),
+/// Destruction order for the morgue (qjs `gc_free_cycles`'s pass sequence),
 /// spelled as a phase index so a bounded slice
 /// can resume where its budget ran out. Objects first; realms, modules and
 /// function bytecode after; cells and shapes last, because earlier
@@ -2031,13 +2031,13 @@ const Collector = struct {
                 if (kind != .shape and kind != .realm_context)
                     @panic("gc: FRONTIER SAFETY: non-tracing kind reached shade");
                 {
-                    // Mark BEFORE tracing: the mark is both this object's
-                    // survival (an unmarked shape here was condemned alive -- the
-                    // first build of this branch forgot the store and test262
-                    // found what macro-check missed) and the recursion's
-                    // deduplication, since a re-shade of the same shape now takes
-                    // the marked early-return above.
-                    self.rt.gc.setHeaderMarked(header);
+                    // The mark above is both this object's survival (an
+                    // unmarked shape here was condemned alive -- the first
+                    // build of this branch forgot the store and test262 found
+                    // what macro-check missed) and the recursion's
+                    // deduplication, since a re-shade of the same shape now
+                    // takes the marked early-return. It is already stored, so
+                    // tracing follows directly.
                     self.traceHeader(header) catch |err| {
                         self.err = err;
                     };

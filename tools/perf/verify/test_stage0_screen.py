@@ -25,7 +25,6 @@ def stats(
     *,
     published: int = 100,
     reopened: int = 50,
-    deferred: int = 40,
     major: int = 10,
     minor: int = 20,
     stw: int = 1000,
@@ -38,7 +37,6 @@ def stats(
         "blockHeap": {
             "hotReusePublished": published,
             "reopened": reopened,
-            "deferredBlockRuns": deferred,
             "committed": committed,
             reclaimed_leaf: reclaimed,
         },
@@ -68,7 +66,6 @@ class Stage0ScreenTests(unittest.TestCase):
         self.assertEqual(classes["cycles.minor"], "deterministic")
         self.assertEqual(classes["pauseNs.minor.total"], "phase-sensitive")
         self.assertEqual(classes["blockHeap.bitmapReclaimedCells"], "deterministic")
-        self.assertEqual(classes["blockHeap.deferredBlockRuns"], "deterministic")
         self.assertEqual(classes["cycles.majorCompleted"], "phase-sensitive")
         self.assertEqual(classes["blockHeap.hotReusePublished"], "phase-sensitive")
         self.assertEqual(classes["blockHeap.reopened"], "phase-sensitive")

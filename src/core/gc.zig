@@ -299,6 +299,7 @@ pub const minor_crossing_young_floor: usize = minor_young_threshold / 16;
 /// and only the workload knows that. `gc_generation.noteMinorYield` measures it
 /// (see `low_yield_limit`); this constant only decides how much room the young
 /// set gets before the question is asked.
+
 /// Time budget for one incremental marking increment at a poll. §1.3's major
 /// pause target is 2 ms p99; 1 ms per increment leaves room for the begin and
 /// remark slices, which carry fixed whole-heap work until Phase 3.
@@ -1712,7 +1713,7 @@ pub const Registry = struct {
         }
         self.address_registry.deinit(addressRegistryAllocator());
         self.generation.deinit(addressRegistryAllocator());
-        self.marking.deinit(addressRegistryAllocator());
+        self.marking.deinit();
         self.block_heap.deinit();
         if (comptime heap_accounting_oracle_enabled) {
             std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
@@ -1753,16 +1754,6 @@ pub const Registry = struct {
         self.stats.external_alloc_count +|= 1;
         const weighted = std.math.mul(usize, bytes, self.scheduler.policy.external_weight) catch std.math.maxInt(usize);
         self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
-    }
-
-    /// Legacy raw live-ledger decrement. This does not discharge an
-    /// `ExternalMemoryToken`; tracked callers must call `token.release()` so
-    /// the registry entry and live bytes move together. No in-tree caller
-    /// uses this raw hook.
-    pub fn reportExternalFree(self: *Registry, bytes: usize) void {
-        if (bytes == 0) return;
-        self.stats.external_bytes -|= bytes;
-        self.stats.external_free_count +|= 1;
     }
 
     pub fn reportExternalFreeUntracked(self: *Registry, bytes: usize) void {
@@ -2154,17 +2145,6 @@ pub const Registry = struct {
         self.recordHeapFreeWithBytes(h, bytes);
     }
 
-    /// TGC S2: unpublish an extent string the extent sweep found dead
-    /// (`string.sweepExtents`). Not `unlinkObjectWithBytes`: that path
-    /// reads the intrusive link word, which a string does not have. What a
-    /// standalone string publication left behind is the byte ledger, the
-    /// census; undo exactly those. Since S2-h1 there is no occupant entry to
-    /// remove: the heap's `extent_pages` index is the extent's membership,
-    /// and `Heap.free` unindexes it as part of returning the mapping.
-    /// TGC S2: a condemned string BLOCK CELL leaves the registry. Cells are
-    /// bitmap-owned (no list link, no occupant-table entry), so this is the
-    /// byte debit plus the remembered-owner release -- the string twin of
-    /// what `unregisterObjectWithBytes` does for an Object cell.
     /// TGC S4-b spec 2.2: the ONE allocation + publication funnel for a bare
     /// storage cell (property entries, array elements, and in S4-c a-class
     /// payloads). Returns the BODY pointer (`base + 8`); the cell carries no
@@ -2188,15 +2168,6 @@ pub const Registry = struct {
         return body;
     }
 
-    /// Sweep-time return of a condemned storage BLOCK CELL. Pure memory: a
-    /// storage cell owns no edges, no atom entry and no external resource, so
-    /// unlike `string.destroyCellFromHeader` there is no handshake -- only the
-    /// registry unpublish and the allocator free. The byte count comes from
-    /// the block geometry rather than from the body, because a storage cell is
-    /// not self-describing (its body IS the caller's array).
-    ///
-    /// The extent twin is the storage arm of `string.destroyDeadStringExtent`,
-    /// which is handed `user_bytes` by `Heap.sweepExtents`.
     /// TGC S4-d spec 2.4: retire every condemned cell of `block` that owes no
     /// destructor, after the finalizer subset has been drained and the block
     /// has left the doomed list.
@@ -2265,6 +2236,15 @@ pub const Registry = struct {
         return self.block_heap.reclaimDoomedCells(block);
     }
 
+    /// Sweep-time return of a condemned storage BLOCK CELL. Pure memory: a
+    /// storage cell owns no edges, no atom entry and no external resource, so
+    /// unlike `string.destroyCellFromHeader` there is no handshake -- only the
+    /// registry unpublish and the allocator free. The byte count comes from
+    /// the block geometry rather than from the body, because a storage cell is
+    /// not self-describing (its body IS the caller's array).
+    ///
+    /// The extent twin is the storage arm of `string.destroyDeadStringExtent`,
+    /// which is handed `user_bytes` by `Heap.sweepExtents`.
     pub fn destroyStorageCell(self: *Registry, h: *GCObjectHeader) void {
         std.debug.assert(isBlockCellHeader(h));
         std.debug.assert(kindIsPrefixCarrier(h.metaConst().flags.kind));
@@ -2280,12 +2260,23 @@ pub const Registry = struct {
         return BlockHeapMod.Block.fromCellTrusted(cell).cell_size;
     }
 
+    /// TGC S2: a condemned string BLOCK CELL leaves the registry. Cells are
+    /// bitmap-owned (no list link, no occupant-table entry), so this is the
+    /// byte debit plus the remembered-owner release -- the string twin of
+    /// what `unregisterObjectWithBytes` does for an Object cell.
     pub fn unpublishStringCell(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         std.debug.assert(isBlockCellHeader(h));
         self.recordHeapFreeWithBytes(h, bytes);
         self.forgetGenerationalOwner(h);
     }
 
+    /// TGC S2: unpublish an extent string the extent sweep found dead
+    /// (`string.sweepExtents`). Not `unlinkObjectWithBytes`: that path
+    /// reads the intrusive link word, which a string does not have. What a
+    /// standalone string publication left behind is the byte ledger, the
+    /// census; undo exactly those. Since S2-h1 there is no occupant entry to
+    /// remove: the heap's `extent_pages` index is the extent's membership,
+    /// and `Heap.free` unindexes it as part of returning the mapping.
     pub fn unpublishStringExtent(self: *Registry, h: *GCObjectHeader, bytes: usize) void {
         std.debug.assert(kindIsExtentCapable(h.metaConst().flags.kind));
         std.debug.assert(h.metaConst().alloc_info.standalone);
@@ -2819,10 +2810,6 @@ pub const Registry = struct {
     /// read the header of a corpse that owes nothing. D-S4-4: set-only --
     /// the bit is cleared only when the cell itself is released
     /// (`Heap.freeSmall` / `settleDoomedCellInPassA`).
-    ///
-    /// Nothing calls this in S4-a: the bit placement, the block bitmap and
-    /// the extent column land here so S4-d is only its set sites and its
-    /// sweep.
     pub fn setNeedsFinalizer(self: *Registry, header: *GCObjectHeader) void {
         header.meta().flags.needs_finalizer = true;
         const meta = header.metaConst();
@@ -2834,8 +2821,8 @@ pub const Registry = struct {
         // Only a block-heap EXTENT has a table row to stamp. A standalone
         // prefix alone does not prove one: non-block Objects, shapes, modules
         // and the rest come from the slab allocator and keep the header bit
-        // alone. String extents are the whole extent population today; S4-b
-        // adds the storage kinds to this test when they start allocating.
+        // alone. Since S4-b/S4-c the storage kinds allocate extents too, which
+        // is why the test is `kindIsExtentCapable` and not "is it a string".
         if (meta.alloc_info.standalone and kindIsExtentCapable(meta.flags.kind)) {
             self.block_heap.extentSetNeedsFinalizer(@intFromPtr(header) - metadata_prefix_size);
         }

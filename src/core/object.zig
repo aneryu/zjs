@@ -53,8 +53,9 @@ const PropertyReadError = errors.RuntimeError;
 ///
 /// The Metadata prefix is intentional: a reentrant GC/read helper may inspect
 /// the Shape header even though the tombstone is never linked into a runtime's
-/// GC registry. Its high refcount makes accidental retain/release benign;
-/// object mutation from a class finalizer remains outside the callback contract.
+/// GC registry. It is a static with `.ownership = .{ .shared = 1 }` that the
+/// tracer never owns or frees, so a stray reference to it is harmless; object
+/// mutation from a class finalizer remains outside the callback contract.
 const FinalizingShapeStorage = extern struct {
     metadata: gc.Metadata = .{
         .alloc_info = .{ .standalone = true },
@@ -879,9 +880,11 @@ pub const Object = extern struct {
     }
 
     /// Construct a FinalizationRegistry with its QJS-style Realm owner already
-    /// installed. Retaining the Realm is infallible and happens before the
-    /// object can be published by the caller, so a production registry never
-    /// exists with a borrowed or missing construction context.
+    /// installed. Taking the Realm reference is infallible and is the last step
+    /// before this returns, so a production registry never becomes reachable to
+    /// JS with a missing construction context. (`createInternal` publishes the
+    /// object to the GC registry first; the Realm edge lands right after, while
+    /// the caller still holds the only reference.)
     pub fn createFinalizationRegistry(
         rt: *JSRuntime,
         realm: *context_mod.RealmContext,
@@ -913,9 +916,10 @@ pub const Object = extern struct {
     /// the public object once with its final constructor-derived prototype.
     ///
     /// The shell is not a JSValue and must be paired with either
-    /// `finishGeneratorShell` or `destroyGeneratorShell`. Its owned JSValue
-    /// edges carry ordinary refcounts while detached, so allocation-triggered
-    /// cycle collection cannot reclaim them.
+    /// `finishGeneratorShell` or `destroyGeneratorShell`. While detached it is
+    /// held by a construction root (see `pins.removeConstructionRoot` in
+    /// `destroyGeneratorShell`), so an allocation-triggered collection cannot
+    /// reclaim it or the edges it keeps.
     pub fn createGeneratorShell(rt: *JSRuntime, class_id: class.ClassId) !*Object {
         std.debug.assert(class_id == class.ids.generator or class_id == class.ids.async_generator);
         // Generator ids are standard: no pin traffic, so the by-value plan
@@ -996,9 +1000,9 @@ pub const Object = extern struct {
             return err;
         };
         // Parameter initialization parks the frame while this shell is still
-        // detached. Publish first (the shell's raw owner keeps it alive), then
-        // install the open-cell -> generator edges so registry publication
-        // retains its fresh-header rc==1 contract.
+        // detached. Publish first (the construction root keeps it alive), then
+        // install the open-cell -> generator edges, so no edge is ever stored
+        // into an object the GC registry has not seen yet.
         self.attachGeneratorOpenVarRefOwners(rt);
     }
 
@@ -1234,7 +1238,8 @@ pub const Object = extern struct {
     /// Object-literal allocation for a compiler-proven one/two-slot Shape.
     /// The Shape capacity is exactly two, so its value entries trail the
     /// Object in the same GC allocation. This does not add dormant slots to
-    /// `{}`: the ordinary zero-capacity constructor above remains 64 bytes.
+    /// `{}`: the ordinary zero-capacity constructor above keeps its own,
+    /// smaller cell class (`objectBodyBytes(ids.object, false)`).
     pub fn createPlainObjectReserved2(rt: *JSRuntime, prototype: ?*Object) !*Object {
         if (builtin.mode == .Debug) {
             const definition = rt.classes.standardPlan(class.ids.object);
@@ -1753,7 +1758,7 @@ pub const Object = extern struct {
 
     /// True iff `payload_kind` names a class whose object carries a separately
     /// heap-allocated payload behind `u.payload`. The plain-object hot kinds
-    /// (`.none` fast array, `.ordinary`, `.realm`) return false and skip
+    /// (`.none` fast array, `.ordinary`, `.global`) return false and skip
     /// `allocClassPayload` entirely.
     inline fn payloadKindAllocates(payload_kind: class.PayloadKind) bool {
         return switch (payload_kind) {
@@ -1772,8 +1777,10 @@ pub const Object = extern struct {
     /// `.regexp` is listed because a dynamic class may select it and then take
     /// the out-of-line arm; `class.ids.regexp` itself keeps the payload INLINE
     /// in `regexpArm()` and is never a cell (checked at every use below).
-    /// `.function` is listed for its BYTECODE arm only -- `class_id` is the
-    /// discriminator, and the native arm is b class.
+    /// `.function` is NOT listed: `payload_kind` cannot separate a bytecode
+    /// function (whose aux record IS a `.payload` cell, obtained directly in
+    /// `ensureFunctionRarePayload`) from a native one (b class), so the kind
+    /// answers false and `class_id` is what discriminates at the use sites.
     pub inline fn payloadKindIsTracerOwnedCell(payload_kind: class.PayloadKind) bool {
         return switch (payload_kind) {
             .ordinary,
@@ -2237,13 +2244,6 @@ pub const Object = extern struct {
         removeCachedIteratorNextEntryAt(rt, index);
     }
 
-    fn clearCachedIteratorNextWithoutFree(rt: *JSRuntime, self: *Object) void {
-        if (rt.cached_iterator_next_entries.len == 0) return;
-        const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
-        rt.cached_iterator_next_entries[index].value = null;
-        removeCachedIteratorNextEntryAt(rt, index);
-    }
-
     fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
         if (rt.cached_iterator_next_entries.len == 0) return null;
         const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
@@ -2456,10 +2456,11 @@ pub const Object = extern struct {
             rt.gc.rememberOwnerForBulkWrite(self.gcHeader());
             return &aux.rare;
         }
-        const payload = self.functionPayload() orelse {
-            std.debug.assert(self.flags.class_payload_kind == .function);
-            return error.TypeError;
-        };
+        // Reaching this `orelse` means the object is NOT a `.function` payload
+        // carrier (the bytecode arm was split off above), so the old
+        // `assert(class_payload_kind == .function)` here was necessarily false
+        // and turned the intended TypeError into a safety-build abort.
+        const payload = self.functionPayload() orelse return error.TypeError;
         if (payload.rare) |rare| return rare;
         const rare = try rt.createRuntime(FunctionRarePayload);
         rare.* = .{};
@@ -2802,8 +2803,10 @@ pub const Object = extern struct {
         // cell (S4-b), so there is nothing to release -- the sweep returns the
         // cell. The iterator-next cache is different: it is a side table
         // holding a bare `*Object`, so the entry has to go (and the object
-        // carries the finalizer bit precisely because of it).
-        if (rt.gc.hot.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
+        // carries the finalizer bit precisely because of it). The cached value
+        // itself is a plain traced edge, so the `deinit` phase takes the very
+        // same path -- there is no separate "without free" variant any more.
+        self.clearCachedIteratorNext(rt);
         // The class payloads all share the single `u.payload` union slot,
         // discriminated by `class_payload_kind` — at most ONE is ever live per
         // object. A synchronous callback clears that payload and its
@@ -2928,20 +2931,18 @@ pub const Object = extern struct {
     }
 
     fn clearBorrowedReferencesForMatcher(rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        compactBorrowedReferenceHolders(rt);
+        refreshBorrowedReferenceHolderIndexes(rt);
         var finalization_enqueue_blocked = false;
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
-            if (!current.mayContainBorrowedReferences(rt)) {
+            if (!current.mayContainBorrowedReferences()) {
                 index += 1;
                 continue;
             }
             current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher, &finalization_enqueue_blocked);
             if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
-                if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
-                    index += 1;
-                }
+                index += 1;
                 continue;
             }
             const current_index = runtimeBorrowedReferenceHolderIndex(rt, current) orelse {
@@ -2955,12 +2956,14 @@ pub const Object = extern struct {
         }
     }
 
-    /// TGC S4-e: the list used to be compacted here because a weak husk could
-    /// sit in it as an already-destroyed entry. Husks are gone -- an entry
-    /// leaves this list in `unregisterBorrowedReferenceHolder`, inside the
-    /// holder's own destructor -- so the pass is now only the cached-index
-    /// repair the matcher loop relies on.
-    fn compactBorrowedReferenceHolders(rt: *JSRuntime) void {
+    /// Re-stamp every holder's cached position so the matcher loop below can
+    /// trust `borrowedReferenceHolderIndex()` after a callback reshuffles the
+    /// list. TGC S4-e: this pass used to COMPACT the list as well, because a
+    /// weak husk could sit in it as an already-destroyed entry. Husks are gone
+    /// -- an entry leaves this list in `unregisterBorrowedReferenceHolder`,
+    /// inside the holder's own destructor -- so only the index repair is left,
+    /// which is what the name now says.
+    fn refreshBorrowedReferenceHolderIndexes(rt: *JSRuntime) void {
         for (rt.borrowed_reference_holders, 0..) |current, index| {
             current.setBorrowedReferenceHolderIndex(index);
         }
@@ -2982,23 +2985,14 @@ pub const Object = extern struct {
 
     pub fn pruneBorrowedReferenceHolderIfEmpty(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_borrowed_reference_holder) return;
-        if (!self.hasBorrowedReferences(rt)) rt.unregisterBorrowedReferenceHolder(self);
+        if (!self.mayContainBorrowedReferences()) rt.unregisterBorrowedReferenceHolder(self);
     }
 
-    fn hasBorrowedReferences(self: *const Object, _: *JSRuntime) bool {
-        if (self.weakRefPayloadConst()) |payload| {
-            if (payload.weak_target_identity != null) return true;
-        }
-        if (self.collectionPayloadConst()) |payload| {
-            if (payload.weak_entries.len != 0) return true;
-        }
-        if (self.finalizationRegistryPayloadConst()) |payload| {
-            if (payload.cells.len != 0) return true;
-        }
-        return false;
-    }
-
-    fn mayContainBorrowedReferences(self: *const Object, _: *JSRuntime) bool {
+    /// The three payload shapes that can own a borrowed (weak) reference. The
+    /// answer is exact, not a coarse filter: both the prune path and the
+    /// matcher sweep above rely on the same predicate, which is why the
+    /// separate `hasBorrowedReferences` twin was folded into this one.
+    fn mayContainBorrowedReferences(self: *const Object) bool {
         if (self.weakRefPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
@@ -3650,7 +3644,6 @@ pub const Object = extern struct {
         // after the first minor is an old-to-young store, and the sticky mark on
         // the registry stops the trace before `visitFinalizationCell` runs.
         rt.gc.generationalBarrier(self.gcHeader(), rooted_held_value.cycleMarkHeader());
-        try rt.registerBorrowedReferenceHolder(self);
     }
 
     pub fn stdFileSlot(self: *Object) *?*std.c.FILE {
@@ -4232,10 +4225,11 @@ pub const Object = extern struct {
         }
     }
 
-    /// Install an already-compiled narrow-string payload by retaining it.
+    /// Install an already-compiled narrow-string payload by storing the
+    /// pointer (plus the generational barrier -- no RC retain exists any more).
     /// RegExp literals use this path to share their bytecode constant exactly
     /// like qjs `JS_NewRegexp`; dynamic constructors use the slice overload
-    /// above because they own a fresh compiler buffer.
+    /// above because they build a fresh compiler buffer.
     pub fn setRegexpCompiledBytecodeString(self: *Object, rt: *JSRuntime, bytecode: *string.String) !void {
         if (bytecode.isWide() or bytecode.len() == 0) return error.TypeError;
         if (self.regExpPayload()) |payload| {
@@ -4408,6 +4402,10 @@ pub const Object = extern struct {
         defer root_frame.deactivate(rt);
 
         const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
+        // Register BEFORE the payload is touched: this is the only fallible
+        // step left, and at this point nothing has been mutated, so a failure
+        // needs no rollback. (`registerBorrowedReferenceHolder` is idempotent,
+        // which is why the old duplicate call after the store was dead weight.)
         try rt.registerBorrowedReferenceHolder(self);
         const payload = self.weakRefPayload() orelse {
             std.debug.assert(self.flags.class_payload_kind == .weak_ref);
@@ -4416,7 +4414,6 @@ pub const Object = extern struct {
         const old_identity = payload.weak_target_identity;
         if (weak_target_identity) |identity| rt.retainWeakIdentity(identity);
         payload.weak_target_identity = weak_target_identity;
-        try rt.registerBorrowedReferenceHolder(self);
         if (old_identity) |identity| rt.releaseWeakIdentity(identity);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
@@ -6240,9 +6237,10 @@ pub const Object = extern struct {
         return fb.realmContext();
     }
 
-    /// Install the construction realm owned by a true C_FUNCTION. Retain the
-    /// replacement before dropping the old owner so assigning the same realm
-    /// remains safe even when this object is its last external owner.
+    /// Install the construction realm named by a true C_FUNCTION. `RealmRef`
+    /// is a plain traced pointer wrapper (`retain` just wraps, `deinit` just
+    /// nulls), so the same-realm early return is an optimisation, not the
+    /// self-destruction guard it was in the refcounted era.
     pub fn setNativeFunctionRealm(self: *Object, realm: *context_mod.RealmContext) void {
         std.debug.assert(self.class_id == class.ids.c_function);
         const payload = self.functionPayload() orelse unreachable;
@@ -6252,10 +6250,6 @@ pub const Object = extern struct {
         payload.native.realm = next;
     }
 
-    /// Finalize a true C_FUNCTION's owned realm edge during final Runtime
-    /// teardown. The caller must retain `realm` across its object-list scan so
-    /// dropping the last native edge cannot destroy the context mid-iteration.
-    /// Caller-semantics carriers never enter this path and keep owning no realm.
     /// Test seam: forget a true C function's realm edge so the final-arm
     /// invariant can be exercised. The RealmRef is a plain traced pointer.
     pub fn forgetNativeFunctionRealmForTest(self: *Object) void {
@@ -8141,13 +8135,12 @@ pub const Object = extern struct {
         return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
     }
 
-    /// Return an owned value for the realm's Object.prototype.
+    /// Return the realm's Object.prototype as a plain traced value.
     ///
-    /// The visible-constructor fallback is observable and may produce a fresh
-    /// object. Keeping only its raw pointer after freeing the property result
-    /// leaves bare/embedder realms with a dangling prototype during the
-    /// following allocation. Cached intrinsic values are duplicated so both
-    /// branches have the same ownership contract.
+    /// Both branches -- the cached intrinsic and the visible-constructor
+    /// fallback (which is observable and may produce a fresh object) -- return
+    /// a borrowed value; the caller must keep it rooted across any following
+    /// allocation rather than relying on an ownership transfer.
     fn objectPrototypeValueForAutoInit(realm: *context_mod.RealmContext) !JSValue {
         const rt = realm.runtime;
         const global = realm.global orelse return error.InvalidBuiltinRegistry;
@@ -8355,7 +8348,7 @@ pub const Object = extern struct {
                 if (self.flags.fast_array) try self.convertDenseArrayElementsToSparseProperties(rt);
                 try self.defineOrdinaryOwnProperty(rt, atom_id, actual_desc);
                 if (index >= old_length) self.setArrayLength(index + 1);
-                self.updateArrayStorageMode(index);
+                self.leaveFastArrayMode();
                 return;
             }
         }
@@ -8580,14 +8573,15 @@ pub const Object = extern struct {
         });
     }
 
-    /// Install a normal module-namespace export as the exporter-owned VarRef
-    /// itself.  The supplied cell reference is consumed on every return path;
-    /// the property owns that transferred reference on success.
+    /// Install a normal module-namespace export as the exporter's VarRef cell
+    /// itself. The cell stays owned by the exporting module record; on success
+    /// the property simply names it as a second traced edge, and the failure
+    /// paths need no teardown because nothing was transferred.
     pub fn defineModuleVarRefProperty(
         self: *Object,
         rt: *JSRuntime,
         atom_id: atom.Atom,
-        owned_cell: *var_ref_mod.VarRef,
+        cell: *var_ref_mod.VarRef,
     ) !void {
         const flags = property.Flags.varRef(true, true, false);
         if (self.class_id != class.ids.module_ns or
@@ -8596,7 +8590,7 @@ pub const Object = extern struct {
         {
             return error.IncompatibleDescriptor;
         }
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .var_ref = owned_cell });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .var_ref = cell });
     }
 
     /// Install a delayed module-namespace export.  The stable owner Interface
@@ -8955,17 +8949,6 @@ pub const Object = extern struct {
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        return self.appendDenseArrayIndexMode(rt, index, atom_id, new_value, false);
-    }
-
-    /// Owned-value counterpart of `appendDenseArrayIndex`. The value is
-    /// consumed only when this returns true; false/error leave ownership with
-    /// the caller. Mirrors QuickJS OP_put_array_el's direct stack-to-slot move.
-    pub fn appendDenseArrayIndexOwned(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        return self.appendDenseArrayIndexMode(rt, index, atom_id, new_value, true);
-    }
-
-    fn appendDenseArrayIndexMode(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue, comptime take_ownership: bool) !bool {
         // qjs add_fast_array_element (quickjs.c:9542-9570): the dense append
         // gate is `idx == count`, NOT `idx == length`. A holey array (length >
         // count) can append at `count`; `length` is bumped to `index+1` only
@@ -8975,11 +8958,18 @@ pub const Object = extern struct {
         if (!self.canExtendFastArray()) return false;
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
 
-        try self.appendInitializedFastArrayValue(rt, if (take_ownership) new_value else new_value);
+        try self.appendInitializedFastArrayValue(rt, new_value);
         if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
+
+    /// Historical owned-value counterpart of `appendDenseArrayIndex`, kept as a
+    /// name for QuickJS's consuming OP_put_array_el store. Under the tracing GC
+    /// an append neither retains nor releases, so the two spellings had become
+    /// byte-identical bodies behind a `comptime take_ownership` that selected
+    /// between `new_value` and `new_value`.
+    pub const appendDenseArrayIndexOwned = appendDenseArrayIndex;
 
     /// qjs `js_array_push` store (quickjs.c:42776-42787). Caller already
     /// proved `JS_CLASS_ARRAY && fast_array && can_extend_fast_array &&
@@ -9023,28 +9013,22 @@ pub const Object = extern struct {
     /// fresh own index never consults inherited setters or indexed properties.
     /// Mirrors qjs JS_CreateProperty -> add_fast_array_element.
     pub fn appendDenseArrayDefineIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        return self.appendDenseArrayDefineIndexMode(rt, index, atom_id, new_value, false);
-    }
-
-    /// Owned-value counterpart of `appendDenseArrayDefineIndex`. The value is
-    /// consumed only when this returns true; false/error leave ownership with
-    /// the caller. This matches QuickJS's consuming JS_DefinePropertyValue
-    /// contract without adding a retain/release pair to dense appends.
-    pub fn appendDenseArrayDefineIndexOwned(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        return self.appendDenseArrayDefineIndexMode(rt, index, atom_id, new_value, true);
-    }
-
-    fn appendDenseArrayDefineIndexMode(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue, comptime take_ownership: bool) !bool {
         if (!self.isArray() or index != self.arrayArm().*.count or !self.flags.length_writable) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (!self.flags.extensible) return false;
         if (self.shape_ref.prop_count != 0 and self.findPropertyIndexTrusted(atom_id) != null) return false;
 
-        try self.appendInitializedFastArrayValue(rt, if (take_ownership) new_value else new_value);
+        try self.appendInitializedFastArrayValue(rt, new_value);
         if (index + 1 > self.arrayArm().*.length) self.arrayArm().*.length = index + 1;
         self.markIndexedProperties(rt);
         return true;
     }
+
+    /// Historical owned-value counterpart of `appendDenseArrayDefineIndex`,
+    /// named for QuickJS's consuming JS_DefinePropertyValue contract. The
+    /// tracing GC removed the retain/release pair the distinction stood for, so
+    /// this is the same function under its second name.
+    pub const appendDenseArrayDefineIndexOwned = appendDenseArrayDefineIndex;
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
         if (!self.isArray() or !self.flags.length_writable or !self.flags.extensible) return false;
@@ -9435,7 +9419,7 @@ pub const Object = extern struct {
                 if (self.flags.fast_array) try self.convertDenseArrayElementsToSparseProperties(rt);
                 try self.defineOrdinaryOwnPropertyKnownNoOwn(rt, atom_id, desc);
                 if (index >= old_length) self.setArrayLength(index + 1);
-                self.updateArrayStorageMode(index);
+                self.leaveFastArrayMode();
                 return;
             }
         }
@@ -10005,12 +9989,15 @@ pub const Object = extern struct {
         if (desc.writable) |writable| self.flags.length_writable = writable;
     }
 
+    /// Shrink the dense extent to `new_len`. The retired tail slots keep their
+    /// stale values; they are out of `[0, count)` so the tracer never reads
+    /// them. (This used to decrement `count` one slot at a time because each
+    /// step released an element; with the tracing GC the loop was an empty
+    /// shell around a single store.)
     pub fn truncateArrayElements(self: *Object, _: *JSRuntime, new_len: u32) void {
         if (!self.isArray() or !self.flags.fast_array) return;
-        const len: usize = @min(@as(usize, @intCast(new_len)), self.arrayArm().*.count);
-        while (self.arrayArm().*.count > len) {
-            self.arrayArm().*.count -= 1;
-        }
+        const len: u32 = @min(new_len, self.arrayArm().*.count);
+        self.arrayArm().*.count = len;
     }
 
     pub fn convertDenseArrayElementsToSparseProperties(self: *Object, rt: *JSRuntime) !void {
@@ -10057,9 +10044,10 @@ pub const Object = extern struct {
         try self.ensureArrayBufferCapacity(rt, needed_len);
     }
 
-    fn updateArrayStorageMode(self: *Object, index: u32) void {
+    /// Any indexed write that did not take a dense append path retires the
+    /// fast-array bit; the index itself no longer takes part in the decision.
+    fn leaveFastArrayMode(self: *Object) void {
         if (!self.isArray()) return;
-        _ = index;
         self.flags.fast_array = false;
     }
 
@@ -10068,8 +10056,8 @@ pub const Object = extern struct {
         self.flags.fast_array = self.arrayArm().*.capacity >= self.arrayArm().*.count;
         for (self.shapeProps()) |prop| {
             if (property.Flags.fromBits(prop.flags).deleted) continue;
-            const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
-            self.updateArrayStorageMode(index);
+            _ = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
+            self.leaveFastArrayMode();
         }
     }
 
@@ -10470,9 +10458,11 @@ pub const Object = extern struct {
     pub const slots2_property_storage_offset: usize = @sizeOf(Object);
 
     /// NOTE: `createPlainObjectReserved2` calls this while building the head's
-    /// struct literal, i.e. before any field of `self` is written. It must stay
-    /// a pure address computation; the "only `ids.object` owns a trailing FAM"
-    /// rule is checked by `verifyObjectPropertyStorageLayouts` instead.
+    /// struct literal. That is legal only because the result location writes
+    /// `flags` (hence `slots2_layout`) before `prop_values`, which is what the
+    /// assert below reads -- see the field-order comment there. Apart from that
+    /// assert this is a pure address computation; the "only `ids.object` owns a
+    /// trailing FAM" rule is checked by `verifyObjectPropertyStorageLayouts`.
     pub inline fn trailingPropertyStorageBase(self: *const Object) [*]property.Entry {
         std.debug.assert(self.hasSlots2Layout());
         return @ptrFromInt(@intFromPtr(self) + slots2_property_storage_offset);
@@ -10690,10 +10680,11 @@ pub const Object = extern struct {
     }
 
     /// Replace an existing ordinary property with the supplied VarRef cell.
-    /// The property takes its own cell ref; the caller keeps its ref.  This is
-    /// the object-side half of QuickJS `js_closure_define_global_var`: global
-    /// declaration construction fixes the slot identity and descriptor before
-    /// hoist bytecode writes the declaration value through the cell.
+    /// The property records the cell as one more traced edge; the caller keeps
+    /// naming it too. This is the object-side half of QuickJS
+    /// `js_closure_define_global_var`: global declaration construction fixes
+    /// the slot identity and descriptor before hoist bytecode writes the
+    /// declaration value through the cell.
     pub fn replaceOwnPropertyWithVarRefCell(
         self: *Object,
         rt: *JSRuntime,
@@ -10712,9 +10703,9 @@ pub const Object = extern struct {
             return error.IncompatibleDescriptor;
         }
 
-        // Clone first: after this succeeds, refcount changes and slot teardown
-        // are non-failing, so an OOM leaves the old property and parked cell
-        // untouched.
+        // Clone first: it is the only fallible step, so an OOM leaves the old
+        // property and the parked cell untouched. Everything after it (slot
+        // write + barrier + flag update) cannot fail.
         try self.ensureUniqueShapeForMutation(rt);
         const old_flags = self.propFlagsAt(index);
         const old_slot = self.propertyEntry(index).*.slot;
@@ -10773,7 +10764,6 @@ pub const Object = extern struct {
 
     fn findPropertyProbeTrusted(self: *const Object, atom_id: atom.Atom) ?PropertyProbe {
         const prop_count = self.shape_ref.prop_count;
-        std.debug.assert(prop_count <= self.shape_ref.prop_count);
         const props = self.shape_ref.props().ptr;
         std.debug.assert(self.shape_ref.hasPropertyHash());
         var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
@@ -11312,7 +11302,6 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
 
 fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
     const string_value = value.asStringBody() orelse return std.math.nan(f64);
-    try string_value.ensureFlat(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.ensureTotalCapacity(rt.memory.allocator, string_value.len());
@@ -11392,19 +11381,26 @@ fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
 
 fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*Object) !JSValue {
     var rooted_value = value;
-    var root_frame = runtime_mod.rootValues(.{&rooted_value});
+    var rooted_key_value = JSValue.undefinedValue();
+    var rooted_array = JSValue.undefinedValue();
+    var root_frame = runtime_mod.rootValues(.{ &rooted_value, &rooted_key_value, &rooted_array });
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
     const arr = try Object.createArray(rt, prototype);
-    errdefer Object.destroyFromHeader(rt, arr.gcHeader());
-    const key_value = try entriesAtomToStringValue(rt, key);
+    rooted_array = arr.value();
+    errdefer {
+        Object.destroyFromHeader(rt, arr.gcHeader());
+        rooted_array = JSValue.undefinedValue();
+    }
+    rooted_key_value = try entriesAtomToStringValue(rt, key);
     // qjs js_create_array (quickjs.c:9601): pre-sized dense fast array instead of
-    // two per-element defineOwnProperty. key_value/rooted_value stay rooted (the
-    // root_frame above + the local defer) across the slice alloc; dups precede adopt.
+    // two per-element defineOwnProperty. The fresh array and the fresh key string
+    // both cross `createArrayStorageSlice`, so both are in the root frame above
+    // (the key string used to be a bare local, rooted by nothing).
     // TGC S4-b spec 2.2: `.array_storage` GC cell.
     const elements = try Object.createArrayStorageSlice(rt, 2);
-    elements[0] = key_value;
+    elements[0] = rooted_key_value;
     elements[1] = rooted_value;
     arr.adoptDenseArrayElementsAssumingEmpty(rt, elements);
     arr.flags.may_have_indexed_properties = true;

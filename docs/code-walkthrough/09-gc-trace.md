@@ -224,62 +224,61 @@ Stats 的所有字段默认零，按以下含义分组：
 | envelope_measured_cycles、envelope_skipped_cycles | 同域包络统计有效/跳过周期数 |
 | envelope_max_start_bytes、envelope_max_threshold_bytes、envelope_max_begin_bytes、envelope_max_peak_bytes | 具有最大 P/T 的同一个已完成周期元组，不是四项各取最大值 |
 | doomed_condemned_headers、doomed_destroyed_objects | condemned GC 节点数与公共 freed-object 口径的析构数，后者排除 bytecode |
-| doomed_parked_entries_drained、doomed_parked_drain_slices | 保留的 parked 物理释放计数槽；是否增长由当前析构路径决定，字段存在不表示仍有独立 parked 栈 |
 | phase_begin_clear_ns、phase_begin_precise_seed_ns、phase_begin_conservative_seed_ns、phase_begin_retire_ns | begin 内部阶段累计时间 |
 | phase_finish_init_ns、phase_finish_remark_ns、phase_finish_weak_ns、phase_finish_condemn_ns、phase_finish_tail_ns | finish 内部阶段累计时间 |
 | phase_finish_conservative_seed_ns | remark 中保守根扫描的子集，不能再与 remark 相加 |
 | phase_retired_nonblock_headers、phase_retired_young_blocks、phase_retired_remembered_sets、phase_cleared_nonblock_headers | 清标记/代际退役工作的数量统计 |
 
-### `ratioMillionthsCeil` (`src/core/gc_incremental.zig:92`)
+### `ratioMillionthsCeil` (`src/core/gc_incremental.zig:89`)
 
 - **签名**：`pub fn ratioMillionthsCeil(numerator: usize, denominator: usize) usize`。
 - **作用**：将 numerator/denominator 换算为向上取整的百万分比。
 - **实现**：分母为零返回 0；用 u128 计算 numerator*1_000_000，再加 denominator-1 后整除，最后截到 usize 最大值。
 - **所有权 / 错误 / 调用**：纯计算；扩宽中间量避免本项目 64 位 usize 的乘法溢出。返回整数百万分比，不是浮点百分数。
 
-### `State.markingActive` (`src/core/gc_incremental.zig:135`)
+### `State.markingActive` (`src/core/gc_incremental.zig:132`)
 
 - **签名**：`pub inline fn markingActive(self: *const State) bool`。
 - **作用**：查询是否处于增量 major 标记阶段。
 - **实现**：直接返回 major_marking_active 普通 bool。
 - **所有权 / 错误 / 调用**：只读、无同步；写屏障的 mutator 路径也会调用，不限于 STW。所有访问由 runtime owner 线程串行执行。
 
-### `Marking.deinit` (`src/core/gc_incremental.zig:163`)
+### `Marking.deinit` (`src/core/gc_incremental.zig:160`)
 
-- **签名**：`pub fn deinit(self: *Marking, allocator: std.mem.Allocator) void`。
+- **签名**：`pub fn deinit(self: *Marking) void`。
 - **作用**：释放私有标记栈和共享队列所持有的所有前沿段。
-- **实现**：先 stack.deinitStack() 将栈段归还池并清空栈，再 queue.deinit(allocator) 归还队列段、释放池缓存并重置队列。header_epoch 不改。
-- **所有权 / 错误 / 调用**：在合法生命周期内可重复调用：两项底层 deinit 都重置为空。必须先归还栈段再销毁队列池；Queue 实际使用初始化时绑定的 allocator，传入的 allocator 参数不参与释放。
+- **实现**：先 stack.deinitStack() 将栈段归还池并清空栈，再 queue.deinit() 归还队列段、释放池缓存并重置队列。header_epoch 不改。
+- **所有权 / 错误 / 调用**：在合法生命周期内可重复调用：两项底层 deinit 都重置为空。必须先归还栈段再销毁队列池；Queue 用池首次绑定的 allocator 释放，因此本函数不再接收 allocator 参数（调用方 `Registry.deinit` 也不再传）。
 
-### `Morgue.startAssistCredit` (`src/core/gc_incremental.zig:219`)
+### `Morgue.startAssistCredit` (`src/core/gc_incremental.zig:216`)
 
 - **签名**：`pub fn startAssistCredit(self: *Morgue, estimated_bytes: usize) void`。
 - **作用**：开始本轮析构辅助额度的预估计账。
 - **实现**：将 assist_credit_bytes 与 assist_unreconciled_bytes 都覆盖为 estimated_bytes。
 - **所有权 / 错误 / 调用**：不是累加旧额度；estimated_bytes 表示尚未实际释放、但已预先计入的 condemned body 字节。无分配。
 
-### `Morgue.recordAssistReclaim` (`src/core/gc_incremental.zig:224`)
+### `Morgue.recordAssistReclaim` (`src/core/gc_incremental.zig:221`)
 
 - **签名**：`pub fn recordAssistReclaim(self: *Morgue, before: usize, after: usize) void`。
 - **作用**：将一轮析构的实际账户下降与预发额度对账。
 - **实现**：reclaimed=before-|after；先消耗 min(reclaimed,assist_unreconciled_bytes) 的未核销预估，再将超出预估部分饱和加到 assist_credit_bytes。
 - **所有权 / 错误 / 调用**：防止预估尸体与实际释放重复授信；before/after 来自同一析构切片账户采样。账户不降时不增加额度。
 
-### `Morgue.consumeAssistDebt` (`src/core/gc_incremental.zig:233`)
+### `Morgue.consumeAssistDebt` (`src/core/gc_incremental.zig:230`)
 
 - **签名**：`pub fn consumeAssistDebt(self: *Morgue, requested_bytes: *usize) void`。
 - **作用**：为一次析构辅助扣除一个 interval 的分配债务与补充额度。
 - **实现**：paid=min(requested_bytes,incremental_assist_interval_bytes)；额度饱和减 interval-paid，requested_bytes 指向的计数饱和减 interval。
 - **所有权 / 错误 / 调用**：原地更新借用的债务计数；债务先支付，缺口才消耗额度。额度不足也截到零，不返回错误，不自行判断是否应该运行切片。
 
-### `Morgue.clearAssistCredit` (`src/core/gc_incremental.zig:239`)
+### `Morgue.clearAssistCredit` (`src/core/gc_incremental.zig:236`)
 
 - **签名**：`pub fn clearAssistCredit(self: *Morgue) void`。
 - **作用**：清空辅助额度及未核销预估。
 - **实现**：将 assist_credit_bytes 和 assist_unreconciled_bytes 同时置零。
 - **所有权 / 错误 / 调用**：不释放 morgue 对象，不改变 pending、bytes 或析构游标。
 
-### `Morgue.init` (`src/core/gc_incremental.zig:246`)
+### `Morgue.init` (`src/core/gc_incremental.zig:243`)
 
 - **签名**：`pub fn init(self: *Morgue) void`。
 - **作用**：初始化每个 kind 桶的侵入式循环链表哨兵。
@@ -424,84 +423,84 @@ Stats 的所有字段默认零，按以下含义分组：
 - **实现**：非测试构建走 `@compileError("test-only helper")`；测试构建委托 self.pool.failBackingAllocationsForTest(count)。
 - **所有权 / 错误 / 调用**：不改动队列条目、item_count 或 failure_state；注入的失败要等到 push 取不到段时才由 noteOutOfMemory 记成 out_of_memory。
 
-### `Queue.deinit` (`src/core/gc_mark_queue.zig:283`)
+### `Queue.deinit` (`src/core/gc_mark_queue.zig:285`)
 
-- **签名**：`pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void`。
+- **签名**：`pub fn deinit(self: *Queue) void`。
 - **作用**：释放队列与它持有的池缓存，恢复默认状态。
-- **实现**：忽略传入 allocator；reset 归还队列段，pool.deinit 销毁缓存，最后 self.*=.{}。
-- **所有权 / 错误 / 调用**：实际释放使用池首次绑定的 allocator。共享池的私有栈须先 deinitStack；满足此前提时重复销毁安全。
+- **实现**：reset 归还队列段，pool.deinit 销毁缓存，最后 self.*=.{}。
+- **所有权 / 错误 / 调用**：实际释放使用池首次绑定的 allocator，所以签名不带 allocator 参数。共享池的私有栈须先 deinitStack；满足此前提时重复销毁安全。
 
-### `Queue.reset` (`src/core/gc_mark_queue.zig:290`)
+### `Queue.reset` (`src/core/gc_mark_queue.zig:291`)
 
 - **签名**：`pub fn reset(self: *Queue) void`。
 - **作用**：清空队列工作和失败状态，保留可复用段池。
 - **实现**：先清 oldest/newest/item_count/failure_state，再从旧 oldest 沿 newer 逐段归还池。
 - **所有权 / 错误 / 调用**：不触碰私有栈里的段，不释放 header；缓存超限的段会实际释放，不是只清逻辑长度。
 
-### `Queue.len` (`src/core/gc_mark_queue.zig:303`)
+### `Queue.len` (`src/core/gc_mark_queue.zig:304`)
 
 - **签名**：`pub fn len(self: *const Queue) usize`。
 - **作用**：查询仍在共享队列中的 header 条目数。
 - **实现**：返回 item_count。
 - **所有权 / 错误 / 调用**：不含已 steal 到私有栈的条目，也不是池活跃段数。
 
-### `Queue.isEmpty` (`src/core/gc_mark_queue.zig:307`)
+### `Queue.isEmpty` (`src/core/gc_mark_queue.zig:308`)
 
 - **签名**：`pub fn isEmpty(self: *const Queue) bool`。
 - **作用**：判断共享队列是否没有条目。
 - **实现**：返回 item_count==0。
 - **所有权 / 错误 / 调用**：空队列仍可能保留缓存、失败状态或有私有栈工作；不能单独据此判定标记完成。
 
-### `Queue.stats` (`src/core/gc_mark_queue.zig:311`)
+### `Queue.stats` (`src/core/gc_mark_queue.zig:312`)
 
 - **签名**：`pub fn stats(self: *const Queue) Stats`。
 - **作用**：取得共享段池统计。
 - **实现**：返回 Stats{.pool=pool.stats()} 值快照。
 - **所有权 / 错误 / 调用**：池统计包括共享同一池的私有栈段，不只当前队列。
 
-### `Queue.failure` (`src/core/gc_mark_queue.zig:315`)
+### `Queue.failure` (`src/core/gc_mark_queue.zig:316`)
 
 - **签名**：`pub fn failure(self: *const Queue) Failure`。
 - **作用**：读取本轮记录的首个前沿失败原因。
 - **实现**：返回 failure_state。
 - **所有权 / 错误 / 调用**：查询不清除失败；reset/deinit 才清除，队列后来成功 push 也不会清除。
 
-### `Queue.invalidateBarrier` (`src/core/gc_mark_queue.zig:319`)
+### `Queue.invalidateBarrier` (`src/core/gc_mark_queue.zig:320`)
 
 - **签名**：`pub fn invalidateBarrier(self: *Queue) void`。
 - **作用**：将不能安全入队的屏障标为本轮失败。
 - **实现**：仅当 failure_state==none 时写 unqueueable_barrier。
 - **所有权 / 错误 / 调用**：保留已记录的首个失败，不丢弃已有工作；收集器边界负责停止本轮并避免 sweep。
 
-### `Queue.noteOutOfMemory` (`src/core/gc_mark_queue.zig:323`)
+### `Queue.noteOutOfMemory` (`src/core/gc_mark_queue.zig:324`)
 
 - **签名**：`fn noteOutOfMemory(self: *Queue) void`。
 - **作用**：记录前沿取段失败。
 - **实现**：仅在 failure_state==none 时写 out_of_memory。
 - **所有权 / 错误 / 调用**：不覆盖先前的 unqueueable_barrier，也不抛 Zig error；通过 failure 查询传播到标记边界。
 
-### `Queue.push` (`src/core/gc_mark_queue.zig:328`)
+### `Queue.push` (`src/core/gc_mark_queue.zig:329`)
 
 - **签名**：`pub noinline fn push(self: *Queue, header: *gc.Header) bool`。
 - **作用**：在共享队列最新端追加一个 header。
 - **实现**：newest 有空位则直接追加；否则 acquire 新段，填首项后 appendNewest。取段失败时 noteOutOfMemory 并返回 false，成功递增 item_count。
 - **所有权 / 错误 / 调用**：保存借用 header，不接管其内存。即使已有失败也可继续追加，成功不撤销失败；调用方/收集器必须检查本轮 failure。
 
-### `Queue.steal` (`src/core/gc_mark_queue.zig:349`)
+### `Queue.steal` (`src/core/gc_mark_queue.zig:350`)
 
 - **签名**：`pub fn steal(self: *Queue, local: *MarkStack) bool`。
 - **作用**：把队列最老的一整段工作移交私有栈。
 - **实现**：空队列返回 false；否则摘 oldest、修复两端、清段链接，item_count 减去段长，然后 local.adoptAsTop，返回 true。
 - **所有权 / 错误 / 调用**：O(1) 转移段使用权，不逐条复制。调用方须把 local 绑定到本队列池；通常在栈空时调用，方法本身不要求 local 为空。
 
-### `Queue.pop` (`src/core/gc_mark_queue.zig:362`)
+### `Queue.pop` (`src/core/gc_mark_queue.zig:363`)
 
 - **签名**：`pub fn pop(self: *Queue) ?*gc.Header`。
 - **作用**：从最新段末端弹出一条工作。
 - **实现**：无 newest 返回 null；递减段长和 item_count 后读取末项；段空则摘链并 pool.release。
 - **所有权 / 错误 / 调用**：这是最新端 LIFO 弹出，不是 FIFO；steal 则优先最老段。返回借用 header，不释放它。
 
-### `Queue.appendNewest` (`src/core/gc_mark_queue.zig:377`)
+### `Queue.appendNewest` (`src/core/gc_mark_queue.zig:378`)
 
 - **签名**：`fn appendNewest(self: *Queue, segment: *Segment) void`。
 - **作用**：把脱链段链接到队列最新端。
@@ -892,7 +891,7 @@ Collector 持有借用rt/extra_roots、page_allocator支持的临时arena及work
 
 - **签名**：`fn shadeExact(self: *Collector, header: *gc.Header) void`。
 - **作用**：标记一条已具备有效typed header契约的强引用并安排其边遍历。
-- **实现**：已有err、已marked、未heap_accounted或headerCondemned均返回；否则先setHeaderMarked。shade_to_queue时，非frontierEpochSafe只允许Shape/Realm并同步traceHeader（错误锁存）；其它先转frontierSafeHeaderAfterMarkClaim，优先私有stack.push，失败再queue.push，两者均失败锁存OOM。同步模式append到arena work，失败锁存错误。
+- **实现**：已有err、已marked、未heap_accounted或headerCondemned均返回；否则先setHeaderMarked（全函数只此一次）。shade_to_queue时，非frontierEpochSafe只允许Shape/Realm并直接同步traceHeader（错误锁存）；其它先转frontierSafeHeaderAfterMarkClaim，优先私有stack.push，失败再queue.push，两者均失败锁存OOM。同步模式append到arena work，失败锁存错误。
 - **所有权 / 错误 / 调用**：void接口通过self.err传播失败；mark在入队前已写，失败不撤销，因此调用方不得忽略err继续sweep。不进行任意地址验证，保守候选须先解析。它不直接按minor_mode过滤old，而依赖已有标记等机制。
 
 ### `Collector.visitValue` (`src/core/gc_trace_stw.zig:2063`)

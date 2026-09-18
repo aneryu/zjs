@@ -236,7 +236,7 @@ QCP-1 配置字段，顺序与 `configSignature` 及 `src/config_signature.zig` 
 | `test-runner` | `src/runner_tests.zig` | `cli.run_test262` |
 | `test-compiler` | `src/compiler_tests.zig` | `compiler.` |
 
-共用一份 Debug `internal_root` 模块 + `scoped_test_options`（期望是 Debug 签名）。每个 `addRunArtifact` 带 `--require-tests`（空选择失败）。`needs_plugin_fixtures` 今日为 true 的只有 `test-runtime`，插件加载器已删，对应分支是空体。
+共用一份 Debug `internal_root` 模块 + `scoped_test_options`（期望是 Debug 签名）。每个 `addRunArtifact` 带 `--require-tests`（空选择失败）。原先 `ScopedTestConfig` 还有个 `needs_plugin_fixtures` 字段（只有 `test-runtime` 置 true）与一处 `if (config.needs_plugin_fixtures) {}` 空分支——插件加载器已删，两者都不产生任何效果，已一并清理。
 
 另：`gc-representation-snapshot` 用同一 Debug 引擎模块编 `tools/gc/representation_snapshot.zig`。
 
@@ -327,7 +327,7 @@ QCP-1 配置字段，顺序与 `configSignature` 及 `src/config_signature.zig` 
 其它 Run：
 
 - **`test262-check`**：`run-test262 -c test262.conf -d test262/test 0 100000 -R reports/test262-latest -v`，`expectStdOutMatch("Result: 0/")`。check 模式不继承 stdio，避免占 stderr 锁与 smoke 串行。`-v` 让失败用例打到 stdout，以免只写进下次绿会覆盖的 log。
-- **`macro-check`**：`python3 tools/perf/bench_v8/check_completes.py` + zjs，环境 `ZJS_GC_ARENA_AUDIT=1`。断言 vendored bench-v8 **跑完**（不是分数）——test262 太短，minor 晋升/写屏障几乎摸不到。
+- **`macro-check`**：`python3 tools/perf/bench_v8/check_completes.py` + zjs，环境 `ZJS_GC_ARENA_AUDIT=1`。断言 vendored bench-v8 **跑完**（不是分数）——test262 太短，minor 晋升/写屏障几乎摸不到。**不挂在任何聚合步骤上**（`checkpoint-gate` / `merge-gate` / `engine-production-gate` 都不 `dependOn` 它）：聚合门上同一批 vendored workload 已由 `gate-smoke` 在图内跑，再并一份会把最长边直接翻倍；需要九个基准的全量扫时手动 `zig build macro-check`。源码注释已写明这条取舍。
 - **`config-signature-check`**：`zjs --print-config-signature` 必须等于 Fast 期望 + `\n`。`smoke` 也依赖它。
 - **`gate-smoke`**：`tools/perf/gate_smoke.sh` + 安装好的 zjs；位置参数 corpus（默认 `/tmp/gcgap-fixed`）、占位 CPU `5`、普通 run 次数（默认 1，`-Dgate-smoke-runs`）。并行 CPU 来自 `-Dgate-smoke-cpus` 否则 run 池，写入 `ZJS_GATE_PARALLEL_CPUS`。`expectStdOutMatch("fixed-work smoke: all clean")`。
 

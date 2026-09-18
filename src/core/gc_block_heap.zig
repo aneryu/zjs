@@ -159,21 +159,7 @@ comptime {
         @compileError("free_nil impersonates a block-cell header");
 }
 
-/// Why this heap does not yet serve `createRuntime`.
-///
-/// A GC object is not just its struct: `memory.zig` writes an 8-byte prefix in
-/// front of every allocation, and `alloc_info` in that prefix records which
-/// slab class the object came from. `GCObjectHeader.meta()` reads back through
-/// it. Handing out raw cells from here therefore produces headers whose
-/// `meta()` dereferences uninitialised memory — wiring it into the allocation
-/// funnel segfaults immediately, in `addInitializedWithSizeNoFail`'s first
-/// assertion, which is exactly where it should.
-///
-/// Serving GC nodes means the cell layout has to carry that prefix, which is
-/// the object-header representation change §4.5 defers to its own tranche with
-/// its own binary and performance gates. Until then this heap is exercised
-/// through its own tests and reports its geometry, and the compatibility
-/// allocator keeps serving the collector.
+/// Superblock signature, checked before any block header is trusted.
 pub const block_magic: u64 = 0x5a4a53_424c4b_0001;
 
 /// Per-block sweep lifecycle (§8.7), the collector's only remaining consumer
@@ -209,9 +195,8 @@ pub const Stats = struct {
     decommit_max_batch_bytes: usize = 0,
     malloc_trim_attempts: usize = 0,
     malloc_trim_successes: usize = 0,
-    /// Completed partial blocks published to the per-class hot pool, and
-    /// blocks subsequently selected instead of initializing fresh storage.
-    deferred_block_runs_completed: usize = 0,
+    /// Partial blocks published to the per-class hot pool, and blocks
+    /// subsequently selected instead of initializing fresh storage.
     hot_blocks_published: usize = 0,
     hot_blocks_reopened: usize = 0,
     /// TGC S4-f (2): why a candidate partial block was NOT admitted to the
@@ -390,9 +375,9 @@ const Superblock = struct {
 /// the mark lives in the table entry: an extent is marked in the current
 /// major iff `mark_epoch == Heap.mark_epoch`. Epoch 0 is newborn/unmarked
 /// (the heap's epoch is even and only ever advanced by `beginMajor`).
-/// Only string extents exist -- Object never allocates an extent, ropes
-/// always fit a cell -- so no kind field is needed yet; the sweep below
-/// treats every entry as a string extent.
+/// Entries carry no kind field: since S4-b/S4-c property/array/payload storage
+/// cells reach `createExtent` too, and the sweep dispatches on the entry's
+/// `needs_finalizer` bit rather than on a kind.
 const LargeMap = struct {
     bytes: []u8,
     /// Requested size; `bytes.len` is the page-rounded mapping. The sweep
@@ -475,9 +460,6 @@ pub const Block = extern struct {
     /// the sparse nonempty index cannot silently enlarge every block header.
     super_index: u32 = 0,
     next_free: usize = 0,
-    /// Lowest cell index that may still carry a doomed bit, so a block's
-    /// drain is linear rather than quadratic in its bitmap words. Reset by
-    /// `snapshotDoomed`, which is the only writer of those bits.
     /// Word index the doomed scan is serving, and the bits of that word not
     /// yet handed out. Reset by `snapshotDoomed`, the only writer of those
     /// bits.
@@ -1181,20 +1163,8 @@ pub const Heap = struct {
         self.freeSmall(block, index, ptr);
     }
 
-    /// TGC S2 extent marking (spec §5.7 "extent"). `base` is the allocation
-    /// start (`Heap.alloc` result = body pointer - 8). The block-cell twins
-    /// are `Block.setMark` / `Block.isMarked`; extents keep their mark in the
-    /// table entry instead, reached by one hash probe on medium then large.
-    /// Cold path: only strings over the 128-byte cell ceiling live here.
-    ///
-    /// The receiver is const like `setHeaderMarked`'s Registry: the entry is
-    /// reached through the table's own storage pointer (as `Block.setMark`
-    /// reaches the bitmap through the block address), not through `self`.
-    /// Plain stores: extents are marked by the STW collector. Parallel
-    /// marking (default off) would need these to become atomics AND the
-    /// tables to be insert-free while marking runs.
-    /// Keys (allocation bases) of every live string extent, medium then
-    /// large. Audits use it to enumerate what no list or bitmap holds.
+    /// Keys (allocation bases) of every live extent, medium then large.
+    /// Audits use it to enumerate what no list or bitmap holds.
     pub const ExtentKeyIterator = struct {
         medium: std.AutoHashMapUnmanaged(usize, MediumExtent).KeyIterator,
         large: std.AutoHashMapUnmanaged(usize, LargeMap).KeyIterator,
@@ -1210,6 +1180,18 @@ pub const Heap = struct {
         return .{ .medium = self.medium.keyIterator(), .large = self.large.keyIterator() };
     }
 
+    /// TGC S2 extent marking (spec §5.7 "extent"). `base` is the allocation
+    /// start (`Heap.alloc` result = body pointer - 8). The block-cell twins
+    /// are `Block.setMark` / `Block.isMarked`; extents keep their mark in the
+    /// table entry instead, reached by one hash probe on medium then large.
+    /// Cold path: only strings over the 128-byte cell ceiling live here.
+    ///
+    /// The receiver is const like `setHeaderMarked`'s Registry: the entry is
+    /// reached through the table's own storage pointer (as `Block.setMark`
+    /// reaches the bitmap through the block address), not through `self`.
+    /// Plain stores: extents are marked by the STW collector. Parallel
+    /// marking (default off) would need these to become atomics AND the
+    /// tables to be insert-free while marking runs.
     pub fn extentSetMark(self: *const Heap, base: usize, epoch: u64) void {
         if (self.medium.getPtr(base)) |extent| {
             extent.mark_epoch = epoch;
@@ -3169,7 +3151,6 @@ pub const Heap = struct {
         const slot = try self.takeClassedBlock(cell_size);
         const block: *Block = @ptrCast(@alignCast(slot.ptr));
         try self.resetBlock(block, class_idx, cell_size, slot.super_index, false);
-        block.sweep_state = .fresh;
         block.sweep_state = .active;
         return block;
     }

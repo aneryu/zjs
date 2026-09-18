@@ -19,11 +19,10 @@ const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 
-/// qjs JS_ToPrimitiveFree: CONSUMES `value` (ownership transfers in). A non-object
-/// operand — the hot int/float add case — passes straight through with no dup and
-/// no free; only objects fall to the outlined Symbol.toPrimitive path, which frees
-/// the input object. The caller hands in an owned value and owns the result out.
-/// This is the faithful primitive; `toPrimitiveForAddition` borrows on top of it.
+/// qjs `JS_ToPrimitiveFree` (the name keeps qjs's; under the tracing GC there
+/// is no ownership transfer and nothing is freed). A non-object operand -- the
+/// hot int/float add case -- passes straight through; only objects fall to the
+/// outlined Symbol.toPrimitive path.
 pub inline fn toPrimitiveForAdditionFree(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -34,16 +33,11 @@ pub inline fn toPrimitiveForAdditionFree(
     return toPrimitiveForAdditionObject(ctx, output, global, value);
 }
 
-/// Borrowing wrapper for callers that hold a borrowed value: dups first so the
-/// consume contract of `toPrimitiveForAdditionFree` leaves their reference intact.
-pub inline fn toPrimitiveForAddition(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    return toPrimitiveForAdditionFree(ctx, output, global, value);
-}
+/// The `Free` suffix is a refcount-era spelling of qjs `JS_ToPrimitiveFree`
+/// (it consumed its argument). Under the tracing GC nothing is consumed, so
+/// the "borrowing wrapper" is literally the same call; both names stay because
+/// each reads correctly at its own VM call sites.
+pub const toPrimitiveForAddition = toPrimitiveForAdditionFree;
 
 fn toPrimitiveForAdditionObject(
     ctx: *core.JSContext,
@@ -218,6 +212,9 @@ pub fn coerceOptionalNumberMethodArgument(
     return try value_ops.toNumberValue(ctx.runtime, primitive);
 }
 
+/// The `[[PrimitiveValue]]` slot of a Number/Boolean/BigInt/Symbol wrapper, or
+/// null for anything else. `rt` is unused (borrowed reads only) and is kept
+/// only so the cross-file call sites keep their uniform `(rt, value)` shape.
 pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue {
     _ = rt;
     if (!value.isObject()) return null;
@@ -250,6 +247,9 @@ pub fn toNumberForDateMethod(
         }
         return value_ops.toNumberValue(ctx.runtime, primitive);
     }
+    // Neither leg needs the caller frame today: `toPrimitiveForNumber` opens
+    // its own native environment. The pair stays so the ~10 date_ops call
+    // sites keep passing the frame they already hold.
     _ = caller_function;
     _ = caller_frame;
     if (value.isBigInt()) {

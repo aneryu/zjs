@@ -197,7 +197,7 @@ fn publishNativeFunctionMetadataWork(
         try string.String.createAscii(rt, name)
     else
         try string.String.createUtf8(rt, name);
-    const name_value = if (name.len == 0) name_string.value() else name_string.value();
+    const name_value = name_string.value();
 
     const name_key = atom.predefinedId("name", .string).?;
     try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));

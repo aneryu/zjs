@@ -89,7 +89,7 @@ ES 7.4：`GetIterator` → 反复 `IteratorStep`/`IteratorValue` → 完成或�
 - 栈上压 **三元组** `[iterator, nextMethod, catchMarker]`。marker 由 `forof_ops.iteratorCatchMarker` 编码：借用 catch-offset tag，payload `<= -2`（`-2` = async；更小的编码保存外层 catch target）。这让 unwind 能精确认出迭代器记录，而不靠「旁边是不是 object/callable」猜测。
 - `forOfNext`：按 bytecode `depth` 定位记录（`forOfIteratorIndex`）。快路径——未覆写的 Array Iterator / Map·Set Iterator / Generator.next——直接把 `value` 和 `done` 压栈，**不**分配 `{value, done}` 对象。慢路径调 `next()`，再 `finishForOfNextResult` 读 `done`/`value`。
 - **next 失败**：`errdefer abandonForOfIteratorAtIndex` 把 iterator 槽写成 `undefined`。对齐 qjs `js_for_of_next`：对刚刚失败的 `next` 不再 `return()`，外层记录仍可被正常 close。
-- **IteratorClose**：`forof_ops.closeIteratorFromVmImpl` Get `return`，可调用则调它，结果必须是 Object。pending 异常路径（`closeStackTopForOfIteratorForPendingErrorInternal`）先 take 异常、关掉所有无 catch 边界的 for-of 记录、吞掉 close 错误、再 throw 回原值；不可捕获中断整段跳过；OOM 标志单独恢复。
+- **IteratorClose**：`forof_ops.closeIteratorFromVmImpl` Get `return`，可调用则调它，结果必须是 Object。pending 异常路径（`closeStackTopForOfIteratorForPendingError`）先 take 异常、关掉所有无 catch 边界的 for-of 记录、吞掉 close 错误、再 throw 回原值；不可捕获中断整段跳过；OOM 标志单独恢复。
 
 `for-in` **不是** 这个协议。`createForInIterator` 造 `JS_CLASS_FOR_IN_ITERATOR`，只快照根对象的可枚举字符串键（或 fast array 的元素个数）；原型链由 `forInNext`（noinline 包装已纳入清单）一档一档惰性走。已访问键是迭代器对象上的 null 属性。删除检测是 **own** `[[GetOwnProperty]]` / `existsOwnProperty`，不是会走原型的 `[[HasProperty]]`。
 

@@ -1,9 +1,11 @@
 //! Cold opcode handlers for the tail-call dispatcher. One handler per opcode,
 //! transcribed from the former switch-dispatcher slow-path helper calls.
 //! `buildTable` assembles the 256-entry dispatch table (cold handlers here +
-//! the special handlers passed in from the main file). v1: hot ops route
-//! through their cold handler too (frame story holds either way; the
-//! frame-zero fast paths are a perf follow-up).
+//! the special handlers passed in from the main file). The `fast` parameter
+//! selects between the all-cold table — every opcode routed through its cold
+//! handler, which is what the fast handlers fall back THROUGH — and the
+//! production table, whose tail section (see the "HOT fast-path overrides"
+//! block) points ~100 opcodes straight at register-resident handlers.
 //!
 //! This file has no linksection literal of its own: every handler here lands
 //! in the hot .text.zjs.op_handlers island implicitly via dispatch.coldStd's
@@ -163,7 +165,12 @@ pub const SpecialHandlers = struct {
 
 pub const BuiltTable = struct {
     table: [256]Handler,
-    /// Geometry keep: reclaimed-slot coldStd leaves. Live so LLVM cannot DCE them.
+    /// Geometry keep: coldStd leaves for opcode slots that fusion reclaimed.
+    /// NOT reachable dispatch arms — nothing indexes this array, and the
+    /// opcodes they used to serve now route through `using_ops.execVm`'s
+    /// `ext0_sub` switch. What keeps the handler bodies in the island is the
+    /// comptime instantiation in `buildTable`, not a read of this field (no
+    /// caller reads it); the field only gives those instantiations a home.
     keep: [12]Handler,
 };
 
@@ -245,7 +252,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     inline for ([_]struct { o: u8, v: i32 }{ .{ .o = op.push_minus1, .v = -1 }, .{ .o = op.push_0, .v = 0 }, .{ .o = op.push_1, .v = 1 }, .{ .o = op.push_2, .v = 2 }, .{ .o = op.push_3, .v = 3 }, .{ .o = op.push_4, .v = 4 }, .{ .o = op.push_5, .v = 5 }, .{ .o = op.push_6, .v = 6 }, .{ .o = op.push_7, .v = 7 } }) |e| {
         t[e.o] = h(struct {
             fn b(vm: *Vm) HostError!void {
-                try vm_value.pushSmallIntMaybeFuse(vm.stack, vm.function, vm.frame, e.v);
+                try vm_value.pushSmallInt(vm.stack, e.v);
             }
         }.b);
     }
@@ -302,11 +309,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // (direct routing would perturb the int32 fast-path codegen).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = dispatch.opCompareCold(o);
     inline for ([_]u8{ op.neg, op.to_number, op.inc, op.dec }) |o| t[o] = h_unary;
-    t[op.in] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_field.inOrInstanceof(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, undefined);
-        }
-    }.b);
     t[op.in] = handlerComparePlaceholder(op.in);
     t[op.instanceof] = handlerComparePlaceholder(op.instanceof);
     t[op.private_in] = h(struct {
@@ -322,11 +324,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.lnot] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try vm_value.logicalNot(vm.ctx.runtime, vm.stack);
-        }
-    }.b);
-    t[op.post_inc] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_arith.postUpdateVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, undefined, vm.output, vm.global);
         }
     }.b);
     t[op.post_inc] = handlerPost(op.post_inc);
@@ -497,22 +494,12 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             _ = try object_ops.defineMethodComputed(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    t[op.append] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_literal.appendSpreadValuesVm(vm.ctx, vm.output, vm.global, vm.stack, undefined, vm.frame, vm.catch_target);
-        }
-    }.b);
     t[op.append] = handlerAppend(op.append);
     t[op.copy_data_properties] = h(struct {
         fn b(vm: *Vm) HostError!void {
             const mask = vm.function.byteCode()[vm.frame.pc];
             vm.frame.pc += 1;
             _ = try vm_literal.copyDataProperties(vm.ctx, vm.output, vm.global, vm.stack, mask, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
-    t[op.put_var_init] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, dispatch.evalGlobalVarBindings(vm), undefined);
         }
     }.b);
     t[op.put_var_init] = handlerPutVarInit(op.put_var_init);
@@ -539,9 +526,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         }
     }.b);
     // 240/242/243 were these three type tests. Fusion v3 reclaimed the
-    // slots; instantiate the same coldStd leaves here (returned in
-    // `keep` so LLVM cannot DCE them) so later island offsets match
-    // 6a61951e. Both tables instantiate — ICF folds the pair, same as v2.1.
+    // slots; instantiate the same coldStd leaves here (parked in `keep`, see
+    // `BuiltTable.keep`: these are NOT reachable dispatch arms) so later
+    // island offsets match 6a61951e. Both tables instantiate — ICF folds the
+    // pair, same as v2.1.
     keep[0] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try vm_value.typeOfIsUndefined(vm.ctx.runtime, vm.stack);
@@ -552,8 +540,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try vm_value.typeOfIsFunction(vm.ctx.runtime, vm.stack);
         }
     }.b);
-    t[op.get_var_field] = dispatch.op_get_var_field_cold;
-    t[op.get_loc2_field2] = dispatch.op_get_loc2_field2_cold;
     t[op.is_undefined_or_null] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try vm_value.isUndefinedOrNull(vm.ctx.runtime, vm.stack);
@@ -564,7 +550,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
             try vm_value.isUndefined(vm.ctx.runtime, vm.stack);
         }
     }.b);
-    t[op.get_field_field2] = dispatch.op_get_field_field2_cold;
     t[op.is_null] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try vm_value.isNull(vm.ctx.runtime, vm.stack);
@@ -878,7 +863,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     inline for ([_]u8{ op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 }) |o| t[o] = dispatch.opArgStore(.set);
     t[op.push_atom_value] = dispatch.op_push_atom_value;
     t[op.special_object] = dispatch.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
-    t[op.push_this] = dispatch.op_push_this; // object dup / sloppy nullish->global; ToObject boxing + strict non-object + uninitialized stay cold
+    t[op.push_this] = dispatch.op_push_this; // objects and (in strict code) any non-uninitialized value push directly; sloppy nullish->global too. Only sloppy ToObject boxing and uninitialized stay cold
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
     // no fast leg and falls straight to js_binary_arith_slow).

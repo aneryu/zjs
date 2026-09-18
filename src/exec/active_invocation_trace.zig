@@ -1,8 +1,8 @@
 //! Exec-owned no-fail root walk for `JSRuntime.active_invocation`.
 //!
 //! Core only sees `ActiveInvocationTrace` at offset 0 of the published record
-//! (tracing-gc-design.md §7.1). This module is imported solely when
-//! `value_root_frames_enabled`; default `rc` never compiles it.
+//! (tracing-gc-design.md §7.1). `value_root_frames_enabled` is now constant
+//! true (core/runtime.zig), so this module is always compiled in.
 //!
 //! Live windows only: typed Frame slices, Stack `top_ptr` prefix, VarRef
 //! cells that are present, and Entry.native_caller when that slot is a

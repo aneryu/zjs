@@ -640,9 +640,6 @@ pub inline fn strictUnresolvedGetVar(vm: *Vm) bool {
     return if (vm.machine.depth == 0) vm.machine.l0.strict_unresolved_get_var else (vm.function.isStrictMode() or vm.function.runtimeStrictMode());
 }
 
-inline fn evIsEval(vm: *Vm) bool {
-    return isEvalCode(vm);
-}
 
 // ===========================================================================
 // Endpoint handlers
@@ -3742,9 +3739,9 @@ pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 
 /// Frameless primitive constant pushes. QuickJS's `CASE(OP_null)` is the direct
 /// `*sp++ = JS_NULL; BREAK;` form; undefined, booleans, and immediate integers
-/// are the same register-resident primitive stores. `pushSmallIntMaybeFuse` is a
-/// plain `JSValue.int32` push (vm_value.zig:58-75), so the small-int handlers do
-/// not omit a runtime fusion or bytecode-patching step.
+/// are the same register-resident primitive stores. `pushSmallInt` is a plain
+/// `JSValue.int32` push (vm_value.zig), so the small-int handlers do not omit a
+/// runtime fusion or bytecode-patching step.
 ///
 /// Stack-capacity contract: zjs_vm.reserveEntryFrameCapacity reserves the verified
 /// `function.stack_size` before dispatch (zjs_vm.zig:469-480), matching opLoc's
@@ -4790,7 +4787,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     // `[receiver, getter]`, exactly the zero-argument `.method` layout expected
     // by pushAndEnter. frame.pc already names the opcode after this property
     // read, so normal return/throw resumes at the correct instruction.
-    if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
+    if (inline_calls.resolveInlineTarget(vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
         vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
@@ -4893,7 +4890,7 @@ inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, v
         }
         return null;
     }
-    const target = inline_calls.resolveInlineTarget(vm.ctx, vm.global, handler_value, trap) orelse return null;
+    const target = inline_calls.resolveInlineTarget(vm.global, handler_value, trap) orelse return null;
 
     const key = if (computed_key)
         computed_key_value
@@ -5315,12 +5312,13 @@ pub fn opCompare(comptime opc: u8) Handler {
 /// so every other shape paid the indirect `cold_table[pc[0]]` hop plus a `syncPc`
 /// store before `compareAt`.
 ///
-/// Reached by a `noinline` PC-relative tail from `opCompare` (硬门 #9: 直跳
-/// 单一冷入口, not `resident_tail_tbl`). An *inlinable* same-file hop lets
-/// LLVM fold this body back and the operand-release `bl`s regrow a 0x70 frame
-/// on the int leaf (the same reason `op_compare_cold` is dispatched through
-/// `cold_table` — a direct route once cost the canonical `s=s+i` loop +37
-/// insn/iter). Unresolved shapes fall to the unchanged `cold_table[pc[0]]`, so
+/// Reached by a PC-relative tail through the `zjs_cmp_*_framed` / `zjs_cmp_*_mixed`
+/// `export fn` boundary below (硬门 #9: 直跳单一冷入口, not `resident_tail_tbl`).
+/// That exported hop — not a `noinline` marker on this body, which has none — is
+/// what stops LLVM from folding the body back into the caller and regrowing a
+/// 0x70 frame on the int leaf via the operand-release `bl`s (the same reason
+/// `op_compare_cold` is dispatched through `cold_table` — a direct route once
+/// cost the canonical `s=s+i` loop +37 insn/iter). Unresolved shapes fall to the unchanged `cold_table[pc[0]]`, so
 /// string↔number coercion, ToPrimitive on objects, BigInt and mixed Symbol/object operands keep the
 /// full `js_eq_slow` protocol.
 ///
@@ -6410,7 +6408,8 @@ pub fn op_cmp_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm
 
 /// `eq` then musttail `op_if_false8`. Int32 hit stays on this leaf and
 /// `b`s into the one `op_if_false8` (poll lives there). Every other
-/// shape `b`s into the `noinline` `opCompareEq(eq)` sibling — the same
+/// shape `b`s through the `zjs_cmp_eq_mixed` export into the `opCompareEq(eq)`
+/// sibling — the same
 /// nine-arm body unfused `eq` uses — which `cont`s onto leftover B.
 /// Sending those shapes through `eq_if_false8_cold`/`compareAt` was the
 /// wave-21 richards +579M tax (misattributed to 245). 246 is not in this
@@ -7398,11 +7397,14 @@ pub fn op_push_0_or(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, opBinary(.bor), .{ pc + 1, sp + 1, var_buf, vm });
 }
 
+/// `push_0_or` is a ONE-byte opcode (`.fmt = .none`), so `publish` already
+/// left `frame.pc` on the leftover `or`. Advancing again would skip it and
+/// strand the pushed `0` (the two-byte `op_push_i8_add_cold` is the case that
+/// does need the extra step, for its `i8` operand).
 pub fn op_push_0_or_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     sp[0] = JSValue.int32(0);
     vm.stack.setTopPtr(sp + 1);
-    vm.frame.pc += 1;
     return coldNext(var_buf, vm);
 }
 
@@ -7430,11 +7432,12 @@ pub fn op_push_2_sar(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     return @call(.always_tail, opBinary(.sar), .{ pc + 1, sp + 1, var_buf, vm });
 }
 
+/// One-byte opcode like `op_push_0_or_cold`: `publish` already points
+/// `frame.pc` at the leftover `sar`, so no extra advance.
 pub fn op_push_2_sar_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     vm.publish(pc, sp);
     sp[0] = JSValue.int32(2);
     vm.stack.setTopPtr(sp + 1);
-    vm.frame.pc += 1;
     return coldNext(var_buf, vm);
 }
 
@@ -7563,7 +7566,6 @@ comptime {
     _ = &coldGen;
     _ = &coldStd;
     _ = &coldNext;
-    _ = &evIsEval;
     _ = &runDispatchLoop;
     _ = dispatch_table;
 }

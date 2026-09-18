@@ -112,15 +112,3 @@ fn reflectCall(
     }
     return try reflect_ops.reflectCallForNativeRecord(ctx, output, global, id, args, caller_function, caller_frame);
 }
-
-pub fn ownKeys(rt: *core.JSRuntime, object: *core.Object) ![]core.Atom {
-    return object.ownKeys(rt);
-}
-
-pub const RevocableProxy = struct {
-    revoked: bool = false,
-
-    pub fn revoke(self: *RevocableProxy) void {
-        self.revoked = true;
-    }
-};

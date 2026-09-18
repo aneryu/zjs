@@ -190,8 +190,6 @@ function readAllowlist() {
 const files = [];
 walk(path.join(repoRoot, 'src/core'), files);
 if (fs.existsSync(path.join(repoRoot, 'src/bytecode.zig'))) files.push('src/bytecode.zig');
-const bytecodeDir = path.join(repoRoot, 'src/bytecode');
-if (fs.existsSync(bytecodeDir)) walk(bytecodeDir, files);
 
 const findings = [];
 for (const file of files) {

@@ -349,9 +349,9 @@ pub fn isAsciiBytes(bytes: []const u8) bool {
 /// its characters INLINE, laid out immediately after the struct (a flexible
 /// array member reached via the `latin1()`/`utf16()`/`bytes()` accessors, like
 /// qjs `u.str8[]`/`u.str16[]`). There is no `Data` union and no separate heap
-/// buffer for the characters. A rope-backed value keeps `is_rope = true` and
-/// points at a `StringRope` through `rope`; its inline payload is empty and its
-/// content materializes lazily on first read.
+/// buffer for the characters, and a `String` is always flat: deferred
+/// concatenation lives in the separate `StringRope` object, whose content
+/// materializes into a fresh flat `String` on first read.
 pub const String = struct {
     pub const no_atom_id: u32 = std.math.maxInt(u32);
 
@@ -409,8 +409,8 @@ pub const String = struct {
         return @ptrCast(@alignCast(base - gc.string_prefix_size));
     }
 
-    /// Returns an owned runtime string. The runtime releases it through
-    /// reference counting when all `JSValue` handles are freed.
+    /// Returns a fresh runtime string. The collector owns it from the moment
+    /// it is published; callers keep it alive by rooting, not by counting.
     pub fn createAscii(rt: *JSRuntime, bytes: []const u8) !*String {
         return createLatin1(rt, bytes);
     }
@@ -433,8 +433,8 @@ pub const String = struct {
         return self;
     }
 
-    /// Returns an owned runtime string. Caller transfers the returned value to
-    /// `JSValue.free` or another owner.
+    /// Returns a fresh runtime string decoded from UTF-16 code units, narrowed
+    /// to latin1 storage when every unit fits. The collector owns it.
     pub fn createUtf16(rt: *JSRuntime, units: []const u16) !*String {
         var needs_wide = false;
         for (units) |unit| {
@@ -501,8 +501,9 @@ pub const String = struct {
         return self;
     }
 
-    /// Interns this string's content as a property-key atom and returns an
-    /// owned atom reference (caller releases it via `rt.atoms.free`).
+    /// Interns this string's content as a property-key atom and returns its
+    /// id. The atom table owns the entry; there is no per-caller reference to
+    /// release.
     ///
     /// The atom name uses the same UTF-8/WTF-8 encoding the lexer and the
     /// JSON parser produce, so keys built from runtime strings unify with
@@ -511,7 +512,6 @@ pub const String = struct {
     /// table traces the cached string and `atom_id` becomes a weak
     /// back-pointer; the reverse direction (`AtomTable.toStringValue`) reuses
     /// the same string with zero conversion.
-    /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
         if (self.atom_id != no_atom_id) return self.atom_id;
         _ = self.contentHash();
@@ -614,11 +614,6 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createLatin1ConcatWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
-        _ = seed;
-        return createLatin1Concat(rt, a, b);
-    }
-
     /// Concatenate two utf16 unit buffers into a single freshly allocated
     /// utf16 string. The runtime owns the result.
     pub fn createUtf16Concat(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
@@ -708,10 +703,9 @@ pub const String = struct {
 
     /// Creates a rope deferring the concatenation of `left ++ right`. Returns a
     /// STANDALONE `*StringRope` (the caller emits its `Tag.string_rope` value via
-    /// `node.value()`). Retains both children; content materializes lazily on
-    /// first read. `left`/`right` are borrowed `*String`/`*StringRope` handles
-    /// supplied as-is by the concat machinery; the rope stores them as owned
-    /// `JSValue`s.
+    /// `node.value()`). Content materializes lazily on first read.
+    /// `left`/`right` are `*String`/`*StringRope` handles supplied as-is by the
+    /// concat machinery; the rope stores them as traced `JSValue` edges.
     pub fn createRope(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
         // QJS classifies each operand once, collecting len/width/depth from
         // the same branch before allocating. Do not repeat ropeBody/raw-body
@@ -721,17 +715,10 @@ pub const String = struct {
         return createRopeNode(rt, left, right, left_info, right_info);
     }
 
-    /// Consuming counterpart of `createRope`, matching QJS
-    /// `js_new_string_rope(ctx, op1, op2)`: both input owners transfer directly
-    /// into the new node, with no retain-then-free round trip. On failure both
-    /// inputs are released.
-    pub fn createRopeOwned(rt: *JSRuntime, left: JSValue, right: JSValue) !*StringRope {
-        const left_info = stringValueInfo(left);
-        const right_info = stringValueInfo(right);
-        return createRopeNode(rt, left, right, left_info, right_info) catch |err| {
-            return err;
-        };
-    }
+    /// Name kept for the QJS `js_new_string_rope(ctx, op1, op2)` call sites
+    /// that used to transfer owners. Under the tracing collector construction
+    /// neither retains nor releases, so this is `createRope` itself.
+    pub const createRopeOwned = createRope;
 
     /// Creates a rope and applies the same depth cap and Fibonacci-bucket
     /// rebalance as QuickJS `js_new_string_rope`. The inputs are borrowed; the
@@ -853,14 +840,6 @@ pub const String = struct {
             };
         }
     };
-
-    /// No-op on a flat string: ropes are a separate object flattened at the
-    /// value boundary (`asStringBody`), so a `*String` reaching here is always
-    /// flat. Kept for source compatibility with the fallible read paths.
-    pub fn ensureFlat(self: *String, rt: *JSRuntime) !void {
-        _ = self;
-        _ = rt;
-    }
 
     pub fn resolveData(self: *const String) ResolvedData {
         if (self.len_meta.is_wide) return .{ .utf16 = self.utf16() };
@@ -1243,7 +1222,6 @@ pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
 /// core files, which cannot import exec.
 pub fn appendValueUtf8(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !void {
     const string_value = value.asStringBody() orelse return;
-    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             if (isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
@@ -1340,16 +1318,15 @@ const rope_bucket_len = [_]usize{
 
 const RopeBuckets = [rope_bucket_len.len]?JSValue;
 
-/// Consumes two owned values and returns one owned raw rope value. `createRope`
-/// itself borrows and retains the inputs, so releasing the two incoming owners
-/// after construction implements the ownership transfer used by QJS's
-/// `js_new_string_rope`.
+/// Builds one raw rope value over two string values -- the value-typed
+/// spelling of `createRope`, matching QJS's `js_new_string_rope`. No ownership
+/// moves: the new node's edges are traced.
 fn createOwnedRope(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
     return (try String.createRopeOwned(rt, left, right)).value();
 }
 
-/// Inserts one owned flat leaf into the Fibonacci buckets. On either success
-/// or failure ownership of `owned_leaf` is consumed.
+/// Inserts one flat leaf into the Fibonacci buckets. The leaf ends up owned by
+/// a bucket (or by a rope built from one); nothing is released on either path.
 fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSValue) !void {
     const leaf_len = stringValueLen(owned_leaf);
     if (leaf_len == 0) {
@@ -1724,9 +1701,6 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.GCObjectHeader) void {
     rt.memory.destroyStringCell(body, layout.total_size);
 }
 
-/// TGC S2 extent sweep (spec §5.7): destroy every string extent the major
-/// did not mark. The collector calls this after the bitmap sweep (the block
-/// cells' twin is `destroyCellFromHeader`); returns the count destroyed.
 /// Runtime teardown twin of the sweep: every remaining string cell and
 /// extent is dead by definition. Cells are collected first so freeing does
 /// not disturb the bitmap walk.
@@ -1767,6 +1741,9 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
     _ = heap.sweepExtents(heap.mark_epoch +% 2, @ptrCast(rt), destroyDeadStringExtent);
 }
 
+/// TGC S2 extent sweep (spec §5.7): destroy every string extent the major did
+/// not mark. The collector calls this after the bitmap sweep (the block cells'
+/// twin is `destroyCellFromHeader`); returns the count destroyed.
 pub fn sweepExtents(rt: *JSRuntime) usize {
     const heap = &rt.gc.block_heap;
     return heap.sweepExtents(heap.mark_epoch, @ptrCast(rt), destroyDeadStringExtent);

@@ -46,70 +46,70 @@ Z-GE Registry：发布、barrier、mark 访问器、分代、地址登记、exte
 - **实现**：存在MINOR_AUDIT/ARENA_AUDIT/VERIFY_MINOR变量时按非空且非0启用，fatal单独精确匹配；ATOM_AUDIT只取fatal。VERIFY_MINOR verbose为roots_diag_enabled或文本verbose。MAJOR_ALL仅roots_diag构建读取；测试突变变量仅test读取。STRESS缺失、空或0直接返回；其它文本先将stress_collect置true，再尝试解析i32，只有>1才写cadence。
 - **所有权 / 错误 / 调用**：不是幂等重置：缺失变量保留旧全局值，STRESS=0也不清已true的stress_collect；1、负数或解析失败不复位已有cadence。Registry.init调用，不是进程范围once锁；多runtime共享开关，不能写成每个runtime独立配置。
 
-### `Policy.needsProcessMemorySnapshot` (`src/core/gc.zig:390`)
+### `Policy.needsProcessMemorySnapshot` (`src/core/gc.zig:391`)
 
 - **签名**：`pub inline fn needsProcessMemorySnapshot(self: Policy) bool`。
 - **作用**：判断策略是否需要OS级内存快照输入。
 - **实现**：rss_soft_limit或rss_hard_limit非null，或任一cgroup soft/hard ratio非0，则true。
 - **所有权 / 错误 / 调用**：不读取OS或检查是否超过限额；external soft/hard仅依赖内部计数，不触发此条件，也不按策略模式名称判断。
 
-### `ExternalMemoryToken.release` (`src/core/gc.zig:403`)
+### `ExternalMemoryToken.release` (`src/core/gc.zig:404`)
 
 - **签名**：`pub fn release(self: *ExternalMemoryToken) void`。
 - **作用**：撤销本token的外部内存登记并使自身失效。
 - **实现**：registry为null返回；保存id/bytes后先清registry/id/bytes，再调用registry.releaseExternalToken。
 - **所有权 / 错误 / 调用**：只处理登记，不释放外部实际内存。对同一个已清token重复调用无操作；复制token不会自动共享清空状态，登记层如何防重复由releaseExternalToken负责。registry必须仍有效。
 
-### `ExternalMemoryToken.deinit` (`src/core/gc.zig:413`)
+### `ExternalMemoryToken.deinit` (`src/core/gc.zig:414`)
 
 - **签名**：`pub fn deinit(self: *ExternalMemoryToken) void`。
 - **作用**：以释放外部登记的方式结束token。
 - **实现**：调用self.release()。
 - **所有权 / 错误 / 调用**：不销毁Registry或宿主buffer，幂等范围与release相同。
 
-### `kindIsBlockCellKind` (`src/core/gc.zig:463`)
+### `kindIsBlockCellKind` (`src/core/gc.zig:464`)
 
 - **签名**：`pub inline fn kindIsBlockCellKind(kind: RefKind) bool`。
 - **作用**：判断某个kind是否允许block-cell承载。
 - **实现**：Object、string、rope、string_buffer、property_storage、array_storage、payload为true，其余六类false。
 - **所有权 / 错误 / 调用**：是kind能力分类，不证明具体header实际在block或已分配；实际路由仍需看prefix/成员信息。
 
-### `kindIsPrefixCarrier` (`src/core/gc.zig:477`)
+### `kindIsPrefixCarrier` (`src/core/gc.zig:478`)
 
 - **签名**：`pub inline fn kindIsPrefixCarrier(kind: RefKind) bool`。
 - **作用**：判断body是否从collector handle处开始、无需TraceHeader链字的prefix载体类型。
 - **实现**：string、rope、string_buffer、property_storage、array_storage、payload为true，Object及其它kind为false。
 - **所有权 / 错误 / 调用**：不等于block-cell分类：Object是block-capable但不属于此集合。prefix载体不应挂入普通非Object intrusive lists；rope另受固定cell布局约束。
 
-### `kindIsOwnedStorageCell` (`src/core/gc.zig:499`)
+### `kindIsOwnedStorageCell` (`src/core/gc.zig:500`)
 
 - **签名**：`pub inline fn kindIsOwnedStorageCell(kind: RefKind) bool`。
 - **作用**：分类在minor触发人口中扣除的四种叶子storage载体。
 - **实现**：property_storage、array_storage、payload、string_buffer为true，其余false。
 - **所有权 / 错误 / 调用**：分类本身不证明运行时只有一个引用，也不执行追踪/回收；这些载体仍计入young_count，只从young_trigger_count排除。
 
-### `kindIsExtentCapable` (`src/core/gc.zig:512`)
+### `kindIsExtentCapable` (`src/core/gc.zig:513`)
 
 - **签名**：`inline fn kindIsExtentCapable(kind: RefKind) bool`。
 - **作用**：判断prefix载体是否可采用medium/large extent路由。
 - **实现**：string、string_buffer、property_storage、array_storage、payload为true；rope、Object及其它kind为false。
 - **所有权 / 错误 / 调用**：能力分类不表示本次分配实际使用extent；rope固定大小走cell，不应把所有prefix载体直接当extent。
 
-### `representationKindDescriptor` (`src/core/gc.zig:548`)
+### `representationKindDescriptor` (`src/core/gc.zig:549`)
 
 - **签名**：`pub inline fn representationKindDescriptor(kind: RefKind) *const RepresentationKindDescriptor`。
 - **作用**：按kind枚举序号取得静态载体目录项。
 - **实现**：返回representation_kind_catalog[@intFromEnum(kind)]的const指针；编译期断言目录长度、序号及block分类与谓词一致。
 - **所有权 / 错误 / 调用**：借用静态常量，不分配或验证某个具体对象。AllocationCarrier目录是允许类别，不执行分配路由；旧注释“只有普通Object可进block”已不适用。
 
-### `frontierEpochSafe` (`src/core/gc.zig:576`)
+### `frontierEpochSafe` (`src/core/gc.zig:577`)
 
 - **签名**：`pub inline fn frontierEpochSafe(kind: GcKind) bool`。
 - **作用**：判断kind是否允许以稳定裸header指针进入跨切片mark前沿。
 - **实现**：除realm_context和shape外，当前其它11个kind均true。
 - **所有权 / 错误 / 调用**：只按kind分类，不验证发布、condemned或地址归属。Shape可迁移结构而同步追踪；Realm当前也保留同步路线，false不等同不受tracer管理。
 
-### `ratioPerMille` (`src/core/gc.zig:680`)
+### `ratioPerMille` (`src/core/gc.zig:681`)
 
 - **签名**：`pub fn ratioPerMille(numerator: usize, denominator: usize) usize`。
 - **作用**：计算受1000上限约束的整数千分比。
@@ -126,77 +126,77 @@ barrier_young_bit与barrier_remembered_bit通过将仅设置对应字段的Metad
 
 TraceHeader只有一个8字节next_non_object链字，Header/GCObjectHeader/ObjectHeader都是其别名。真实Object的handle等于body起点，不能访问该别名的链字段；prefix carrier也没有可借用的链字。链sentinel直接使用存储字段且没有Metadata前缀。object_deferred_link_body_offset=8现用于固定Object.shape_ref位置，不表示仍在该位置存放已退役的延迟释放后继。
 
-### `barrierOwnerWord` (`src/core/gc.zig:911`)
+### `barrierOwnerWord` (`src/core/gc.zig:912`)
 
 - **签名**：`pub inline fn barrierOwnerWord(header: *const Header) u64`。
 - **作用**：一次读取header前的metadata作为屏障判定字。
 - **实现**：取header.metaConst().*并bitCast为u64。
 - **所有权 / 错误 / 调用**：普通对齐读取，不是atomicLoad，不改变状态；输入须为带有效prefix的header，sentinel不能调用。得到的是整8字节布局，不仅kind或young位。
 
-### `TraceHeader.meta` (`src/core/gc.zig:935`)
+### `TraceHeader.meta` (`src/core/gc.zig:936`)
 
 - **签名**：`pub inline fn meta(self: *TraceHeader) *Metadata`。
 - **作用**：借用header前的可变Metadata。
 - **实现**：将self地址减metadata_prefix_size并转为*Metadata。
 - **所有权 / 错误 / 调用**：不验证映射、kind或发布，不分配；要求真实carrier prefix存在。纯链sentinel没有prefix，不适用。
 
-### `TraceHeader.metaConst` (`src/core/gc.zig:939`)
+### `TraceHeader.metaConst` (`src/core/gc.zig:940`)
 
 - **签名**：`pub inline fn metaConst(self: *const TraceHeader) *const Metadata`。
 - **作用**：只读借用header前的Metadata。
 - **实现**：以self地址减metadata_prefix_size构造const指针。
 - **所有权 / 错误 / 调用**：const只约束此指针访问，不提供并发快照或有效性检查。
 
-### `TraceHeader.nextNonObject` (`src/core/gc.zig:945`)
+### `TraceHeader.nextNonObject` (`src/core/gc.zig:946`)
 
 - **签名**：`pub inline fn nextNonObject(self: *const TraceHeader) ?*TraceHeader`。
 - **作用**：读取真实非Object list header的后继。
 - **实现**：安全构建断言meta.flags.kind!=object，随后返回next_non_object。
 - **所有权 / 错误 / 调用**：Object调用不返回null而是前置条件违例；关闭安全检查会把其body首字当链接。prefix载体也不因此成为合法list member，调用方须有真实链字。
 
-### `TraceHeader.setNextNonObject` (`src/core/gc.zig:951`)
+### `TraceHeader.setNextNonObject` (`src/core/gc.zig:952`)
 
 - **签名**：`inline fn setNextNonObject(self: *TraceHeader, next: ?*TraceHeader) void`。
 - **作用**：更新真实非Object list header的后继。
 - **实现**：安全构建断言kind不是object，再赋值next_non_object。
 - **所有权 / 错误 / 调用**：不调整前驱、长度或其它成员状态；只适用于合法链载体，不可用于Object或无TraceHeader链字的prefix body。
 
-### `bodyOffsetFromHeader` (`src/core/gc.zig:969`)
+### `bodyOffsetFromHeader` (`src/core/gc.zig:970`)
 
 - **签名**：`pub inline fn bodyOffsetFromHeader(comptime kind: GcKind) usize`。
 - **作用**：返回此编译期kind转换助手规定的header到body偏移。
 - **实现**：object为0，所有其它枚举kind均返回sizeOf(TraceHeader)，当前8字节。
 - **所有权 / 错误 / 调用**：这是函数实际映射，不可当成所有prefix载体物理布局的统一规则：string/rope/storage等真实handle即body的路径不应套用此助手。它不查看实际对象、prefix或分配路线。
 
-### `bodyAddressFromHeader` (`src/core/gc.zig:991`)
+### `bodyAddressFromHeader` (`src/core/gc.zig:992`)
 
 - **签名**：`pub inline fn bodyAddressFromHeader(comptime kind: GcKind, header: *const GCObjectHeader) usize`。
 - **作用**：按指定kind的转换规则计算body整数地址。
 - **实现**：正常使用bodyOffsetFromHeader；测试mutation 4可将Object偏移改为TraceHeader大小，安全构建检测Object非零偏移并panic；最后header地址加offset。
 - **所有权 / 错误 / 调用**：不验证实际header kind或地址有效性，kind由调用方编译期给出。Object正常返回原地址，其它返回加8；不能替代prefix carrier自身的转换协议。
 
-### `headerNeedsFinalizer` (`src/core/gc.zig:1019`)
+### `headerNeedsFinalizer` (`src/core/gc.zig:1020`)
 
 - **签名**：`pub inline fn headerNeedsFinalizer(h: *const Header) bool`。
 - **作用**：读取metadata中的析构责任标志。
 - **实现**：直接返回h.metaConst().flags.needs_finalizer。
 - **所有权 / 错误 / 调用**：不查询block finalizer bitmap或extent表，不执行析构；不同存储列之间的一致性由发布/标记析构责任等写入路径保证。
 
-### `headerCondemned` (`src/core/gc.zig:1063`)
+### `headerCondemned` (`src/core/gc.zig:1064`)
 
 - **签名**：`pub inline fn headerCondemned(h: *const Header) bool`。
 - **作用**：检查header lifetime是否带持久condemnation戳。
 - **实现**：monotonic原子读取u16 mark_epoch并比较condemned_mark_epoch=maxInt(u16)。
 - **所有权 / 错误 / 调用**：O(1)读prefix，不查doomed链/bitmap缓存，不证明存储仍分配；free cell可能保留旧戳直到复用初始化。
 
-### `stampHeaderCondemned` (`src/core/gc.zig:1070`)
+### `stampHeaderCondemned` (`src/core/gc.zig:1071`)
 
 - **签名**：`inline fn stampHeaderCondemned(h: *Header) void`。
 - **作用**：将header lifetime写成保留的condemnation epoch。
 - **实现**：monotonic atomicStore写condemned_mark_epoch。
 - **所有权 / 错误 / 调用**：不自行摘live链、设置block doomed位图或执行析构；调用方先建立判死条件并完成相应成员协议。原子写不使整个condemnation过程成为原子事务。
 
-### `assertInitialHeaderLifetime` (`src/core/gc.zig:1074`)
+### `assertInitialHeaderLifetime` (`src/core/gc.zig:1075`)
 
 - **签名**：`inline fn assertInitialHeaderLifetime(h: *const Header) void`。
 - **作用**：断言新发布前header lifetime符合初始约束。
@@ -205,273 +205,266 @@ TraceHeader只有一个8字节next_non_object链字，Header/GCObjectHeader/Obje
 
 MetadataSemanticState仅有registry_published和construction_block_object，选择两套不同的prefix检查合同。FailureKind为none/out_of_memory/payload_mark_failed（0/1/2），CollectionError为OutOfMemory/PayloadMarkFailed；CollectionResult保存freed_objects与duration_ns，默认0。InvariantError按列表/分配账/identity/pin/代际/condemned/representation/尾部属性storage/延迟payload根等检查区分错误；一个错误值不保证对应唯一根因。list*与IntrusiveHeaderList等在此只是gc_registry_lists实现的别名，不是另一套链算法。
 
-### `verifyMetadataSemantics` (`src/core/gc.zig:1194`)
+### `verifyMetadataSemantics` (`src/core/gc.zig:1195`)
 
 - **签名**：`pub fn verifyMetadataSemantics( meta: *const Metadata, expected_kind: GcKind, state: MetadataSemanticState, ) InvariantError!void`。
 - **作用**：在不读取body的前提下核对metadata kind、分配类别及指定发布状态约束。
 - **实现**：先kind匹配，再按目录拒绝不允许的block marker；block与standalone不可同时成立，standalone必须block_size_idx=0，非block/slab索引须小于slab class_count。registry_published要求heap_accounted、standalone size_class非0、lifetime reserved为0，非Object shape摘要低7位为0。construction_block_object要求Object且block marker、未accounted/非standalone、young/finalizing/BlockFlags.reserved为false，并要求epoch=0、shape低7位=0和lifetime reserved=0。
 - **所有权 / 错误 / 调用**：构造分支允许needs_finalizer及remembered高位，已发布分支不在此禁止这些标志或核查mark epoch。AllocInfo.reserved未被本函数检查；也不解析size_class编码值、cell索引、对象布局、真实映射/列表或pin成员。返回首个分类错误，成功仅证明所列prefix条件，不能替代实际carrier/发布审计。
 
-### `Registry.init` (`src/core/gc.zig:1543`)
+### `Registry.init` (`src/core/gc.zig:1544`)
 
 - **签名**：`pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry`。
 - **作用**：创建绑定MemoryAccount与Policy的Registry初值。
 - **实现**：调用readStressFromEnv更新全局配置，返回memory指针、scheduler.policy及BlockHeap.init；OOM注入配置时block backing用account.backing_allocator，否则page_allocator，其余字段用默认值。
 - **所有权 / 错误 / 调用**：不在此绑定自引用sentinel或分配block；最终地址确定后还须initLists。借用account，生命周期须覆盖Registry；不能称此函数创建了完整可发布对象的运行时。
 
-### `Registry.initLists` (`src/core/gc.zig:1558`)
+### `Registry.initLists` (`src/core/gc.zig:1559`)
 
 - **签名**：`pub fn initLists(self: *Registry) void`。
 - **作用**：在Registry最终地址绑定自引用链状态并刷新屏障门控。
 - **实现**：依次refreshBarrierGate、lists.init、morgue.init。
 - **所有权 / 错误 / 调用**：应在发布header之前调用；两个init只在未初始化时绑定，不是用于清空活链的重置接口。已绑定结构不能随意按值移动后期待此函数修复所有旧地址。
 
-### `Registry.deinit` (`src/core/gc.zig:1564`)
+### `Registry.deinit` (`src/core/gc.zig:1565`)
 
 - **签名**：`pub fn deinit(self: *Registry, rt: anytype) void`。
 - **作用**：按依赖顺序拆除Registry仍管理的载体与辅助存储。
 - **实现**：先中止/失效cycle envelope、关闭marking并排空前沿，设phase=deinit；销毁pin账中construction shell。先处理nonblock Object并排延迟payload finalizer，再消费普通链：Shape、VarRef和bytecode分别暂存，VarRef先prepare，其余适用kind直接销毁并排延迟finalizer。之后依次销毁bytecode、记账并free VarRef结构、销毁Shape并deinit shape表；调用lists.init、external/pins.deinit、destroyAllStringCarriersForDeinit，再释放nonblock authority、地址/代际/marking表、block heap；按配置核对/释放oracle及carrier账，最后phase=none。
 - **所有权 / 错误 / 调用**：依赖JSRuntime此前host-quiescent回收等teardown前置流程，不能单独保证对所有剩余block Object执行析构；block_heap.deinit本身只归还存储。Object与bytecode结构由自身析构释放，不延迟到Shape之后；持有栈只安排资源依赖。此函数无整体self重置，不承诺重复deinit安全；外部token、pin及借用指针在相关存储销毁后不能继续使用。
 
-### `Registry.reportExternalAlloc` (`src/core/gc.zig:1728`)
+### `Registry.reportExternalAlloc` (`src/core/gc.zig:1729`)
 
 - **签名**：`pub fn reportExternalAlloc(self: *Registry, bytes: usize) !ExternalMemoryToken`。
 - **作用**：登记一笔带token的外部内存并累积GC调度债务。
 - **实现**：bytes=0返回默认空token；先external.add取得id，成功后饱和更新external_bytes/peak/alloc_count；bytes*external_weight乘法溢出取maxInt，再饱和加到allocation_debt，返回registry/id/bytes。
 - **所有权 / 错误 / 调用**：add失败上抛且不走后续统计；不实际分配宿主buffer，也不在此调用requestGC或做OS内存检查，调用层负责调度。token用于后续对称撤销live账，债务另按major完成重置。
 
-### `Registry.reportExternalAllocUntracked` (`src/core/gc.zig:1748`)
+### `Registry.reportExternalAllocUntracked` (`src/core/gc.zig:1749`)
 
 - **签名**：`pub fn reportExternalAllocUntracked(self: *Registry, bytes: usize) void`。
 - **作用**：为已由GC payload承载的逻辑外部字节记账，不创建token。
 - **实现**：零字节忽略；饱和增加external_bytes、external_untracked_bytes、peak、alloc_count及加权allocation_debt。
 - **所有权 / 错误 / 调用**：当前用于inline BufferPayload字节分类，不应让真实离账宿主分配借此绕过token/调度协议；无失败返回，不执行立即pressure检查。
 
-### `Registry.reportExternalFree` (`src/core/gc.zig:1762`)
-
-- **签名**：`pub fn reportExternalFree(self: *Registry, bytes: usize) void`。
-- **作用**：直接扣外部live总账的原始兼容接口。
-- **实现**：零字节返回，否则external_bytes饱和减bytes并饱和增加free_count。
-- **所有权 / 错误 / 调用**：不释放实际内存、不移除token条目，也不扣untracked分项或allocation_debt；tracked调用应release token，避免账目不一致。
-
-### `Registry.reportExternalFreeUntracked` (`src/core/gc.zig:1768`)
+### `Registry.reportExternalFreeUntracked` (`src/core/gc.zig:1759`)
 
 - **签名**：`pub fn reportExternalFreeUntracked(self: *Registry, bytes: usize) void`。
 - **作用**：扣除untracked逻辑外部字节。
 - **实现**：非零时external_bytes和external_untracked_bytes各饱和减bytes，free_count饱和加一。
 - **所有权 / 错误 / 调用**：不验证请求是否超过既有账目，饱和减可掩盖过量扣减；不取消token或偿还allocation_debt。
 
-### `Registry.releaseExternalToken` (`src/core/gc.zig:1776`)
+### `Registry.releaseExternalToken` (`src/core/gc.zig:1767`)
 
 - **签名**：`fn releaseExternalToken(self: *Registry, id: u64, bytes: usize) void`。
 - **作用**：按token身份与字节数校验释放登记，并更新外部live账。
 - **实现**：external.release返回malformed/unknown_id/byte_mismatch时只饱和加invalid_release_count；released为0返回，非零则external_bytes饱和减实际released_bytes，free_count饱和加一。
 - **所有权 / 错误 / 调用**：没有错误返回给token；无效释放不会扣live账。释放登记不释放宿主资源，也不减少累计allocation_debt，以保留分配周转产生的调度压力。
 
-### `Registry.externalMemoryRequestReason` (`src/core/gc.zig:1795`)
+### `Registry.externalMemoryRequestReason` (`src/core/gc.zig:1786`)
 
 - **签名**：`pub fn externalMemoryRequestReason(self: Registry) ?RequestReason`。
 - **作用**：按外部内存硬限额、分配债务、软限额顺序挑选GC请求原因。
 - **实现**：external_hard_limit存在且external_bytes>=limit先返回external_memory；其次debt>=major_debt_threshold返回allocation_debt；最后外部soft达到返回external_memory，否则null。
 - **所有权 / 错误 / 调用**：只查询，不锁存请求；阈值为0也按>=比较，不自动代表禁用。debt可优先于软限额。
 
-### `Registry.externalMemoryRequestUrgency` (`src/core/gc.zig:1806`)
+### `Registry.externalMemoryRequestUrgency` (`src/core/gc.zig:1797`)
 
 - **签名**：`pub fn externalMemoryRequestUrgency(self: Registry) RequestUrgency`。
 - **作用**：按外部硬限额判断请求紧急程度。
 - **实现**：硬限额存在且external_bytes>=limit返回urgent，否则soon。
 - **所有权 / 错误 / 调用**：即使当前没有请求原因也会返回soon；只提供优先级，不判断是否应该请求，不因allocation_debt单独变urgent。
 
-### `Registry.processMemoryRequest` (`src/core/gc.zig:1813`)
+### `Registry.processMemoryRequest` (`src/core/gc.zig:1804`)
 
 - **签名**：`pub fn processMemoryRequest(self: Registry, rss_bytes: usize, cgroup_limit_bytes: usize) ?PressureRequest`。
 - **作用**：把进程内存输入交给scheduler策略生成可选请求。
 - **实现**：返回scheduler.processMemoryRequest(rss_bytes,cgroup_limit_bytes)。
 - **所有权 / 错误 / 调用**：不自行读OS、更新输入或requestGC；策略优先级和零值处理由scheduler实现，返回null是无请求。
 
-### `Registry.requestGC` (`src/core/gc.zig:1819`)
+### `Registry.requestGC` (`src/core/gc.zig:1810`)
 
 - **签名**：`pub fn requestGC(self: *Registry, reason: RequestReason, urgency: RequestUrgency) void`。
 - **作用**：统计一次GC请求并交给scheduler合并锁存。
 - **实现**：gc_request_count饱和加一，last_request_reason写本次reason，再scheduler.request(reason,urgency)。
 - **所有权 / 错误 / 调用**：不立即收集；每次调用都计数，即使scheduler已有更强请求。last_request_reason是最近提交值，不必等于最终锁存reason。
 
-### `Registry.hasPendingMajorRequest` (`src/core/gc.zig:1825`)
+### `Registry.hasPendingMajorRequest` (`src/core/gc.zig:1816`)
 
 - **签名**：`pub fn hasPendingMajorRequest(self: Registry) bool`。
 - **作用**：查询scheduler是否锁存major请求。
 - **实现**：返回scheduler.hasPendingMajorRequest()。
 - **所有权 / 错误 / 调用**：不检查当前是否允许执行、是否有垃圾或major已完成；不消费请求。
 
-### `Registry.resetAllocationDebt` (`src/core/gc.zig:1829`)
+### `Registry.resetAllocationDebt` (`src/core/gc.zig:1820`)
 
 - **签名**：`pub fn resetAllocationDebt(self: *Registry) void`。
 - **作用**：清除累计分配调度债务。
 - **实现**：将stats.allocation_debt置0。
 - **所有权 / 错误 / 调用**：不改live字节、token或pending请求，也不自行证明major已支付该债务；上层决定调用时机。
 
-### `Registry.addInitializedWithSize` (`src/core/gc.zig:1833`)
+### `Registry.addInitializedWithSize` (`src/core/gc.zig:1824`)
 
 - **签名**：`pub inline fn addInitializedWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void`。
 - **作用**：发布已初始化header，并为非block Object预留外部成员容量。
 - **实现**：kind为Object且非block时try prepareNonBlockObjectAuthority，随后addInitializedWithSizeNoFail。
 - **所有权 / 错误 / 调用**：预留失败不进入发布；本函数不分配或构造对象本体，也不代替其它载体在发布前应完成的准备。
 
-### `Registry.prepareNonBlockObjectAuthority` (`src/core/gc.zig:1844`)
+### `Registry.prepareNonBlockObjectAuthority` (`src/core/gc.zig:1835`)
 
 - **签名**：`pub fn prepareNonBlockObjectAuthority(self: *Registry) !void`。
 - **作用**：预留非block Object成员记录容量。
 - **实现**：要求nonblock_objects非null，否则unreachable；调用authority.prepare(addressRegistryAllocator())并传播失败。
 - **所有权 / 错误 / 调用**：不是创建缺失authority的懒初始化函数；prepare只预留，尚未发布header。
 
-### `Registry.addInitializedWithSizeNoFail` (`src/core/gc.zig:1852`)
+### `Registry.addInitializedWithSizeNoFail` (`src/core/gc.zig:1843`)
 
 - **签名**：`pub fn addInitializedWithSizeNoFail(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：进入已准备载体的通用发布流程。
 - **实现**：调用publishInitialized(h,bytes,.fast)。
 - **所有权 / 错误 / 调用**：void接口不意味着无需前置条件或不可能panic；所有可失败准备须由调用方先完成，carrier状态错误会在发布路径触发panic。
 
-### `Registry.publishInitializedCold` (`src/core/gc.zig:1869`)
+### `Registry.publishInitializedCold` (`src/core/gc.zig:1860`)
 
 - **签名**：`noinline fn publishInitializedCold(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：实例化通用发布逻辑的cold分支。
 - **实现**：noinline调用publishInitialized(h,bytes,.cold)。
 - **所有权 / 错误 / 调用**：与fast共享同一实现，不是第二套独立协议；是否生成特定尾调用/叶子机器码需编译证据，源码只保证该分派结构。
 
-### `Registry.publicationNeedsColdArm` (`src/core/gc.zig:1879`)
+### `Registry.publicationNeedsColdArm` (`src/core/gc.zig:1870`)
 
 - **签名**：`inline fn publicationNeedsColdArm(self: *const Registry, is_large: bool, standalone: bool) bool`。
 - **作用**：判断当前发布是否必须启用cold分支。
 - **实现**：is_large或standalone为true返回true；否则incremental.markingActive为true返回true，其余false。
 - **所有权 / 错误 / 调用**：只判断三个条件，不检查对象初始化、地址登记或侧表容量。is_large是Registry策略分类，不必等于block_heap的large extent。
 
-### `Registry.publishInitialized` (`src/core/gc.zig:1885`)
+### `Registry.publishInitialized` (`src/core/gc.zig:1876`)
 
 - **签名**：`inline fn publishInitialized( self: *Registry, h: *GCObjectHeader, bytes: usize, comptime arm: PublicationArm, ) void`。
 - **作用**：建立header发布状态及对应成员/地址/代际记录。
 - **实现**：先断言初始lifetime、未finalizing/condemned/accounted，普通非Object非prefix载体还须unlinked。计算逻辑is_large并缓存alloc_info；fast遇cold条件转cold返回。standalone编码bytes到size_class，置heap_accounted；按配置记oracle和carrierPublish（失败panic）。依据kind和block marker分类，非block Object入side authority，其它非block非prefix载体入普通链；registerLiveAddressClassified后observeNewPublication。extent-capable standalone不再重复建普通occupant条目。
 - **所有权 / 错误 / 调用**：写accounted发生在后续登记之前，无事务回滚保证；header和bytes须是已准备的真实载体。prefix载体没有可用intrusive链字。函数组织保证cold条件分派，但不凭源码声称特定机器码一定无调用；观察新发布可能涉及标记/代际义务，由对应函数处理。
 
-### `Registry.addInitializedShape` (`src/core/gc.zig:1985`)
+### `Registry.addInitializedShape` (`src/core/gc.zig:1976`)
 
 - **签名**：`pub fn addInitializedShape(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：执行Shape专用发布，standalone时转通用路径。
 - **实现**：断言初始lifetime、未accounted且unlinked；standalone调用通用NoFail并返回。否则置accounted，oracle按is_large=false登记，配置开启时carrierPublish失败panic；linkTail，按cold登记地址，再observeNewPublication。
 - **所有权 / 错误 / 调用**：假定调用者确实传Shape且尺寸符合专用逻辑：非standalone分支不运行isLargeAllocation比较，不重新验证kind或所有通用断言。不能因专用入口就自动证明任意自定义large阈值下分类一致。
 
-### `Registry.encodeHeapBytes` (`src/core/gc.zig:2007`)
+### `Registry.encodeHeapBytes` (`src/core/gc.zig:1998`)
 
 - **签名**：`fn encodeHeapBytes(bytes: usize) u16`。
 - **作用**：把standalone记账字节数编码为u16。
 - **实现**：取min(bytes,maxInt(u16))后转换；65535为溢出/回查sentinel。
 - **所有权 / 错误 / 调用**：不是压缩精确大尺寸；bytes恰等65535也使用回查值，0原样保留。
 
-### `Registry.storedHeapBytes` (`src/core/gc.zig:2011`)
+### `Registry.storedHeapBytes` (`src/core/gc.zig:2002`)
 
 - **签名**：`fn storedHeapBytes(h: *const GCObjectHeader) ?usize`。
 - **作用**：尝试从standalone metadata直接读取记账大小。
 - **实现**：非standalone返回null；size_class=0返回0；等于65535返回null；其它返回该值。
 - **所有权 / 错误 / 调用**：null表示需按kind重新求大小，不一定是无效header；0与null不同，不验证发布状态。
 
-### `Registry.heapByteSizeFromHeader` (`src/core/gc.zig:2018`)
+### `Registry.heapByteSizeFromHeader` (`src/core/gc.zig:2009`)
 
 - **签名**：`pub fn heapByteSizeFromHeader(rt: anytype, h: *const GCObjectHeader) usize`。
 - **作用**：取得载体记账尺寸，优先采用可用standalone大小戳。
 - **实现**：storedHeapBytes有值立即返回；否则Object/bytecode/Shape/BigInt调用各自尺寸方法，VarRef/Realm/Module用结构大小，string/rope/string_buffer走string尺寸助手；property/array/payload storage按block class总字节或extent.user_bytes扣metadata_prefix_size。
 - **所有权 / 错误 / 调用**：不统一等于OS映射容量或语言对象净内容，不做地址有效性/发布检查。裸storage不自描述，须依赖block/extent权威；缺少应存在的extent条目会unreachable。
 
-### `Registry.isLargeAllocation` (`src/core/gc.zig:2059`)
+### `Registry.isLargeAllocation` (`src/core/gc.zig:2050`)
 
 - **签名**：`pub fn isLargeAllocation(self: Registry, bytes: usize) bool`。
 - **作用**：按Registry策略阈值判断逻辑large分类。
 - **实现**：bytes非0且bytes>=policy.large_object_threshold返回true。
 - **所有权 / 错误 / 调用**：不检查实际分配路线；阈值0仍排除零字节。不能等同于block_heap按64KiB阈值选择large映射。
 
-### `Registry.isCycleCandidate` (`src/core/gc.zig:2066`)
+### `Registry.isCycleCandidate` (`src/core/gc.zig:2057`)
 
 - **签名**：`pub fn isCycleCandidate(h: *const GCObjectHeader) bool`。
 - **作用**：按当前kind目录判断载体属于tracer候选。
 - **实现**：对现有13种kind穷举，全部返回true。
 - **所有权 / 错误 / 调用**：不检查是否真的处于引用环、已发布或地址有效；名称保留cycle历史，结果不能视为环检测。
 
-### `Registry.recordHeapFreeWithBytes` (`src/core/gc.zig:2085`)
+### `Registry.recordHeapFreeWithBytes` (`src/core/gc.zig:2076`)
 
 - **签名**：`fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void`。
 - **作用**：撤销header发布账目及可选生命周期记录。
 - **实现**：未heap_accounted或bytes=0直接返回；先assertFrontierAllowsReclaimKind，按bytes计算逻辑large并在oracle配置下recordUnpublish；清heap_accounted，配置开启时carrierTransition(.doomed)失败panic；standalone再清size_class。
 - **所有权 / 错误 / 调用**：不实际释放内存、不摘链或清mark，也不直接扣MemoryAccount字节。bytes=0不会清发布位；调用者须给正确记账尺寸。该动作不可因已condemned而省略。
 
-### `Registry.headerIsPinned` (`src/core/gc.zig:2108`)
+### `Registry.headerIsPinned` (`src/core/gc.zig:2099`)
 
 - **签名**：`pub inline fn headerIsPinned(self: *const Registry, header: *const GCObjectHeader) bool`。
 - **作用**：通过pin索引查询header成员身份。
 - **实现**：返回pins.contains(header)。
 - **所有权 / 错误 / 调用**：不读取header中的pin标志或证明仍存活；成员索引一致性由pin账维护。
 
-### `Registry.pinHeader` (`src/core/gc.zig:2112`)
+### `Registry.pinHeader` (`src/core/gc.zig:2103`)
 
 - **签名**：`pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void`。
 - **作用**：为header增加pin账记录或引用计数。
 - **实现**：委托pins.pin(memory,header)，传播错误。
 - **所有权 / 错误 / 调用**：可能需要侧表分配；具体计数/构造根契约在pins实现，不直接执行标记或复制对象。
 
-### `Registry.unpinHeader` (`src/core/gc.zig:2116`)
+### `Registry.unpinHeader` (`src/core/gc.zig:2107`)
 
 - **签名**：`pub fn unpinHeader(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：撤销一个普通pin引用。
 - **实现**：调用pins.unpin(header)。
 - **所有权 / 错误 / 调用**：无返回错误，不直接释放对象；构造根与饱和计数的处理由pin账协议决定，不能当作任意header销毁入口。
 
-### `Registry.unlinkObjectWithBytes` (`src/core/gc.zig:2125`)
+### `Registry.unlinkObjectWithBytes` (`src/core/gc.zig:2116`)
 
 - **签名**：`pub fn unlinkObjectWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：先撤销发布记录，再按载体类型移除必要live成员关系。
 - **实现**：recordHeapFreeWithBytes先执行；condemned或非候选则返回。Object分支非block时removeNonBlockObject，block直接返回；其它kind已unlinked或condemned返回，否则removeGcObject。
 - **所有权 / 错误 / 调用**：condemned提前退出发生在账目撤销之后。非Object分支可能读取链字，不适用于无TraceHeader链字的string/storage prefix载体，后者走专门unpublish接口。不在此返还cell或执行资源析构。
 
-### `Registry.recordDetachedHeapFreeWithBytes` (`src/core/gc.zig:2150`)
+### `Registry.recordDetachedHeapFreeWithBytes` (`src/core/gc.zig:2141`)
 
 - **签名**：`pub inline fn recordDetachedHeapFreeWithBytes(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：为已condemned且已摘成员的载体执行发布账撤销。
 - **实现**：安全构建断言headerCondemned，再调用recordHeapFreeWithBytes。
 - **所有权 / 错误 / 调用**：不重复摘链，不把condemned视为已完成记账；不实际释放存储。
 
-### `Registry.createStorageCellPublished` (`src/core/gc.zig:2180`)
+### `Registry.createStorageCellPublished` (`src/core/gc.zig:2160`)
 
 - **签名**：`pub fn createStorageCellPublished( self: *Registry, kind_tag: u8, total_bytes: usize, ) ![*]u8`。
 - **作用**：分配并发布裸storage cell，返回可填充的body。
 - **实现**：try memory.createStorageCell(kind_tag,total_bytes)，body=base+metadata_prefix_size，按cell.accounted_bytes调用addInitializedWithSizeNoFail，再返回body。
 - **所有权 / 错误 / 调用**：body内容未初始化，调用方负责在使用前填充及安装owner边；仅适用预期叶子storage种类，不能借此发布尚未初始化的有出边对象。分配失败上抛，发布后的失败不由此回滚。
 
-### `Registry.reclaimDoomedBlock` (`src/core/gc.zig:2219`)
+### `Registry.reclaimDoomedBlock` (`src/core/gc.zig:2190`)
 
 - **签名**：`pub fn reclaimDoomedBlock(self: *Registry, block: *BlockHeapMod.Block) usize`。
 - **作用**：在底层批量回收前完成必要逐cell退役记录。
 - **实现**：audit_walk由lifecycle_state_enabled决定；它为真或rememberedCount非零时，按doomed word先预取候选，再逐bit对合法index调用unpublishStringCell(block.cell_size-prefix)，audit配置另noteBlockCellBitmapReclaim。之后block_heap.reclaimDoomedCells并返回cell数。
 - **所有权 / 错误 / 调用**：调用前须排空finalizer子集并unlink doomed block。没有逐cell分支时可保留已空闲header的旧accounted字节，查询需先看alloc位；Runtime字节在判死时按bitmap_bytes批量扣除，不在这里重复扣。逐cell门控实际看lifecycle，不是泛指所有诊断开关。
 
-### `Registry.destroyStorageCell` (`src/core/gc.zig:2268`)
+### `Registry.destroyStorageCell` (`src/core/gc.zig:2248`)
 
 - **签名**：`pub fn destroyStorageCell(self: *Registry, h: *GCObjectHeader) void`。
 - **作用**：按block几何归还一个无需资源握手的prefix storage cell。
 - **实现**：断言block marker与kindIsPrefixCarrier，取storageCellBlockTotalBytes，经accountedBodyBytesForRequest求净记账字节，unpublishStringCell后memory.destroyStringCell。
 - **所有权 / 错误 / 调用**：此接口自身只做存储/发布/代际清理，不执行atom或其它资源析构；prefix断言集合比真正无析构storage更宽，调用方须证明适用，不能任意把flat string等有责任载体送入。
 
-### `Registry.storageCellBlockTotalBytes` (`src/core/gc.zig:2278`)
+### `Registry.storageCellBlockTotalBytes` (`src/core/gc.zig:2258`)
 
 - **签名**：`inline fn storageCellBlockTotalBytes(h: *const GCObjectHeader) usize`。
 - **作用**：读取已知block cell的class物理尺寸。
 - **实现**：header地址减metadata_prefix_size，fromCellTrusted取block，返回cell_size。
 - **所有权 / 错误 / 调用**：不检查alloc、归属或kind，要求先证明block路由；结果含prefix，不是原请求长度。
 
-### `Registry.unpublishStringCell` (`src/core/gc.zig:2283`)
+### `Registry.unpublishStringCell` (`src/core/gc.zig:2267`)
 
 - **签名**：`pub fn unpublishStringCell(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：撤销block cell的发布记录和代际owner记录。
 - **实现**：断言isBlockCellHeader，recordHeapFreeWithBytes后forgetGenerationalOwner。
 - **所有权 / 错误 / 调用**：名字不限定string，批量无析构cell路径也使用；不释放存储或移除extent页索引。
 
-### `Registry.unpublishStringExtent` (`src/core/gc.zig:2289`)
+### `Registry.unpublishStringExtent` (`src/core/gc.zig:2280`)
 
 - **签名**：`pub fn unpublishStringExtent(self: *Registry, h: *GCObjectHeader, bytes: usize) void`。
 - **作用**：撤销extent载体的发布和代际owner记录。
@@ -482,546 +475,546 @@ GcObjectIterator保存普通链cursor/sentinel、可空heap、young_only/unmarke
 
 HeapAccountingIterator在live之外借用doomed_by_kind桶数组，捕获doomed_objects slice与sweep_current；doomed_kind_index/cursor、doomed_object_index及current_yielded记录各阶段进度。它补充仍有发布账的死亡载体，不建立引用拥有关系或稳定快照。
 
-### `Registry.GcObjectIterator.next` (`src/core/gc.zig:2358`)
+### `Registry.GcObjectIterator.next` (`src/core/gc.zig:2349`)
 
 - **签名**：`pub fn next(self: *GcObjectIterator) ?*GCObjectHeader`。
 - **作用**：按普通链、block、非block Object侧表、extent顺序返回所选header。
 - **实现**：链阶段先保存next再返回current，到sentinel停止；block阶段调用nextYoungCell或nextCell，耗尽清heap指针。side阶段从sentinel恢复Registry，每步重读authority.items，按young/unmarked标志过滤；extent阶段依次取主表base，要求heap_accounted并断言extent kind/standalone，耗尽清extents。
 - **所有权 / 错误 / 调用**：返回借用而非pin。链阶段依赖成员不变量，不再次检查accounted/young；side不重查accounted且不关闭side_objects，因此后续next仍可重读侧表。extent持有哈希迭代器，不能因side可容忍数组增长就认为所有阶段允许任意分配/删除。
 
-### `Registry.GcObjectIterator.registryFromSentinel` (`src/core/gc.zig:2409`)
+### `Registry.GcObjectIterator.registryFromSentinel` (`src/core/gc.zig:2400`)
 
 - **签名**：`inline fn registryFromSentinel(self: *const GcObjectIterator) *const Registry`。
 - **作用**：由固定嵌入位置恢复所属Registry。
 - **实现**：依次fieldParentPtr从sentinel到IntrusiveHeaderList，再到Lists.objects，再到Registry.lists，按需alignCast。
 - **所有权 / 错误 / 调用**：依赖sentinel确属Registry.lists.objects且Registry未移动，不适用于任意独立sentinel。无查表或所有权转移。
 
-### `Registry.GcObjectIterator.nextInBlock` (`src/core/gc.zig:2415`)
+### `Registry.GcObjectIterator.nextInBlock` (`src/core/gc.zig:2406`)
 
 - **签名**：`fn nextInBlock(self: *GcObjectIterator, block: *BlockHeapMod.Block, young_filter: bool) ?*GCObjectHeader`。
 - **作用**：按word跳过空位并枚举block内符合过滤条件的cell。
 - **实现**：从cell_index读alloc word，unmarked_only时改读deadWord当前heap epoch；右移忽略已处理位，空word推进64，非空取ctz后推进cursor。候选须heap_accounted；young_filter还要求young且!block.isDoomed(index)，随后返回base+prefix。
 - **所有权 / 错误 / 调用**：young过滤只查doomed位图，不含doomed_word缓存，依赖收集阶段约束；普通all模式不排除仍accounted的condemned cell。此处只按位图/前缀筛选，不追踪可达性，也不核对具体kind。
 
-### `Registry.GcObjectIterator.nextCell` (`src/core/gc.zig:2453`)
+### `Registry.GcObjectIterator.nextCell` (`src/core/gc.zig:2444`)
 
 - **签名**：`fn nextCell(self: *GcObjectIterator, heap: *const BlockHeapMod.Heap) ?*GCObjectHeader`。
 - **作用**：遍历全部classed superblock的已用block槽。
 - **实现**：跳过非classed superblock；逐used_blocks算block基址，magic不符跳过；nextInBlock(block,false)产出则暂停，否则推进block并清cell_index，superblock耗尽再推进。
 - **所有权 / 错误 / 调用**：不使用非空block索引，不枚举extent。字段保存进度而非冻结heap快照；要求映射和容器在调用协议下稳定。
 
-### `Registry.GcObjectIterator.nextYoungCell` (`src/core/gc.zig:2479`)
+### `Registry.GcObjectIterator.nextYoungCell` (`src/core/gc.zig:2470`)
 
 - **签名**：`fn nextYoungCell(self: *GcObjectIterator, heap: *const BlockHeapMod.Heap) ?*GCObjectHeader`。
 - **作用**：沿young block链枚举已发布young cell。
 - **实现**：young_block>1时转Block并调用nextInBlock(...,true)，产出则返回；block耗尽沿young_link推进并清cell_index，尾哨兵0/1结束。
 - **所有权 / 错误 / 调用**：heap参数本身未使用，nextInBlock从self.heap取epoch；不重新检查链地址归属或magic，依赖链完整性。
 
-### `Registry.HeapAccountingIterator.next` (`src/core/gc.zig:2510`)
+### `Registry.HeapAccountingIterator.next` (`src/core/gc.zig:2501`)
 
 - **签名**：`pub fn next(self: *HeapAccountingIterator) ?*GCObjectHeader`。
 - **作用**：在普通遍历之外补充已摘出的、仍accounted的死亡载体。
 - **实现**：先耗尽live；再逐kind morgue桶保存next并筛heap_accounted；随后扫描捕获的doomed_objects slice，最后最多检查一次捕获的sweep_current并仅在accounted时返回。
 - **所有权 / 错误 / 调用**：计账人口包含待析构垃圾，不是可达集。没有全局去重，依赖各成员来源互斥；doomed_objects是捕获slice，不能容忍任意重分配或swap移除；链和当前回调槽的有效性也由上层保证。
 
-### `Registry.objectIterator` (`src/core/gc.zig:2545`)
+### `Registry.objectIterator` (`src/core/gc.zig:2536`)
 
 - **签名**：`pub fn objectIterator(self: *const Registry, comptime selection: ObjectIteration) GcObjectIterator`。
 - **作用**：按编译期selection构造多阶段载体遍历器。
 - **实现**：all从普通链头开始，包含block、非block Object侧表与extent；young从young_head开始，加young block和young side；young_block只走young block；young_list走young链后缀及young side；dead_block只走全部classed block并按unmarked筛选。sentinel始终指向objects链，游标采用默认零值。
 - **所有权 / 错误 / 调用**：所有young选项均不含extent，年轻extent需另走young_extents。dead_block不含普通链和side Object。链后缀依赖young_head不变量，不逐项重查young；all不保证排除尚accounted的死亡cell。
 
-### `Registry.heapAccountingIterator` (`src/core/gc.zig:2569`)
+### `Registry.heapAccountingIterator` (`src/core/gc.zig:2560`)
 
 - **签名**：`pub fn heapAccountingIterator(self: *const Registry) HeapAccountingIterator`。
 - **作用**：构造用于物理生命周期记账的人口遍历器。
 - **实现**：live取objectIterator(all)，借用morgue.by_kind；捕获nonblock authority.doomed.items或空slice，以及lists.sweep_current。
 - **所有权 / 错误 / 调用**：不分配或复制header存储，捕获当前slice/slot而非自动追踪未来全部变更。此人口用于账目对照，不是再次执行mark证明存活。
 
-### `Registry.blockCellPublicationAllowance` (`src/core/gc.zig:2582`)
+### `Registry.blockCellPublicationAllowance` (`src/core/gc.zig:2573`)
 
 - **签名**：`pub fn blockCellPublicationAllowance( context: *const anyopaque, cell_addr: usize, ) BlockHeapMod.Heap.UnpublishedCellAllowance.Kind`。
 - **作用**：为未发布block cell审计提供构造或终结状态分类。
 - **实现**：由cell_addr+prefix取header；pins.isConstructionRoot成立返回marked_construction。否则要求未heap_accounted、finalizing、headerCondemned、kind Object且block marker，满足返回parked_finalizer，其余none。
 - **所有权 / 错误 / 调用**：本回调不查询真实deferred/parked栈成员；parked_finalizer只是这些前缀条件的分类。marked_construction的mark检查由BlockHeap验证器随后执行，不由此回调执行。
 
-### `Registry.blockCellAccountingAllowance` (`src/core/gc.zig:2605`)
+### `Registry.blockCellAccountingAllowance` (`src/core/gc.zig:2596`)
 
 - **签名**：`pub fn blockCellAccountingAllowance( context: *const anyopaque, cell_addr: usize, ) BlockHeapMod.Heap.UnpublishedCellAllowance.Kind`。
 - **作用**：给记账审计提供无需当前mark的构造根例外。
 - **实现**：构造root成员成立返回unmarked_construction，否则委托blockCellPublicationAllowance。
 - **所有权 / 错误 / 调用**：只改变构造根mark要求；parked分类同样依赖前缀状态而非栈成员查询。输入为物理cell基址，context须指向有效Registry。
 
-### `Registry.isBlockCellHeader` (`src/core/gc.zig:2617`)
+### `Registry.isBlockCellHeader` (`src/core/gc.zig:2608`)
 
 - **签名**：`pub inline fn isBlockCellHeader(h: *const GCObjectHeader) bool`。
 - **作用**：检查metadata低5位是否为block-cell路由marker。
 - **实现**：比较alloc_info.block_size_idx与representation.block_cell_size_class。
 - **所有权 / 错误 / 调用**：不比较整个alloc_info字节，heap_accounted叠加不改变结果；不验证实际block成员、alloc位或kind，不能将此谓词用于未经解析的任意地址。
 
-### `Registry.unregisterNonBlockObject` (`src/core/gc.zig:2626`)
+### `Registry.unregisterNonBlockObject` (`src/core/gc.zig:2617`)
 
 - **签名**：`fn unregisterNonBlockObject(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：撤销非block Object的独立地址和代际登记。
 - **实现**：断言Object且非block；standalone时address_registry.remove，随后forgetGenerationalOwner。
 - **所有权 / 错误 / 调用**：不移除nonblock side authority、不清heap_accounted或实际释放；这些是外层remove/condemn/析构的职责。
 
-### `Registry.removeNonBlockObject` (`src/core/gc.zig:2635`)
+### `Registry.removeNonBlockObject` (`src/core/gc.zig:2626`)
 
 - **签名**：`fn removeNonBlockObject(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：从live side authority移除非block Object并注销其地址/代际记录。
 - **实现**：authority为空或authority.remove失败直接返回；成功才unregisterNonBlockObject。
 - **所有权 / 错误 / 调用**：无成员时不会执行后续注销，不能用它代替强制修复不一致状态；不设condemned或撤发布账。
 
-### `Registry.condemnNonBlockObject` (`src/core/gc.zig:2644`)
+### `Registry.condemnNonBlockObject` (`src/core/gc.zig:2635`)
 
 - **签名**：`pub fn condemnNonBlockObject(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：把live非block Object移到side authority的doomed人口。
 - **实现**：先assertFrontierAllowsReclaimKind(Object)，断言kind、非block且未condemned；要求authority存在，condemn后unregisterNonBlockObject，最后stampHeaderCondemned。
 - **所有权 / 错误 / 调用**：依赖发布预留的doomed容量，无分配接口；不清heap_accounted或执行析构，后续释放仍需撤账。不是可重复调用的删除函数。
 
-### `Registry.removeGcObject` (`src/core/gc.zig:2658`)
+### `Registry.removeGcObject` (`src/core/gc.zig:2649`)
 
 - **签名**：`fn removeGcObject(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：从普通非Object链移除一个已链接header。
 - **实现**：断言非Object；headerLinked为false返回；否则listPrevious寻找前驱，再removeGcObjectAfter。
 - **所有权 / 错误 / 调用**：寻找前驱可能遍历链，不能称O(1)；依赖真实list载体，prefix载体无链字不适用。
 
-### `Registry.removeGcObjectAfter` (`src/core/gc.zig:2666`)
+### `Registry.removeGcObjectAfter` (`src/core/gc.zig:2657`)
 
 - **签名**：`fn removeGcObjectAfter(self: *Registry, previous: *GCObjectHeader, header: *GCObjectHeader) void`。
 - **作用**：用已知前驱完成常数时间摘链及young后缀修正。
 - **实现**：断言previous.next==header；记录header是否young_predecessor，先unregisterLiveAddress以保留可读取的后继；需要时将young_predecessor改为previous，young_head为空则前驱置空，最后listDelAfter。
 - **所有权 / 错误 / 调用**：前驱须属于正确链且紧邻header。先注销后断链有顺序要求；函数不释放存储或自行撤发布账。
 
-### `Registry.frontierSafeHeaderAfterMarkClaim` (`src/core/gc.zig:2694`)
+### `Registry.frontierSafeHeaderAfterMarkClaim` (`src/core/gc.zig:2685`)
 
 - **签名**：`pub inline fn frontierSafeHeaderAfterMarkClaim( self: *const Registry, header: *GCObjectHeader, ) *Header`。
 - **作用**：在安全构建中检查裸header入mark前沿的条件。
 - **实现**：runtime_safety时依次检查frontierEpochSafe、已accounted且未condemned、verifyMetadataSemantics已发布合同、headerMarked；任一失败panic，成功原指针返回。
 - **所有权 / 错误 / 调用**：非安全构建直接返回，既不标记也不登记generation；检查的是prefix/mark合同，不执行完整Object shape投影审计或任意地址解析。
 
-### `Registry.frontierSafeHeaderForRequeue` (`src/core/gc.zig:2726`)
+### `Registry.frontierSafeHeaderForRequeue` (`src/core/gc.zig:2717`)
 
 - **签名**：`pub inline fn frontierSafeHeaderForRequeue( self: *const Registry, header: *GCObjectHeader, ) ?*Header`。
 - **作用**：仅为已标记owner提供重入前沿候选。
 - **实现**：headerMarked为false返回null，true则frontierSafeHeaderAfterMarkClaim。
 - **所有权 / 错误 / 调用**：这是mark查询而非置mark，不说明对象所有边已经完全遍历；不入队，调用方负责实际requeue。
 
-### `Registry.frontierHasEntriesForSafety` (`src/core/gc.zig:2734`)
+### `Registry.frontierHasEntriesForSafety` (`src/core/gc.zig:2725`)
 
 - **签名**：`fn frontierHasEntriesForSafety(self: *Registry) bool`。
 - **作用**：判断私有/共享或共享池其它活动段是否仍持有前沿。
 - **实现**：本地stack.len非零或queue非空返回true，否则检查segmentPool.stats.active_segments是否非零。
 - **所有权 / 错误 / 调用**：依赖活动段不为空的池协议，涵盖使用同池的helper stack；不是并发原子快照，不执行drain。
 
-### `Registry.assertFrontierAllowsReclaimKind` (`src/core/gc.zig:2745`)
+### `Registry.assertFrontierAllowsReclaimKind` (`src/core/gc.zig:2736`)
 
 - **签名**：`pub fn assertFrontierAllowsReclaimKind(self: *Registry, kind: GcKind) void`。
 - **作用**：为可进入前沿的kind检查回收时的局部安全条件。
 - **实现**：非runtime_safety直接返回；frontierEpochSafe为false也返回；仅当markingActive且frontierHasEntries同时为真时panic。
 - **所有权 / 错误 / 调用**：并非分别要求marking关闭和前沿为空：任一条件为false都会通过。Shape/Realm豁免；不要把它等同于更严格的assertFrontierDrainedBeforeReclaim。
 
-### `Registry.assertFrontierDrainedBeforeReclaim` (`src/core/gc.zig:2752`)
+### `Registry.assertFrontierDrainedBeforeReclaim` (`src/core/gc.zig:2743`)
 
 - **签名**：`pub fn assertFrontierDrainedBeforeReclaim(self: *Registry) void`。
 - **作用**：在安全构建中要求标记已关闭且所有前沿段排空。
 - **实现**：markingActive则panic；随后frontierHasEntries则panic。非runtime_safety为空操作。
 - **所有权 / 错误 / 调用**：只检查不清状态、不释放段；两个条件分别检查，强于按kind的回收保护。
 
-### `Registry.headerMarked` (`src/core/gc.zig:2760`)
+### `Registry.headerMarked` (`src/core/gc.zig:2751`)
 
 - **签名**：`pub inline fn headerMarked(self: *const Registry, h: *const GCObjectHeader) bool`。
 - **作用**：按实际载体路由查询当前mark。
 - **实现**：block marker走Block.isMarked，index取metadata.size_class、epoch取block_heap.mark_epoch；extent-capable且standalone走extent表，先断言base存在；其余monotonic读取header lifetime epoch并与marking.header_epoch比较。
 - **所有权 / 错误 / 调用**：不检查accounted/alloc/condemned或任意地址有效性，依赖有效typed header。三条路的mark权威不同，不能把非block都描述成header epoch。
 
-### `Registry.headerMarkedKnownNonBlock` (`src/core/gc.zig:2792`)
+### `Registry.headerMarkedKnownNonBlock` (`src/core/gc.zig:2783`)
 
 - **签名**：`pub inline fn headerMarkedKnownNonBlock(self: *const Registry, h: *const GCObjectHeader) bool`。
 - **作用**：对已知使用header epoch的类型省略路由查询。
 - **实现**：断言不是block marker，直接原子读lifetime.mark_epoch与header_epoch比较。
 - **所有权 / 错误 / 调用**：前提比“不是block”更强：extent同样非block但mark在表中，不能调用此快捷接口。常见调用为Shape等固定header epoch载体。
 
-### `Registry.setHeaderMarked` (`src/core/gc.zig:2797`)
+### `Registry.setHeaderMarked` (`src/core/gc.zig:2788`)
 
 - **签名**：`pub inline fn setHeaderMarked(self: *const Registry, h: *GCObjectHeader) void`。
 - **作用**：按block、extent或普通header分别写当前mark。
 - **实现**：block.setMark(index,heap epoch)；extent-capable standalone则extentSetMark(base,heap epoch)；其它monotonic写header_epoch。
 - **所有权 / 错误 / 调用**：不先拒绝未发布或condemned、不入队或遍历边、不执行young退役；Collector.shade等上层负责这些守卫和后续义务。
 
-### `Registry.setNeedsFinalizer` (`src/core/gc.zig:2826`)
+### `Registry.setNeedsFinalizer` (`src/core/gc.zig:2813`)
 
 - **签名**：`pub fn setNeedsFinalizer(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：写析构责任的header标志及对应侧权威。
 - **实现**：先header.flags.needs_finalizer=true；block则设置finalizer bitmap，非block且standalone/extent-capable则设置extent表needs_finalizer；其它只保留header标志。
 - **所有权 / 错误 / 调用**：只置位，不运行析构，不验证是否已发布或实际资源存在。standalone本身不足以判extent，须同时kind分类；各步不是回滚事务。
 
-### `Registry.retireTracedYoung` (`src/core/gc.zig:2861`)
+### `Registry.retireTracedYoung` (`src/core/gc.zig:2848`)
 
 - **签名**：`pub inline fn retireTracedYoung(self: *Registry, h: *GCObjectHeader) void`。
 - **作用**：在退役窗口内清除已遍历block cell的young位。
 - **实现**：generation.retirementOpen为false直接返回；窗口内安全构建断言accounted且未condemned；block marker才清young，其它不改。
 - **所有权 / 错误 / 调用**：不检查本函数调用前是否真的遍历完边，调用方负责；不移除young block链、不改young_count/remembered表或mark。非block人口保持原位直到其独立关闭流程。
 
-### `Registry.setHeaderUnmarked` (`src/core/gc.zig:2880`)
+### `Registry.setHeaderUnmarked` (`src/core/gc.zig:2867`)
 
 - **签名**：`pub inline fn setHeaderUnmarked(self: *const Registry, h: *GCObjectHeader) void`。
 - **作用**：清block mark或普通header lifetime epoch。
 - **实现**：block marker时clearMark(index,当前heap epoch)；其它路径断言候选后原子写lifetime.mark_epoch=0。
 - **所有权 / 错误 / 调用**：没有extent表分支，因此不能用它清除extent的有效mark；extent须走专用清理。也不守护condemned戳，调用方须限定人口/阶段。
 
-### `Registry.advanceHeaderMarkEpoch` (`src/core/gc.zig:2893`)
+### `Registry.advanceHeaderMarkEpoch` (`src/core/gc.zig:2880`)
 
 - **签名**：`pub fn advanceHeaderMarkEpoch(self: *Registry) void`。
 - **作用**：推进普通header epoch，回绕前清理live成员的旧戳。
 - **实现**：header_epoch<65534时加一；否则沿lists.objects及nonblock authority.items将lifetime epoch清0，再设header_epoch=1。
 - **所有权 / 错误 / 调用**：只扫描这两种live人口，不碰block/extent mark或morgue中的condemned戳。正常值不产生0或65535；回绕路径不再是O(1)，依赖live列表完整。
 
-### `Registry.detachCycleCandidate` (`src/core/gc.zig:2915`)
+### `Registry.detachCycleCandidate` (`src/core/gc.zig:2902`)
 
 - **签名**：`pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：从适用live成员结构摘除候选并写condemned戳。
 - **实现**：按kind检查frontier回收许可，断言未condemned；Object非block则removeNonBlockObject，block Object不摘链；其它removeGcObject，最后stamp。
 - **所有权 / 错误 / 调用**：不清accounted、不释放，不自动入morgue桶；无链字prefix载体不能任意套用非Object分支。非block Object要进入side doomed人口应使用condemnNonBlockObject协议。
 
-### `Registry.detachBlockObjectCandidate` (`src/core/gc.zig:2929`)
+### `Registry.detachBlockObjectCandidate` (`src/core/gc.zig:2916`)
 
 - **签名**：`pub inline fn detachBlockObjectCandidate(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：对已由block枚举证明归属的cell写condemned戳。
 - **实现**：安全构建检查frontier、未condemned、kindIsBlockCellKind及block marker，其余构建省略这些检查；最后stampHeaderCondemned。
 - **所有权 / 错误 / 调用**：名字不限定Object，可用于符合条件的string/storage等block kind。不清alloc/young/accounted、不入doomed链或更新bitmap，块级快照另负责这些事实。
 
-### `Registry.detachCycleCandidateAfter` (`src/core/gc.zig:2942`)
+### `Registry.detachCycleCandidateAfter` (`src/core/gc.zig:2929`)
 
 - **签名**：`pub fn detachCycleCandidateAfter(self: *Registry, previous: *GCObjectHeader, header: *GCObjectHeader) void`。
 - **作用**：以已知前驱摘除普通链候选并判死。
 - **实现**：检查frontier、断言未condemned，removeGcObjectAfter(previous,header)，然后stampHeaderCondemned。
 - **所有权 / 错误 / 调用**：依赖前驱正确及真实list载体，不释放存储/撤发布账，也不加入morgue。
 
-### `Registry.abortIncrementalCycle` (`src/core/gc.zig:2957`)
+### `Registry.abortIncrementalCycle` (`src/core/gc.zig:2944`)
 
 - **签名**：`pub fn abortIncrementalCycle(self: *Registry) void`。
 - **作用**：丢弃当前增量标记工作并使未完成退役等待major修复。
 - **实现**：先abortCycleEnvelope；marking未active则返回；否则closeMarkingAndDrainFrontier、generation.abandonMajorRetirement，并增加cycles_aborted。
 - **所有权 / 错误 / 调用**：不恢复已置mark或已清young，也不直接执行完整STW重算；上层后续major负责修复。即使未active，envelope中止仍发生。
 
-### `Registry.closeMarkingAndDrainFrontier` (`src/core/gc.zig:2968`)
+### `Registry.closeMarkingAndDrainFrontier` (`src/core/gc.zig:2955`)
 
 - **签名**：`fn closeMarkingAndDrainFrontier(self: *Registry) void`。
 - **作用**：关闭标记并丢弃本地/共享前沿记录。
 - **实现**：active时setMajorMarkingActive(false)，再stack.reset、queue.reset，最后assertFrontierDrainedBeforeReclaim。
 - **所有权 / 错误 / 调用**：这里drain指清空/归还段，不是遍历queued header的边；不释放对象或撤销mark。其它helper私有段须已按协议归还，否则安全断言仍可失败。
 
-### `Registry.noteCycleEnvelopeBaseline` (`src/core/gc.zig:2981`)
+### `Registry.noteCycleEnvelopeBaseline` (`src/core/gc.zig:2968`)
 
 - **签名**：`pub fn noteCycleEnvelopeBaseline(self: *Registry, start_bytes: usize, threshold_bytes: usize) void`。
 - **作用**：保存下次自动增量周期的已结算起点/阈值并开始峰值跟踪。
 - **实现**：非detailed_reports返回；断言envelope未active，若旧baseline有效先endCyclePeakTracking。写next_start/next_threshold及peak=start，baseline_valid取threshold!=0；有效时把peak字段地址交MemoryAccount跟踪。
 - **所有权 / 错误 / 调用**：峰值跟踪从baseline时刻开始，不是等begin才开始。threshold=0不建立有效baseline；Registry及peak字段地址须在跟踪期间稳定。
 
-### `Registry.invalidateCycleEnvelopeBaseline` (`src/core/gc.zig:2996`)
+### `Registry.invalidateCycleEnvelopeBaseline` (`src/core/gc.zig:2983`)
 
 - **签名**：`pub fn invalidateCycleEnvelopeBaseline(self: *Registry) void`。
 - **作用**：使周期测量基线失效，必要时结束正在跟踪的峰值。
 - **实现**：active时end tracking、清active、饱和增加skipped_cycles；否则baseline有效也end tracking；最后清baseline_valid。
 - **所有权 / 错误 / 调用**：不清所有历史数值或max tuple，不中止实际GC标记。无active且仅清baseline不增加skipped。
 
-### `Registry.beginCycleEnvelope` (`src/core/gc.zig:3009`)
+### `Registry.beginCycleEnvelope` (`src/core/gc.zig:2996`)
 
 - **签名**：`pub fn beginCycleEnvelope(self: *Registry, threshold_bytes: usize) void`。
 - **作用**：将匹配的已保存基线转为本周期测量状态。
 - **实现**：非详细模式返回，断言尚未active；基线无效或阈值不匹配时invalidate并增加skipped后返回。匹配则清baseline_valid，将next_start/threshold写cycle字段，begin_bytes取当前allocated_bytes，active置true。
 - **所有权 / 错误 / 调用**：不重置peak、不重新begin tracking，沿用baseline已开启的跟踪；这是记账域峰值，不是OS RSS。阈值匹配是精确整数相等。
 
-### `Registry.abortCycleEnvelope` (`src/core/gc.zig:3026`)
+### `Registry.abortCycleEnvelope` (`src/core/gc.zig:3013`)
 
 - **签名**：`fn abortCycleEnvelope(self: *Registry) void`。
 - **作用**：停止一个active测量周期的峰值跟踪。
 - **实现**：非active直接返回，否则endCyclePeakTracking并清active。
 - **所有权 / 错误 / 调用**：不增加skipped计数，不清有效但尚未active的baseline，也不丢GC队列。统计中止与实际GC中止由外层组合。
 
-### `Registry.finishCycleEnvelope` (`src/core/gc.zig:3032`)
+### `Registry.finishCycleEnvelope` (`src/core/gc.zig:3019`)
 
 - **签名**：`pub fn finishCycleEnvelope(self: *Registry) void`。
 - **作用**：结算测量周期，并按最大peak/threshold比保留同周期完整tuple。
 - **实现**：非active返回；结束跟踪并清active，取start/threshold/begin/peak，断言threshold非0且peak>=threshold。measured_cycles饱和加一；未有max或u128交叉乘法显示新peak/threshold更大时同时替换四个max字段。
 - **所有权 / 错误 / 调用**：比值相等不替换；没有把不同周期最大值拼接。只更新诊断，不证明GC达到任何性能阈值，也不调整分配策略。
 
-### `Registry.shadeCellForAtomBarrier` (`src/core/gc.zig:3061`)
+### `Registry.shadeCellForAtomBarrier` (`src/core/gc.zig:3048`)
 
 - **签名**：`pub fn shadeCellForAtomBarrier(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：为atom屏障的已发布body设置mark并安排前沿工作。
 - **实现**：已marked返回；未heap_accounted返回；其余setHeaderMarked后将frontierSafeHeaderAfterMarkClaim结果push队列，忽略push返回值。
 - **所有权 / 错误 / 调用**：没有自查markingActive，调用者必须位于有效marking屏障协议。入队失败由queue锁存，调用链后续必须检查，mark不回滚；不增加这里未写入的shaded统计。不接受任意未验证地址。
 
-### `Registry.shadeForIncrementalMark` (`src/core/gc.zig:3070`)
+### `Registry.shadeForIncrementalMark` (`src/core/gc.zig:3057`)
 
 - **签名**：`pub inline fn shadeForIncrementalMark(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void`。
 - **作用**：处理强写的新目标，或在特殊类型目标下重扫owner。
 - **实现**：测试/详细模式统计calls及各早退；target已marked先返回，owner或target未published也返回。target为Shape/Realm时：owner也为Shape/Realm且target为Shape，直接标记Shape并仅对其非空proto执行未marked时标记、shaded计数与入队；target为Realm则invalidateBarrier。其它owner遇这两类target时统计requeued_owner，再仅为已marked owner取得安全header并入队。普通target直接setHeaderMarked、shaded加一、push安全前沿。
 - **所有权 / 错误 / 调用**：不自查markingActive，调用方负责；普通目标分支不要求owner已marked，owner重扫分支才查。requeued_owner计数发生在owner mark检查前，不等于实际入队数。Shape特例是源码中显式proto处理，不是调用完整通用边遍历。push失败锁存在queue，void不代表成功，既有mark不回滚；Shape/Realm不入持久前沿的原因按当前生命周期/迁移协议解释，不沿用已退休RC机制。
 
-### `Registry.shouldTryMinor` (`src/core/gc.zig:3156`)
+### `Registry.shouldTryMinor` (`src/core/gc.zig:3143`)
 
 - **签名**：`pub inline fn shouldTryMinor(self: *const Registry) bool`。
 - **作用**：判断常规调度是否值得尝试minor。
 - **实现**：phase非none或minorsAllowed为false先拒绝；stress_collect直接返回young_count!=0。普通模式再拒绝minorSuspended及markingActive，最后比较young_trigger_count>=minor_young_threshold。
 - **所有权 / 错误 / 调用**：stress使用含owned storage的population并绕过后续suspension/marking/threshold检查，但不绕过前两项。函数不执行收集，也未直接检查待销毁队列；能否实际运行仍由调用路径决定。
 
-### `Registry.shouldTryMinorBeforeMajor` (`src/core/gc.zig:3209`)
+### `Registry.shouldTryMinorBeforeMajor` (`src/core/gc.zig:3196`)
 
 - **签名**：`pub inline fn shouldTryMinorBeforeMajor(self: *const Registry) bool`。
 - **作用**：在whole-heap阈值已跨越时判定是否先尝试minor。
 - **实现**：先检查phase及minorsAllowed；stress返回young_count!=0。普通模式先要求young_trigger_count>=minor_crossing_young_floor，再检查suspension和markingActive，全部通过返回true。
 - **所有权 / 错误 / 调用**：与shouldTryMinor使用不同触发下限；stress同样绕过下限与后两项。返回true只是调度候选，不保证minor成功或避免major。
 
-### `Registry.rememberOwnerForBulkWrite` (`src/core/gc.zig:3246`)
+### `Registry.rememberOwnerForBulkWrite` (`src/core/gc.zig:3233`)
 
 - **签名**：`pub inline fn rememberOwnerForBulkWrite(self: *Registry, owner: *GCObjectHeader) void`。
 - **作用**：为不能提供精确child的批量写执行owner屏障。
 - **实现**：barrierOwnerSkips为true立即返回，否则调用rememberOwnerForBulkWriteSlow。
 - **所有权 / 错误 / 调用**：应在批量写协议中使用，后续重扫必须能看到完成后的边。入口本身不检查owner publication，检查在marking慢分支。
 
-### `Registry.rememberOwnerForBulkWriteSlow` (`src/core/gc.zig:3251`)
+### `Registry.rememberOwnerForBulkWriteSlow` (`src/core/gc.zig:3238`)
 
 - **签名**：`fn rememberOwnerForBulkWriteSlow(self: *Registry, owner: *GCObjectHeader) void`。
 - **作用**：按当前阶段重排owner扫描或记录代际owner。
 - **实现**：markingActive时只对heap_accounted且已marked的owner取得安全前沿并push，然后返回；非marking时young owner返回，其余rememberGenerationalOwner。
 - **所有权 / 错误 / 调用**：不解码child；marking队列可重复加入owner，push失败由队列锁存且不回滚。非marking分支无heap_accounted检查。详细统计关闭快速跳过时仍需这里的young检查。
 
-### `Registry.expectedBarrierGate` (`src/core/gc.zig:3275`)
+### `Registry.expectedBarrierGate` (`src/core/gc.zig:3262`)
 
 - **签名**：`inline fn expectedBarrierGate(self: *const Registry) u64`。
 - **作用**：计算当前屏障允许的owner快速跳过位。
 - **实现**：markingActive或detailed_reports为true返回0，否则返回barrier_skip_bits。
 - **所有权 / 错误 / 调用**：0使任何owner都不能由位测试跳过，以执行目标shade或诊断统计；不写Registry状态。
 
-### `Registry.refreshBarrierGate` (`src/core/gc.zig:3293`)
+### `Registry.refreshBarrierGate` (`src/core/gc.zig:3280`)
 
 - **签名**：`pub fn refreshBarrierGate(self: *Registry) void`。
 - **作用**：发布由当前阶段和统计模式决定的门控值。
 - **实现**：将expectedBarrierGate结果写入hot.barrier_gate。
 - **所有权 / 错误 / 调用**：live Registry改变detailed_reports后也须调用；这是普通赋值，不提供线程间原子同步。
 
-### `Registry.setMajorMarkingActive` (`src/core/gc.zig:3308`)
+### `Registry.setMajorMarkingActive` (`src/core/gc.zig:3295`)
 
 - **签名**：`pub fn setMajorMarkingActive(self: *Registry, active: bool) void`。
 - **作用**：同时更新major标记状态及派生屏障门控。
 - **实现**：赋值incremental.major_marking_active后调用refreshBarrierGate。
 - **所有权 / 错误 / 调用**：两步构成调用协议上的状态更新，不是硬件原子事务；不启动遍历、清队列或处理generation retirement。
 
-### `Registry.barrierOwnerSkips` (`src/core/gc.zig:3322`)
+### `Registry.barrierOwnerSkips` (`src/core/gc.zig:3309`)
 
 - **签名**：`pub inline fn barrierOwnerSkips(self: *const Registry, owner: *const GCObjectHeader) bool`。
 - **作用**：用owner metadata位与当前门控判断是否跳过屏障。
 - **实现**：runtime_safety构建断言hot.barrier_gate==expectedBarrierGate；返回barrierOwnerWord(owner)&hot.barrier_gate!=0。
 - **所有权 / 错误 / 调用**：常规门控允许young或remembered owner跳过，marking/详细模式门控为0。实际函数没有旁边C2注释所称的kind断言，也不验证地址或publication；须传合法carrier。
 
-### `Registry.rememberGenerationalOwner` (`src/core/gc.zig:3343`)
+### `Registry.rememberGenerationalOwner` (`src/core/gc.zig:3330`)
 
 - **签名**：`inline fn rememberGenerationalOwner(self: *Registry, owner: *GCObjectHeader) void`。
 - **作用**：向权威remembered map登记owner并缓存成员位。
 - **实现**：summary的trace_remembered_mask已置则返回；generation.rememberOwner失败也返回；成功后才置summary高位。
 - **所有权 / 错误 / 调用**：当前实现不限定Object，不沿用旧注释的Object-only说法。map插入OOM增加remembered_drops，位保持未置；void返回不证明登记成功。调用方负责old-owner等分类。
 
-### `Registry.clearGenerationalRememberedBit` (`src/core/gc.zig:3350`)
+### `Registry.clearGenerationalRememberedBit` (`src/core/gc.zig:3337`)
 
 - **签名**：`inline fn clearGenerationalRememberedBit(owner: *GCObjectHeader) void`。
 - **作用**：清单个owner的remembered缓存位。
 - **实现**：对lifetime.object_shape_summary按位与~trace_remembered_mask。
 - **所有权 / 错误 / 调用**：保留低七位Shape摘要；不删除map条目，也不更新young census，须配合退役协议。
 
-### `Registry.clearGenerationalRememberedBits` (`src/core/gc.zig:3354`)
+### `Registry.clearGenerationalRememberedBits` (`src/core/gc.zig:3341`)
 
 - **签名**：`inline fn clearGenerationalRememberedBits(self: *Registry) void`。
 - **作用**：清权威remembered map中所有owner的缓存位。
 - **实现**：迭代rememberedIterator，将每个地址转header并调用clearGenerationalRememberedBit。
 - **所有权 / 错误 / 调用**：不清map、不做地址存活验证；迭代期间map及owner必须有效，短暂位/map不一致受调用方退役窗口约束。
 
-### `Registry.retireGenerationalYoungSet` (`src/core/gc.zig:3367`)
+### `Registry.retireGenerationalYoungSet` (`src/core/gc.zig:3354`)
 
 - **签名**：`pub fn retireGenerationalYoungSet(self: *Registry) void`。
 - **作用**：成对清remembered缓存与权威map，并归零young计数。
 - **实现**：openRetirementWindow后遍历清缓存位，再调用generation.retireYoungSet清map及young_count/young_trigger_count并关闭审计窗口。
 - **所有权 / 错误 / 调用**：不逐对象清young标志，不自行追踪或宣称完成minor。该窗口是remembered一致性审计窗口，与major_retirement控制minor admission的状态不同。
 
-### `Registry.forgetGenerationalOwner` (`src/core/gc.zig:3396`)
+### `Registry.forgetGenerationalOwner` (`src/core/gc.zig:3383`)
 
 - **签名**：`pub inline fn forgetGenerationalOwner(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：在detach时移除代际登记并更新young计数。
 - **实现**：缓存位未置时调用forgetUnremembered并返回；已置则先清位，再调用generation.forget删除map条目和更新young census。
 - **所有权 / 错误 / 调用**：当前代码无Object-only或其它kind分支。未置位路径依赖位清即map不存在的不变量，审计构建在callee验证；不是只清缓存，也不释放对象。
 
-### `Registry.generationalBarrierDetailed` (`src/core/gc.zig:3406`)
+### `Registry.generationalBarrierDetailed` (`src/core/gc.zig:3393`)
 
 - **签名**：`inline fn generationalBarrierDetailed(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void`。
 - **作用**：记录非marking目标屏障分类并登记old-to-young owner。
 - **实现**：barrier_calls加一；young owner计barrier_young_owner后返回；非young target计barrier_old_target后返回；其余rememberGenerationalOwner。
 - **所有权 / 错误 / 调用**：没有publication或marking检查，调用路径负责阶段选择。计数包括被young/old分类提前返回的调用；不代表真实新增map条目数。
 
-### `Registry.auditUnbarrieredStore` (`src/core/gc.zig:3430`)
+### `Registry.auditUnbarrieredStore` (`src/core/gc.zig:3417`)
 
 - **签名**：`pub inline fn auditUnbarrieredStore( self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader, comptime site: UnbarrieredStoreSite, ) void`。
 - **作用**：在启用诊断时检查可疑写入是否形成未登记的old-to-young边。
 - **实现**：仅runtime_safety或roots_diag_enabled构建保留；minor_audit关闭或child为空返回，否则never_inline调用slow并传编译期site。
 - **所有权 / 错误 / 调用**：诊断不会补屏障或修复边；不是所有ReleaseFast都删除，roots_diag_enabled构建仍可保留。
 
-### `Registry.auditUnbarrieredStoreSlow` (`src/core/gc.zig:3442`)
+### `Registry.auditUnbarrieredStoreSlow` (`src/core/gc.zig:3429`)
 
 - **签名**：`fn auditUnbarrieredStoreSlow( self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader, site: UnbarrieredStoreSite, ) void`。
 - **作用**：报告已发布old owner不在remembered map却引用young target的情况。
 - **实现**：owner未accounted、owner young或target非young均返回；遍历权威map发现owner也返回。否则对应site命中数加一，输出site/hit/owner kind与Object class/child kind；该site首次命中dump stack，minor_audit_fatal时panic。
 - **所有权 / 错误 / 调用**：不依赖remembered缓存位，不检查target publication、marking阶段或实际槽位内容；owner/target是调用者提供的有效指针。普通模式只报告，不阻止后续执行或修复登记。
 
-### `Registry.generationalBarrier` (`src/core/gc.zig:3481`)
+### `Registry.generationalBarrier` (`src/core/gc.zig:3468`)
 
 - **签名**：`pub inline fn generationalBarrier(self: *Registry, owner: *GCObjectHeader, child: ?*GCObjectHeader) void`。
 - **作用**：执行header形式的强写屏障。
 - **实现**：child为空先返回；barrierOwnerSkips为true返回；否则调用generationalBarrierSlow(owner,target)。
 - **所有权 / 错误 / 调用**：空child不触发门控安全断言或统计。此函数不执行实际store，调用方承担写入顺序和合法header契约。
 
-### `Registry.generationalBarrierSlow` (`src/core/gc.zig:3494`)
+### `Registry.generationalBarrierSlow` (`src/core/gc.zig:3481`)
 
 - **签名**：`fn generationalBarrierSlow(self: *Registry, owner: *GCObjectHeader, target: *GCObjectHeader) void`。
 - **作用**：按major marking或代际阶段处理精确target。
 - **实现**：markingActive调用shadeForIncrementalMark并返回；否则detailed_reports调用Detailed分支。常规路径target非young返回，young target调用rememberGenerationalOwner。
 - **所有权 / 错误 / 调用**：常规分支依赖入口门控已证明owner old且未remembered，不能视作任意参数独立入口。marking与remembered登记是二选一，不先后都执行。
 
-### `Registry.generationalBarrierValue` (`src/core/gc.zig:3529`)
+### `Registry.generationalBarrierValue` (`src/core/gc.zig:3516`)
 
 - **签名**：`pub inline fn generationalBarrierValue(self: *Registry, owner: *GCObjectHeader, child: JSValue) void`。
 - **作用**：在需要屏障时才把JSValue转换为GC target。
 - **实现**：先barrierOwnerSkips；未跳过才child.cycleMarkHeader，无header返回，否则调用generationalBarrierSlow。
 - **所有权 / 错误 / 调用**：与header入口顺序不同：即使primitive也先检查owner门控。只有能解码的GC边才进入慢分支统计；不执行实际store或改变JSValue所有权。
 
-### `Registry.markQueueAllocator` (`src/core/gc.zig:3538`)
+### `Registry.markQueueAllocator` (`src/core/gc.zig:3525`)
 
 - **签名**：`pub inline fn markQueueAllocator() std.mem.Allocator`。
 - **作用**：取得标记前沿使用的基础设施allocator。
 - **实现**：直接返回addressRegistryAllocator()。
 - **所有权 / 错误 / 调用**：独立于JS heap account，避免GC基础设施分配重新进入JS收集漏斗；不是Registry拥有的独立arena。
 
-### `Registry.addressRegistryAllocator` (`src/core/gc.zig:3542`)
+### `Registry.addressRegistryAllocator` (`src/core/gc.zig:3529`)
 
 - **签名**：`inline fn addressRegistryAllocator() std.mem.Allocator`。
 - **作用**：选择GC地址索引等辅助结构的allocator。
 - **实现**：返回std.heap.smp_allocator。
 - **所有权 / 错误 / 调用**：与JS heap allocator/account独立；不等于每次直接page_allocator系统调用，也不意味着分配不会失败。
 
-### `Registry.serveObjectCells` (`src/core/gc.zig:3571`)
+### `Registry.serveObjectCells` (`src/core/gc.zig:3558`)
 
 - **签名**：`pub fn serveObjectCells(self: *Registry, account: *memory.MemoryAccount) !void`。
 - **作用**：将MemoryAccount和保守地址解析连接到Registry的block heap。
 - **实现**：先设置address_registry.block_heap与account.gc_object_cell_heap；oracle构建另设置account.gc_heap_oracle；随后用基础设施allocator创建并清零NonBlockObjectAuthority，保存到nonblock_objects。
 - **所有权 / 错误 / 调用**：唯一显式try是authority分配，失败前的指针赋值不回滚。不是slab arena订阅函数；不可当作幂等初始化反复调用，否则可覆盖旧authority。Registry/account须保持约定生命周期和地址稳定。
 
-### `Registry.noteSlabArenaCreated` (`src/core/gc.zig:3588`)
+### `Registry.noteSlabArenaCreated` (`src/core/gc.zig:3575`)
 
 - **签名**：`fn noteSlabArenaCreated(ctx: *anyopaque, base: usize) void`。
 - **作用**：把slab的新arena通知地址解析表。
 - **实现**：将opaque ctx按对齐转换为Registry指针，调用address_registry.noteArenaCreated(addressRegistryAllocator(),base)。
 - **所有权 / 错误 / 调用**：ctx须来自有效Registry；本函数无error返回，注册失败语义由Table记录，不能据void认定成功。
 
-### `Registry.noteSlabArenaReleased` (`src/core/gc.zig:3593`)
+### `Registry.noteSlabArenaReleased` (`src/core/gc.zig:3580`)
 
 - **签名**：`fn noteSlabArenaReleased(ctx: *anyopaque, base: usize) void`。
 - **作用**：从保守地址解析的arena登记中移除释放的arena。
 - **实现**：将ctx转换为Registry指针并调用address_registry.noteArenaReleased(base)。
 - **所有权 / 错误 / 调用**：只是登记生命周期通知，不负责释放slab内存或所有对象的GC记账。
 
-### `Registry.observeSlabArenas` (`src/core/gc.zig:3598`)
+### `Registry.observeSlabArenas` (`src/core/gc.zig:3585`)
 
 - **签名**：`pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void`。
 - **作用**：登记已有slab arenas并安装后续创建/释放通知。
 - **实现**：保存arena_slab指针，先forEachArena调用noteSlabArenaCreated，再覆盖slab.arena_observer为以self为ctx的两个回调。
 - **所有权 / 错误 / 调用**：保留slab供失败登记后的重新遍历；不是仅观察未来arena。替换已有observer，需外层保证生命周期与安装期间稳定，不自带并发同步。
 
-### `Registry.registerLiveAddressClassified` (`src/core/gc.zig:3619`)
+### `Registry.registerLiveAddressClassified` (`src/core/gc.zig:3606`)
 
 - **签名**：`inline fn registerLiveAddressClassified( self: *Registry, header: *GCObjectHeader, bytes: usize, tracked: bool, needs_occupant: bool, is_block_cell: bool, comptime arm: PublicationArm, ) void`。
 - **作用**：利用发布端已有分类执行地址登记和young发布。
 - **实现**：tracked为false直接返回；needs_occupant时insertLiveAddressCold；随后markPublishedYoungClassified(header,is_block_cell,arm)。
 - **所有权 / 错误 / 调用**：不重新验证传入分类；地址插入失败仍继续young发布。slab/block通常依赖几何登记而无需每对象occupant，具体选择由调用方提供。
 
-### `Registry.insertLiveAddressCold` (`src/core/gc.zig:3651`)
+### `Registry.insertLiveAddressCold` (`src/core/gc.zig:3638`)
 
 - **签名**：`noinline fn insertLiveAddressCold(self: *Registry, header: *GCObjectHeader, bytes: usize) void`。
 - **作用**：在独立慢路径向地址表加入已发布对象范围。
 - **实现**：调用address_registry.insert，catch中调用noteFailedInsert。
 - **所有权 / 错误 / 调用**：没有向调用方返回error或回滚publication；失败被显式记录而非保证成功，后续收集必须遵循地址表失效/恢复协议。
 
-### `Registry.noteYoungPublicationCensus` (`src/core/gc.zig:3673`)
+### `Registry.noteYoungPublicationCensus` (`src/core/gc.zig:3660`)
 
 - **签名**：`inline fn noteYoungPublicationCensus(self: *Registry, header: *const GCObjectHeader) void`。
 - **作用**：增加young population及调度触发计数。
 - **实现**：runtime_safety构建young_publications以+%=环绕加一；young_count普通加一，非owned storage kind再令young_trigger_count普通加一。
 - **所有权 / 错误 / 调用**：这里只改计数，不设young flag、插入young列表或去重；同一对象重复调用会重复记账。population包含owned storage，触发计数排除它们。
 
-### `Registry.markPublishedYoungClassified` (`src/core/gc.zig:3681`)
+### `Registry.markPublishedYoungClassified` (`src/core/gc.zig:3668`)
 
 - **签名**：`inline fn markPublishedYoungClassified( self: *Registry, header: *GCObjectHeader, is_block_cell: bool, comptime arm: PublicationArm, ) void`。
 - **作用**：按carrier分类登记新发布对象的young状态，并处理增量期发布。
 - **实现**：fast arm只在runtime_safety断言marker inactive；cold arm在markingActive时先publishGreyCold。非block且extent-capable的对象断言standalone、置young并计数后返回。其它对象置young并计数，断言block分类一致；block调用noteYoungCell返回；非block Object返回；剩余断言非prefix carrier，young_head为空则要求young_predecessor已保存并以header开启suffix。
 - **所有权 / 错误 / 调用**：不直接向young_extents追加条目，那属于allocator协议；非block Object由side authority按young位枚举。普通list suffix依赖发布前已保存前驱并完成尾插，不是此函数重新链接对象。即使marking期先发布到mark前沿，后面仍会设置young并计数。
 
-### `Registry.publishGreyCold` (`src/core/gc.zig:3767`)
+### `Registry.publishGreyCold` (`src/core/gc.zig:3754`)
 
 - **签名**：`noinline fn publishGreyCold(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：在增量期发布普通Object时建立其初始边扫描工作。
 - **实现**：仅kind==object时setHeaderMarked，然后将frontierSafeHeaderAfterMarkClaim所得指针push标记队列；其它kind无操作。
 - **所有权 / 错误 / 调用**：不是所有新carrier都黑化或入队。其它类型的构造完成后引用安装屏障与根扫描承担可达性协议；此函数不自查markingActive。push失败由队列锁存，mark不回滚，也不增加shaded计数。
 
-### `Registry.unregisterLiveAddress` (`src/core/gc.zig:3789`)
+### `Registry.unregisterLiveAddress` (`src/core/gc.zig:3776`)
 
 - **签名**：`inline fn unregisterLiveAddress(self: *Registry, header: *GCObjectHeader) void`。
 - **作用**：撤销普通list carrier的地址与代际登记，并推进young suffix头。
 - **实现**：standalone时从address_registry移除；随后forgetGenerationalOwner。若young_head等于header，读取nextNonObject，后继为objects sentinel则清空head，否则将head移至后继。
 - **所有权 / 错误 / 调用**：须在链字仍有效、真正unlink之前调用；不自行移除intrusive链接，也不清heap_accounted或释放内存。此处不更新young_predecessor，完整摘链由外层维护；Object与无链prefix carrier有各自路径。
 
-### `Registry.observeNewPublication` (`src/core/gc.zig:3814`)
+### `Registry.observeNewPublication` (`src/core/gc.zig:3801`)
 
 - **签名**：`inline fn observeNewPublication(self: *Registry, header: *GCObjectHeader, bytes: usize) void`。
 - **作用**：为首次publication记录分配尺寸直方图。
 - **实现**：test构建直接按Object的hasSlots2Layout调用recordObject，其它kind调用record；非test仅detailed_reports时调用recordSpacePublicationDetailed。
 - **所有权 / 错误 / 调用**：当前函数体只记录histogram，没有旧注释所说的sweep-window更新；不建立地址或mark成员。默认非详细生产模式不记该诊断，重复调用会重复统计。
 
-### `Registry.recordSpacePublicationDetailed` (`src/core/gc.zig:3833`)
+### `Registry.recordSpacePublicationDetailed` (`src/core/gc.zig:3820`)
 
 - **签名**：`noinline fn recordSpacePublicationDetailed(self: *Registry, header: *GCObjectHeader, bytes: usize) void`。
 - **作用**：执行详细模式publication尺寸统计的慢路径。
 - **实现**：Object调用space_histogram.recordObject(bytes,hasSlots2Layout)，其余调用record(bytes)。
 - **所有权 / 错误 / 调用**：函数内部不查detailed_reports，调用者负责门控；统计使用传入bytes而非重新计算实际分配大小。
 
-### `Registry.addressSetWhole` (`src/core/gc.zig:3850`)
+### `Registry.addressSetWhole` (`src/core/gc.zig:3837`)
 
 - **签名**：`pub fn addressSetWhole(self: *Registry, rt: anytype) bool`。
 - **作用**：恢复保守地址索引的完整性，决定调用方能否依赖它回收。
 - **实现**：arenasIncomplete时须有arena_slab且resyncArenas成功，否则false；occupants完整则true。否则遍历objectIterator(.all)，仅为standalone、非extent-capable且by_header缺失的对象，以heapByteSizeFromHeader计算范围并insert；任一失败返回false，全程成功才清occupantsIncomplete并返回true。
 - **所有权 / 错误 / 调用**：失败保留已成功补入的记录，不回滚；sticky不完整状态保留以供重试。extent由heap自身索引负责，不能补进occupant形成无法移除的陈旧范围。该函数不自行mark、sweep或阻止回收，false由调用方遵守。
 
-### `Registry.containsHeader` (`src/core/gc.zig:3899`)
+### `Registry.containsHeader` (`src/core/gc.zig:3886`)
 
 - **签名**：`pub fn containsHeader(self: *const Registry, header: *const GCObjectHeader) bool`。
 - **作用**：查询地址是否仍由Registry的live或待销毁成员结构持有。
 - **实现**：先匹配sweep_current。属于block时验证cell interior索引、allocated位、精确header起点及heap_accounted后直接返回；否则查nonblock doomed数组、morgue各kind桶，再遍历objectIterator(.all)。
 - **所有权 / 错误 / 调用**：包含condemned但尚未销毁成员，不能解释为仅语义存活对象。block路径没有generation或kind核对，失败也不继续其它结构；该接口与address_registry.containsHeader的候选解析用途不同。
 
-### `Registry.resolveCurrentMember` (`src/core/gc.zig:3941`)
+### `Registry.resolveCurrentMember` (`src/core/gc.zig:3928`)
 
 - **签名**：`pub fn resolveCurrentMember( self: *const Registry, key: CurrentMembershipKey, expected_kind: ?GcKind, ) CarrierResolveError!ResolvedCurrentMember`。
 - **作用**：以当前地址成员资格解析header，并可核对kind。
 - **实现**：把key.base转为header，address_registry.containsHeader为false返回NotFound；expected_kind不匹配返回KindMismatch；成功返回tracing header。
 - **所有权 / 错误 / 调用**：使用地址索引而非Registry.containsHeader的morgue扫描；没有generation、生命周期mask或ABA保护，索引不完整时可能NotFound。返回借用指针，不pin也不延长生命。
 
-### `Registry.allocationHandle` (`src/core/gc.zig:3955`)
+### `Registry.allocationHandle` (`src/core/gc.zig:3942`)
 
 - **签名**：`pub fn allocationHandle(self: *const Registry, header: *const GCObjectHeader) ?AllocationHandle`。
 - **作用**：在carrier审计构建取得地址对应的generation handle。
 - **实现**：编译期断言carrier.authority_audit_enabled，调用memory.carrierGenerationHandle(header地址)。
 - **所有权 / 错误 / 调用**：可能null；不创建新身份或pin。生产构建不能把此接口视作始终可调用的通用句柄机制。
 
-### `Registry.resolveExact` (`src/core/gc.zig:3961`)
+### `Registry.resolveExact` (`src/core/gc.zig:3948`)
 
 - **签名**：`pub fn resolveExact( self: *const Registry, handle: AllocationHandle, expected_kind: ?GcKind, allowed_states: CarrierStateMask, ) CarrierResolveError!ResolvedExact`。
 - **作用**：在carrier审计构建按身份与允许生命周期解析对象。
@@ -1677,6 +1670,6 @@ host_quiescent 初始 false，由 runtime teardown 协议设置，声明宿主�
 
 ## 覆盖核对
 
-- 清单函数数: 226（`src/core/gc.zig` 141 + `src/core/gc_audit_print.zig` 6 + `src/core/gc_registry_diagnostics.zig` 23 + `src/core/gc_registry_heap.zig` 14 + `src/core/gc_registry_lists.zig` 16 + `src/core/gc_registry_pins.zig` 13 + `src/core/gc_registry_scheduler.zig` 13）
-- 本文标题覆盖: 226
+- 清单函数数: 225（`src/core/gc.zig` 140 + `src/core/gc_audit_print.zig` 6 + `src/core/gc_registry_diagnostics.zig` 23 + `src/core/gc_registry_heap.zig` 14 + `src/core/gc_registry_lists.zig` 16 + `src/core/gc_registry_pins.zig` 13 + `src/core/gc_registry_scheduler.zig` 13）
+- 本文标题覆盖: 225
 - 未覆盖: 无

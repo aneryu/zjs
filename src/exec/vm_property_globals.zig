@@ -152,7 +152,8 @@ pub noinline fn getVar(
         }
     }
     if (fastInstalledGlobalDataValueForAtomAtPc(ctx, function, global, frame, site_pc, atom_id)) |value| {
-        return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value);
+        try stack.push(value);
+        return .done;
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame)) {
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
@@ -164,7 +165,8 @@ pub noinline fn getVar(
             return .done;
         }
         if (globalDataPropertyValueForFastPath(ctx.runtime, global, function, site_pc, atom_id)) |value| {
-            return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value);
+            try stack.push(value);
+            return .done;
         }
     }
     const value = value: {
@@ -197,46 +199,6 @@ pub noinline fn getVar(
     };
     try stack.pushOwned(value);
     return .done;
-}
-
-fn useFastGlobalDataValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    site_pc: usize,
-    atom_id: core.Atom,
-    value: core.JSValue,
-) !Step {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = catch_target;
-    _ = site_pc;
-    _ = atom_id;
-    const value_int = value.asInt32();
-    if (value_int != null) {}
-    if (value_int != null or value.asShortBigInt() != null) {} else {
-        if (value.isString()) {} else if (nextOpCanStartGlobalUriCall1(function, frame)) {}
-    }
-    try stack.push(value);
-    return .done;
-}
-
-fn nextOpCanStartGlobalUriCall1(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
-    if (frame.pc >= function.byteCode().len) return false;
-    const code = function.byteCode();
-    return switch (code[frame.pc]) {
-        // `call1 idx` is two bytes; the bound covers its cache-index operand.
-        op.push_atom_value => frame.pc + 7 <= code.len and code[frame.pc + 5] == op.call1,
-        op.get_var_ref, op.get_var_ref_check => frame.pc + 5 <= code.len and code[frame.pc + 3] == op.call1,
-        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => frame.pc + 3 <= code.len and code[frame.pc + 1] == op.call1,
-        op.get_var, op.get_var_undef => frame.pc + 5 <= code.len and code[frame.pc + 3] == op.call1,
-        else => false,
-    };
 }
 
 pub noinline fn putVar(

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""F0d raw-access CI gate (opcode-design.md 10.5).
+"""F0d raw-access lint (opcode-design.md 10.5).
+
+Run it with `mise run lint-raw-access`. It is deliberately NOT a `zig build`
+gate step and not part of any default lint target: it is a whole-tree state
+scan against a hand-maintained baseline, so a drifting baseline would block
+merges rather than report drift. The baseline
+HAS drifted (src/compiler/resolve_labels.zig R1/R2 are above their allowed
+counts while src/exec/vm_property.zig is below its) -- re-baselining is a
+reviewed decision, not a mechanical one, so the tool stays red until someone
+makes it.
 
 The F0b/F0c migrations moved every reader and the shortening writers onto
 the declaration-derived decode layer. This gate freezes that state: the

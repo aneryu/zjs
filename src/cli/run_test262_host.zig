@@ -223,16 +223,32 @@ fn test262AgentSweepReportsLocked(rt: *zjs.JSRuntime) void {
 pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
     const io = test262AgentIo();
 
+    const allocator = test262PageAllocator();
+
+    // Collect every agent runtime owned by `rt` so all of them get their
+    // `Atomics.wait` sleepers woken. The inline buffer covers the common case;
+    // beyond that we size the scratch to the live agent count. Only if that
+    // allocation fails do we fall back to the inline buffer and let the 500 ms
+    // poll below wait the stragglers out.
     var agent_runtimes_buf: [16]*zjs.JSRuntime = undefined;
+    var agent_runtimes: []*zjs.JSRuntime = &agent_runtimes_buf;
+    var agent_runtimes_owned: ?[]*zjs.JSRuntime = null;
+    defer if (agent_runtimes_owned) |owned| allocator.free(owned);
     var agent_runtimes_count: usize = 0;
 
     test262_agents.mutex.lockUncancelable(io);
+    if (test262_agents.agents.len > agent_runtimes_buf.len) {
+        if (allocator.alloc(*zjs.JSRuntime, test262_agents.agents.len)) |owned| {
+            agent_runtimes_owned = owned;
+            agent_runtimes = owned;
+        } else |_| {}
+    }
     for (test262_agents.agents) |agent| {
         if (agent.owner_runtime == rt) {
             agent.done = true;
             if (agent.agent_runtime) |art| {
-                if (agent_runtimes_count < agent_runtimes_buf.len) {
-                    agent_runtimes_buf[agent_runtimes_count] = art;
+                if (agent_runtimes_count < agent_runtimes.len) {
+                    agent_runtimes[agent_runtimes_count] = art;
                     agent_runtimes_count += 1;
                 }
             }
@@ -241,7 +257,7 @@ pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
     test262_agents.cond.broadcast(io);
     test262_agents.mutex.unlock(io);
 
-    runtime_layer.wakeAtomicsWaitersForRuntimes(rt, agent_runtimes_buf[0..agent_runtimes_count]);
+    runtime_layer.wakeAtomicsWaitersForRuntimes(rt, agent_runtimes[0..agent_runtimes_count]);
 
     var attempts: usize = 0;
     while (attempts < 500) : (attempts += 1) {
@@ -471,20 +487,17 @@ fn test262AgentLeaving(
 }
 
 fn test262AgentSleep(
-    ctx: *zjs.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    _: *zjs.JSContext,
+    _: ?*std.Io.Writer,
+    _: ?*zjs.Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
-    _ = output;
-    _ = global;
     const value = if (args.len >= 1) args[0] else zjs.JSValue.int32(0);
     const number = value.asNumber() orelse 0;
     if (number > 0) {
         const ms: i64 = @intFromFloat(@min(number, 60_000));
         std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
     }
-    _ = ctx;
     return zjs.JSValue.undefinedValue();
 }
 

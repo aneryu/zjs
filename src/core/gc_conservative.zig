@@ -58,8 +58,9 @@ const SpillImage = switch (builtin.cpu.arch) {
         }
     },
     .x86_64 => extern struct {
-        /// rax, rbx, rcx, rdx, rsi, rdi, rbp, r8-r15. Slot 7 is unused padding
-        /// so XMM spills start at offset 128.
+        /// rax, rbx, rcx, rdx, rsi, rdi, rbp, r8-r15 in `dumpRegisters` order
+        /// (offsets 0..112). Slot 15 (offset 120) is unused padding so XMM
+        /// spills start at offset 128.
         gpr: [16]u64 align(16) = undefined,
         xmm: [32]u64 = undefined,
 
@@ -276,8 +277,9 @@ fn scanWords(
         // sitting where object A's one-past-end meets object B's metadata
         // prefix is a live reference to whichever of the two the native code
         // meant, and the registry cannot tell; shading both is the only safe
-        // reading. String and rope hits are still discarded -- they are
-        // refcount-owned and the tracer does not sweep them.
+        // reading. Which kinds a hit is offered for is entirely `scan_filter`
+        // plus the `shade` callback's business: this loop forwards every
+        // candidate and never filters by kind itself.
         _ = rt.gc.address_registry.forEachTraceCandidateAt(word, scan_filter, shade_ctx, shade);
     }
 }
@@ -439,7 +441,9 @@ fn diagRegisterName(index: usize, buf: []u8) []const u8 {
         const q = (index - 32) / 2;
         return std.fmt.bufPrint(buf, "q{d}.{s}", .{ q, if ((index - 32) % 2 == 0) "lo" else "hi" }) catch "?";
     } else if (comptime builtin.cpu.arch == .x86_64) {
-        const names = [_][]const u8{ "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "pad", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+        // Must match `dumpRegisters`'s x86_64 store order exactly: r8 lands in
+        // slot 7 (offset 56) and the unwritten padding slot is the last one.
+        const names = [_][]const u8{ "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "pad" };
         if (index < names.len) return names[index];
         const x = (index - 16) / 2;
         return std.fmt.bufPrint(buf, "xmm{d}.{s}", .{ x, if ((index - 16) % 2 == 0) "lo" else "hi" }) catch "?";

@@ -133,7 +133,7 @@ pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*c
     return promise_constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
-pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
+pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     if (cachedRealmObject(rt, global, .async_function_prototype)) |stored| return stored;
 
     const prototype = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
@@ -199,7 +199,7 @@ pub inline fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.
     return builtin_glue.defineStampedNativeDataMethod(rt, global, object, atom_id, length, .async_generator, 0);
 }
 
-pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
+pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     if (cachedRealmObject(rt, global, .async_generator_function_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
@@ -1021,15 +1021,6 @@ fn resolvePromiseWithState(
     unreachable;
 }
 
-pub fn promiseThenableJob(
-    ctx: *core.JSContext,
-    target_value: core.JSValue,
-    thenable_value: core.JSValue,
-    then_value: core.JSValue,
-) !jobs_mod.Job {
-    return jobs_mod.Job.initPromiseThenable(ctx, target_value, thenable_value, then_value);
-}
-
 const PromiseJobOomProbe = struct {
     calls: usize = 0,
     fail: bool,
@@ -1400,7 +1391,7 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
 }
 
-test "promiseThenableJob roots direct function bytecode then callback while creating job" {
+test "Job.initPromiseThenable roots direct function bytecode then callback while creating job" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -1429,7 +1420,7 @@ test "promiseThenableJob roots direct function bytecode then callback while crea
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    var job = try promiseThenableJob(ctx, target.value(), thenable.value(), then_callback);
+    var job = jobs_mod.Job.initPromiseThenable(ctx, target.value(), thenable.value(), then_callback);
     var job_alive = true;
     defer if (job_alive) job.deinit();
 

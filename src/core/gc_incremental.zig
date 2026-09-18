@@ -54,12 +54,9 @@ pub const Stats = struct {
     envelope_max_peak_bytes: usize = 0,
     /// Cumulative morgue accounting. `doomed_destroyed_objects` follows the
     /// public freed-object convention and therefore excludes bytecode nodes;
-    /// `doomed_condemned_headers` counts every condemned GC node. Parked
-    /// entries are the second, physical-free pass after destructors.
+    /// `doomed_condemned_headers` counts every condemned GC node.
     doomed_condemned_headers: usize = 0,
     doomed_destroyed_objects: usize = 0,
-    doomed_parked_entries_drained: usize = 0,
-    doomed_parked_drain_slices: usize = 0,
     /// Worst attributed phase segment: begin, increment, destroy, finish.
     /// A final poll has both increment and finish segments but is one pause.
     segment_max_ns: [4]u64 = @splat(0),
@@ -160,9 +157,9 @@ pub const Marking = struct {
     /// Idempotent: both the private stack and the shared queue reset to their
     /// empty state, so a Registry torn down twice -- the OOM rollback case --
     /// does not double-free a segment.
-    pub fn deinit(self: *Marking, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Marking) void {
         self.stack.deinitStack();
-        self.queue.deinit(allocator);
+        self.queue.deinit();
     }
 };
 

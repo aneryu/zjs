@@ -68,6 +68,13 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     //
     // It asserts completion, not a score, so it is a correctness gate and
     // belongs here rather than under `perf-*`.
+    //
+    // It is NOT wired into `checkpoint-gate` / `merge-gate` /
+    // `engine-production-gate`: on the aggregates that macro shape is already
+    // paid for by `gate-smoke`, which runs the same vendored workloads from the
+    // fixed-work corpus in-graph and would double the gate's longest pole if
+    // this ran beside it. Run it by hand (`zig build macro-check`) when a GC or
+    // write-barrier change needs the full nine-benchmark sweep.
     const run_macro_check = b.addSystemCommand(&.{ "python3", "tools/perf/bench_v8/check_completes.py" });
     // The macro workloads are where the arena invariant broke, and where a
     // deleted block stamp is still caught today; unit tests never recycle an

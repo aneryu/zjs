@@ -519,7 +519,9 @@ fn arrayPopCall(
 pub const isArrayValue = core_array.isArrayValue;
 
 /// QuickJS source map: narrow array literal helper used by transitional
-/// `new_array` bytecode.
+/// `new_array` bytecode. No production caller is left (array literals lower
+/// through the VM's own fast path); it remains only as the subject of the
+/// GC-reentrancy unit tests in `src/tests/exec.zig`.
 pub fn construct(rt: *core.JSRuntime, values: []const core.JSValue) !core.JSValue {
     return constructWithPrototype(rt, values, null);
 }
@@ -538,6 +540,9 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
     return constructWithPrototype(rt, args, prototype);
 }
 
+/// Shared body of `construct` / `constructConstructorWithPrototype`. Reached
+/// from production only through the latter; the direct entry point is exercised
+/// by the GC-reentrancy unit tests in `src/tests/exec.zig`.
 pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
@@ -579,28 +584,10 @@ fn arrayLengthFromNumber(value: core.JSValue) ?u32 {
     return @intFromFloat(truncated);
 }
 
-/// QuickJS source map: selected Array.prototype.join behavior used by the
-/// transitional `array_join` bytecode.
-pub fn join(rt: *core.JSRuntime, array_value: core.JSValue, separator_value: core.JSValue) !core.JSValue {
-    const object = try expectObject(array_value);
-
-    var separator = std.ArrayList(u8).empty;
-    defer separator.deinit(rt.memory.allocator);
-    try appendValueString(rt, &separator, separator_value);
-
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    var index: u32 = 0;
-    while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.appendSlice(rt.memory.allocator, separator.items);
-        const item = try object.getProperty(core.atom.atomFromUInt32(index));
-        if (!item.isUndefined() and !item.isNull()) try appendValueString(rt, &buffer, item);
-    }
-    return createStringValue(rt, buffer.items);
-}
-
 /// QuickJS source map: selected Array.prototype methods currently covered by
-/// smoke fixtures and transitional array opcodes.
+/// smoke fixtures and transitional array opcodes. No production caller is left
+/// (the spec paths go through `array_ops`); this entry point remains only as
+/// the subject of the GC-reentrancy unit tests in `src/tests/core.zig`.
 pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
     return methodCallWithRealm(null, rt, receiver, method, args);
 }
@@ -1305,11 +1292,6 @@ fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) !u32 {
     if (buffer_ops.isTypedArrayObject(object)) return buffer_ops.typedArrayLength(rt, object) catch 0;
     const length = try object.getProperty(core.atom.ids.length);
     return @intCast(length.asInt32() orelse 0);
-}
-
-fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const str = try core.string.String.createUtf8(rt, bytes);
-    return str.value();
 }
 
 fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {

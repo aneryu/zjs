@@ -29,7 +29,7 @@ pub const Step = enum { done, continue_loop };
 pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
     const value = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
-    try pushImmediateInt32MaybeFuse(stack, function, frame, value);
+    try pushSmallInt(stack, value);
 }
 
 pub fn pushBigIntI32Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
@@ -41,32 +41,23 @@ pub fn pushBigIntI32Operand(stack: *stack_mod.Stack, function: *const bytecode.F
 pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
     const value = readInt(i16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    try pushImmediateInt32MaybeFuse(stack, function, frame, value);
+    try pushSmallInt(stack, value);
 }
 
 pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
     const value: i8 = @bitCast(function.byteCode()[frame.pc]);
     frame.pc += 1;
-    try pushImmediateInt32MaybeFuse(stack, function, frame, value);
+    try pushSmallInt(stack, value);
 }
 
-pub fn pushSmallIntMaybeFuse(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, value: i32) !void {
-    try pushImmediateInt32MaybeFuse(stack, function, frame, value);
-}
-
-fn pushImmediateInt32MaybeFuse(
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    value: i32,
-) !void {
-    // qjs has no runtime push+binop fusion: every push opcode is a standalone
-    // `*sp++ = ...` and a following binop is a separate dispatch (quickjs.c
-    // 17879-17910). The threaded fast path (zjs_vm.zig push_i32/i16/i8) already
-    // pushes the immediate inline with no fusion; this is the non-threaded
-    // fallback, kept byte-identical to it — a plain push, no stack-lhs fold.
-    _ = function;
-    _ = frame;
+/// Plain immediate-integer push, no fusion of any kind.
+///
+/// qjs has no runtime push+binop fusion: every push opcode is a standalone
+/// `*sp++ = ...` and a following binop is a separate dispatch (quickjs.c
+/// 17879-17910). The threaded fast path (zjs_vm.zig push_i32/i16/i8) already
+/// pushes the immediate inline; this is the non-threaded fallback, kept
+/// byte-identical to it — a plain push, no stack-lhs fold.
+pub fn pushSmallInt(stack: *stack_mod.Stack, value: i32) !void {
     stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
 }
 

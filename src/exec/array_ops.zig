@@ -43,7 +43,6 @@ const promise_ops = @import("promise_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const string_ops = @import("string_ops.zig");
 const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
-const IteratorZipRecord = iterator_ops.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
 const appendAtom = core.atom.appendAtom;
 const atomListContains = core.atom.atomListContains;
@@ -385,8 +384,7 @@ pub fn regExpLegacyNoCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, kin
     };
 }
 
-pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, getter_value: core.JSValue) !?core.JSValue {
-    _ = global;
+pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, getter_value: core.JSValue) !?core.JSValue {
     const getter_object = objectFromValue(getter_value) orelse return error.InvalidBuiltinRegistry;
     const getter_realm = getter_object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
     if (ctx != getter_realm) return error.InvalidBuiltinRegistry;
@@ -397,7 +395,7 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
     return error.JSException;
 }
 
-pub noinline fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !core.JSValue {
+pub noinline fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, found: *const RegExpMatch) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
 
@@ -416,7 +414,6 @@ pub noinline fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Obje
     }
 
     try defineRegExpIndicesGroupsProperty(rt, global, out, found);
-    _ = input_bytes;
     return out.value();
 }
 
@@ -844,7 +841,7 @@ pub fn arrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accesso
     return error.TypeError;
 }
 
-pub fn sharedArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
+pub fn sharedArrayBufferAccessor(receiver: core.JSValue, accessor: []const u8) !core.JSValue {
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
     if (std.mem.eql(u8, accessor, "byteLength")) {
@@ -856,7 +853,6 @@ pub fn sharedArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, a
     if (std.mem.eql(u8, accessor, "growable")) {
         return core.JSValue.boolean(object.arrayBufferMaxByteLength() != null);
     }
-    _ = ctx;
     return error.TypeError;
 }
 
@@ -2752,10 +2748,10 @@ pub fn arrayCopyWithinCall(
 
         const current_length = @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)));
         const length = @min(initial_length, current_length);
-        const to_start = arrayRelativeIndexFromNumber(length, target_number, 0);
-        const from_start = arrayRelativeIndexFromNumber(length, start_number, 0);
+        const to_start = arrayRelativeIndexFromNumber(length, target_number);
+        const from_start = arrayRelativeIndexFromNumber(length, start_number);
         const final = if (end_number) |end|
-            arrayRelativeIndexFromNumber(length, end, length)
+            arrayRelativeIndexFromNumber(length, end)
         else
             length;
         const count = @min(final -| from_start, length -| to_start);
@@ -3515,11 +3511,10 @@ pub fn arrayRelativeIndex(ctx: *core.JSContext, output: ?*std.Io.Writer, global:
     const primitive = try toPrimitiveForNumber(ctx, output, global, args[arg_index]);
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     const n = value_ops.numberValue(number_value) orelse std.math.nan(f64);
-    return arrayRelativeIndexFromNumber(length, n, default_value);
+    return arrayRelativeIndexFromNumber(length, n);
 }
 
-pub fn arrayRelativeIndexFromNumber(length: usize, n: f64, default_value: usize) usize {
-    _ = default_value;
+pub fn arrayRelativeIndexFromNumber(length: usize, n: f64) usize {
     if (std.math.isNan(n)) return 0;
     if (std.math.isNegativeInf(n)) return 0;
     const len_float = @as(f64, @floatFromInt(length));
@@ -3796,7 +3791,8 @@ fn fromAsyncStateSet(rt: *core.JSRuntime, state: *core.Object, key: core.Atom, v
     try state.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
-/// Returns an owned ref (caller frees).
+/// Borrowed read of a state slot; the value stays owned by the state object
+/// (under tracing GC there is no retain here and no free at the call site).
 fn fromAsyncStateGet(_: *core.JSRuntime, state: *core.Object, key: core.Atom) core.JSValue {
     if (state.getOwnDataPropertyValue(key)) |value| return value;
     std.debug.assert(!state.hasOwnProperty(key));
@@ -4208,6 +4204,7 @@ fn fromAsyncArrayLikeStep(
     }
     const items = fromAsyncStateGet(rt, state, core.atom.ids.items);
     const index_atom = try propertyAtomFromLengthIndex(rt, @intFromFloat(k));
+    defer index_atom.deinit(rt);
     const k_value = try getValueProperty(ctx, output, global, items, index_atom.atom, caller_function, caller_frame);
     try fromAsyncAwait(ctx, output, global, state, k_value, from_async_phase_array_value);
 }
@@ -4226,6 +4223,7 @@ fn fromAsyncDefineElement(
     const target = fromAsyncStateGet(rt, state, core.atom.ids.target);
     const target_object = objectFromValue(target) orelse return error.TypeError;
     const index_atom = try propertyAtomFromLengthIndex(rt, @intFromFloat(fromAsyncStateNumber(rt, state, core.atom.ids.k)));
+    defer index_atom.deinit(rt);
     try createDataPropertyOrThrow(ctx, output, global, target, target_object, index_atom.atom, value, caller_function, caller_frame);
 }
 
@@ -4535,7 +4533,7 @@ pub fn arrayFromIteratorLike(
             try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        if (done.asBool() == true) break;
+        if (valueTruthy(done)) break;
         var item = getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
             try iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
@@ -5645,7 +5643,7 @@ pub fn typedArrayOwnKeys(rt: *core.JSRuntime, source: *core.Object) ![]core.Atom
     for (ordinary) |key| {
         if (rt.atoms.isPublicSymbol(key)) continue;
         if (try core.object.typedArrayCanonicalNumericIndex(rt, key) != .none) continue;
-        if (isTypedArrayInternalOwnKey(rt, key)) continue;
+        if (isTypedArrayInternalOwnKey(key)) continue;
         if (atomListContains(keys, key)) continue;
         try appendAtom(rt, &keys, key);
     }
@@ -5657,8 +5655,7 @@ pub fn typedArrayOwnKeys(rt: *core.JSRuntime, source: *core.Object) ![]core.Atom
     return keys;
 }
 
-pub fn isTypedArrayInternalOwnKey(rt: *core.JSRuntime, atom_id: core.Atom) bool {
-    _ = rt;
+pub fn isTypedArrayInternalOwnKey(atom_id: core.Atom) bool {
     return atom_id == atom_buffer or
         atom_id == core.atom.ids.length or
         atom_id == atom_byte_length or
@@ -6047,29 +6044,6 @@ pub const ValueSliceRoot = struct {
     }
 };
 
-/// `ValueSliceRoot` for a slot-typed var-ref cell slice under construction
-/// (`[]*VarRef`, VARREFS-SLOT-TYPING-BLUEPRINT phase D).
-pub const CellSliceRoot = struct {
-    rt: ?*core.JSRuntime = null,
-    slices: [1]core.runtime.ValueRootSlice = undefined,
-    frame: core.runtime.ValueRootFrame = .{},
-
-    pub fn init(self: *CellSliceRoot, rt: *core.JSRuntime, cells: *[]*core.VarRef) void {
-        self.rt = rt;
-        self.slices[0] = .{ .cells = cells };
-        self.frame = .{
-            .slices = &self.slices,
-        };
-        self.frame.activate(rt);
-    }
-
-    pub fn deinit(self: *CellSliceRoot) void {
-        const rt = self.rt orelse return;
-        self.frame.deactivate(rt);
-        self.rt = null;
-    }
-};
-
 pub const OwnedArrayLikeArgs = struct {
     const Storage = enum {
         empty,
@@ -6358,24 +6332,6 @@ pub fn arrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, rec
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = kind;
     return iterator.value();
-}
-
-pub fn iteratorZipFlattenableRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !IteratorZipRecord {
-    return iterator_ops.iteratorZipFlattenableRecord(
-        ctx,
-        output,
-        global,
-        value,
-        caller_function,
-        caller_frame,
-    );
 }
 
 pub fn arrayIteratorNextFast(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {

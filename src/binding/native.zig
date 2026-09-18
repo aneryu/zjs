@@ -158,9 +158,15 @@ pub fn managed(comptime f: anytype) Spec {
 /// function over primitives. The signature is inferred from the parameter
 /// and return types and must be one of the FNABI schema shapes; anything
 /// else is a compile error (no silent generic fallback). The VM performs the
-/// canonical marshal checks (int32 / f64 / bool exact, no coercion) and
-/// boxing; the target never sees a JSValue, never allocates, never throws
-/// and does not appear in `Error().stack`.
+/// marshal checks and the boxing; the target never sees a JSValue, never
+/// allocates, never throws and does not appear in `Error().stack`.
+///
+/// Marshal policy (`builtin_dispatch.invokeLeafFast`): `i32` and `bool`
+/// parameters are exact-tag, no coercion -- a mismatch misses and, with no
+/// fallback registered, raises a TypeError. The `f64` parameters of the
+/// `fn (f64) f64` / `fn (f64, f64) f64` shapes are the one deliberate
+/// exception: they take `primitiveF64Arg`, which additionally accepts a
+/// missing argument and `undefined` (NaN), `null` (0) and booleans (0/1).
 ///
 ///   fn (i32, i32) i32   fn (i32) i32   fn (f64) f64   fn (f64, f64) f64
 ///   fn (f64) void       fn (bool) bool fn () void

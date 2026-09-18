@@ -479,8 +479,9 @@ pub const builtin_method_ids = struct {
         };
 
         // Construct record ids for `new Map/Set/WeakMap/WeakSet(...)`. Distinct
-        // from the PrototypeMethod (1-21) and StaticMethod (101) id ranges so
-        // they densify into their own record slots. Each maps to the matching
+        // from the PrototypeMethod (1-21) id range so they densify into their
+        // own record slots. (This namespace has no `StaticMethod` enum at all
+        // -- see the note in `builtin_method_id_lookup.collection`.) Each maps to the matching
         // `builtin_method_id_lookup.collection.ConstructorKind`; the constructor
         // objects themselves carry no native id (collection construct is
         // resolved by name -> `constructorId`), so these records are reached
@@ -910,8 +911,10 @@ pub const builtin_method_id_lookup = struct {
         /// (`builtin_dispatch.callInternalRecord`) of the reused `methodCall` /
         /// `charAtValue` bodies, so they route through the table instead of
         /// naming the builtin directly. Returns null for decoded ids with no
-        /// installed record (e.g. the exec-only `substr` id 25, or the HTML and
-        /// pad/normalize/locale/search bodies that live in exec/string_ops.zig).
+        /// installed record (e.g. the exec-only `substr` id 25, or the HTML
+        /// wrapper bodies). The switch below is the authority on what IS
+        /// mapped: pad/normalize/locale/search (34-37, 40) are mapped, even
+        /// though an older version of this note claimed they were not.
         pub fn encodePrototypeMethodId(decoded: u32) ?u32 {
             return switch (decoded) {
                 0 => @intFromEnum(PrototypeMethod.char_at),

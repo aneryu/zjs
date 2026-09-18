@@ -144,8 +144,9 @@ const oom_coverage = struct {
     }
 };
 
-/// Number of distinct allocation call sites observed since process start
-/// (or the last `oomCoverageReset`). Always 0 when coverage is disabled.
+/// Number of distinct allocation call sites observed since process start.
+/// The set is never reset -- there is no reset entry point. Always 0 when
+/// coverage is disabled.
 pub fn oomCoverageDistinctSiteCount() usize {
     if (comptime !oom_coverage_enabled) return 0;
     oom_coverage.lock();
@@ -1386,9 +1387,6 @@ pub const MemoryAccount = struct {
 
     pub fn beginGcRawFree(self: *MemoryAccount, base: usize) void {
         comptime std.debug.assert(block_tracking_enabled or extent_tracking_enabled);
-        if (comptime builtin.is_test) {
-            if (comptime extent_identity_enabled) {}
-        }
         if (comptime lifecycle_state_enabled) {
             self.carrierTransition(base, .raw_free_in_progress) catch
                 @panic("gc: CARRIER IDENTITY: raw free missing lifecycle record");
@@ -1449,12 +1447,6 @@ pub const MemoryAccount = struct {
         return @as(*const u8, @ptrFromInt(@intFromPtr(ptr) - gc_prefix_size + 2)).*;
     }
 
-    /// Initialize GC metadata at `meta` (= objectPtr - 8). Bytes 0..2 are the
-    /// slab allocator's live block index when the metadata is overlaid, so that
-    /// case must preserve them. `slab_class` = the slab size-class backing this
-    /// allocation (null = standalone prefix); it lands in the alloc_info byte,
-    /// mirroring qjs `JSMallocBlockHeader`'s adjacent block_size_idx +
-    /// gc_obj_type:7|mark:1 bytes (quickjs.c:275-277) with one u16 store.
     /// Prefix writer for a block-heap cell: same field layout as
     /// `initGcPrefix`, info byte fixed to the block-cell marker.
     inline fn initGcPrefixBlockCell(comptime T: type, meta: [*]u8) void {
@@ -1468,6 +1460,12 @@ pub const MemoryAccount = struct {
         @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = 0;
     }
 
+    /// Initialize GC metadata at `meta` (= objectPtr - 8). Bytes 0..2 are the
+    /// slab allocator's live block index when the metadata is overlaid, so that
+    /// case must preserve them. `slab_class` = the slab size-class backing this
+    /// allocation (null = standalone prefix); it lands in the alloc_info byte,
+    /// mirroring qjs `JSMallocBlockHeader`'s adjacent block_size_idx +
+    /// gc_obj_type:7|mark:1 bytes (quickjs.c:275-277) with one u16 store.
     inline fn initGcPrefix(comptime T: type, meta: [*]u8, slab_class: ?usize) void {
         // The kind must stay inside the low nibble of the shared kind/flags
         // byte (gc.BlockFlags.kind).
@@ -1914,7 +1912,8 @@ pub const MemoryAccount = struct {
     }
 
     /// Return a string-family block cell (see `createStringCell`). `payload`
-    /// is the body pointer (cell base + 8); accounting mirrors
+    /// is the body pointer (cell base + 8); the accounted byte count mirrors
+    /// the one `createStringCell` charged, so the ledger balances.
     pub fn destroyStringCell(self: *MemoryAccount, payload: *const anyopaque, total_bytes: usize) void {
         const heap = self.gc_object_cell_heap orelse unreachable;
         const accounted = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?;

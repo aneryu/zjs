@@ -42,7 +42,6 @@ pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), va
         try appendEscapedJsonString(rt, buffer, "");
         return;
     };
-    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try appendEscapedJsonLatin1String(rt, buffer, bytes),
         .utf16 => |units| try appendEscapedJsonUtf16String(rt, buffer, units),

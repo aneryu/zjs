@@ -743,21 +743,7 @@ fn createTypedArrayBackingBuffer(rt: *core.JSRuntime, array_buffer_prototype: *c
 }
 
 fn typedArraySourceValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
-    return primitiveWrapperStoredValue(rt, value) orelse value;
-}
-
-fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue {
-    _ = rt;
-    if (!value.isObject()) return null;
-    const object = expectObject(value) catch return null;
-    switch (object.class_id) {
-        core.class.ids.number,
-        core.class.ids.boolean,
-        core.class.ids.big_int,
-        core.class.ids.symbol,
-        => if (object.objectData()) |stored| return stored else return null,
-        else => return null,
-    }
+    return coercion_ops.primitiveWrapperStoredValue(rt, value) orelse value;
 }
 
 fn constructFunctionValue(rt: *core.JSRuntime) !core.JSValue {

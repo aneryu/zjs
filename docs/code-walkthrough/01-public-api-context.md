@@ -682,24 +682,24 @@
 
 - **签名**：`pub fn formatException(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) ![]const u8`。
 - **作用**：把异常格式化成 `"Name: message"` 或退化字符串。
-- **实现**：对象则读 `name`/`message`（`getPropertyString`）；两者都有则 `allocPrint("{s}: {s}")` 并释放临时；只有一个则直接返回那份；否则 `appendValueString` 再 dupe。
-- **所有权 / 错误 / 调用**：返回切片由调用方 allocator 释放；对象的 name/message 通过 core getProperty 读取，不执行 accessor getter，非字符串不做 ToString。两者都是字符串时即使为空也拼接冒号与空格；无可用字符串时走内部 appendValueString，不是完整 JS ToString。当前双字符串分支对两块临时字节同时注册 errdefer 和 defer，若 allocPrint 失败会重复释放；这是现有实现的失败清理缺陷，不能据文档保证该 OOM 路径安全。
+- **实现**：对象则读 `name`/`message`（`getPropertyString`）；两者都有则 `allocPrint("{s}: {s}")` 成功之后再显式 free 两块临时字节；只有一个则直接返回那份；否则 `appendValueString` 再 dupe。
+- **所有权 / 错误 / 调用**：返回切片由调用方 allocator 释放；对象的 name/message 通过 core getProperty 读取，不执行 accessor getter，非字符串不做 ToString。两者都是字符串时即使为空也拼接冒号与空格；无可用字符串时走内部 appendValueString，不是完整 JS ToString。双字符串分支只有一条释放路径：两块临时字节在 `allocPrint` 之前归 `errdefer` 所有（失败时各释放一次），成功后才由显式 `free` 释放，OOM 路径不再重复释放。
 
-### `JSContext.formatExceptionStack` (`src/binding/context.zig:816`)
+### `JSContext.formatExceptionStack` (`src/binding/context.zig:820`)
 
 - **签名**：`pub fn formatExceptionStack(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) !?[]const u8`。
 - **作用**：读 `stack` 字符串；非对象或非字符串则 null。
 - **实现**：`getPropertyAtom(..., atom.ids.stack)` + `appendRawString` + dupe。
 - **所有权 / 错误 / 调用**：与 formatException 的核心读取不同，此处执行层 getPropertyAtom 可运行 stack getter / Proxy 代码并抛错。成功切片由 allocator 释放；非字符串 stack 返回 null，不做 ToString。函数不消费 pending exception，内容使用 UTF-8/WTF-8 且无 NUL 终止符。
 
-### `getPropertyString` (`src/binding/context.zig:829`)
+### `getPropertyString` (`src/binding/context.zig:833`)
 
 - **签名**：`fn getPropertyString(rt: *JSRuntime, obj: *Object, key: atom.Atom, allocator: std.mem.Allocator) !?[]const u8`。
 - **作用**：own/inherited get 后若是字符串则拷 UTF-8。
 - **实现**：`obj.getProperty`；非字符串 null；`appendRawString` + dupe。
 - **所有权 / 错误 / 调用**：用于 formatException 的 name/message；core 读取可沿原型链或物化 auto-init，但不执行 getter。返回字节由调用方 allocator 释放，内部 runtime 临时数组始终释放；非字符串返回 null，读取和分配错误传播。
 
-### `arrayObjectFromValue` (`src/binding/context.zig:839`)
+### `arrayObjectFromValue` (`src/binding/context.zig:843`)
 
 - **签名**：`fn arrayObjectFromValue(value: JSValue) !?*Object`。
 - **作用**：解开（含 Proxy 链）得到 Array 对象；revoked/缺 target → TypeError；非对象/非数组 → null。
@@ -712,56 +712,56 @@
 
 可复用的 native→JS 调用站点：初始化时选择执行路径，并为 callee 和默认 receiver 建立持久根槽。选择通用路径不表示 callee 已通过可调用性检查；实际调用仍可能失败。调用先检查 interrupt，再进入适用的 bytecode 路径或通用调用；不能据“解析一次”断言后续调用不分配、没有进一步校验或只有固定成本。站点借用创建它的 context 和 output writer，须保证它们的生命周期。
 
-### `CallSite.init` (`src/binding/context.zig:887`)
+### `CallSite.init` (`src/binding/context.zig:891`)
 
 - **签名**：`pub fn init(ctx: *JSContext, callee: JSValue, options: Options) !CallSite`。
 - **作用**：解析并 pin 目标。
 - **实现**：`globalObject`；`this_value` 默认 undefined；`exec.call_site.CallSite.init`。
 - **所有权 / 错误 / 调用**：global 获取及两个持久槽分配均可失败，第二个槽失败时释放第一个。成功站点持有 callee/默认 this 的根，但不拥有 context 门面或 output writer；init 成功不保证 callee 可调用。
 
-### `CallSite.deinit` (`src/binding/context.zig:896`)
+### `CallSite.deinit` (`src/binding/context.zig:900`)
 
 - **签名**：`pub fn deinit(self: *CallSite) void`。
 - **作用**：放掉 pin。
 - **实现**：`self.site.deinit()`。
 - **所有权 / 错误 / 调用**：须在 context/runtime 销毁前执行；同一实例的已清空根槽允许重复 deinit，但不要复制活跃站点后分别释放。底层只释放根并把 route 置为 generic，保留其他裸值和指针；deinit 后不得继续调用站点。
 
-### `CallSite.call` (`src/binding/context.zig:900`)
+### `CallSite.call` (`src/binding/context.zig:904`)
 
 - **签名**：`pub fn call(self: *CallSite, args: []const JSValue) !JSValue`。
 - **作用**：用 init 时的 receiver 调一次。
 - **实现**：`callInto` + OOM 恢复 + `pinnedLoad`。
 - **所有权 / 错误 / 调用**：args 仅借用本次，宿主堆中参数值须另有根覆盖。返回值不成为站点持久根；pinnedLoad 是值的整数位加载方式，不是 GC pin 注册。执行错误传播，未捕获且带 OOM 标志的 JSException 转回 OutOfMemory。
 
-### `CallSite.call0` (`src/binding/context.zig:906`)
+### `CallSite.call0` (`src/binding/context.zig:910`)
 
 - **签名**：`pub inline fn call0(self: *CallSite) !JSValue`。
 - **作用**：零参快路径。
 - **实现**：`callFixed(0, &.{})`。
 - **所有权 / 错误 / 调用**：`inline` 转发到 `callFixed(0, &.{})`（`src/binding/context.zig:923`），后者调 `exec.call_site.callFixedInto` 并用 `pinnedLoad` 取回结果。错误是 `HostError`：JS 抛出时返回 `error.JSException` 并把异常留在 realm 的异常槽里；若该异常是 OOM 异常，`restoreUncaughtOutOfMemory`（`src/binding/context.zig:601`）把它换回 `error.OutOfMemory`。返回的 `JSValue` 是借用值，不 retain、不入句柄；宿主栈上的副本靠保守栈扫描保活。调用方：`src/tests/embedding_examples.zig:239`、`:259`，`tools/perf/native_boundary/zjs_boundary_bench.zig:234`。
 
-### `CallSite.call1` (`src/binding/context.zig:910`)
+### `CallSite.call1` (`src/binding/context.zig:914`)
 
 - **签名**：`pub inline fn call1(self: *CallSite, a0: JSValue) !JSValue`。
 - **作用**：单参；参数经 `pinnedStore` 放进栈数组。
 - **实现**：`callFixed(1, &args)`。
 - **所有权 / 错误 / 调用**：a0 需在调用期间可达；pinnedStore 只控制位存储方式，不为它新增持久根，也不复制参数所指的对象。
 
-### `CallSite.call2` (`src/binding/context.zig:916`)
+### `CallSite.call2` (`src/binding/context.zig:920`)
 
 - **签名**：`pub inline fn call2(self: *CallSite, a0: JSValue, a1: JSValue) !JSValue`。
 - **作用**：两参快路径。
 - **实现**：两次 `pinnedStore` + `callFixed(2, ...)`。
 - **所有权 / 错误 / 调用**：同 call1。
 
-### `CallSite.callFixed` (`src/binding/context.zig:923`)
+### `CallSite.callFixed` (`src/binding/context.zig:927`)
 
 - **签名**：`inline fn callFixed(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue) !JSValue`。
 - **作用**：固定 argc 的底层调用。
 - **实现**：`callFixedInto` + OOM 恢复 + `pinnedLoad`。
 - **所有权 / 错误 / 调用**：`call0/1/2`。
 
-### `CallSite.callWithThis` (`src/binding/context.zig:931`)
+### `CallSite.callWithThis` (`src/binding/context.zig:935`)
 
 - **签名**：`pub fn callWithThis(self: *CallSite, this_value: JSValue, args: []const JSValue) !JSValue`。
 - **作用**：同一 callee，这次换 receiver。`this_value` 必须在调用期间从宿主可达。

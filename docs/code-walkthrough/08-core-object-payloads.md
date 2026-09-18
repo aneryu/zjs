@@ -595,28 +595,28 @@ ArrayBuiltinMarker 与 TypedArrayBuiltinMarker 是 property.zig 类型别名。�
 - **实现**：先以 realm.ptr 的实际地址调用 callVisitRealm，再按值调用 atom.callVisitAtom(native_dispatch_name)。
 - **所有权 / 错误 / 调用**：不枚举 rare，外层 Object 负责另行访问；realm 可被回写，atom 按 id 传入。包括 null realm/null_atom 的处理由 visitor 决定。
 
-### `BytecodeFunctionAux.destroy` (`src/core/object_payloads.zig:1212`)
+### `BytecodeFunctionAux.destroy` (`src/core/object_payloads.zig:1213`)
 
 - **签名**：`pub fn destroy(self: *BytecodeFunctionAux, rt: *JSRuntime) void`。
 - **作用**：清 closure home object 与内嵌 rare 状态。
 - **实现**：home_object=null，调用 rare.destroy。
 - **所有权 / 错误 / 调用**：不直接释放 aux GC cell，也不把内嵌 rare 当独立分配销毁；home object 只丢追踪边。
 
-### `BytecodeFunctionStorage.captureSlots` (`src/core/object_payloads.zig:1229`)
+### `BytecodeFunctionStorage.captureSlots` (`src/core/object_payloads.zig:1230`)
 
 - **签名**：`pub inline fn captureSlots(self: *const BytecodeFunctionStorage) []?*var_ref_mod.VarRef`。
 - **作用**：借用已安装的可空 capture 指针数组。
 - **实现**：var_refs 为 emptyVarRefs 哨兵则返回空；无 FunctionBytecode 也返回空；否则以 fb.closureVarCount 截取指针 slice。
 - **所有权 / 错误 / 调用**：即使 FB 需要 capture，构造期哨兵仍返回空；不验证底层容量或逐槽非空，不分配或建立根。
 
-### `BytecodeFunctionStorage.captureSlice` (`src/core/object_payloads.zig:1240`)
+### `BytecodeFunctionStorage.captureSlice` (`src/core/object_payloads.zig:1241`)
 
 - **签名**：`pub inline fn captureSlice(self: *const BytecodeFunctionStorage) []*var_ref_mod.VarRef`。
 - **作用**：把完成初始化的 capture 表作为非空指针 slice 借出。
 - **实现**：无 FB 返回空；取 captureSlots，Debug/ReleaseSafe 验证长度等于 closureVarCount 且各槽非 null；空则返回空，否则重解释指针类型。
 - **所有权 / 错误 / 调用**：发布构建不逐槽验证；调用方必须遵守初始化完成与 backing 容量合同，const self 不使返回的 capture 指针数组只读。
 
-### `BytecodeFunctionStorage.emptyVarRefs` (`src/core/object_payloads.zig:1252`)
+### `BytecodeFunctionStorage.emptyVarRefs` (`src/core/object_payloads.zig:1253`)
 
 - **签名**：`pub inline fn emptyVarRefs() [*]?*var_ref_mod.VarRef`。
 - **作用**：返回空 capture 表的非空哨兵地址。

@@ -197,7 +197,7 @@ fn publishEmptyModule(
     module_name: core.Atom,
 ) !*core.ModuleRecord {
     var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer pending.deinit(rt);
+    defer pending.deinit();
     return publishFreshModule(registry, module_name, &pending);
 }
 
@@ -2274,7 +2274,7 @@ test "GC keeps module registry unique symbol atoms until release" {
     const binding_cell = try core.VarRef.createClosed(rt, try rt.takeSymbolValue(binding_symbol));
 
     var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer pending.deinit(rt);
+    defer pending.deinit();
     try pending.addExport(binding_name, binding_name, 0);
     const record = try publishFreshModule(&ctx.modules, module_name, &pending);
     record.publishRetainedExportCellNoFail(0, binding_cell.valueRef());
@@ -2286,7 +2286,7 @@ test "GC keeps module registry unique symbol atoms until release" {
     try std.testing.expect(rt.atoms.name(binding_symbol) != null);
     try std.testing.expect(rt.atoms.name(import_meta_symbol) != null);
 
-    record.clearRetainedExportCellNoFail(rt, 0);
+    record.clearRetainedExportCellNoFail(0);
     record.import_meta = null;
 
     _ = rt.runObjectCycleRemoval();
@@ -2908,10 +2908,6 @@ fn countFinalizer() void {
 fn countNativeCleanup(ptr: *anyopaque) void {
     const count: *usize = @ptrCast(@alignCast(ptr));
     count.* += 1;
-}
-
-fn dummyExternalHostCall(_: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
-    return core.JSValue.undefinedValue();
 }
 
 fn countPayloadFinalizer(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
@@ -5695,7 +5691,7 @@ test "module namespace uses shape-only live-binding storage" {
     try std.testing.expect(!namespace.deleteProperty(rt, export_name));
 }
 
-test "shapes retain property atoms and compare transitions" {
+test "shapes keep property atoms addressable after a transition" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -5707,7 +5703,6 @@ test "shapes retain property atoms and compare transitions" {
 
     try std.testing.expect(first.isHashed());
     try std.testing.expectEqual(@as(usize, 1), first.prop_count);
-    try std.testing.expect(first.sameTransition(second));
     try std.testing.expect(rt.atoms.name(first.props()[0].atom_id) != null);
     try std.testing.expectEqual(
         core.shape.hashIndex(first.hash, core.shape.initial_shape_hash_bits),
@@ -5728,7 +5723,7 @@ test "shape shared bit and prototype transitions are tracked" {
     var second = try rt.shapes.create(proto_two);
     try rt.shapes.addProperty(&first, name_atom, 0b000001);
     try rt.shapes.addProperty(&second, name_atom, 0b000001);
-    try std.testing.expect(!first.sameTransition(second));
+    try std.testing.expect(first.proto != second.proto);
 
     try std.testing.expect(!first.isShared());
     first.markShared();
@@ -11271,25 +11266,25 @@ test "collection iterator prototype follows explicit active realm, never receive
 
     const map = try core.Object.create(rt, core.class.ids.map, first_iterator_prototype);
 
-    const context_iterator_value = try engine.exec.collection_ops.methodCallWithContext(
+    const context_iterator_value = try engine.exec.collection_ops.methodCallWithContextAndHost(
         second_realm,
         map.value(),
         @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
         &.{},
-        &.{},
+        .{ .globals = &.{} },
     );
     const context_iterator = try core.Object.expect(context_iterator_value);
     try std.testing.expectEqual(second_iterator_prototype, context_iterator.getPrototype().?);
 
     // The explicit active global wins even when the caller passes a different
     // current context and the receiver belongs to that context's object graph.
-    const iterator_value = try engine.exec.collection_ops.methodCallWithGlobal(
+    const iterator_value = try engine.exec.collection_ops.methodCallWithGlobalAndHost(
         first_realm,
         second_global,
         map.value(),
         @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
         &.{},
-        &.{},
+        .{ .globals = &.{} },
     );
     const result_iterator = try core.Object.expect(iterator_value);
     try std.testing.expectEqual(second_iterator_prototype, result_iterator.getPrototype().?);
@@ -12859,7 +12854,7 @@ test "module registries isolate records between realms" {
     const binding_name = try rt.internAtom("only-in-first");
 
     var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer first_pending.deinit(rt);
+    defer first_pending.deinit();
     try first_pending.addExport(binding_name, binding_name, 0);
     const first = try publishFreshModule(&first_ctx.modules, module_name, &first_pending);
     const second = try publishEmptyModule(rt, &second_ctx.modules, module_name);
@@ -13053,7 +13048,7 @@ test "module publication retains indexed metadata and all strong value edges" {
     const dependency = try publishEmptyModule(rt, &ctx.modules, dep_name);
 
     var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer pending.deinit(rt);
+    defer pending.deinit();
     const request_index = try pending.addRequest(dep_name);
     try pending.addImport(request_index, import_name, local_name, 3, false);
     try pending.addExport(export_name, local_name, 4);
@@ -13121,7 +13116,7 @@ test "pending module metadata and publication OOM are atomic" {
     defer name_roots.deactivate(rt);
 
     var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer pending.deinit(rt);
+    defer pending.deinit();
     const request_index = try pending.addRequest(dep_name);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -13162,31 +13157,31 @@ test "module registry resolves local indirect star and ambiguous exports" {
     defer {}
 
     var dep_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer dep_a_pending.deinit(rt);
+    defer dep_a_pending.deinit();
     try dep_a_pending.addExport(value_name, local_a_name, 0);
     const dep_a = try publishFreshModule(&ctx.modules, dep_a_name, &dep_a_pending);
 
     var dep_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer dep_b_pending.deinit(rt);
+    defer dep_b_pending.deinit();
     try dep_b_pending.addExport(value_name, local_b_name, 0);
     const dep_b = try publishFreshModule(&ctx.modules, dep_b_name, &dep_b_pending);
 
     var dep_c_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer dep_c_pending.deinit(rt);
+    defer dep_c_pending.deinit();
     const dep_c_to_a = try dep_c_pending.addRequest(dep_a_name);
     try dep_c_pending.addIndirectExport(dep_c_to_a, other_name, value_name, false);
     const dep_c = try publishFreshModule(&ctx.modules, dep_c_name, &dep_c_pending);
     dep_c.setRequestModuleNoFail(dep_c_to_a, dep_a);
 
     var unique_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer unique_pending.deinit(rt);
+    defer unique_pending.deinit();
     const unique_to_a = try unique_pending.addRequest(dep_a_name);
     try unique_pending.addStarExport(unique_to_a);
     const unique = try publishFreshModule(&ctx.modules, unique_name, &unique_pending);
     unique.setRequestModuleNoFail(unique_to_a, dep_a);
 
     var main_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer main_pending.deinit(rt);
+    defer main_pending.deinit();
     const main_to_c = try main_pending.addRequest(dep_c_name);
     const main_to_a = try main_pending.addRequest(dep_a_name);
     const main_to_b = try main_pending.addRequest(dep_b_name);
@@ -13224,13 +13219,13 @@ test "existing published module generation is not overwritten by pending definit
     defer {}
 
     var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer first_pending.deinit(rt);
+    defer first_pending.deinit();
     try first_pending.addExport(old_export_name, old_export_name, 0);
     const first = try publishFreshModule(&ctx.modules, module_name, &first_pending);
     first.setStatus(.linked);
 
     var replacement = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer replacement.deinit(rt);
+    defer replacement.deinit();
     try replacement.addExport(replacement_export_name, replacement_export_name, 1);
     const prepared = try ctx.modules.prepareFreshTarget(module_name, &replacement);
 
@@ -13266,25 +13261,25 @@ test "indexed module resolution is pure across not-found ambiguous and cyclic gr
     defer {}
 
     var dep_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer dep_pending.deinit(rt);
+    defer dep_pending.deinit();
     try dep_pending.addExport(value_name, local_a_name, 0);
     const dep = try publishFreshModule(&ctx.modules, dep_name, &dep_pending);
     const missing = try publishEmptyModule(rt, &ctx.modules, missing_name);
 
     var unresolved_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer unresolved_pending.deinit(rt);
+    defer unresolved_pending.deinit();
     const unresolved_request = try unresolved_pending.addRequest(dep_name);
     try unresolved_pending.addStarExport(unresolved_request);
     const unresolved = try publishFreshModule(&ctx.modules, unresolved_name, &unresolved_pending);
 
     var cycle_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer cycle_a_pending.deinit(rt);
+    defer cycle_a_pending.deinit();
     const cycle_a_to_b = try cycle_a_pending.addRequest(cycle_b_name);
     try cycle_a_pending.addStarExport(cycle_a_to_b);
     const cycle_a = try publishFreshModule(&ctx.modules, cycle_a_name, &cycle_a_pending);
 
     var cycle_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer cycle_b_pending.deinit(rt);
+    defer cycle_b_pending.deinit();
     const cycle_b_to_a = try cycle_b_pending.addRequest(cycle_a_name);
     try cycle_b_pending.addStarExport(cycle_b_to_a);
     const cycle_b = try publishFreshModule(&ctx.modules, cycle_b_name, &cycle_b_pending);
@@ -13292,17 +13287,17 @@ test "indexed module resolution is pure across not-found ambiguous and cyclic gr
     cycle_b.setRequestModuleNoFail(cycle_b_to_a, cycle_a);
 
     var amb_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer amb_a_pending.deinit(rt);
+    defer amb_a_pending.deinit();
     try amb_a_pending.addExport(value_name, local_a_name, 0);
     const amb_a = try publishFreshModule(&ctx.modules, amb_a_name, &amb_a_pending);
 
     var amb_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer amb_b_pending.deinit(rt);
+    defer amb_b_pending.deinit();
     try amb_b_pending.addExport(value_name, local_b_name, 0);
     const amb_b = try publishFreshModule(&ctx.modules, amb_b_name, &amb_b_pending);
 
     var ambiguous_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer ambiguous_pending.deinit(rt);
+    defer ambiguous_pending.deinit();
     const ambiguous_to_a = try ambiguous_pending.addRequest(amb_a_name);
     const ambiguous_to_b = try ambiguous_pending.addRequest(amb_b_name);
     try ambiguous_pending.addStarExport(ambiguous_to_a);
@@ -13355,19 +13350,19 @@ test "module resolution follows local exports of ordinary imports" {
     defer {}
 
     var source_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer source_pending.deinit(rt);
+    defer source_pending.deinit();
     try source_pending.addExport(foo_name, source_local_name, 0);
     const source = try publishFreshModule(&ctx.modules, source_name, &source_pending);
 
     var direct_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer direct_pending.deinit(rt);
+    defer direct_pending.deinit();
     const direct_to_source = try direct_pending.addRequest(source_name);
     try direct_pending.addIndirectExport(direct_to_source, foo_name, foo_name, false);
     const direct = try publishFreshModule(&ctx.modules, direct_name, &direct_pending);
     direct.setRequestModuleNoFail(direct_to_source, source);
 
     var imported_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer imported_pending.deinit(rt);
+    defer imported_pending.deinit();
     const imported_to_source = try imported_pending.addRequest(source_name);
     try imported_pending.addImport(imported_to_source, foo_name, foo_name, 0, false);
     try imported_pending.addExport(foo_name, foo_name, 0);
@@ -13375,7 +13370,7 @@ test "module resolution follows local exports of ordinary imports" {
     imported.setRequestModuleNoFail(imported_to_source, source);
 
     var root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer root_pending.deinit(rt);
+    defer root_pending.deinit();
     const root_to_direct = try root_pending.addRequest(direct_name);
     const root_to_imported = try root_pending.addRequest(imported_name);
     try root_pending.addStarExport(root_to_direct);
@@ -13423,7 +13418,7 @@ test "module resolution normalizes namespace re-export bindings" {
     const target = try publishEmptyModule(rt, &ctx.modules, target_name);
 
     var star_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer star_a_pending.deinit(rt);
+    defer star_a_pending.deinit();
     const star_a_to_target = try star_a_pending.addRequest(target_name);
     try star_a_pending.addIndirectExport(star_a_to_target, foo_name, star_atom, true);
     try star_a_pending.addIndirectExport(star_a_to_target, default_name, star_atom, true);
@@ -13431,14 +13426,14 @@ test "module resolution normalizes namespace re-export bindings" {
     star_a.setRequestModuleNoFail(star_a_to_target, target);
 
     var star_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer star_b_pending.deinit(rt);
+    defer star_b_pending.deinit();
     const star_b_to_target = try star_b_pending.addRequest(target_name);
     try star_b_pending.addIndirectExport(star_b_to_target, foo_name, star_atom, true);
     const star_b = try publishFreshModule(&ctx.modules, star_b_name, &star_b_pending);
     star_b.setRequestModuleNoFail(star_b_to_target, target);
 
     var import_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer import_a_pending.deinit(rt);
+    defer import_a_pending.deinit();
     const import_a_to_target = try import_a_pending.addRequest(target_name);
     try import_a_pending.addImport(import_a_to_target, star_atom, foo_name, 0, true);
     try import_a_pending.addExport(foo_name, foo_name, 0);
@@ -13446,7 +13441,7 @@ test "module resolution normalizes namespace re-export bindings" {
     import_a.setRequestModuleNoFail(import_a_to_target, target);
 
     var import_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer import_b_pending.deinit(rt);
+    defer import_b_pending.deinit();
     const import_b_to_target = try import_b_pending.addRequest(target_name);
     try import_b_pending.addImport(import_b_to_target, star_atom, foo_name, 0, true);
     try import_b_pending.addExport(foo_name, foo_name, 0);
@@ -13454,7 +13449,7 @@ test "module resolution normalizes namespace re-export bindings" {
     import_b.setRequestModuleNoFail(import_b_to_target, target);
 
     var star_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer star_root_pending.deinit(rt);
+    defer star_root_pending.deinit();
     const star_root_to_a = try star_root_pending.addRequest(star_a_name);
     const star_root_to_b = try star_root_pending.addRequest(star_b_name);
     try star_root_pending.addStarExport(star_root_to_a);
@@ -13464,7 +13459,7 @@ test "module resolution normalizes namespace re-export bindings" {
     star_root.setRequestModuleNoFail(star_root_to_b, star_b);
 
     var import_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer import_root_pending.deinit(rt);
+    defer import_root_pending.deinit();
     const import_root_to_a = try import_root_pending.addRequest(import_a_name);
     const import_root_to_b = try import_root_pending.addRequest(import_b_name);
     try import_root_pending.addStarExport(import_root_to_a);
@@ -13474,7 +13469,7 @@ test "module resolution normalizes namespace re-export bindings" {
     import_root.setRequestModuleNoFail(import_root_to_b, import_b);
 
     var mixed_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
-    defer mixed_root_pending.deinit(rt);
+    defer mixed_root_pending.deinit();
     const mixed_root_to_star = try mixed_root_pending.addRequest(star_a_name);
     const mixed_root_to_import = try mixed_root_pending.addRequest(import_a_name);
     try mixed_root_pending.addStarExport(mixed_root_to_star);
@@ -15477,7 +15472,7 @@ test "segmented shared mark frontier grows without dropping work" {
     const MarkQueue = core.gc.mark_queue;
     var queue = MarkQueue.Queue{};
     queue.ensureCapacity(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
+    defer queue.deinit();
 
     // A header-shaped address is all this test needs; the queue never
     // dereferences what it carries.
@@ -15533,7 +15528,7 @@ test "checked frontier admission requires a published marked header" {
 
     var queue = core.gc.mark_queue.Queue{};
     queue.ensureCapacity(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
+    defer queue.deinit();
     try std.testing.expect(queue.push(entry));
     try std.testing.expectEqual(object.gcHeader(), queue.pop().?);
 }
@@ -15795,7 +15790,7 @@ test "the barrier queue hands whole segments to a private mark stack" {
     const MarkQueue = core.gc.mark_queue;
     var queue = MarkQueue.Queue{};
     queue.ensureCapacity(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
+    defer queue.deinit();
     var donor = core.gc.MarkStack{};
     donor.ensure(queue.segmentPool());
     defer donor.deinitStack();
@@ -16935,7 +16930,7 @@ test "mark frontier allocation failure invalidates rather than rescans" {
     var fba = std.heap.FixedBufferAllocator.init(&no_storage);
     var queue = core.gc.mark_queue.Queue{};
     queue.ensureCapacity(fba.allocator());
-    defer queue.deinit(fba.allocator());
+    defer queue.deinit();
     var fake: core.gc.Header = undefined;
 
     try std.testing.expect(!queue.push(&fake));
@@ -17359,7 +17354,6 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
     // so the counter that used to be a union of two routes is now the whole
     // population.
     try std.testing.expect(rt.gc.block_heap.stats.bitmap_reclaimed_cells >= 256);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.incremental.stats.doomed_parked_entries_drained);
     // Compact trace epochs clear marks without walking the non-block list,
     // and its young bits retire in the mandatory finish condemnation walk.
     try std.testing.expectEqual(@as(usize, 0), rt.gc.incremental.stats.phase_retired_nonblock_headers);

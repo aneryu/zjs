@@ -282,27 +282,6 @@ fn uint8ArrayCodecCall(
 // resolving them here.
 const typed_array_core = core.typed_array;
 
-/// Legacy narrow ArrayBuffer storage struct. Retained as a public type; the
-/// live engine-core storage lives on `core.Object`'s array-buffer slots.
-pub const ArrayBuffer = struct {
-    bytes: []u8,
-    detached: bool = false,
-
-    pub fn byteLength(self: ArrayBuffer) usize {
-        return if (self.detached) 0 else self.bytes.len;
-    }
-
-    pub fn detach(self: *ArrayBuffer) void {
-        self.detached = true;
-    }
-};
-
-/// QuickJS source map: narrow ArrayBuffer constructor used by transitional
-/// `new_array_buffer` bytecode.
-pub fn arrayBufferConstruct(rt: *core.JSRuntime, length_value: core.JSValue) !core.JSValue {
-    return typed_array_core.arrayBufferConstruct(rt, length_value);
-}
-
 // ArrayBuffer / SharedArrayBuffer argument-coercing constructors read the
 // `maxByteLength` option off a user object, so the conservative Phase 6b-3c
 // placement put them in exec (`exec/typed_array_construct.zig`); re-exported

@@ -77,140 +77,133 @@
 - **实现**：栈上 `out`，`callInto`，`pinnedLoad`。
 - **所有权 / 错误 / 调用**：返回值所有权与 `callInto` 相同。
 
-### `CallSite.call0` (`src/exec/call_site.zig:190`)
-
-- **签名**：`pub inline fn call0(self: *CallSite) HostError!JSValue`。
-- **作用**：0 参固定元数调用。
-- **实现**：`callFixed(0, &.{})`。
-- **所有权 / 错误 / 调用**：不分配（空窗口 `&.{}`）；error set 是 `HostError`，来自 `callInto` 里的 `pollInterrupt` 与被调方，异常本身留在 `ctx` 上。树内无调用方：这是给嵌入者的 pub 形态，`src/binding/context.zig:906` 的同名门面走自己的 `callFixed`→`callFixedInto`。
-
-### `CallSite.call1` (`src/exec/call_site.zig:194`)
+### `CallSite.call1` (`src/exec/call_site.zig:190`)
 
 - **签名**：`pub inline fn call1(self: *CallSite, a0: JSValue) HostError!JSValue`。
 - **作用**：1 参；参数用 pinned store 写入窗口。
 - **实现**：`[1]JSValue` + `pinnedStore` + `callFixed(1, &args)`。避免 LLVM 经 q 寄存器拼窗口。
 - **所有权 / 错误 / 调用**：`a0` 按值；窗口栈上。
 
-### `CallSite.call2` (`src/exec/call_site.zig:200`)
+### `CallSite.call2` (`src/exec/call_site.zig:196`)
 
 - **签名**：`pub inline fn call2(self: *CallSite, a0: JSValue, a1: JSValue) HostError!JSValue`。
 - **作用**：2 参固定元数。
 - **实现**：与 `call1` 相同，两个 `pinnedStore`。
 - **所有权 / 错误 / 调用**：`args` 是本函数栈上的临时窗口，被调方按借用读；两个实参不 retain、不建根，存活由调用方保证。error set `HostError` 原样上抛。调用方 `src/exec/array_ops.zig:3767`、`4451`、`4544`（map/其它回调迭代）与 `4998`（sort comparator）。
 
-### `CallSite.call3` (`src/exec/call_site.zig:207`)
+### `CallSite.call3` (`src/exec/call_site.zig:203`)
 
 - **签名**：`pub inline fn call3(self: *CallSite, a0: JSValue, a1: JSValue, a2: JSValue) HostError!JSValue`。
 - **作用**：3 参固定元数。
 - **实现**：三个 pinned store。
 - **所有权 / 错误 / 调用**：栈上三槽窗口，借用语义同 `call2`；不分配、不建根。调用方 `src/exec/array_ops.zig:1550`、`1635`、`1664` 等 4 处（`(item, index, receiver)` 形状的数组回调）。
 
-### `CallSite.call4` (`src/exec/call_site.zig:215`)
+### `CallSite.call4` (`src/exec/call_site.zig:211`)
 
 - **签名**：`pub inline fn call4(self: *CallSite, a0: JSValue, a1: JSValue, a2: JSValue, a3: JSValue) HostError!JSValue`。
 - **作用**：4 参固定元数。
 - **实现**：四个 pinned store。
 - **所有权 / 错误 / 调用**：栈上四槽窗口，借用语义同 `call2`。调用方只有 `Array.prototype.reduce`/`reduceRight` 两处（`src/exec/array_ops.zig:1793`、`1836`），accumulator 由那两处的循环自己保活。
 
-### `CallSite.callFixed` (`src/exec/call_site.zig:228`)
+### `CallSite.callFixed` (`src/exec/call_site.zig:224`)
 
 - **签名**：`pub inline fn callFixed(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue) HostError!JSValue`。
 - **作用**：`call0..call4` 的共享返回包装。
 - **实现**：`callFixedInto` + `pinnedLoad`。不把 comptime argc 穿进 `enterBytecode`，避免每个 leftover arity 一份 ~6 KiB 拷贝。
 - **所有权 / 错误 / 调用**：不分配；`args` 指向调用方栈上的固定数组，只在调用期间借用。error set `HostError` 由 `callFixedInto` 透传。调用方仅本文件的 `call0`..`call4`（`call_site.zig:190`-`224`）。
 
-### `CallSite.callFixedInto` (`src/exec/call_site.zig:234`)
+### `CallSite.callFixedInto` (`src/exec/call_site.zig:230`)
 
 - **签名**：`pub inline fn callFixedInto(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue, out: *JSValue) HostError!void`。
 - **作用**：固定元数写入 `out`。
 - **实现**：转 `callInto(args, out)`。
 - **所有权 / 错误 / 调用**：纯转发，不分配、不改站点状态；结果经 `out` 出参回传（见 `callInto` 的两字宽度纪律）。调用方：本文件 `callFixed`，以及 binding 门面 `src/binding/context.zig:925`——OOM 在那里被 `restoreUncaughtOutOfMemory` 收成嵌入层错误。
 
-### `CallSite.callWithThisInto` (`src/exec/call_site.zig:244`)
+### `CallSite.callWithThisInto` (`src/exec/call_site.zig:240`)
 
 - **签名**：`pub noinline fn callWithThisInto(self: *CallSite, this_value: JSValue, args: []const JSValue, out: *JSValue) HostError!void`。
 - **作用**：复用已解析 callable，换本次 `this`（JSON reviver 每步换 holder）。
 - **实现**：poll 后拷一份 `route.target` 到栈上改 `this_value`，不改站点模板。generic 走 `callGeneric`。
 - **所有权 / 错误 / 调用**：`this_value` 由调用方根住至返回。
 
-### `CallSite.callWithThis` (`src/exec/call_site.zig:257`)
+### `CallSite.callWithThis` (`src/exec/call_site.zig:253`)
 
 - **签名**：`pub inline fn callWithThis(self: *CallSite, this_value: JSValue, args: []const JSValue) HostError!JSValue`。
 - **作用**：`callWithThisInto` 的按值包装。
 - **实现**：`pinnedLoad`。
 - **所有权 / 错误 / 调用**：按值包装，不分配；`this_value` 与 `args` 都要由调用方根住到返回（见 `callWithThisInto`）。调用方是 JSON 的 reviver/replacer 遍历 `src/exec/json_ops.zig:1780`、`2356`，那里的 holder 已经过 `rooted_holder_value` 显式建根；另有 binding 门面 `src/binding/context.zig:931` 走 `callWithThisInto`。
 
-### `pinnedLoad` (`src/exec/call_site.zig:267`)
+### `pinnedLoad` (`src/exec/call_site.zig:263`)
 
 - **签名**：`pub inline fn pinnedLoad(slot: *const JSValue) JSValue`。
 - **作用**：用整数对加载 16 字节槽（AArch64 `ldp`）。
 - **实现**：aarch64 内联汇编；其它架构 `JSValue.loadSlotAsIntPair`。宽度纪律与 `Vm.takeNativeReturnInto` 一致，保证 store-to-load forwarding。
 - **所有权 / 错误 / 调用**：纯位拷贝。
 
-### `pinnedStore` (`src/exec/call_site.zig:283`)
+### `pinnedStore` (`src/exec/call_site.zig:279`)
 
 - **签名**：`pub inline fn pinnedStore(slot: *JSValue, value: JSValue) void`。
 - **作用**：`pinnedLoad` 的孪生 store（`stp`）。
 - **实现**：aarch64 `stp`；否则 `storeSlotAsIntPair`。
 - **所有权 / 错误 / 调用**：只写调用方给的槽位，不分配、不抛、不做屏障（窗口是栈上临时数组，不是堆槽）。调用方：本文件 `call1`..`call4` 的窗口构造与 `callGeneric` 的结果写出（`call_site.zig:411`），以及 binding 门面 `src/binding/context.zig:912`/`918`/`919`。
 
-### `callOnceInto` (`src/exec/call_site.zig:302`)
+### `callOnceInto` (`src/exec/call_site.zig:298`)
 
 - **签名**：`pub inline fn callOnceInto( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, args: []const JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, out: *JSValue, ) HostError!void`。
 - **作用**：一次性 `initInternal`+`callInto`，不物化站点（给 `JSContext.callFunction`）。
 - **实现**：poll。若有活动 invocation：解析 inline，Machine 匹配则 `runOnInvocation`。否则若 `hostEligible`：`HostInvocation.acquire` + `oneShotRoute` 缓存命中则 publish/跑/unpublish。否则 `callGeneric`。嵌套宿主→JS 禁止改写空闲 Machine 的 one-shot 缓存。
 - **所有权 / 错误 / 调用**：不 pin。one-shot 缓存靠 `one_shot_pin` 保 callee 身份。
 
-### `hostEligible` (`src/exec/call_site.zig:346`)
+### `hostEligible` (`src/exec/call_site.zig:342`)
 
 - **签名**：`inline fn hostEligible(ctx: *core.JSContext, global: *core.Object) bool`。
 - **作用**：常驻 host Machine 只跑调用者自己的 Realm。
 - **实现**：`ctx.global == global`；无全局则 false。根路径会切到 callee Realm，所以跨 Realm 不能走 host。
 - **所有权 / 错误 / 调用**：`resolveRoute` 与 `callOnceInto` 共用。
 
-### `enterBytecode` (`src/exec/call_site.zig:354`)
+### `enterBytecode` (`src/exec/call_site.zig:350`)
 
 - **签名**：`inline fn enterBytecode( comptime fixed_argc: ?usize, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, route: *BytecodeRoute, target: *const inline_calls.InlineTarget, this_value: *const JSValue, callee: *const JSValue, args: []const JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, lean: ?*inline_calls.LeanFrame, out: *JSValue, ) HostError!void`。
 - **作用**：bytecode 臂选 Machine。
 - **实现**：活动 invocation 等于 `route.invocation` 或 `machineMatches` → `runOnInvocation`；否则 `host_eligible` → `runOnHostInvocation`；否则 `callGeneric`。`this_value`/`callee` 用指针，避免每次 32 字节 q 临时量。
 - **所有权 / 错误 / 调用**：`callInto` / `callWithThisInto`。
 
-### `machineMatches` (`src/exec/call_site.zig:382`)
+### `machineMatches` (`src/exec/call_site.zig:378`)
 
 - **签名**：`inline fn machineMatches(machine: *const inline_calls.Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) bool`。
 - **作用**：执行权威三元组比较。
 - **实现**：指针相等 `ctx`/`global`/`output`。
 - **所有权 / 错误 / 调用**：纯指针比较，不分配、不抛。调用方只有本文件两处：`call_site.zig:320`（`callOnceInto` 的嵌套宿主→JS 臂）与 `373`（`enterBytecode` 进入前复核活动 invocation）。`resolveRoute` 在 `499` 把同样三个比较写开，没有走这个 helper。
 
-### `callGeneric` (`src/exec/call_site.zig:389`)
+### `callGeneric` (`src/exec/call_site.zig:385`)
 
 - **签名**：`fn callGeneric( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, args: []const JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, out: *JSValue, ) HostError!void`。
 - **作用**：JS_Call 形根路径：在 callee Realm 开新执行根。
 - **实现**：`callValueOrBytecodeDispatchAfterInterruptPoll(..., copy_argv=true)`，`pinnedStore` 到 `out`。
 - **所有权 / 错误 / 调用**：bound/proxy/native/generator/跨 Realm 都落到这里。
 
-### `runOnInvocation` (`src/exec/call_site.zig:414`)
+### `runOnInvocation` (`src/exec/call_site.zig:410`)
 
 - **签名**：`inline fn runOnInvocation( comptime fixed_argc: ?usize, comptime idle_machine: bool, invocation: *inline_calls.ActiveInvocation, simple: bool, target: *const inline_calls.InlineTarget, ctx: *core.JSContext, global: *core.Object, this_value: *const JSValue, callee: *const JSValue, args: []const JSValue, lean: ?*inline_calls.LeanFrame, out: *JSValue, ) HostError!void`。
 - **作用**：在已有 Machine 上压 Entry 跑到 native_boundary。
 - **实现**：`simple` → `runSyncInlineRouteCopiedArgs`；否则 `runSyncInlineRouteOwnedCopy`。
 - **所有权 / 错误 / 调用**：`idle_machine=true` 时跳过外层 dispatch 快照。
 
-### `runOnHostInvocation` (`src/exec/call_site.zig:438`)
+### `runOnHostInvocation` (`src/exec/call_site.zig:434`)
 
 - **签名**：`inline fn runOnHostInvocation( comptime fixed_argc: ?usize, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, route: *BytecodeRoute, target: *const inline_calls.InlineTarget, this_value: *const JSValue, callee: *const JSValue, args: []const JSValue, lean: ?*inline_calls.LeanFrame, out: *JSValue, ) HostError!void`。
 - **作用**：无活动 invocation：publish 常驻 host Machine，入口与内建回调相同。
 - **实现**：cached `route.host` 且 epoch 匹配则复用；否则 `acquireForRoute`。`publish` / `defer unpublish` / `runOnInvocation(..., idle_machine=true)`。
 - **所有权 / 错误 / 调用**：只对 `host_eligible` 路由 publish。
 
-### `acquireForRoute` (`src/exec/call_site.zig:466`)
+### `acquireForRoute` (`src/exec/call_site.zig:462`)
 
 - **签名**：`noinline fn acquireForRoute( rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, route: *BytecodeRoute, ) HostError!*host_invocation_mod.HostInvocation`。
 - **作用**：绑定站点到常驻 invocation 的冷臂。
 - **实现**：`HostInvocation.acquire`，写 `route.host` 与 `host_epoch`。
 - **所有权 / 错误 / 调用**：首次创建或其它调用者 retarget 后走这里。
 
-### `resolveRoute` (`src/exec/call_site.zig:483`)
+### `resolveRoute` (`src/exec/call_site.zig:479`)
 
 - **签名**：`inline fn resolveRoute( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, ) Route`。
 - **作用**：解析一次：class + inline 资格 + 活动 invocation + host 资格。

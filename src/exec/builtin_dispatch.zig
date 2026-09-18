@@ -967,7 +967,10 @@ pub inline fn invokeTypedGetterFast(entry: *const core.NativeEntry, this_value: 
             const f: native_legacy.LeafSelfToI32 = @ptrCast(entry.target);
             return core.JSValue.int32(f(self_ptr));
         },
-        else => unreachable,
+        // An embedder may register a typed accessor with any other `sig`
+        // through `zjs.native.Class`. Miss gracefully like `invokeLeafFast`
+        // instead of calling through a mismatched prototype.
+        else => return null,
     }
 }
 
@@ -988,7 +991,10 @@ pub inline fn invokeTypedSetterFast(entry: *const core.NativeEntry, this_value: 
             const x = marshalI32(new_value) orelse return .value_miss;
             f(self_ptr, x);
         },
-        else => unreachable,
+        // Same guard as `invokeTypedGetterFast`: an unsupported `sig` from an
+        // embedder-registered typed setter reports a miss (the caller raises
+        // the class TypeError) rather than calling a mismatched prototype.
+        else => return .receiver_miss,
     }
     return .stored;
 }
@@ -1137,8 +1143,14 @@ inline fn leafStringReceiver(this_value: core.JSValue) ?*const core.string.Strin
 /// One-code-unit result string (charAt / at). A latin1 unit is a load from
 /// the runtime's single-code-unit string table (`singleByteString`), so the
 /// leaf arm allocates nothing at all after the first request for that unit.
-/// Allocation failure is a miss: the fallback repeats the allocation and
-/// reports it through the legacy error path.
+///
+/// Allocation failure is deliberately reported as a miss rather than an
+/// error: this arm and its VM callers (`invokeMethodLeafFastEntry`) are
+/// `?JSValue`, with no error channel, and the fallback is the legacy
+/// `charAt`/`at` body that immediately repeats the very same allocation and
+/// raises the OOM there. The accepted cost is that an OOM which is over by
+/// the time the fallback re-allocates shows up only as one extra slow-path
+/// run instead of an error.
 inline fn leafCodeUnitString(rt: *core.JSRuntime, unit: u16) ?core.JSValue {
     if (unit < 0x100) {
         const str = rt.singleByteString(@intCast(unit)) catch return null;
@@ -1249,6 +1261,13 @@ noinline fn invokeLeafFallback(
 /// Numeric C-proto calls mirror QuickJS's primitive JS_ToFloat64 fast path.
 /// Strings, objects, BigInts and Symbols deliberately miss: the record's cold
 /// typed generic+magic fallback owns their full, observable ToNumber semantics.
+/// Lenient `f64` marshal used ONLY by the two `f64`-returning K1 leaf arms
+/// (`sig_f64_to_f64` / `sig_f64_f64_to_f64`). Unlike the canonical
+/// `leafF64Arg` (FNABI §15.3: any JS Number, nothing else) it also accepts
+/// the values whose ToNumber is exact and allocation-free -- a missing
+/// argument and `undefined` (NaN), `null` (0) and booleans (0/1) -- so the
+/// Math leaves keep the fast arm for them instead of paying the managed
+/// fallback. Every other tag still misses.
 inline fn primitiveF64Arg(args: []const core.JSValue, index: usize) ?f64 {
     if (index >= args.len) return std.math.nan(f64);
     const value = args[index];

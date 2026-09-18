@@ -26,7 +26,7 @@ gc: weak refs current 3, finalizer queue current 4
 gc: major pause p50 1 ns, p95 2 ns, p99 3 ns, max 4 ns, retained 9 of 50 pauses
 gc: allocation histogram publications 100, payload bytes 200, p50-below-large 16, p95-below-large 32, p99-below-large 64, max-small 128, covered-by-small 90/95 below-large, large 5
 gc: block heap committed 4000 live 500 committed/live-x1000 8000 superblocks 2 large maps 1
-gc: block heap deferred block runs 12, hot reuse published 13, reopened 14, bitmap reclaimed cells 15
+gc: block heap hot reuse published 13, reopened 14, bitmap reclaimed cells 15
 gc: major threshold resets growth 11, small-heap-floor 7
 gc: block heap page returns cumulative decommitted 6000, recommitted 700
 gc: block heap decommit checks 8, released blocks cumulative 9, current bytes 5300, max batch bytes 1000
@@ -38,7 +38,7 @@ gc: minor collections 22, reclaimed 23, promoted-by-minor 24, promoted-all 25, r
 gc: major retirement commits 27, abandons 28, current state clean
 gc: generational barrier calls 29, exit young-owner 10, exit old-target 5, remembered-owner 14
 gc: exact-target marking barrier calls 40, exit marked-target 10, exit unpublished-owner 2, exit unpublished-target 3, requeued-owner 4, shaded-target 21
-gc: incremental doomed condemned headers 48, destroyed counted objects 47, parked entries drained 46, parked-drain slices 6
+gc: incremental doomed condemned headers 48, destroyed counted objects 47
 gc: minor stw total 36 ns, mean 32 ns, max 33 ns
 gc: minor pause p50 30 ns, p95 34 ns, p99 35 ns, max 36 ns over 21 retained of 22 samples
 gc: minor phase totals clear 1, roots 2, conservative 3, remembered 4, trace 5, sweep+destroy 6, promote 7, other 8 ns
@@ -86,7 +86,6 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(parsed["blockHeap"]["currentDecommitted"], 5300)
         self.assertEqual(parsed["blockHeap"]["thresholdGrowthResets"], 11)
         self.assertEqual(parsed["blockHeap"]["thresholdSmallHeapFloorResets"], 7)
-        self.assertEqual(parsed["blockHeap"]["deferredBlockRuns"], 12)
         self.assertEqual(parsed["blockHeap"]["hotReusePublished"], 13)
         self.assertEqual(parsed["blockHeap"]["reopened"], 14)
         self.assertEqual(parsed["blockHeap"]["bitmapReclaimedCells"], 15)
@@ -95,7 +94,7 @@ class GcStatsSnapshotTests(unittest.TestCase):
         self.assertEqual(parsed["barriers"]["marking"]["exitMarkedTarget"], 10)
         self.assertEqual(parsed["barriers"]["totalCalls"], 69)
         self.assertEqual(parsed["doomed"]["condemnedHeaders"], 48)
-        self.assertEqual(parsed["doomed"]["parkedEntriesDrained"], 46)
+        self.assertEqual(parsed["doomed"]["destroyedCountedObjects"], 47)
         self.assertEqual(parsed["marking"]["clearMarksNonBlockHeaders"], 19)
         self.assertEqual(parsed["marking"]["retiredYoungBlocks"], 7)
         self.assertEqual(parsed["marking"]["retiredRememberedSets"], 6)
@@ -200,9 +199,10 @@ class GcStatsSnapshotTests(unittest.TestCase):
                 if path in retired:
                     continue
                 self.assertIn(path, leaves, f"schema v{version} leaf {path}")
+        # v10 adds no leaf; v9 is the newest version that does.
         self.assertIn(
             "blockHeap.bitmapReclaimedCells",
-            snapshot.SCHEMA_ADDED_LEAVES[snapshot.SCHEMA_VERSION],
+            snapshot.SCHEMA_ADDED_LEAVES[9],
         )
 
     def test_registered_schema_removals_name_leaves_the_emitter_dropped(self) -> None:
@@ -214,8 +214,9 @@ class GcStatsSnapshotTests(unittest.TestCase):
             self.assertLessEqual(version, snapshot.SCHEMA_VERSION)
             for path in paths:
                 self.assertNotIn(path, leaves, f"schema v{version} leaf {path}")
+        self.assertIn("collector.zeroRefDrains", snapshot.SCHEMA_REMOVED_LEAVES[9])
         self.assertIn(
-            "collector.zeroRefDrains",
+            "blockHeap.deferredBlockRuns",
             snapshot.SCHEMA_REMOVED_LEAVES[snapshot.SCHEMA_VERSION],
         )
 

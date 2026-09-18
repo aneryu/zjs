@@ -1153,7 +1153,7 @@ pub fn atomicsRunAsyncWaiterCompletion(
         // chained .then promise). Pre-setting the result here would make that
         // drain early-return (promiseResult != null) and drop the chain after the
         // first reaction. The callback receives the settle value via the reaction
-        // arg below; free the now-unused result_value.
+        // arg below, which is where `result_value` ends up.
     } else {
         result_slot.* = result_value;
         promise_object.promiseIsRejectedSlot().* = false;

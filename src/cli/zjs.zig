@@ -639,8 +639,6 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     if (perf_profile) |profile| {
         try stderr.print(",\n", .{});
         try dumpPerfJsonOpcodeProfile(stderr, profile);
-        try stderr.print(",\n", .{});
-        try dumpPerfJsonIc(stderr, profile);
     }
     try stderr.print("\n}}\n", .{});
     try stderr.flush();
@@ -669,6 +667,22 @@ fn dumpPerfJsonMetrics(stderr: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage, t
     }, "\n  }");
 }
 
+/// Whether the `OpcodeProfile` counters below are known to have no increment
+/// site, so the dumps must say so instead of printing a `0` that reads like a
+/// measurement.
+///
+/// The name is deliberately not `opcode_profile_build_enabled` even though it
+/// tracks it: the flag is what *enables* profiling, but the counters it leaves
+/// empty are the ones listed here. In a profiling build the tail-call
+/// dispatcher only calls `OpcodeProfile.noteDispatch` -- counts, never timings,
+/// because a scope cannot span an `always_tail` chain (see
+/// `src/exec/vm_profile.zig`) -- and nothing increments the value-dup,
+/// call-frame or global-lookup counters on that path. `--profile-opcodes` is
+/// the only way to reach these dumps for real and it requires a profiling
+/// build, so the `false` arm is exercised only by the unit tests at the bottom
+/// of this file, which poke the counters by hand and then expect raw values.
+const profile_counters_uninstrumented = zjs.opcode_profile_build_enabled;
+
 fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
     ensureOpcodeProfileNames();
 
@@ -687,28 +701,27 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
 
     try output.print("  \"opcode_profile\": {{\n", .{});
     try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try output.writeAll("    \"measured_ns\": \"not instrumented\",\n");
     } else {
         try output.print("    \"measured_ns\": {d},\n", .{profile.totalOpcodeNanos()});
     }
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try output.writeAll("    \"value_dups\": \"not instrumented\",\n");
     } else {
         try output.print("    \"value_dups\": {d},\n", .{profile.value_dup_count});
     }
     try output.print("    \"value_frees\": {d},\n", .{profile.value_free_count});
     try output.print("    \"prop_lookups\": {d},\n", .{profile.prop_lookup_count});
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try output.writeAll("    \"global_lookups\": \"not instrumented\",\n");
     } else {
         try output.print("    \"global_lookups\": {d},\n", .{profile.global_lookup_count});
     }
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.writeAll("    \"allocations\": \"not instrumented\",\n");
+    try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
+    if (comptime profile_counters_uninstrumented) {
         try output.writeAll("    \"call_frames\": \"not instrumented\",\n");
     } else {
-        try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
         try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
     }
     try output.writeAll("    \"opcodes\": [");
@@ -719,7 +732,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
         try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
         try writeJsonString(output, display_name);
-        if (comptime zjs.opcode_profile_build_enabled) {
+        if (comptime profile_counters_uninstrumented) {
             try output.print(", \"count\": {d}, \"nanos\": \"not instrumented\", \"avg_ns\": \"not instrumented\", \"slow\": \"not instrumented\"}}", .{row.count});
         } else {
             try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
@@ -727,50 +740,6 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
     }
     if (row_count != 0) try output.writeByte('\n');
     try output.writeAll("    ]\n  }");
-}
-
-fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  \"ic\": {{\n", .{});
-        try output.writeAll("    \"hit\": \"not instrumented\",\n");
-        try output.writeAll("    \"miss\": \"not instrumented\",\n");
-        try output.writeAll("    \"invalidate\": \"not instrumented\",\n");
-        try output.writeAll("    \"promote_poly\": \"not instrumented\",\n");
-        try output.writeAll("    \"promote_mega\": \"not instrumented\"\n");
-        try output.print("  }},\n", .{});
-        try output.writeAll("  \"ic_hit\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_miss\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_invalidate\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_promote_poly\": \"not instrumented\",\n");
-        try output.writeAll("  \"ic_promote_mega\": \"not instrumented\"");
-        return;
-    }
-    try output.print("  \"ic\": {{\n", .{});
-    try output.print("    \"hit\": {d},\n", .{profile.totalIcHit()});
-    try output.print("    \"miss\": {d},\n", .{profile.totalIcMiss()});
-    try output.print("    \"invalidate\": {d},\n", .{profile.totalIcInvalidate()});
-    try output.print("    \"promote_poly\": {d},\n", .{profile.totalIcPromotePoly()});
-    try output.print("    \"promote_mega\": {d}\n", .{profile.totalIcPromoteMega()});
-    try output.print("  }},\n", .{});
-    try output.writeAll("  \"ic_hit\": ");
-    try writeJsonU64Array(output, &profile.ic_hit);
-    try output.writeAll(",\n  \"ic_miss\": ");
-    try writeJsonU64Array(output, &profile.ic_miss);
-    try output.writeAll(",\n  \"ic_invalidate\": ");
-    try writeJsonU64Array(output, &profile.ic_invalidate);
-    try output.writeAll(",\n  \"ic_promote_poly\": ");
-    try writeJsonU64Array(output, &profile.ic_promote_poly);
-    try output.writeAll(",\n  \"ic_promote_mega\": ");
-    try writeJsonU64Array(output, &profile.ic_promote_mega);
-}
-
-fn writeJsonU64Array(output: *std.Io.Writer, values: *const [zjs.OpcodeProfile.opcode_count]u64) !void {
-    try output.writeByte('[');
-    for (values.*, 0..) |value, index| {
-        if (index != 0) try output.writeByte(',');
-        try output.print("{d}", .{value});
-    }
-    try output.writeByte(']');
 }
 
 fn commandPerfFile(command: Command) []const u8 {
@@ -991,8 +960,6 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
     try writeCounterLine(writer, &.{
         .{ "gc: incremental doomed condemned headers ", cs.doomed_condemned_headers },
         .{ ", destroyed counted objects ", cs.doomed_destroyed_objects },
-        .{ ", parked entries drained ", cs.doomed_parked_entries_drained },
-        .{ ", parked-drain slices ", cs.doomed_parked_drain_slices },
     }, "\n");
     try writeCounterLine(writer, &.{
         .{ "gc: incremental major cycles completed ", cs.cycles_completed },
@@ -1042,8 +1009,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
         .{ " large maps ", st.large_maps },
     }, "\n");
     try writeCounterLine(writer, &.{
-        .{ "gc: block heap deferred block runs ", st.deferred_block_runs_completed },
-        .{ ", hot reuse published ", st.hot_blocks_published },
+        .{ "gc: block heap hot reuse published ", st.hot_blocks_published },
         .{ ", reopened ", st.hot_blocks_reopened },
         .{ ", bitmap reclaimed cells ", st.bitmap_reclaimed_cells },
     }, "\n");
@@ -1338,40 +1304,29 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
 
     try output.print("\nZJS opcode profile\n", .{});
     try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try output.print("  measured ns:      not instrumented\n", .{});
     } else {
         try output.print("  measured ns:      {d}\n", .{profile.totalOpcodeNanos()});
     }
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try output.print("  value dups:       not instrumented\n", .{});
     } else {
         try output.print("  value dups:       {d}\n", .{profile.value_dup_count});
     }
     try output.print("  value frees:      {d}\n", .{profile.value_free_count});
     try output.print("  prop lookups:     {d}\n", .{profile.prop_lookup_count});
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try output.print("  global lookups:   not instrumented\n", .{});
     } else {
         try output.print("  global lookups:   {d}\n", .{profile.global_lookup_count});
     }
-    if (comptime zjs.opcode_profile_build_enabled) {
-        try output.print("  allocations:      not instrumented\n", .{});
+    try output.print("  allocations:      {d}\n", .{profile.alloc_count});
+    if (comptime profile_counters_uninstrumented) {
         try output.print("  call frames:      not instrumented\n", .{});
-        try output.print("  ic hits:          not instrumented\n", .{});
-        try output.print("  ic misses:        not instrumented\n", .{});
-        try output.print("  ic invalidations: not instrumented\n", .{});
-        try output.print("  ic promote poly:  not instrumented\n", .{});
-        try output.print("  ic promote mega:  not instrumented\n", .{});
         try output.print("\nOPCODE                 COUNT          TOTAL_NS           AVG_NS             SLOW\n", .{});
     } else {
-        try output.print("  allocations:      {d}\n", .{profile.alloc_count});
         try output.print("  call frames:      {d}\n", .{profile.call_frame_count});
-        try output.print("  ic hits:          {d}\n", .{profile.totalIcHit()});
-        try output.print("  ic misses:        {d}\n", .{profile.totalIcMiss()});
-        try output.print("  ic invalidations: {d}\n", .{profile.totalIcInvalidate()});
-        try output.print("  ic promote poly:  {d}\n", .{profile.totalIcPromotePoly()});
-        try output.print("  ic promote mega:  {d}\n", .{profile.totalIcPromoteMega()});
         try output.print("\nOPCODE                 COUNT      TOTAL_NS       AVG_NS       SLOW\n", .{});
     }
 
@@ -1387,7 +1342,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
-        if (comptime zjs.opcode_profile_build_enabled) {
+        if (comptime profile_counters_uninstrumented) {
             try output.print("{s:<20} {d:>9} {s:>18} {s:>16} {s:>16}\n", .{ display_name, row.count, "not instrumented", "not instrumented", "not instrumented" });
         } else {
             try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
@@ -1624,16 +1579,15 @@ test "zjs perf json opcode profile includes counters and rows" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"opcode_profile\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"opcodes_executed\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"value_frees\": 1") != null);
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try std.testing.expect(std.mem.indexOf(u8, json, "\"value_dups\": \"not instrumented\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"global_lookups\": \"not instrumented\"") != null);
     } else {
         try std.testing.expect(std.mem.indexOf(u8, json, "\"value_dups\": 1") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"global_lookups\": 1") != null);
     }
-    if (comptime zjs.opcode_profile_build_enabled) {
+    if (comptime profile_counters_uninstrumented) {
         try std.testing.expect(std.mem.indexOf(u8, json, "\"measured_ns\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"allocations\": \"not instrumented\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"call_frames\": \"not instrumented\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"nanos\": \"not instrumented\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"avg_ns\": \"not instrumented\"") != null);
@@ -1642,14 +1596,9 @@ test "zjs perf json opcode profile includes counters and rows" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"get_var\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"push_i16\"") != null);
 
-    if (comptime zjs.opcode_profile_build_enabled) {
-        var ic_buffer: [1024]u8 = undefined;
-        var ic_writer = std.Io.Writer.fixed(&ic_buffer);
-        try dumpPerfJsonIc(&ic_writer, &profile);
-        const ic_json = ic_writer.buffered();
-        try std.testing.expect(std.mem.indexOf(u8, ic_json, "\"hit\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, ic_json, "\"ic_hit\": \"not instrumented\"") != null);
-    }
+    // `allocations` is wired up in every build (JSRuntime.setOpcodeProfile points
+    // the allocator's counter at it), so it is always a real number.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"allocations\": 0") != null);
 }
 
 test "zjs args accept module file" {
@@ -1809,7 +1758,7 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
         \\gc: minor young-at-start mean 2, max 34
         \\gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)
         \\gc: exact-target marking barrier calls 102, exit marked-target 103, exit unpublished-owner 104, exit unpublished-target 105, requeued-owner 106, shaded-target 101
-        \\gc: incremental doomed condemned headers 121, destroyed counted objects 122, parked entries drained 123, parked-drain slices 124
+        \\gc: incremental doomed condemned headers 121, destroyed counted objects 122
         \\gc: incremental major cycles completed 107, aborted 108, forced 114, mark steps 109, cycle STW last 110 ns max 113 ns
         \\gc: cycle envelope measured 115, skipped 116, max-P/T S 117, T 118, B 119, P 120, B/T-x1000000 1008475, P/T-x1000000 1016950, P/S-x1000000 1025642, forced 114
         \\gc: incremental STW phase-segment max ns begin 0, increment 0, destroy 0, finish 0
@@ -1908,17 +1857,17 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
         \\gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free
         \\gc: block census total 0 0 0 0 0 0 0 0 0 0 0 0 0 0
         \\gc: block heap committed 101 live 0 committed/live-x1000 0 superblocks 103 large maps 104
-        \\gc: block heap deferred block runs 115, hot reuse published 116, reopened 117, bitmap reclaimed cells 127
-        \\gc: block heap hot publish rejects empty 118, capacity 119, active 120, doomed 121, young 122, listed 123, decommitted 124, cached-k 125, k-rejected reopens 126
+        \\gc: block heap hot reuse published 115, reopened 116, bitmap reclaimed cells 126
+        \\gc: block heap hot publish rejects empty 117, capacity 118, active 119, doomed 120, young 121, listed 122, decommitted 123, cached-k 124, k-rejected reopens 125
         \\gc: major threshold resets growth 29, small-heap-floor 30
         \\gc: object destructor calls 32, plain-object calls 33, plain objects carrying the finalizer bit 34
         \\gc: block heap page returns cumulative decommitted 109, recommitted 110
-        \\gc: block heap medium superblocks returned 128, bytes 129
+        \\gc: block heap medium superblocks returned 127, bytes 128
         \\gc: block heap decommit checks 111, released blocks cumulative 0, current bytes 0, max batch bytes 112
         \\gc: process heap trim attempts 113, successes 114
-        \\gc: incremental subphase ns totals begin-clear 226, begin-precise-seed 227, begin-conservative-seed 228, begin-retire 229, finish-remark-total 230, finish-conservative-seed-subset 231, finish-weak 232, finish-condemn 233
-        \\gc: incremental subphase reconciliation finish-init 234, finish-tail 235; begin STW 10000 - subphases 910 = other 9090 ns; finish STW 40000 - subphases 1164 = other 38836 ns
-        \\gc: incremental subphase work totals retired non-block headers 236, retired young blocks 237, retired remembered sets 238, clearMarks non-block headers 239
+        \\gc: incremental subphase ns totals begin-clear 224, begin-precise-seed 225, begin-conservative-seed 226, begin-retire 227, finish-remark-total 228, finish-conservative-seed-subset 229, finish-weak 230, finish-condemn 231
+        \\gc: incremental subphase reconciliation finish-init 232, finish-tail 233; begin STW 10000 - subphases 902 = other 9098 ns; finish STW 40000 - subphases 1154 = other 38846 ns
+        \\gc: incremental subphase work totals retired non-block headers 234, retired young blocks 235, retired remembered sets 236, clearMarks non-block headers 237
         \\gc: collection entries total 321, major completed 322, minor completed 0, failed 326
         \\gc: collector counted objects freed 328 (excludes bytecode)
         \\gc: heap live 303 bytes, account peak 302 bytes

@@ -193,164 +193,164 @@
 
 - **签名**：`pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.WeakCollectionEntry) !void`。
 - **作用**：追加弱身份条目并登记弱引用持有对象。
-- **实现**：重算identity hash，retainWeakIdentity；记录原holder状态，必要时先注册，预留索引与entry容量，再扩slice写条目并链入，最后再次注册holder。
-- **所有权 / 错误 / 调用**：失败释放本次identity保留，并仅撤销本次新增holder；扩容后的容量/桶表可保留。末尾注册在前面已注册且无外部干扰时是无分配幂等操作；不能把这些errdefer泛称任意状态完整回滚。retain只对符号弱引用记账，对对象identity为空操作，不把弱目标变成强GC边。
+- **实现**：重算identity hash，retainWeakIdentity；记录原holder状态，必要时先注册（配errdefer撤销），预留索引与entry容量，再扩slice写条目并链入。
+- **所有权 / 错误 / 调用**：失败释放本次identity保留，并仅撤销本次新增holder；扩容后的容量/桶表可保留，不能把这些errdefer泛称任意状态完整回滚。retain只对符号弱引用记账，对对象identity为空操作，不把弱目标变成强GC边。原先末尾那次无条件的 registerBorrowedReferenceHolder 已删除：注册本身幂等，而它一旦失败会触发前面的 errdefer 去注销一个条目已经链入桶的 holder，回滚并不对称。
 
-### `ensureWeakIndexForInsert` (`src/core/collection.zig:330`)
+### `ensureWeakIndexForInsert` (`src/core/collection.zig:333`)
 
 - **签名**：`fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void`。
 - **作用**：准备弱表桶索引。
 - **实现**：next_count<8返回；无桶时按负载创建，有桶且负载超过3/4时翻倍一次。
 - **所有权 / 错误 / 调用**：与强表使用同一对象bucket槽，但按弱entry身份重建。不会缩小已有桶；大幅跳增不保证一次翻倍足够，普通算术依赖规模前提。
 
-### `rebuildWeakIndex` (`src/core/collection.zig:342`)
+### `rebuildWeakIndex` (`src/core/collection.zig:345`)
 
 - **签名**：`fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void`。
 - **作用**：按所有弱条目identity重建桶链。
 - **实现**：分配清空新heads，逐条重算hash、重置hash_next并头插，最后释放旧heads、替换槽。
 - **所有权 / 错误 / 调用**：无active/目标存活过滤，不验证identity；分配失败保留原表。条目顺序、weak identity保留计数及holder登记不变。
 
-### `linkWeakEntry` (`src/core/collection.zig:360`)
+### `linkWeakEntry` (`src/core/collection.zig:363`)
 
 - **签名**：`fn linkWeakEntry(object: *core.Object, index: usize) void`。
 - **作用**：将弱条目当前下标头插到其桶。
 - **实现**：无桶直接返回；否则用存储hash定位，修改条目hash_next和桶头。
 - **所有权 / 错误 / 调用**：前提是index有效且尚未在链中；不注册holder、保留identity或验证目标存活。
 
-### `unlinkWeakEntry` (`src/core/collection.zig:372`)
+### `unlinkWeakEntry` (`src/core/collection.zig:375`)
 
 - **签名**：`fn unlinkWeakEntry(object: *core.Object, index: usize) void`。
 - **作用**：从一个弱桶链摘掉指定条目下标。
 - **实现**：无桶或index越界返回；沿该条目hash对应链寻找，命中则前驱绕过；遇越界链下标截断链。
 - **所有权 / 错误 / 调用**：不删除数组元素或release identity，也不检测环；swap-remove分别摘掉victim和尾部mover后另行重新链接。单桶查找成本取决于碰撞链长度。
 
-### `shouldCompactStrongEntries` (`src/core/collection.zig:405`)
+### `shouldCompactStrongEntries` (`src/core/collection.zig:408`)
 
 - **签名**：`fn shouldCompactStrongEntries(object: *core.Object) bool`。
 - **作用**：判断是否应压缩强表墓碑。
 - **实现**：有live cursor返回false；否则tombstones=len-active_count，须至少4且tombstones*2>=len。
 - **所有权 / 错误 / 调用**：只做判据，不压缩或缩容；依赖active_count<=len及计数一致。游标限制保护下标语义，不代表数组地址永远固定。
 
-### `compactStrongEntries` (`src/core/collection.zig:422`)
+### `compactStrongEntries` (`src/core/collection.zig:425`)
 
 - **签名**：`fn compactStrongEntries(object: *core.Object) void`。
 - **作用**：原地稳定压缩强表活条目并重连桶。
 - **实现**：按原顺序向前复制活项，空出尾部清成undefined key/value、inactive和sentinel；缩短slice并assert长度等于active_count。有桶则清桶并使用保存hash重新头插。
 - **所有权 / 错误 / 调用**：不分配、不释放entry容量，不重算键hash；调用方须先保证没有live cursor，本函数不检查这一条件。清尾避免旧长slice看到重复活项，但不让跨扩容或GC的旧借用自动安全。
 
-### `shrinkStrongStorage` (`src/core/collection.zig:463`)
+### `shrinkStrongStorage` (`src/core/collection.zig:466`)
 
 - **签名**：`fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void`。
 - **作用**：在强表显著缩小时尽力回收多余容量。
 - **实现**：以当前entry slice长度为live。entry容量>=32且live*4<=容量时，尝试缩到至少8且>=2*live的2幂；分配成功复制/替换/释放旧块。桶数>=32且满足相同稀疏条件时，再尝试按bucketCountForActiveCount缩桶并以存储hash重连。
 - **所有权 / 错误 / 调用**：两次分配分别catch失败，不让删除报错；entry缩容成功而桶缩容失败是允许状态。预期在压缩后调用：桶重连不筛active，函数也不检查游标。重新分配可使旧slice/指针失效，非原地减容量。
 
-### `removeStrongEntry` (`src/core/collection.zig:496`)
+### `removeStrongEntry` (`src/core/collection.zig:499`)
 
 - **签名**：`pub fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void`。
 - **作用**：删除活强条目，并按条件压缩与缩容。
 - **实现**：takeStrongEntry失败则返回；成功后仅shouldCompactStrongEntries为true才压缩，再尽力shrinkStrongStorage。
 - **所有权 / 错误 / 调用**：无可恢复错误返回；常规删除先留墓碑，不保证立即释放数组容量。无游标且达到墓碑阈值才搬动条目。
 
-### `rollbackLastStrongEntry` (`src/core/collection.zig:503`)
+### `rollbackLastStrongEntry` (`src/core/collection.zig:506`)
 
 - **签名**：`fn rollbackLastStrongEntry(object: *core.Object, index: usize) void`。
 - **作用**：撤销末尾活条目并缩短逻辑长度。
 - **实现**：assert index+1==len；takeStrongEntry成功后len=index，失败直接返回。
 - **所有权 / 错误 / 调用**：只支持末尾活条目：末尾已inactive时不会缩短。容量不回退、不销毁key/value堆对象或清空调用方值。
 
-### `rollbackStrongEntriesTo` (`src/core/collection.zig:510`)
+### `rollbackStrongEntriesTo` (`src/core/collection.zig:513`)
 
 - **签名**：`pub fn rollbackStrongEntriesTo(object: *core.Object, len: usize, active_count: usize) void`。
 - **作用**：撤回一段新增活尾项并恢复给定活计数。
 - **实现**：当当前len大于目标len时反复rollbackLastStrongEntry，最后直接写active_count。
 - **所有权 / 错误 / 调用**：要求被撤销尾项均active，否则循环可能不前进；目标len/计数必须是合法快照。不会恢复已覆盖的旧值、桶容量或entry容量，目标len大于当前len也不会补齐。
 
-### `removeWeakEntry` (`src/core/collection.zig:530`)
+### `removeWeakEntry` (`src/core/collection.zig:533`)
 
 - **签名**：`pub fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !void`。
 - **作用**：从弱数组移除条目，用尾项填洞。
 - **实现**：要求数组非空且index有效；先摘victim桶链，非尾项时再摘尾项旧链，复制尾项到index、缩len并重链；最后destroy旧entry释放identity记账，按需prune holder。
 - **所有权 / 错误 / 调用**：当前函数虽返回!void，内部没有try或错误返回；prune也是void。无分配，但摘链需扫描桶链，不能称最坏O(1)。不清空逻辑范围外尾槽、不缩容量。
 
-### `clearStrongEntries` (`src/core/collection.zig:554`)
+### `clearStrongEntries` (`src/core/collection.zig:557`)
 
 - **签名**：`pub fn clearStrongEntries(object: *core.Object) void`。
 - **作用**：清空活强条目，同时保留可复用容量。
 - **实现**：len=0直接返回；active_count=0时仅在无游标时缩len。否则清桶与活计数，无游标则先缩len为0，再通过底层ptr把原活槽写成undefined/inactive；有游标保留墓碑长度。
 - **所有权 / 错误 / 调用**：不立即释放key/value堆分配，不shrink entry或bucket容量；仅解除这些槽的GC边。早退路径依赖原有计数/桶一致性，不是修复损坏状态的操作。
 
-### `takeStrongEntry` (`src/core/collection.zig:586`)
+### `takeStrongEntry` (`src/core/collection.zig:589`)
 
 - **签名**：`fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEntry`。
 - **作用**：摘除活条目并返回其值副本。
 - **实现**：越界或inactive返回null；否则unlink，保存旧entry，把槽写成undefined key/value、inactive与sentinel；活计数非0才减1。
 - **所有权 / 错误 / 调用**：不缩slice、不释放容量；返回值没有额外root/retain，原槽已不再追踪key/value。返回副本的hash_next仍是原链数据，不是新可链接条目保证。
 
-### `clearWeakEntries` (`src/core/collection.zig:597`)
+### `clearWeakEntries` (`src/core/collection.zig:600`)
 
 - **签名**：`pub fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void`。
 - **作用**：内部清空弱集合条目并释放identity记账。
 - **实现**：从尾向前先缩len再entry.destroy；结束后清空heads并prune holder。
 - **所有权 / 错误 / 调用**：保留entry和bucket分配，不逐槽置空；不暴露标准WeakMap.clear方法，不能把内部helper当作JS API。prune只在无其他借用引用时注销holder。
 
-### `weakKeyIdentityRegister` (`src/core/collection.zig:614`)
+### `weakKeyIdentityRegister` (`src/core/collection.zig:617`)
 
 - **签名**：`pub fn weakKeyIdentityRegister(rt: *core.JSRuntime, value: core.JSValue) !?usize`。
 - **作用**：为插入路径取得可弱持有键的identity。
 - **实现**：canBeHeldWeakly失败返回null；否则weakIdentityFromValue对Symbol编码(atom<<1)|1，对有效Object登记runtime身份；对象候选还检查GC header kind。
 - **所有权 / 错误 / 调用**：对象登记可能失败；非注册Symbol直接编码不必新增对象identity。此步骤本身不retainWeakIdentity，条目append才负责符号弱引用记账。
 
-### `weakKeyIdentityPeek` (`src/core/collection.zig:622`)
+### `weakKeyIdentityPeek` (`src/core/collection.zig:625`)
 
 - **签名**：`pub fn weakKeyIdentityPeek(rt: *core.JSRuntime, value: core.JSValue) ?usize`。
 - **作用**：查询键identity而不创建对象登记。
 - **实现**：先canBeHeldWeakly过滤；Symbol直接编码，Object走peekWeakObjectIdentity，从未登记对象返回null。
 - **所有权 / 错误 / 调用**：只读无分配；Symbol可在从未插入弱集合时也返回identity，所以非null不证明存在条目。对象/符号目标活性仍由其他机制决定。
 
-### `sweepWeakEntries` (`src/core/collection.zig:631`)
+### `sweepWeakEntries` (`src/core/collection.zig:634`)
 
 - **签名**：`pub fn sweepWeakEntries( rt: *core.JSRuntime, object: *core.Object, context: ?*anyopaque, isLive: *const fn (?*anyopaque, usize) bool, ) !usize`。
 - **作用**：根据外部存活谓词删除弱条目。
 - **实现**：先要求WeakMap/WeakSet，否则TypeError；从i=0扫描，存活则i++，不存活则removeWeakEntry并增加删除数，不递增i以继续检查交换来的尾项。
 - **所有权 / 错误 / 调用**：返回删除数量，不自行标记或计算ephemeron闭包；isLive及context借用，谓词应遵守GC遍历期间不破坏集合的合同。
 
-### `setWeakMapEntryByIdentityChecked` (`src/core/collection.zig:655`)
+### `setWeakMapEntryByIdentityChecked` (`src/core/collection.zig:658`)
 
 - **签名**：`pub fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void`。
 - **作用**：在已验证的WeakMap中按identity更新或插入值。
 - **实现**：findWeakEntry命中则直接替换entry.value；未命中创建WeakCollectionEntry并appendWeakEntry。
 - **所有权 / 错误 / 调用**：Checked意为调用方已校验，不在此检查class/identity。命中分支没有显式GC屏障或重新登记holder；值的存活由弱集合GC/ephemeron规则处理，不是无条件强边。
 
-### `setWeakMapEntryByIdentity` (`src/core/collection.zig:667`)
+### `setWeakMapEntryByIdentity` (`src/core/collection.zig:670`)
 
 - **签名**：`pub fn setWeakMapEntryByIdentity(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void`。
 - **作用**：带class检查的弱表identity写入口。
 - **实现**：class非weakmap返回TypeError；否则委托Checked版本。
 - **所有权 / 错误 / 调用**：不验证identity来自合法键、已登记或仍存活，调用方负责；追加错误传播。
 
-### `setWeakMapEntry` (`src/core/collection.zig:674`)
+### `setWeakMapEntry` (`src/core/collection.zig:677`)
 
 - **签名**：`pub fn setWeakMapEntry(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void`。
 - **作用**：从键值解析身份后更新WeakMap。
 - **实现**：要求WeakMap class；weakKeyIdentityRegister返回null则TypeError，得到identity后委托Checked。
 - **所有权 / 错误 / 调用**：键登记成功而后续append失败时不会回滚对象identity登记；无用户属性调用，不是一般JS WeakMap方法包装。
 
-### `mapGetLatin1PrefixIntValue` (`src/core/collection.zig:685`)
+### `mapGetLatin1PrefixIntValue` (`src/core/collection.zig:688`)
 
 - **签名**：`pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_value: i32) ?core.JSValue`。
 - **作用**：按Latin1前缀加有符号十进制i32查Map值。
 - **实现**：非Map返回null；formatInt32写栈上16字节缓冲，计算前缀seed与拼接hash，调用concat查找；命中返回entry.value副本。
 - **所有权 / 错误 / 调用**：支持负整数文本；不创建拼接key，但比较现有rope可能展开，因此连miss也不能统称无分配。返回无RC dup或独立根，null与存储的JS null值不同。
 
-### `mapSetLatin1PrefixInt32Range` (`src/core/collection.zig:698`)
+### `mapSetLatin1PrefixInt32Range` (`src/core/collection.zig:701`)
 
 - **签名**：`pub fn mapSetLatin1PrefixInt32Range( rt: *core.JSRuntime, object: *core.Object, prefix: []const u8, start: i32, limit: i32, ) !void`。
 - **作用**：批量设置prefix加十进制i对应的Map值为i。
 - **实现**：非Map、start<0或limit<start为TypeError；空范围返回。按最大新增数预留entry与索引，再保存len/活计数。循环命中覆盖value，缺失则创建Latin1拼接字符串并追加；首次追加后设inserted，错误时回滚新增尾项。
-- **所有权 / 错误 / 调用**：回滚只删除新插入项，不恢复已覆盖的旧值或预留容量；循环中后续索引仍可继续扩容。成功后清inserted仅是局部标志，errdefer本来也不在正常返回执行。没有函数级显式根帧。
+- **所有权 / 错误 / 调用**：回滚只删除新插入项，不恢复已覆盖的旧值或预留容量；循环中后续索引仍可继续扩容。没有函数级显式根帧。（末尾那条 `if (inserted) inserted = false;` 是无效果的死语句，已删除。）
 
-### `stringFromValue` (`src/core/collection.zig:744`)
+### `stringFromValue` (`src/core/collection.zig:745`)
 
 - **签名**：`fn stringFromValue(value: core.JSValue) ?*core.string.String`。
 - **作用**：为字符串比较取得flat String body。

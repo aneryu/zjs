@@ -2409,10 +2409,6 @@ pub const GC = enum(u8) {
     Z,
     C,
 
-    pub fn index(self: @This()) usize {
-        return @intFromEnum(self);
-    }
-
     pub fn count() usize {
         return @typeInfo(@This()).@"enum".fields.len;
     }
@@ -2640,10 +2636,6 @@ pub const Script = enum(u16) {
     Yezidi,
     Yi,
     Zanabazar_Square,
-
-    pub fn index(self: @This()) usize {
-        return @intFromEnum(self);
-    }
 
     pub fn count() usize {
         return @typeInfo(@This()).@"enum".fields.len;
@@ -2895,14 +2887,6 @@ pub const Prop = enum(u8) {
     XID_Continue,
     XID_Start,
     Cased1,
-
-    pub fn index(self: @This()) usize {
-        return @intFromEnum(self);
-    }
-
-    pub fn count() usize {
-        return @typeInfo(@This()).@"enum".fields.len;
-    }
 };
 
 pub const unicode_prop_name_table = [_]u8{
@@ -2988,10 +2972,6 @@ pub const SequenceProp = enum(u8) {
     RGI_Emoji_Tag_Sequence,
     RGI_Emoji_ZWJ_Sequence,
     RGI_Emoji,
-
-    pub fn index(self: @This()) usize {
-        return @intFromEnum(self);
-    }
 
     pub fn count() usize {
         return @typeInfo(@This()).@"enum".fields.len;

@@ -291,14 +291,16 @@ fn mathOpCall(
     return preparedOpCall(host_call.ctx, host_call.output, global, host_call.magic, host_call.args);
 }
 
-/// Realm-path scalar `Math.*` computation (ids 1..36), shared by the record
-/// handler (`mathOpCall`) and direct opcode helpers. The opcode helpers call
-/// this directly rather than through the record table's function pointer: the
-/// indirect call and table lookup measurably regress the hottest scalar math
-/// (Math.abs/sqrt/floor) by ~5%, so this is the documented hybrid: Math keeps
-/// a specialized prepared branch while every other migrated domain unifies on
-/// the table. Always invoked with a realm `global`; the bare-runtime fallback
-/// stays in `mathOpCall`.
+/// Realm-path scalar `Math.*` computation (ids 1..36). Its two callers are
+/// both in this file — the record handler (`mathOpCall`) and the min/max
+/// opcode helper (`mathMinMaxDirect`) — and they call it directly rather than
+/// through the record table's function pointer: the indirect call and table
+/// lookup measurably regress the hottest scalar math (Math.abs/sqrt/floor) by
+/// ~5%, so this is the documented hybrid: Math keeps a specialized prepared
+/// branch while every other migrated domain unifies on the table. It stays
+/// `pub` for that opcode-helper contract, not for a current out-of-file caller.
+/// Always invoked with a realm `global`; the bare-runtime fallback stays in
+/// `mathOpCall`.
 pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, id: u32, args: []const core.JSValue) HostError!core.JSValue {
     const number = switch (id) {
         1 => @abs(try mathArg(ctx, output, global, args, 0)),
