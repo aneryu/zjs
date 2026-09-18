@@ -1,7 +1,7 @@
 # Public API Contract
 
 This document is the active public Zig API authority for embedders. Keep it in
-sync with `src/root.zig`, `src/binding/`, and `src/event_loop.zig`. The
+sync with `src/root.zig`, `src/js_context.zig`, `src/native.zig`, and `src/event_loop.zig`. The
 name lists in `src/tests/embedding_examples.zig` are the executable check:
 adding or removing a public name must update those arrays in the same
 commit. They are not a freeze of the API, and they are not the removed

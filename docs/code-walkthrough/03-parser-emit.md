@@ -15,7 +15,7 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **签名**：`fn rollbackEmission(self: *State, snapshot: EmissionSnapshot) void`。
 - **作用**：把一次 parser 阶段发射期间写过的所有可失败流（字节码、atom 操作数、source_loc、label 计数、last_opcode 记号）退回快照点，使 OOM 失败不留半成品。
 - **实现**：按 `emit_to_function_def` 选 `curFunc()` 或 `self.function` 作为目标，依次 `truncateAtomOperands` / `truncateSourceLocs` / 截断字节码（FunctionDef 侧是 `truncateByteCode`，root 侧是 `truncateCode`）；再 `setParserLabelCount(snapshot.label_count)`、写回 `curFunc().last_opcode_pos` 与 `self.last_opcode_source_offset`。（增量维护的 flow-tail 摘要 `FlowTailSummary` 已随 phase-1 原始字节后端一起删除，这里不再有摘要要作废。）与 QuickJS 的差别也写在 doc 注释里：qjs 在 DynBuf 失败后毒化整个编译且不再恢复，zjs 返回 OOM 并保持 runtime 可用，因此绝不能让任何消费者看到这份半发布的 code/atom/source/provenance 状态。
-- **所有权 / 错误 / 调用**：只退长度，不释放也不重分配任何缓冲：`truncateAtomOperands` / `truncateSourceLocs` / `truncateByteCode`（root 侧 `truncateCode`）都只改 slice 的 len、保留容量。被丢掉的 atom 操作数只是 id——两个 `truncateAtomOperands`（`FunctionDefImpl` / `BytecodeImpl`）都只改 slice 长度，rc 时代那条 release 循环在 TGC S3-c 之后先变成空循环、本轮已删；编译期 atom 的存活统一由 `CompileAtomScope` 这个 GC RootProvider 负责，所以这里没有任何引用计数义务。不碰 `v2_builder`（Builder 有自己的 `snapshot`/`rollback`），也不碰已发布的 `FunctionBytecode`。无 error set，两处调用全在 errdefer 上：`parseReturnStatement`、`parseThrowStatement`。
+- **所有权 / 错误 / 调用**：只退长度，不释放也不重分配任何缓冲：`truncateAtomOperands` / `truncateSourceLocs` / `truncateByteCode`（root 侧 `truncateCode`）都只改 slice 的 len、保留容量。被丢掉的 atom 操作数只是 id——两个 `truncateAtomOperands`（`FunctionDefImpl` / `BytecodeImpl`）都只改 slice 长度，rc 时代那条 release 循环在 TGC S3-c 之后先变成空循环、本轮已删；编译期 atom 的存活统一由 `CompileAtomScope` 这个 GC RootProvider 负责，所以这里没有任何引用计数义务。不碰 `builder`（Builder 有自己的 `snapshot`/`rollback`），也不碰已发布的 `FunctionBytecode`。无 error set，两处调用全在 errdefer 上：`parseReturnStatement`、`parseThrowStatement`。
 
 ### `currentParserLabelCount` (`src/parser.zig:2839`)
 
@@ -43,14 +43,14 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **签名**：`fn emitFClosure8(self: *State, idx: u8) Error!void`。
 - **作用**：发「用子函数常量池下标造闭包」的指令，并在 phase-1 下避开与临时码撞号的短形式。
 - **实现**：`emit_phase1_temp` 为真时**故意不发短形式**：phase-1 临时 opcode 占用的编号区间与含 `fclosure8` 的短 opcode 区重叠，于是先发宽形式 `Emitter.opU32(self, op.fclosure, idx)`，等临时码被擦除后由 `resolve_labels` 缩短（qjs `js_parse_function_decl2`，quickjs.c:36500）。否则（已是 phase-2 形态）直接 `Emitter.opU8(self, op.fclosure8, idx)`，立即数仍是子函数在父常量池里的下标。
-- **所有权 / 错误 / 调用**：不分配；两条臂都落到 `Emitter.opU32` / `Emitter.opU8` → `activeBuilder()`（即 `curFunc().v2_builder.?`，其缓冲长在 `fd.memory` 上），可能的失败是 Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode`，经 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。唯一调用方 `emitFClosure`（`:2946`）。
+- **所有权 / 错误 / 调用**：不分配；两条臂都落到 `Emitter.opU32` / `Emitter.opU8` → `activeBuilder()`（即 `curFunc().builder.?`，其缓冲长在 `fd.memory` 上），可能的失败是 Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode`，经 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。唯一调用方 `emitFClosure`（`:2946`）。
 
 ### `emitFClosure` (`src/parser.zig:2873`)
 
 - **签名**：`fn emitFClosure(self: *State, idx: u32) Error!void`。
 - **作用**：按常量池下标大小在 `fclosure8` 短形式与 `fclosure` 宽形式之间选一个。
 - **实现**：按常量池下标宽度选形式：`idx < 256` 时 `@intCast` 后转给 `emitFClosure8`（再由后者决定短/宽），否则直接 `Emitter.opU32(self, op.fclosure, idx)` 保留宽操作数（qjs `js_parse_function_decl2`，quickjs.c:36500）。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 6 处：`parseFunctionParamsAndBody`（`:12067`/`:12079`/`:12125`）、`parseArrowFunction`（`:12534`）、`emitClassFieldsInitValue`（`:14675`）、`emitClassStaticInitCall`（`:14706`），传入的都是子函数在父常量池里的下标。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 6 处：`parseFunctionParamsAndBody`（`:12067`/`:12079`/`:12125`）、`parseArrowFunction`（`:12534`）、`emitClassFieldsInitValue`（`:14675`）、`emitClassStaticInitCall`（`:14706`），传入的都是子函数在父常量池里的下标。
 
 ### `emitCloseLoc` (`src/parser.zig:2883`)
 
@@ -92,56 +92,56 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **签名**：`inline fn emitScopeGetVar(self: *State, atom_id: Atom) Error!void`。
 - **作用**：发「按名字读变量」：phase-1 是待解析的 `scope_get_var`，非 phase-1 是全局 `get_var`。
 - **实现**：一行转调 `emitScopeVar(atom_id, op.scope_get_var, op.get_var, true)`：phase-1 发带 atom + `scope_level` 的临时读取码，非 phase-1 发全局 `get_var`，两者都附 source marker。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。最热的一个：树内 39 处调用，从 `emitThisValue`（`:3062`/`:3072`）、`emitSuperThis`（`:5106`）、`parsePrimary`（`:6377`）到 `parseClass`（`:14957`/`:14958`），凡是「按名字读一个标识符」都走它。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。最热的一个：树内 39 处调用，从 `emitThisValue`（`:3062`/`:3072`）、`emitSuperThis`（`:5106`）、`parsePrimary`（`:6377`）到 `parseClass`（`:14957`/`:14958`），凡是「按名字读一个标识符」都走它。
 
 ### `emitScopeGetVarCheckThis` (`src/parser.zig:2957`)
 
 - **签名**：`inline fn emitScopeGetVarCheckThis(self: *State, atom_id: Atom) Error!void`。
 - **作用**：发带 this-TDZ 检查的按名读取（派生构造器里 `this` 未初始化要抛 ReferenceError）。
 - **实现**：转调 `emitScopeVar(atom_id, op.scope_get_var_checkthis, op.get_var, true)`。scope 侧换成带 this-TDZ 检查的读取形式（派生构造器里 `this` 未初始化要抛 ReferenceError），全局侧仍回落到普通 `get_var`。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 3 处，全在派生构造器/函数体的 `this` 读回上：`emitFunctionReturn`（`:10307`/`:10310`）与 `parseFunctionParamsAndBody`（`:11993`）。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 3 处，全在派生构造器/函数体的 `this` 读回上：`emitFunctionReturn`（`:10307`/`:10310`）与 `parseFunctionParamsAndBody`（`:11993`）。
 
 ### `emitScopePutVar` (`src/parser.zig:2961`)
 
 - **签名**：`inline fn emitScopePutVar(self: *State, atom_id: Atom) Error!void`。
 - **作用**：发「按名字写回变量」的普通赋值指令。
 - **实现**：转调 `emitScopeVar(atom_id, op.scope_put_var, op.put_var, true)`：普通赋值写回，带 source marker。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 5 处：`parseEnumDeclaration`（`:8725`）、`parseNamespaceDeclarationWithIdent`（`:8845`）、`parseTryStatement`（`:9829`，catch 形参绑定）、`parseForInOf`（`:10867`/`:10939`）。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 5 处：`parseEnumDeclaration`（`:8725`）、`parseNamespaceDeclarationWithIdent`（`:8845`）、`parseTryStatement`（`:9829`，catch 形参绑定）、`parseForInOf`（`:10867`/`:10939`）。
 
 ### `emitScopePutVarNoSource` (`src/parser.zig:2965`)
 
 - **签名**：`inline fn emitScopePutVarNoSource(self: *State, atom_id: Atom) Error!void`。
 - **作用**：按名写回的无 source marker 版本，供编译器自己插入的合成存储使用。
 - **实现**：与 `emitScopePutVar` 同一对 opcode，但 `attach_source = false`，供不该在源码里留位置的合成写回（编译器自己插的存储）使用。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。树内唯一调用方 `parseVar`（`:10649`）——`var` 声明的合成写回不该在源码里留位置。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。树内唯一调用方 `parseVar`（`:10649`）——`var` 声明的合成写回不该在源码里留位置。
 
 ### `emitScopeGetVarUndef` (`src/parser.zig:2969`)
 
 - **签名**：`inline fn emitScopeGetVarUndef(self: *State, atom_id: Atom) Error!void`。
 - **作用**：发「名字解析不到时求值成 `undefined` 而不抛」的读取指令（`typeof` 一类场合）。
 - **实现**：转调 `emitScopeVar(atom_id, op.scope_get_var_undef, op.get_var_undef, true)`：未解析的名字求值为 `undefined` 而不是抛 ReferenceError 的读取形式（`typeof` 等场合）。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 2 处：`parseEnumDeclaration`（`:8717`）与 `parseNamespaceDeclarationWithIdent`（`:8837`），都是「名字可能还不存在」的探测式读取。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 2 处：`parseEnumDeclaration`（`:8717`）与 `parseNamespaceDeclarationWithIdent`（`:8837`），都是「名字可能还不存在」的探测式读取。
 
 ### `emitScopePutVarInit` (`src/parser.zig:2977`)
 
 - **签名**：`inline fn emitScopePutVarInit(self: *State, atom_id: Atom) Error!void`。
 - **作用**：为 `let` / `const` 的初始化写回发一条 `scope_put_var_init`。
 - **实现**：转调 `emitScopeVar(atom_id, op.scope_put_var_init, op.put_var_init, true)`，带 source marker。与普通 `scope_put_var` 的区别在 TDZ：这是把槽从「未初始化」点亮的那一次写。流水线后续按解析结果降码——解析成局部就是 `put_loc`，顶层词法全局则保留 `put_var_init`。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 15 处，覆盖所有词法绑定的点亮点：`parseVar`（`:10664`）、`parseUsingDeclaration`（`:9964`）、`parseForInOf`（`:10865`/`:11013`）、`parseClassElement`（`:13773`/`:13777`/`:13837`）、`addPrivateClassFieldBinding`（`:14014`）、`parseExport`（`:15469`/`:15499`）等。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。调用方 15 处，覆盖所有词法绑定的点亮点：`parseVar`（`:10664`）、`parseUsingDeclaration`（`:9964`）、`parseForInOf`（`:10865`/`:11013`）、`parseClassElement`（`:13773`/`:13777`/`:13837`）、`addPrivateClassFieldBinding`（`:14014`）、`parseExport`（`:15469`/`:15499`）等。
 
 ### `emitScopePutVarInitNoSource` (`src/parser.zig:2981`)
 
 - **签名**：`inline fn emitScopePutVarInitNoSource(self: *State, atom_id: Atom) Error!void`。
 - **作用**：`let` / `const` 初始化写回的无 source marker 版本。
 - **实现**：转调 `emitScopeVar(atom_id, op.scope_put_var_init, op.put_var_init, false)`：`let` / `const` 绑定初始化写入的无 source marker 版本，与 `emitScopePutVarInit` 只差 `attach_source`。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。树内唯一调用方 `parseVar`（`:10647`）。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。树内唯一调用方 `parseVar`（`:10647`）。
 
 ### `emitThisValue` (`src/parser.zig:2985`)
 
 - **签名**：`fn emitThisValue(self: *State) Error!void`。
 - **作用**：按当前函数有没有自己的 ThisBinding，发出取 `this` 的正确形式。
 - **实现**：三路分支。①`emit_to_function_def` 且 `curFunc().has_this_binding`：发 `emitScopeGetVar(atom_this)`——显式 `this` 读走普通词法检查，派生构造器里未初始化的 `this` 因此在自己的 realm 抛 TDZ ReferenceError；带 caller-realm 的 checkthis 形式只留给 `emitReturnValue` 里合成的派生返回回退。②`emit_to_function_def` 且当前函数是 `.arrow` / `.class_static_init` / `is_direct_eval`：同样 `emitScopeGetVar(atom_this)`，因为它们没有自己的 ThisBinding，要沿闭包链解析（qjs 的 TOK_THIS 恒发 `OP_scope_get_var this`，quickjs.c:26934-26939；直接 eval 见 quickjs.c:37239，按调用者种子解析以免 root eval 捕获的 `this` 遮蔽方法自己的 this）。③其余情况（root 发射、有自己 this 的普通函数走不到这里）直接 `Emitter.op(self, op.push_this)`。
-- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().v2_builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。前两条臂经 `emitScopeGetVar` 出去，第三条臂直接 `Emitter.op(push_this)`；本身不分配、不改函数状态。调用方 2 处：`parseLhsExpr`（`:5669`）与 `parsePrimary`（`:6274`，`TOK_THIS`）。
+- **所有权 / 错误 / 调用**：不分配；经 `Emitter.*` → `activeBuilder()`（`curFunc().builder.?`）写入，Builder 的 `OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode` 由 `mapBuilderError`（`:7448`）折成 `Error.OutOfMemory` / `Error.BytecodeOverflow` / `Error.ParserInvariant`。前两条臂经 `emitScopeGetVar` 出去，第三条臂直接 `Emitter.op(push_this)`；本身不分配、不改函数状态。调用方 2 处：`parseLhsExpr`（`:5669`）与 `parsePrimary`（`:6274`，`TOK_THIS`）。
 
 ### `emitBigIntLiteral` (`src/parser.zig:3413`)
 
@@ -155,14 +155,14 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **签名**：`fn invalidateLastOpcode(self: *State) void`。
 - **作用**：作废「最后一条已发指令」的记录，让之后的窥孔改写不敢跨过这个点。
 - **实现**：一行转调 `self.activeBuilder().invalidateLastOpcode()`，清掉 Builder 的 last-opcode provenance。控制流汇合（绑定 label）和字节码截断后都必须调它，否则窥孔会把汇合点两侧的指令融在一起。
-- **所有权 / 错误 / 调用**：不分配、无 error set：把 `activeBuilder()`（`curFunc().v2_builder.?`）的 `last_opcode_pos` 置成无效，之后的窥孔改写就不会跨过这个点。`curFunc()` 为空 builder 时 `.?` 会 panic，所以只能在 `ensureBuilderForFd` 之后调用。同名方法有两层：本条是 `State` 的转发，直接调 `Builder.invalidateLastOpcode` 的还有 `builderBindLabel`（`:3694`）/`builderBindParserLabel`（`:3703`）等 7 处（`:5638`、`:13636`、`:13668`、`:14315`、`:15062`）。`State` 这一层的调用方是 `parseExpr2`、`parseTaggedTemplateInvocation` 等 3 处（原来的第四处 `State.truncateCode` 已随 phase-1 原始字节后端一起删除）。
+- **所有权 / 错误 / 调用**：不分配、无 error set：把 `activeBuilder()`（`curFunc().builder.?`）的 `last_opcode_pos` 置成无效，之后的窥孔改写就不会跨过这个点。`curFunc()` 为空 builder 时 `.?` 会 panic，所以只能在 `ensureBuilderForFd` 之后调用。同名方法有两层：本条是 `State` 的转发，直接调 `Builder.invalidateLastOpcode` 的还有 `builderBindLabel`（`:3694`）/`builderBindParserLabel`（`:3703`）等 7 处（`:5638`、`:13636`、`:13668`、`:14315`、`:15062`）。`State` 这一层的调用方是 `parseExpr2`、`parseTaggedTemplateInvocation` 等 3 处（原来的第四处 `State.truncateCode` 已随 phase-1 原始字节后端一起删除）。
 
 ### `activeBuilder` (`src/parser.zig:3460`)
 
 - **签名**：`pub fn activeBuilder(self: *State) *compiler.Builder`。
-- **作用**：取当前正在解析的 FunctionDef 所属的 compiler-v2 `Builder`。
-- **实现**：`return self.curFunc().v2_builder.?;` —— 刻意用不带检查的解包。doc 注释说明只在 v2 解析期间有意义：v2 解析里每个被发射的 FunctionDef 都应由 `ensureBuilderForFd` 装过 Builder，没装上就是迁移漏洞，宁可在这里响亮地 panic。
-- **所有权 / 错误 / 调用**：纯访问器：不分配、不写任何流、无 error set。返回的是**借用**指针（`curFunc().v2_builder` 这个 optional 的负载），生存期绑在该 `FunctionDef` 上，调用方不得跨 `pushFunction`/`popFunction` 保存。`v2_builder` 为 `null` 时 `.?` 直接 panic（不是可恢复错误），所以必须在 `ensureBuilderForFd`（`:3709`）之后调用。树内约 70 处调用，几乎所有 `builder*` / `emitter*` 包装的第一行都是它。
+- **作用**：取当前正在解析的 FunctionDef 所属的 `Builder`。
+- **实现**：`return self.curFunc().builder.?;` —— 刻意用不带检查的解包。doc 注释说明只在 v2 解析期间有意义：v2 解析里每个被发射的 FunctionDef 都应由 `ensureBuilderForFd` 装过 Builder，没装上就是迁移漏洞，宁可在这里响亮地 panic。
+- **所有权 / 错误 / 调用**：纯访问器：不分配、不写任何流、无 error set。返回的是**借用**指针（`curFunc().builder` 这个 optional 的负载），生存期绑在该 `FunctionDef` 上，调用方不得跨 `pushFunction`/`popFunction` 保存。`builder` 为 `null` 时 `.?` 直接 panic（不是可恢复错误），所以必须在 `ensureBuilderForFd`（`:3709`）之后调用。树内约 70 处调用，几乎所有 `builder*` / `emitter*` 包装的第一行都是它。
 
 ### `builderAddSourceMarker` (`src/parser.zig:3467`)
 
@@ -286,9 +286,9 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 ### `ensureBuilderForFd` (`src/parser.zig:3582`)
 
 - **签名**：`pub fn ensureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler.builder.Error!void`。
-- **作用**：给一个 FunctionDef 装上属于它自己的 compiler-v2 `Builder`（幂等）。
-- **实现**：`self` 未使用（`_ = self`）。仅当 `fd.v2_builder == null` 时：`fd.memory.create(compiler.Builder)` 分配，`compiler.Builder.init(fd.memory, fd.atoms)` 初始化，`enableControlIndex()` 打开控制流索引，最后挂到 `fd.v2_builder`。已经有则原样返回，因此可反复调用。注释（QCP-1 S2-G4）指出 v2 解析中每个被发射进去的 FunctionDef 都拥有一个，后续阶段替换的是测试入口接线而非这里的按-fd 供给。
-- **所有权 / 错误 / 调用**：**本族唯一真正分配的函数**：`fd.memory.create(compiler.Builder)` + `Builder.init(fd.memory, fd.atoms)` + `enableControlIndex()`，所有权归 `fd.v2_builder`，由 `FunctionDef.deinit`（`bytecode.zig` 里那段「parse-time/error-path backstop」）或 v2 lowering 的消费点释放，本函数不负责。幂等（已有则直接返回）。失败是 `compiler.builder.Error`（`create`/`enableControlIndex` 的 OOM）；生产调用方大多写成 `catch return error.OutOfMemory`：`initRootEmitter`（`src/parser.zig:952`）、`pushFunction`（`:1396`）、`createClassFieldsInitFunction`（`:14302`）、`appendDefaultClassConstructor`（`:15117`），另有 `beginProgramEmission`（`:3729`）与测试钩子（`:3722`）。
+- **作用**：给一个 FunctionDef 装上属于它自己的 `Builder`（幂等）。
+- **实现**：`self` 未使用（`_ = self`）。仅当 `fd.builder == null` 时：`fd.memory.create(compiler.Builder)` 分配，`compiler.Builder.init(fd.memory, fd.atoms)` 初始化，`enableControlIndex()` 打开控制流索引，最后挂到 `fd.builder`。已经有则原样返回，因此可反复调用。每个被发射进去的 FunctionDef 都拥有一个 Builder。
+- **所有权 / 错误 / 调用**：**本族唯一真正分配的函数**：`fd.memory.create(compiler.Builder)` + `Builder.init(fd.memory, fd.atoms)` + `enableControlIndex()`，所有权归 `fd.builder`，由 `FunctionDef.deinit`（`bytecode.zig` 里那段「parse-time/error-path backstop」）或 v2 lowering 的消费点释放，本函数不负责。幂等（已有则直接返回）。失败是 `compiler.builder.Error`（`create`/`enableControlIndex` 的 OOM）；生产调用方大多写成 `catch return error.OutOfMemory`：`initRootEmitter`（`src/parser.zig:952`）、`pushFunction`（`:1396`）、`createClassFieldsInitFunction`（`:14302`）、`appendDefaultClassConstructor`（`:15117`），另有 `beginProgramEmission`（`:3729`）与测试钩子（`:3722`）。
 
 ### `beginBuilderEmissionForTest` (`src/parser.zig:3594`)
 
@@ -302,7 +302,7 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **签名**：`pub fn beginProgramEmission(self: *State) compiler.builder.Error!void`。
 - **作用**：生产路径的程序根发射起点：装好 Builder 并把 body scope 的 `enter_scope` 事件补进流里。
 - **实现**：先 `ensureBuilderForFd(self.curFunc())`；`curFunc().body_scope < 0` 视为 `error.InvalidBytecode`。取 Builder、`v2b.snapshot()` 并挂 `errdefer v2b.rollback(snapshot)`，再 `v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope))`。之所以要补发：`initRootEmitter` 在任何 Builder 存在之前就确立了 body-scope 标识，这一个 enter 事件只能等 Builder 挂上后才落流（qjs 在 `js_parse_program` 之前由 `push_scope` 发 `OP_enter_scope`，无 source 事件，quickjs.c:24128-24135/31441）。
-- **所有权 / 错误 / 调用**：自己不分配，分配发生在转调的 `ensureBuilderForFd`（Builder 挂在 `fd.v2_builder` 上）。error set 是 **`compiler.builder.Error`**：`body_scope < 0` 直接 `error.InvalidBytecode`，`enter_scope` 的发射失败由 `errdefer v2b.rollback(snapshot)` 把 Builder 退回本函数入口态（注意退的是 Builder 的快照，不是 `rollbackEmission`）。唯一调用方 `compileQjsProgram`（`:16255`）。
+- **所有权 / 错误 / 调用**：自己不分配，分配发生在转调的 `ensureBuilderForFd`（Builder 挂在 `fd.builder` 上）。error set 是 **`compiler.builder.Error`**：`body_scope < 0` 直接 `error.InvalidBytecode`，`enter_scope` 的发射失败由 `errdefer v2b.rollback(snapshot)` 把 Builder 退回本函数入口态（注意退的是 Builder 的快照，不是 `rollbackEmission`）。唯一调用方 `compileQjsProgram`（`:16255`）。
 
 ### `currentCodeLen` (`src/parser.zig:3613`)
 
@@ -1373,7 +1373,7 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 
 - **签名**：`fn appendClassFieldInitCallToFunctionDef( fd: *function_def_mod.FunctionDef, this_idx: u16, ) Error!void`。
 - **作用**：往一个构造器 FunctionDef 的字节码里补上「若存在字段初始化器就以 `this` 为接收者调用它」这段序幕。
-- **实现**：先按 `fd.is_derived_class_constructor` 选读 `this` 的 opcode：派生构造器用 `get_loc_check`（它的 `this` 是词法绑定、要 TDZ 检查），基类默认构造器用普通 `get_loc`。然后经 `fd.v2_builder orelse return Error.ParserInvariant` 拿到 Builder（两个调用方都在 `ensureBuilderForFd` 之后，所以这条 orelse 只是 fail-closed），依次 `emitAtomOpU16Owned(scope_get_var, atom_class_fields_init, fd.scope_level)`、`emitOp(dup)`、`newLabel()` 得到 `skip`、`emitJump(if_false, skip)`、`emitOpU16(this_read_op, this_idx)`、`emitOp(swap)`、`emitCallOp(call_method, 0)`、`bindLabel(skip)` + `invalidateLastOpcode()`、`emitOp(drop)`；所有 builder 错误经 `mapBuilderError`。（原先还有一条没有 Builder 时手写 22 字节 raw 码的备用臂，生产不可达，已删。）注释解释了为何这里全用长形式：qjs `emit_class_field_init`（quickjs.c:25184-25207）用 phase-1 的 `scope_get_var` 读 `this`，而 `resolve_scope_var` 只有在绑定是词法的时候才把它降成 `get_loc_check`——`add_var_this`（quickjs.c:32834-32845）只对派生构造器这么做；基类默认构造器的 `this` 是普通 var，qjs 用 `get_loc` 读、再由 `resolve_labels` 缩成 `get_loc0`。这里短槽号落在 phase-1 临时码的重叠区间里不能用，所以连 `if_false` 也发长形式：`resolve_labels` 会重映射它的绝对目标并在 `get_loc` 缩短之后重新缩短这条跳转，而裸的 `if_false8` 相对操作数永远不会被重映射，因此绝不能让它跨越尺寸会变的指令。
+- **实现**：先按 `fd.is_derived_class_constructor` 选读 `this` 的 opcode：派生构造器用 `get_loc_check`（它的 `this` 是词法绑定、要 TDZ 检查），基类默认构造器用普通 `get_loc`。然后经 `fd.builder orelse return Error.ParserInvariant` 拿到 Builder（两个调用方都在 `ensureBuilderForFd` 之后，所以这条 orelse 只是 fail-closed），依次 `emitAtomOpU16Owned(scope_get_var, atom_class_fields_init, fd.scope_level)`、`emitOp(dup)`、`newLabel()` 得到 `skip`、`emitJump(if_false, skip)`、`emitOpU16(this_read_op, this_idx)`、`emitOp(swap)`、`emitCallOp(call_method, 0)`、`bindLabel(skip)` + `invalidateLastOpcode()`、`emitOp(drop)`；所有 builder 错误经 `mapBuilderError`。（原先还有一条没有 Builder 时手写 22 字节 raw 码的备用臂，生产不可达，已删。）注释解释了为何这里全用长形式：qjs `emit_class_field_init`（quickjs.c:25184-25207）用 phase-1 的 `scope_get_var` 读 `this`，而 `resolve_scope_var` 只有在绑定是词法的时候才把它降成 `get_loc_check`——`add_var_this`（quickjs.c:32834-32845）只对派生构造器这么做；基类默认构造器的 `this` 是普通 var，qjs 用 `get_loc` 读、再由 `resolve_labels` 缩成 `get_loc0`。这里短槽号落在 phase-1 临时码的重叠区间里不能用，所以连 `if_false` 也发长形式：`resolve_labels` 会重映射它的绝对目标并在 `get_loc` 缩短之后重新缩短这条跳转，而裸的 `if_false8` 相对操作数永远不会被重映射，因此绝不能让它跨越尺寸会变的指令。
 - **所有权 / 错误 / 调用**：⚠️ 签名里没有 `*State`：它直接往传入的 `fd` 的 Builder 上发射（`emitAtomOpU16Owned` + `newLabel`/`bindLabel` + `invalidateLastOpcode`，错误经 `mapBuilderError`）。Builder 缺席时返回 `Error.ParserInvariant`，实际不会发生——`appendDefaultClassConstructor` 在调用它之前必定 `ensureBuilderForFd`。`atom_class_fields_init` 是预定义 atom（借用），`this_idx` 是借用槽号。失败即 `OutOfMemory` / Builder 折叠出的错误，没有局部回滚。调用方 2 处，都在 `appendDefaultClassConstructor`（`:15138` 派生、`:15150` 基类）。
 
 ### `appendDefaultClassConstructor` (`src/parser.zig:14600`)

@@ -137,14 +137,14 @@ exec 子系统命名空间与嵌入用薄 `Vm` 门面。只 re-export 各域，�
 - **签名**：`pub inline fn contextGlobalFast(ctx: *core.JSContext) !*core.Object`。
 - **作用**：`contextGlobal` 的寄存器快臂：活 context 已有 global 则不再走 bootstrap。
 - **实现**：`ctx.global` 已有且 `ctx.isLive()` 则直接返回；否则落到 `contextGlobal` 做 bootstrap。
-- **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：嵌入 API 侧的 `src/binding/context.zig`（宿主取全局的快路径）。
+- **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：嵌入 API 侧的 `src/js_context.zig`（宿主取全局的快路径）。
 
 ### `contextGlobal` (`src/exec/zjs_vm.zig:110`)
 
 - **签名**：`pub fn contextGlobal(ctx: *core.JSContext) !*core.Object`。
 - **作用**：懒构建并缓存 per-context 全局对象（标准构造器 + print/console）。
 - **实现**：已有 global：未 live 则 `publishLive` 后返回。否则按 `call_mod.contextGlobalOwnPropertyCapacity` 的容量 `Object.createWithOwnPropertyCapacity` 建 `class.ids.global_object`，`ensureGlobalPayload`，暂存 `ctx.global`（construction-only），`installHostGlobals`，建 `throwTypeErrorIntrinsicForGlobal`，首次时预分配 OOM 错误对象（无栈，对齐 qjs；失败吞成 null），读出 `eval` 缓存到 `ctx.eval_function`，`finishConstruction`。`errdefer` 调 `rollbackIntrinsicBootstrap` 并把 `ctx.global` 置回 null。
-- **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：`runWithOutput`、`eval_entry.zig`、`module_graph.zig`，以及嵌入层 `src/binding/context.zig` / `src/binding/binding.zig`。
+- **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：`runWithOutput`、`eval_entry.zig`、`module_graph.zig`，以及嵌入层 `src/js_context.zig` / `src/binding/binding.zig`。
 
 ### `runWithArgs` (`src/exec/zjs_vm.zig:151`)
 

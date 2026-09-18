@@ -7,7 +7,7 @@
 ## 分层地图
 
 ```
-zjs / zjs-dev / zjs-profile          run-test262 / test-runner
+zjs / zjs-profile                    run-test262 / test-runner
         │                                      │
         ▼                                      ▼
  src/cli/zjs.zig                      src/cli/run_test262.zig
@@ -48,7 +48,6 @@ zjs / zjs-dev / zjs-profile          run-test262 / test-runner
 | `zjs -e "<script>"` | 把第二个参数当脚本源，`filename = "<eval>"`，`EvalMode.script`，`discard_script_result = true`。`-e` **不能**与 `--can-block` 同用，且 `rest` 必须正好两个词（`-e` + 源）。 |
 | `zjs <file.js>` | 读文件（上限 64 MiB）。`.mjs` 或首 token 为 `import`（后不跟 `(`/`.`）/`export` 则当模块，否则脚本。文件名及其后参数成为 `scriptArgs`（含路径自身，对齐 qjs）。 |
 | `zjs -m <file>` | 强制模块模式；其余同文件路径。 |
-| `zjs --print-config-signature` | **不经过** `parseArgs`、不造 Runtime，打印编译期配置签名后返回。 |
 | 缺参 / 未知旗标 / `-h` / `--help` | `parseArgs` 返回 `error.Usage`；`main` 打 usage 到 stderr 并 **`exit(2)`**。 |
 
 可选旗标必须出现在位置参数之前：`-d`/`--dump`、`-T`/`--trace`、`--profile-opcodes`、`--gc-stats`、`--gc-gate-settle`、`--gc-mark-footprint`、`--gc-block-census`、`--perf-json`、`--leak-check`、`--memory-limit n`、`--stack-size n`、`-I`/`--include file`、`--can-block`（仅文件模式）。读文件失败、引擎 init 失败、求值抛错走 `exit(1)`。成功路径默认 `exit(0)` 而不 `deinit` Runtime（短命进程把内存还给 OS；`--leak-check` 才显式拆循环/context/runtime 好让 GPA 验漏）。

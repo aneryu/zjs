@@ -10,21 +10,10 @@ const std = @import("std");
 const cli_process = @import("cli_process.zig");
 const test262_root = @import("zjs");
 
-/// Message-only panics in ReleaseFast, full traces everywhere else — the
-/// `-dev` runner and the `test-runner` artifact are Debug, so they keep them.
+/// Message-only panics in ReleaseFast, full traces everywhere else.
 pub const panic = @import("panic_policy.zig").policy;
 
-// QCP-1: this root is shared by the `run-test262` / `run-test262-dev`
-// executables and by the `test-runner` scoped test artifact, so it proves the
-// effective configuration of all three at compile time
-// (src/config_signature.zig). It is the reason a test262 sweep can now name
-// the configuration it ran: before the signature, a nested gate build silently
-// resolved the defaults and still read as a whole-engine result.
-comptime {
-    test262_root.config_signature.attest("run-test262 / test-runner");
-}
-
-const zjs = test262_root.binding_root;
+const zjs = test262_root;
 const runtime_layer = test262_root.runtime;
 const parser = test262_root.parser;
 const core_runtime = test262_root.core.runtime;

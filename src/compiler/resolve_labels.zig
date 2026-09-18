@@ -1,5 +1,5 @@
-//! QCP-1 compiler-v2 Stage 4: QuickJS resolve_labels port (single forward
-//! pass + relocation chains + comptime-selectable plain/short final layout).
+//! QuickJS resolve_labels port (single forward pass + relocation chains +
+//! comptime-selectable plain/short final layout).
 //! Direct spec: quickjs.c resolve_labels (34796). Comment each arm qjs:<line>.
 
 const std = @import("std");
@@ -20,9 +20,9 @@ pub const Error = error{ OutOfMemory, InvalidBytecode, BytecodeOverflow };
 
 pub const LayoutMode = enum { plain, short };
 
-/// The final-layout mode `compileFunctionV2` actually resolves with; the one
+/// The final-layout mode `compileFunction` actually resolves with; the one
 /// value handed to `run` on the production path (root.zig). `-Dzjs_compiler_layout`
-/// selects it and QCP-1 ships `short`. `.plain` stays reachable as the A/B
+/// selects it; production ships `short`. `.plain` stays reachable as the A/B
 /// diagnostic instrument (it is how C2-B artifact residency was localised),
 /// which is why this is a real option rather than a deleted branch.
 ///
@@ -176,7 +176,7 @@ fn panicFinalBoundaryUniquenessViolation(
 ) noreturn {
     cfg.recordDiffBucket(bucket);
     std.debug.panic(
-        "compiler oracle violation: bucket={s} category={s} role={s} construct=resolve_labels_v2 key=canonical_identities={d},{d}:raw_labels={d},{d} identities=[canonical_label#{d}@{d}, canonical_label#{d}@{d}] block=none label=none source=none addresses=[{d},{d}]",
+        "compiler oracle violation: bucket={s} category={s} role={s} construct=resolve_labels key=canonical_identities={d},{d}:raw_labels={d},{d} identities=[canonical_label#{d}@{d}, canonical_label#{d}@{d}] block=none label=none source=none addresses=[{d},{d}]",
         .{
             bucket.name(),
             category,
@@ -3811,7 +3811,7 @@ const ResolveLabelsTestHarness = struct {
         errdefer harness.fd.deinit(harness.rt);
         const input_builder = try harness.rt.memory.create(builder.Builder);
         input_builder.* = builder.Builder.init(&harness.rt.memory, &harness.rt.atoms);
-        harness.fd.v2_builder = input_builder;
+        harness.fd.builder = input_builder;
     }
 
     fn deinit(harness: *ResolveLabelsTestHarness) void {
@@ -3821,7 +3821,7 @@ const ResolveLabelsTestHarness = struct {
     }
 
     fn input(harness: *ResolveLabelsTestHarness) *builder.Builder {
-        return harness.fd.v2_builder.?;
+        return harness.fd.builder.?;
     }
 
     fn resolve(harness: *ResolveLabelsTestHarness) !resolve_variables.ResolvedProduct {

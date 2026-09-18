@@ -18,7 +18,7 @@ const std = @import("std");
 const zjs = @import("zjs");
 
 const core = zjs.core;
-const BindingContext = zjs.binding_root.JSContext;
+const BindingContext = zjs.JSContext;
 
 const cap_bytes: usize = 8 * 1024 * 1024;
 

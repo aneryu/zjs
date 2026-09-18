@@ -1,10 +1,10 @@
-//! Exact block-CFG liveness for the compiler-v2 temporary stream.
+//! Exact block-CFG liveness for the compiler temporary stream.
 //!
 //! Bound LabelIds partition the compact byte stream into basic blocks. The
 //! production graph stores only block starts, one metadata row per block, a
 //! flat CSR edge array, and a packed reachability bitset. Debug and
 //! ReleaseSafe additionally run an instruction-granularity oracle to prove
-//! that the block/cutoff classification is identical to byte-exact legacy
+//! that the block/cutoff classification is identical to byte-exact
 //! reachability.
 
 const std = @import("std");
@@ -170,7 +170,7 @@ pub const FanoutCensus = struct {
     chain_depth_samples: u64 = 0,
     chain_depth_total: u64 = 0,
     max_chain_depth: u64 = 0,
-    /// resolve_labels_v2 adds exactly one hop per live product-coordinate
+    /// resolve_labels adds exactly one hop per live product-coordinate
     /// alias group: boundary -> final address. A reference's end-to-end chain
     /// is therefore `chain_depth + 1`, uniformly.
     final_address_hops: u64 = 0,
@@ -795,7 +795,7 @@ const temp_decode_info: [256]TempDecodeInfo = blk: {
     break :blk table;
 };
 
-/// Production compiler-v2 consumes a parser phase-1 Builder, not an arbitrary
+/// Production lowering consumes a parser phase-1 Builder, not an arbitrary
 /// final bytecode stream.  QuickJS relies on the same phase boundary: ids in
 /// the temporary-opcode range name temporary instructions until
 /// `resolve_variables` removes them, and short opcodes are introduced only by
@@ -2022,7 +2022,7 @@ fn roleForLabelOperand(op_id: u8, instruction: TempInstruction) BoundaryRole {
 /// Identity hops a label reference traverses from the operand to the semantic
 /// boundary it denotes. The ruling asks for chain depth alongside fan-out:
 /// fewer identities is NOT the goal, short chains with one clear owner per hop
-/// is. Hops counted here (input coordinates; resolve_labels_v2 adds the final
+/// is. Hops counted here (input coordinates; resolve_labels adds the final
 /// output hop):
 ///   1 operand -> LabelId
 ///  +1 LabelId -> alias-group representative   (only when the operand named an
@@ -2291,7 +2291,7 @@ fn writeHistogramP95(
 ///  `contested=<n>}`
 ///
 /// `chain` measures label references in INPUT coordinates; `+final-hop` counts
-/// the single additional `boundary -> final address` edge resolve_labels_v2
+/// the single additional `boundary -> final address` edge resolve_labels
 /// adds per live alias group. They are reported separately so neither
 /// population skews the other's mean: end-to-end chain per reference is
 /// uniformly `chain + 1`.

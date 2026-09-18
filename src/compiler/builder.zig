@@ -1,22 +1,18 @@
-//! QCP-1 compiler-v2 Stage 1: the parser-facing emission builder.
+//! Parser-facing compact emission builder.
 //!
-//! API-FROZEN SHELL (driver-owned). Stage 1 fills the bodies; later stages
-//! code against exactly this surface. The parser emits COMPACT temporary
-//! bytecode (opcode + compact operands + LabelId + Atom + scope operand) —
-//! no per-instruction object IR (C1 proved a per-instruction record stream
-//! is a real cache tax). Consumer-proportional side tables only:
-//! LabelSlot[], RelocEntry[], SourceSlot[].
+//! The parser emits compact temporary bytecode (opcode + compact operands +
+//! LabelId + Atom + scope operand) — no per-instruction object IR. Side
+//! tables are consumer-proportional: LabelSlot[], RelocEntry[], SourceSlot[].
 //!
-//! Ownership contract (post-TGC S3-c: compile-time atoms are rooted by the
-//! enclosing CompileAtomScope, so the builder never retains or releases):
+//! Ownership contract (compile-time atoms are rooted by the enclosing
+//! CompileAtomScope, so the builder never retains or releases):
 //!   - atom operands appended to the builder are BORROWED ids recorded in the
 //!     builder's ledger; `deinit` / `rollback` / `discardSegment` only free or
 //!     rewind the backing arrays (by capacity; uninitialized tails never read),
-//!     never touching refcounts. The `*Owned` suffixes are legacy names kept
-//!     for the call sites that transfer an id into a longer-lived table;
+//!     never touching refcounts. The `*Owned` suffixes are kept for the call
+//!     sites that transfer an id into a longer-lived table;
 //!   - speculative emission uses snapshot/rollback restoring code length,
-//!     atom ledger length, label count, reloc length, and source-slot length —
-//!     mirroring the legacy EmissionSnapshot discipline;
+//!     atom ledger length, label count, reloc length, and source-slot length;
 //!   - OOM anywhere leaves the builder consistent for deinit; no partial
 //!     state is observable by later passes.
 //!

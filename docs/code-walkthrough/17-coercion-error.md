@@ -88,7 +88,7 @@
 - **作用**：ToPrimitive（number hint），借用入参。
 - **实现**：非对象直接返回。其余与 `toPrimitiveForAdditionObject` 同形：hint 字符串是 `"number"`，兜底走 `toOrdinaryPrimitiveNumber`；非 callable 的 `Symbol.toPrimitive` 报 `"not a function"`（quickjs.c:11096），返回对象报 `"toPrimitive"`（quickjs.c:11104）。
 - **所有权 / 错误 / 调用**：hint 字符串 `"number"` 由 `value_ops.createStringValue` 新建，GC 管理；返回的原始值同样归 GC，调用方不释放。TypeError 由 `throwTypeErrorMessage` 就地挂 pending exception 并返回 `error.TypeError` 哨兵；属性读与方法调用的错误原样透传。全树 54 处调用，典型如 `src/exec/vm_arith.zig:65`
-、`src/exec/iterator_ops.zig:2508`、`src/binding/context.zig:418`。
+、`src/exec/iterator_ops.zig:2508`、`src/js_context.zig:418`。
 
 ### `toOrdinaryPrimitive` (`src/exec/coercion_ops.zig:91`)
 
@@ -336,7 +336,7 @@
 - **签名**：`pub fn numberToValue(value: f64) core.JSValue`。
 - **作用**：double 结果装箱：能精确回落 int32 就用 int32。
 - **实现**：值落在 i32 范围内、`@intFromFloat` 往返相等且不是 -0 才走 `int32`，否则 `float64`。
-- **所有权 / 错误 / 调用**：无：只做 tag 规范化（可精确表示且非 -0 就 int32，否则 float64），不分配、无 error set。全树 45 处调用，典型 `src/exec/vm_arith.zig:249`、`src/binding/native.zig:595`、`src/exec/builtin_glue.zig:61`。
+- **所有权 / 错误 / 调用**：无：只做 tag 规范化（可精确表示且非 -0 就 int32，否则 float64），不分配、无 error set。全树 45 处调用，典型 `src/exec/vm_arith.zig:249`、`src/native.zig:595`、`src/exec/builtin_glue.zig:61`。
 
 ### `createStringValue` (`src/exec/value_ops.zig:427`)
 
@@ -444,14 +444,14 @@
 - **签名**：`pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool`。
 - **作用**：atom 的名字是否等于给定字节串。
 - **实现**：`rt.atoms.name(atom_id)` 取不到名字直接 false，否则 `std.mem.eql`。
-- **所有权 / 错误 / 调用**：无：拿 atom 表里的**借用**名字切片与字面量比对，不分配、不 retain atom、无 error set；未知 atom 返回 false。4 处调用：`src/exec/property_ops.zig:33`、`:48`、`src/exec/call_runtime.zig:4704`、`src/binding/context.zig:548`。
+- **所有权 / 错误 / 调用**：无：拿 atom 表里的**借用**名字切片与字面量比对，不分配、不 retain atom、无 error set；未知 atom 返回 false。4 处调用：`src/exec/property_ops.zig:33`、`:48`、`src/exec/call_runtime.zig:4704`、`src/js_context.zig:548`。
 
 ### `appendRawString` (`src/exec/value_ops.zig:630`)
 
 - **签名**：`pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void`。
 - **作用**：把一个字符串 JSValue 的内容以 UTF-8 追加到调用方的字节缓冲，是引擎内 `JS_ToCStringLen2` 的等价出口（atom 驻留、数字解析、栈文本拼装、主机/FS 边界共用这一份编码）。
 - **实现**：转调 `core.string.appendValueUtf8`：ASCII latin1 原样拷，latin1 0x80-0xFF 展成两字节 UTF-8，UTF-16 按代理对合并编码（qjs `JS_ToCStringLen2` quickjs.c:4458）。latin1 高位字节**不能**裸写，下游一律按 UTF-8 解读。该名字也在嵌入 API（`src/root.zig`）中公开。
-- **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u8)` 追加，缓冲的分配/释放全归调用方，本函数不建根也不产生 JS 值。error set 是 `core.string.appendValueUtf8` 的 `RuntimeError`（OOM、编码类）裸哨兵。42 处调用，典型 `src/exec/error_stack_ops.zig:140`、`src/exec/exception_ops.zig:459`、`src/binding/context.zig:824`。
+- **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u8)` 追加，缓冲的分配/释放全归调用方，本函数不建根也不产生 JS 值。error set 是 `core.string.appendValueUtf8` 的 `RuntimeError`（OOM、编码类）裸哨兵。42 处调用，典型 `src/exec/error_stack_ops.zig:140`、`src/exec/exception_ops.zig:459`、`src/js_context.zig:824`。
 
 
 ### `formatFiniteNumberAssumeCapacity` (`src/exec/value_ops.zig:634`)
@@ -1229,7 +1229,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue`。
 - **作用**：不抓栈的命名 Error 构造，只给两处用：预分配 OOM 对象，以及嵌入方显式 `capture_stack = false` 的 `JSContext.createError`。
 - **实现**：`rt.internAtom(name)` 后从 global 取同名构造器，交给 `buildNamedErrorObject`。所有用户可见的 throw 路径都必须走上面会抓栈的原语。
-- **所有权 / 错误 / 调用**：只拿 `*core.JSRuntime`（没有 ctx，所以物理上也捕不到 VM 栈）：`internAtom` 把名字登记进 atom 表，`global.getProperty` 取到的构造器是**借用**值，实体构造在 `buildNamedErrorObject`。返回的 Error 归 GC 且**没有** `.stack` sites——只有预分配 OOM 对象和显式 `capture_stack = false` 的嵌入 API 允许走这里。错误是 atom 登记/属性读/构造的透传。4 处调用：`createNamedError`（`:32`）、`createPreallocatedOutOfMemoryError`（`:124`）、`error_stack_ops.throwParseSyntaxError`（`:110`）、`src/binding/context.zig:475`。
+- **所有权 / 错误 / 调用**：只拿 `*core.JSRuntime`（没有 ctx，所以物理上也捕不到 VM 栈）：`internAtom` 把名字登记进 atom 表，`global.getProperty` 取到的构造器是**借用**值，实体构造在 `buildNamedErrorObject`。返回的 Error 归 GC 且**没有** `.stack` sites——只有预分配 OOM 对象和显式 `capture_stack = false` 的嵌入 API 允许走这里。错误是 atom 登记/属性读/构造的透传。4 处调用：`createNamedError`（`:32`）、`createPreallocatedOutOfMemoryError`（`:124`）、`error_stack_ops.throwParseSyntaxError`（`:110`）、`src/js_context.zig:475`。
 
 ### `createPreallocatedOutOfMemoryError` (`src/exec/exception_ops.zig:127`)
 
@@ -1399,7 +1399,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn isErrorConstructorName(name: []const u8) bool`。
 - **作用**：谓词：这个名字是不是标准 Error 构造器名。
 - **实现**：转调 `core.error_names.isErrorConstructorName`。
-- **所有权 / 错误 / 调用**：无：转调 `core.error_names.isErrorConstructorName` 的静态名字表查询，只读借用切片，不分配、无 error set。4 处调用走这个 exec 包装：`src/exec/class_init_ops.zig:160`、`src/exec/call_runtime.zig:1169`、`:2358`、`src/binding/context.zig:502`（`src/exec/reflect_ops.zig:389` 等另有几处直接调 `core.error_names.isErrorConstructorName`）。
+- **所有权 / 错误 / 调用**：无：转调 `core.error_names.isErrorConstructorName` 的静态名字表查询，只读借用切片，不分配、无 error set。4 处调用走这个 exec 包装：`src/exec/class_init_ops.zig:160`、`src/exec/call_runtime.zig:1169`、`:2358`、`src/js_context.zig:502`（`src/exec/reflect_ops.zig:389` 等另有几处直接调 `core.error_names.isErrorConstructorName`）。
 
 
 ### `functionNameBytes` (`src/exec/exception_ops.zig:521`)

@@ -1,22 +1,11 @@
-//! QCP-1 compiler-v2 (`compiler-v2-qjs` branch): the zjs identity-native
-//! compiler, using selected QuickJS production mechanisms. It is THE compiler:
-//! the legacy absolute-PC Phase 1/2/3 production path was deleted after the
-//! switch ruling, along with the dual comparator that proved the two agreed.
+//! The compiler: compact temporary bytecode, parser-native LabelId /
+//! LabelSlot / RelocEntry, resolve_variables with exact LabelId block-CFG
+//! liveness, then resolve_labels with a layout-selectable final emission.
 //!
-//! Production shape:
-//!   compact temporary bytecode (no per-instruction object IR)
-//!   + parser-native LabelId / LabelSlot / RelocEntry
-//!   + resolve_variables_v2 with exact LabelId block-CFG liveness
-//!     (an instruction-granularity CFG is the Debug/ReleaseSafe proof oracle)
-//!   + resolve_labels_v2 + single layout-selectable final emission (jump
-//!     threading, pc2line generated directly at output positions)
+//! Final layout: -Dzjs_compiler_layout=short (default) | plain (A/B
+//! diagnostic).
 //!
-//! Final layout: -Dzjs_compiler_layout=short (default) |plain (A/B diagnostic
-//! instrument). It is named in the build's configuration signature; see
-//! src/config_signature.zig and `zig build config-signature-check`.
-//!
-//! With one implementation left there is no second product to compare
-//! against, so correctness rests on V2's OWN invariants — the CFG identity
+//! Correctness rests on the compiler's own invariants — CFG identity
 //! oracles, boundary uniqueness, the atom-ownership audit and the escape
 //! assertions — plus execution (test262 / force-GC / OOM).
 
@@ -45,35 +34,35 @@ pub fn formatOracleReport(buffer: []u8) []const u8 {
     return cfg.formatOracleReport(buffer, cfg.oracleReportSnapshot());
 }
 
-/// QCP-1 v2 per-function lowering: resolve_variables_v2 then resolve_labels_v2,
-/// installing final executable code/atoms/source slots on `function` (the
-/// finalize "lowered" carrier). Tree recursion and the packed FunctionBytecode
-/// ABI stay in pipeline_finalize (createFunctionBytecode), which dispatches
-/// here for every FunctionDef that carries a v2 builder.
-pub fn compileFunctionV2(
+/// Per-function lowering: resolve_variables then resolve_labels, installing
+/// final executable code/atoms/source slots on `function` (the finalize
+/// "lowered" carrier). Tree recursion and the packed FunctionBytecode ABI
+/// stay in pipeline_finalize (createFunctionBytecode), which dispatches here
+/// for every FunctionDef that carries a builder.
+pub fn compileFunction(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
 ) resolve_variables.Error!void {
-    return compileFunctionV2Impl(false, function, fd);
+    return compileFunctionImpl(false, function, fd);
 }
 
 /// Packed FunctionBytecode finalization variant.  The outer finalize choke
 /// point performs the final code/atom/var-ref proof in one fused traversal
-/// before publishing the artifact; direct callers use `compileFunctionV2` and
+/// before publishing the artifact; direct callers use `compileFunction` and
 /// retain resolve_labels' self-contained output validation.
 ///
 /// This is an architectural phase boundary, not a speculative inline hint.
 /// Removing unrelated legacy state changed Zig/LLVM whole-program inlining and
-/// folded V2 lowering into the packed finalizer, regressing crypto/code-load.
+/// folded lowering into the packed finalizer, regressing crypto/code-load.
 /// Keep the boundary explicit; see docs/qcp1_switch_decision.md §9.3.
-pub noinline fn compileFunctionV2ForPackedFinalize(
+pub noinline fn compileFunctionForPackedFinalize(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
 ) resolve_variables.Error!void {
-    return compileFunctionV2Impl(true, function, fd);
+    return compileFunctionImpl(true, function, fd);
 }
 
-fn compileFunctionV2Impl(
+fn compileFunctionImpl(
     comptime packed_finalize_validates_code: bool,
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
@@ -97,12 +86,10 @@ fn compileFunctionV2Impl(
 /// reader of the compact stream, so the producer becomes inert here: its
 /// slice fields reset to empty, capacity 0, backings freed, and the
 /// FunctionDef no longer names it. `FunctionDef.deinit` stays as the
-/// parse-time / error-path backstop only. This lives with the CONSUMER, so it
-/// moves with the consumer when builder ownership relocates into a
-/// `V2Emitter`.
+/// parse-time / error-path backstop only. This lives with the consumer.
 fn releaseConsumedBuilder(fd: *bytecode.function_def.FunctionDef) void {
-    const consumed = fd.v2_builder orelse return;
-    fd.v2_builder = null;
+    const consumed = fd.builder orelse return;
+    fd.builder = null;
     consumed.deinit();
     std.debug.assert(consumed.code_capacity == 0 and consumed.atom_capacity == 0 and
         consumed.label_capacity == 0 and consumed.reloc_capacity == 0 and
@@ -144,6 +131,6 @@ test {
     _ = builder;
     _ = resolve_variables;
     _ = resolve_labels;
-    _ = compileFunctionV2;
+    _ = compileFunction;
     _ = @import("tests.zig");
 }

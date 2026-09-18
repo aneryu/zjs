@@ -42,7 +42,7 @@ recover them from git history when needed.
 - [VM value representation contract](vm-value-representation-contract.md):
   normative `JSValue` / slot / barrier / root protocol.
 - [API Boundary](api-boundary.md): layering rules between public API, core,
-  runtime, bindings, and CLI.
+  runtime, host facade, and CLI.
 - [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.
 - [Verification Policy](verification-policy.md): per-change and batch gates.
 - [Compiler Contract](compiler-contract.md): normative compiler identity rules.

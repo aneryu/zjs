@@ -4,14 +4,14 @@
 //! realm until `deinit`/`destroy`; `borrowCore` is explicitly non-owning.
 //! Evaluation, calls, conversion, properties, and exception APIs translate the
 //! core ownership rules into embedder-visible operations while lazily ensuring
-//! standard globals are installed. This binding seam may bridge core and exec
+//! standard globals are installed. This host facade may bridge core and exec
 //! (the QuickJS `JSContext` API role) but must never import CLI.
 
 const std = @import("std");
-const core = @import("../core/root.zig");
+const core = @import("core/root.zig");
 const native = @import("native.zig");
-const exec = @import("../exec/root.zig");
-const platform_clock = @import("../platform_clock.zig");
+const exec = @import("exec/root.zig");
+const platform_clock = @import("platform_clock.zig");
 
 const JSRuntime = core.JSRuntime;
 const Object = core.Object;

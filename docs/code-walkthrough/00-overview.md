@@ -12,13 +12,7 @@ zjs 是 **QuickJS 的 Zig 重写**，已经从「对照镜像」变成独立引�
 - **性能标尺**：vendored bench-v8 / Octane。
 - **不是**：Node/Deno/Bun、浏览器、敌意代码沙箱、libquickjs C ABI 的 drop-in。
 
-生产配置签名（编译期钉死）：
-
-```
-zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off
-```
-
-`compiler=v2` 是**唯一**编译器的身份名，不是目录名。`layout=short` 是发布布局。
+发货：`zig build -Doptimize=ReleaseFast`，`layout=short`。`plain` 只是 A/B 诊断。
 
 ## 2. 分层与依赖方向
 
@@ -27,7 +21,8 @@ embedder / CLI / tests
         │
         ▼
  src/root.zig          CLI/测试门面（JSRuntime / JSContext / JSValue / native.managed）
- src/binding/          把 core 类型收成 JSContext 门面与 NativeEntry thunk
+ src/js_context.zig    宿主 JSContext 门面
+ src/native.zig        NativeEntry thunk（zjs.native.managed）
         │
         ▼
  src/core/             值、对象、形状、属性、GC、Runtime/Context   ← 禁止依赖 parser/exec/runtime/CLI
@@ -43,8 +38,6 @@ embedder / CLI / tests
 
 - `event_loop.zig`：宿主定时器、fd/signal、job draining（`zjs.runtime`）。
 - `simple_token.zig`：QuickJS `simple_next_token` 那种前瞻用的 token 子集。
-- `config_signature.zig`：编译期配置签名证明。
-- `dossier_pad.zig`：布局谱系的 padding 仪器；`pad=0` 什么都不发。
 
 `src/internal_root.zig` 聚合 CLI / test262 / 仓内测试，**不是**公共嵌入契约。
 
@@ -60,7 +53,7 @@ const result = try ctx.eval("let x = 1 + 2; x;", .{});
 
 实际路径（名字以当前树为准）：
 
-1. **`JSContext.eval`**（`binding/context.zig`）把源文、文件名、eval 标志收成内部调用。
+1. **`JSContext.eval`**（`js_context.zig`）把源文、文件名、eval 标志收成内部调用。
 2. **`eval_entry`**（`exec/eval_entry.zig`）决定 script vs module、直接 vs 间接 eval、strict、new.target 等宿主标志。
 3. **`parser.compile`**（`parser.zig`）词法 + 语法 + 作用域 + 发射临时字节码。TypeScript 只做语法擦除，不是类型检查。
 4. **compiler 管线**（`compiler/`）

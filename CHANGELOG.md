@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Build:** every artifact follows `-Doptimize` (Zig default: Debug).
+  `zjs` is no longer pinned to ReleaseFast; `zjs-dev` / `run-test262-dev` /
+  `smoke-dev` are gone. Ship with `zig build -Doptimize=ReleaseFast`.
+  Batch and production gates that need the shipped binary pass that flag
+  explicitly.
+
+- **Build:** removed `src/config_signature.zig` and `src/dossier_pad.zig`.
+  The signature lock existed for a mixed Debug/ReleaseFast graph; the pad
+  emitted nothing at the default of 0. `--print-config-signature`,
+  `config-signature-check`, and `-Dzjs_dossier_layout_pad` are gone.
+
+- **Build:** configuration signature is `zjs-config-v4`. The constant
+  `compiler=v2` field is gone; there is one compiler and nothing to select.
+  Production names follow that: `FunctionDef.builder`, `compileFunction`,
+  and the parse/exec test harnesses no longer carry a `v2` identity.
+
+- **Host surface:** removed the `src/binding/` directory. The host `JSContext`
+  facade is `src/js_context.zig`; `zjs.native.managed` is `src/native.zig`.
+  Re-exports live on `src/root.zig` and `src/internal_root.zig`. The public
+  `zjs.JSContext` / `zjs.native` spellings are unchanged.
+
 - **Build:** trimmed `build/` after the profiles/perf-harness cut. `Ctx` and
   `Artifacts` keep only fields a helper reads; CLI / shard / smoke setup share
   helpers; `runArtifactOnCpus` lives next to `gateRunCpus` so tests no longer

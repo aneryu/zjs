@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
-      - run: zig build engine-production-gate --summary all
+      - run: zig build engine-production-gate -Doptimize=ReleaseFast --summary all
       - run: zig build test -Doptimize=ReleaseSafe --summary all
       # Instrumentation tiers. These used to depend on a developer remembering
       # to run them when they touched the matching subsystem; that is how the
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
-      - run: zig build engine-production-gate --summary all
+      - run: zig build engine-production-gate -Doptimize=ReleaseFast --summary all
       - run: zig build test -Doptimize=ReleaseSafe --summary all
       # Strip BEFORE the contract check, so the check runs against the exact
       # bytes the tarball ships. Debug info is 85% of the artifact (29 MB ->
@@ -65,9 +65,7 @@ jobs:
         run: |
           test "$(uname -m)" = "x86_64"
           strip zig-out/bin/zjs
-          expected="$(cat zig-out/bin/zjs.config-signature)"
-          actual="$(zig-out/bin/zjs --print-config-signature)"
-          test "$actual" = "$expected"
+          test "$(zig-out/bin/zjs -e 'print(1)')" = "1"
       - name: Package Linux binary
         run: |
           mkdir -p release
@@ -88,8 +86,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --summary all
-      - run: zig build smoke --summary all
+      - run: zig build zjs smoke -Doptimize=ReleaseFast --summary all
       # Same stripping rationale as the Linux job. On arm64 macOS `strip`
       # invalidates the ad-hoc code signature the loader requires, so re-sign
       # immediately; the contract check that follows is what proves the
@@ -99,9 +96,7 @@ jobs:
           test "$(uname -m)" = "arm64"
           strip -x zig-out/bin/zjs
           codesign -s - -f zig-out/bin/zjs
-          expected="$(cat zig-out/bin/zjs.config-signature)"
-          actual="$(zig-out/bin/zjs --print-config-signature)"
-          test "$actual" = "$expected"
+          test "$(zig-out/bin/zjs -e 'print(1)')" = "1"
       - name: Package macOS binary
         run: |
           mkdir -p release
@@ -122,21 +117,19 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --summary all
-      - run: zig build smoke --summary all
+      - run: zig build zjs smoke -Doptimize=ReleaseFast --summary all
       - name: Verify benchmark CLI contract
         shell: pwsh
         run: |
           if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
             throw "Expected an x86_64 Windows runner, got $env:PROCESSOR_ARCHITECTURE"
           }
-          $expected = (Get-Content -Raw .\zig-out\bin\zjs.config-signature).Trim()
-          $actual = (& .\zig-out\bin\zjs.exe --print-config-signature | Out-String).Trim()
+          $actual = (& .\zig-out\bin\zjs.exe -e "print(1)" | Out-String).Trim()
           if ($LASTEXITCODE -ne 0) {
-            throw "zjs configuration check exited with code $LASTEXITCODE"
+            throw "zjs post-strip check exited with code $LASTEXITCODE"
           }
-          if ($actual -ne $expected) {
-            throw "Unexpected zjs configuration signature: $actual"
+          if ($actual -ne "1") {
+            throw "Unexpected zjs output after strip: $actual"
           }
       - name: Package Windows binary
         shell: pwsh

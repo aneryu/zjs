@@ -1,6 +1,6 @@
 # 18 — CLI（`src/cli/zjs.zig`、`cli_process.zig`、`panic_policy.zig`）
 
-`zjs` / `zjs-dev` / `zjs-profile` / `zjs-size` 共用这一根。comptime `config_signature.attest("zjs CLI")`，并检查 `builtin.mode` 与签名里的 optimize 一致。`pub const panic` 来自 `panic_policy.zig`。
+`zjs` / `zjs-profile` / `zjs-size` 共用这一根，全部跟随 `-Doptimize`。`pub const panic` 来自 `panic_policy.zig`。
 
 argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函数展开。
 
@@ -8,7 +8,7 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 
 ### `src/cli/panic_policy.zig`（零函数）
 
-`pub const policy`：`ReleaseFast` → `std.debug.simple_panic`（只打消息，不带符号器）；其它模式 → `FullPanic(defaultPanic)`。发行 tarball 是 stripped ReleaseFast，完整 handler 会链上 ELF/DWARF/flate 与两份 `std.sort.block`，约 209 KB 且一帧都解不出。`zjs-dev`、测试、带断言的构建仍打解析后的栈。
+`pub const policy`：`ReleaseFast` → `std.debug.simple_panic`（只打消息，不带符号器）；其它模式 → `FullPanic(defaultPanic)`。发行 tarball 是 stripped ReleaseFast，完整 handler 会链上 ELF/DWARF/flate 与两份 `std.sort.block`，约 209 KB 且一帧都解不出。Debug `zjs`、测试、带断言的构建仍打解析后的栈。
 
 ### `CliError` / `Command` / `RuntimeOptions` / `EvalCommand` / `FileCommand`
 
@@ -93,10 +93,10 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 ### `main` (`src/cli/zjs.zig:218`)
 
 - **签名**：`pub fn main(init: std.process.Init) !void`。
-- **作用**：CLI 全过程：签名查询、解析 argv、造引擎、求值、排 job、报告、按合同退出。
+- **作用**：CLI 全过程：解析 argv、造引擎、求值、排 job、报告、按合同退出。
 - **实现**：
   1. `setupV2OracleReportExitDump`。
-  2. `argsToSlice`。若 `args[1] == --print-config-signature` 则打印签名 return（不造 Runtime）。
+  2. `argsToSlice`。
   3. `parseArgs` 失败 → usage + `exit(2)`。
   4. eval 用 argv 源；file 用 `readFileAlloc` 上限 64 MiB，失败 `exit(1)`。
   5. `JSRuntime.createWithOptions`（trace writer、memory_limit、默认 gc threshold、stack_size）+ `JSContext.create`；失败 `exit(1)`。
@@ -115,17 +115,10 @@ argv 合同见 [18-runtime-cli-abi.md](18-runtime-cli-abi.md)。本文件按函�
 
 - **签名**：`fn printUsage(io: std.Io) !void`。
 - **作用**：把契约写到 stderr。
-- **实现**：三行：`zjs [flags] -e <script>`、`zjs [flags] [-m] <file.js>`、`zjs --print-config-signature`。
+- **实现**：两行：`zjs [flags] -e <script>`、`zjs [flags] [-m] <file.js>`。
 - **所有权 / 错误 / 调用**：`parseArgs` 失败。随后 `exit(2)`。
 
-### `printConfigSignature` (`src/cli/zjs.zig:490`)
-
-- **签名**：`fn printConfigSignature(io: std.Io) !void`。
-- **作用**：打印编译期配置签名（QCP-1）。
-- **实现**：stdout 一行 `engine.config_signature.signature` 后 flush。
-- **所有权 / 错误 / 调用**：`main` 在任何引擎构造之前。`zig build config-signature-check` 消费。
-
-### `commandRuntimeOptions` (`src/cli/zjs.zig:498`)
+### `commandRuntimeOptions` (`src/cli/zjs.zig:468`)
 
 - **签名**：`fn commandRuntimeOptions(command: Command) RuntimeOptions`。
 - **作用**：从 eval/file 抽出选项。

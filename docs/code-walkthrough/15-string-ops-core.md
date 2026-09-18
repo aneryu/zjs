@@ -7,7 +7,7 @@
 - **签名**：`pub fn toStringForAnnexB( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：本文件的 ToString owner：对齐 qjs `JS_ToString`，Symbol 抛 TypeError，对象先取 string hint 的原始值。
 - **实现**：Symbol 直接抛 TypeError「cannot convert symbol to string」（`JS_ToStringInternal`，quickjs.c:13632）；已是字符串原样返回；对象经 `toPrimitiveForString` 取原始值，取回来仍是 Symbol 同样抛 TypeError，是字符串则直接返回；其余走 `value_ops.toStringValue`。
-- **所有权 / 错误 / 调用**：字符串入参**原样借用返回**（`if (value.isString()) return value;`，既不 dup 也不建根），对象腿的结果来自 `toPrimitiveForString`（可能跑用户 `Symbol.toPrimitive`/`toString`/`valueOf`），其余经 `value_ops.toStringValue` 新建串。Symbol（含 ToPrimitive 后仍是 Symbol）由 `throwTypeErrorMessage` 挂上 "cannot convert symbol to string" 并返回 `error.TypeError`——本文件所有 `throw*Message` 都是「装 pending 异常 + 返回对应 Zig error」。它是本文件最热的入口，全树 80+ 处调用，除本文件的 `stringConcat`/`stringReplaceCore`/`captureReplaceMatch` 外还有 `src/binding/context.zig:407`、`src/exec/uri_ops.zig:104`。
+- **所有权 / 错误 / 调用**：字符串入参**原样借用返回**（`if (value.isString()) return value;`，既不 dup 也不建根），对象腿的结果来自 `toPrimitiveForString`（可能跑用户 `Symbol.toPrimitive`/`toString`/`valueOf`），其余经 `value_ops.toStringValue` 新建串。Symbol（含 ToPrimitive 后仍是 Symbol）由 `throwTypeErrorMessage` 挂上 "cannot convert symbol to string" 并返回 `error.TypeError`——本文件所有 `throw*Message` 都是「装 pending 异常 + 返回对应 Zig error」。它是本文件最热的入口，全树 80+ 处调用，除本文件的 `stringConcat`/`stringReplaceCore`/`captureReplaceMatch` 外还有 `src/js_context.zig:407`、`src/exec/uri_ops.zig:104`。
 
 ### `toStringCheckObject` (`src/exec/string_ops.zig:137`)
 

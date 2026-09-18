@@ -1,4 +1,3 @@
-const std = @import("std");
 const config = @import("config.zig");
 const artifacts_mod = @import("artifacts.zig");
 const tests_mod = @import("tests.zig");
@@ -27,29 +26,18 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     const test262_check_step = b.step("test262-check", "Run the full test262 suite; any failed or newly-fixed case fails the step");
     test262_check_step.dependOn(&run_test262_exec.step);
 
-    // The shipped artifact states its own configuration; this build states
-    // what it believes it configured. `zjs` pins ReleaseFast regardless of
-    // `-Doptimize`, so the string it must print is the ReleaseFast expectation.
-    const run_config_signature = b.addRunArtifact(artifacts.zjs_exe);
-    run_config_signature.addArg("--print-config-signature");
-    run_config_signature.expectStdOutEqual(b.fmt("{s}\n", .{ctx.expect_config_fast}));
-    const config_signature_step = b.step("config-signature-check", "Check the built zjs reports the configuration signature this build requested");
-    config_signature_step.dependOn(&run_config_signature.step);
-
-    test_graph.smoke_step.dependOn(&run_config_signature.step);
-
     const quick_gate_step = b.step("quick-gate", "Run the fast inner-loop validation gate");
-    quick_gate_step.dependOn(test_graph.smoke_dev_step);
+    quick_gate_step.dependOn(test_graph.smoke_step);
 
-    const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262, OOM-injection, or ReleaseFast binary gates");
+    const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262, OOM-injection, or stress tiers");
     checkpoint_gate_step.dependOn(test_graph.test_step);
     checkpoint_gate_step.dependOn(test_graph.gc_stress_step);
-    checkpoint_gate_step.dependOn(test_graph.smoke_dev_step);
-    // Public-API surface snapshot. A Debug source-shape check; costs the
+    checkpoint_gate_step.dependOn(test_graph.smoke_step);
+    // Public-API surface snapshot. A source-shape check; costs the
     // gate nothing it was not already paying.
     checkpoint_gate_step.dependOn(test_graph.check_embedding_step);
 
-    const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
+    const engine_production_gate_step = b.step("engine-production-gate", "Run the engine production gate (pass -Doptimize=ReleaseFast for the shipped configuration)");
     engine_production_gate_step.dependOn(test_graph.test_step);
     engine_production_gate_step.dependOn(test_graph.stress_step);
     engine_production_gate_step.dependOn(test_graph.smoke_step);

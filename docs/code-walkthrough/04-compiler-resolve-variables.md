@@ -27,7 +27,7 @@ Pass A 从只读 Builder 建不可变 LabelId CFG（audit 下），再建立事�
 - **签名**：`pub fn deinitUncommitted(self: *ResolvedProduct) void`。
 - **作用**：放弃未提交产物：atom backing + 四张表。幂等。对齐 `Builder.deinit`。（函数头注释原来写「item-wise release of the owned atom prefix」，实际没有逐项释放，已改实。）
 - **实现**：free code/atom/label/source，清 `jump_size`。
-- **所有权 / 错误 / 调用**：`compileFunctionV2Impl` 的 `defer`；S4 成功 commit 后流已空，本函数仍安全。
+- **所有权 / 错误 / 调用**：`compileFunctionImpl` 的 `defer`；S4 成功 commit 后流已空，本函数仍安全。
 
 ### `updateLabel` (`src/compiler/resolve_variables.zig:123`)
 
@@ -557,7 +557,7 @@ Pass A 从只读 Builder 建不可变 LabelId CFG（audit 下），再建立事�
 ### `run` (`src/compiler/resolve_variables.zig:2462`)
 
 - **签名**：`pub fn run( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) Error!ResolvedProduct`。
-- **作用**：对 `fd.v2_builder` 做精确块-CFG resolve。入口公共 API。
+- **作用**：对 `fd.builder` 做精确块-CFG resolve。入口公共 API。
 - **实现**：无 builder / memory/atoms 不一致 → 失败。`validateInput`；`JSContext.initWithFunctionDef` + `proveScopeLinksForResolution` + `resolveEvalGlobalVarTargets`。bind 索引；audit 下 `cfg.build` + `auditInstructionOwnership` + 条件 eval 预扫。初始化产物与 Resolver（含 `functionHasDynamicEnvObjects`）。`resolver.run`。audit 下 `auditBoundaryUniqueness`。
 - **所有权 / 错误 / 调用**：`errdefer product.deinitUncommitted`。Builder **仍由调用方持有**直到 root `releaseConsumedBuilder`。注释：QCP-1 精确作用域加速器推迟，链表回退是与遗留管道共享的语义路径。
 
@@ -565,7 +565,7 @@ Pass A 从只读 Builder 建不可变 LabelId CFG（audit 下），再建立事�
 
 - **签名**：`fn init(harness: *ResolveTestHarness, allocator: std.mem.Allocator) !void`。
 - **作用**：S3 单测：runtime + Bytecode + FunctionDef + 堆上 Builder。
-- **实现**：create Builder 填 `fd.v2_builder`。
+- **实现**：create Builder 填 `fd.builder`。
 - **所有权 / 错误 / 调用**：栈上 `undefined` 再 init。
 
 ### `ResolveTestHarness.deinit` (`src/compiler/resolve_variables.zig:2571`)
@@ -586,8 +586,8 @@ Pass A 从只读 Builder 建不可变 LabelId CFG（audit 下），再建立事�
 
 - **签名**：`fn input(harness: *ResolveTestHarness) *builder.Builder`。
 - **作用**：测试发射入口。
-- **实现**：unwrap `v2_builder`。
-- **所有权 / 错误 / 调用**：测试夹具：返回**借用**指针；`Builder` 的所有权在 `fd.v2_builder`，由 harness 的 `deinitInput`（`src/compiler/resolve_variables.zig:2574` 起）先 `input_builder.deinit()` 再 `rt.memory.destroy` 释放（`deinit` 路径则由 `fd.deinit` 做同样两步），调用方不得代劳。`.?` 是断言不是错误路径。
+- **实现**：unwrap `builder`。
+- **所有权 / 错误 / 调用**：测试夹具：返回**借用**指针；`Builder` 的所有权在 `fd.builder`，由 harness 的 `deinitInput`（`src/compiler/resolve_variables.zig:2574` 起）先 `input_builder.deinit()` 再 `rt.memory.destroy` 释放（`deinit` 路径则由 `fd.deinit` 做同样两步），调用方不得代劳。`.?` 是断言不是错误路径。
 
 ### `ResolveTestHarness.resolve` (`src/compiler/resolve_variables.zig:2589`)
 

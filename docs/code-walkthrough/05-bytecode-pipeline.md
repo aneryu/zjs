@@ -33,7 +33,7 @@ validateRuntimeIdentity
 installChildFunctionBytecodes      -- 先子后己，子 FB 进父 cpool
 createFunctionBytecodeAfterChildren
     validatePreLoweringArtifactShape
-    compileFunctionV2ForPackedFinalize
+    compileFunctionForPackedFinalize
     consumeGlobalVars, state=resolved
     publishLoweredMetadata
         pc2line.encode → stack_size.compute(+artifact proof)
@@ -242,7 +242,7 @@ createFunctionBytecodeAfterChildren
 
 - **签名**：`fn prepareCurrentBeforeChildren( fd: *function_def_mod.FunctionDef, root_module_record: ?*module.Record, ) FinalizeError!void`。
 - **作用**：在遍历子函数之前准备本 def：清掉 is_captured / open_binding_idx、重建最终作用域链、跑 addEvalVariables + addGlobalVariables，模块根再核对 import 闭包行并回填 export 的 var_idx。
-- **实现**：要求自身 unprepared、父已 prepared、v2_builder 存在；结束时 finalization_state 推进到 prepared。
+- **实现**：要求自身 unprepared、父已 prepared、builder 存在；结束时 finalization_state 推进到 prepared。
 - **所有权 / 错误 / 调用**：createFunctionBytecode 树走。
 
 
@@ -298,7 +298,7 @@ createFunctionBytecodeAfterChildren
 
 - **签名**：`fn createFunctionBytecodeAfterChildren( fd: *function_def_mod.FunctionDef, compile_context: CompileContext, disasm_enabled: bool, ) FinalizeError![]fb_mod.FunctionBytecode`。
 - **作用**：子函数已装进 cpool 之后：v2 lowering、元数据发布、分配 production shell、搬迁所有者、算 stack_size、publishExecutionFlags、GC 发布。
-- **实现**：`compiler.compileFunctionV2ForPackedFinalize`；`publishLoweredMetadata`；FunctionLayout.init(true,true,…)；createProductionShell；memcpy 代码、逐行填 vardef/closure（名字 atom 留到 no-fail commit 才搬）；applyFlags 与 realm retain；pc2line/source 缓冲整体移交 DebugInfo；`pipeline_stack_size.compute` 带 final_artifact；`function_mod.publishExecutionFlags`；addInitialized。
+- **实现**：`compiler.compileFunctionForPackedFinalize`；`publishLoweredMetadata`；FunctionLayout.init(true,true,…)；createProductionShell；memcpy 代码、逐行填 vardef/closure（名字 atom 留到 no-fail commit 才搬）；applyFlags 与 realm retain；pc2line/source 缓冲整体移交 DebugInfo；`pipeline_stack_size.compute` 带 final_artifact；`function_mod.publishExecutionFlags`；addInitialized。
 - **所有权 / 错误 / 调用**：失败 errdefer 销毁未发布壳。FunctionDef 在 commit 前仍是名字/诊断所有者。
 
 
@@ -322,8 +322,8 @@ createFunctionBytecodeAfterChildren
 
 - **签名**：`fn lowerAttachedBuilder( function: *bytecode_function.Bytecode, def: *function_def_mod.FunctionDef, ) !void`。
 - **作用**：消费 FunctionDef 上的 v2 Builder，把最终码装进 Bytecode。
-- **实现**：要求 state==prepared；compileFunctionV2 消费 Builder 后 consumeGlobalVars、state=resolved、use_short_opcodes=true，最后 publishLoweredMetadata（不跑最终产物校验）。没有第二后端。
-- **所有权 / 错误 / 调用**：packed finalize 在 AfterChildren 里走 compileFunctionV2。
+- **实现**：要求 state==prepared；compileFunction 消费 Builder 后 consumeGlobalVars、state=resolved、use_short_opcodes=true，最后 publishLoweredMetadata（不跑最终产物校验）。没有第二后端。
+- **所有权 / 错误 / 调用**：packed finalize 在 AfterChildren 里走 compileFunction。
 
 
 ### `pipeline_finalize.publishLoweredMetadata` (`src/bytecode.zig:10646`)

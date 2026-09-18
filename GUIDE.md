@@ -350,8 +350,8 @@ mise run checkpoint-gate
 
 This includes the unified Debug suite, its gc-stress rerun, Debug CLI
 smoke, and the sema-only public-root check (`check-embedding`); measured
-2026-09-06 at 33 s after an engine edit on the big-core build pool. It does
-not compile ReleaseFast `zjs`. It also
+2026-09-06 at 33 s after an engine edit on the big-core build pool. Default
+`zig build` is Debug, so this does not compile ReleaseFast `zjs`. It also
 excludes the long-running stress tier (`zig build test-stress`: stack
 exhaustion and bigint kernel sweeps in `src/tests/stress.zig`, selected out
 of the same unified binary by `--only-prefix tests.stress.`) — that tier
@@ -362,7 +362,7 @@ the relevant focused test262 directory or file set; do not run `quick-gate`
 first because checkpoint already supersedes it.
 
 The full test262 suite is a zero-failure gate and runs on every PR
-(`zig build test262-check`), so a semantic regression cannot reach `main`.
+(`zig build test262-check -Doptimize=ReleaseFast`), so a semantic regression cannot reach `main`.
 Running the focused slice locally is still the fast way to find out; CI is the
 backstop, not the first line.
 
@@ -370,8 +370,8 @@ backstop, not the first line.
 evidence, or CI gates:
 
 ```bash
-mise run batch-gate        # checkpoint-gate + test-stress + test262-check (same set as CI linux-arm64)
-mise run production-gate   # engine-production-gate: adds the ReleaseFast zjs-profile smoke and the full test-embedding run
+mise run batch-gate        # Debug checkpoint-gate + test-stress, then ReleaseFast test262-check (same set as CI linux-arm64)
+mise run production-gate   # engine-production-gate -Doptimize=ReleaseFast
 zig build test test-stress -Doptimize=ReleaseSafe --summary all
 ```
 

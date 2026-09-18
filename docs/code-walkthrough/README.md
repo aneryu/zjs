@@ -24,7 +24,7 @@ zjs 是用 Zig 写的可嵌入 JavaScript 引擎，语义权威是 ECMA-262（te
 | 册 | 文件 | 覆盖 |
 | --- | --- | --- |
 | 00 | [00-overview.md](00-overview.md) | 项目地图、一次 eval 的路径、表示与 GC、如何用本系列 |
-| 01 | [01-public-api.md](01-public-api.md) | `src/root.zig`、`internal_root.zig`、`binding/`、配置签名 |
+| 01 | [01-public-api.md](01-public-api.md) | `src/root.zig`、`internal_root.zig`、`js_context.zig`、`native.zig`、配置签名 |
 | 02 | [02-lexer.md](02-lexer.md) | `lexer.zig`、`simple_token.zig` |
 | 03 | [03-parser.md](03-parser.md) | `parser.zig`（词法之后的语法、作用域、发射） |
 | 04 | [04-compiler.md](04-compiler.md) | `src/compiler/`：builder、变量/标签解析、CFG |

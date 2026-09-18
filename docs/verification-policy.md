@@ -16,7 +16,7 @@ size-screen / 场锁 / 强制 PMU ABBA;验证摊销仍从批内扩到批间)。�
 ## 每次改动(implementer 侧)必须做的
 
 默认编辑内循环使用 Debug：`check`、定向 `test-fast`，需要 CLI 时用
-`zjs-dev`。ReleaseFast 后置到稳定候选与批门，
+`zig build zjs`。ReleaseFast 后置到稳定候选与批门，
 不随每次编辑构建。Debug 结果不能替代生产配置的最终验证。
 
 1. 迭代验证用 `zig build check` 判编译错误;定向测试用
@@ -36,18 +36,19 @@ size-screen / 场锁 / 强制 PMU ABBA;验证摊销仍从批内扩到批间)。�
 不以删除测试、放宽 exclude 或删生成表获得收益。保留公共 API/ABI 与
 GC safety net。每合并批仍只跑一轮批门禁。
 
-生产 `zjs` 固定 ReleaseFast。代码生成实验使用
-`zig build zjs-size -Doptimize=ReleaseSmall`，其 CLI 与引擎同时遵循显式
-模式并独立校验配置。跨配置的体积比较必须显式声明。
+发货 `zjs` 用 `zig build -Doptimize=ReleaseFast`。代码生成实验使用
+`zig build zjs-size -Doptimize=ReleaseSmall`（第二安装名，避免覆盖已装的
+`zjs`）。跨配置的体积比较必须显式声明。
 
 ## 每合并批(driver 侧)做的
 
 1. 合并载荷审查(`git log trunk..candidate`,合并 commit = 合并其全部祖先);
 2. 批门禁一轮:`mise run batch-gate` =
-   `zig build checkpoint-gate test-stress test262-check -j32`
+   Debug `checkpoint-gate` + `test-stress`，再单独
+   `zig build test262-check -Doptimize=ReleaseFast`
    (与 CI linux-arm64 同一组步骤,不含已退役的 `gate-smoke` /
    `merge-gate`)。发布门仍是 `mise run production-gate`
-   (`engine-production-gate`)。**门禁一律走 mise 任务**:裸 `zig build`
+   (`engine-production-gate -Doptimize=ReleaseFast`)。**门禁一律走 mise 任务**:裸 `zig build`
    只有 `核数−1` 个 runner 线程,超出的初始步骤会在主线程内联执行;
 3. 失败 → 按批内 commit bisect,只对肇事 commit 追加验证。
 

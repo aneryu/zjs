@@ -27,7 +27,7 @@ pub const Program = struct {
     /// The parser-phase instruction stream to assert on: the compact
     /// temporary stream the Builder holds before lowering.
     pub fn phase1Code(p: *const Program) []const u8 {
-        return p.state.function_def.v2_builder.?.code[0..p.state.function_def.v2_builder.?.code_len];
+        return p.state.function_def.builder.?.code[0..p.state.function_def.builder.?.code_len];
     }
 
     pub fn deinit(p: *Program, rt: *core.JSRuntime) void {

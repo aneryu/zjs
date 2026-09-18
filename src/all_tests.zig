@@ -3,7 +3,6 @@ const std = @import("std");
 const internal = @import("internal_root.zig");
 
 pub const public_api = internal.public_api;
-pub const binding_root = internal.binding_root;
 pub const platform_clock = internal.platform_clock;
 pub const core = internal.core;
 pub const parser = internal.parser;
@@ -13,7 +12,6 @@ pub const exec = internal.exec;
 pub const libs = internal.libs;
 pub const runtime = internal.runtime;
 pub const compiler = internal.compiler;
-pub const config_signature = internal.config_signature;
 pub const printSmallInlineProbe = internal.printSmallInlineProbe;
 pub const sort_erased = internal.sort_erased;
 
@@ -62,14 +60,6 @@ pub const object = internal.public_api.object;
 pub const context = internal.public_api.context;
 pub const module = internal.public_api.module;
 pub const job = internal.public_api.job;
-
-// QCP-1: the unified suite proves its OWN effective configuration at compile
-// time. It follows -Doptimize, so `zig build test` reports `optimize=Debug`
-// and `zig build test -Doptimize=ReleaseSafe` reports `optimize=ReleaseSafe` --
-// the distinction that decides whether the run had the assert oracle at all.
-comptime {
-    config_signature.attest("unified-tests (src/all_tests.zig)");
-}
 
 fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) void {
     @setEvalBranchQuota(200000);

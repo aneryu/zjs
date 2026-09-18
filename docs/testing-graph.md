@@ -10,8 +10,8 @@ Three roots, each a superset of the one above it:
 
 | Root | Role |
 |---|---|
-| `src/root.zig` | Public embedder facade. Does not export `config_signature`. |
-| `src/internal_root.zig` | Engine + CLI surface. Adds binding `Object`, `Descriptor`, `Atom`, `config_signature`. |
+| `src/root.zig` | Public embedder facade. |
+| `src/internal_root.zig` | Engine + CLI surface. Adds core `Object`, `Descriptor`, `Atom`. |
 | `src/all_tests.zig` | Unified suite. Re-exports every `internal_root` name and overlays public-surface mirrors. |
 
 `all_tests` asserts at runtime that every public declaration on
@@ -39,9 +39,9 @@ Two artifacts still compile a different root:
 
 ### Independent options (rule C)
 
-Every engine-bearing module gets its own `addOptions` object. Reusing one
-options object across a Debug artifact and a ReleaseFast artifact is how a
-test binary would attest the wrong `optimize` field.
+Every engine-bearing module gets its own `addOptions` object when the
+generated file would otherwise be shared as two module roots. One `zig build`
+is one `-Doptimize`; do not pin a second mode inside the graph.
 
 ### `helpers.zig` (rule D)
 
@@ -53,11 +53,11 @@ and in-tree runtime tests must never import it: they are pulled into
 
 | Artifact | How it attests | Notes |
 |---|---|---|
-| `zjs` / `zjs-profile` / `zjs-dev` | `src/cli/zjs.zig` → `engine.config_signature.attest("zjs CLI")` | |
-| `run-test262` / `run-test262-dev` | `src/cli/run_test262.zig` attests `"run-test262 / test-runner"` | |
-| unified `test` | `all_tests` attests `"unified-tests (src/all_tests.zig)"` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 16) parallel `--shard i/N` run processes with captured stderr; optional `-Dgate-run-cpus` pin |
+| `zjs` / `zjs-profile` / `zjs-size` | `src/cli/zjs.zig` | Follow `-Doptimize` |
+| `run-test262` | `src/cli/run_test262.zig` | Follow `-Doptimize` |
+| unified `test` | `src/all_tests.zig` | Follows `-Doptimize`; one compile, `-Dtest-shards` (default 16) parallel `--shard i/N` run processes with captured stderr; optional `-Dgate-run-cpus` pin |
 | `test-fast -- <substring>` | same unified binary | One runtime-filtered process; missing, empty, unmatched, or list-only selection fails. Changing the substring does not change the compile artifact. |
-| `test-embedding` | **does not attest** | Public module does not export `config_signature`; same choice as the plugin fixtures |
+| `test-embedding` | public `src/root.zig` | |
 | `test-oom` | `src/tests/oom.zig` attests `"oom-tests"` | |
 | `test-leak-census` | same unified binary | Runtime `--repeat 2 --leak-census` plus `--filter tests.exec.` / `tests.builtins.` |
 
@@ -74,17 +74,18 @@ Area selection is a runtime filter on the unified binary. Multiple
 | `test-leak-census` | `--filter tests.exec.` `--filter tests.builtins.` plus `--repeat 2 --leak-census` |
 | `test-embedding` / `check-embedding` | public-root compile of `src/tests/embedding_examples.zig`; no name filter |
 
-`test-embedding` uses an independent Debug `zjs` module rooted at
-`src/root.zig` and hangs on `engine-production-gate`; checkpoint-gate
-takes its sema-only twin `check-embedding` because the same test
-bodies, runtime pins included, already run in the unified suite.
+`test-embedding` uses an independent `zjs` module rooted at
+`src/root.zig` (same `-Doptimize` as the rest of the graph) and hangs on
+`engine-production-gate`; checkpoint-gate takes its sema-only twin
+`check-embedding` because the same test bodies, runtime pins included,
+already run in the unified suite.
 
 ## Step naming
 
 | Suffix | Meaning | Examples |
 |---|---|---|
 | `-gate` | Aggregate validation gate | `quick-gate`, `checkpoint-gate`, `engine-production-gate` |
-| `-check` | Single check | `config-signature-check`, `test262-check` |
+| `-check` | Single check | `test262-check` |
 | (none) | Build or run | `zjs`, `test`, `smoke`, `test-fast` |
 
 `check` (no suffix, no prefix) is the one exception, and it is deliberate:
@@ -104,8 +105,8 @@ peaks at 1.4 GB instead of 8.25 GB, which is what decides whether several
 agents can build on one machine at once.
 
 What `check` still proves: every comptime assertion the tree owns.
-`config_signature.attest`, the opcode declaration ledger and the FNABI
-`@cImport` round-trip are semantic analysis, so they all fire.
+The opcode declaration ledger and the FNABI `@cImport` round-trip are
+semantic analysis, so they all fire.
 
 What it does not prove: anything a machine-code backend decides
 (`@call(.always_tail)` lowering, the `.space` tombstones) and any behaviour
@@ -142,8 +143,8 @@ runs unprompted.
 
 | Workflow | Primary job | Steps it runs |
 |---|---|---|
-| `ci.yml` (push to `main`, pull requests) | `linux-arm64` | `zjs`, `checkpoint-gate`, the compiler-stage boundary lint, and `test262-check` |
-| `nightly.yml` (scheduled) | `linux-arm64` | `engine-production-gate`, `test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, and `test -Dzjs_ownership_audit=true` |
+| `ci.yml` (push to `main`, pull requests) | `linux-arm64` | ReleaseFast `zjs`, Debug `checkpoint-gate` / `test-stress`, ReleaseFast `test262-check` |
+| `nightly.yml` (scheduled) | `linux-arm64` | `engine-production-gate -Doptimize=ReleaseFast`, `test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, and `test -Dzjs_ownership_audit=true` |
 
 `test262-check` is a zero-failure gate — any failed or newly-fixed case fails
 the step — which makes it the sharpest semantic-regression signal available. It

@@ -29,8 +29,8 @@ zig build run-test262 --summary all
 The checked 2026-08-22 report has 44,584 passes, 0 checked-in known failures,
 0 unexpected failures, and 5,194 feature skips, out of 49,778 prepared cases.
 It was recorded under the production default
-(`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`);
-the v2 compiler (`src/compiler/`) is the only compiler. `zig build test262-check` writes local
+(`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`).
+Live default is in `AGENTS.md`. `zig build test262-check -Doptimize=ReleaseFast` writes local
 bucket, per-directory, feature-skip, and failure reports under
 `reports/test262-latest/` (gitignored).
 
@@ -138,8 +138,8 @@ repository validation profile. Required gates from a clean checkout:
 ```sh
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
-zig build test262-check --summary all
-zig build engine-production-gate --summary all
+zig build test262-check -Doptimize=ReleaseFast --summary all
+zig build engine-production-gate -Doptimize=ReleaseFast --summary all
 git diff --check
 ```
 

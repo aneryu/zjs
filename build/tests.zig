@@ -12,7 +12,6 @@ pub const TestGraph = struct {
     /// (`test-gc-stress`). ~1 minute, so it rides checkpoint-gate.
     gc_stress_step: *std.Build.Step,
     smoke_step: *std.Build.Step,
-    smoke_dev_step: *std.Build.Step,
     embedding_step: *std.Build.Step,
     /// Sema-only twin of `embedding_step` (public root assembles; comptime
     /// pins hold). checkpoint-gate's embedding dependency.
@@ -72,39 +71,24 @@ fn addShardedUnifiedRuns(
     }
 }
 
-fn addSmokeStep(
-    ctx: build_config.Ctx,
-    step_name: []const u8,
-    step_desc: []const u8,
-    test_name: []const u8,
-    optimize: std.builtin.OptimizeMode,
-    zjs_exe: *std.Build.Step.Compile,
-    install_zjs: *std.Build.Step.InstallArtifact,
-    profile_exe: ?*std.Build.Step.Compile,
-    install_profile: ?*std.Build.Step.InstallArtifact,
-) *std.Build.Step {
+fn addSmokeStep(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) *std.Build.Step {
     const b = ctx.b;
     const options = b.addOptions();
-    options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, zjs_exe.out_filename));
-    if (profile_exe) |profile| {
-        options.addOption([]const u8, "zjs_profile_executable_path", b.getInstallPath(.bin, profile.out_filename));
-        options.addOption(bool, "smoke_profile_checks", true);
-    } else {
-        options.addOption([]const u8, "zjs_profile_executable_path", "");
-        options.addOption(bool, "smoke_profile_checks", false);
-    }
-    const tests = addZjsTest(ctx, test_name, b.createModule(.{
+    options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, artifacts.zjs_exe.out_filename));
+    options.addOption([]const u8, "zjs_profile_executable_path", b.getInstallPath(.bin, artifacts.zjs_profile_exe.out_filename));
+    options.addOption(bool, "smoke_profile_checks", true);
+    const tests = addZjsTest(ctx, "smoke-tests", b.createModule(.{
         .root_source_file = b.path("src/tests/smoke_test.zig"),
         .target = ctx.target,
-        .optimize = optimize,
+        .optimize = ctx.optimize,
         .link_libc = true,
     }), &.{});
     tests.root_module.addOptions("build_options", options);
     const run = b.addRunArtifact(tests);
-    run.step.dependOn(&install_zjs.step);
-    if (install_profile) |install| run.step.dependOn(&install.step);
+    run.step.dependOn(&artifacts.install_zjs.step);
+    run.step.dependOn(&artifacts.install_zjs_profile.step);
     forwardArgs(b, run);
-    const step = b.step(step_name, step_desc);
+    const step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     step.dependOn(&run.step);
     return step;
 }
@@ -140,8 +124,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         if (test_filter) |f| &.{f} else &.{},
     );
     unified_tests.root_module.strip = test_strip;
-    // Own options object: embedding pins Debug and must not share this one
-    // (rule C — a Debug artifact would attest the wrong `optimize` field).
+    // Own options object so this compile root does not share a generated
+    // options file with the public `zjs` module or the CLI.
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", build_config.addEngineOptions(b, ctx.engine_inputs));
 
@@ -169,28 +153,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const stress_step = b.step("test-stress", "Run the long-running stress tier (stack exhaustion, bigint kernel sweeps) from the unified binary");
     stress_step.dependOn(&run_stress_tests.step);
 
-    const smoke_step = addSmokeStep(
-        ctx,
-        "smoke",
-        "Run JavaScript smoke fixtures against zjs",
-        "smoke-tests-releasefast",
-        ctx.optimize,
-        artifacts.zjs_exe,
-        artifacts.install_zjs,
-        artifacts.zjs_profile_exe,
-        artifacts.install_zjs_profile,
-    );
-    const smoke_dev_step = addSmokeStep(
-        ctx,
-        "smoke-dev",
-        "Run JavaScript smoke fixtures against the Debug zjs",
-        "smoke-tests-debug",
-        .Debug,
-        artifacts.zjs_dev_exe,
-        artifacts.install_zjs_dev,
-        null,
-        null,
-    );
+    const smoke_step = addSmokeStep(ctx, artifacts);
 
     // Nightly instrumentation, not a checkpoint dependency. Multiple
     // `--filter` arguments are OR-matched.
@@ -212,15 +175,14 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const test_leak_census_step = b.step("test-leak-census", "Run the shared exec and builtins tiers twice and reject unaccounted retained growth (instrumentation tier; runs nightly)");
     test_leak_census_step.dependOn(&run_leak_census_tests.step);
 
-    // Public-module assembly check. Independent Debug `zjs` module rooted at
-    // `src/root.zig` (not internal_root) and its own options object (rule C).
-    // The public surface does not export config_signature, so this artifact
-    // does not attest. Hangs on engine-production-gate, not checkpoint.
-    const embedding_engine_options = build_config.addEngineOptions(b, ctx.engine_inputs.withExpect(ctx.expect_config_debug));
+    // Public-module assembly check. Independent `zjs` module rooted at
+    // `src/root.zig` (not internal_root) and its own options object.
+    // Hangs on engine-production-gate, not checkpoint.
+    const embedding_engine_options = build_config.addEngineOptions(b, ctx.engine_inputs);
     const embedding_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = ctx.target,
-        .optimize = .Debug,
+        .optimize = ctx.optimize,
         .link_libc = true,
     });
     // One options module shared by the engine and the test root: identical
@@ -230,7 +192,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const embedding_root = b.createModule(.{
         .root_source_file = b.path("src/tests/embedding_examples.zig"),
         .target = ctx.target,
-        .optimize = .Debug,
+        .optimize = ctx.optimize,
         .link_libc = true,
         .imports = &.{
             .{ .name = "zjs", .module = embedding_zjs_mod },
@@ -244,8 +206,8 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const embedding_step = b.step("test-embedding", "Run focused public-module embedding tests");
     embedding_step.dependOn(&run_embedding_tests.step);
     // Sema-only twin: the same bodies already run inside the unified suite
-    // through `internal_root`. checkpoint-gate takes this instead of a Debug
-    // engine compile + link; the production gate keeps the full run.
+    // through `internal_root`. checkpoint-gate takes this instead of a
+    // second engine compile + link; the production gate keeps the full run.
     const check_embedding = addZjsTest(ctx, "check-embedding", embedding_tests.root_module, &.{});
     const check_embedding_step = b.step("check-embedding", "Semantic-analysis-only compile of the public-root embedding tests (no codegen, no run)");
     check_embedding_step.dependOn(&check_embedding.step);
@@ -289,7 +251,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .stress_step = stress_step,
         .gc_stress_step = gc_stress_step,
         .smoke_step = smoke_step,
-        .smoke_dev_step = smoke_dev_step,
         .embedding_step = embedding_step,
         .check_embedding_step = check_embedding_step,
     };

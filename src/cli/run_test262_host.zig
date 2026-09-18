@@ -6,7 +6,8 @@
 const std = @import("std");
 const test262_root = @import("zjs");
 
-const zjs = test262_root.binding_root;
+const zjs = test262_root;
+const Object = test262_root.core.Object;
 const runtime_layer = test262_root.runtime;
 
 pub fn assertSameValue(actual: zjs.JSValue, expected: zjs.JSValue) !zjs.JSValue {
@@ -17,8 +18,8 @@ pub fn assertSameValue(actual: zjs.JSValue, expected: zjs.JSValue) !zjs.JSValue 
 fn test262EvalScript(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: *zjs.Object,
-    function_object: *zjs.Object,
+    global: *Object,
+    function_object: *Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     if (args.len == 0) return zjs.JSValue.undefinedValue();
@@ -345,7 +346,7 @@ fn test262AgentIsDone(agent: *Test262Agent) bool {
 fn test262AgentStart(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -376,7 +377,7 @@ fn test262AgentStart(
 fn test262AgentBroadcast(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -401,7 +402,7 @@ fn test262AgentBroadcast(
 fn test262AgentReceiveBroadcast(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     const agent = current_test262_agent orelse return error.TypeError;
@@ -431,7 +432,7 @@ fn test262AgentReceiveBroadcast(
 fn test262AgentReport(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -447,7 +448,7 @@ fn test262AgentReport(
 fn test262AgentGetReport(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -469,7 +470,7 @@ fn test262AgentGetReport(
 fn test262AgentLeaving(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = ctx;
@@ -489,7 +490,7 @@ fn test262AgentLeaving(
 fn test262AgentSleep(
     _: *zjs.JSContext,
     _: ?*std.Io.Writer,
-    _: ?*zjs.Object,
+    _: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     const value = if (args.len >= 1) args[0] else zjs.JSValue.int32(0);
@@ -504,7 +505,7 @@ fn test262AgentSleep(
 fn test262AgentMonotonicNow(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = ctx;
@@ -515,7 +516,7 @@ fn test262AgentMonotonicNow(
     return zjs.JSValue.float64(@as(f64, @floatFromInt(now.nanoseconds)) / std.time.ns_per_ms);
 }
 
-pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Object) !void {
+pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *Object) !void {
     try defineGlobalExternalHostFunction(rt, ctx, global, "Test262Error", 1, wrapExternal(hostCallTest262Error), true);
     try defineGlobalExternalHostFunction(rt, ctx, global, "verifyProperty", 3, wrapExternal(hostCallVerifyProperty), false);
     try defineGlobalExternalHostFunction(rt, ctx, global, "verifyCallableProperty", 4, wrapExternal(hostCallVerifyCallableProperty), false);
@@ -592,7 +593,7 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
     }
 }
 
-fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Object) !void {
+fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *Object) !void {
     const assert_val = try createExternalHostFunction(rt, ctx, "assert", 1, wrapExternal(hostCallAssertTrue));
     const methods = [_]struct {
         name: []const u8,
@@ -614,7 +615,7 @@ fn installAssertObject(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *zjs.Obj
 fn defineGlobalExternalHostFunction(
     rt: *zjs.JSRuntime,
     ctx: *zjs.JSContext,
-    global: *zjs.Object,
+    global: *Object,
     name: []const u8,
     length: i32,
     call: zjs.native.Spec,
@@ -627,7 +628,7 @@ fn defineGlobalExternalHostFunction(
 fn hostCallTest262Error(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -639,7 +640,7 @@ fn hostCallTest262Error(
 fn hostCallAssertSameValue(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = ctx;
@@ -651,7 +652,7 @@ fn hostCallAssertSameValue(
 fn hostCallAssertTrue(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = ctx;
@@ -664,7 +665,7 @@ fn hostCallAssertTrue(
 fn hostCallAssertNotSameValue(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = ctx;
@@ -678,7 +679,7 @@ fn hostCallAssertNotSameValue(
 fn hostCallAssertThrows(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     if (args.len < 2) return error.TypeError;
@@ -706,7 +707,7 @@ fn hostCallAssertThrows(
 fn hostCallVerifyProperty(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -717,7 +718,7 @@ fn hostCallVerifyProperty(
 fn hostCallVerifyCallableProperty(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -728,7 +729,7 @@ fn hostCallVerifyCallableProperty(
 fn hostCallIsConstructor(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -740,7 +741,7 @@ fn hostCallIsConstructor(
 fn hostCallVerifyNotWritable(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -751,7 +752,7 @@ fn hostCallVerifyNotWritable(
 fn hostCallVerifyNotEnumerable(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -762,7 +763,7 @@ fn hostCallVerifyNotEnumerable(
 fn hostCallVerifyConfigurable(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -773,7 +774,7 @@ fn hostCallVerifyConfigurable(
 fn hostCallCompareArray(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -794,7 +795,7 @@ fn hostCallCompareArray(
 fn hostCallSetTimeout(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -914,16 +915,16 @@ fn int64ResultValue(value: i64) zjs.JSValue {
     return zjs.JSValue.number(@floatFromInt(value));
 }
 
-fn test262InternalObjectFromValue(value: zjs.JSValue) ?*zjs.Object {
+fn test262InternalObjectFromValue(value: zjs.JSValue) ?*Object {
     const header = value.refHeader() orelse return null;
     if (header.meta().flags.kind != .object) return null;
-    return zjs.Object.fromHeader(header);
+    return Object.fromHeader(header);
 }
 
 fn hostCallIsHtmlDda(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = ctx;
@@ -936,7 +937,7 @@ fn hostCallIsHtmlDda(
 fn test262CreateRealm(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -952,7 +953,7 @@ fn test262CreateRealm(
 fn test262DetachArrayBuffer(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -964,7 +965,7 @@ fn test262DetachArrayBuffer(
 fn test262Gc(
     ctx: *zjs.JSContext,
     output: ?*std.Io.Writer,
-    global: ?*zjs.Object,
+    global: ?*Object,
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
@@ -1001,7 +1002,7 @@ fn wrapExternalWithFunc(comptime f: anytype) zjs.native.Spec {
     }.call);
 }
 
-fn ensureTest262HarnessException(ctx: *zjs.JSContext, global: ?*zjs.Object, err: anyerror) !void {
+fn ensureTest262HarnessException(ctx: *zjs.JSContext, global: ?*Object, err: anyerror) !void {
     if (err != error.JSException or ctx.hasException()) return;
     _ = throwTest262HarnessError(ctx, global, "") catch |throw_err| switch (throw_err) {
         error.JSException => return,
@@ -1009,11 +1010,11 @@ fn ensureTest262HarnessException(ctx: *zjs.JSContext, global: ?*zjs.Object, err:
     };
 }
 
-fn throwTest262HarnessError(ctx: *zjs.JSContext, global: ?*zjs.Object, message: []const u8) !zjs.JSValue {
+fn throwTest262HarnessError(ctx: *zjs.JSContext, global: ?*Object, message: []const u8) !zjs.JSValue {
     return ctx.throwError("Test262Error", message, .{ .realm_global = global });
 }
 
-fn createTest262ErrorValue(ctx: *zjs.JSContext, global: ?*zjs.Object, message: []const u8) !zjs.JSValue {
+fn createTest262ErrorValue(ctx: *zjs.JSContext, global: ?*Object, message: []const u8) !zjs.JSValue {
     return ctx.createError("Test262Error", message, .{ .realm_global = global });
 }
 
@@ -1034,7 +1035,7 @@ fn createExternalHostFunctionWithRealm(
     length: i32,
     spec: zjs.native.Spec,
     with_prototype: bool,
-    realm_global: ?*zjs.Object,
+    realm_global: ?*Object,
 ) !zjs.JSValue {
     std.debug.assert(runtime == context.runtimePtr());
     return context.createFunction(name, spec, .{

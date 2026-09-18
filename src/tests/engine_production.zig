@@ -66,6 +66,8 @@ test "production public API contract exposes Zig-native embedding spellings" {
     try std.testing.expect(!@hasDecl(public_zjs, "JSString"));
     try std.testing.expect(!@hasDecl(public_zjs, "JSBytes"));
     try std.testing.expect(!@hasDecl(public_zjs, "binding"));
+    try std.testing.expect(!@hasDecl(public_zjs, "binding_root"));
+    try std.testing.expect(!@hasDecl(public_zjs, "js_context"));
     try std.testing.expect(!@hasDecl(public_zjs.host, "NativeBinding"));
     try std.testing.expect(!@hasDecl(public_zjs.host, "PropName"));
     try std.testing.expect(!@hasDecl(public_zjs.native, "leaf"));

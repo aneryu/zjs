@@ -1,13 +1,12 @@
 //! Compiler contract tests spanning IR construction, label and variable
 //! resolution, packed bytecode, the production short layout, and execution in
-//! the VM. `V2Parse` and `V2Exec` are stack-local harnesses whose explicit
+//! the VM. `ParseHarness` and `ExecHarness` are stack-local harnesses whose explicit
 //! teardown releases runtime, atom, lexer, bytecode, and context state in
 //! reverse ownership order. These tests are the structural oracle for emitted
 //! instructions as well as an end-to-end parser-to-execution check.
 
 const std = @import("std");
 const build_options = @import("build_options");
-const config_signature = @import("../config_signature.zig");
 const core = @import("../core/root.zig");
 const parser_mod = @import("../parser.zig");
 const bytecode_mod = @import("../bytecode.zig");
@@ -23,15 +22,15 @@ const P = parser_mod.Parser;
 const opcode = bytecode_mod.opcode;
 const qop = bytecode_mod.opcode.op;
 
-const V2Parse = struct {
+const ParseHarness = struct {
     rt: *core.JSRuntime,
     name_atom: core.atom.Atom,
     function: bytecode_mod.Bytecode,
     lex: parser_mod.Lexer,
     state: P.ParseState,
 
-    /// `h` must be a stack local (`var h: V2Parse = undefined;`).
-    fn init(h: *V2Parse, src: []const u8) !void {
+    /// `h` must be a stack local (`var h: ParseHarness = undefined;`).
+    fn init(h: *ParseHarness, src: []const u8) !void {
         h.rt = try core.JSRuntime.create(std.testing.allocator);
         errdefer h.rt.destroy();
         h.name_atom = try h.rt.atoms.internString("s2g1");
@@ -41,25 +40,25 @@ const V2Parse = struct {
         errdefer h.lex.deinit();
         h.state = try P.ParseState.init(&h.lex, &h.function);
         // Scope events (enter_scope/leave_scope) belong to the un-migrated
-        // scope group; the S2-G1 harness parses without phase-1 temp scope
+        // scope group; the parse harness runs without phase-1 temp scope
         // markers so statement snippets stay inside the migrated surface.
         h.state.emit_phase1_temp = false;
         try h.state.beginBuilderEmissionForTest();
     }
 
-    fn builder(h: *V2Parse) *builder_mod.Builder {
-        return h.state.function_def.v2_builder.?;
+    fn builder(h: *ParseHarness) *builder_mod.Builder {
+        return h.state.function_def.builder.?;
     }
 
-    fn childBuilder(h: *V2Parse, index: usize) *builder_mod.Builder {
-        return h.state.function_def.child_list[index].v2_builder.?;
+    fn childBuilder(h: *ParseHarness, index: usize) *builder_mod.Builder {
+        return h.state.function_def.child_list[index].builder.?;
     }
 
-    fn grandchildBuilder(h: *V2Parse, index: usize, sub: usize) *builder_mod.Builder {
-        return h.state.function_def.child_list[index].child_list[sub].v2_builder.?;
+    fn grandchildBuilder(h: *ParseHarness, index: usize, sub: usize) *builder_mod.Builder {
+        return h.state.function_def.child_list[index].child_list[sub].builder.?;
     }
 
-    fn deinit(h: *V2Parse) void {
+    fn deinit(h: *ParseHarness) void {
         h.state.deinit(h.rt);
         h.lex.deinit();
         h.function.deinit(h.rt);
@@ -67,7 +66,7 @@ const V2Parse = struct {
     }
 };
 
-const V2Exec = struct {
+const ExecHarness = struct {
     rt: *core.JSRuntime,
     ctx: *core.JSContext,
     name_atom: core.atom.Atom,
@@ -76,8 +75,8 @@ const V2Exec = struct {
     state: P.ParseState,
     installed_short_opcode: bool,
 
-    /// `h` must be a stack local (`var h: V2Exec = undefined;`).
-    fn init(h: *V2Exec, src: []const u8) !void {
+    /// `h` must be a stack local (`var h: ExecHarness = undefined;`).
+    fn init(h: *ExecHarness, src: []const u8) !void {
         h.rt = try core.JSRuntime.create(std.testing.allocator);
         errdefer h.rt.destroy();
         standard_globals.configureRuntime(h.rt);
@@ -98,7 +97,7 @@ const V2Exec = struct {
         h.installed_short_opcode = false;
     }
 
-    fn deinit(h: *V2Exec) void {
+    fn deinit(h: *ExecHarness) void {
         h.state.deinit(h.rt);
         h.lex.deinit();
         h.function.deinit(h.rt);
@@ -196,14 +195,14 @@ fn installedFunctionHasShortOpcode(fb: *const bytecode_mod.FunctionBytecode) !bo
 /// Parse as a completion-returning script, translate the whole FunctionDef
 /// tree to v2, finalize through the production packed-FB pipeline, and execute
 /// it on the VM. The returned completion value is owned by the caller.
-fn compileAndRun(h: *V2Exec) !core.JSValue {
+fn compileAndRun(h: *ExecHarness) !core.JSValue {
     return compileAndRunWithHook(h, null);
 }
 
 /// `compileAndRun` with a hook that runs after the parse and before
 /// `createFunctionBytecode` -- the window in which the FunctionDef tree owns
 /// every constant and no artifact has been published (TGC S3-b).
-fn compileAndRunWithHook(h: *V2Exec, before_finalize: ?*const fn (*V2Exec) anyerror!void) !core.JSValue {
+fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarness) anyerror!void) !core.JSValue {
     try h.state.enableReturnCompletion();
     try P.parseProgramStatements(
         &h.state,
@@ -256,7 +255,7 @@ fn compileAndRunWithHook(h: *V2Exec, before_finalize: ?*const fn (*V2Exec) anyer
 fn expectFunctionDefInertAfterEscape(
     fd: *const bytecode_mod.function_def.FunctionDef,
 ) !void {
-    try std.testing.expect(fd.v2_builder == null);
+    try std.testing.expect(fd.builder == null);
     try std.testing.expectEqual(core.atom.null_atom, fd.func_name);
     try std.testing.expectEqual(core.atom.null_atom, fd.filename);
     try std.testing.expectEqual(core.atom.null_atom, fd.script_or_module);
@@ -646,7 +645,7 @@ test "compiler.tests: rollback restores a shared label reloc chain" {
 }
 
 test "compiler.s2g1: conditional expression" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true ? false : null");
     defer h.deinit();
 
@@ -672,7 +671,7 @@ test "compiler.s2g1: conditional expression" {
 }
 
 test "compiler.s2g1: logical or" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("false || true");
     defer h.deinit();
 
@@ -697,7 +696,7 @@ test "compiler.s2g1: logical or" {
 }
 
 test "compiler.s2g1: logical and chain" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true && false && null");
     defer h.deinit();
 
@@ -729,7 +728,7 @@ test "compiler.s2g1: logical and chain" {
 }
 
 test "compiler.s2g1: coalesce" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("null ?? true");
     defer h.deinit();
 
@@ -755,7 +754,7 @@ test "compiler.s2g1: coalesce" {
 }
 
 test "compiler.s2g1: coalesce chain" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("null ?? null ?? true");
     defer h.deinit();
 
@@ -789,7 +788,7 @@ test "compiler.s2g1: coalesce chain" {
 }
 
 test "compiler.s2g1: optional chain field" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true?.b");
     defer h.deinit();
 
@@ -824,7 +823,7 @@ test "compiler.s2g1: optional chain field" {
 }
 
 test "compiler.s2g1: optional chain element" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true?.[false]");
     defer h.deinit();
 
@@ -855,7 +854,7 @@ test "compiler.s2g1: optional chain element" {
 }
 
 test "compiler.s2g1: if else empty" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("if (true) ; else ;");
     defer h.deinit();
 
@@ -879,7 +878,7 @@ test "compiler.s2g1: if else empty" {
 }
 
 test "compiler.s2g1: if else expression bodies" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("if (true) false; else null;");
     defer h.deinit();
 
@@ -907,7 +906,7 @@ test "compiler.s2g1: if else expression bodies" {
 }
 
 test "compiler.s2g1: if without else" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("if (true) ;");
     defer h.deinit();
 
@@ -929,7 +928,7 @@ test "compiler.s2g1: if without else" {
 }
 
 test "compiler.s2g1: labeled break" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("L: if (true) break L;");
     defer h.deinit();
 
@@ -953,7 +952,7 @@ test "compiler.s2g1: labeled break" {
 }
 
 test "compiler.s2g1: labeled statement without break" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("L: ;");
     defer h.deinit();
 
@@ -973,7 +972,7 @@ test "compiler.s2g1: labeled statement without break" {
 }
 
 test "compiler.s2g1: optional chain atom ownership" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true?.b");
     defer h.deinit();
 
@@ -991,7 +990,7 @@ test "compiler.s2g1: optional chain atom ownership" {
 }
 
 test "compiler.s2g2: while" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
 
@@ -1018,7 +1017,7 @@ test "compiler.s2g2: while" {
 }
 
 test "compiler.s2g2: while continue" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("while (true) continue;");
     defer h.deinit();
 
@@ -1046,7 +1045,7 @@ test "compiler.s2g2: while continue" {
 }
 
 test "compiler.s2g2: labeled while continue" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("L: while (true) continue L;");
     defer h.deinit();
 
@@ -1076,7 +1075,7 @@ test "compiler.s2g2: labeled while continue" {
 }
 
 test "compiler.s2g2: do while" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("do ; while (false);");
     defer h.deinit();
 
@@ -1101,7 +1100,7 @@ test "compiler.s2g2: do while" {
 }
 
 test "compiler.s2g2: classic for empty head" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (;;) ;");
     defer h.deinit();
 
@@ -1131,7 +1130,7 @@ test "compiler.s2g2: classic for empty head" {
 }
 
 test "compiler.s2g2: classic for test break" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (; false; ) break;");
     defer h.deinit();
 
@@ -1159,7 +1158,7 @@ test "compiler.s2g2: classic for test break" {
 }
 
 test "compiler.s2g2: for in" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (var x in null) ;");
     defer h.deinit();
 
@@ -1196,7 +1195,7 @@ test "compiler.s2g2: for in" {
 }
 
 test "compiler.s2g2: for in break cleanup" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (var x in null) break;");
     defer h.deinit();
 
@@ -1235,7 +1234,7 @@ test "compiler.s2g2: for in break cleanup" {
 }
 
 test "compiler.s2g2: for of" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (var x of null) ;");
     defer h.deinit();
 
@@ -1273,7 +1272,7 @@ test "compiler.s2g2: for of" {
 }
 
 test "compiler.s2g2: for of break cleanup" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (var x of null) break;");
     defer h.deinit();
 
@@ -1313,7 +1312,7 @@ test "compiler.s2g2: for of break cleanup" {
 }
 
 test "compiler.s2g2: switch single case" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("switch (true) { case false: null; }");
     defer h.deinit();
 
@@ -1342,7 +1341,7 @@ test "compiler.s2g2: switch single case" {
 }
 
 test "compiler.s2g2: switch break default" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("switch (true) { case false: break; default: null; }");
     defer h.deinit();
 
@@ -1378,7 +1377,7 @@ test "compiler.s2g2: switch break default" {
 }
 
 test "compiler.s2g2: switch case fallthrough" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("switch (true) { case false: null; case null: false; }");
     defer h.deinit();
 
@@ -1416,7 +1415,7 @@ test "compiler.s2g2: switch case fallthrough" {
 }
 
 test "compiler.s2g2: switch default only" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("switch (true) { default: null; }");
     defer h.deinit();
 
@@ -1447,7 +1446,7 @@ test "compiler.s2g2: switch default only" {
 }
 
 test "compiler.s2g2: switch break suppresses fallthrough" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("switch (true) { case false: break; case null: ; }");
     defer h.deinit();
 
@@ -1480,7 +1479,7 @@ test "compiler.s2g2: switch break suppresses fallthrough" {
 }
 
 test "compiler.s2g3: try finally live tail" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("try { null; } finally { false; }");
     defer h.deinit();
 
@@ -1515,7 +1514,7 @@ test "compiler.s2g3: try finally live tail" {
 }
 
 test "compiler.s2g3: try catch optional binding live tails" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("try { null; } catch { false; }");
     defer h.deinit();
 
@@ -1558,7 +1557,7 @@ test "compiler.s2g3: try catch optional binding live tails" {
 }
 
 test "compiler.s2g3: try catch binding after throw" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("try { throw true; } catch (e) { }");
     defer h.deinit();
 
@@ -1595,7 +1594,7 @@ test "compiler.s2g3: try catch binding after throw" {
 }
 
 test "compiler.s2g3: return through finally" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("try { return; } finally { null; }");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
     h.state.return_depth = 1;
@@ -1629,7 +1628,7 @@ test "compiler.s2g3: return through finally" {
 }
 
 test "compiler.s2g3: break through finally inside loop" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("while (true) { try { break; } finally { null; } }");
     defer h.deinit();
 
@@ -1670,7 +1669,7 @@ test "compiler.s2g3: break through finally inside loop" {
 }
 
 test "compiler.s2g3: epilogue after plain statement" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("null;");
     defer h.deinit();
 
@@ -1693,7 +1692,7 @@ test "compiler.s2g3: epilogue after plain statement" {
 }
 
 test "compiler.s2g3: epilogue after terminal" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("throw null;");
     defer h.deinit();
 
@@ -1715,7 +1714,7 @@ test "compiler.s2g3: epilogue after terminal" {
 }
 
 test "compiler.s2g3: epilogue after loop merge" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("while (true) ;");
     defer h.deinit();
 
@@ -1744,7 +1743,7 @@ test "compiler.s2g3: epilogue after loop merge" {
 }
 
 test "compiler.s2g3: plain return dead epilogue" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("return;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
     h.state.return_depth = 1;
@@ -1769,7 +1768,7 @@ test "compiler.s2g3: plain return dead epilogue" {
 }
 
 test "compiler.s2g3: return with value" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("return null;");
     // Statement-entry harness runs outside a function body; return needs the qjs return-allowed depth.
     h.state.return_depth = 1;
@@ -1792,7 +1791,7 @@ test "compiler.s2g3: return with value" {
 }
 
 test "compiler.s2g4: classic for splices update after body" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (; false; null) ;");
     defer h.deinit();
 
@@ -1825,7 +1824,7 @@ test "compiler.s2g4: classic for splices update after body" {
 }
 
 test "compiler.s2g4: classic for shifts detached conditional labels" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (; false; true ? null : false) ;");
     defer h.deinit();
 
@@ -1866,7 +1865,7 @@ test "compiler.s2g4: classic for shifts detached conditional labels" {
 }
 
 test "compiler.s2g4: classic for splices update after break" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (; false; null) break;");
     defer h.deinit();
 
@@ -1898,7 +1897,7 @@ test "compiler.s2g4: classic for splices update after break" {
 }
 
 test "compiler.s2g4: plain field assignment rewinds getter" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true.b = null;");
     defer h.deinit();
 
@@ -1929,7 +1928,7 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
 }
 
 test "compiler.s2g4: compound field assignment reemits getter" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true.b += null;");
     defer h.deinit();
 
@@ -1962,7 +1961,7 @@ test "compiler.s2g4: compound field assignment reemits getter" {
 }
 
 test "compiler.s2g4: plain array element assignment rewinds getter" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true[false] = null;");
     defer h.deinit();
 
@@ -1990,7 +1989,7 @@ test "compiler.s2g4: plain array element assignment rewinds getter" {
 }
 
 test "compiler.s2g4: postfix field update preserves old value" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("true.b++;");
     defer h.deinit();
 
@@ -2021,7 +2020,7 @@ test "compiler.s2g4: postfix field update preserves old value" {
 }
 
 test "compiler.s2g4: prefix array element update preserves new value" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("++true[false];");
     defer h.deinit();
 
@@ -2049,7 +2048,7 @@ test "compiler.s2g4: prefix array element update preserves new value" {
 }
 
 test "compiler.s2g4: minimal class expression and default constructor" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class {});");
     defer h.deinit();
 
@@ -2114,7 +2113,7 @@ test "compiler.s2g4: minimal class expression and default constructor" {
 }
 
 test "compiler.s2g4: class declaration stores local binding" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("class C {}");
     defer h.deinit();
 
@@ -2180,7 +2179,7 @@ test "compiler.s2g4: class declaration stores local binding" {
 }
 
 test "compiler.s2g4: named class method splices runtime definition" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { m() { null; } });");
     defer h.deinit();
 
@@ -2263,7 +2262,7 @@ test "compiler.s2g4: named class method splices runtime definition" {
 }
 
 test "compiler.s2g4: explicit constructor rolls back parent closure" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { constructor() { null; } });");
     defer h.deinit();
 
@@ -2325,7 +2324,7 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
 }
 
 test "compiler.s2g4: derived default constructor returns checked this" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class extends null {});");
     defer h.deinit();
 
@@ -2388,7 +2387,7 @@ test "compiler.s2g4: derived default constructor returns checked this" {
 }
 
 test "compiler.s2g4: instance field uses dormant brand prologue" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { x = null; });");
     defer h.deinit();
 
@@ -2456,7 +2455,7 @@ test "compiler.s2g4: instance field uses dormant brand prologue" {
 }
 
 test "compiler.s2g4: private method patches instance brand prologue" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { #m() {} });");
     defer h.deinit();
 
@@ -2546,7 +2545,7 @@ test "compiler.s2g4: private method patches instance brand prologue" {
 }
 
 test "compiler.s2g4: static block nests closure in static initializer" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { static { null; } });");
     defer h.deinit();
 
@@ -2628,7 +2627,7 @@ test "compiler.s2g4: static block nests closure in static initializer" {
 }
 
 test "compiler.s2g4: static field emits through static initializer" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { static x = null; });");
     defer h.deinit();
 
@@ -2692,7 +2691,7 @@ test "compiler.s2g4: static field emits through static initializer" {
 }
 
 test "compiler.s2g4: computed method splices key and closure" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { [true]() {} });");
     defer h.deinit();
 
@@ -2748,7 +2747,7 @@ test "compiler.s2g4: computed method splices key and closure" {
 }
 
 test "compiler.s2g4: getter child keeps return terminal" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("(class { get g() { return null; } });");
     defer h.deinit();
 
@@ -2794,7 +2793,7 @@ test "compiler.s2g4: getter child keeps return terminal" {
     const getter = h.childBuilder(0);
     try expectV2Stream(getter, &.{
         .{ .op = qop.null, .size = 1 },
-        // S2-G3 keeps the explicit return terminal; no return_undef is appended.
+        // Keep the explicit return terminal; no return_undef is appended.
         .{ .op = qop.@"return", .size = 1 },
     });
     try std.testing.expectEqual(@as(u32, 2), getter.code_len);
@@ -2806,7 +2805,7 @@ test "compiler.s2g4: getter child keeps return terminal" {
 }
 
 test "compiler.s3: parsed dead code after break is dropped" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     // Numeric literal emission is outside the migrated v2 parser surface;
     // null keeps the same dead expression-statement shape through v2.
     try h.init("for (;;) { break; null; }");
@@ -2847,7 +2846,7 @@ test "compiler.s3: parsed dead code after break is dropped" {
 }
 
 test "compiler.s3: parsed dead-only loop labels stay dead" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("for (;;) { break; continue; }");
     defer h.deinit();
 
@@ -2887,7 +2886,7 @@ test "compiler.s3: parsed dead-only loop labels stay dead" {
 }
 
 test "compiler.s3: parsed return through finally keeps live gosub" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("try { return; } finally { null; }");
     h.state.return_depth = 1;
     defer h.deinit();
@@ -2926,7 +2925,7 @@ test "compiler.s3: parsed return through finally keeps live gosub" {
 }
 
 test "compiler.s3: parsed empty finally removes gosub" {
-    var h: V2Parse = undefined;
+    var h: ParseHarness = undefined;
     try h.init("try { return; } finally { }");
     h.state.return_depth = 1;
     defer h.deinit();
@@ -3009,7 +3008,7 @@ fn countInstalledOpcode(fb: *const bytecode_mod.FunctionBytecode, want: u8) !usi
 }
 
 fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
-    var h: V2Exec = undefined;
+    var h: ExecHarness = undefined;
     try h.init(src);
     defer h.deinit();
     try h.state.enableReturnCompletion();
@@ -3110,7 +3109,7 @@ test "no compiled program emits a reclaimed opcode id (R0 + F0a0)" {
         "(function () { var s = ''; for (var i = 0; i < 3; i++) { s += i; } return s; })();",
     };
     for (shapes) |src| {
-        var h: V2Exec = undefined;
+        var h: ExecHarness = undefined;
         try h.init(src);
         defer h.deinit();
         try h.state.enableReturnCompletion();
@@ -3306,7 +3305,7 @@ test "compiler.fuse: put_loc8_get_loc8 emit and execute" {
 }
 
 test "compiler.s4: installed for loop matches the configured default layout" {
-    var h: V2Exec = undefined;
+    var h: ExecHarness = undefined;
     try h.init("let s = 0; for (let k = 0; k < 5; k = k + 1) { s = s + k; } s;");
     defer h.deinit();
     const result = try compileAndRun(&h);
@@ -3332,22 +3331,20 @@ test "compiler.s4: installed for loop matches the configured default layout" {
     // The `.plain` diagnostic's self-proof, in-suite half. `.plain` survives
     // release only as an A/B instrument, and an instrument that exists in name
     // while being ignored in fact would silently invalidate every diagnostic
-    // taken with it. So close the whole chain here, from the option string to
-    // the emitted bytes to the string every gate compares:
+    // taken with it. Close the chain from the option string to the emitted
+    // bytes:
     //
     //   -Dzjs_compiler_layout  ->  resolve_labels.default_layout  ->  emitted
-    //   bytecode  ->  config_signature.layout
     //
     // Note the direction: the option string is checked AGAINST the observed
     // emission, not the other way round. A test that asserted `.plain` because
     // `.plain` was the input parameter would pass on a build where the
     // resolver ignores the option entirely.
     try std.testing.expectEqualStrings(build_options.zjs_compiler_layout, observed_layout);
-    try std.testing.expectEqualStrings(observed_layout, config_signature.layout);
 }
 
 test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escape" {
-    var h: V2Exec = undefined;
+    var h: ExecHarness = undefined;
     try h.init(
         \\var escapeAuditOuter = 1;
         \\function escapeAuditChild(escapeAuditArg) {
@@ -3419,7 +3416,7 @@ fn s3bExpectDefTreeMarked(
     for (fd.child_list) |child| try s3bExpectDefTreeMarked(rt, child, counted);
 }
 
-fn s3bMajorBeforeFinalize(h: *V2Exec) anyerror!void {
+fn s3bMajorBeforeFinalize(h: *ExecHarness) anyerror!void {
     // The parse is done and nothing is published: string literal bodies and
     // the tagged-template arrays live only in `FunctionDef.cpool`, a Zig-heap
     // `[]JSValue` that neither the conservative stack scan nor any tracer edge
@@ -3455,8 +3452,8 @@ test "TGC S3-b: a major between parse and finalize keeps cpool constants alive" 
         \\(s3bOuter("x") === "x-in" ? 4 : 0) +
         \\(s3bArrow("y") === "y-ar" ? 8 : 0);
     ;
-    var h: V2Exec = undefined;
-    try V2Exec.init(&h, source);
+    var h: ExecHarness = undefined;
+    try ExecHarness.init(&h, source);
     defer h.deinit();
 
     const collections_before = h.rt.gc.stats.collections;
@@ -3471,7 +3468,7 @@ test "TGC S3-b: a major between parse and finalize keeps cpool constants alive" 
     try std.testing.expectEqual(@as(i32, 15), result.as(.int).?);
 }
 
-fn s3bExpectTemplateArraysMarked(h: *V2Exec) anyerror!void {
+fn s3bExpectTemplateArraysMarked(h: *ExecHarness) anyerror!void {
     _ = try h.rt.forceMajorGC(null);
     s3bDrainGc(h.rt);
     var counted: usize = 0;
@@ -3532,8 +3529,8 @@ test "TGC S3-b: a collection inside the tagged-template window keeps cooked and 
         \\var s3bMake = (v) => s3bTagFn`a\nb${v}c`;
         \\s3bMake("Z");
     ;
-    var h: V2Exec = undefined;
-    try V2Exec.init(&h, source);
+    var h: ExecHarness = undefined;
+    try ExecHarness.init(&h, source);
     defer h.deinit();
     // Precise for the COMPILE only; `s3bExpectTemplateArraysMarked` closes the
     // window at its end, before the FunctionBytecode becomes a native local.
@@ -3655,7 +3652,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         try std.testing.expectEqual(parser_mod.token.TOK_EOF, state.token.val);
         try state.finalizeEvalReturn();
 
-        const parser_builder = state.function_def.v2_builder.?;
+        const parser_builder = state.function_def.builder.?;
         var phase1_probe_refs: usize = 0;
         for (parser_builder.atom_operands[0..parser_builder.atom_len]) |owner| {
             phase1_probe_refs += @intFromBool(owner == probe);

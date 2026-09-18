@@ -274,8 +274,8 @@ teardown, and createRealm leftover without child `JSContext.destroy`
 ```sh
 zig build zjs --summary all
 zig build test --summary all
-zig build engine-production-gate --summary all
-zig build test262-check --summary all
+zig build engine-production-gate -Doptimize=ReleaseFast --summary all
+zig build test262-check -Doptimize=ReleaseFast --summary all
 ```
 
 Direct test262 runner (after `zig build run-test262 --summary all`):

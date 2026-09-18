@@ -735,14 +735,14 @@ QuickJS `resolve_labels`（quickjs.c:34796）的端口：单次前向走 + 重�
 - **签名**：`pub fn run( comptime layout: LayoutMode, function: *bytecode.Bytecode, fd: ?*const bytecode.function_def.FunctionDef, product: *resolve_variables.ResolvedProduct, ) Error!void`。
 - **作用**：带自包含最终码证明的 S4。
 - **实现**：`runImpl(false, …)`。
-- **所有权 / 错误 / 调用**：`compileFunctionV2`、S4 单测。
+- **所有权 / 错误 / 调用**：`compileFunction`、S4 单测。
 
 ### `runForPackedFinalize` (`src/compiler/resolve_labels.zig:3782`)
 
 - **签名**：`pub fn runForPackedFinalize( comptime layout: LayoutMode, function: *bytecode.Bytecode, fd: ?*const bytecode.function_def.FunctionDef, product: *resolve_variables.ResolvedProduct, ) Error!void`。
 - **作用**：packed 变体：跳过完整码遍历，调用方必须在发布 FunctionBytecode 前做融合校验。
 - **实现**：`runImpl(true, …)`，仍 `validateFinalSources`。
-- **所有权 / 错误 / 调用**：`compileFunctionV2ForPackedFinalize`。
+- **所有权 / 错误 / 调用**：`compileFunctionForPackedFinalize`。
 
 ### `ResolveLabelsTestHarness.init` (`src/compiler/resolve_labels.zig:3797`)
 
@@ -762,8 +762,8 @@ QuickJS `resolve_labels`（quickjs.c:34796）的端口：单次前向走 + 重�
 
 - **签名**：`fn input(harness: *ResolveLabelsTestHarness) *builder.Builder`。
 - **作用**：phase-1 发射。
-- **实现**：unwrap v2_builder。
-- **所有权 / 错误 / 调用**：测试夹具：返回**借用**指针，`Builder` 本体由 harness 的 `fd.v2_builder` 持有并在 `init`（`src/compiler/resolve_labels.zig:3808`）用 `rt.memory.create` 分配、在 `fd.deinit` 里释放，调用方不得 destroy。`.?` 是断言：phase-1 builder 未安装就 panic，没有 error set。
+- **实现**：unwrap builder。
+- **所有权 / 错误 / 调用**：测试夹具：返回**借用**指针，`Builder` 本体由 harness 的 `fd.builder` 持有并在 `init`（`src/compiler/resolve_labels.zig:3808`）用 `rt.memory.create` 分配、在 `fd.deinit` 里释放，调用方不得 destroy。`.?` 是断言：phase-1 builder 未安装就 panic，没有 error set。
 
 ### `ResolveLabelsTestHarness.resolve` (`src/compiler/resolve_labels.zig:3828`)
 

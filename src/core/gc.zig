@@ -3413,7 +3413,7 @@ pub const Registry = struct {
     ///
     /// Erased in ReleaseFast (`runtime_safety` is false there) so the shipped
     /// `zjs` carries no symbol; armed in Debug / ReleaseSafe test binaries,
-    /// in `zjs-dev`, and in the `-Dzjs_gc_roots_diag` ReleaseFast binary
+    /// in Debug `zjs`, and in the `-Dzjs_gc_roots_diag` ReleaseFast binary
     /// (which is how Octane runs under the probe at speed); gated at run time
     /// on `ZJS_MINOR_AUDIT`.
     pub inline fn auditUnbarrieredStore(

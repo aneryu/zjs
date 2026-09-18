@@ -65,7 +65,7 @@ packed u32，镜像 `PF_*`：`in_accepted`、`pow_allowed`、`result_needed`、`
 
 ### `BlockEnv` / `LabelFrame` / `ControlFrames` / `ReturnFinallyFrame` / `UsingBlockFrame`
 
-break/continue/finally/using 的解析期栈。`LabelFrame` 带 QCP-1 的 `LabelId`（不再写绝对 PC）。`UsingBlockFrame` 记 disposable stack 局部、catch 标签、是否见过 async hint。
+break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不再写绝对 PC）。`UsingBlockFrame` 记 disposable stack 局部、catch 标签、是否见过 async hint。
 
 ### `DeclMask` / `FunctionKind` / `ParseFunctionKind` / `FeatureImpl`
 
@@ -398,7 +398,7 @@ RegExp 编译回调。`opaque_ptr` 转 `*JSRuntime`，转调 `checkNativeStackOv
 
 - **签名**：`fn pushFunction(self: *State, fd: *function_def_mod.FunctionDef) Error!void`。
 - **作用**：进入嵌套函数时把它的 `FunctionDef` 压上解析栈，并保证它有自己的 `Builder`。
-- **实现**：对照 `js_new_function_def`（`quickjs.c:31484-31490`）的父链建立。栈是手工管理的 `[]*FunctionDef` + 容量：不够时容量从 4 起翻倍（至少够 `new_len`），新块 `@memcpy` 旧内容后再释放旧块；写入栈顶后若该 def 还没有 `v2_builder` 就 `ensureBuilderForFd`。
+- **实现**：对照 `js_new_function_def`（`quickjs.c:31484-31490`）的父链建立。栈是手工管理的 `[]*FunctionDef` + 容量：不够时容量从 4 起翻倍（至少够 `new_len`），新块 `@memcpy` 旧内容后再释放旧块；写入栈顶后若该 def 还没有 `builder` 就 `ensureBuilderForFd`。
 - **所有权 / 错误 / 调用**：**只接管指针不接管对象**：`fd` 由调用方创建（`memory.create(FunctionDef)`），压栈后其释放责任转到 `State`（正常出口 `popFunction` + 父 def 的 `addChild`，异常出口 `discardCurrentFunction` 或 `State.deinit` 扫 `cur_func_stack`）。自身的分配是栈数组的翻倍扩容（`function.memory.alloc` + `@memcpy` + 释放旧块，`errdefer` 覆盖新块），失败即 `Error.OutOfMemory`；随后 `ensureBuilderForFd(fd)` 给它补 Builder，错误统一折成 `OutOfMemory`。三个调用方：`parseFunctionParamsAndBody`（`src/parser.zig:11896`）、`parseArrowFunction`（`:12214`）、`enterFieldInitFunction`（`:14127`）。
 
 ### `ParseState.popFunction` (`src/parser.zig:1397`)

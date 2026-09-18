@@ -33,7 +33,7 @@
 - **签名**：`pub fn init( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, ) !CallSite`。
 - **作用**：宿主侧构造：pin callee/receiver，解析路由一次。
 - **实现**：`initInternal` 填字段后 `JSValueHandle.init` pin 两个值；pin `this_value` 失败时 `errdefer` 释放已拿到的 callee pin。`deinit` 必须成对调用。
-- **所有权 / 错误 / 调用**：pin 走 runtime persistent ledger（`createPersistentRootSlot`）。OOM 时返回分配错误。唯一调用方是 binding 门面 `src/binding/context.zig:892`（`zjs.CallSite.init`）——嵌入者要复用的长寿命站点；`JSContext.callFunction` 不走这里，它走 `callOnceInto`。
+- **所有权 / 错误 / 调用**：pin 走 runtime persistent ledger（`createPersistentRootSlot`）。OOM 时返回分配错误。唯一调用方是 binding 门面 `src/js_context.zig:892`（`zjs.CallSite.init`）——嵌入者要复用的长寿命站点；`JSContext.callFunction` 不走这里，它走 `callOnceInto`。
 
 ### `CallSite.initInternal` (`src/exec/call_site.zig:114`)
 
@@ -117,7 +117,7 @@
 - **签名**：`pub inline fn callFixedInto(self: *CallSite, comptime argc: usize, args: *const [argc]JSValue, out: *JSValue) HostError!void`。
 - **作用**：固定元数写入 `out`。
 - **实现**：转 `callInto(args, out)`。
-- **所有权 / 错误 / 调用**：纯转发，不分配、不改站点状态；结果经 `out` 出参回传（见 `callInto` 的两字宽度纪律）。调用方：本文件 `callFixed`，以及 binding 门面 `src/binding/context.zig:925`——OOM 在那里被 `restoreUncaughtOutOfMemory` 收成嵌入层错误。
+- **所有权 / 错误 / 调用**：纯转发，不分配、不改站点状态；结果经 `out` 出参回传（见 `callInto` 的两字宽度纪律）。调用方：本文件 `callFixed`，以及 binding 门面 `src/js_context.zig:925`——OOM 在那里被 `restoreUncaughtOutOfMemory` 收成嵌入层错误。
 
 ### `CallSite.callWithThisInto` (`src/exec/call_site.zig:240`)
 
@@ -131,7 +131,7 @@
 - **签名**：`pub inline fn callWithThis(self: *CallSite, this_value: JSValue, args: []const JSValue) HostError!JSValue`。
 - **作用**：`callWithThisInto` 的按值包装。
 - **实现**：`pinnedLoad`。
-- **所有权 / 错误 / 调用**：按值包装，不分配；`this_value` 与 `args` 都要由调用方根住到返回（见 `callWithThisInto`）。调用方是 JSON 的 reviver/replacer 遍历 `src/exec/json_ops.zig:1780`、`2356`，那里的 holder 已经过 `rooted_holder_value` 显式建根；另有 binding 门面 `src/binding/context.zig:931` 走 `callWithThisInto`。
+- **所有权 / 错误 / 调用**：按值包装，不分配；`this_value` 与 `args` 都要由调用方根住到返回（见 `callWithThisInto`）。调用方是 JSON 的 reviver/replacer 遍历 `src/exec/json_ops.zig:1780`、`2356`，那里的 holder 已经过 `rooted_holder_value` 显式建根；另有 binding 门面 `src/js_context.zig:931` 走 `callWithThisInto`。
 
 ### `pinnedLoad` (`src/exec/call_site.zig:263`)
 
@@ -145,7 +145,7 @@
 - **签名**：`pub inline fn pinnedStore(slot: *JSValue, value: JSValue) void`。
 - **作用**：`pinnedLoad` 的孪生 store（`stp`）。
 - **实现**：aarch64 `stp`；否则 `storeSlotAsIntPair`。
-- **所有权 / 错误 / 调用**：只写调用方给的槽位，不分配、不抛、不做屏障（窗口是栈上临时数组，不是堆槽）。调用方：本文件 `call1`..`call4` 的窗口构造与 `callGeneric` 的结果写出（`call_site.zig:411`），以及 binding 门面 `src/binding/context.zig:912`/`918`/`919`。
+- **所有权 / 错误 / 调用**：只写调用方给的槽位，不分配、不抛、不做屏障（窗口是栈上临时数组，不是堆槽）。调用方：本文件 `call1`..`call4` 的窗口构造与 `callGeneric` 的结果写出（`call_site.zig:411`），以及 binding 门面 `src/js_context.zig:912`/`918`/`919`。
 
 ### `callOnceInto` (`src/exec/call_site.zig:298`)
 

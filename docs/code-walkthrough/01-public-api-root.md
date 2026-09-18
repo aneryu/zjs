@@ -1,6 +1,6 @@
 # 01 — `src/root.zig`：公共门面
 
-CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `JSContext` / `JSValue`、`zjs.native`（仅 `managed`）、`zjs.value`、`zjs.object`、`zjs.host`、`zjs.context` / `module` / `job`、`zjs.runtime`。多数类型从 `binding/root.zig` 再导出；本文件同时实现字节借用描述符、若干对象构造与属性助手，以及有预算的 job 排空循环。
+CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `JSContext` / `JSValue`、`zjs.native`（仅 `managed`）、`zjs.value`、`zjs.object`、`zjs.host`、`zjs.context` / `module` / `job`、`zjs.runtime`。多数类型从 `js_context.zig` / `native.zig` / core 再导出；本文件同时实现字节借用描述符、若干对象构造与属性助手，以及有预算的 job 排空循环。
 
 `core` / `exec` / `internal` 不作为这里的公开命名空间导出，但部分类型通过别名公开，不能据此声称整个类型图不含 core 类型。句柄公开拼写是 `zjs.value.Scope/Local/Persistent/Weak`，不是根上的 `JSValueHandle`。`object.Object` 是 **opaque**，不能通过该类型直接调用 core 的 `Object.create`。`CallSite` / `PropertySite` / `NativeBinding` / `PropName` 已从本文件删除。
 
@@ -11,11 +11,11 @@ CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `J
 | 名字 | 含义 |
 | --- | --- |
 | `runtime` | `event_loop.zig`：宿主事件循环（`EventLoop` / `runUntilIdle`）。 |
-| `JSRuntime` / `JSContext` / `JSValue` / `CallSite` / `PropertySite` | binding 门面。 |
+| `JSRuntime` / `JSContext` / `JSValue` | `JSContext` 来自 `js_context.zig`；其余来自 core。 |
 | `GCStats` / `GCPauseDistribution` / `RuntimeOptions` / `RuntimeMemoryUsage` / `OpcodeProfile` | 统计与选项。 |
 | `default_stack_size` / `default_gc_threshold` | 默认限额。 |
 | `opcode_profile_build_enabled` | `-Dzjs_enable_opcode_profile`。CLI 在 false 时对 `--profile-opcodes` fail-close。 |
-| `native` | `binding/native.zig`。 |
+| `native` | `src/native.zig`。 |
 | `value` | 值构造 + 句柄/String/Bytes 别名。 |
 | `host` | `NativeBinding`=`binding`、`NativeObject`=`object.Object`、`PropName`=`PropNameID`，以及 CLI 形全局助手。 |
 | `object.Object` | `opaque {}`。内部用 ptrCast 接到 core Object。 |
@@ -25,7 +25,7 @@ CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `J
 | `object.Buffer.Borrow` | 零拷贝借用描述符：`ptr`/`mut_ptr`/`len`/`kind`/`byte_offset`/`shared`；仅当 mut_ptr 非 null 时可写。 |
 | `object.Buffer.ReadonlyBorrow` | 无 `mut_ptr`、无 `sliceMut` 的只读借阅（类型级保证）。 |
 | `object.Buffer.BorrowGuard` | `view_pin` + `buffer_pin`（TypedArray 还要 pin 背后的 ArrayBuffer）。 |
-| `context.Options` 等 | 从 binding 再导出的选项类型。`FunctionCallOptions` 在这里用 opaque Object 表示 `realm_global`。 |
+| `context.Options` 等 | 从 core 再导出的选项类型。`FunctionCallOptions` 在这里用 opaque Object 表示 `realm_global`。 |
 | `module.Key` / `Source` / `Host` / `ResolveResult` / `LoadResult` | `module_graph.HostHooks` 的别名。 |
 | `job.DrainOptions` / `DrainResult` | `budget`；`jobs_drained` + `has_more`。 |
 
@@ -37,7 +37,7 @@ CLI 与仓内测试 `@import("zjs")` 的模块。主要入口：`JSRuntime` / `J
 
 - **签名**：`pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile`。
 - **作用**：给剖析器装 opcode 名提供者并激活缓冲区。
-- **实现**：`zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName)`，再 `zjs_binding.activateOpcodeProfile`。
+- **实现**：`zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName)`，再 `zjs_core.profile.activate`。
 - **所有权 / 错误 / 调用**：返回此前的线程局部活动 profile，供调用方恢复；不拥有、清零或释放 profile，不修改 Runtime 的 profile 字段。此包装不检查 opcode_profile_build_enabled，激活指针本身不会给未编入计数的产物补上采样。
 
 ### `value.undefinedValue` (`src/root.zig:47`)

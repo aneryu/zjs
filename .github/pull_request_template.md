@@ -15,7 +15,7 @@
 - [ ] `mise run quick-gate` for a focused change, **or** `mise run checkpoint-gate` for a non-trivial code-bearing change. See GUIDE.md Part B.6.
 - [ ] `git diff --check`
 - [ ] Relevant test262 slice:
-- [ ] `zig build engine-production-gate --summary all` for phase-close semantic/bytecode evidence.
+- [ ] `zig build engine-production-gate -Doptimize=ReleaseFast --summary all` for phase-close semantic/bytecode evidence.
 - [ ] Triggered only if the changed surface needs them: ReleaseSafe, force-GC,
       perf. (`test-oom` and the ownership-audit build run nightly.)
 - [ ] Perf report paths if this change affects performance:

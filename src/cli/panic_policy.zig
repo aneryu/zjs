@@ -8,7 +8,7 @@
 //! debug sections, and two 30 KB-class `std.sort.block` instantiations that
 //! only those readers use. Message-only panics are the honest trade there.
 //!
-//! Debug and ReleaseSafe keep the full handler, so `zjs-dev`, every test
+//! Debug and ReleaseSafe keep the full handler, so Debug `zjs`, every test
 //! artifact, and every assertion-bearing build still print a resolved trace.
 //! That is where a panic is actually diagnosed.
 

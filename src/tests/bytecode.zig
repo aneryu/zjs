@@ -245,11 +245,11 @@ const function_def = bytecode.function_def;
 /// attached Builder is rejected by `prepareCurrentBeforeChildren`, so every
 /// fixture that reaches the finalizer must emit through this.
 /// The Builder is owned by the FunctionDef and released by `fd.deinit`.
-fn attachV2Builder(fd: *function_def.FunctionDef) !*compiler.Builder {
-    if (fd.v2_builder) |existing| return existing;
+fn attachBuilder(fd: *function_def.FunctionDef) !*compiler.Builder {
+    if (fd.builder) |existing| return existing;
     const b = try fd.memory.create(compiler.Builder);
     b.* = compiler.Builder.init(fd.memory, fd.atoms);
-    fd.v2_builder = b;
+    fd.builder = b;
     return b;
 }
 
@@ -267,7 +267,7 @@ fn emitTestBody(
     code: []const u8,
     atoms: []const core.Atom,
 ) !void {
-    const b = try attachV2Builder(fd);
+    const b = try attachBuilder(fd);
     const opcode = bytecode.opcode;
     var pc: usize = 0;
     var atom_index: usize = 0;
@@ -1192,7 +1192,7 @@ test "FunctionDef final scope proof reseals late arguments links and rejects cyc
     try std.testing.expectError(error.InvalidScope, fd.ensureArgumentsArgumentBinding());
 }
 
-test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
+test "compiler run rejects cyclic scope links before trusted lookup" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1207,7 +1207,7 @@ test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
     const local_idx = try fd.addScopeVar(local, .normal, 0, false, false);
     try fd.rebuildFinalScopeLinks();
 
-    const input = try attachV2Builder(&fd);
+    const input = try attachBuilder(&fd);
     try input.emitAtomOpU16Owned(
         bytecode.opcode.op.scope_get_var,
         local,
@@ -1222,7 +1222,7 @@ test "compiler-v2 run rejects cyclic scope links before trusted lookup" {
     );
 }
 
-test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors" {
+test "compiler parent miss proves corrupt and cyclic synthetic ancestors" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1245,7 +1245,7 @@ test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors" {
     child.parent = &parent;
     child.parent_scope_level = 0;
 
-    const input = try attachV2Builder(&child);
+    const input = try attachBuilder(&child);
     try input.emitAtomOpU16Owned(
         bytecode.opcode.op.scope_get_var,
         requested,
@@ -1383,7 +1383,7 @@ test "finalize: runs the full v2 lowering pipeline" {
     // through the only producer the compiler reads:
     // enter_scope <idx=0> ; scope_get_var <x> <scope_level=0> ; label ;
     // return_undef ; leave_scope <idx=0>
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     try b.emitOpU16(op.enter_scope, 0);
     try b.emitAtomOpU16Owned(op.scope_get_var, x_atom, 0);
     const tail = try b.newLabel();
@@ -1560,7 +1560,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
     // drop; return_undef pair. This covers atom operand copying and IC
     // metadata for var_ref-based global access.
     const op = bytecode.opcode.op;
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     try b.emitAtomOpOwned(op.push_atom_value, name);
     // The marker lands on the instruction boundary just past the 5-byte
     // push_atom_value; the source-loc entry contract rejects mid-instruction pcs.
@@ -1702,7 +1702,7 @@ test "finalize rejects a same-count mismatched inline atom owner before transfer
     defer fd.deinit(rt);
 
     const op = bytecode.opcode.op;
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     try b.emitAtomOpOwned(op.push_atom_value, encoded_atom);
     try b.emitOp(op.drop);
     try b.emitOp(op.return_undef);
@@ -2532,7 +2532,7 @@ test "surviving local references reserve compact open VarRef storage" {
 
     // `scope_make_ref` carries a LabelId in the producer, not an address, so
     // the reference tail is a real label identity bound after the read.
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
@@ -2574,7 +2574,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
 
     // `scope_make_ref` carries a LabelId in the producer, not an address, so
     // the reference tail is a real label identity bound after the read.
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
@@ -2627,7 +2627,7 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
 
     // `scope_make_ref` carries a LabelId in the producer, not an address, so
     // the reference tail is a real label identity bound after the read.
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
@@ -2669,7 +2669,7 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     defer function.deinit(rt);
     // `scope_make_ref` carries a LabelId in the producer, not an address, so
     // the reference tail is a real label identity bound after the read.
-    const b = try attachV2Builder(&fd);
+    const b = try attachBuilder(&fd);
     const ref_tail = try b.newLabel();
     try b.emitScopeRefOpOwned(
         bytecode.opcode.op.scope_make_ref,
@@ -2838,7 +2838,7 @@ fn populateFunctionDefForFinalizeFailure(
     captured_name: atom_module.Atom,
 ) !void {
     const op = bytecode.opcode.op;
-    const b = try attachV2Builder(fd);
+    const b = try attachBuilder(fd);
     try b.emitAtomOpOwned(op.push_atom_value, name);
     // The marker lands on the instruction boundary just past the 5-byte
     // push_atom_value; the source-loc entry contract rejects mid-instruction pcs.

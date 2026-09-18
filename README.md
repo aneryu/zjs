@@ -74,15 +74,14 @@ They are development snapshots; verify downloads against the attached
 ```sh
 git clone https://github.com/aneryu/zjs.git
 cd zjs
-zig build zjs-dev --summary all
-./zig-out/bin/zjs-dev -e "console.log(1 + 2)"
+zig build zjs --summary all
+./zig-out/bin/zjs -e "console.log(1 + 2)"
 ```
 
-The Debug CLI above is the shortest development path. Build the ReleaseFast
-CLI with:
+That default is Debug. Build the shipped ReleaseFast CLI with:
 
 ```sh
-zig build zjs --summary all
+zig build zjs -Doptimize=ReleaseFast --summary all
 ./zig-out/bin/zjs -e "console.log(1 + 2)"
 ./zig-out/bin/zjs path/to/file.js
 ```

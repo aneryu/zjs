@@ -10,18 +10,6 @@ const platform_clock = engine.platform_clock;
 /// See `panic_policy.zig` for why the shipped binary drops the symbolizer.
 pub const panic = @import("panic_policy.zig").policy;
 
-// QCP-1: this root is shared by `zjs` (ReleaseFast), `zjs-profile`
-// (ReleaseFast), `zjs-dev` (Debug), and `zjs-size` (-Doptimize), so it proves the effective
-// configuration of the shipped binary itself at compile time, each reporting
-// its own optimize mode (src/config_signature.zig). `--print-config-signature`
-// below is the runtime half of the same statement.
-comptime {
-    engine.config_signature.attest("zjs CLI");
-    if (!std.mem.eql(u8, @tagName(@import("builtin").mode), engine.config_signature.optimize)) {
-        @compileError("zjs CLI optimize mode differs from its engine");
-    }
-}
-
 const public_api = engine.public_api;
 const zjs = public_api;
 const runtime_layer = public_api.runtime;
@@ -231,15 +219,6 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try cli_process.argsToSlice(arena, init.minimal.args);
-
-    // QCP-1 configuration signature. Answered before any engine construction
-    // so it is readable from every configuration, including instrumented
-    // tiers, and so `zig build config-signature-check` can compare the
-    // shipped binary's own answer against what the build graph requested.
-    if (args.len >= 2 and std.mem.eql(u8, args[1], config_signature_flag)) {
-        try printConfigSignature(io);
-        return;
-    }
 
     const command = parseArgs(args[1..]) catch {
         try printUsage(io);
@@ -489,19 +468,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n       zjs " ++ config_signature_flag ++ "\n");
-}
-
-/// Standalone query flag: it takes no script and constructs no runtime, so it
-/// deliberately never reaches `parseArgs`.
-const config_signature_flag = "--print-config-signature";
-
-fn printConfigSignature(io: std.Io) !void {
-    var stdout_buf: [256]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    const stdout = &stdout_writer.interface;
-    try stdout.print("{s}\n", .{engine.config_signature.signature});
-    try stdout.flush();
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n");
 }
 
 fn commandRuntimeOptions(command: Command) RuntimeOptions {

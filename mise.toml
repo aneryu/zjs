@@ -55,20 +55,26 @@ run = '"$MISE_TASK_DIR/tools/worktree_init.sh"'
 [tasks.test262-stress]
 description = "Full test262 under ZJS_GC_STRESS=1; -R products in reports/test262-stress/"
 run = """
-zig build run-test262
+zig build run-test262 -Doptimize=ReleaseFast
 ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 100000 -R reports/test262-stress "$@"
 """
 
-# Local one-shot of the same steps CI linux-arm64 already runs after
-# `zig build zjs`: checkpoint-gate + test-stress + test262-check.
+# Local one-shot of the same steps CI linux-arm64 already runs:
+# Debug checkpoint + stress, then shipped-mode test262.
 [tasks.batch-gate]
-description = "Local CI-equivalent batch: checkpoint-gate + test-stress + test262-check"
-run = 'zig build checkpoint-gate test-stress test262-check "$ZJS_BUILD_JOBS" --summary all'
+description = "Local CI-equivalent batch: Debug checkpoint-gate + test-stress, then ReleaseFast test262-check"
+run = """
+zig build checkpoint-gate test-stress "$ZJS_BUILD_JOBS" --summary all
+zig build test262-check -Doptimize=ReleaseFast "$ZJS_BUILD_JOBS" --summary all
+"""
 
 [tasks.batch-gate-profile]
 description = "Same as batch-gate plus ReleaseFast CLI/profile smoke"
-run = 'zig build checkpoint-gate test-stress test262-check smoke "$ZJS_BUILD_JOBS" --summary all'
+run = """
+zig build checkpoint-gate test-stress "$ZJS_BUILD_JOBS" --summary all
+zig build test262-check smoke -Doptimize=ReleaseFast "$ZJS_BUILD_JOBS" --summary all
+"""
 
 [tasks.production-gate]
-description = "Release gate: engine-production-gate (adds the ReleaseFast zjs-profile smoke and the full test-embedding run)"
-run = 'zig build engine-production-gate "$ZJS_BUILD_JOBS" --summary all'
+description = "Release gate: engine-production-gate at -Doptimize=ReleaseFast"
+run = 'zig build engine-production-gate -Doptimize=ReleaseFast "$ZJS_BUILD_JOBS" --summary all'

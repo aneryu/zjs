@@ -625,14 +625,14 @@
 
 - **签名**：`fn fdPhase1Code(fd: *const engine.bytecode.FunctionDef) []const u8`。
 - **作用**：The compact phase-1 stream a FunctionDef's Builder holds while the parse is still live.。
-- **实现**：`fd.v2_builder orelse return &.{}`，再返回 `b.code[0..b.code_len]`——解析仍在进行时，phase-1 紧凑流只存在于 Builder 里。
+- **实现**：`fd.builder orelse return &.{}`，再返回 `b.code[0..b.code_len]`——解析仍在进行时，phase-1 紧凑流只存在于 Builder 里。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `fdLabelOffset` (`src/tests/parser.zig:6837`)
 
 - **签名**：`fn fdLabelOffset(fd: *const engine.bytecode.FunctionDef, label_index: u32) u32`。
 - **作用**：Output offset a parser-created LabelId is bound at, in the compact stream. The compact encoding stores the LabelId in the jump operand; the target is the slot's bound offset, which is what the legacy absolute operand used to carry directly.。
-- **实现**：`fd.v2_builder.?.label_slots[label_index].bound_offset`——直接取 label 槽的绑定偏移（无 v2_builder 时会 panic）。
+- **实现**：`fd.builder.?.label_slots[label_index].bound_offset`——直接取 label 槽的绑定偏移（无 builder 时会 panic）。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `publishPhase1Stream` (`src/tests/parser.zig:6844`)
@@ -4501,10 +4501,10 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit releases it"` (`src/tests/parser.zig:13100`)
+### `test "FunctionDef builder emit and deinit releases it"` (`src/tests/parser.zig:13100`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit releases it」。
+- **作用**：钉住场景「FunctionDef builder emit and deinit releases it」。
 - **实现**：断言 11 处 `std.testing.expect*`。约 11 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 

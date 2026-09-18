@@ -1,5 +1,4 @@
-//! QCP-1 compiler-v2 Stage 3: identity-native variable resolution with exact
-//! block-CFG liveness.
+//! Variable resolution with exact block-CFG liveness.
 //!
 //! Pass A builds one immutable LabelId CFG from the read-only Builder, then
 //! establishes the transactional output, short-form label bookkeeping, atom
@@ -49,7 +48,7 @@ pub const ResolvedProduct = struct {
     /// LabelSlot.pos2), labels.unbound for labels inside removed dead
     /// regions; ref_count = retained-reference count after qjs update_label
     /// bookkeeping for Stage 4 short-form selection;
-    /// first_reloc is always labels.no_reloc here (resolve_labels_v2 builds
+    /// first_reloc is always labels.no_reloc here (resolve_labels builds
     /// its own chains next stage); flags.backward_target carried from input.
     label_slots: []labels.LabelSlot = &.{},
     label_capacity: usize = 0,
@@ -2453,7 +2452,7 @@ fn markReachableEvalCaptures(
         return error.InvalidBytecode;
 }
 
-/// Exact block-CFG resolve pass over fd.v2_builder. The input Builder is
+/// Exact block-CFG resolve pass over fd.builder. The input Builder is
 /// strictly read-only: output atom ids are copied from the input ledger with no
 /// retain (this pass makes no retain/release call), and every fallible output
 /// allocation is owned by the uncommitted product or scratch topology until the
@@ -2462,7 +2461,7 @@ pub fn run(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,
 ) Error!ResolvedProduct {
-    const input = fd.v2_builder orelse return error.InvalidBytecode;
+    const input = fd.builder orelse return error.InvalidBytecode;
     if (input.memory != fd.memory or input.atoms != fd.atoms)
         return error.InvalidBytecode;
     try validateInput(input);
@@ -2494,8 +2493,8 @@ pub fn run(
     try initializeLabels(&product, input);
     try preallocateProductStreams(&product, input);
 
-    // QCP-1 S3: exact-scope accelerator deferred; the linked-chain fallback is
-    // the semantic path shared with the legacy pipeline.
+    // Exact-scope accelerator is deferred; the linked-chain walk is the
+    // semantic path.
 
     const initial_bind_offset: u64 = if (binds.len != 0)
         binds[0].input_offset
@@ -2564,7 +2563,7 @@ const ResolveTestHarness = struct {
 
         const input_builder = try harness.rt.memory.create(builder.Builder);
         input_builder.* = builder.Builder.init(&harness.rt.memory, &harness.rt.atoms);
-        harness.fd.v2_builder = input_builder;
+        harness.fd.builder = input_builder;
     }
 
     fn deinit(harness: *ResolveTestHarness) void {
@@ -2574,15 +2573,15 @@ const ResolveTestHarness = struct {
     }
 
     fn deinitInput(harness: *ResolveTestHarness) void {
-        if (harness.fd.v2_builder) |input_builder| {
-            harness.fd.v2_builder = null;
+        if (harness.fd.builder) |input_builder| {
+            harness.fd.builder = null;
             input_builder.deinit();
             harness.rt.memory.destroy(builder.Builder, input_builder);
         }
     }
 
     fn input(harness: *ResolveTestHarness) *builder.Builder {
-        return harness.fd.v2_builder.?;
+        return harness.fd.builder.?;
     }
 
     fn resolve(harness: *ResolveTestHarness) Error!ResolvedProduct {

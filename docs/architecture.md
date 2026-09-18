@@ -12,7 +12,7 @@ reference shapes, matching QuickJS’s own monoliths.
 ## Layers
 
 ```
-embedder  →  src/root.zig  →  src/binding/  →  src/core/
+embedder  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
 CLI/tests →  src/internal_root.zig
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode.zig
 execute   →  src/exec/  (VM, builtins, modules, promises)
@@ -26,12 +26,10 @@ the event loop.
 
 - `event_loop.zig`: host timers, fd/signal handlers, and job draining
   (`zjs.runtime`).
+- `js_context.zig`: host `JSContext` facade (eval, calls, properties).
+- `native.zig`: `zjs.native.managed` host-function thunks.
 - `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
   lookahead; used by `parser.zig` and the CLI.
-- `config_signature.zig`: compile-time configuration-signature attestation
-  (see [qcp1_switch_decision.md](qcp1_switch_decision.md)).
-- `dossier_pad.zig`: layout-lineage padding instrument; `pad=0` emits
-  nothing.
 
 ## Public entry — `src/root.zig`
 
@@ -44,9 +42,9 @@ Contract: [public-api-contract.md](public-api-contract.md). Examples:
 `src/internal_root.zig` aggregates CLI, test262, and in-repo tests. It is not
 the public embedding contract.
 
-`src/binding/` adapts core types for CLI and in-repo tests: context helpers
-(`context.zig`) and native functions (`native.zig`: comptime thunks over
-`NativeEntry` via `managed`).
+`src/js_context.zig` is the host `JSContext` facade (eval, calls, properties,
+native-function install). `src/native.zig` builds comptime thunks over
+`NativeEntry` via `managed`. Neither file may import CLI.
 
 ## Core — `src/core/`
 
@@ -98,12 +96,10 @@ by that lookahead path.
 
 ## Compiler — `src/compiler/`
 
-This is the only compiler (renamed from `compiler_v2` on 2026-08-19 by owner
-ruling). The published configuration-signature string keeps `compiler=v2` —
-"v2" is the compiler's attested identity, not the directory name. Temporary
-bytecode uses `LabelId` / `LabelSlot` / `RelocEntry` until final layout.
-`resolve_variables` and `resolve_labels` are separate stages. Production
-layout is `-Dzjs_compiler_layout=short`; `plain` is an A/B diagnostic.
+This is the only compiler. Temporary bytecode uses `LabelId` / `LabelSlot` /
+`RelocEntry` until final layout. `resolve_variables` and `resolve_labels` are
+separate stages. Production layout is `-Dzjs_compiler_layout=short`; `plain`
+is an A/B diagnostic.
 
 | File | Role |
 | --- | --- |

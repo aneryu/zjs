@@ -73,8 +73,8 @@
 ### `registerStandardGlobalsBare` (`src/tests/helpers.zig:31`)
 
 - **签名**：`pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void`。
-- **作用**：给绕过 binding 层、直接 `JSRuntime.create` 的测试安装标准全局；与 installer 容量不变量绑在一起，幂等。
-- **实现**：Install the standard + host globals on a bare `core.JSRuntime` global for tests that build a runtime directly (bypassing the binding-layer context create that wires the installer). The deep setup interface keeps the installer callback and its capacity invariant together. Idempotent.。关键调用：`engine.exec.standard_globals.configureRuntime`。
+- **作用**：给绕过宿主门面、直接 `JSRuntime.create` 的测试安装标准全局；与 installer 容量不变量绑在一起，幂等。
+- **实现**：Install the standard + host globals on a bare `core.JSRuntime` global for tests that build a runtime directly (bypassing the `js_context` create that wires the installer). The deep setup interface keeps the installer callback and its capacity invariant together. Idempotent.。关键调用：`engine.exec.standard_globals.configureRuntime`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `installHostGlobalsBare` (`src/tests/helpers.zig:35`)
@@ -457,7 +457,7 @@
 
 ## `src/tests/smoke_test.zig` — CLI smoke
 
-`smoke` 打 ReleaseFast `zjs`+`zjs-profile`；`smoke-dev` 只打 Debug `zjs-dev` 且关掉 profile 合同。路径来自 `build_options.zjs_executable_path`。
+`smoke` 打当前 `-Doptimize` 下的 `zjs`+`zjs-profile`。路径来自 `build_options.zjs_executable_path`。
 
 文件头：Runs executable smoke tests for CLI behavior and profiling artifacts.
 
@@ -1289,7 +1289,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住嵌入面：public API core signatures stay source-compatible。
-- **实现**：不建任何 Runtime/Context：把九个公共入口（`JSRuntime.create`/`createWithOptions`、`JSContext.create`/`createWithOptions`、`defineFunction`、`createFunction`、`eval`、`arrayBuffer`、`toOwnedUtf8`）赋值给写死的函数类型常量，签名一变即编译失败；再断言 `zjs.value.Bytes.Store == zjs.JSValue.Bytes.Store`、`object.Object` 是 opaque，以及（仅当 `zjs` 是公共 facade、无 `config_signature` 时）`JSBytes`/`JSString`/`PropNameID`/`binding` 四个名字缺席。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：不建任何 Runtime/Context：把九个公共入口（`JSRuntime.create`/`createWithOptions`、`JSContext.create`/`createWithOptions`、`defineFunction`、`createFunction`、`eval`、`arrayBuffer`、`toOwnedUtf8`）赋值给写死的函数类型常量，签名一变即编译失败；再断言 `zjs.value.Bytes.Store == zjs.JSValue.Bytes.Store`、`object.Object` 是 opaque，以及（仅当 `zjs` 是公共 facade、无 `printSmallInlineProbe` 时）`JSBytes`/`JSString`/`PropNameID`/`binding` 四个名字缺席。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "embedding destroy of one context keeps auto_init-bearing objects from that realm alive"` (`src/tests/embedding_examples.zig:603`)
@@ -1338,7 +1338,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「public API surface snapshot matches the checked-in name lists」。
-- **实现**：`zjs` 若带 `config_signature`（即统一套件里的内部根）直接 return，只在 `test-embedding` 的公共 facade 下生效。对 `zjs` 及 `value`/`host`/`object`/`context`/`module`/`job`/`runtime` 八个命名空间各跑一次 `expectPublicDeclSnapshot`（失败只记 flag，末尾统一 `error.TestExpectedEqual`，一轮就能看全所有差异），再钉住两个已知宽面的声明数：`JSValue` 80、`JSRuntime` 162。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：`zjs` 若带 `printSmallInlineProbe`（即统一套件里的内部根）直接 return，只在 `test-embedding` 的公共 facade 下生效。对 `zjs` 及 `value`/`host`/`object`/`context`/`module`/`job`/`runtime` 八个命名空间各跑一次 `expectPublicDeclSnapshot`（失败只记 flag，末尾统一 `error.TestExpectedEqual`，一轮就能看全所有差异），再钉住两个已知宽面的声明数：`JSValue` 80、`JSRuntime` 162。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ## `src/tests/oom.zig` — `test-oom` 注入语料
@@ -1709,9 +1709,9 @@
 
 ### 函数（清单 6）
 
-### `attachV2Builder` (`src/tests/bytecode.zig:248`)
+### `attachBuilder` (`src/tests/bytecode.zig:248`)
 
-- **签名**：`fn attachV2Builder(fd: *function_def.FunctionDef) !*compiler.Builder`。
+- **签名**：`fn attachBuilder(fd: *function_def.FunctionDef) !*compiler.Builder`。
 - **作用**：Give a hand-built FunctionDef the compact producer finalization requires. There is one compiler and one lowering input: a FunctionDef with no attached Builder is rejected by `prepareCurrentBeforeChildren`, so every fixture that reaches the finalizer must emit through this. The Builder is owned by the FunctionDef and released by `fd.deinit`.。
 - **实现**：Give a hand-built FunctionDef the compact producer finalization requires. There is one compiler and one lowering input: a FunctionDef with no attached Builder is rejected by `prepareCurrentBeforeChildren`, so every fixture that reaches the finalizer must emit through this. The Builder is owned by the FunctionDef and released by `fd.deinit`.。热路径用 `try` 传播分配/引擎错误。关键调用：`fd.memory.create`、`compiler.Builder.init`。
 - **所有权 / 错误 / 调用**：返回 `!*compiler.Builder`，由测试 `try`/`expectError` 消费。
@@ -1719,8 +1719,8 @@
 ### `emitTestBody` (`src/tests/bytecode.zig:265`)
 
 - **签名**：`fn emitTestBody( fd: *function_def.FunctionDef, code: []const u8, atoms: []const core.Atom, ) !void`。
-- **作用**：Replay a literal instruction sequence into `fd`'s v2 Builder. This is the V2-equivalent of the `fd.appendByteCode` fixtures the deleted legacy pipeline accepted: the same instructions, delivered through the only producer the compiler reads. Atom operands are taken from `atoms` in stream order and retained by the builder.  Label-bearing operands are deliberately unsupported: in the producer they are LabelId identities, not addresses, so a fixture that needs one emits it directly with `emitJump` / `emitScopeRefOpOwned`.。
-- **实现**：Replay a literal instruction sequence into `fd`'s v2 Builder. This is the V2-equivalent of the `fd.appendByteCode` fixtures the deleted legacy pipeline accepted: the same instructions, delivered through the only producer the compiler reads. Atom operands are taken from `atoms` in stream order and retained by the builder.  Label-bearing operands are deliberately unsupported: in the producer they are LabelId identities, not addresses, so a fixture that needs one emits it directly with `emitJump` / `emitScopeRefOpOwned`.。主体是 `switch` 分发。含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`attachV2Builder`、`opcode.sizeOfPhase1`、`opcode.formatOfPhase1`、`b.emitOp`、`b.emitOpU8`。显式 `return error.InvalidBytecode`。
+- **作用**：Replay a literal instruction sequence into `fd`'s Builder, the only producer the compiler reads. Atom operands are taken from `atoms` in stream order and retained by the builder.  Label-bearing operands are deliberately unsupported: in the producer they are LabelId identities, not addresses, so a fixture that needs one emits it directly with `emitJump` / `emitScopeRefOpOwned`.。
+- **实现**：Replay a literal instruction sequence into `fd`'s Builder, the only producer the compiler reads. Atom operands are taken from `atoms` in stream order and retained by the builder.  Label-bearing operands are deliberately unsupported: in the producer they are LabelId identities, not addresses, so a fixture that needs one emits it directly with `emitJump` / `emitScopeRefOpOwned`.。主体是 `switch` 分发。含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`attachBuilder`、`opcode.sizeOfPhase1`、`opcode.formatOfPhase1`、`b.emitOp`、`b.emitOpU8`。显式 `return error.InvalidBytecode`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
 ### `createTestFunctionBytecode` (`src/tests/bytecode.zig:343`)
@@ -1741,7 +1741,7 @@
 
 - **签名**：`fn populateFunctionDefForFinalizeFailure( fd: *function_def.FunctionDef, name: atom_module.Atom, arg_name: atom_module.Atom, captured_name: atom_module.Atom, ) !void`。
 - **作用**：把一个手搓 `FunctionDef` 填成 finalize OOM 扫描要的形状：经 v2 Builder 发 `push_atom_value(name)`（并在其后第 5 字节的指令边界加一条 source marker，因为 source-loc 条目不接受指令中间的 pc）、`drop`/`get_var 0`/`drop`/`return_undef`，再加一个 cpool int32(99)、一个参数、一个 const 变量、一个 lexical const 闭包变量，最后 `replaceSourceText`——即每类 owner（atom/cpool/arg/var/closure/source text）各占一份。
-- **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`attachV2Builder`、`b.emitAtomOpOwned`、`b.addSourceMarker`、`b.emitOp`、`b.emitOpU16`。
+- **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`attachBuilder`、`b.emitAtomOpOwned`、`b.addSourceMarker`、`b.emitOp`、`b.emitOpU16`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
 ### `runFunctionBytecodeFinalizeOomLifecycle` (`src/tests/bytecode.zig:2864`)
@@ -1963,17 +1963,17 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.InvalidScope`。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "compiler-v2 run rejects cyclic scope links before trusted lookup"` (`src/tests/bytecode.zig:1195`)
+### `test "compiler run rejects cyclic scope links before trusted lookup"` (`src/tests/bytecode.zig:1195`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「compiler-v2 run rejects cyclic scope links before trusted lookup」。
+- **作用**：钉住场景「compiler run rejects cyclic scope links before trusted lookup」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。用 `expectError` 钉失败路径。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors"` (`src/tests/bytecode.zig:1225`)
+### `test "compiler parent miss proves corrupt and cyclic synthetic ancestors"` (`src/tests/bytecode.zig:1225`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「compiler-v2 parent miss proves corrupt and cyclic synthetic ancestors」。
+- **作用**：钉住场景「compiler parent miss proves corrupt and cyclic synthetic ancestors」。
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。用 `expectError` 钉失败路径。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 

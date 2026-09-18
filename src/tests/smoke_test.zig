@@ -212,8 +212,8 @@ test "zjs CLI behavior" {
             try std.testing.expectEqual(@as(u8, 2), exit_code);
             try std.testing.expect(std.mem.indexOf(u8, result.stderr, "requires a profiling build") != null);
         } else {
-            // zjs-dev is built without profiling scopes too, so the same
-            // fail-closed contract applies.
+            // The non-profile `zjs` is built without profiling scopes, so
+            // the same fail-closed contract applies.
             try std.testing.expectEqual(@as(u8, 2), exit_code);
         }
     }

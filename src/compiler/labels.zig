@@ -1,14 +1,9 @@
-//! QCP-1 compiler-v2: parser-native label identity, mirroring the QuickJS
-//! production model (`quickjs.c` LabelSlot / label relocation chains).
+//! Parser-native label identity, mirroring QuickJS LabelSlot / relocation
+//! chains (`quickjs.c`).
 //!
-//! V2 NEVER materializes absolute-PC jump operands in the parser. A jump is
-//! emitted against a `LabelId` from the moment of creation; `resolve_labels_v2`
-//! assigns final positions and rewrites operands once. Producing an absolute
-//! PC first and converting later is forbidden — that would recreate the old
-//! compiler's debt inside the new one.
-//!
-//! API-FROZEN (driver-owned): the shapes below are the contract every v2
-//! agent codes against. Changes require a driver decision, not an agent one.
+//! Jumps are emitted against a LabelId from creation; resolve_labels assigns
+//! final positions once. Materializing an absolute PC in the parser and
+//! converting later is forbidden.
 
 const std = @import("std");
 
@@ -29,7 +24,7 @@ pub const LabelFlags = packed struct(u8) {
     /// Bound offsets refer to the temporary bytecode stream.
     bound: bool = false,
     /// At least one backward jump resolved through this label while retained
-    /// (feeds resolve_labels_v2 short-form bookkeeping).
+    /// (feeds resolve_labels short-form bookkeeping).
     backward_target: bool = false,
     /// The parser requested an explicit sequential-match barrier at this
     /// bind. This is the identity-native analogue of a physical `OP_label`:
@@ -39,7 +34,7 @@ pub const LabelFlags = packed struct(u8) {
 };
 
 /// One label. `ref_count` is retained qjs update_label bookkeeping for the
-/// resolve_labels_v2 short-form pass; exact block-CFG reachability decides
+/// resolve_labels short-form pass; exact block-CFG reachability decides
 /// liveness. `first_reloc` heads an intrusive chain of operand positions
 /// awaiting the final relative rewrite.
 pub const LabelSlot = struct {

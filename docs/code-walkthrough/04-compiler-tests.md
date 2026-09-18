@@ -12,7 +12,7 @@
 
 - **签名**：`pub fn phase1Code(p: *const Program) []const u8`。
 - **作用**：断言用的 parser 阶段指令流：lowering 前 Builder 紧凑临时流。
-- **实现**：`v2_builder.code[0..code_len]`。
+- **实现**：`builder.code[0..code_len]`。
 - **所有权 / 错误 / 调用**：切片借 Builder；Program 活着才能用。
 
 ### `Program.deinit` (`src/compiler/test_entry.zig:33`)
@@ -47,53 +47,53 @@
 
 ## `tests.zig` harness
 
-`V2Parse`：无 realm 的解析夹具，`emit_phase1_temp = false`，只 `beginBuilderEmissionForTest`，用来断言迁移面内的语句片段。`V2Exec`：带 Context、standard_globals、canonical root、compile roots、`is_global_var`，跑完整 parse→finalize→VM。
+`ParseHarness`：无 realm 的解析夹具，`emit_phase1_temp = false`，只 `beginBuilderEmissionForTest`，用来断言迁移面内的语句片段。`ExecHarness`：带 Context、standard_globals、canonical root、compile roots、`is_global_var`，跑完整 parse→finalize→VM。
 
-### `V2Parse.init` (`src/compiler/tests.zig:35`)
+### `ParseHarness.init` (`src/compiler/tests.zig:35`)
 
-- **签名**：`fn init(h: *V2Parse, src: []const u8) !void`。
-- **作用**：栈上夹具必须 `var h: V2Parse = undefined`。建 runtime、Bytecode（名 `s2g1`）、lexer、ParseState；关 phase-1 作用域标记；`beginBuilderEmissionForTest`。
+- **签名**：`fn init(h: *ParseHarness, src: []const u8) !void`。
+- **作用**：栈上夹具必须 `var h: ParseHarness = undefined`。建 runtime、Bytecode（名 `s2g1`）、lexer、ParseState；关 phase-1 作用域标记；`beginBuilderEmissionForTest`。
 - **实现**：errdefer destroy runtime / deinit function / deinit lexer。
 - **所有权 / 错误 / 调用**：S2-G1/G2/G3/G4 形态测试。`defer h.deinit()`。
 
-### `V2Parse.builder` (`src/compiler/tests.zig:51`)
+### `ParseHarness.builder` (`src/compiler/tests.zig:51`)
 
-- **签名**：`fn builder(h: *V2Parse) *builder_mod.Builder`。
+- **签名**：`fn builder(h: *ParseHarness) *builder_mod.Builder`。
 - **作用**：根 FunctionDef 的 v2 builder。
 - **实现**：unwrap。
 - **所有权 / 错误 / 调用**：`expectV2Stream` / `expectRelocIntegrity`。
 
-### `V2Parse.childBuilder` (`src/compiler/tests.zig:55`)
+### `ParseHarness.childBuilder` (`src/compiler/tests.zig:55`)
 
-- **签名**：`fn childBuilder(h: *V2Parse, index: usize) *builder_mod.Builder`。
+- **签名**：`fn childBuilder(h: *ParseHarness, index: usize) *builder_mod.Builder`。
 - **作用**：第 `index` 个嵌套函数的 builder（方法、默认 ctor）。
-- **实现**：`child_list[index].v2_builder`。
+- **实现**：`child_list[index].builder`。
 - **所有权 / 错误 / 调用**：class 测试。
 
-### `V2Parse.grandchildBuilder` (`src/compiler/tests.zig:59`)
+### `ParseHarness.grandchildBuilder` (`src/compiler/tests.zig:59`)
 
-- **签名**：`fn grandchildBuilder(h: *V2Parse, index: usize, sub: usize) *builder_mod.Builder`。
+- **签名**：`fn grandchildBuilder(h: *ParseHarness, index: usize, sub: usize) *builder_mod.Builder`。
 - **作用**：两层嵌套（静态块里的函数等）。
 - **实现**：`child_list[index].child_list[sub]`。
 - **所有权 / 错误 / 调用**：static block 测试。
 
-### `V2Parse.deinit` (`src/compiler/tests.zig:63`)
+### `ParseHarness.deinit` (`src/compiler/tests.zig:63`)
 
-- **签名**：`fn deinit(h: *V2Parse) void`。
+- **签名**：`fn deinit(h: *ParseHarness) void`。
 - **作用**：state → lexer → function → runtime。
 - **实现**：`h.state.deinit(rt)` / `h.lex.deinit()` / `h.function.deinit(rt)` / `rt.destroy()`。
-- **所有权 / 错误 / 调用**：测试夹具释放序：`state.deinit(rt)` 连带放掉 `function_def` 树上的各级 `v2_builder`（`builder`/`childBuilder`/`grandchildBuilder` 返回的都是这棵树上的借用指针），接着 `lex.deinit()`（与 `V2Exec` 对齐——今天 JS 源下 `Lexer.deinit` 只释放 TS 的 `skipped_intervals`、此夹具无此缓冲，但一旦给本夹具加 TS 语料就会立刻变成 testing-allocator 泄漏），再 `function.deinit(rt)`，最后 `rt.destroy()` 关掉这些缓冲所挂的 memory 账户——runtime 必须最后走。`void`、不返回错误，由各测试的 `defer` 调用。
+- **所有权 / 错误 / 调用**：测试夹具释放序：`state.deinit(rt)` 连带放掉 `function_def` 树上的各级 `builder`（`builder`/`childBuilder`/`grandchildBuilder` 返回的都是这棵树上的借用指针），接着 `lex.deinit()`（与 `ExecHarness` 对齐——今天 JS 源下 `Lexer.deinit` 只释放 TS 的 `skipped_intervals`、此夹具无此缓冲，但一旦给本夹具加 TS 语料就会立刻变成 testing-allocator 泄漏），再 `function.deinit(rt)`，最后 `rt.destroy()` 关掉这些缓冲所挂的 memory 账户——runtime 必须最后走。`void`、不返回错误，由各测试的 `defer` 调用。
 
-### `V2Exec.init` (`src/compiler/tests.zig:81`)
+### `ExecHarness.init` (`src/compiler/tests.zig:81`)
 
-- **签名**：`fn init(h: *V2Exec, src: []const u8) !void`。
+- **签名**：`fn init(h: *ExecHarness, src: []const u8) !void`。
 - **作用**：执行夹具：runtime+globals+context+canonical ParseState，`activateCompileRoots`，`beginProgramEmission`。
 - **实现**：名 `compiler-s4-exec`。`installed_short_opcode = false`。TGC S3-b：`h` 栈上且 state 不再移动，故可在此注册 root provider。
 - **所有权 / 错误 / 调用**：fuse / 执行 / escape / GC 窗口测试。
 
-### `V2Exec.deinit` (`src/compiler/tests.zig:102`)
+### `ExecHarness.deinit` (`src/compiler/tests.zig:102`)
 
-- **签名**：`fn deinit(h: *V2Exec) void`。
+- **签名**：`fn deinit(h: *ExecHarness) void`。
 - **作用**：state、lexer、function、ctx、rt。
 - **实现**：显式 `lex.deinit`（canonical 路径 lexer 独立）。
 - **所有权 / 错误 / 调用**：反向所有权。
@@ -135,14 +135,14 @@
 
 ### `compileAndRun` (`src/compiler/tests.zig:200`)
 
-- **签名**：`fn compileAndRun(h: *V2Exec) !core.JSValue`。
+- **签名**：`fn compileAndRun(h: *ExecHarness) !core.JSValue`。
 - **作用**：当 completion 脚本 parse，整棵 FunctionDef 树走 v2，生产 packed-FB，在 VM 上跑。返回值归调用方。
 - **实现**：转 `compileAndRunWithHook(h, null)`。
 - **所有权 / 错误 / 调用**：大多数执行测试。
 
 ### `compileAndRunWithHook` (`src/compiler/tests.zig:207`)
 
-- **签名**：`fn compileAndRunWithHook(h: *V2Exec, before_finalize: ?*const fn (*V2Exec) anyerror!void) !core.JSValue`。
+- **签名**：`fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarness) anyerror!void) !core.JSValue`。
 - **作用**：parse 与 `createFunctionBytecode` 之间的钩子——此时 FunctionDef 树拥有全部常量、尚未发布产物（TGC S3-b）。
 - **实现**：`enableReturnCompletion`、parse 到 EOF、`finalizeEvalReturn`、可选 hook、finalize、造根函数对象、`zjs_vm.runWithCallEnv`（strict this=undefined，否则 realm global；`direct_eval_vars_reach_global`）。
 - **所有权 / 错误 / 调用**：`createRootBytecodeFunctionObject` 每条路径消费 FB 值。返回 JSValue 未 free（测试立刻 asInt32）。
@@ -226,14 +226,14 @@
 
 ### `s3bMajorBeforeFinalize` (`src/compiler/tests.zig:3423`)
 
-- **签名**：`fn s3bMajorBeforeFinalize(h: *V2Exec) anyerror!void`。
+- **签名**：`fn s3bMajorBeforeFinalize(h: *ExecHarness) anyerror!void`。
 - **作用**：compileAndRun 钩子：parse 完、未发布。字符串字面量体与模板数组只活在 Zig 堆 `FunctionDef.cpool`，保守栈扫与 tracer 边都到不了，只有 `State.traceCompileValueRoots` 能保住。
 - **实现**：forceMajorGC、drain、`s3bExpectDefTreeMarked` 至少 2（RegExp 模式串+编译字节码串），且 child_list≥2。
 - **所有权 / 错误 / 调用**：`TGC S3-b: a major between parse and finalize keeps cpool constants alive`。
 
 ### `s3bExpectTemplateArraysMarked` (`src/compiler/tests.zig:3475`)
 
-- **签名**：`fn s3bExpectTemplateArraysMarked(h: *V2Exec) anyerror!void`。
+- **签名**：`fn s3bExpectTemplateArraysMarked(h: *ExecHarness) anyerror!void`。
 - **作用**：钩子：强制 major 后 def 树至少 1 个标上的 GC 槽，且某 cpool（根或 child）有 OBJECT（frozen cooked 数组；raw 挂在其 `raw` 属性上）。窗口在此结束：之后 hook 返回，`compileAndRunWithHook` 把 FB 放进 native 局部，`.declared_only` 看不见。ZJS_GC_STRESS 会在缝里回收 FB，所以恢复默认保守根扫描。
 - **实现**：`restoreDefaultRootScanForTest`。
 - **所有权 / 错误 / 调用**：tagged-template 测试在 hook 前 `forcePreciseRootScanForTest`。

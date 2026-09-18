@@ -10,7 +10,7 @@ parser 的 Phase 1 状态：作用域、变量、标签、临时字节码、子�
 
 - 缓冲全部几何增长（`growSliceBy`，容量翻倍、地板 8），`slice.len` 是已用，backing 是 `ptr[0..capacity]`。
 - `scope_next` 链与 `arg_scope_end = -2` 对齐 QuickJS 参数环境。
-- `v2_builder` 是唯一 lowering 后端；finalize 时必须存在。
+- `builder` 是唯一 lowering 后端；finalize 时必须存在。
 - `deinit` 递归销毁 `child_list`，释放 label reloc、cpool reserved BigInt、source（len+1）。
 
 ## Bytecode
@@ -365,8 +365,8 @@ finalize 的中间载体：最终码、atom ledger、argdefs/vardefs/closure_var
 
 - **签名**：`pub fn deinit(self: *FunctionDefImpl, rt: anytype) void`。
 - **作用**：释放全部编译缓冲、子 FunctionDef、label reloc、cpool 值、source。
-- **实现**：先清三个 atom 字段并兜底释放 v2_builder，再依次释放 vars/vars_htab/args/scopes/global_vars/byte_code/atom_operands、label reloc 链与 label_slots、cpool（逐槽 freeOwnedValue）、closure_var、jump_slots、source_loc_slots 与 source（len+1）；**最后**才递归 `child.deinit` 并 destroy 每个子 def，再释放 child_list backing。
-- **所有权 / 错误 / 调用**：无 error set，不可失败；`rt` 只透传给 `freeOwnedValue`（`src/bytecode.zig:4966`），用于销毁那些还没发布进 FunctionBytecode 的 reserved cpool BigInt，其余缓冲一律还给 `MemoryAccount`。释放前先把字段置空/清零再释放旧块，所以重复调用安全；`v2_builder` 这一支是 parse 期与错误路径的兜底（成功的 v2 lowering 已在消费点释放它）；`child_list` 里的子 def 由本函数递归 `deinit` 后 `destroy`，父对子指针的所有权来自 `addChild`。
+- **实现**：先清三个 atom 字段并兜底释放 builder，再依次释放 vars/vars_htab/args/scopes/global_vars/byte_code/atom_operands、label reloc 链与 label_slots、cpool（逐槽 freeOwnedValue）、closure_var、jump_slots、source_loc_slots 与 source（len+1）；**最后**才递归 `child.deinit` 并 destroy 每个子 def，再释放 child_list backing。
+- **所有权 / 错误 / 调用**：无 error set，不可失败；`rt` 只透传给 `freeOwnedValue`（`src/bytecode.zig:4966`），用于销毁那些还没发布进 FunctionBytecode 的 reserved cpool BigInt，其余缓冲一律还给 `MemoryAccount`。释放前先把字段置空/清零再释放旧块，所以重复调用安全；`builder` 这一支是 parse 期与错误路径的兜底（成功的 v2 lowering 已在消费点释放它）；`child_list` 里的子 def 由本函数递归 `deinit` 后 `destroy`，父对子指针的所有权来自 `addChild`。
 
 
 

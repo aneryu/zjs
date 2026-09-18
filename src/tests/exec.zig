@@ -20239,10 +20239,9 @@ test "native function toString keeps non-ASCII identifier names (qjs js_function
 }
 
 test "switch dispatch trampoline shapes keep their identity and semantics" {
-    // QCP-1 switch-dispatch regression corpus. Each source below reproduced a
-    // real divergence while two backends existed; with one backend left they
-    // pin the observable clause-fallthrough semantics of the shapes that
-    // exercise the resolver's dispatch folding.
+    // Switch-dispatch regression corpus. Each source below pins the
+    // observable clause-fallthrough semantics of the shapes that exercise
+    // the resolver's dispatch folding.
     //
     // The epilogue dispatch bridge several of these shapes were written
     // against no longer exists: the unmatched-dispatch references now move onto

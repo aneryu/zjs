@@ -549,7 +549,7 @@ pub const parser_core = struct {
         break_frame_depth: usize,
         break_fixups: std.ArrayList(usize) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
-        /// QCP-1 S2-G1: v2 parses carry the qjs label identities directly.
+        /// Break/continue labels are parser-native LabelIds (qjs identities).
         break_label: ?compiler.LabelId = null,
         continue_label: ?compiler.LabelId = null,
 
@@ -709,8 +709,6 @@ pub const parser_core = struct {
         last_token_line_num: u32 = 1,
         last_token_col_num: u32 = 1,
         last_opcode_source_offset: ?u32 = null,
-        /// QCP-1 L3: the parser construct that an in-v2-scope legacy emission is
-        /// attributed to. `.none` = undeclared fallback = gate violation.
         /// Lazily-built line-start byte offsets for O(1) (line,col)->offset
         /// conversion in `emitSourcePos`. This replaces an O(n) rescan of the
         /// whole source from byte 0 on EVERY opcode source-position emit, which
@@ -895,8 +893,8 @@ pub const parser_core = struct {
         emit_lexical_tdz_at_decl: bool = false,
         break_fixups: std.ArrayList(usize) = .empty,
         break_frame_lens: std.ArrayList(usize) = .empty,
-        /// QCP-1 S2-G1: one LabelId per break/continue frame (qjs
-        /// push_break_entry label_break/label_cont).
+        /// One LabelId per break/continue frame (qjs push_break_entry
+        /// label_break/label_cont).
         break_frame_labels: std.ArrayList(compiler.LabelId) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
         continue_frame_lens: std.ArrayList(usize) = .empty,
@@ -1387,7 +1385,7 @@ pub const parser_core = struct {
 
             self.cur_func_stack = self.cur_func_stack.ptr[0..new_len];
             self.cur_func_stack[old_len] = fd;
-            if (fd.v2_builder == null) {
+            if (fd.builder == null) {
                 self.ensureBuilderForFd(fd) catch return error.OutOfMemory;
             }
         }
@@ -2283,7 +2281,7 @@ pub const parser_core = struct {
 
         fn patchLabelBreaks(s: *State, frame_index: usize) Error!void {
             // qjs emit_label(label_break): the merge label binds unconditionally,
-            // even with zero refs (resolve_labels_v2 drops dead labels).
+            // even with zero refs (resolve_labels drops dead labels).
             if (s.label_frames.items[frame_index].break_label) |label| {
                 try emitterBindLabel(s, label);
             }
@@ -2291,7 +2289,7 @@ pub const parser_core = struct {
 
         fn patchLabelContinues(s: *State, frame_index: usize) Error!void {
             // qjs emit_label(label_cont): the merge label binds unconditionally,
-            // even with zero refs (resolve_labels_v2 drops dead labels).
+            // even with zero refs (resolve_labels drops dead labels).
             if (s.label_frames.items[frame_index].continue_label) |label| {
                 try emitterBindLabel(s, label);
             }
@@ -3376,8 +3374,8 @@ pub const parser_core = struct {
 
         fn emitGlobalVarOp(self: *State, op_id: u8, atom_id: Atom) Error!void {
             const ref_idx = try self.ensureGlobalClosureVarIndex(atom_id);
-            // QCP-1 S2-G2 harness leaf: non-temp global var lowering, same
-            // op + u16 closure-var-index temp encoding.
+            // Non-temp global var lowering: same op + u16 closure-var-index
+            // encoding as the temp form.
             try Emitter.opU16(self, op_id, ref_idx);
         }
 
@@ -3449,21 +3447,16 @@ pub const parser_core = struct {
             self.activeBuilder().invalidateLastOpcode();
         }
 
-        // ===== QCP-1 stage 2P: compiler-v2 emission veneer =====
-        // Thin State-level wrappers over compiler.Builder. The later facade
-        // groups call these; no production construct is migrated yet. Marker
-        // precedes opcode, mirroring the appendBytesAt order.
+        // State-level wrappers over compiler.Builder. Marker precedes opcode.
 
-        /// Builder of the function currently being parsed. Only meaningful
-        /// during a v2 parse; the unwrap fails loudly for a v2 parse whose
-        /// FunctionDef never began v2 emission.
+        /// Builder of the function currently being parsed. The unwrap fails
+        /// if this FunctionDef never began emission.
         pub fn activeBuilder(self: *State) *compiler.Builder {
-            return self.curFunc().v2_builder.?;
+            return self.curFunc().builder.?;
         }
 
-        /// v2 half of `emitSourcePosAndLoc`: record the (line,col) authority
-        /// for the next emitted opcode. The Builder ignores non-positive
-        /// coordinates.
+        /// Record the (line,col) authority for the next emitted opcode.
+        /// The Builder ignores non-positive coordinates.
         pub fn builderAddSourceMarker(self: *State, line_num: u32, col_num: u32) compiler.builder.Error!void {
             const v2b = self.activeBuilder();
             if (v2b.source_len != 0) {
@@ -3547,7 +3540,7 @@ pub const parser_core = struct {
         }
 
         /// QuickJS `emit_goto()` is source-less. The LabelId operand remains
-        /// pending until resolve_labels_v2.
+        /// pending until resolve_labels.
         pub fn builderEmitJump(self: *State, op_id: u8, label: compiler.LabelId) compiler.builder.Error!void {
             try self.activeBuilder().emitJump(op_id, label);
         }
@@ -3576,16 +3569,15 @@ pub const parser_core = struct {
             v2b.invalidateLastOpcode();
         }
 
-        /// QCP-1 S2-G4: give `fd` its v2 Builder (idempotent). Every FunctionDef
-        /// emitted into during a v2 parse owns one; stage 5 replaces the
-        /// test-entry wiring, not this per-fd provisioning.
+        /// Give `fd` its Builder (idempotent). Every FunctionDef emitted
+        /// into during a parse owns one.
         pub fn ensureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler.builder.Error!void {
             _ = self;
-            if (fd.v2_builder == null) {
+            if (fd.builder == null) {
                 const v2b = try fd.memory.create(compiler.Builder);
                 v2b.* = compiler.Builder.init(fd.memory, fd.atoms);
                 try v2b.enableControlIndex();
-                fd.v2_builder = v2b;
+                fd.builder = v2b;
             }
         }
 
@@ -3608,7 +3600,7 @@ pub const parser_core = struct {
             // before js_parse_program (quickjs.c:24128-24135/31441).
             try v2b.emitOpU16(opcode.op.enter_scope, @intCast(self.curFunc().body_scope));
         }
-        // ===== end QCP-1 stage 2P veneer =====
+        // ===== end Builder wrappers =====
 
         fn currentCodeLen(self: *State) usize {
             if (self.emit_to_function_def) return self.curFunc().byte_code.len;
@@ -4009,8 +4001,8 @@ pub const parser_core = struct {
         name: Atom = atom_module.null_atom,
         owns_name: bool = false,
         label_offset: ?usize = null,
-        /// QCP-1 S2-G4: v2 twin of `label_offset` — the scope_make_ref aux label
-        /// travels as a LabelId; put binds it (qjs put_lvalue emit_label).
+        /// scope_make_ref aux label as a LabelId; put binds it
+        /// (qjs put_lvalue emit_label).
         ref_label: ?compiler.LabelId = null,
         depth: u8,
         invalid_call: bool = false,
@@ -4081,7 +4073,7 @@ pub const parser_core = struct {
         return false;
     }
 
-    /// QCP-1 S2-G4: v2 twin of `reemitLValueGetterAssumeCapacity` (all NoSource).
+    /// Re-emit the lvalue getter with no source marker (qjs get_lvalue).
     fn reemitLValueGetter(s: *State, lvalue: *const LValue) Error!void {
         switch (lvalue.opcode) {
             .scope_var => {
@@ -4121,8 +4113,8 @@ pub const parser_core = struct {
         }
     }
 
-    /// QCP-1 S2-G4: v2 twin of `getLValue` — qjs get_lvalue (quickjs.c:25933)
-    /// over the v2 temp stream. Builder.last_opcode_pos is the sole target fact;
+    /// Assignment-target capture — qjs get_lvalue (quickjs.c:25933).
+    /// Builder.last_opcode_pos is the sole target fact;
     /// getter removal is the qjs `fd->byte_code.size = fd->last_opcode_pos`
     /// rewind (Builder.truncateLastOpcodePreserveSources after the ledger take-back).
     fn getLValue(s: *State, keep: bool) Error!LValue {
@@ -4132,10 +4124,9 @@ pub const parser_core = struct {
         const op_id = v2b.code[pos];
         const fd = s.curFunc();
 
-        // Annex-B runtime-error CallExpression target, same classification the
-        // legacy twin runs: the call opcode must be the whole tail. The v2
-        // temp stream uses the phase-1 encodings, so the size table applies
-        // unchanged.
+        // Annex-B runtime-error CallExpression target: the call opcode must
+        // be the whole tail. The temp stream uses the phase-1 encodings, so
+        // the size table applies unchanged.
         if (!s.is_strict and !fd.is_strict_mode and isRuntimeInvalidCallOpcode(op_id)) {
             const call_size = opcode.sizeOfPhase1(op_id);
             if (call_size == 0 or pos + call_size != v2b.code_len) return Error.InvalidAssignmentTarget;
@@ -4163,15 +4154,15 @@ pub const parser_core = struct {
                 }
                 if (name == atom_this or name == atom_new_target) return Error.InvalidAssignmentTarget;
                 try s.ensureClosureVar(name);
-                // Same reference-form selection as the legacy twin: a sloppy
+                // Same reference-form selection as QuickJS: a sloppy
                 // assignment whose RHS can run a direct eval must keep the
                 // binding it selected while evaluating the LHS, because the
                 // eval may insert a same-named var before the store happens.
                 // `resolve_variables` folds the reference back to a direct
                 // store when no dynamic environment is present.
                 //
-                // The strict-unresolved snapshot is the same decision the
-                // legacy twin makes: an unresolvable Reference in strict code
+                // The strict-unresolved snapshot is the same decision
+                // QuickJS makes: an unresolvable Reference in strict code
                 // must be decided when the LHS is evaluated, before the RHS
                 // can create the global property.
                 const strict_unresolved = strictUnresolvedAssignmentNeedsReference(s, name, keep);
@@ -4259,8 +4250,8 @@ pub const parser_core = struct {
         return lvalue;
     }
 
-    /// QCP-1 S2-G4: v2 twin of QuickJS `put_lvalue` (quickjs.c:26077), with
-    /// LabelId binding replacing the legacy deferred absolute-target publish.
+    /// QuickJS `put_lvalue` (quickjs.c:26077), with LabelId binding
+    /// instead of a deferred absolute-target publish.
     fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
         const shuffle_op: ?u8 = switch (lvalue.opcode) {
             .scope_var => switch (mode) {
@@ -5088,7 +5079,7 @@ pub const parser_core = struct {
         try emitterOp(s, opcode.op.push_true);
     }
 
-    /// v2 twin of `js_parse_delete` over Builder.last_opcode_pos. Same-width
+    /// `js_parse_delete` over Builder.last_opcode_pos. Same-width
     /// field/scope rewrites retain their atom-ledger entries; truncated
     /// atom-less getters are replaced transactionally by appending first and
     /// compacting only after every allocation succeeds.
@@ -5420,7 +5411,7 @@ pub const parser_core = struct {
         if (optional_chain_label) |label| {
             // v2 chain close: no in-stream raw label marker — the bind slot
             // carries the position; the pseudo getter rewrite is identical.
-            // resolve_labels_v2 later lowers *_opt_chain exactly like phase 2.
+            // resolve_labels later lowers *_opt_chain exactly like phase 2.
             const v2b = s.activeBuilder();
             const getter_end = v2b.code_len;
             try emitterBindParserLabelRaw(s, label);
@@ -6051,17 +6042,14 @@ pub const parser_core = struct {
             @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => try parseRegExpLiteral(s),
             tok.TOK_TEMPLATE => return parseTemplate(s, flags),
             tok.TOK_TRUE => {
-                // QCP-1 S2-G1 harness leaf
                 try Emitter.op(s, opcode.op.push_true);
                 try s.advance();
             },
             tok.TOK_FALSE => {
-                // QCP-1 S2-G1 harness leaf
                 try Emitter.op(s, opcode.op.push_false);
                 try s.advance();
             },
             tok.TOK_NULL => {
-                // QCP-1 S2-G1 harness leaf
                 try Emitter.op(s, opcode.op.null);
                 try s.advance();
             },
@@ -7115,17 +7103,16 @@ pub const parser_core = struct {
         return @intCast(signed);
     }
 
-    // ===== QCP-1 P3: the parser's single emission vocabulary =====
+    // ===== the parser's emission vocabulary =====
     //
-    // SHAPE: Parser -> Emitter -> the compact Builder. The parser speaks one
-    // vocabulary and never asks which backend it is; there is only one.
+    // SHAPE: Parser -> Emitter -> the compact Builder.
     //
     // ATOM CONVENTION: atoms are BORROWED at this interface. The emitter
     // duplicates into the Builder ledger, which is what the construct arms
     // used to spell as `atom` at the call site. The
     // duplication moved, the ownership contract did not.
 
-    /// QCP-1 P3: one patch-label identity.
+    /// One patch-label identity.
     ///
     /// A `Label` is a real `LabelId` from the identity model; unbound until
     /// `bind`, and any jump that references it before then is a relocation the
@@ -7134,7 +7121,7 @@ pub const parser_core = struct {
         id: compiler.LabelId = undefined,
     };
 
-    /// QCP-1 P3: the PHYSICAL-label family — the one that survives into the
+    /// The PHYSICAL-label family — the one that survives into the
     /// stream as an `OP_label` marker (qjs emit_label/emit_goto). Unlike
     /// `Label`, any number of jumps may target one `PhysLabel`.
     const PhysLabel = struct {
@@ -7226,8 +7213,8 @@ pub const parser_core = struct {
         }
     };
 
-    // ===== QCP-1 S2-G1: parser-error-typed facade over the S2P v2 veneer =====
-    // Construct arms call these; the S2P State veneers stay builder-typed.
+    // Parser-error-typed facade over the Builder wrappers.
+    // Construct arms call these; the State wrappers stay builder-typed.
 
     fn mapBuilderError(err: compiler.builder.Error) Error {
         return switch (err) {
@@ -7243,12 +7230,12 @@ pub const parser_core = struct {
         return s.builderNewLabel() catch |err| mapBuilderError(err);
     }
 
-    /// v2 mirror of `emitForwardJump`/`emitParserLabelJump` (marker'd).
+    /// Counterpart of `emitForwardJump`/`emitParserLabelJump` (marker'd).
     fn emitterJump(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
         s.builderEmitJump(op_id, label) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `emitForwardJumpNoSource`. `builderEmitJump` is itself
+    /// Counterpart of `emitForwardJumpNoSource`. `builderEmitJump` is itself
     /// source-less (grammar sites own their markers), so this is `emitterJump`
     /// under the name that documents the caller's intent.
     inline fn emitterJumpNoSource(s: *State, op_id: u8, label: compiler.LabelId) Error!void {
@@ -7263,20 +7250,20 @@ pub const parser_core = struct {
         s.builderEmitOp(op_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpNoSource`. Same walk as `emitterOp`:
+    /// Counterpart of `State.emitOpNoSource`. Same walk as `emitterOp`:
     /// `builderEmitOp` is already source-less (grammar sites own markers).
     inline fn emitterOpNoSource(s: *State, op_id: u8) Error!void {
         return emitterOp(s, op_id);
     }
 
-    /// v2 mirror of the `emitSourcePosAndLoc` + `emitOpNoSource` pair: one opcode
+    /// Counterpart of the `emitSourcePosAndLoc` + `emitOpNoSource` pair: one opcode
     /// pinned to an explicit source event (assignment/update operators).
     inline fn emitterOpAt(s: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
         s.builderAddSourceMarker(line_num, col_num) catch |err| return mapBuilderError(err);
         return emitterOp(s, op_id);
     }
 
-    /// v2 mirror of `State.emitOpU16At`: one explicit source marker followed
+    /// Counterpart of `State.emitOpU16At`: one explicit source marker followed
     /// by the compact u16 instruction, as a single rollback transaction.
     fn emitterOpU16At(s: *State, op_id: u8, val: u16, line_num: u32, col_num: u32) Error!void {
         const v2b = s.activeBuilder();
@@ -7287,7 +7274,7 @@ pub const parser_core = struct {
         s.builderRecordU16Control(op_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 half of an explicit source event followed by one or more NoSource
+    /// an explicit source event followed by one or more NoSource
     /// instructions. The caller owns the surrounding Builder transaction.
     fn emitterAddSourceMarker(s: *State, line_num: u32, col_num: u32) Error!void {
         s.builderAddSourceMarker(line_num, col_num) catch |err| return mapBuilderError(err);
@@ -7299,18 +7286,18 @@ pub const parser_core = struct {
         try emitterAddSourceMarker(s, source.line_num, source.col_num);
     }
 
-    /// v2 mirror of `State.emitOpAtom` — ownership of `atom_id` (one retain)
+    /// Counterpart of `State.emitOpAtom` — ownership of `atom_id` (one retain)
     /// transfers into the builder ledger (marker'd).
     fn emitterAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
         s.builderEmitAtomOpOwned(op_id, atom_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `emitOpAtomNoSource` — owned-atom sink, no marker.
+    /// Counterpart of `emitOpAtomNoSource` — owned-atom sink, no marker.
     fn emitterAtomOpOwnedNoSource(s: *State, op_id: u8, atom_id: Atom) Error!void {
         s.activeBuilder().emitAtomOpOwned(op_id, atom_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `emitOpAtomU16NoSource` — owned-atom sink, no marker.
+    /// Counterpart of `emitOpAtomU16NoSource` — owned-atom sink, no marker.
     fn emitterAtomOpU16OwnedNoSource(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
         s.activeBuilder().emitAtomOpU16Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
     }
@@ -7321,13 +7308,13 @@ pub const parser_core = struct {
         s.activeBuilder().emitScopeRefOpOwned(op_id, atom_id, label, scope) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpAtomU8` — ownership of `atom_id` (one
+    /// Counterpart of `State.emitOpAtomU8` — ownership of `atom_id` (one
     /// retain) transfers into the builder ledger (marker'd).
     fn emitterAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
         s.builderEmitAtomOpU8Owned(op_id, atom_id, val) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpU8` (marker'd).
+    /// Counterpart of `State.emitOpU8` (marker'd).
     fn emitterOpU8(s: *State, op_id: u8, val: u8) Error!void {
         s.builderEmitOpU8(op_id, val) catch |err| return mapBuilderError(err);
     }
@@ -7355,18 +7342,18 @@ pub const parser_core = struct {
         s.builderRecordU16Control(op_id) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpU32` (marker'd).
+    /// Counterpart of `State.emitOpU32` (marker'd).
     fn emitterOpU32(s: *State, op_id: u8, val: u32) Error!void {
         s.builderEmitOpU32(op_id, val) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitOpI32` (marker'd). QuickJS emits the signed
+    /// Counterpart of `State.emitOpI32` (marker'd). QuickJS emits the signed
     /// literal payload directly after OP_push_i32 (quickjs.c:26847-26853).
     fn emitterOpI32(s: *State, op_id: u8, val: i32) Error!void {
         s.builderEmitOpI32(op_id, val) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `State.emitPushConst`: publish the placeholder instruction
+    /// Counterpart of `State.emitPushConst`: publish the placeholder instruction
     /// first, then append the value and patch its cpool index. This
     /// preserves QuickJS emit_push_const ordering (quickjs.c:23974-24004) and
     /// lets Builder rollback remove the instruction if the cpool grow fails.
@@ -7393,13 +7380,13 @@ pub const parser_core = struct {
         return emitterPushConst(s, value);
     }
 
-    /// v2 mirror of `State.emitOpU16NoSource`. Same walk as `emitterOpU16`:
+    /// Counterpart of `State.emitOpU16NoSource`. Same walk as `emitterOpU16`:
     /// `builderEmitOpU16` is already source-less (grammar sites own markers).
     inline fn emitterOpU16NoSource(s: *State, op_id: u8, val: u16) Error!void {
         return emitterOpU16(s, op_id, val);
     }
 
-    /// v2 mirror of `State.emitOpU32NoSource`.
+    /// Counterpart of `State.emitOpU32NoSource`.
     fn emitterOpU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
         s.activeBuilder().emitOpU32(op_id, val) catch |err| return mapBuilderError(err);
         s.builderRecordU32Control(op_id) catch |err| return mapBuilderError(err);
@@ -7424,13 +7411,13 @@ pub const parser_core = struct {
         s.activeBuilder().spliceSegment(seg) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `patchForwardJump` / `emitParserLabelNoSource`: bind at the
+    /// Counterpart of `patchForwardJump` / `emitParserLabelNoSource`: bind at the
     /// current position AND forget the last opcode (control-flow merge).
     fn emitterBindLabel(s: *State, label: compiler.LabelId) Error!void {
         s.builderBindLabel(label) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `emitParserLabelRawNoSource`: bind WITHOUT invalidating the
+    /// Counterpart of `emitParserLabelRawNoSource`: bind WITHOUT invalidating the
     /// last opcode (the preceding real opcode stays visible as call/delete
     /// provenance — qjs emit_label_raw).
     fn emitterBindLabelRaw(s: *State, label: compiler.LabelId) Error!void {
@@ -7449,20 +7436,18 @@ pub const parser_core = struct {
         s.activeBuilder().bindLabelMatchBarrier(label) catch |err| return mapBuilderError(err);
     }
 
-    /// v2 mirror of `patchJumpTarget`: redirect a pending jump to a boundary
-    /// that is already bound elsewhere. Like its legacy twin it emits nothing
+    /// Counterpart of `patchJumpTarget`: redirect a pending jump to a boundary
+    /// that is already bound elsewhere. Like QuickJS it emits nothing
     /// and does NOT invalidate the last opcode — no control-flow merge happens
     /// at the current position.
     fn emitterRetargetLabel(s: *State, from: compiler.LabelId, to: compiler.LabelId) Error!void {
         s.activeBuilder().retargetLabelRefs(from, to) catch |err| return mapBuilderError(err);
     }
 
-    /// QCP-1 S2-G1: chain-exit label identity for `?.`. Only the v2 builder
-    /// backend survives, so this is just the LabelId of the chain exit.
+    /// Chain-exit label identity for `?.`.
     const OptionalChainLabel = compiler.LabelId;
 
-    /// QCP-1 S2-G3: finally-target identity for gosub emission (same shape as
-    /// OptionalChainLabel).
+    /// Finally-target identity for gosub emission.
     const FinallyLabel = compiler.LabelId;
 
     fn pushBreakFrame(s: *State) Error!void {
@@ -7597,8 +7582,8 @@ pub const parser_core = struct {
         return s.eval_ret_idx >= 0 and !s.lex.is_module;
     }
 
-    /// QCP-1 S2-G2: decide whether a switch clause body can fall through.
-    /// The v2 temp stream carries no line_num pseudo-ops, so the last opcode
+    /// Decide whether a switch clause body can fall through.
+    /// The temp stream carries no line_num pseudo-ops, so the last opcode
     /// of the case body (bounded forward scan from the body start) is the
     /// answer.
     ///
@@ -7649,8 +7634,8 @@ pub const parser_core = struct {
         return false;
     }
 
-    /// QCP-1 S2-G3: v2 twin of `isLiveCode` — qjs js_is_live_code
-    /// (quickjs.c:23816) over the v2 temp stream: get_prev_opcode is
+    /// qjs js_is_live_code (quickjs.c:23816) over the temp stream:
+    /// get_prev_opcode is
     /// Builder.last_opcode_pos (every emitterBindLabel invalidated it, so any merge
     /// bound at the current end already answers live, exactly like qjs OP_label
     /// being the visible prev opcode). The ref_count scan covers raw binds
@@ -7686,9 +7671,9 @@ pub const parser_core = struct {
         return false;
     }
 
-    /// QCP-1 S2-G3 TEST HOOK: the script/plain-function epilogue tail under v2
-    /// (decision + terminal), callable from the emission harness exactly as the
-    /// script epilogue runs it.
+    /// TEST HOOK: the script/plain-function epilogue tail (decision +
+    /// terminal), callable from the emission harness as the script epilogue
+    /// runs it.
     pub fn emitPlainTailForTest(s: *State) Error!void {
         if (isLiveCode(s)) try s.emitReturnUndefined();
     }
@@ -8997,11 +8982,11 @@ pub const parser_core = struct {
             // qjs TOK_FOR binds label_test before the condition;
             // labels themselves carry no source event.
             top_label = try emitterNewLabel(s);
-            // The legacy twin is a physical `OP_label`, so it keeps
-            // the Stage-4 sequential-match barrier even once the
-            // backedge dies (a loop body whose only exit is an outer
-            // `continue` leaves this label unreferenced, and legacy
-            // still refuses to fuse `put_loc; get_loc` across it).
+            // Bind a physical-label analogue so the sequential-match
+            // barrier stays even once the backedge dies (a loop body
+            // whose only exit is an outer `continue` leaves this label
+            // unreferenced, and QuickJS still refuses to fuse
+            // `put_loc; get_loc` across it).
             try emitterBindParserLabel(s, top_label);
 
             // Test condition.
@@ -9033,7 +9018,7 @@ pub const parser_core = struct {
             defer s.activeBuilder().discardSegment(&update_seg);
             // qjs TOK_FOR: the update block is moved after the body. v2 detach keeps
             // LabelIds intact — only slot offsets shift at the splice. An empty
-            // update detaches nothing (S2-G2 byte-shape preserved).
+            // update detaches nothing.
             if (s.activeBuilder().code_len != update_mark.code_len) {
                 update_seg = try emitterDetachTail(s, update_mark);
                 // Legacy truncateCode + appendMovedCodeWithAtoms
@@ -9478,7 +9463,6 @@ pub const parser_core = struct {
         if (keep_completion) {
             try s.emitEvalRetPut();
         } else {
-            // QCP-1 S2-G1 harness leaf
             try Emitter.opNoSource(s, opcode.op.drop);
         }
     }
@@ -13579,7 +13563,7 @@ pub const parser_core = struct {
         const init_fd = parent.child_list[child_index];
         // qjs js_parse_class: enable the dormant instance-brand prologue
         // after the first private method or accessor requires it.
-        const v2b = init_fd.v2_builder orelse return Error.ParserInvariant;
+        const v2b = init_fd.builder orelse return Error.ParserInvariant;
         if (v2b.code_len == 0) return Error.ParserInvariant;
         switch (v2b.code[0]) {
             opcode.op.push_false => v2b.code[0] = opcode.op.push_true,
@@ -13837,7 +13821,7 @@ pub const parser_core = struct {
             // qjs js_parse_class: dormant instance-brand prologue (push_false patched to
             // push_true by the first private method/accessor); the skip target is born
             // as a LabelId instead of the legacy absolute base+15.
-            const v2b = child_fd.v2_builder.?;
+            const v2b = child_fd.builder.?;
             v2b.emitOp(opcode.op.push_false) catch |err| return mapBuilderError(err);
             const skip = v2b.newLabel() catch |err| return mapBuilderError(err);
             v2b.emitJump(opcode.op.if_false, skip) catch |err| return mapBuilderError(err);
@@ -13871,7 +13855,7 @@ pub const parser_core = struct {
         const init_fd = parent_fd.child_list[child_index];
         // qjs js_is_live_code shape over the child's temp stream: get_prev_opcode
         // is Builder.last_opcode_pos (an invalidated merge answers live).
-        const v2b = init_fd.v2_builder orelse return Error.ParserInvariant;
+        const v2b = init_fd.builder orelse return Error.ParserInvariant;
         const needs_return = if (v2b.last_opcode_pos < 0)
             true
         else switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
@@ -14584,7 +14568,7 @@ pub const parser_core = struct {
         // qjs emit_class_field_init (quickjs.c:25184-25207): the skip target is a
         // LabelId bound at the shared drop (legacy absolute base+20). The only
         // callers run after `ensureBuilderForFd`, so the builder always exists.
-        const v2b = fd.v2_builder orelse return Error.ParserInvariant;
+        const v2b = fd.builder orelse return Error.ParserInvariant;
         v2b.emitAtomOpU16Owned(opcode.op.scope_get_var, atom_class_fields_init, @intCast(fd.scope_level)) catch |err| return mapBuilderError(err);
         v2b.emitOp(opcode.op.dup) catch |err| return mapBuilderError(err);
         const skip = v2b.newLabel() catch |err| return mapBuilderError(err);
@@ -14632,7 +14616,7 @@ pub const parser_core = struct {
         // Pinned qjs default base constructors enter through OP_check_ctor.
         // Default derived constructors use OP_init_ctor below, whose handler
         // performs the new.target gate while initializing derived state.
-        const v2b = child_fd.v2_builder.?;
+        const v2b = child_fd.builder.?;
         if (!s.class_has_extends) {
             // qjs js_parse_class_default_ctor (quickjs.c:25109): a base
             // default constructor first verifies construct invocation.

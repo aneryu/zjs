@@ -26,7 +26,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
     → exec/zjs_vm 跑 FunctionBytecode.byteCode()
 ```
 
-生产配置 `compiler=v2,layout=short`。`plain` 只是 A/B 诊断。
+生产配置 `layout=short`。`plain` 只是 A/B 诊断。
 
 ## 文件级类型（本页相关）
 

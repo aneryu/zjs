@@ -1514,7 +1514,7 @@ core 不得 import exec/parser/binding；标准全局安装、builtin 表、acti
 - **签名**：`pub fn gcThreshold(self: JSRuntime) usize`。
 - **作用**：读阈值。
 - **实现**：`malloc_gc_threshold`。
-- **所有权 / 错误 / 调用**：只读 `malloc_gc_threshold`，不分配、无 error set。与 `setGCThreshold`（`src/core/runtime.zig:3691`，会顺带 `invalidateCycleEnvelopeBaseline`）成对，典型用法是「存旧值 → 临时改 → `defer` 还原」：`src/binding/context.zig:92` 跨 intrinsic bootstrap 保住嵌入方设的阈值，`src/core/promise.zig:78`（根覆盖单测）与 `src/exec/call.zig:608` 等大量 GC 根测试则临时把阈值压到 0 以强制每次分配都触发收集。
+- **所有权 / 错误 / 调用**：只读 `malloc_gc_threshold`，不分配、无 error set。与 `setGCThreshold`（`src/core/runtime.zig:3691`，会顺带 `invalidateCycleEnvelopeBaseline`）成对，典型用法是「存旧值 → 临时改 → `defer` 还原」：`src/js_context.zig:92` 跨 intrinsic bootstrap 保住嵌入方设的阈值，`src/core/promise.zig:78`（根覆盖单测）与 `src/exec/call.zig:608` 等大量 GC 根测试则临时把阈值压到 0 以强制每次分配都触发收集。
 
 ### `JSRuntime.setMemoryLimit` (`src/core/runtime.zig:3699`)
 

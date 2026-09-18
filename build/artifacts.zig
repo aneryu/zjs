@@ -6,8 +6,6 @@ pub const Artifacts = struct {
     install_zjs: *std.Build.Step.InstallArtifact,
     zjs_profile_exe: *std.Build.Step.Compile,
     install_zjs_profile: *std.Build.Step.InstallArtifact,
-    zjs_dev_exe: *std.Build.Step.Compile,
-    install_zjs_dev: *std.Build.Step.InstallArtifact,
     run_test262_exe: *std.Build.Step.Compile,
     install_run_test262: *std.Build.Step.InstallArtifact,
 };
@@ -27,14 +25,13 @@ fn applyHotLayout(b: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Bui
 
 fn addInternalEngine(
     ctx: config.Ctx,
-    optimize: std.builtin.OptimizeMode,
     options: *std.Build.Step.Options,
     omit_frame_pointer: bool,
 ) *std.Build.Module {
     const mod = ctx.b.createModule(.{
         .root_source_file = ctx.b.path("src/internal_root.zig"),
         .target = ctx.target,
-        .optimize = optimize,
+        .optimize = ctx.optimize,
         .link_libc = true,
         .omit_frame_pointer = omit_frame_pointer,
     });
@@ -47,7 +44,6 @@ fn addCli(
     name: []const u8,
     root_source: []const u8,
     engine: *std.Build.Module,
-    optimize: std.builtin.OptimizeMode,
     hot_layout: bool,
 ) Cli {
     const b = ctx.b;
@@ -56,7 +52,7 @@ fn addCli(
         .root_module = b.createModule(.{
             .root_source_file = b.path(root_source),
             .target = ctx.target,
-            .optimize = optimize,
+            .optimize = ctx.optimize,
             .link_libc = true,
             .imports = &.{.{ .name = "zjs", .module = engine }},
         }),
@@ -71,12 +67,20 @@ fn addInstallStep(b: *std.Build, name: []const u8, desc: []const u8, install: *s
     step.dependOn(&install.step);
 }
 
+fn omitFramePointer(optimize: std.builtin.OptimizeMode, keep_frame_pointer: bool) bool {
+    return switch (optimize) {
+        .ReleaseFast, .ReleaseSmall => !keep_frame_pointer,
+        .Debug, .ReleaseSafe => false,
+    };
+}
+
 pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     const b = ctx.b;
     const keep_frame_pointer = ctx.engine_inputs.gc_roots_diag;
+    const omit_frames = omitFramePointer(ctx.optimize, keep_frame_pointer);
 
     // Named public module for downstream `@import("zjs")`. Not returned:
-    // embedding tests build their own Debug root, and no other helper reads it.
+    // embedding tests build their own root, and no other helper reads it.
     const engine_mod = b.addModule("zjs", .{
         .root_source_file = b.path("src/root.zig"),
         .target = ctx.target,
@@ -85,51 +89,33 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     });
     engine_mod.addOptions("build_options", ctx.engine_options);
 
-    const internal_fast_mod = addInternalEngine(ctx, .ReleaseFast, ctx.engine_options_fast, !keep_frame_pointer);
-    const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", internal_fast_mod, .ReleaseFast, true);
-    // Publish the build graph's expectation for post-strip release checks.
-    // The executable independently attests this value during compilation.
-    const signature_files = b.addWriteFiles();
-    const signature_file = signature_files.add("zjs.config-signature", b.fmt("{s}\n", .{ctx.expect_config_fast}));
-    const install_signature = b.addInstallFileWithDir(signature_file, .bin, "zjs.config-signature");
-    zjs.install.step.dependOn(&install_signature.step);
-    addInstallStep(b, "zjs", "Build and install production zjs (always ReleaseFast; use zjs-size for -Doptimize experiments)", zjs.install);
+    const internal_mod = addInternalEngine(ctx, ctx.engine_options, omit_frames);
+    const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", internal_mod, true);
+    addInstallStep(b, "zjs", "Build and install zjs (follows -Doptimize; default Debug)", zjs.install);
     b.getInstallStep().dependOn(&zjs.install.step);
 
-    // Size/codegen experiments follow -Doptimize in BOTH modules and retain
-    // the caller's expected signature verbatim. Keep the production artifact
-    // and its cache identity independent of the experimental mode.
-    const internal_size_mod = addInternalEngine(ctx, ctx.optimize, ctx.engine_options, !keep_frame_pointer);
-    const zjs_size = addCli(ctx, "zjs-size", "src/cli/zjs.zig", internal_size_mod, ctx.optimize, true);
-    addInstallStep(b, "zjs-size", "Build experimental zjs-size following -Doptimize (e.g. -Doptimize=ReleaseSmall; default Debug)", zjs_size.install);
+    // Second install name so a later `-Doptimize=ReleaseSmall` (or similar)
+    // does not overwrite an already-installed `zjs` from a previous invocation.
+    const zjs_size = addCli(ctx, "zjs-size", "src/cli/zjs.zig", internal_mod, true);
+    addInstallStep(b, "zjs-size", "Build zjs-size: same engine as zjs under a second install name (follows -Doptimize)", zjs_size.install);
 
-    // Same ReleaseFast engine with per-opcode dispatch scopes compiled in.
+    // Same engine with per-opcode dispatch scopes compiled in.
     // A separate artifact so the default zjs binary never carries profiling code.
-    var profile_engine_inputs = ctx.engine_inputs.withExpect(ctx.expect_config_fast);
+    var profile_engine_inputs = ctx.engine_inputs;
     profile_engine_inputs.enable_opcode_profile = true;
     const profile_engine_options = config.addEngineOptions(b, profile_engine_inputs);
-    const internal_profile_mod = addInternalEngine(ctx, .ReleaseFast, profile_engine_options, true);
-    const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", internal_profile_mod, .ReleaseFast, true);
-    addInstallStep(b, "zjs-profile", "Build and install the profiling zjs (per-opcode dispatch scopes)", zjs_profile.install);
+    const internal_profile_mod = addInternalEngine(ctx, profile_engine_options, omit_frames);
+    const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", internal_profile_mod, true);
+    addInstallStep(b, "zjs-profile", "Build and install zjs with per-opcode dispatch scopes (follows -Doptimize)", zjs_profile.install);
 
-    // Debug CLI for the inner-loop gate. Production `zjs` stays ReleaseFast.
-    const internal_dev_mod = addInternalEngine(ctx, .Debug, ctx.engine_options_dev, false);
-    const zjs_dev = addCli(ctx, "zjs-dev", "src/cli/zjs.zig", internal_dev_mod, .Debug, false);
-    addInstallStep(b, "zjs-dev", "Build and install the Debug zjs used by inner-loop checks", zjs_dev.install);
-
-    const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", internal_fast_mod, .ReleaseFast, false);
-    addInstallStep(b, "run-test262", "Build and install run-test262", run_test262.install);
-
-    const run_test262_dev = addCli(ctx, "run-test262-dev", "src/cli/run_test262.zig", internal_dev_mod, .Debug, false);
-    addInstallStep(b, "run-test262-dev", "Build and install the Debug test262 runner", run_test262_dev.install);
+    const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", internal_mod, false);
+    addInstallStep(b, "run-test262", "Build and install run-test262 (follows -Doptimize)", run_test262.install);
 
     return .{
         .zjs_exe = zjs.exe,
         .install_zjs = zjs.install,
         .zjs_profile_exe = zjs_profile.exe,
         .install_zjs_profile = zjs_profile.install,
-        .zjs_dev_exe = zjs_dev.exe,
-        .install_zjs_dev = zjs_dev.install,
         .run_test262_exe = run_test262.exe,
         .install_run_test262 = run_test262.install,
     };

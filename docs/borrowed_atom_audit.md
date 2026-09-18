@@ -304,9 +304,9 @@ history.
 zig build test        --summary all -Dzjs_ownership_audit=true   # unified suite
 zig build test-parser               -Dzjs_ownership_audit=true   # one subtree, faster isolation
 zig build test-oom    --summary all -Dzjs_ownership_audit=true
-zig build zjs-dev                            -Dzjs_ownership_audit=true   # hand corpus
-zig build run-test262-dev                    -Dzjs_ownership_audit=true   # test262 subtree
-./zig-out/bin/run-test262-dev -c test262.conf -d test262/test/language/module-code
+zig build zjs                                -Dzjs_ownership_audit=true   # hand corpus
+zig build run-test262                        -Dzjs_ownership_audit=true   # test262 subtree
+./zig-out/bin/run-test262 -c test262.conf -d test262/test/language/module-code
 ```
 
 Asserts are live only in Debug / ReleaseSafe (`std.debug.assert`). Turning

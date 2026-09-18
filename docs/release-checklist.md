@@ -2,7 +2,7 @@
 
 Use this checklist for an engine-only Production v1 release decision.
 
-`zig build engine-production-gate --summary all` is the semantic gate. It is
+`zig build engine-production-gate -Doptimize=ReleaseFast --summary all` is the semantic gate. It is
 required release evidence, but it does not replace the ReleaseSafe, hygiene,
 and performance checks below.
 
@@ -32,9 +32,9 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 
 ## Compatibility
 
-- `zig build engine-production-gate --summary all` passes from a clean
-  checkout; it includes the unified Debug suite, ReleaseFast CLI smoke,
-  OOM-cap coverage, and the full test262 gate.
+- `zig build engine-production-gate -Doptimize=ReleaseFast --summary all`
+  passes from a clean checkout; it includes the unified ReleaseFast suite,
+  CLI/profile smoke, embedding tests, and the full test262 gate.
 - `zig build test -Doptimize=ReleaseSafe --summary all` passes once as
   the optimized-loop safety gate.
 - Focused test262 slices were run for every changed semantic area.
@@ -52,23 +52,20 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 
 - Release tarballs carry a **stripped** `zjs`. `.github/workflows/nightly.yml`
   runs `strip` (plus `codesign -s -` on arm64 macOS, which `strip` invalidates)
-  before the configuration-signature check, so the check runs against the exact
-  bytes shipped and a broken strip fails the release rather than the user.
-  The expected signature comes from `zig-out/bin/zjs.config-signature`, installed
-  alongside `zjs` from the build graph's expectation; workflows do not repeat a
-  versioned literal. The CLI independently attests that expectation. The
-  sidecar is a verification input and is not included in the release archive.
+  then `zjs -e 'print(1)'` against the exact bytes shipped, so a broken strip
+  fails the release rather than the user.
 - Stripping is post-link on purpose: it leaves `.text` and the
   `.text.zjs.op_handlers` island byte-identical to the binary the gates
   measured. Building with `-fstrip` instead moves `.text` by 40 bytes, which
   would ship a layout the performance gate never measured.
-- Reproduce a release artifact locally with `zig build zjs && strip
-  zig-out/bin/zjs`. Do not strip a binary you intend to profile: `nm`,
+- Reproduce a release artifact locally with
+  `zig build zjs -Doptimize=ReleaseFast && strip zig-out/bin/zjs`. Do not
+  strip a binary you intend to profile: `nm`,
   `addr2line`, and `perf` attribution all need the symbols, which is why no
   build step strips by default.
 - Shipped ReleaseFast binaries panic with the message only, no stack trace
   (`src/cli/panic_policy.zig`). A stripped binary cannot symbolize a trace
-  anyway; `zjs-dev` and every test artifact keep the full handler.
+  anyway; Debug `zjs` and every test artifact keep the full handler.
 
 ## Hygiene
 

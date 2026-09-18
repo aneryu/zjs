@@ -23,7 +23,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --summary all
+      - run: zig build zjs -Doptimize=ReleaseFast --summary all
       - run: zig build checkpoint-gate --summary all
       # The stress tier is excluded from checkpoint-gate and per-change close-out
       # to keep local feedback fast; the primary-platform CI job pays for it here.
@@ -31,7 +31,7 @@ jobs:
       # test262 is a zero-failure gate, so it is the sharpest semantic-regression
       # signal available. It runs on the primary development platform only:
       # results are architecture-independent, and a second copy would buy noise.
-      - run: zig build test262-check --summary all
+      - run: zig build test262-check -Doptimize=ReleaseFast --summary all
 
   linux-x86_64:
     runs-on: ubuntu-24.04
@@ -43,7 +43,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --summary all
+      - run: zig build zjs -Doptimize=ReleaseFast --summary all
       - run: zig build checkpoint-gate --summary all
 
   macos-build-smoke:
@@ -56,8 +56,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --summary all
-      - run: zig build smoke --summary all
+      - run: zig build zjs smoke -Doptimize=ReleaseFast --summary all
 
   windows-build-smoke:
     runs-on: windows-2025
@@ -69,5 +68,4 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
-      - run: zig build zjs --summary all
-      - run: zig build smoke --summary all
+      - run: zig build zjs smoke -Doptimize=ReleaseFast --summary all

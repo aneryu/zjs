@@ -2,7 +2,7 @@
 //!
 //! The loop owns callback JSValues and a retained realm reference; handler
 //! removal/deinit releases them, while `output` remains borrowed from the host.
-//! JS call/job semantics stay in exec and the public adapter stays in binding:
+//! JS call/job semantics stay in exec and the public adapter stays in js_context:
 //! this module is only the scheduling seam. Host topology follows QuickJS libc
 //! read/write handlers, signals, timers, and poll loop at
 //! quickjs-libc.c:2014-2175 and quickjs-libc.c:2422-2627.
@@ -16,7 +16,7 @@ const builtin = @import("builtin");
 const core = @import("core/root.zig");
 const exec = @import("exec/root.zig");
 const platform_clock = @import("platform_clock.zig");
-const zjs = @import("binding/root.zig");
+const js_context = @import("js_context.zig");
 
 const libc = if (builtin.os.tag == .windows)
     struct {}
@@ -122,7 +122,7 @@ pub const EventLoop = struct {
     exit_code: ?u8 = null,
     installed: bool = false,
 
-    pub inline fn init(context: *zjs.JSContext, options: EventLoopOptions) EventLoop {
+    pub inline fn init(context: *js_context.JSContext, options: EventLoopOptions) EventLoop {
         return initCore(context.core, options);
     }
 
@@ -196,7 +196,7 @@ pub const EventLoop = struct {
         return id;
     }
 
-    pub fn enqueueTimer(self: *EventLoop, ctx: *core.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
+    pub fn enqueueTimer(self: *EventLoop, ctx: *core.JSContext, id: i64, callback: core.JSValue, delay_ms: u64, repeats: bool) !void {
         try self.timers.append(ctx, Timer.init(id, callback, nowMs() + delay_ms, delay_ms, repeats));
     }
 
@@ -240,7 +240,7 @@ pub const EventLoop = struct {
             if (exec.object_ops.objectFromValue(callback)) |promise| {
                 if (promise.class_id == core.class.ids.promise) {
                     if (promise.promiseResultSlot().* == null) {
-                        try promise.setPromiseResult(rt, zjs.JSValue.undefinedValue());
+                        try promise.setPromiseResult(rt, core.JSValue.undefinedValue());
                     }
                     try exec.promise_ops.settlePendingPromiseReaction(ctx, output, global, promise);
                     return true;
@@ -271,7 +271,7 @@ pub const EventLoop = struct {
         return false;
     }
 
-    fn setRwHandler(self: *EventLoop, ctx: *core.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
+    fn setRwHandler(self: *EventLoop, ctx: *core.JSContext, fd: i32, write_handler: bool, callback: core.JSValue) !void {
         for (self.rw_handlers.items) |*handler| {
             if (handler.fd != fd) continue;
             handler.setCallback(write_handler, callback);
@@ -305,7 +305,7 @@ pub const EventLoop = struct {
     /// jobs are handled by the adjacent event-loop arms before this hook.
     fn runNextRwHandlerWindows(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
         if (self.rw_handlers.items.len == 0) return false;
-        var callback = zjs.JSValue.nullValue();
+        var callback = core.JSValue.nullValue();
         for (self.rw_handlers.items) |handler| {
             if (handler.fd == 0 and !handler.read_callback.is(.null_value)) {
                 callback = handler.read_callback;
@@ -397,7 +397,7 @@ pub const EventLoop = struct {
         return false;
     }
 
-    fn setSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, callback: zjs.JSValue) !void {
+    fn setSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, callback: core.JSValue) !void {
         for (self.signal_handlers.items) |*handler| {
             if (handler.sig != sig) continue;
             handler.setCallback(callback);
@@ -428,14 +428,14 @@ pub const EventLoop = struct {
             if ((os_pending_signals & mask) == 0) continue;
             os_pending_signals &= ~mask;
             const callback = handler.callback;
-            _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
+            _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, null, null);
             return true;
         }
         return false;
     }
 };
 
-pub fn runUntilIdle(context: *zjs.JSContext, options: EventLoopOptions) !EventLoopRunResult {
+pub fn runUntilIdle(context: *js_context.JSContext, options: EventLoopOptions) !EventLoopRunResult {
     var loop = EventLoop.init(context, options);
     loop.install();
     defer loop.deinit();
@@ -444,12 +444,12 @@ pub fn runUntilIdle(context: *zjs.JSContext, options: EventLoopOptions) !EventLo
 
 const Timer = struct {
     id: i64,
-    callback: zjs.JSValue,
+    callback: core.JSValue,
     timeout_ms: u64,
     delay_ms: u64,
     repeats: bool,
 
-    fn init(id: i64, callback: zjs.JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) Timer {
+    fn init(id: i64, callback: core.JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) Timer {
         return .{
             .id = id,
             .callback = callback,
@@ -466,17 +466,17 @@ const Timer = struct {
 
 const RwHandler = struct {
     fd: i32,
-    read_callback: zjs.JSValue = zjs.JSValue.nullValue(),
-    write_callback: zjs.JSValue = zjs.JSValue.nullValue(),
+    read_callback: core.JSValue = core.JSValue.nullValue(),
+    write_callback: core.JSValue = core.JSValue.nullValue(),
 
-    fn setCallback(self: *RwHandler, write_handler: bool, callback: zjs.JSValue) void {
+    fn setCallback(self: *RwHandler, write_handler: bool, callback: core.JSValue) void {
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
         slot.* = callback;
     }
 
     fn clearCallback(self: *RwHandler, write_handler: bool) void {
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
-        slot.* = zjs.JSValue.nullValue();
+        slot.* = core.JSValue.nullValue();
     }
 
     fn traceRoots(self: *RwHandler, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
@@ -487,16 +487,16 @@ const RwHandler = struct {
 
 const SignalHandler = struct {
     sig: u32,
-    callback: zjs.JSValue,
+    callback: core.JSValue,
 
-    fn init(sig: u32, callback: zjs.JSValue) SignalHandler {
+    fn init(sig: u32, callback: core.JSValue) SignalHandler {
         return .{
             .sig = sig,
             .callback = callback,
         };
     }
 
-    fn setCallback(self: *SignalHandler, callback: zjs.JSValue) void {
+    fn setCallback(self: *SignalHandler, callback: core.JSValue) void {
         self.callback = callback;
     }
 
@@ -547,7 +547,7 @@ fn nextTimerId(ptr: *anyopaque) i64 {
     return fromOpaque(ptr).takeNextTimerId();
 }
 
-fn enqueueTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
+fn enqueueTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64, callback: core.JSValue, delay_ms: u64, repeats: bool) !void {
     try installedLoop(ptr, core_ctx).enqueueTimer(core_ctx, id, callback, delay_ms, repeats);
 }
 
@@ -559,7 +559,7 @@ fn runNextTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*st
     return installedLoop(ptr, core_ctx).runNextTimer(core_ctx, output, global);
 }
 
-fn setRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
+fn setRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool, callback: core.JSValue) !void {
     try installedLoop(ptr, core_ctx).setRwHandler(core_ctx, fd, write_handler, callback);
 }
 
@@ -571,7 +571,7 @@ fn runNextRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: 
     return installedLoop(ptr, core_ctx).runNextRwHandler(core_ctx, output, global);
 }
 
-fn setSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, callback: zjs.JSValue) !void {
+fn setSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, callback: core.JSValue) !void {
     try installedLoop(ptr, core_ctx).setSignalHandler(core_ctx, sig, callback);
 }
 
@@ -599,10 +599,10 @@ fn hostTimerIo() std.Io {
 }
 
 test "runtime.EventLoop drains queued JS callbacks" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt);
     defer ctx.destroy();
     var loop = EventLoop.init(ctx, .{});
     loop.install();
@@ -623,9 +623,9 @@ test "runtime.EventLoop drains queued JS callbacks" {
 }
 
 test "runtime.EventLoop removes timers without allocation" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt);
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -635,14 +635,14 @@ test "runtime.EventLoop removes timers without allocation" {
     loop.timers.items = loop.timers.items.ptr[0..2];
     loop.timers.items[0] = .{
         .id = 10,
-        .callback = zjs.JSValue.int32(1),
+        .callback = core.JSValue.int32(1),
         .timeout_ms = 100,
         .delay_ms = 0,
         .repeats = false,
     };
     loop.timers.items[1] = .{
         .id = 11,
-        .callback = zjs.JSValue.int32(2),
+        .callback = core.JSValue.int32(2),
         .timeout_ms = 200,
         .delay_ms = 5,
         .repeats = true,
@@ -666,9 +666,9 @@ test "runtime.EventLoop removes timers without allocation" {
 }
 
 test "runtime.EventLoop removes rw handlers without allocation" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt);
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -678,13 +678,13 @@ test "runtime.EventLoop removes rw handlers without allocation" {
     loop.rw_handlers.items = loop.rw_handlers.items.ptr[0..2];
     loop.rw_handlers.items[0] = .{
         .fd = 10,
-        .read_callback = zjs.JSValue.int32(1),
-        .write_callback = zjs.JSValue.nullValue(),
+        .read_callback = core.JSValue.int32(1),
+        .write_callback = core.JSValue.nullValue(),
     };
     loop.rw_handlers.items[1] = .{
         .fd = 11,
-        .read_callback = zjs.JSValue.int32(2),
-        .write_callback = zjs.JSValue.nullValue(),
+        .read_callback = core.JSValue.int32(2),
+        .write_callback = core.JSValue.nullValue(),
     };
 
     const old_bytes = rt.memory.allocated_bytes;
@@ -705,9 +705,9 @@ test "runtime.EventLoop removes rw handlers without allocation" {
 }
 
 test "runtime.EventLoop removes signal handlers without allocation" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt);
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -717,11 +717,11 @@ test "runtime.EventLoop removes signal handlers without allocation" {
     loop.signal_handlers.items = loop.signal_handlers.items.ptr[0..2];
     loop.signal_handlers.items[0] = .{
         .sig = 1,
-        .callback = zjs.JSValue.int32(1),
+        .callback = core.JSValue.int32(1),
     };
     loop.signal_handlers.items[1] = .{
         .sig = 2,
-        .callback = zjs.JSValue.int32(2),
+        .callback = core.JSValue.int32(2),
     };
 
     const old_bytes = rt.memory.allocated_bytes;
@@ -742,9 +742,9 @@ test "runtime.EventLoop removes signal handlers without allocation" {
 }
 
 test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt);
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -785,11 +785,11 @@ test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
 }
 
 test "runtime.root tracer visits EventLoop host roots" {
-    var rt: zjs.JSRuntime = undefined;
+    var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var ctx: zjs.JSContext = undefined;
+    var ctx: js_context.JSContext = undefined;
     try ctx.init(&rt, .{});
     defer ctx.deinit();
 
@@ -797,15 +797,15 @@ test "runtime.root tracer visits EventLoop host roots" {
     loop.install();
     defer loop.deinit();
 
-    try loop.enqueueTimer(ctx.core, 1, zjs.JSValue.int32(102), 0, false);
-    try loop.setRwHandler(ctx.core, 1, false, zjs.JSValue.int32(103));
-    try loop.setRwHandler(ctx.core, 1, true, zjs.JSValue.int32(104));
-    try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, zjs.JSValue.int32(105)));
+    try loop.enqueueTimer(ctx.core, 1, core.JSValue.int32(102), 0, false);
+    try loop.setRwHandler(ctx.core, 1, false, core.JSValue.int32(103));
+    try loop.setRwHandler(ctx.core, 1, true, core.JSValue.int32(104));
+    try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, core.JSValue.int32(105)));
 
     const Counter = struct {
         count: usize = 0,
 
-        fn visitValue(context: *anyopaque, slot: *zjs.JSValue) core.runtime.RootTraceError!void {
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (slot.as(.int)) |value| {
                 if (value >= 102 and value <= 105) self.count += 1;
@@ -831,8 +831,8 @@ test "runtime.root tracer visits EventLoop host roots" {
 test "runtime.EventLoop roots one-shot function bytecode timer callback after dequeue" {
     const bytecode = @import("bytecode.zig");
 
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
-    const ctx = try zjs.JSContext.create(rt);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const ctx = try js_context.JSContext.create(rt);
     const global = try ctx.globalObject();
     defer {
         ctx.destroy();
@@ -854,7 +854,7 @@ test "runtime.EventLoop roots one-shot function bytecode timer callback after de
     fb.publishFixtureNoFail(rt);
     fb_published = true;
 
-    const callback = zjs.JSValue.functionBytecode(&fb.header);
+    const callback = core.JSValue.functionBytecode(&fb.header);
 
     try loop.enqueueTimer(ctx.core, 1, callback, 0, false);
     const old_threshold = rt.gcThreshold();

@@ -10,11 +10,11 @@
 //! Only cross-call retention needs a persistent handle.
 
 const std = @import("std");
-const core = @import("../core/root.zig");
-const exec = @import("../exec/root.zig");
-const context_mod = @import("context.zig");
+const core = @import("core/root.zig");
+const exec = @import("exec/root.zig");
+const js_context = @import("js_context.zig");
 
-pub const JSContext = context_mod.JSContext;
+pub const JSContext = js_context.JSContext;
 pub const JSValue = core.JSValue;
 pub const NativeEntry = core.NativeEntry;
 

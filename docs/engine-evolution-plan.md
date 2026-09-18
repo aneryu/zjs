@@ -384,7 +384,7 @@ pub const VmExecState = extern struct {
    `vm_registers.inc` / `opcode_ids.inc`),禁止手写;
 2. `VmExecState` 是解释器、baseline JIT、slow helper 的共同状态接口,
    **对骨架中立**(tail-call 常青时同样定稿,不等 1-Z);
-3. ABI 版本挂接编译配置签名(`layout=short/plain`、`repr=tagged` 等):
+3. ABI 版本挂接编译配置签名(`layout=short/plain`、`repr=nan_boxed` 等):
 
 ```zig
 pub const VM_ABI_VERSION: u32 = 1;

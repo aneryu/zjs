@@ -1,62 +1,46 @@
-//! Defines opcode metadata and the bytecode, module, and function carriers.
+//! Bytecode carrier: opcode metadata, compile-time FunctionDef / Bytecode,
+//! and the GC-managed FunctionBytecode the VM runs.
+//!
+//! Stable import surface (`@import("bytecode.zig")`). Namespaces below own
+//! the ISA table, compile-time carriers, finalize pipeline, and disassembly.
+
 pub const subsystem_name = "bytecode";
-const core_context = @import("core/context.zig");
 
+const std = @import("std");
+const builtin = @import("builtin");
+const array_list_erased = @import("core/array_list_erased.zig");
+const atom = @import("core/atom.zig");
+const bigint_mod = @import("core/bigint.zig");
+const bulk_memory = @import("core/bulk_memory.zig");
+const context = @import("core/context.zig");
+const gc = @import("core/gc.zig");
+const memory = @import("core/memory.zig");
+const runtime = @import("core/runtime.zig");
+const JSValue = @import("core/value.zig").JSValue;
+const compiler = @import("compiler/root.zig");
+const opcode_logical = @import("opcode_logical.zig");
+
+pub const Bytecode = function_mod.Bytecode;
+pub const FunctionBytecode = function_bytecode.FunctionBytecode;
+pub const FunctionLayout = function_bytecode.FunctionLayout;
+pub const CallSiteCache = function_bytecode.CallSiteCache;
+pub const PropSiteCache = function_bytecode.PropSiteCache;
+pub const CallFacts = function_bytecode.CallFacts;
+pub const legacy_byte_code_len_sentinel = function_bytecode.legacy_byte_code_len_sentinel;
+pub const LegacyExecutionAdapter = function_mod.LegacyExecutionAdapter;
+pub const FunctionDef = function_def.FunctionDef;
+
+pub const pipeline = struct {
+    pub const pc2line = pipeline_pc2line;
+    pub const stack_size = pipeline_stack_size;
+    pub const finalize = pipeline_finalize;
+};
+
+/// Instruction catalog: physical ids (`op`) and the two views of the
+/// 178..196 overlap (temp vs short). Use `sizeOf` / `sizeOfPhase1`;
+/// never index `opcode_info` with a raw id.
 pub const opcode = struct {
-    const std = @import("std");
-
-    // QuickJS opcode metadata, inlined from the previous generated table.
-    // Keep this table aligned with QuickJS quickjs-opcode.h / quickjs.c opcode_info.
-    //
-    // Layout mirrors QuickJS (`quickjs.c:1166` + `quickjs.c:21826`):
-    //   - DEF entries get sequential ids 0..op_count-1.
-    //   - def (temp) entries take ids op_temp_start..op_temp_end-1, which
-    //     OVERLAP the short opcodes in the same range. Temp ops exist only
-    //     in phase-1 streams (parser output, before resolve_labels); short
-    //     ops only exist afterwards, so sharing the id space is sound.
-    //   - `opcode_info` is filled in file order: temp entries sit exactly at
-    //     their id, short entries are shifted op_temp_count slots past their
-    //     id (QuickJS `short_opcode_info`). Do not index it with a raw id;
-    //     use the view functions in opcode.zig (`sizeOf` for final-form
-    //     bytecode, `sizeOfPhase1` for phase-1 streams, and friends).
-
-    /// Operand format tags, from the FMT() list in quickjs-opcode.h.
-    pub const Format = enum(u8) {
-        none,
-        none_int,
-        none_loc,
-        none_arg,
-        none_var_ref,
-        u8,
-        i8,
-        loc8,
-        const8,
-        label8,
-        u16,
-        i16,
-        label16,
-        npop,
-        npopx,
-        npop_u16,
-        loc,
-        arg,
-        var_ref,
-        u32,
-        i32,
-        @"const",
-        label,
-        atom,
-        atom_u8,
-        atom_u16,
-        atom_label_u8,
-        atom_label_u16,
-        label_u16,
-        /// `argc:u16` + `cache_idx:u8` (call family; see opcode_logical.zig).
-        npop_u8,
-        /// `atom:u32` + `cache_idx:u8` (W1 property-site family; see
-        /// opcode_logical.zig).
-        atom_cache_u8,
-    };
+    pub const Format = opcode_logical.Format;
 
     /// Phase-1 scope operand flag: the LHS reference has already selected its
     /// environment, so the fallback put must resolve only the static chain.
@@ -108,8 +92,6 @@ pub const opcode = struct {
     /// one it was (a bool for four of them, a three-valued enum for the put
     /// form whose third value had no emitter).
     pub const dyn_env = struct {
-        /// Not named `Kind`: the enclosing `opcode` namespace already has one
-        /// (the normal/temp/short opcode phase).
         pub const ProbeKind = enum(u3) {
             read = 0,
             delete = 1,
@@ -674,7 +656,7 @@ pub const opcode = struct {
         comptime {
             for (logical.form_decls) |d| {
                 if (d.form != form) continue;
-                const fmt: Format = @enumFromInt(@intFromEnum(d.fmt));
+                const fmt = d.fmt;
                 var size: usize = 1;
                 for (logical.operandsOf(form, d.fmt)) |operand| {
                     switch (operand.source) {
@@ -706,22 +688,6 @@ pub const opcode = struct {
             };
         }
         break :blk table;
-    };
-
-    pub const Kind = enum {
-        normal,
-        temp,
-        short,
-    };
-
-    pub const Metadata = struct {
-        index: u16,
-        name: []const u8,
-        size: u8,
-        n_pop: u8,
-        n_push: u8,
-        format: Format,
-        kind: Kind,
     };
 
     pub const special_object_subtype = struct {
@@ -1014,7 +980,7 @@ pub const opcode = struct {
         /// namespace has been closed since 2026-08-27.
         pub const ExecutableAlias = struct {
             id: u8,
-            canonical: @import("opcode_logical.zig").LogicalOpcode,
+            canonical: opcode_logical.LogicalOpcode,
         };
 
         pub const executable_aliases: []const ExecutableAlias = &.{
@@ -1029,7 +995,7 @@ pub const opcode = struct {
         /// at the late-encoding and lowered-direct checks) and the decode
         /// fingerprint below both read it; deleting it would change the
         /// pinned fingerprint and drop two invariants.
-        pub fn aliasOf(op_id: u8) ?@import("opcode_logical.zig").LogicalOpcode {
+        pub fn aliasOf(op_id: u8) ?opcode_logical.LogicalOpcode {
             inline for (executable_aliases) |a| {
                 if (a.id == op_id) return a.canonical;
             }
@@ -1043,22 +1009,10 @@ pub const opcode = struct {
     /// exec -> bytecode -> logical (P0-3). This block is the join: it proves
     /// the logical declaration and the physical table describe the same
     /// instruction set.
-    pub const logical = @import("opcode_logical.zig");
+    pub const logical = opcode_logical;
 
     comptime {
         @setEvalBranchQuota(40000);
-
-        // Format mirror agrees field for field. Ownership of Format moves to
-        // the declaration source at G0; until then a reorder here must break
-        // the build rather than silently re-map every operand template.
-        const mine = @typeInfo(Format).@"enum".fields;
-        const theirs = @typeInfo(logical.Format).@"enum".fields;
-        if (mine.len != theirs.len)
-            @compileError("logical.Format has a different field count than opcode.Format");
-        for (mine, theirs) |a, b| {
-            if (!std.mem.eql(u8, a.name, b.name) or a.value != b.value)
-                @compileError("logical.Format disagrees with opcode.Format field for field");
-        }
 
         // Every final logical form names a claimed physical id, and every
         // claimed id has exactly one final form. This is what makes the two
@@ -1106,7 +1060,7 @@ pub const opcode = struct {
                 @intCast(f.value);
             const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
             const form: logical.LogicalOpcode = @enumFromInt(f.value);
-            const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+            const fmt = info.fmt;
             const operands = logical.operandsOf(form, fmt);
             var payload: usize = 0;
             for (operands) |operand| {
@@ -1144,7 +1098,7 @@ pub const opcode = struct {
             else
                 @intCast(raw);
             const info = if (raw >= 300) phase1Info(id).? else finalInfo(id).?;
-            const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+            const fmt = info.fmt;
             if (logical.operandTemplate(fmt) != null)
                 @compileError("operand override shadows an unambiguous format template");
         }
@@ -1540,7 +1494,7 @@ pub const opcode = struct {
                     @intCast(f.value);
                 const info = if (f.value >= 300) phase1Info(id).? else finalInfo(id).?;
                 const form: logical.LogicalOpcode = @enumFromInt(f.value);
-                const fmt: logical.Format = @enumFromInt(@intFromEnum(info.fmt));
+                const fmt = info.fmt;
                 const operands = logical.operandsOf(form, fmt);
                 var layout = OperandLayout{ .len = @intCast(operands.len), .slots = undefined, .atom_slot = null, .var_ref_slot = null };
                 var offset: u8 = 0;
@@ -1876,7 +1830,7 @@ pub const opcode = struct {
         /// derived view identical before they were deleted.
         pub inline fn headerAtParser(
             code: []const u8,
-            atoms_ledger: []const @import("core/atom.zig").Atom,
+            atoms_ledger: []const atom.Atom,
             pc: u32,
             atom_index: u32,
         ) Error!Header {
@@ -1892,7 +1846,7 @@ pub const opcode = struct {
                     const end = @as(usize, pc) + trow.size;
                     if (end <= code.len and atom_index < atoms_ledger.len) {
                         const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                        if (@import("core/atom.zig").Atom.fromRaw(operand) == atoms_ledger[atom_index])
+                        if (atom.Atom.fromRaw(operand) == atoms_ledger[atom_index])
                             return .{ .form = form, .instruction_pc = pc, .size = trow.size, .flags = trow.flags };
                     }
                 } else {
@@ -1919,7 +1873,7 @@ pub const opcode = struct {
         /// the ledger entry without re-reading the operand.
         pub inline fn headerAtPhase1(
             code: []const u8,
-            atoms_ledger: []const @import("core/atom.zig").Atom,
+            atoms_ledger: []const atom.Atom,
             pc: u32,
             atom_index: u32,
         ) Error!Header {
@@ -1931,7 +1885,7 @@ pub const opcode = struct {
                 if (row.size < 5 or atom_index >= atoms_ledger.len)
                     return error.InvalidOpcode;
                 const operand = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (@import("core/atom.zig").Atom.fromRaw(operand) != atoms_ledger[atom_index]) return error.InvalidOpcode;
+                if (atom.Atom.fromRaw(operand) != atoms_ledger[atom_index]) return error.InvalidOpcode;
             }
             return .{ .form = @enumFromInt(row.form_index), .instruction_pc = pc, .size = row.size, .flags = row.flags };
         }
@@ -2765,11 +2719,6 @@ pub const opcode = struct {
 };
 
 pub const constant = struct {
-    const memory = @import("core/memory.zig");
-    const atom = @import("core/atom.zig");
-    const bigint_mod = @import("core/bigint.zig");
-    const JSValue = @import("core/value.zig").JSValue;
-
     fn freeOwnedValue(value: JSValue, rt: anytype) void {
         // A constant-pool BigInt that never reached a published
         // FunctionBytecode is still reserved: nothing else will free it.
@@ -2819,10 +2768,6 @@ pub const constant = struct {
 };
 
 pub const module = struct {
-    const std = @import("std");
-    const atom = @import("core/atom.zig");
-    const memory = @import("core/memory.zig");
-
     pub const Request = struct {
         module_name: atom.Atom,
     };
@@ -3015,29 +2960,17 @@ pub const CompileTiming = struct {
 /// children. The context itself is non-owning; published artifacts own their
 /// independent `RealmRef`s.
 pub const CompileContext = struct {
-    realm: *core_context.RealmContext,
+    realm: *context.RealmContext,
     policy: CompilePolicy = .{},
     timing: ?*CompileTiming = null,
 
-    pub inline fn artifactAllocator(self: CompileContext) @import("std").mem.Allocator {
+    pub inline fn artifactAllocator(self: CompileContext) std.mem.Allocator {
         return self.realm.runtime.memory.persistent_allocator;
     }
 };
 
 pub const function_bytecode = struct {
     pub const AsyncExecutionPolicy = enum(u16) { unknown, no_suspend, may_suspend };
-    const std = @import("std");
-    const builtin = @import("builtin");
-    const build_options = @import("build_options");
-
-    const atom = @import("core/atom.zig");
-    const bulk_memory = @import("core/bulk_memory.zig");
-    const context = @import("core/context.zig");
-    const gc = @import("core/gc.zig");
-    const memory = @import("core/memory.zig");
-    const runtime = @import("core/runtime.zig");
-    const shape = @import("core/shape.zig");
-    const JSValue = @import("core/value.zig").JSValue;
 
     /// Mirrors `JSFunctionKindEnum` (`quickjs.c:761`).
     pub const FunctionKind = enum(u2) {
@@ -4716,14 +4649,7 @@ pub const function_def = struct {
     //! After Phase 2/Phase 3 pipeline, it's lowered to `FunctionBytecode`
     //! (`JSFunctionBytecode` at `quickjs.c:768`).
 
-    const std = @import("std");
-    const atom = @import("core/atom.zig");
-    const bigint_mod = @import("core/bigint.zig");
     const function_bytecode_mod = function_bytecode;
-    const memory = @import("core/memory.zig");
-    const runtime_mod = @import("core/runtime.zig");
-    const JSValue = @import("core/value.zig").JSValue;
-    const compiler = @import("compiler/root.zig");
 
     fn freeOwnedValue(value: JSValue, rt: anytype) void {
         // A constant-pool BigInt that never reached a published
@@ -4775,7 +4701,7 @@ pub const function_def = struct {
     const ScopeLinkCache = enum { disabled, unproven, proven };
 
     // Shared with the parser route test; production has no counters or stores.
-    pub const ScopeProofTestCounters = if (@import("builtin").is_test) struct {
+    pub const ScopeProofTestCounters = if (builtin.is_test) struct {
         pub threadlocal var validations: usize = 0;
         pub threadlocal var cache_hits: usize = 0;
     } else void;
@@ -5033,12 +4959,11 @@ pub const function_def = struct {
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
         last_opcode_pos: i32 = -1,
-        /// QCP-1 stage 2P: compiler-v2 emission backend for this function's
-        /// parse. Heap-allocated when a v2 parse begins for this function
-        /// (stage 5 wires production; for now only the parser test hook does);
-        /// released in `deinit`. One optional pointer keeps @sizeOf impact
-        /// minimal.
-        v2_builder: ?*compiler.Builder = null,
+        /// Compact temporary-bytecode emission backend for this function.
+        /// Heap-allocated when parse begins; released in `deinit` or at the
+        /// resolve_variables consumption point. One optional pointer keeps
+        /// `@sizeOf` impact minimal.
+        builder: ?*compiler.Builder = null,
         // Labels
         label_slots: []LabelSlot = &.{},
         label_count: i32 = 0,
@@ -5109,8 +5034,8 @@ pub const function_def = struct {
             // lexed (`ParseState.initRootEmitter`), so an initializer that
             // fails after that point owns one exactly like a fully built
             // FunctionDef does. Release it on the same terms as `deinit`.
-            if (self.v2_builder) |v2b| {
-                self.v2_builder = null;
+            if (self.builder) |v2b| {
+                self.builder = null;
                 v2b.deinit();
                 self.memory.destroy(compiler.Builder, v2b);
             }
@@ -5201,7 +5126,7 @@ pub const function_def = struct {
         /// deeper scope either owns an exact-scope prefix or inherits its
         /// already-proven parent head, matching `rebuildFinalScopeLinks` above.
         pub fn validateFinalScopeLinks(self: *const FunctionDefImpl) error{InvalidScope}!void {
-            if (@import("builtin").is_test) ScopeProofTestCounters.validations += 1;
+            if (builtin.is_test) ScopeProofTestCounters.validations += 1;
             if (self.scopes.len == 0) {
                 // Synthetic resolve_variables fixtures may contain no lexical
                 // scopes at all.  The retained per-operand scope bound prevents
@@ -5279,7 +5204,7 @@ pub const function_def = struct {
 
         fn proveAncestorScopeLinks(self: *FunctionDefImpl) error{InvalidScope}!void {
             if (self.scope_link_cache == .proven) {
-                if (@import("builtin").is_test) ScopeProofTestCounters.cache_hits += 1;
+                if (builtin.is_test) ScopeProofTestCounters.cache_hits += 1;
                 return;
             }
             try self.validateFinalScopeLinks();
@@ -5659,8 +5584,8 @@ pub const function_def = struct {
         /// than this one, so anything that parsed can be walked here.
         pub fn traceCompileRoots(
             self: *FunctionDefImpl,
-            visitor: *runtime_mod.RootVisitor,
-        ) runtime_mod.RootTraceError!void {
+            visitor: *runtime.RootVisitor,
+        ) runtime.RootTraceError!void {
             try visitor.values(self.cpool);
             for (self.child_list) |child| try child.traceCompileRoots(visitor);
         }
@@ -5687,8 +5612,8 @@ pub const function_def = struct {
 
             // Parse-time/error-path backstop; successful v2 lowering
             // releases the builder at its consumption point.
-            if (self.v2_builder) |v2b| {
-                self.v2_builder = null;
+            if (self.builder) |v2b| {
+                self.builder = null;
                 v2b.deinit();
                 self.memory.destroy(compiler.Builder, v2b);
             }
@@ -5757,7 +5682,7 @@ pub const function_def = struct {
     pub const FunctionDef = FunctionDefImpl;
 
     test "scope proof cache invalidates variable scope and late arguments mutations" {
-        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        const rt = try runtime.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
         const name = try rt.internAtom("scope-cache");
         var fd = FunctionDefImpl.init(&rt.memory, &rt.atoms, name);
@@ -5841,9 +5766,6 @@ pub const pipeline_pc2line = struct {
     //!   leb128(diff_pc)
     //!   sleb128(diff_line)
     //!   sleb128(diff_col)
-
-    const std = @import("std");
-    const memory = @import("core/memory.zig");
 
     /// PC2LINE encoding constants (mirror `quickjs.c:756`).
     pub const PC2LINE_BASE: i32 = -1;
@@ -6326,9 +6248,6 @@ pub const binding_rules = struct {
     //! output) and calls in here for every binding decision, so there is one
     //! definition of QuickJS binding semantics in the tree.
 
-    const std = @import("std");
-    const atom = @import("core/atom.zig");
-    const memory = @import("core/memory.zig");
     const bytecode_function = function_mod;
     const function_def_mod = function_def;
 
@@ -6857,8 +6776,7 @@ pub const binding_rules = struct {
     }
 
     test "resolved closure identity owns lexical opcode selection" {
-        const runtime_mod = @import("core/runtime.zig");
-        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        const rt = try runtime.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
 
         const name = try rt.internAtom("resolved-closure-opcode-selection");
@@ -9194,9 +9112,6 @@ pub const pipeline_stack_size = struct {
     //! (jumps are relative); the BFS walks fall-through and jump
     //! successors symmetrically.
 
-    const std = @import("std");
-    const bulk_memory = @import("core/bulk_memory.zig");
-
     /// `JS_STACK_SIZE_MAX` mirror.
     pub const JS_STACK_SIZE_MAX: u16 = 0xFFFE;
 
@@ -9234,7 +9149,7 @@ pub const pipeline_stack_size = struct {
     /// graph. Whenever the graph walk reaches that linear frontier, both
     /// proofs consume the same opcode metadata lookup.
     pub const FinalArtifactValidation = struct {
-        atom_owners: []const @import("core/atom.zig").Atom,
+        atom_owners: []const atom.Atom,
         closure_var_count: usize,
     };
 
@@ -9313,7 +9228,7 @@ pub const pipeline_stack_size = struct {
                     return error.InvalidFinalArtifact;
                 const encoded = opcode.decode.operandAt(h, bytecode, i, u32) catch
                     return error.InvalidFinalArtifact;
-                if (@import("core/atom.zig").Atom.fromRaw(encoded) != self.config.atom_owners[self.owner_index])
+                if (atom.Atom.fromRaw(encoded) != self.config.atom_owners[self.owner_index])
                     return error.InvalidFinalArtifact;
                 self.owner_index += 1;
             }
@@ -9606,7 +9521,7 @@ pub const pipeline_stack_size = struct {
 
         try std.testing.expectEqual(@as(u16, 1), try compute(&bc, .{
             .final_artifact = .{
-                .atom_owners = &.{@import("core/atom.zig").Atom.fromRaw(owned_atom)},
+                .atom_owners = &.{atom.Atom.fromRaw(owned_atom)},
                 .closure_var_count = 1,
             },
         }));
@@ -9622,7 +9537,7 @@ pub const pipeline_stack_size = struct {
 
         try std.testing.expectError(error.InvalidFinalArtifact, compute(&bc, .{
             .final_artifact = .{
-                .atom_owners = &.{@import("core/atom.zig").Atom.fromRaw(wrong_owner)},
+                .atom_owners = &.{atom.Atom.fromRaw(wrong_owner)},
                 .closure_var_count = 0,
             },
         }));
@@ -9670,7 +9585,7 @@ pub const pipeline_stack_size = struct {
         earlier_artifact_mismatch[6] = opcode.op.drop;
         earlier_artifact_mismatch[7] = opcode.op.return_undef;
         try std.testing.expectError(error.StackUnderflow, compute(&earlier_artifact_mismatch, .{
-            .final_artifact = .{ .atom_owners = &.{@import("core/atom.zig").Atom.fromRaw(wrong_owner)}, .closure_var_count = 0 },
+            .final_artifact = .{ .atom_owners = &.{atom.Atom.fromRaw(wrong_owner)}, .closure_var_count = 0 },
         }));
     }
 
@@ -9967,19 +9882,12 @@ pub const pipeline_finalize = struct {
     //! This walks the child_list of FunctionDefs, runs all pipeline phases,
     //! and installs the final FunctionBytecode into the parent's cpool.
 
-    const std = @import("std");
-    const atom = @import("core/atom.zig");
-    const array_list_erased = @import("core/array_list_erased.zig");
-    const bigint_mod = @import("core/bigint.zig");
-    const runtime_mod = @import("core/runtime.zig");
     const fb_mod = function_bytecode;
     const bytecode_function = function_mod;
     const function_def_mod = function_def;
 
     const pc2line = pipeline_pc2line;
     const stack_size = pipeline_stack_size;
-    const JSValue = @import("core/value.zig").JSValue;
-    const compiler = @import("compiler/root.zig");
 
     pub const FinalizeError = error{
         OutOfMemory,
@@ -10244,10 +10152,10 @@ pub const pipeline_finalize = struct {
         }
 
         // QCP-1 v2: resolve_variables_v2 validates its own compact input
-        // (validateInput + fail-closed walk) when compileFunctionV2 consumes
+        // (validateInput + fail-closed walk) when compileFunction consumes
         // the attached builder. There is no phase-1 code array to validate:
         // the compact Builder is the only lowering input the compiler accepts.
-        if (fd.v2_builder == null) return error.InvalidBytecode;
+        if (fd.builder == null) return error.InvalidBytecode;
         fd.var_ref_count = 0;
         for (fd.vars) |*vd| {
             vd.is_captured = false;
@@ -10352,7 +10260,7 @@ pub const pipeline_finalize = struct {
         return createFunctionBytecodeAfterChildren(fd, compile_context, disasm_enabled);
     }
 
-    fn validateRuntimeIdentity(fd: *const function_def_mod.FunctionDef, rt: *runtime_mod.JSRuntime) FinalizeError!void {
+    fn validateRuntimeIdentity(fd: *const function_def_mod.FunctionDef, rt: *runtime.JSRuntime) FinalizeError!void {
         // FunctionDef buffers and atom owners must be released by the same
         // Runtime that accounts, registers, and eventually destroys the FB.
         // Reject a mismatched public caller before any owner is moved.
@@ -10423,13 +10331,13 @@ pub const pipeline_finalize = struct {
         // point and transfers final buffers to `lowered`. There is no second
         // backend: an absent Builder is a compile error, not a fallback.
         if (fd.finalization_state != .prepared) return error.InvalidBytecode;
-        compiler.compileFunctionV2ForPackedFinalize(&lowered, fd) catch |err| switch (err) {
+        compiler.compileFunctionForPackedFinalize(&lowered, fd) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidBytecode, error.NoFunctionDef, error.NoParentScope => return error.InvalidBytecode,
             error.BytecodeOverflow => return error.BytecodeOverflow,
             error.ClosureVarNotFound => return error.ClosureVarNotFound,
         };
-        std.debug.assert(fd.v2_builder == null);
+        std.debug.assert(fd.builder == null);
         fd.consumeGlobalVars();
         fd.finalization_state = .resolved;
         fd.use_short_opcodes = true;
@@ -10571,10 +10479,9 @@ pub const pipeline_finalize = struct {
         rt.gc.addInitializedWithSizeNoFail(&fb.header, fb.heapByteSizeWithLayout(layout));
 
         if (disasm_enabled) {
-            const dump_mod = bytecode_dump;
             var disbuf: [65536]u8 = undefined;
             var diswriter = std.Io.Writer.fixed(&disbuf);
-            dump_mod.dumpFunctionBytecode(&diswriter, fb, &rt.atoms, .{ .show_raw_bytes = true }) catch {};
+            dump.dumpFunctionBytecode(&diswriter, fb, &rt.atoms, .{ .show_raw_bytes = true }) catch {};
             std.debug.print("{s}\n", .{diswriter.buffered()});
         }
         return slice;
@@ -10635,8 +10542,8 @@ pub const pipeline_finalize = struct {
         def: *function_def_mod.FunctionDef,
     ) !void {
         if (def.finalization_state != .prepared) return error.InvalidBytecode;
-        try compiler.compileFunctionV2(function, def);
-        std.debug.assert(def.v2_builder == null);
+        try compiler.compileFunction(function, def);
+        std.debug.assert(def.builder == null);
         def.consumeGlobalVars();
         def.finalization_state = .resolved;
         def.use_short_opcodes = true;
@@ -10893,9 +10800,9 @@ pub const pipeline_finalize = struct {
     }
 
     test "scope proof cache is revoked on successful and failed finalization" {
-        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        const rt = try runtime.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
-        const realm = try @import("core/context.zig").RealmContext.create(rt);
+        const realm = try context.RealmContext.create(rt);
         defer realm.destroy();
         const name = try rt.internAtom("scope-cache-cleanup");
         const Exit = enum { success, prepare_error, lowering_error };
@@ -10906,7 +10813,7 @@ pub const pipeline_finalize = struct {
             _ = try parent.addScopeVar(name, .normal, 0, false, false);
             const input = try rt.memory.create(compiler.Builder);
             input.* = compiler.Builder.init(&rt.memory, &rt.atoms);
-            parent.v2_builder = input;
+            parent.builder = input;
             try input.emitOp(opcode.op.return_undef);
 
             const child_count: usize = if (exit_kind == .lowering_error) 2 else 1;
@@ -10923,7 +10830,7 @@ pub const pipeline_finalize = struct {
                 if (exit_kind != .prepare_error) {
                     const body = try rt.memory.create(compiler.Builder);
                     body.* = compiler.Builder.init(&rt.memory, &rt.atoms);
-                    child.v2_builder = body;
+                    child.builder = body;
                     try body.emitAtomOpU16Owned(opcode.op.scope_get_var, name, 0);
                     try body.emitOp(opcode.op.drop);
                     try body.emitOp(opcode.op.return_undef);
@@ -10960,16 +10867,8 @@ pub const pipeline_finalize = struct {
 };
 
 const function_mod = struct {
-    const std = @import("std");
-    const build_options = @import("build_options");
-    const atom = @import("core/atom.zig");
-    const context = @import("core/context.zig");
     const function_bytecode_mod = function_bytecode;
-    const gc = @import("core/gc.zig");
-    const memory = @import("core/memory.zig");
-    const JSValue = @import("core/value.zig").JSValue;
     const pc2line = pipeline_pc2line;
-    const runtime = @import("core/runtime.zig");
 
     /// Generic geometric growth helper, identical in shape to the FunctionDef
     /// helper of the same name. Keeps `slice.*.len` as the *used* count and
@@ -11795,9 +11694,6 @@ pub const dump = struct {
     //! similar in spirit to `qjs --bytecode-dump`. Shared by tooling and tests
     //! that need to inspect emitted bytecode.
 
-    const std = @import("std");
-    const atom = @import("core/atom.zig");
-
     /// Disassembly options.
     pub const Options = struct {
         /// When true, prepend the byte offset of each instruction.
@@ -11901,7 +11797,7 @@ pub const dump = struct {
                 };
             switch (slot.kind) {
                 .atom => {
-                    const a = @import("core/atom.zig").Atom.fromRaw(@intCast(value));
+                    const a = atom.Atom.fromRaw(@intCast(value));
                     if (atoms.name(a)) |name_str| {
                         try writer.print("\"{s}\"", .{name_str});
                     } else {
@@ -11930,8 +11826,7 @@ pub const dump = struct {
     }
 
     test "dyn_env_probe flags byte disassembles as kind[,with]" {
-        const runtime_mod = @import("core/runtime.zig");
-        const rt = try runtime_mod.JSRuntime.create(std.testing.allocator);
+        const rt = try runtime.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
 
         const name = try rt.internAtom("probe-dump");
@@ -11952,27 +11847,9 @@ pub const dump = struct {
     }
 };
 
-pub const pipeline = struct {
-    pub const pc2line = pipeline_pc2line;
-    pub const stack_size = pipeline_stack_size;
-    pub const finalize = pipeline_finalize;
-};
-
-const bytecode_dump = dump;
-pub const Bytecode = function_mod.Bytecode;
-pub const FunctionBytecode = function_bytecode.FunctionBytecode;
-pub const FunctionLayout = function_bytecode.FunctionLayout;
-pub const CallSiteCache = function_bytecode.CallSiteCache;
-pub const PropSiteCache = function_bytecode.PropSiteCache;
-pub const CallFacts = function_bytecode.CallFacts;
-pub const legacy_byte_code_len_sentinel = function_bytecode.legacy_byte_code_len_sentinel;
-pub const LegacyExecutionAdapter = function_mod.LegacyExecutionAdapter;
-pub const FunctionDef = function_def.FunctionDef;
-
 // Historical sparse representations are retained only for equivalence tests.
 // Production decoding uses the direct authoritative tables above.
 const SparseDecodeTestOracle = struct {
-    const std = @import("std");
     const logical = opcode.logical;
     const OperandLayout = opcode.decode.OperandLayout;
     const layout_table = opcode.decode.layout_table;
@@ -12033,7 +11910,6 @@ const SparseDecodeTestOracle = struct {
 };
 
 test "operand layout pool preserves every declared layout and absent row" {
-    const std = @import("std");
     const D = opcode.decode;
     for (D.layout_table, 0..) |optional, id| {
         if (optional) |expected| {
@@ -12056,7 +11932,6 @@ test "operand layout pool preserves every declared layout and absent row" {
 }
 
 test "dynamic shape index preserves all declared effects and absent forms" {
-    const std = @import("std");
     const D = opcode.decode;
     for (D.dynamic_by_form, 0..) |expected, id| {
         const index = SparseDecodeTestOracle.dynamic_shape_indices[id];

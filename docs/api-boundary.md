@@ -22,10 +22,9 @@ This document is the active boundary guide for ordinary project documentation.
 re-exports the low-level embedding API and the explicit `zjs.runtime`
 namespace.
 
-`src/binding/` contains the adapter layer for context (`context.zig`) and
-native-function (`native.zig`: `zjs.native.managed`) surfaces. There is no
-landed `src/kernel/` directory; earlier "kernel API" language maps to this
-adapter layer plus `src/root.zig`.
+`src/js_context.zig` is the host `JSContext` facade. `src/native.zig` is
+`zjs.native.managed`. There is no landed `src/kernel/` directory; earlier
+"kernel API" language maps to these files plus `src/root.zig`.
 
 `src/event_loop.zig` owns the host event loop and is the `zjs.runtime`
 module. Module file graph helpers, Atomics waiter cleanup, and ArrayBuffer
@@ -41,8 +40,8 @@ internal tests. It is not the public embedding contract.
 
 - `src/core/` must not depend on CLI policy, test262 harness glue, plugin
   loaders, JSI/FFI policy, event-loop policy, or product-runtime APIs.
-- Public embedding APIs are added through `src/root.zig`, `src/binding/`, or an
-  explicit `zjs.runtime` entrypoint.
+- Public embedding APIs are added through `src/root.zig`, `src/js_context.zig`,
+  `src/native.zig`, or an explicit `zjs.runtime` entrypoint.
 - New runtime features should depend on core primitives. Core must not depend
   on runtime features.
 - `zjs` and `run-test262` are runtime users. They do not own core concepts.
@@ -133,7 +132,7 @@ in the runtime's entry arena by `JSContext.createFunction` and are never
 freed before the runtime dies (retiring one rewrites its kind to a tombstone
 in place).
 
-`zjs.native` (`src/binding/native.zig`) is the only public way to make an
+`zjs.native` (`src/native.zig`) is the only public way to make an
 entry: `managed(f)` wraps `fn (*zjs.native.Call) E!JSValue` into a
 `callconv(.c)` thunk (the call receives the callee realm, `this`, and a view
 of the VM operand window; Zig errors map to JS exceptions at the seam);

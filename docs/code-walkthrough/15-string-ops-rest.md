@@ -294,7 +294,7 @@
 - **签名**：`pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSValue, expected_name: []const u8) !bool`。
 - **作用**：判断一个抛出值是不是指定构造器名（如 "TypeError"）造出来的错误对象——只比名字，不看原型链身份。
 - **实现**：非对象直接 false。先看 `constructor` 属性：是对象时用 `nativeFunctionNameForVmBorrowed` 取它的原生函数名（借用视图，`defer deinit`），与 `expected_name` 相等即 true。否则退到 `name` 属性：不是字符串返回 false，是字符串就 `appendRawString` 到临时缓冲后 `std.mem.eql` 比较。两道判据都不命中返回 false——它只做名字匹配，不看原型链身份。
-- **所有权 / 错误 / 调用**：只读借用的异常对象：`dispatch_name` 是借用的名字视图，`defer deinit` 归还；`name_bytes` 缓冲 defer deinit。它不清异常也不改引擎状态。调用方：`consumePendingExceptionIfMatchesConstructor:2884`、`binding/context.zig:486`。
+- **所有权 / 错误 / 调用**：只读借用的异常对象：`dispatch_name` 是借用的名字视图，`defer deinit` 归还；`name_bytes` 缓冲 defer deinit。它不清异常也不改引擎状态。调用方：`consumePendingExceptionIfMatchesConstructor:2884`、`js_context.zig:486`。
 
 ### `arraySearchCall` (`src/exec/string_ops.zig:2890`)
 

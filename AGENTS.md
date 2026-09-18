@@ -62,17 +62,12 @@ C-shaped structure. QuickJS remains the performance yardstick (bench-v8).
 
 ## Production Configuration
 
-Shipped default:
-
-```
-zjs-config-v3:compiler=v2,layout=short,repr=nan_boxed,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off
-```
-
-`compiler=v2` is the only compiler. `layout=short` is the release layout;
-`-Dzjs_compiler_layout=plain` is an A/B diagnostic. Every engine-bearing artifact
-attests the configuration signature at compile time. See
-`docs/qcp1_switch_decision.md` §9 if a layout-sensitive compiler change is in
-scope.
+Shipped default is `zig build -Doptimize=ReleaseFast` with `layout=short`,
+nan-boxed `JSValue`, and `force_gc` / `ownership_audit` off. A default
+`zig build` / `zig build test` is Debug, like any other Zig project.
+`-Dzjs_compiler_layout=plain` is an A/B diagnostic. See
+`docs/qcp1_switch_decision.md` §9 if a layout-sensitive compiler change is
+in scope.
 
 ## Agent skills
 
@@ -92,7 +87,8 @@ See `docs/architecture.md`. Short map:
 - `src/bytecode.zig`: bytecode carrier and packing.
 - `src/exec/`: VM, builtins, calls, modules, promises.
 - `src/event_loop.zig`: host event loop (`zjs.runtime`).
-- `src/binding/`: public adapters and FFI descriptors.
+- `src/js_context.zig`: public `JSContext` facade over core + exec.
+- `src/native.zig`: host-function registration (`zjs.native.managed`).
 - `src/libs/`, `src/cli/`, `src/tests/`.
 
 ## Commands

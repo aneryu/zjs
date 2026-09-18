@@ -36,13 +36,8 @@ QCP-1 closed as **two** separately adjudicated verdicts:
 zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off
 ```
 
-Current attested default is `zjs-config-v3` with `repr=nan_boxed` and
-`gc_layout=obj64_m` (`AGENTS.md`, `src/config_signature.zig`). The live
+Live shipped default is in `AGENTS.md` (no `compiler` field). The live
 rulings that still constrain compiler work are §0.1.6 and §9.
-
-Every engine-bearing artifact attests this configuration signature at compile
-time, and `zig build config-signature-check` compares the shipped binary's
-self-reported signature against the build graph.
 
 **QCP-1A** was adjudicated on true production defaults against a three-part
 gate (code-load ratio vs corrected legacy ≥ 1.2359×; full-zoo geomean not
@@ -202,5 +197,5 @@ The architecture distinction is intentional: reusable QuickJS binding rules
 remain in `bytecode.binding_rules`; the legacy pass structures and selectable
 backend do not. The active compiler directory was `src/compiler_v2/` at
 close-out; it was renamed to `src/compiler/` on 2026-08-19 (owner ruling).
-The attested signature string keeps `compiler=v2` as the compiler's published
-identity.
+At close-out the attested string kept `compiler=v2` as a published identity;
+that field is no longer in the live signature.

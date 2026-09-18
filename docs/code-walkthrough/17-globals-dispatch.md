@@ -1035,7 +1035,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn vmCallerView(ctx: *core.JSContext) VmCallerView`。
 - **作用**：不建 per-call 环境地取回 VM 调用方视图：host output writer 与调用方 bytecode/frame。
 - **实现**：有 active invocation 就从 `machine.currentLevel()` 读（native 自己不压 level）；否则读已发布的 `NativeCallEnvironment`；都没有则三个字段全 null。
-- **所有权 / 错误 / 调用**：返回的三个字段全是借用指针（`*std.Io.Writer` / `*const Bytecode` / `*Frame`），生命周期绑在当前 invocation 或已发布的 `NativeCallEnvironment` 上——**不可跨调用保存**。不分配、无 error set；查不到来源时三个字段全给 null（rooted host 调用的正常情形）。三路来源的优先级就是函数体的顺序：活跃 invocation → 已发布的 native environment → 空。调用方 12 处跨 8 个文件：`src/exec/function_ops.zig:105`/125/145、`src/exec/array_builtin_ops.zig:393`/463、`src/exec/string_builtin_ops.zig:427`/503、`src/exec/object_builtin_ops.zig:688`、`src/exec/call.zig:119`、`src/exec/math_ops.zig:106`、`src/binding/native.zig:70`、`src/tests/helpers.zig:904`。
+- **所有权 / 错误 / 调用**：返回的三个字段全是借用指针（`*std.Io.Writer` / `*const Bytecode` / `*Frame`），生命周期绑在当前 invocation 或已发布的 `NativeCallEnvironment` 上——**不可跨调用保存**。不分配、无 error set；查不到来源时三个字段全给 null（rooted host 调用的正常情形）。三路来源的优先级就是函数体的顺序：活跃 invocation → 已发布的 native environment → 空。调用方 12 处跨 8 个文件：`src/exec/function_ops.zig:105`/125/145、`src/exec/array_builtin_ops.zig:393`/463、`src/exec/string_builtin_ops.zig:427`/503、`src/exec/object_builtin_ops.zig:688`、`src/exec/call.zig:119`、`src/exec/math_ops.zig:106`、`src/native.zig:70`、`src/tests/helpers.zig:904`。
 
 ### `CallRealmView.caller` (`src/exec/builtin_dispatch.zig:207`)
 
@@ -1273,28 +1273,28 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub fn nativeReceiverSelfOrThrow(ctx: *core.JSContext, this_value: core.JSValue, entry: *const core.NativeEntry) ?*anyopaque`。
 - **作用**：thunk 侧解包（`zjs.native.Class` 造的访问器 / 构造器 thunk）：失败时把 TypeError 留成 pending 并返回 null，让 thunk 用 sentinel 应答。
 - **实现**：`nativeReceiverSelf` 命中直接返回，否则 `throwNativeReceiverTypeError` 并吞掉它的 error 后返回 null。
-- **所有权 / 错误 / 调用**：返回的是 `obj.nativeSelfAssumeClass()` 的**借用**裸指针（native 实例的 self），所有权仍归 JS 对象。无 error set：走 thunk 侧协议——失败时用 `throwNativeReceiverTypeError` 把 `"<Class> object expected"` 装成 pending TypeError（该函数内部有 128 字节栈缓冲拼消息，`bufPrint` 溢出退到常量串）并返回 null，由 thunk 自己答哨兵。两个调用方都在 `src/binding/native.zig`（579 与 641，访问器与构造器 thunk），后面紧跟 `orelse return JSValue.exception()`。
+- **所有权 / 错误 / 调用**：返回的是 `obj.nativeSelfAssumeClass()` 的**借用**裸指针（native 实例的 self），所有权仍归 JS 对象。无 error set：走 thunk 侧协议——失败时用 `throwNativeReceiverTypeError` 把 `"<Class> object expected"` 装成 pending TypeError（该函数内部有 128 字节栈缓冲拼消息，`bufPrint` 溢出退到常量串）并返回 null，由 thunk 自己答哨兵。两个调用方都在 `src/native.zig`（579 与 641，访问器与构造器 thunk），后面紧跟 `orelse return JSValue.exception()`。
 
 ### `marshalI32` (`src/exec/builtin_dispatch.zig:879`)
 
 - **签名**：`pub inline fn marshalI32(val: core.JSValue) ?i32`。
 - **作用**：FNABI 规范 marshal：只接受已是目标标签的值，不做 ToNumber。
 - **实现**：包成单元素数组走 `leafI32Arg`，即与叶子臂完全同一套无强制转换规则。
-- **所有权 / 错误 / 调用**：无：把单个值包成一元栈数组转给 `leafI32Arg`，不分配、无 error set，**不做任何强制转换**（FNABI §15.3 的 canonical 策略：只有数学值确是 int32 的 Number 才算命中，`-0.0` 也算 miss）。两个调用方：`src/binding/native.zig:665`（miss 即 `throwTypeErrorSentinel("int32 expected")`）与本文件 `invokeTypedSetterFast`（988，miss 即 `.value_miss`）。
+- **所有权 / 错误 / 调用**：无：把单个值包成一元栈数组转给 `leafI32Arg`，不分配、无 error set，**不做任何强制转换**（FNABI §15.3 的 canonical 策略：只有数学值确是 int32 的 Number 才算命中，`-0.0` 也算 miss）。两个调用方：`src/native.zig:665`（miss 即 `throwTypeErrorSentinel("int32 expected")`）与本文件 `invokeTypedSetterFast`（988，miss 即 `.value_miss`）。
 
 ### `marshalF64` (`src/exec/builtin_dispatch.zig:884`)
 
 - **签名**：`pub inline fn marshalF64(val: core.JSValue) ?f64`。
 - **作用**：FNABI 规范 marshal：只接受已是目标标签的值，不做 ToNumber。
 - **实现**：包成单元素数组走 `leafF64Arg`。
-- **所有权 / 错误 / 调用**：无：同 `marshalI32` 的形状，转给 `leafF64Arg`——只接受 Number（int 标签或 double），其余一律 miss，不强制转换。两个调用方：`src/binding/native.zig:661`（`throwTypeErrorSentinel("number expected")`）与本文件 `invokeTypedSetterFast`（983）。
+- **所有权 / 错误 / 调用**：无：同 `marshalI32` 的形状，转给 `leafF64Arg`——只接受 Number（int 标签或 double），其余一律 miss，不强制转换。两个调用方：`src/native.zig:661`（`throwTypeErrorSentinel("number expected")`）与本文件 `invokeTypedSetterFast`（983）。
 
 ### `throwTypeErrorSentinel` (`src/exec/builtin_dispatch.zig:891`)
 
 - **签名**：`pub fn throwTypeErrorSentinel(ctx: *core.JSContext, message: []const u8) NativeValue`。
 - **作用**：在 native thunk 里抛一个带消息的 `TypeError`，并把它折成边界要求的 `NativeValue` 哨兵返回值。
 - **实现**：无 global 时直接 `nativeFromHostError(TypeError)`；否则 `throwTypeErrorMessage(ctx, global, message)`，此后有 pending 就返回 sentinel，仍然没有则再走 `nativeFromHostError`。
-- **所有权 / 错误 / 调用**：会真建一个 TypeError 对象并装成 pending exception，返回哨兵值；`message` 是调用方给的静态串，不复制所有权。无 error set——失败也只落到哨兵（`throwTypeErrorMessage` 的错误被 `catch {}` 吞掉，随后 `ctx.hasException()` 不成立时再走 `nativeFromHostError` 兜底；`ctx.global` 为 null 时直接走兜底）。5 个调用方全在 `src/binding/native.zig`（382/383 构造器门，661/665/669 三个 setter marshal miss）。
+- **所有权 / 错误 / 调用**：会真建一个 TypeError 对象并装成 pending exception，返回哨兵值；`message` 是调用方给的静态串，不复制所有权。无 error set——失败也只落到哨兵（`throwTypeErrorMessage` 的错误被 `catch {}` 吞掉，随后 `ctx.hasException()` 不成立时再走 `nativeFromHostError` 兜底；`ctx.global` 为 null 时直接走兜底）。5 个调用方全在 `src/native.zig`（382/383 构造器门，661/665/669 三个 setter marshal miss）。
 
 ### `invokeNativeMethodLeafFast` (`src/exec/builtin_dispatch.zig:900`)
 

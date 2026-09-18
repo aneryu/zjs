@@ -20,7 +20,7 @@
 
 1. **三个编译根**：公共 `src/root.zig` ⊂ 内部 `src/internal_root.zig` ⊂ 统一 `src/all_tests.zig`。生产 CLI 编内部根；`zig build test` 编统一根；`test-embedding` 是唯一把公共根当 `zjs` 模块来编的测试产物。
 2. **统一套件是唯一 Zig 单测编译**：子系统选择走 `test-fast` 运行期过滤，不为每个领域再编一份根。
-3. **每份引擎模块自己的 `addOptions`**：Debug 产物与 ReleaseFast 产物不得共享同一 options 对象，否则会 attest 错 `optimize`。
+3. **一次 `zig build` 一种 `-Doptimize`**：默认 Debug；发货显式 `-Doptimize=ReleaseFast`。需要独立 options 文件时各自 `addOptions`，不为第二种优化模式再钉一颗 CLI。
 
 细节与 attest 矩阵：[docs/testing-graph.md](../testing-graph.md)。
 
@@ -41,7 +41,7 @@ git diff --check
 
 子系统选择：`mise run test-fast -- 'tests.core.'`（或其它名字子串），空选择失败。
 
-CLI/runtime 胶水：`mise run quick-gate`（= Debug `smoke-dev`）。
+CLI/runtime 胶水：`mise run quick-gate`（= `smoke`）。
 
 **每改动收尾**
 
@@ -52,7 +52,7 @@ zig build test                           # 统一套件，默认 16 分片，跳
 **checkpoint**（额外表面需要时；收尾仍是一次 `test`）
 
 ```bash
-mise run checkpoint-gate                 # test + gc-stress + smoke-dev + check-embedding
+mise run checkpoint-gate                 # test + gc-stress + smoke + check-embedding
 ```
 
 不含 Fast `zjs`、不含全量 test262、不含 `test-stress`。碰栈展开/bigint 内核时本地加 `zig build test-stress`。
@@ -60,8 +60,8 @@ mise run checkpoint-gate                 # test + gc-stress + smoke-dev + check-
 **合并批 / 发布**
 
 ```bash
-mise run batch-gate                      # checkpoint-gate + test-stress + test262-check（与 CI linux-arm64 同组）
-mise run production-gate                 # engine-production-gate：再加 zjs-profile smoke 与 test-embedding 全跑
+mise run batch-gate                      # Debug checkpoint-gate + test-stress，再 ReleaseFast test262-check
+mise run production-gate                 # engine-production-gate -Doptimize=ReleaseFast
 zig build test test-stress -Doptimize=ReleaseSafe --summary all
 ```
 
@@ -82,26 +82,21 @@ test262 零失败门在 PR：`zig build test262-check`。本地先跑聚焦切�
 
 ## 3. 产物与步骤速查
 
-生产配置签名（编译期钉死）：
-
-```
-zjs-config-v3:compiler=v2,layout=short,repr=tagged,gc_layout=obj64_m,optimize=ReleaseFast,force_gc=off,ownership_audit=off
-```
+发货：`zig build -Doptimize=ReleaseFast`，`layout=short`。
 
 | 步骤 | 编什么 | 谁依赖 |
 | --- | --- | --- |
-| `zjs` | Fast CLI | install、smoke、config-signature-check、perf-benchmark |
-| `zjs-dev` | Debug CLI | smoke-dev / quick-gate |
-| `zjs-profile` | Fast + opcode profile | smoke（profile 合同） |
-| `zjs-size` | 跟随 `-Doptimize` 的体积实验 | 不进门 |
-| `run-test262` | Fast runner | `test262-check` |
+| `zjs` | 跟随 `-Doptimize` 的 CLI | install、smoke、perf-benchmark |
+| `zjs-profile` | 同模式 + opcode profile | smoke（profile 合同） |
+| `zjs-size` | 同引擎第二安装名 | 不进门 |
+| `run-test262` | 跟随 `-Doptimize` 的 runner | `test262-check` |
 | `check` | 统一根 sema-only | **无门依赖** |
 | `test` | 统一根，16 分片，跳过 stress | checkpoint / production |
 | `test-stress` | 同一二进制 `--only-prefix tests.stress.` | batch-gate / production / CI |
 | `test-gc-stress` | 同一二进制 + GC 诊断环境 | checkpoint |
 | `test-oom` / `test-leak-census` | test-oom 独立产物；leak-census 复用统一二进制 | 夜间 |
 | `test-embedding` / `check-embedding` | 公共根；后者 sema-only | production / checkpoint |
-| `quick-gate` | smoke-dev | 内循环胶水 |
+| `quick-gate` | smoke | 内循环胶水 |
 | `checkpoint-gate` | 见上表 | 需要额外表面时 / batch-gate |
 | `engine-production-gate` | 见 B.6 | 发布 / 夜间 |
 
@@ -141,4 +136,4 @@ python3 docs/code-walkthrough/_check_coverage.py --docs 'docs/code-walkthrough/2
   src/tests/parser.zig src/tests/smoke_test.zig src/tests/stress.zig
 ```
 
-`build.zig` / `build/*.zig` 的 21 个函数已纳入 `_inventory.tsv`；函数条目见 [20-build.md](20-build.md) 文末列表。
+`build.zig` / `build/*.zig` 的 19 个函数已纳入 `_inventory.tsv`；函数条目见 [20-build.md](20-build.md) 文末列表。

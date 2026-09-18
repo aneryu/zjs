@@ -16,7 +16,7 @@
 
 ## 1. 管线：一次函数怎么被 lower
 
-`pipeline_finalize.createFunctionBytecode` 的树递归（`createFunctionBytecodeAfterChildren`，`bytecode.zig:10825`）对每个 `finalization_state == .prepared` 的 `FunctionDef` 调 `compileFunctionV2ForPackedFinalize`；`compileFunctionV2` 由片段级入口 `runWithFunctionDef` / `runWithFunctionDefRuntime` 经 `lowerAttachedBuilder`（`bytecode.zig:11037`）调用：
+`pipeline_finalize.createFunctionBytecode` 的树递归（`createFunctionBytecodeAfterChildren`，`bytecode.zig:10825`）对每个 `finalization_state == .prepared` 的 `FunctionDef` 调 `compileFunctionForPackedFinalize`；`compileFunction` 由片段级入口 `runWithFunctionDef` / `runWithFunctionDefRuntime` 经 `lowerAttachedBuilder`（`bytecode.zig:11037`）调用：
 
 ```
 parser 发射
@@ -107,7 +107,7 @@ FunctionBytecode 打包（bytecode.zig，05 册）
 
 ## `root.zig`
 
-`root.zig` 是 compiler 包入口：re-export `cfg` / `builder` / `labels` / 两路 resolve，以及 `compileFunctionV2`。文件头写明：没有第二条编译器可比；正确性靠 CFG oracle、边界唯一性、atom 所有权审计和执行套件。
+`root.zig` 是 compiler 包入口：re-export `cfg` / `builder` / `labels` / 两路 resolve，以及 `compileFunction`。文件头写明：没有第二条编译器可比；正确性靠 CFG oracle、边界唯一性、atom 所有权审计和执行套件。
 
 ### `formatOracleReport` (`src/compiler/root.zig:43`)
 
@@ -116,23 +116,23 @@ FunctionBytecode 打包（bytecode.zig，05 册）
 - **实现**：`cfg.audit_oracles` 为假则 `return ""`；否则 `cfg.formatOracleReport(buffer, cfg.oracleReportSnapshot())`。
 - **所有权 / 错误 / 调用**：不分配。`buffer` 由调用方提供。scratch / 环境变量诊断用。
 
-### `compileFunctionV2` (`src/compiler/root.zig:53`)
+### `compileFunction` (`src/compiler/root.zig:53`)
 
-- **签名**：`pub fn compileFunctionV2( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
+- **签名**：`pub fn compileFunction( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
 - **作用**：每个 `FunctionDef` 的生产 lowering：先 S3 再 S4，把最终码装进 `function`。树递归与 packed ABI 仍在 `createFunctionBytecode`。
-- **实现**：转 `compileFunctionV2Impl(false, …)`，走带完整输出校验的 `resolve_labels.run`。
-- **所有权 / 错误 / 调用**：错误来自两路 resolve（OOM / InvalidBytecode / 绑定失败）。成功后 Builder 已释放；`function` 拥有最终码/atom/pc2line。调用方是 `pipeline_finalize.lowerAttachedBuilder`（`runWithFunctionDef` / `runWithFunctionDefRuntime` 片段级入口）；生产树递归走 `compileFunctionV2ForPackedFinalize`。
+- **实现**：转 `compileFunctionImpl(false, …)`，走带完整输出校验的 `resolve_labels.run`。
+- **所有权 / 错误 / 调用**：错误来自两路 resolve（OOM / InvalidBytecode / 绑定失败）。成功后 Builder 已释放；`function` 拥有最终码/atom/pc2line。调用方是 `pipeline_finalize.lowerAttachedBuilder`（`runWithFunctionDef` / `runWithFunctionDefRuntime` 片段级入口）；生产树递归走 `compileFunctionForPackedFinalize`。
 
-### `compileFunctionV2ForPackedFinalize` (`src/compiler/root.zig:69`)
+### `compileFunctionForPackedFinalize` (`src/compiler/root.zig:69`)
 
-- **签名**：`pub noinline fn compileFunctionV2ForPackedFinalize( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
+- **签名**：`pub noinline fn compileFunctionForPackedFinalize( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
 - **作用**：packed FunctionBytecode 收口用的变体：跳过 S4 自包含码流校验，留给最终器一次融合遍历。
-- **实现**：`noinline` 是架构边界，不是内联提示。注释记录：无关遗留状态删除曾让 LLVM 把 V2 lowering 折进 packed finalizer，crypto/code-load 回退。转 `compileFunctionV2Impl(true, …)`。
+- **实现**：`noinline` 是架构边界，不是内联提示。注释记录：无关遗留状态删除曾让 LLVM 把 V2 lowering 折进 packed finalizer，crypto/code-load 回退。转 `compileFunctionImpl(true, …)`。
 - **所有权 / 错误 / 调用**：调用方必须在发布产物前做码/atom/var-ref 证明。见 `docs/qcp1_switch_decision.md` §9.3。
 
-### `compileFunctionV2Impl` (`src/compiler/root.zig:76`)
+### `compileFunctionImpl` (`src/compiler/root.zig:76`)
 
-- **签名**：`fn compileFunctionV2Impl( comptime packed_finalize_validates_code: bool, function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
+- **签名**：`fn compileFunctionImpl( comptime packed_finalize_validates_code: bool, function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
 - **作用**：真正的两段式：S3 产物 → 立刻释放 Builder → S4 最终发射。
 - **实现**：`var product = try resolve_variables.run(function, fd); defer product.deinitUncommitted();`。然后 `releaseConsumedBuilder(fd)`。`packed_finalize_validates_code` 选 `resolve_labels.runForPackedFinalize` 或 `run`，布局都是 `default_layout`。audit 开时再 `emitIdentityHealth` / `emitAnchorSplit`。
 - **所有权 / 错误 / 调用**：`deinitUncommitted` 覆盖 S4 失败：未提交的产物码/atom/标签 backing 被释放。S4 `commit` 成功后码/atom/源已交给 `function`，`releaseConsumedStreams` 已把产物流掏空，defer 仍幂等。
@@ -141,8 +141,8 @@ FunctionBytecode 打包（bytecode.zig，05 册）
 
 - **签名**：`fn releaseConsumedBuilder(fd: *bytecode.function_def.FunctionDef) void`。
 - **作用**：在消费点释放 Builder。S3 是紧凑流最后一个读者。
-- **实现**：`fd.v2_builder` 为空则返回。置空指针，`consumed.deinit()`，断言五张表 capacity 均为 0，再 `fd.memory.destroy(Builder, consumed)`。
-- **所有权 / 错误 / 调用**：所有权在消费者侧，以便日后随 `V2Emitter` 搬家。`FunctionDef.deinit` 只做解析失败/中途放弃的后盾。无 error。
+- **实现**：`fd.builder` 为空则返回。置空指针，`consumed.deinit()`，断言五张表 capacity 均为 0，再 `fd.memory.destroy(Builder, consumed)`。
+- **所有权 / 错误 / 调用**：所有权在消费者侧。`FunctionDef.deinit` 只做解析失败/中途放弃的后盾。无 error。
 
 ### `emitIdentityHealth` (`src/compiler/root.zig:113`)
 

@@ -284,7 +284,7 @@ test "embedding public API core signatures stay source-compatible" {
 
     try std.testing.expect(zjs.value.Bytes.Store == zjs.JSValue.Bytes.Store);
     try std.testing.expect(@typeInfo(zjs.object.Object) == .@"opaque");
-    if (!@hasDecl(zjs, "config_signature")) {
+    if (!@hasDecl(zjs, "printSmallInlineProbe")) {
         try std.testing.expect(!@hasDecl(zjs, "JSBytes"));
         try std.testing.expect(!@hasDecl(zjs, "JSString"));
         try std.testing.expect(!@hasDecl(zjs, "CallSite"));

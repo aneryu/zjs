@@ -446,7 +446,7 @@
 
 - **签名**：`fn emitGlobalVarOp(self: *State, op_id: u8, atom_id: Atom) Error!void`。
 - **作用**：把一个按名字的全局变量访问发射成「闭包行下标」形式：先给该名字要到一行全局 closure var，再发 `op <u16 idx>`。
-- **实现**：`ensureGlobalClosureVarIndex(atom_id)` 拿到（或按需建出）该名字的全局闭包行下标，再 `Emitter.opU16(self, op_id, ref_idx)`。注释标明这是 QCP-1 S2-G2 harness 的叶子：非 temp 的全局 var 降级，与 temp 形态共用同一套 op + u16 闭包行下标编码。
+- **实现**：`ensureGlobalClosureVarIndex(atom_id)` 拿到（或按需建出）该名字的全局闭包行下标，再 `Emitter.opU16(self, op_id, ref_idx)`。非 temp 的全局 var 降级与 temp 形态共用同一套 op + u16 闭包行下标编码。
 - **所有权 / 错误 / 调用**：先经 `ensureGlobalClosureVarIndex` 可能新增一行 closure（OOM / `ParserInvariant`），再发 `op + u16`（builder 错误经 `mapBuilderError` 收成 OOM / BytecodeOverflow / ParserInvariant）。不分配长期对象。parser 内调用方三处：`src/parser.zig:3018`、12744、12746；`src/bytecode.zig:8501`/8528 的同名函数是另一份实现，不是本函数的调用方。
 
 ### `emitGlobalVarOpNoSource` (`src/parser.zig:3384`)
@@ -697,8 +697,8 @@
 
 - **签名**：`fn markPrivateBrandNeeded(s: *State) Error!void`。
 - **作用**：标记本类需要私有 brand；实例侧还要把字段初始化子函数开头休眠的 brand 前奏打开。
-- **实现**：static 侧只置 `class_static_private_brand_needed = true` 就返回。实例侧置 `class_instance_private_brand_needed = true` 后，经 `ensureClassFieldsInitFunction` 拿到字段初始化子函数（下标越过 `parent.child_list.len` 即 `Error.ParserInvariant`），取它的 `v2_builder`（为空或 `code_len == 0` 都是 `ParserInvariant`），把首字节的 `push_false` 就地改写成 `push_true`——`createClassFieldsInitFunction` 预先埋了一段以 `push_false` + `if_false` 跳过的休眠 brand 前奏，第一个需要 brand 的私有方法/访问器在这里把它点亮；已经是 `push_true` 则什么都不做，其它值说明前奏被破坏，报 `ParserInvariant`。
-- **所有权 / 错误 / 调用**：实例分支会经 `ensureClassFieldsInitFunction` 现建字段初始化子函数（子 `FunctionDef` 归父的 `child_list`，OOM 上抛），然后**直接改写那个子函数已发射字节码的第一个字节**（`push_false` → `push_true`）。因此它对状态一致性极敏感：child 下标越界、`v2_builder` 缺失、`code_len == 0`、首字节不是 `push_true`/`push_false` 四种情况都返回 `Error.ParserInvariant`。调用方：私有访问器 `src/parser.zig:13763`、私有方法 13825。
+- **实现**：static 侧只置 `class_static_private_brand_needed = true` 就返回。实例侧置 `class_instance_private_brand_needed = true` 后，经 `ensureClassFieldsInitFunction` 拿到字段初始化子函数（下标越过 `parent.child_list.len` 即 `Error.ParserInvariant`），取它的 `builder`（为空或 `code_len == 0` 都是 `ParserInvariant`），把首字节的 `push_false` 就地改写成 `push_true`——`createClassFieldsInitFunction` 预先埋了一段以 `push_false` + `if_false` 跳过的休眠 brand 前奏，第一个需要 brand 的私有方法/访问器在这里把它点亮；已经是 `push_true` 则什么都不做，其它值说明前奏被破坏，报 `ParserInvariant`。
+- **所有权 / 错误 / 调用**：实例分支会经 `ensureClassFieldsInitFunction` 现建字段初始化子函数（子 `FunctionDef` 归父的 `child_list`，OOM 上抛），然后**直接改写那个子函数已发射字节码的第一个字节**（`push_false` → `push_true`）。因此它对状态一致性极敏感：child 下标越界、`builder` 缺失、`code_len == 0`、首字节不是 `push_true`/`push_false` 四种情况都返回 `Error.ParserInvariant`。调用方：私有访问器 `src/parser.zig:13763`、私有方法 13825。
 
 ### `isForbiddenPublicFieldName` (`src/parser.zig:13591`)
 
@@ -753,7 +753,7 @@
 - **签名**：`noinline fn emitFieldInitializer( s: *State, atom_id: Atom, is_private: bool, is_computed: bool, has_initializer: bool, is_static: bool, ) Error!void`。
 - **作用**：把一条 class 字段初始化写进对应的 init 子函数：进子函数、推 receiver、可选 RHS、define、drop。
 - **实现**：static 走 `ensureClassStaticInitFunction`，否则 `ensureClassFieldsInitFunction`；下标越界 `ParserInvariant`。`enterFieldInitFunction` + `errdefer leave`。receiver：static 用 `emitScopeGetVar(atom_this)`，instance 用 `push_this`（qjs `js_parse_class`：实例字段从传入的 this 起）。private/computed 再 `emitScopeGetVar(atom_id)` 取 key。有初始化则 `parseAssignExpr`，再 `setObjectNameComputed` 或 `setObjectName`；无则 `undefined`。define：private → `define_private_field`，computed → `define_array_el`，否则 `define_field` + atom。最后 `drop` 并 `leaveFieldInitFunction`。outlined leftover：把 instance/static/computed 三份拷贝收成运行时标志。
-- **所有权 / 错误 / 调用**：失败走 `parser_core.Error`；写入 init 子 `FunctionDef.v2_builder`。`emitStaticFieldInitializer` / `emitInstanceFieldInitializer` 是 inline 包装。
+- **所有权 / 错误 / 调用**：失败走 `parser_core.Error`；写入 init 子 `FunctionDef.builder`。`emitStaticFieldInitializer` / `emitInstanceFieldInitializer` 是 inline 包装。
 
 ### `emitStaticFieldInitializer` (`src/parser.zig:13770`)
 
@@ -815,8 +815,8 @@
 
 - **签名**：`fn finishClassInitFunction(s: *State, child_index: usize) Error!void`。
 - **作用**：给初始化子函数收尾：最后一条不是终结指令时补 `return_undef`。
-- **实现**：`child_index` 越过 `parent_fd.child_list.len`、或子函数没有 `v2_builder`，都报 `Error.ParserInvariant`。终结判定照 qjs `js_is_live_code` 的形状做在子函数的临时指令流上：`v2b.last_opcode_pos < 0`（`get_prev_opcode` 无效，例如刚绑过 merge 标签）按「活」处理、需要补终结；否则看最后一条指令，是 `return` / `return_undef` / `return_async` / `throw` 才算已终结。需要补时发 `return_undef` 并 `recordControl(.terminal)`。
-- **所有权 / 错误 / 调用**：不分配；注意它写的**不是当前函数**的 Builder——`v2b` 直接取自 `parent_fd.child_list[child_index].v2_builder`，绕过 `activeBuilder()` 往子函数的指令流上补码。自有错误两条 `Error.ParserInvariant`（下标越界、子函数没有 Builder），`emitOp` 与 `recordControl` 的失败经 `mapBuilderError` 变成 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方 2 处：`finishClassFieldsInitFunction`（`src/parser.zig:14327`）与 `finishClassStaticInitFunction`（`src/parser.zig:14332`）。
+- **实现**：`child_index` 越过 `parent_fd.child_list.len`、或子函数没有 `builder`，都报 `Error.ParserInvariant`。终结判定照 qjs `js_is_live_code` 的形状做在子函数的临时指令流上：`v2b.last_opcode_pos < 0`（`get_prev_opcode` 无效，例如刚绑过 merge 标签）按「活」处理、需要补终结；否则看最后一条指令，是 `return` / `return_undef` / `return_async` / `throw` 才算已终结。需要补时发 `return_undef` 并 `recordControl(.terminal)`。
+- **所有权 / 错误 / 调用**：不分配；注意它写的**不是当前函数**的 Builder——`v2b` 直接取自 `parent_fd.child_list[child_index].builder`，绕过 `activeBuilder()` 往子函数的指令流上补码。自有错误两条 `Error.ParserInvariant`（下标越界、子函数没有 Builder），`emitOp` 与 `recordControl` 的失败经 `mapBuilderError` 变成 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方 2 处：`finishClassFieldsInitFunction`（`src/parser.zig:14327`）与 `finishClassStaticInitFunction`（`src/parser.zig:14332`）。
 
 ### `registerClassPrivateBoundName` (`src/parser.zig:13887`)
 

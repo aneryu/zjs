@@ -2320,7 +2320,7 @@ test "F4: logical producer uses one source-less shared merge label" {
         defer state.deinit(env.rt);
         try parser_core.parseExpr(&state);
 
-        const b = state.function_def.v2_builder.?;
+        const b = state.function_def.builder.?;
         const code = b.code[0..b.code_len];
 
         var branch_label: ?u32 = null;
@@ -2817,7 +2817,7 @@ test "M3.1 F4: the program root's scope marker and source authority are stream e
     // qjs push_scope emits the body-scope marker as the program's first
     // instruction; the source authority is a marker beside the stream rather
     // than the legacy `line_num` temp opcode inside it.
-    const b = state.function_def.v2_builder.?;
+    const b = state.function_def.builder.?;
     try std.testing.expectEqual(op.enter_scope, b.code[0]);
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, b.code[1..3], .little));
     try std.testing.expect(b.source_len > 0);
@@ -6826,7 +6826,7 @@ fn countPhase1Opcode(code: []const u8, opcode_id: u8) !usize {
 /// The compact phase-1 stream a FunctionDef's Builder holds while the parse
 /// is still live.
 fn fdPhase1Code(fd: *const engine.bytecode.FunctionDef) []const u8 {
-    const b = fd.v2_builder orelse return &.{};
+    const b = fd.builder orelse return &.{};
     return b.code[0..b.code_len];
 }
 
@@ -6835,14 +6835,14 @@ fn fdPhase1Code(fd: *const engine.bytecode.FunctionDef) []const u8 {
 /// the slot's bound offset, which is what the legacy absolute operand used to
 /// carry directly.
 fn fdLabelOffset(fd: *const engine.bytecode.FunctionDef, label_index: u32) u32 {
-    return fd.v2_builder.?.label_slots[label_index].bound_offset;
+    return fd.builder.?.label_slots[label_index].bound_offset;
 }
 
 /// Publish the parser's compact phase-1 stream onto `function` so the
 /// byte-sequence tests below can inspect it after the ParseState — which owns
 /// the Builder the parser emitted into — is torn down.
 fn publishPhase1Stream(function: *engine.bytecode.Bytecode, state: *ParseState) !void {
-    const b = state.function_def.v2_builder orelse return;
+    const b = state.function_def.builder orelse return;
     try function.setCode(b.code[0..b.code_len]);
     for (b.atom_operands[0..b.atom_len]) |atom_id| try function.appendAtomOperand(atom_id);
     for (b.source_slots[0..b.source_len]) |slot| {
@@ -13095,9 +13095,9 @@ test "label/patch/move/truncate corpus keeps compiling after a flow-tail rewrite
     }
 }
 
-// ===== QCP-1 stage 2P: compiler-v2 emission scaffolding =====
+// ===== FunctionDef builder emission =====
 
-test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit releases it" {
+test "FunctionDef builder emit and deinit releases it" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
@@ -13108,7 +13108,7 @@ test "QCP-1 S2P: v2 veneer emits through the FunctionDef builder and deinit rele
     defer state.deinit(env.rt);
 
     try state.beginBuilderEmissionForTest();
-    try std.testing.expect(state.function_def.v2_builder != null);
+    try std.testing.expect(state.function_def.builder != null);
 
     const b = state.activeBuilder();
     const label = try state.builderNewLabel();
@@ -13591,14 +13591,14 @@ pub const phase_ownership = struct {
     /// Relocations the parser produced, over the whole FunctionDef tree: the
     /// live population the resolver must consume before the artifact exists.
     fn builderRelocCount(fd: *const engine.bytecode.FunctionDef) usize {
-        var count: usize = if (fd.v2_builder) |b| b.reloc_len else 0;
+        var count: usize = if (fd.builder) |b| b.reloc_len else 0;
         for (fd.child_list) |child| count += builderRelocCount(child);
         return count;
     }
 
     /// Source markers the parser produced, over the whole FunctionDef tree.
     fn builderSourceCount(fd: *const engine.bytecode.FunctionDef) usize {
-        var count: usize = if (fd.v2_builder) |b| b.source_len else 0;
+        var count: usize = if (fd.builder) |b| b.source_len else 0;
         for (fd.child_list) |child| count += builderSourceCount(child);
         return count;
     }

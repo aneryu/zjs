@@ -20,8 +20,7 @@
 //! import bytecode.zig and nothing goes the other way, so a declaration
 //! that reached into the execution layer would close the loop.
 
-/// Mirror of `opcode.Format`. `bytecode.zig` asserts the two agree field for
-/// field; ownership moves here at G0.
+/// Operand layout of a form. Re-exported as `bytecode.opcode.Format`.
 pub const Format = enum(u8) {
     none,
     none_int,

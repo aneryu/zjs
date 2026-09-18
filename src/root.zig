@@ -1,21 +1,21 @@
 //! Host facade used by the CLI and in-repo tests.
 const std = @import("std");
-const zjs_binding = @import("binding/root.zig");
+const js_context = @import("js_context.zig");
 pub const runtime = @import("event_loop.zig");
 const zjs_core = @import("core/root.zig");
 const zjs_exec = @import("exec/root.zig");
-const CoreObject = zjs_binding.Object;
+const CoreObject = zjs_core.Object;
 
-pub const JSRuntime = zjs_binding.JSRuntime;
-pub const GCStats = zjs_binding.GCStats;
-pub const GCPauseDistribution = zjs_binding.GCPauseDistribution;
-pub const JSContext = zjs_binding.JSContext;
-pub const JSValue = zjs_binding.JSValue;
-pub const RuntimeOptions = zjs_binding.RuntimeOptions;
-pub const RuntimeMemoryUsage = zjs_binding.RuntimeMemoryUsage;
-pub const OpcodeProfile = zjs_binding.OpcodeProfile;
-pub const default_stack_size = zjs_binding.default_stack_size;
-pub const default_gc_threshold = zjs_binding.default_gc_threshold;
+pub const JSRuntime = zjs_core.JSRuntime;
+pub const GCStats = zjs_core.GCStats;
+pub const GCPauseDistribution = zjs_core.GCPauseDistribution;
+pub const JSContext = js_context.JSContext;
+pub const JSValue = zjs_core.JSValue;
+pub const RuntimeOptions = zjs_core.RuntimeOptions;
+pub const RuntimeMemoryUsage = zjs_core.RuntimeMemoryUsage;
+pub const OpcodeProfile = zjs_core.OpcodeProfile;
+pub const default_stack_size = zjs_core.runtime.default_stack_size;
+pub const default_gc_threshold = zjs_core.runtime.default_gc_threshold;
 
 /// True when this binary carries per-opcode profiling scopes
 /// (-Dzjs_enable_opcode_profile / the zjs-profile artifact). The CLI fails
@@ -24,17 +24,17 @@ pub const opcode_profile_build_enabled: bool = @import("build_options").zjs_enab
 
 pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
     zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
-    return zjs_binding.activateOpcodeProfile(profile);
+    return zjs_core.profile.activate(profile);
 }
 
 pub const value = struct {
-    pub const Value = zjs_binding.JSValue;
-    pub const Scope = zjs_binding.HandleScope;
-    pub const Local = zjs_binding.LocalHandle;
-    pub const Persistent = zjs_binding.JSValueHandle;
-    pub const Weak = zjs_binding.WeakPersistentValue;
-    pub const String = zjs_binding.JSString;
-    pub const Bytes = zjs_binding.JSBytes;
+    pub const Value = JSValue;
+    pub const Scope = zjs_core.HandleScope;
+    pub const Local = zjs_core.LocalHandle;
+    pub const Persistent = zjs_core.JSValueHandle;
+    pub const Weak = zjs_core.WeakPersistentValue;
+    pub const String = JSValue.String;
+    pub const Bytes = JSValue.Bytes;
 
     pub fn undefinedValue() Value {
         return Value.undefinedValue();
@@ -117,7 +117,7 @@ pub const value = struct {
 };
 
 /// NB2 native function API (docs/perf/native-boundary-design.md §9).
-pub const native = zjs_binding.native;
+pub const native = @import("native.zig");
 
 pub const host = struct {
     pub fn defineScriptArgs(ctx: *JSContext, args: []const []const u8) !void {
@@ -168,7 +168,7 @@ pub const host = struct {
 pub const object = struct {
     pub const Object = opaque {};
     pub const MemoryAccount = zjs_core.memory.MemoryAccount;
-    pub const SharedArrayBufferRef = zjs_binding.SharedArrayBufferRef;
+    pub const SharedArrayBufferRef = zjs_core.SharedArrayBufferRef;
     pub const String = zjs_core.string.String;
 
     fn fromCore(obj: *CoreObject) *Object {
@@ -977,15 +977,15 @@ test "public Buffer pinForBorrow keeps source alive and releases cleanly" {
 }
 
 pub const context = struct {
-    pub const Options = zjs_binding.ContextOptions;
-    pub const EvalMode = zjs_binding.EvalMode;
-    pub const EvalOptions = zjs_binding.EvalOptions;
-    pub const EvalTiming = zjs_binding.EvalTiming;
-    pub const DataPropertyOptions = zjs_binding.DataPropertyOptions;
-    pub const PropertyAccessOptions = zjs_binding.PropertyAccessOptions;
-    pub const PropertyDescriptor = zjs_binding.PropertyDescriptor;
-    pub const ErrorOptions = zjs_binding.ErrorOptions;
-    pub const ScriptEvalOptions = zjs_binding.ScriptEvalOptions;
+    pub const Options = zjs_core.ContextOptions;
+    pub const EvalMode = zjs_core.EvalMode;
+    pub const EvalOptions = zjs_core.EvalOptions;
+    pub const EvalTiming = zjs_core.EvalTiming;
+    pub const DataPropertyOptions = zjs_core.DataPropertyOptions;
+    pub const PropertyAccessOptions = zjs_core.PropertyAccessOptions;
+    pub const PropertyDescriptor = zjs_core.PropertyDescriptor;
+    pub const ErrorOptions = zjs_core.ErrorOptions;
+    pub const ScriptEvalOptions = zjs_core.ScriptEvalOptions;
     pub const FunctionCallOptions = struct {
         this_value: ?value.Value = null,
         output: ?*std.Io.Writer = null,
@@ -1166,8 +1166,32 @@ test "public job drain executes each entry in its retained Realm" {
 }
 
 test {
-    _ = zjs_binding;
+    _ = js_context;
+    _ = native;
     _ = runtime;
+}
+
+test "JSValue lifetime names are aliases, not wrappers" {
+    try std.testing.expect(!@hasDecl(JSValue, "Scope"));
+    try std.testing.expect(!@hasDecl(JSValue, "Local"));
+    try std.testing.expect(!@hasDecl(JSValue, "Persistent"));
+    try std.testing.expect(!@hasDecl(JSValue, "Weak"));
+    try std.testing.expectEqual(@sizeOf(zjs_core.JSValue), @sizeOf(JSValue));
+    try std.testing.expect(!@hasDecl(@This(), "NativePin"));
+    try std.testing.expect(!@hasDecl(@This(), "Atom"));
+    try std.testing.expect(!@hasDecl(JSRuntime, "pinValueForNative"));
+    try std.testing.expect(!@hasDecl(JSRuntime, "pinHeaderForNative"));
+    try std.testing.expect(!@hasDecl(JSValue, "TypedArray"));
+    try std.testing.expect(!@hasDecl(JSValue.Bytes.Store, "borrowed"));
+    try std.testing.expect(!@hasDecl(JSValue.Bytes.Store, "fromBorrowed"));
+}
+
+test "public JSString is the core JSValue string view" {
+    try std.testing.expect(value.String == zjs_core.JSValue.String);
+}
+
+test "public JSBytes is the core JSValue byte view" {
+    try std.testing.expect(value.Bytes == zjs_core.JSValue.Bytes);
 }
 
 test "public root exposes only the explicit runtime surface" {
@@ -1212,6 +1236,7 @@ test "public root exposes only the explicit runtime surface" {
     try std.testing.expect(!@hasDecl(@This(), "JSString"));
     try std.testing.expect(!@hasDecl(@This(), "JSBytes"));
     try std.testing.expect(!@hasDecl(@This(), "binding"));
+    try std.testing.expect(!@hasDecl(@This(), "binding_root"));
 
     try std.testing.expect(!@hasDecl(runtime, "event_loop"));
     try std.testing.expect(!@hasDecl(runtime, "plugin"));
