@@ -141,4 +141,4 @@ python3 docs/code-walkthrough/_check_coverage.py --docs 'docs/code-walkthrough/2
   src/tests/parser.zig src/tests/smoke_test.zig src/tests/stress.zig
 ```
 
-`build.zig` / `build/*.zig` 的 13 个函数已纳入 `_inventory.tsv`；函数条目见 [20-build.md](20-build.md) 文末列表。
+`build.zig` / `build/*.zig` 的 21 个函数已纳入 `_inventory.tsv`；函数条目见 [20-build.md](20-build.md) 文末列表。

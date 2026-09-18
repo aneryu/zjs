@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Build:** trimmed `build/` after the profiles/perf-harness cut. `Ctx` and
+  `Artifacts` keep only fields a helper reads; CLI / shard / smoke setup share
+  helpers; `runArtifactOnCpus` lives next to `gateRunCpus` so tests no longer
+  import gates.
+
 - **Tools:** removed `gate-smoke` (`tools/gates/`, the `/tmp/gcgap-fixed`
   corpus convention, and the `merge-gate` aggregate). Local
   `mise run batch-gate` is now `checkpoint-gate` + `test-stress` +
@@ -32,7 +37,9 @@
   size-screen, `measure_fields` field locks, mandatory PMU ABBA, and
   refactor-policy rule 2's bench-v8 A/B / identity-set protocol).
   Correctness stays on `zig build test` and the merge batch. Local
-  `perf-benchmark` / `perf stat` are diagnostic only.
+  `perf-benchmark` / `perf stat` are diagnostic only. Removed the
+  preregistered `policies/` threshold files (GC merge gate and the
+  four spike / opcode-E1 records); recover them from git history.
 
 - **Host surface:** removed the leftover `src/runtime/` directory. The host
   event loop is `src/event_loop.zig`; `zjs.runtime` still exposes

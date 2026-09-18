@@ -69,6 +69,6 @@ zjs 是用 Zig 写的可嵌入 JavaScript 引擎，语义权威是 ECMA-262（te
 | 带 `file.zig:LINE` 的 `###` 标题 | 12,501 |
 | 清单与标题 | 按当前源码声明的文件、行号、函数名核对；不代表正文已通过语义审核 |
 
-清单另含构建入口的 13 个函数，共 10,372 条。19 个 `src/` 零函数文件（error set、re-export、ABI 类型）按文件讲解，不漏。`build.zig` / `build/*.zig` 的 13 个函数有条目。`test262/` 子模块不在范围内。
+清单另含构建入口的 21 个函数，共 10,380 条。19 个 `src/` 零函数文件（error set、re-export、ABI 类型）按文件讲解，不漏。`build.zig` / `build/*.zig` 的 21 个函数有条目。`test262/` 子模块不在范围内。
 
 清单随源码变化；若源码改了而分册没跟上，以源码为准。核对脚本：[`_check_coverage.py`](_check_coverage.py)。

@@ -58,7 +58,8 @@ BASE-G0 完成前,一切吞吐/pause 数字是本地决策输入,非可复现项
    四份 spike policy 文件(预注册 kill criteria:primary_metric /
    target_workloads / minimum_effect / maximum_regression /
    correctness_gates / size 与 cost limit / sample_protocol /
-   pass-redesign-fail 三态)
+   pass-redesign-fail 三态)。这些文件已于 2026-09-18 从树中移除,
+   从 git 历史恢复;指纹仍在 reports/evidence/BASE-G0/manifest.json
 6. evidence: reports/evidence/<ITEM>/ 目录;每份 manifest 含
    work_item / commits / binary_sha256 / toolchain / policy_sha256 /
    host / command / raw_artifacts / result / verdict / owner_decision
@@ -223,7 +224,8 @@ Track B 定性:最大架构风险退休项与表示定型点,非产品交付解�
 > 适配,性能其次」,TGC S0–S5 直接落在 main;合入尺变成对冻结 rc
 > 基线 `main-d944f26d` 的 Stage 0 固定功 insn/cycles 筛(六负载中
 > 仅 splay cycles 1.26 为 STOP,已判结构账)加四门全绿。
-> gc_merge_policy.json 留档为历史协议;G2-GC-MERGE 标 done、无
+> gc_merge_policy.json 已从树中移除(2026-09-18,从 git
+> 历史恢复);G2-GC-MERGE 标 done、无
 > verdict。S4b 并行标记 2026-09-03 曾落 main 默认关，随后在 TGC 合入
 > (`e972c4b5`)中**撤回删除**(`gc_parallel_mark.zig` 已不存在,
 > `gc_incremental.zig` State 注释记 "parallel marking (S4-b) was
@@ -304,8 +306,8 @@ HR-P1 让出 WIP 槽排队(root-handle 与 GC 耦合;GC 线 2026-09-05 已
 ```
 GC-GAP → PERF-T-SPIKE → PERF-DYN-SPIKE → PERF-JIT-SPIKE
        → PERF-N-SPIKE
-各 gate 出数即裁,互不等待;四份 spike policy 已预注册
-(policies/spikes/,basis=proposed 的阈值开工前须 owner 批)
+各 gate 出数即裁,互不等待;四份 spike 阈值曾预注册后随
+2026-09-18 测量政策退役从树中移除(从 git 历史恢复)
 ```
 
 **Gate 后分叉(不预设完整路径必做)**
@@ -335,8 +337,8 @@ FN-M2..M6。SER-TRANSFER/GC-MULTIRT-GATE/VM-WEAK-REGISTRY 随 WIP
 最多 1 个后台 measurement item(spike 官方 A/B 期兼占)
 ```
 
-测量队列串行,守 [perf/README.md](perf/README.md) measurement
-contract + BASE-G0 policies;官方读数前必查孤儿+亲和。
+测量队列串行,守 [perf/README.md](perf/README.md);官方读数前必查
+孤儿+亲和。测量与 ablation 政策已于 2026-09-18 退役。
 
 欠账入口:[process ledger §20.2/§20.2a](process-model-design.md);
 动工规则:先改文档递增版本,再动代码。WIP 限额由 owner 执行,不再

@@ -1,15 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Shared build-graph context passed to every add* helper. One bag so each
-/// helper sees the same option objects, signature triple, and resolved
-/// target/optimize without reconstructing them.
+/// helper sees the same option objects, pinned signature pair, and resolved
+/// target/optimize without reconstructing them. Follow-mode `expect_config`
+/// lives on `engine_inputs` / `engine_options`.
 pub const Ctx = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     engine_inputs: EngineOptionInputs,
-    settings: ConfigSettings,
-    expect_config: []const u8,
     expect_config_debug: []const u8,
     expect_config_fast: []const u8,
     engine_options: *std.Build.Step.Options,
@@ -30,6 +30,16 @@ pub fn gateRunCpus(b: *std.Build) []const u8 {
     if (b.graph.environ_map.get("ZJS_GATE_RUN_CPUS")) |v| return v;
     if (b.graph.environ_map.get("ZJS_BUILD_CPUS")) |v| return v;
     return "";
+}
+
+/// Run `exe` under `taskset -c cpus` when a pin list is set. `cpus` empty
+/// (or a non-Linux host) is a plain `addRunArtifact`.
+pub fn runArtifactOnCpus(b: *std.Build, cpus: []const u8, exe: *std.Build.Step.Compile) *std.Build.Step.Run {
+    if (cpus.len == 0 or builtin.os.tag != .linux) return b.addRunArtifact(exe);
+    const run = b.addSystemCommand(&.{ "taskset", "-c", cpus });
+    run.addArtifactArg(exe);
+    run.setName(b.fmt("run {s} (cpus {s})", .{ exe.name, cpus }));
+    return run;
 }
 
 /// QCP-1 configuration settings, in the canonical order the ruling names them.
@@ -60,13 +70,11 @@ pub const ConfigSettings = struct {
 /// option: git is the rollback boundary, but old and new binaries must not
 /// attest the same representation after Object's resident header disappears.
 ///
-/// `repr` is fixed at `tagged`, the same way `compiler` is fixed at `v2`: the
-/// 8-byte NaN-boxed alternative was deleted, so there is no longer a choice to
-/// encode, but an artifact must still state the representation it was built
-/// from. The component is kept rather than dropped so recorded v2 signatures
-/// keep their meaning and the negative-drift check keeps a field to falsify --
-/// the engine half of the comparison derives it from `@sizeOf(JSValue)`, not
-/// from a literal.
+/// `repr` is hardcoded `nan_boxed` to match the engine half, which derives it
+/// from `@sizeOf(JSValue) == 8`. There is no build option: a size change must
+/// fail attest rather than silently rename the field. The component stays so
+/// recorded signatures keep their meaning and the negative-drift check has a
+/// field to falsify.
 pub fn configSignature(b: *std.Build, settings: ConfigSettings) []const u8 {
     return b.fmt(
         "zjs-config-v3:compiler={s},layout={s},repr=nan_boxed,gc_layout=obj64_m,optimize={s},force_gc={s},ownership_audit={s}",

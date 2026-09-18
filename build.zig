@@ -154,8 +154,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .engine_inputs = engine_option_inputs,
-        .settings = config_settings,
-        .expect_config = expect_config,
         .expect_config_debug = expect_config_debug,
         .expect_config_fast = expect_config_fast,
         .engine_options = engine_options,

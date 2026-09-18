@@ -25,9 +25,10 @@ R1.
 BASE-G0 (measurement freeze) completed 2026-08-26: the official QuickJS
 yardstick is the GCC-16 build recorded in
 `reports/evidence/BASE-G0/manifest.json`, the tracing-GC candidate is
-pinned by the public tag `frozen/gc-tracing-2026-08-26`, and all official
-measurements are governed by `policies/` (preregistered) with evidence
-registered under `reports/evidence/`. Main branch protection:
+pinned by the public tag `frozen/gc-tracing-2026-08-26`, and official
+measurement evidence lives under `reports/evidence/`. The preregistered
+`policies/` threshold files were removed with the 2026-09-18 measurement
+policy retirement; recover them from git history. Main branch protection:
 `main-no-force-push` (no force-push/deletion, no bypass) +
 `main-required-checks` (linux-arm64, linux-x86_64;
 repository-admin bypass keeps the owner's direct-push workflow).

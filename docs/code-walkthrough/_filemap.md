@@ -4,11 +4,11 @@
 
 | 源文件 | 函数数 | 讲解 |
 | --- | ---: | --- |
-| `build/artifacts.zig` | 1 | [20-build.md](20-build.md) |
-| `build/config.zig` | 7 | [20-build.md](20-build.md) |
-| `build/gates.zig` | 2 | [20-build.md](20-build.md) |
+| `build/artifacts.zig` | 5 | [20-build.md](20-build.md) |
+| `build/config.zig` | 8 | [20-build.md](20-build.md) |
+| `build/gates.zig` | 1 | [20-build.md](20-build.md) |
 | `build/perf.zig` | 1 | [20-build.md](20-build.md) |
-| `build/tests.zig` | 1 | [20-build.md](20-build.md) |
+| `build/tests.zig` | 5 | [20-build.md](20-build.md) |
 | `build.zig` | 1 | [20-build.md](20-build.md) |
 | `src/all_tests.zig` | 2 | [20-tests.md](20-tests.md) |
 | `src/binding/context.zig` | 104 | [01-public-api-context.md](01-public-api-context.md) |
