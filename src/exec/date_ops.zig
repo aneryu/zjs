@@ -1782,10 +1782,7 @@ fn toNumber(value: core.JSValue) ?f64 {
         var scratch: [128]u8 = undefined;
         var writer = std.Io.Writer.fixed(&scratch);
         appendStringValueAscii(&writer, value) catch return std.math.nan(f64);
-        const text = writer.buffered();
-        const trimmed = std.mem.trim(u8, text, " \t\r\n");
-        if (trimmed.len == 0) return 0;
-        return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+        return core.value_format.parseJsNumber(writer.buffered());
     }
     return std.math.nan(f64);
 }

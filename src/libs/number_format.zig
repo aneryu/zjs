@@ -20,30 +20,54 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-//! Binary64 decimal/radix formatting ported from QuickJS `dtoa.c`/`dtoa.h`.
+//! Binary64 <-> text conversion ported from QuickJS `dtoa.c` / `dtoa.h`, in
+//! both directions and with one kernel per direction.
 //!
-//! The engine job of this file is printing: `formatNumber`, `formatRadix`,
-//! `formatDtoaChecked`. Decimal ToNumber, source literals, `parseFloat`, and
-//! JSON parse through `std.fmt.parseFloat` in `value_format` / `lexer` /
-//! `number` / `json_ops`. Those paths do not call this file.
+//! Formatting: `formatNumber` (shortest), `formatRadix`, `formatDtoaChecked`
+//! (toFixed / toPrecision / toExponential) over `floatToText` (dtoa.c
+//! `js_dtoa`). Zig std cannot replace it: `std.fmt.float` rounds the shortest
+//! digit string a second time and pads with zeros past 17 digits, so
+//! `(1.005).toFixed(2)` and `(0.1).toPrecision(30)` come out wrong, and it
+//! has no radix mode.
 //!
-//! `parseNumber` / `jsAtod` are the inverse of `jsDtoa` (including radix
-//! 2..36). They are not a second ToNumber kernel. They stay so `toString(radix)`
-//! can be round-tripped and so the dtoa.c port remains complete.
+//! Parsing: `parseNumberPrefix` / `parseNumberExact` over `textToFloat`
+//! (dtoa.c `js_atod`, with the prefix / sign / exponent rules of `js_atof`
+//! folded in so one scanner serves every caller). `ParseFlags` selects the
+//! grammar: ToNumber (`accept_bin_oct`), parseInt (`int_only` +
+//! `accept_prefix_after_sign`), parseFloat (radix 10, nothing), source
+//! literals (`accept_bin_oct` + `accept_underscores`), JSON (nothing).
+//!
+//! Deliberate additions over upstream. Formatting: radix-10 FORMAT_FREE
+//! takes Ryu (`shortestDecimalRyu`, comptime tables) instead of
+//! `dtoaShortest`'s descending bignum trials; the digits feed the same
+//! `outputHelper`, so layout rules are untouched. One visible difference
+//! from QuickJS: on powers of two the rounding interval is asymmetric and
+//! Ryu finds the genuinely shortest string (`2**-1017` prints
+//! `7.120236347223045e-307`, as V8 and JSC do), where `dtoaShortest` settles
+//! for 17 digits. Both parse back to the same double; the spec asks for the
+//! fewest digits. Parsing: `textToFloat` keeps the first
+//! FAST_MANTISSA_DIGITS significant decimal digits in a `u64` and converts
+//! them with Clinger's exact fast path or Eisel-Lemire (`convertDecimalFast`)
+//! before touching the bignum; upstream marks this spot `XXX: add fast path
+//! for small integers`. Every accepted / rejected byte is unchanged, and
+//! Eisel-Lemire falls back to the bignum whenever it cannot prove the
+//! rounding.
 //!
 //! No heap allocator: callers pass the output buffer; scratch lives in
-//! `JSDTOATempMem` / `JSATODTempMem`. `jsDtoa` / `jsAtod` / `mpb*` keep the
-//! upstream names (GUIDE A.7).
+//! `FormatScratch` / `ParseScratch`. Bignum helpers (`mpb*`, `udiv1norm`,
+//! `mulPow`, ...) keep their dtoa.c names so the port can be diffed against
+//! upstream.
 //!
 //! ```
 //! formatNumber / formatRadix / formatDtoaChecked
-//!   └─ jsDtoa
+//!   └─ floatToText
 //!        ├─ writeNonFinite | integer fast path
-//!        ├─ dtoaShortest | dtoaFrac | dtoaFixed ─► mulPow
+//!        ├─ dtoaShortestDecimal (Ryu, radix 10) | dtoaShortest | dtoaFrac | dtoaFixed ─► mulPow
 //!        └─ outputDigits / outputHelper
 //!
-//! parseNumber / tests  (dtoa inverse, not ToNumber)
-//!   └─ jsAtod ─► parseAtodExponent ─► atodToBits ─► buildFloat64
+//! parseNumberPrefix / parseNumberExact
+//!   └─ textToFloat ─► parseExponent ─► convertDecimalFast (≤19 digits, radix 10)
+//!                                    └─► convertBignumToBits ─► buildFloat64
 //! ```
 const std = @import("std");
 
@@ -51,11 +75,13 @@ const std = @import("std");
 // Public types and flags (dtoa.h)
 // ============================================================
 
-pub const JSDTOATempMem = extern struct {
+/// Fixed workspace for one `floatToText` call (dtoa.c `FormatScratch`).
+pub const FormatScratch = extern struct {
     mem: [37]u64,
 };
 
-pub const JSATODTempMem = extern struct {
+/// Fixed workspace for one `textToFloat` call (dtoa.c `ParseScratch`).
+const ParseScratch = extern struct {
     mem: [27]u64,
 };
 
@@ -71,10 +97,29 @@ pub const JS_DTOA_EXP_MASK: i32 = 3 << 2;
 
 pub const JS_DTOA_MINUS_ZERO: i32 = 1 << 4;
 
-pub const JS_ATOD_INT_ONLY: i32 = 1 << 0;
-pub const JS_ATOD_ACCEPT_BIN_OCT: i32 = 1 << 1;
-pub const JS_ATOD_ACCEPT_LEGACY_OCTAL: i32 = 1 << 2;
-pub const JS_ATOD_ACCEPT_UNDERSCORES: i32 = 1 << 3;
+/// Grammar switches for `parseNumberPrefix` (QuickJS `ATOD_*` flags).
+pub const ParseFlags = packed struct {
+    /// Integer digits only: no fraction, no exponent, no `Infinity`.
+    int_only: bool = false,
+    /// `0b` / `0o` prefixes (`0x` is always taken when radix is 0 or 16).
+    accept_bin_oct: bool = false,
+    /// `0777` as octal; `089` still decimal.
+    accept_legacy_octal: bool = false,
+    /// `_` between digits.
+    accept_underscores: bool = false,
+    /// Recognise a radix prefix after a sign (`-0x10`); parseInt only.
+    accept_prefix_after_sign: bool = false,
+    /// Fraction and `@` / `p` exponent in a non-decimal radix. Only the
+    /// `formatRadix` round-trip tests want this; JS grammars never do.
+    accept_radix_fraction: bool = false,
+};
+
+/// Result of `parseNumberPrefix`: `len` bytes were consumed. `len` is 0 and
+/// `value` is NaN when no number starts at the text.
+pub const Parsed = struct {
+    value: f64,
+    len: usize,
+};
 
 // ============================================================
 // Engine-facing format API
@@ -88,8 +133,8 @@ pub fn formatNumber(buf: []u8, value: f64) ![]const u8 {
     if (std.math.isPositiveInf(value)) return "Infinity";
     if (std.math.isNegativeInf(value)) return "-Infinity";
 
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoa(buf, value, 10, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO, &tmp_mem);
+    var tmp_mem: FormatScratch = undefined;
+    const len = floatToText(buf, value, 10, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO, &tmp_mem);
     return buf[0..len];
 }
 
@@ -108,47 +153,51 @@ pub fn formatInt64(buf: []u8, value: i64) []const u8 {
 /// with `EXP_DISABLED` runs past a thousand digits on a denormal, which is why
 /// guessing does not work.
 pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, flags: i32) !usize {
-    const len_max = jsDtoaMaxLen(value, radix, n_digits, flags);
+    const len_max = floatToTextMaxLen(value, radix, n_digits, flags);
     if (len_max < 0) return error.InvalidRadix;
     return @as(usize, @intCast(len_max)) + 1;
 }
 
 /// `Number.prototype.toString(radix)` for any radix in 2..36. Digit generation
-/// is the same `jsDtoa` path radix 10 uses.
+/// is the same `floatToText` path radix 10 uses.
 pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, flags: i32) ![]const u8 {
     if (buf.len < try radixMaxLen(value, radix, n_digits, flags)) return error.NoSpaceLeft;
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoa(buf, value, radix, n_digits, flags, &tmp_mem);
+    var tmp_mem: FormatScratch = undefined;
+    const len = floatToText(buf, value, radix, n_digits, flags, &tmp_mem);
     if (len >= buf.len) return error.NoSpaceLeft;
     return buf[0..len];
 }
 
 /// Capacity-checked decimal dtoa for `toFixed` / `toExponential` / `toPrecision`.
 pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]const u8 {
-    const len_max = jsDtoaMaxLen(value, 10, n_digits, flags);
+    const len_max = floatToTextMaxLen(value, 10, n_digits, flags);
     if (len_max < 0) return error.NoSpaceLeft;
     const needed: usize = @as(usize, @intCast(len_max)) + 1;
     if (needed > buf.len) return error.NoSpaceLeft;
-    var tmp_mem: JSDTOATempMem = undefined;
-    const len = jsDtoa(buf, value, 10, n_digits, flags, &tmp_mem);
+    var tmp_mem: FormatScratch = undefined;
+    const len = floatToText(buf, value, 10, n_digits, flags, &tmp_mem);
     if (len >= buf.len) return error.NoSpaceLeft;
     return buf[0..len];
 }
 
-/// Inverse of `jsDtoa` for a whole decimal slice. Not ToNumber: the engine
-/// parses decimals with `std.fmt.parseFloat`. Kept for dtoa round-trip tests.
-fn parseNumber(bytes: []const u8) !f64 {
-    if (std.mem.eql(u8, bytes, "NaN")) return std.math.nan(f64);
+/// Parse the longest number at the start of `text`, QuickJS `js_atof`
+/// style: optional sign, optional radix prefix, digits with the separators
+/// and fraction / exponent the flags allow, or `Infinity` unless `int_only`.
+/// `radix` 0 means 10 unless a prefix says otherwise. The caller trims
+/// whitespace first and decides whether trailing bytes are an error.
+pub fn parseNumberPrefix(text: []const u8, radix: u8, flags: ParseFlags) Parsed {
+    var scratch: ParseScratch = undefined;
+    var end: ?[*]const u8 = null;
+    const value = textToFloat(text, &end, radix, flags, &scratch);
+    if (std.math.isNan(value)) return .{ .value = std.math.nan(f64), .len = 0 };
+    return .{ .value = value, .len = @intFromPtr(end.?) - @intFromPtr(text.ptr) };
+}
 
-    var tmp_mem: JSATODTempMem = undefined;
-    var parsed_end: ?[*]const u8 = null;
-    const value = jsAtod(bytes, &parsed_end, 10, 0, &tmp_mem);
-    const end_ptr = @intFromPtr(bytes.ptr) + bytes.len;
-    if (parsed_end == null or @intFromPtr(parsed_end.?) != end_ptr) {
-        return error.InvalidCharacter;
-    }
-    if (std.math.isNan(value)) return error.InvalidCharacter;
-    return value;
+/// `parseNumberPrefix` that must consume all of `text`; null otherwise.
+pub fn parseNumberExact(text: []const u8, radix: u8, flags: ParseFlags) ?f64 {
+    const parsed = parseNumberPrefix(text, radix, flags);
+    if (parsed.len != text.len) return null;
+    return parsed.value;
 }
 
 // ============================================================
@@ -242,6 +291,99 @@ const min_exponent = [JS_RADIX_MAX - 1]i16{
     -258,  -254, -249, -245, -242, -238, -235, -232,
     -229,  -227, -224, -222, -220, -217, -215, -214,
     -212,  -210, -208,
+};
+
+/// Decimal digits `textToFloat` accumulates in a `u64` before spilling to the
+/// bignum. 10^19 < 2^64.
+const FAST_MANTISSA_DIGITS: i32 = 19;
+
+/// 10^0 .. 10^22 are exactly representable in binary64, so a single
+/// multiply or divide by one of them is a single correctly rounded operation
+/// (Clinger 1990).
+const CLINGER_MAX_EXP10: i32 = 22;
+const clinger_pow10 = blk: {
+    var t: [CLINGER_MAX_EXP10 + 1]f64 = undefined;
+    var v: f64 = 1;
+    for (&t) |*e| {
+        e.* = v;
+        v *= 10;
+    }
+    break :blk t;
+};
+
+/// Eisel-Lemire table: the 128 most significant bits of 5^q for
+/// q in [EL_Q_MIN, EL_Q_MAX], truncated for q >= 0 and rounded up for q < 0
+/// exactly as fast_float generates them (verified entry-for-entry against
+/// Zig std's literal table). Built at comptime, about 1 s of sema, so the
+/// 10 KB of constants are not pasted into the source.
+const EL_Q_MIN: i32 = -342;
+const EL_Q_MAX: i32 = 308;
+const el_pow5_128 = blk: {
+    @setEvalBranchQuota(2_000_000);
+    const Big = u1856; // 2*z+128 bits for 5^342 (z = 800) is 1728, plus headroom
+    var table: [EL_Q_MAX - EL_Q_MIN + 1][2]u64 = undefined;
+    const one: Big = 1;
+    // q >= 0: running power, kept to its top 128 bits.
+    var p: Big = 1;
+    var q: i32 = 0;
+    while (q <= EL_Q_MAX) : (q += 1) {
+        var c = p;
+        while (c >= (one << 128)) c >>= 1;
+        while (c < (one << 127)) c <<= 1;
+        table[@intCast(q - EL_Q_MIN)] = .{ @truncate(c >> 64), @truncate(c) };
+        p *= 5;
+    }
+    // q < 0: 2^b / 5^|q| rounded up; b differs below q = -27 as in fast_float.
+    p = 5;
+    q = -1;
+    while (q >= EL_Q_MIN) : (q -= 1) {
+        const z: u32 = @bitSizeOf(Big) - @clz(p - 1); // smallest z with 2^z >= 5^|q|
+        var c: Big = undefined;
+        if (q >= -27) {
+            c = ((one << @intCast(z + 127)) / p) + 1;
+        } else {
+            c = ((one << @intCast(2 * z + 128)) / p) + 1;
+            while (c >= (one << 128)) c >>= 1;
+        }
+        table[@intCast(q - EL_Q_MIN)] = .{ @truncate(c >> 64), @truncate(c) };
+        p *= 5;
+    }
+    break :blk table;
+};
+
+/// Ryu tables (Adams 2018, "Ryū: fast float-to-string conversion"): the top
+/// 125 bits of 5^i (floor) and of 2^k / 5^i (plus one), exactly the
+/// `DOUBLE_POW5_SPLIT` / `DOUBLE_POW5_INV_SPLIT` full tables of the reference
+/// implementation. Built at comptime like `el_pow5_128`.
+const RYU_POW5_BITCOUNT = 125;
+const RYU_POW5_INV_BITCOUNT = 125;
+const RYU_POW5_TABLE_SIZE = 326;
+const RYU_POW5_INV_TABLE_SIZE = 342;
+const ryu_pow5_split = blk: {
+    @setEvalBranchQuota(1_000_000);
+    const Big = u1024;
+    var table: [RYU_POW5_TABLE_SIZE][2]u64 = undefined;
+    var p: Big = 1;
+    for (&table) |*entry| {
+        const bits: u32 = @bitSizeOf(Big) - @clz(p);
+        const c: Big = if (bits > RYU_POW5_BITCOUNT) p >> @intCast(bits - RYU_POW5_BITCOUNT) else p << @intCast(RYU_POW5_BITCOUNT - bits);
+        entry.* = .{ @truncate(c), @truncate(c >> 64) };
+        p *= 5;
+    }
+    break :blk table;
+};
+const ryu_pow5_inv_split = blk: {
+    @setEvalBranchQuota(1_000_000);
+    const Big = u1024;
+    var table: [RYU_POW5_INV_TABLE_SIZE][2]u64 = undefined;
+    var p: Big = 1;
+    for (&table) |*entry| {
+        const bits: u32 = @bitSizeOf(Big) - @clz(p);
+        const c: Big = ((@as(Big, 1) << @intCast(bits - 1 + RYU_POW5_INV_BITCOUNT)) / p) + 1;
+        entry.* = .{ @truncate(c), @truncate(c >> 64) };
+        p *= 5;
+    }
+    break :blk table;
 };
 
 // ============================================================
@@ -1018,7 +1160,7 @@ fn outputHelper(
 
 const DtoaScale = struct { P: i32, E: i32 };
 
-fn jsDtoaMaxLen(d: f64, radix: i32, n_digits: i32, flags: i32) i32 {
+fn floatToTextMaxLen(d: f64, radix: i32, n_digits: i32, flags: i32) i32 {
     const fmt = flags & JS_DTOA_FORMAT_MASK;
     var n: i32 = 0;
 
@@ -1075,6 +1217,175 @@ fn writeNonFinite(buf: []u8, sgn: i32, frac: u64) usize {
 }
 
 /// FORMAT_FREE: shortest digit string that still round-trips to `(m, e)`.
+const ShortestDecimal = struct { mantissa: u64, exponent: i32 };
+
+inline fn ryuMulShift64(m: u64, mul: [2]u64, j: u32) u64 {
+    // j is always in (64, 128) for binary64.
+    const b0 = @as(u128, m) * mul[0];
+    const b2 = @as(u128, m) * mul[1];
+    return @intCast(((b0 >> 64) + b2) >> @intCast(j - 64));
+}
+
+inline fn ryuLog10Pow2(e: u32) u32 {
+    return @intCast((@as(u64, e) * 169464822037455) >> 49);
+}
+
+inline fn ryuLog10Pow5(e: u32) u32 {
+    return @intCast((@as(u64, e) * 196742565691928) >> 48);
+}
+
+inline fn ryuPow5Bits(e: u32) u32 {
+    return @intCast(((@as(u64, e) * 163391164108059) >> 46) + 1);
+}
+
+fn ryuPow5Factor(value_in: u64) u32 {
+    var value = value_in;
+    var count: u32 = 0;
+    while (value > 0) : ({
+        count += 1;
+        value /= 5;
+    }) {
+        if (value % 5 != 0) return count;
+    }
+    return 0;
+}
+
+inline fn ryuMultipleOfPowerOf5(value: u64, p: u32) bool {
+    return ryuPow5Factor(value) >= p;
+}
+
+inline fn ryuMultipleOfPowerOf2(value: u64, p: u32) bool {
+    return (value & ((@as(u64, 1) << @intCast(p)) - 1)) == 0;
+}
+
+/// Ryu shortest round-trip decimal for a finite, non-zero binary64 given as
+/// its raw IEEE bits: `mantissa * 10^exponent`, the shortest digit string
+/// that parses back to the same double and, among those, the closest (ties
+/// to even). Same answer as `dtoaShortest` in radix 10, without the bignum
+/// trials. Structure follows the reference `d2d` (Adams 2018).
+fn shortestDecimalRyu(bits: u64) ShortestDecimal {
+    const mantissa_bits = 52;
+    const bias = 1023;
+    const ieee_mantissa = bits & ((@as(u64, 1) << mantissa_bits) - 1);
+    const ieee_exponent: u32 = @intCast((bits >> mantissa_bits) & 0x7ff);
+
+    var e2: i32 = undefined;
+    var m2: u64 = undefined;
+    if (ieee_exponent == 0) {
+        e2 = 1 - bias - mantissa_bits - 2;
+        m2 = ieee_mantissa;
+    } else {
+        e2 = @as(i32, @intCast(ieee_exponent)) - bias - mantissa_bits - 2;
+        m2 = (@as(u64, 1) << mantissa_bits) | ieee_mantissa;
+    }
+    const accept_bounds = (m2 & 1) == 0;
+
+    // Interval of decimals that round to this double, scaled by 4.
+    const mv = 4 * m2;
+    const mm_shift: u1 = @intFromBool(ieee_mantissa != 0 or ieee_exponent <= 1);
+
+    var vr: u64 = undefined;
+    var vp: u64 = undefined;
+    var vm: u64 = undefined;
+    var e10: i32 = undefined;
+    var vm_is_trailing_zeros = false;
+    var vr_is_trailing_zeros = false;
+    if (e2 >= 0) {
+        const q: u32 = ryuLog10Pow2(@intCast(e2)) - @intFromBool(e2 > 3);
+        e10 = @intCast(q);
+        const k: i32 = @intCast(RYU_POW5_INV_BITCOUNT + ryuPow5Bits(q) - 1);
+        const i: u32 = @intCast(-e2 + @as(i32, @intCast(q)) + k);
+        const pow5 = ryu_pow5_inv_split[q];
+        vr = ryuMulShift64(mv, pow5, i);
+        vp = ryuMulShift64(mv + 2, pow5, i);
+        vm = ryuMulShift64(mv - 1 - mm_shift, pow5, i);
+        if (q <= 21) {
+            if (mv % 5 == 0) {
+                vr_is_trailing_zeros = ryuMultipleOfPowerOf5(mv, q);
+            } else if (accept_bounds) {
+                vm_is_trailing_zeros = ryuMultipleOfPowerOf5(mv - 1 - mm_shift, q);
+            } else {
+                vp -= @intFromBool(ryuMultipleOfPowerOf5(mv + 2, q));
+            }
+        }
+    } else {
+        const q: u32 = ryuLog10Pow5(@intCast(-e2)) - @intFromBool(-e2 > 1);
+        e10 = @as(i32, @intCast(q)) + e2;
+        const i: i32 = -e2 - @as(i32, @intCast(q));
+        const k: i32 = @as(i32, @intCast(ryuPow5Bits(@intCast(i)))) - RYU_POW5_BITCOUNT;
+        const j: u32 = @intCast(@as(i32, @intCast(q)) - k);
+        const pow5 = ryu_pow5_split[@intCast(i)];
+        vr = ryuMulShift64(mv, pow5, j);
+        vp = ryuMulShift64(mv + 2, pow5, j);
+        vm = ryuMulShift64(mv - 1 - mm_shift, pow5, j);
+        if (q <= 1) {
+            vr_is_trailing_zeros = true;
+            if (accept_bounds) {
+                vm_is_trailing_zeros = mm_shift == 1;
+            } else {
+                vp -= 1;
+            }
+        } else if (q < 63) {
+            vr_is_trailing_zeros = ryuMultipleOfPowerOf2(mv, q);
+        }
+    }
+
+    // Shortest representation inside the interval.
+    var removed: i32 = 0;
+    var last_removed_digit: u8 = 0;
+    if (vm_is_trailing_zeros or vr_is_trailing_zeros) {
+        while (vp / 10 > vm / 10) {
+            vm_is_trailing_zeros = vm_is_trailing_zeros and vm % 10 == 0;
+            vr_is_trailing_zeros = vr_is_trailing_zeros and last_removed_digit == 0;
+            last_removed_digit = @intCast(vr % 10);
+            vr /= 10;
+            vp /= 10;
+            vm /= 10;
+            removed += 1;
+        }
+        if (vm_is_trailing_zeros) {
+            while (vm % 10 == 0) {
+                vr_is_trailing_zeros = vr_is_trailing_zeros and last_removed_digit == 0;
+                last_removed_digit = @intCast(vr % 10);
+                vr /= 10;
+                vp /= 10;
+                vm /= 10;
+                removed += 1;
+            }
+        }
+        if (vr_is_trailing_zeros and last_removed_digit == 5 and vr % 2 == 0) {
+            last_removed_digit = 4; // exactly halfway, round to even
+        }
+        const round_up = (vr == vm and (!accept_bounds or !vm_is_trailing_zeros)) or last_removed_digit >= 5;
+        return .{ .mantissa = vr + @intFromBool(round_up), .exponent = e10 + removed };
+    }
+    // Common case: no trailing-zero bookkeeping needed.
+    while (vp / 10 > vm / 10) {
+        last_removed_digit = @intCast(vr % 10);
+        vr /= 10;
+        vp /= 10;
+        vm /= 10;
+        removed += 1;
+    }
+    const round_up = vr == vm or last_removed_digit >= 5;
+    return .{ .mantissa = vr + @intFromBool(round_up), .exponent = e10 + removed };
+}
+
+/// Radix-10 FORMAT_FREE via Ryu: digits into `tmp1`, returns `{P, E}` with
+/// the same meaning as `dtoaShortest` (value = digits * 10^(E - P)).
+fn dtoaShortestDecimal(tmp1: *MpbMax, bits: u64) DtoaScale {
+    var dec = shortestDecimalRyu(bits);
+    while (dec.mantissa % 10 == 0) {
+        dec.mantissa /= 10;
+        dec.exponent += 1;
+    }
+    var P: i32 = 1;
+    var scale: u64 = 10;
+    while (scale <= dec.mantissa) : (scale *= 10) P += 1;
+    mpbSetU64(tmp1, dec.mantissa);
+    return .{ .P = P, .E = dec.exponent + P };
+}
+
 fn dtoaShortest(tmp1: *MpbMax, m: u64, e: i32, radix: i32, radix1: i32, radix_shift: i32) DtoaScale {
     const P_max: i32 = dtoa_max_digits_table[@intCast(radix - 2)];
     const E0 = 1 + mulLog2Radix(e - 1, radix);
@@ -1152,7 +1463,7 @@ fn dtoaFixed(tmp1: *MpbMax, mant_max: *MpbMax, m: u64, e: i32, E_in: i32, radix1
     return E;
 }
 
-fn jsDtoa(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *JSDTOATempMem) usize {
+fn floatToText(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *FormatScratch) usize {
     var mptr: [*]u64 = &tmp_mem.mem;
     const tmp1 = dtoaMalloc(MpbMax, &mptr);
     const mant_max_small = dtoaMalloc(Mpb(MANT_LEN_MAX), &mptr);
@@ -1215,7 +1526,7 @@ fn jsDtoa(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *JS
     const fmt = flags & JS_DTOA_FORMAT_MASK;
 
     if (fmt == JS_DTOA_FORMAT_FREE) {
-        const scale = dtoaShortest(tmp1, m, e, radix, radix1, radix_shift);
+        const scale = if (radix == 10) dtoaShortestDecimal(tmp1, a) else dtoaShortest(tmp1, m, e, radix, radix1, radix_shift);
         P = scale.P;
         E = scale.E;
     } else if (fmt == JS_DTOA_FORMAT_FRAC) {
@@ -1232,6 +1543,25 @@ fn jsDtoa(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *JS
 // atod: digits → f64
 // ============================================================
 
+/// True when all eight bytes of the little-endian word are '0'..'9'.
+inline fn isEightAsciiDigits(v: u64) bool {
+    const a = v +% 0x4646_4646_4646_4646;
+    const b = v -% 0x3030_3030_3030_3030;
+    return ((a | b) & 0x8080_8080_8080_8080) == 0;
+}
+
+/// Value of eight ASCII digits held little-endian in `v` (first byte is the
+/// most significant digit). Standard SWAR reduction: pairs, then quads, then
+/// the two halves. Precondition: `isEightAsciiDigits(v)`.
+inline fn parseEightAsciiDigits(v_in: u64) u64 {
+    var v = v_in -% 0x3030_3030_3030_3030;
+    v = (v * 10) + (v >> 8);
+    const mask: u64 = 0x0000_00ff_0000_00ff;
+    const v1 = (v & mask) *% 0x000f_4240_0000_0064;
+    const v2 = ((v >> 16) & mask) *% 0x0000_2710_0000_0001;
+    return @as(u32, @truncate((v1 +% v2) >> 32));
+}
+
 inline fn toDigit(c: u8) i32 {
     return switch (c) {
         '0'...'9' => @as(i32, c) - '0',
@@ -1241,29 +1571,28 @@ inline fn toDigit(c: u8) i32 {
     };
 }
 
-const AtodExp = struct {
+const ExponentScan = struct {
     p: []const u8,
     expn: i32 = 0,
     overflow: bool = false,
     is_bin_exp: bool = false,
-    invalid: bool = false,
 };
 
-fn parseAtodExponent(
+fn parseExponent(
     p: []const u8,
     p_start: []const u8,
     radix: i32,
     radix_bits: i32,
-    flags: i32,
+    flags: ParseFlags,
     sep: i32,
-) AtodExp {
-    if ((flags & JS_ATOD_INT_ONLY) != 0 or p.len == 0 or p.ptr == p_start.ptr) {
+) ExponentScan {
+    if (flags.int_only or p.len == 0 or p.ptr == p_start.ptr) {
         return .{ .p = p };
     }
 
     const c0 = p[0];
     const has_exp = (radix == 10 and (c0 == 'e' or c0 == 'E')) or
-        (radix != 10 and (c0 == '@' or (radix_bits >= 1 and radix_bits <= 4 and (c0 == 'p' or c0 == 'P'))));
+        (radix != 10 and flags.accept_radix_fraction and (c0 == '@' or (radix_bits >= 1 and radix_bits <= 4 and (c0 == 'p' or c0 == 'P'))));
     if (!has_exp) return .{ .p = p };
 
     var rest = p[1..];
@@ -1274,8 +1603,10 @@ fn parseAtodExponent(
         exp_is_neg = true;
         rest = rest[1..];
     }
+    // js_atof: an exponent marker without digits is not part of the number
+    // (`parseFloat("1e")` is 1); dtoa.c's own `goto fail` never sees it.
     if (rest.len == 0 or toDigit(rest[0]) >= 10) {
-        return .{ .p = rest, .invalid = true };
+        return .{ .p = p };
     }
 
     var expn = toDigit(rest[0]);
@@ -1304,7 +1635,126 @@ fn parseAtodExponent(
     };
 }
 
-fn atodToBits(
+/// Binary64 bits of `mant * 10^exp10` when both operands are exact binary64
+/// values, so the one IEEE operation is the one rounding. Covers every
+/// literal with at most 15 digits and |exp10| <= 22, plus the "disguised"
+/// case where shifting digits into the mantissa keeps it below 2^53.
+fn convertClinger(mant: u64, exp10: i32) ?u64 {
+    const max_mant: u64 = @as(u64, 1) << 53;
+    if (mant > max_mant) return null;
+    var m = mant;
+    var e = exp10;
+    if (e > CLINGER_MAX_EXP10) {
+        // Disguised fast path: move digits from the exponent into the
+        // mantissa while it stays below 2^53. 10^16 already exceeds 2^53,
+        // so larger shifts cannot work (and 10^20 would not fit a u64).
+        const shift = e - CLINGER_MAX_EXP10;
+        if (shift > 15) return null;
+        var pow10: u64 = 1;
+        for (0..@intCast(shift)) |_| pow10 *= 10;
+        const scaled = @mulWithOverflow(m, pow10);
+        if (scaled[1] != 0 or scaled[0] > max_mant) return null;
+        m = scaled[0];
+        e = CLINGER_MAX_EXP10;
+    } else if (e < -CLINGER_MAX_EXP10) {
+        return null;
+    }
+    const f: f64 = @floatFromInt(m);
+    const r = if (e < 0) f / clinger_pow10[@intCast(-e)] else f * clinger_pow10[@intCast(e)];
+    return @bitCast(r);
+}
+
+/// Eisel-Lemire (Lemire 2021, "Number Parsing at a Gigabyte per Second",
+/// sections 5-6): binary64 bits of `w * 10^q` for any 64-bit `w`, or null
+/// when the 128-bit product cannot prove the rounding and the bignum must
+/// decide. Structure follows the reference implementation in fast_float.
+fn convertEiselLemire(q: i32, w_in: u64) ?u64 {
+    const mantissa_bits = 52;
+    const min_exp2 = -1023;
+    const infinite_power = 0x7ff;
+    var w = w_in;
+    if (w == 0 or q < EL_Q_MIN) return 0;
+    if (q > EL_Q_MAX) return @as(u64, infinite_power) << mantissa_bits;
+
+    const lz: u6 = @intCast(@clz(w));
+    w <<= lz;
+
+    // 128-bit approximation of w * 5^q; a second multiply only when the
+    // low word does not settle the bits we keep (mantissa + 3 precision).
+    const mask: u64 = 0xffff_ffff_ffff_ffff >> (mantissa_bits + 3);
+    const pow5 = el_pow5_128[@intCast(q - EL_Q_MIN)];
+    var prod: u128 = @as(u128, w) * pow5[0];
+    var hi: u64 = @truncate(prod >> 64);
+    var lo: u64 = @truncate(prod);
+    if (hi & mask == mask) {
+        prod = @as(u128, w) * pow5[1];
+        const second_hi: u64 = @truncate(prod >> 64);
+        lo +%= second_hi;
+        if (second_hi > lo) hi += 1;
+    }
+    if (lo == 0xffff_ffff_ffff_ffff and (q < -27 or q > 55)) return null;
+
+    const upper_bit: i32 = @intCast(hi >> 63);
+    const drop: u6 = @intCast(upper_bit + 64 - mantissa_bits - 3);
+    var mantissa: u64 = hi >> drop;
+    var power2: i32 = ((q *% (152170 + 65536)) >> 16) + 63 + upper_bit - @as(i32, lz) - min_exp2;
+    if (power2 <= 0) {
+        if (-power2 + 1 >= 64) return 0;
+        mantissa >>= @intCast(-power2 + 1);
+        mantissa += mantissa & 1;
+        mantissa >>= 1;
+        const carried: u64 = @intFromBool(mantissa >= (@as(u64, 1) << mantissa_bits));
+        return (carried << mantissa_bits) | (mantissa & ((@as(u64, 1) << mantissa_bits) - 1));
+    }
+    // Exact halfway between two binary64 values with an even basis: do not
+    // round up. Only possible when 5^q fits in 64 bits (q in [-4, 23]).
+    if (lo <= 1 and q >= -4 and q <= 23 and mantissa & 3 == 1 and (mantissa << drop) == hi) {
+        mantissa &= ~@as(u64, 1);
+    }
+    mantissa += mantissa & 1;
+    mantissa >>= 1;
+    if (mantissa >= (@as(u64, 2) << mantissa_bits)) {
+        mantissa = @as(u64, 1) << mantissa_bits;
+        power2 += 1;
+    }
+    mantissa &= ~(@as(u64, 1) << mantissa_bits);
+    if (power2 >= infinite_power) return @as(u64, infinite_power) << mantissa_bits;
+    return (@as(u64, @intCast(power2)) << mantissa_bits) | mantissa;
+}
+
+/// Replay `digit_count` decimal digits held in `mant` through the same
+/// `mpbMul1Base` calls the limb loop performs (9 digits per limb), leaving the
+/// incomplete trailing group in `cur_limb` / `limb_digit_count` so the caller
+/// can keep appending or flush it. Keeps the bignum state bit-identical to the
+/// upstream loop.
+fn replayMantissa(tmp0: *MpbMax, mant: u64, digit_count: i32, cur_limb: *limb_t, limb_digit_count: *i32) void {
+    const digits_per_limb: i32 = 9;
+    const radix_base: limb_t = 1_000_000_000;
+    var full_limbs = @divTrunc(digit_count, digits_per_limb);
+    const tail_digits = @rem(digit_count, digits_per_limb);
+    const tail_pow: u64 = @intFromFloat(clinger_pow10[@intCast(tail_digits)]);
+    var head: u64 = mant / tail_pow;
+    // Emit the full limbs most significant first.
+    var divisor: u64 = 1;
+    var k: i32 = 1;
+    while (k < full_limbs) : (k += 1) divisor *= radix_base;
+    while (full_limbs > 0) : (full_limbs -= 1) {
+        mpbMul1Base(tmp0, radix_base, @truncate(head / divisor));
+        head %= divisor;
+        divisor /= radix_base;
+    }
+    cur_limb.* = @truncate(mant % tail_pow);
+    limb_digit_count.* = tail_digits;
+}
+
+/// Radix-10 conversion for inputs whose significant digits fit `mant`
+/// (at most FAST_MANTISSA_DIGITS). Null means "let the bignum decide".
+fn convertDecimalFast(mant: u64, exp10: i32) ?u64 {
+    if (convertClinger(mant, exp10)) |bits| return bits;
+    return convertEiselLemire(exp10, mant);
+}
+
+fn convertBignumToBits(
     tmp0: *MpbMax,
     radix: i32,
     radix1: i32,
@@ -1353,21 +1803,21 @@ fn buildFloat64(m: u64, e: i32) u64 {
     return (@as(u64, @intCast(e + 1022)) << 52) | (m & ((@as(u64, 1) << 52) - 1));
 }
 
-fn finishAtod(a: u64, is_neg: i32, p: []const u8, pnext: *?[*]const u8) f64 {
+fn finishParse(a: u64, is_neg: i32, p: []const u8, pnext: *?[*]const u8) f64 {
     var a2 = a;
     a2 |= @as(u64, @intCast(is_neg)) << 63;
     pnext.* = p.ptr;
     return uint64AsFloat64(a2);
 }
 
-/// Inverse of `jsDtoa`. Not a production ToNumber. `parseNumber` uses radix 10
-/// and flags 0; radix / underscore / `0x` arms exist for `formatRadix` round-trip
-/// tests and to keep the dtoa.c port complete.
-fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp_mem: *JSATODTempMem) f64 {
+/// Text -> binary64 kernel (dtoa.c `js_atod` plus the `js_atof` scan rules).
+/// `pnext` receives the first unconsumed byte, or the start of the digits
+/// when nothing parsed (value NaN). Use `parseNumberPrefix`.
+fn textToFloat(str: []const u8, pnext: *?[*]const u8, radix_arg: u8, flags: ParseFlags, tmp_mem: *ParseScratch) f64 {
     var mptr: [*]u64 = &tmp_mem.mem;
     const tmp0 = dtoaMalloc(MpbMax, &mptr);
 
-    var sep: i32 = if ((flags & JS_ATOD_ACCEPT_UNDERSCORES) != 0) @as(i32, '_') else 256;
+    var sep: i32 = if (flags.accept_underscores) @as(i32, '_') else 256;
 
     var p = str;
     var is_neg: i32 = 0;
@@ -1384,18 +1834,20 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
 
     var radix: i32 = radix_arg;
 
-    if (p.len > 0 and p[0] == '0') {
+    // js_atof: a radix prefix after a sign is only for parseInt.
+    const signed = p.ptr != str.ptr;
+    if (p.len > 0 and p[0] == '0' and (!signed or flags.accept_prefix_after_sign)) {
         var no_prefix: bool = false;
         if (p.len >= 2 and (p[1] == 'x' or p[1] == 'X') and (radix == 0 or radix == 16)) {
             p = p[2..];
             radix = 16;
-        } else if (p.len >= 2 and (p[1] == 'o' or p[1] == 'O') and radix == 0 and (flags & JS_ATOD_ACCEPT_BIN_OCT) != 0) {
+        } else if (p.len >= 2 and (p[1] == 'o' or p[1] == 'O') and radix == 0 and flags.accept_bin_oct) {
             p = p[2..];
             radix = 8;
-        } else if (p.len >= 2 and (p[1] == 'b' or p[1] == 'B') and radix == 0 and (flags & JS_ATOD_ACCEPT_BIN_OCT) != 0) {
+        } else if (p.len >= 2 and (p[1] == 'b' or p[1] == 'B') and radix == 0 and flags.accept_bin_oct) {
             p = p[2..];
             radix = 2;
-        } else if (p.len >= 2 and p[1] >= '0' and p[1] <= '9' and radix == 0 and (flags & JS_ATOD_ACCEPT_LEGACY_OCTAL) != 0) {
+        } else if (p.len >= 2 and p[1] >= '0' and p[1] <= '9' and radix == 0 and flags.accept_legacy_octal) {
             sep = 256;
             const i2_end = blk: {
                 var idx: usize = 1;
@@ -1408,15 +1860,18 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
                 p = p[1..];
                 radix = 8;
             }
+        } else {
+            // Plain `0...`: upstream `goto no_prefix` skips the digit-after-prefix check.
+            no_prefix = true;
         }
         if (!no_prefix) {
             if (p.len == 0 or toDigit(p[0]) >= radix) {
-                pnext.* = p_start.ptr;
+                pnext.* = str.ptr;
                 return std.math.nan(f64);
             }
         }
     } else {
-        if ((flags & JS_ATOD_INT_ONLY) == 0) {
+        if (!flags.int_only) {
             if (p.len >= 8 and std.mem.eql(u8, p[0..8], "Infinity")) {
                 p = p[8..];
                 var a_ret: u64 = @as(u64, 0x7ff) << 52;
@@ -1445,9 +1900,13 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
     var extra_digits: limb_t = 0;
     var pos: i32 = 0;
     var dot_pos: i32 = -1;
+    // Radix 10: the first FAST_MANTISSA_DIGITS significant digits live in `mant`;
+    // on the next digit they are replayed into tmp0 exactly as the limb loop
+    // would have built it (two full 9-digit limbs, one digit pending).
+    var mant: u64 = 0;
 
     while (p.len > 0) {
-        if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and (flags & JS_ATOD_INT_ONLY) == 0) {
+        if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and !flags.int_only and (radix == 10 or flags.accept_radix_fraction)) {
             if (dot_pos >= 0) break;
             dot_pos = pos;
             p = p[1..];
@@ -1462,7 +1921,7 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
     const sig_pos = pos;
 
     while (p.len > 0) {
-        if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and (flags & JS_ATOD_INT_ONLY) == 0) {
+        if (p[0] == '.' and (p.ptr != p_start.ptr or (p.len > 1 and toDigit(p[1]) < radix)) and !flags.int_only and (radix == 10 or flags.accept_radix_fraction)) {
             if (dot_pos >= 0) break;
             dot_pos = pos;
             p = p[1..];
@@ -1471,11 +1930,41 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
             p = p[1..];
 
         if (p.len == 0) break;
+        // Radix 10: swallow a run of digit bytes into `mant` while they fit,
+        // eight at a time and then singly. A digit byte is never '.' or the
+        // separator, so this equals the same number of trips through the
+        // generic body below; whatever stops the run is handled there.
+        if (radix == 10) {
+            const run_start = pos;
+            while (p.len >= 8 and digit_count + 8 <= FAST_MANTISSA_DIGITS) {
+                const word = std.mem.readInt(u64, p[0..8], .little);
+                if (!isEightAsciiDigits(word)) break;
+                mant = mant * 100_000_000 + parseEightAsciiDigits(word);
+                digit_count += 8;
+                pos += 8;
+                p = p[8..];
+            }
+            while (p.len > 0 and digit_count < FAST_MANTISSA_DIGITS) {
+                const d = p[0] -% '0';
+                if (d > 9) break;
+                mant = mant * 10 + d;
+                digit_count += 1;
+                pos += 1;
+                p = p[1..];
+            }
+            // Back to the loop head so '.' / separator get their checks.
+            if (pos != run_start) continue;
+        }
         const c = toDigit(p[0]);
         if (c >= radix) break;
         p = p[1..];
         pos += 1;
         if (digit_count < max_digits) {
+            // Radix 10 only reaches here once `mant` is full: hand its digits
+            // to the bignum and continue with the upstream limb scheme.
+            if (radix == 10 and digit_count == FAST_MANTISSA_DIGITS) {
+                replayMantissa(tmp0, mant, digit_count, &cur_limb, &limb_digit_count);
+            }
             cur_limb = cur_limb * @as(limb_t, @intCast(radix)) + @as(limb_t, @intCast(c));
             limb_digit_count += 1;
             if (limb_digit_count == digits_per_limb) {
@@ -1503,19 +1992,30 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
         tmp0.tab[0] |= 1;
     }
 
-    const exp = parseAtodExponent(p, p_start, radix, radix_bits, flags, sep);
-    if (exp.invalid) {
-        pnext.* = p_start.ptr;
-        return std.math.nan(f64);
-    }
+    const exp = parseExponent(p, p_start, radix, radix_bits, flags, sep);
     p = exp.p;
 
     if (p.ptr == p_start.ptr) {
-        pnext.* = p_start.ptr;
+        pnext.* = str.ptr;
         return std.math.nan(f64);
     }
 
-    const a_ret = atodToBits(
+    if (radix == 10 and !is_zero and digit_count <= FAST_MANTISSA_DIGITS) {
+        if (!exp.overflow) {
+            if (convertDecimalFast(mant, exp.expn - expn_offset)) |bits| {
+                return finishParse(bits, is_neg, p, pnext);
+            }
+        }
+        // Bignum must decide: give it the digits the limb loop would have built.
+        var pending_limb: limb_t = 0;
+        var pending_digits: i32 = 0;
+        replayMantissa(tmp0, mant, digit_count, &pending_limb, &pending_digits);
+        if (pending_digits != 0) {
+            mpbMul1Base(tmp0, @truncate(powUi(10, @intCast(pending_digits))), pending_limb);
+        }
+    }
+
+    const a_ret = convertBignumToBits(
         tmp0,
         radix,
         radix1,
@@ -1528,7 +2028,7 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
         exp.is_bin_exp,
         is_zero,
     );
-    return finishAtod(a_ret, is_neg, p, pnext);
+    return finishParse(a_ret, is_neg, p, pnext);
 }
 
 // ============================================================
@@ -1536,36 +2036,18 @@ fn jsAtod(str: []const u8, pnext: *?[*]const u8, radix_arg: i32, flags: i32, tmp
 // ============================================================
 
 test "dtoa functionality" {
-    const n = try parseNumber("12.5");
+    const n = parseNumberExact("12.5", 10, .{}).?;
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("12.5", try formatNumber(&buf, n));
-    try std.testing.expect(std.math.isPositiveInf(try parseNumber("+Infinity")));
+    try std.testing.expect(std.math.isPositiveInf(parseNumberExact("+Infinity", 10, .{}).?));
 }
 
-test "atod underscore separator stops at end of input" {
-    // Regression: the significant-digit loop used to read `p[1]` after seeing the
-    // separator without checking that a second byte exists, so a trailing `_` went
-    // out of bounds once JS_ATOD_ACCEPT_UNDERSCORES was enabled.
-    var tmp_mem: JSATODTempMem = undefined;
-    var parsed_end: ?[*]const u8 = null;
-    const v = jsAtod("1_", &parsed_end, 10, JS_ATOD_ACCEPT_UNDERSCORES, &tmp_mem);
-    try std.testing.expectEqual(@as(f64, 1), v);
-    try std.testing.expectEqual(@as(usize, 1), @intFromPtr(parsed_end.?) - @intFromPtr("1_".ptr));
-}
-
-test "parseNumber rejects trailing junk and empty input" {
-    try std.testing.expectError(error.InvalidCharacter, parseNumber("12.5x"));
-    try std.testing.expectError(error.InvalidCharacter, parseNumber(""));
-    try std.testing.expectError(error.InvalidCharacter, parseNumber("1_000"));
-    try std.testing.expect(std.math.isNan(try parseNumber("NaN")));
-}
-
-test "formatNumber specials and minus zero" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("NaN", try formatNumber(&buf, std.math.nan(f64)));
-    try std.testing.expectEqualStrings("Infinity", try formatNumber(&buf, std.math.inf(f64)));
-    try std.testing.expectEqualStrings("-Infinity", try formatNumber(&buf, -std.math.inf(f64)));
-    try std.testing.expectEqualStrings("0", try formatNumber(&buf, -0.0));
+test "textToFloat underscore separator stops at end of input" {
+    // Regression: `1_` must parse the `1` and stop at `_`, not read past the
+    // end of the slice.
+    const parsed = parseNumberPrefix("1_", 10, .{ .accept_underscores = true });
+    try std.testing.expectEqual(@as(f64, 1), parsed.value);
+    try std.testing.expectEqual(@as(usize, 1), parsed.len);
 }
 
 test "formatInt32 formatInt64" {
@@ -1577,38 +2059,113 @@ test "formatInt32 formatInt64" {
 }
 
 test "formatRadix round-trips odd and power-of-two radices" {
-    const values = [_]f64{ 0.1, 829, std.math.pi, 1.0 / 3.0, -255, 1e-10 };
-    const radices = [_]i32{ 2, 3, 5, 7, 8, 11, 16, 36 };
-    const flags = JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_DISABLED;
-    for (values) |value| {
+    const values = [_]f64{ 0.1, 1.5, 123456.789, -2.5e-7, 1e300, 3.0 };
+    const radices = [_]u8{ 2, 3, 7, 10, 16, 36 };
+    var buf: [2200]u8 = undefined;
+    for (values) |v| {
         for (radices) |radix| {
-            const needed = try radixMaxLen(value, radix, 0, flags);
-            var storage: [2048]u8 = undefined;
-            try std.testing.expect(needed <= storage.len);
-            const text = try formatRadix(storage[0..needed], value, radix, 0, flags);
-            var tmp_mem: JSATODTempMem = undefined;
-            var parsed_end: ?[*]const u8 = null;
-            const back = jsAtod(text, &parsed_end, radix, 0, &tmp_mem);
-            try std.testing.expectEqual(value, back);
+            const text = try formatRadix(&buf, v, radix, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO);
+            const back = parseNumberExact(text, radix, .{ .accept_radix_fraction = true }).?;
+            try std.testing.expectEqual(v, back);
         }
     }
 }
 
 test "formatDtoaChecked FRAC FIXED and EXP" {
     var buf: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("1.3", try formatDtoaChecked(&buf, 1.25, 1, JS_DTOA_FORMAT_FRAC));
-    try std.testing.expectEqualStrings("1.250", try formatDtoaChecked(&buf, 1.25, 3, JS_DTOA_FORMAT_FRAC));
-    try std.testing.expectEqualStrings("1.25e+0", try formatDtoaChecked(&buf, 1.25, 3, JS_DTOA_FORMAT_FIXED | JS_DTOA_EXP_ENABLED));
-    try std.testing.expectError(error.NoSpaceLeft, formatDtoaChecked(buf[0..2], 1.25, 3, JS_DTOA_FORMAT_FRAC));
+    try std.testing.expectEqualStrings("1.50", try formatDtoaChecked(&buf, 1.5, 2, JS_DTOA_FORMAT_FRAC));
+    try std.testing.expectEqualStrings("1.2e+2", try formatDtoaChecked(&buf, 123.0, 2, JS_DTOA_FORMAT_FIXED | JS_DTOA_EXP_ENABLED));
+    try std.testing.expectEqualStrings("123", try formatDtoaChecked(&buf, 123.0, 3, JS_DTOA_FORMAT_FIXED | JS_DTOA_EXP_DISABLED));
 }
 
-test "jsAtod accepts 0x 0b 0o when flagged" {
-    var tmp_mem: JSATODTempMem = undefined;
-    var parsed_end: ?[*]const u8 = null;
-    const hex = jsAtod("0x10", &parsed_end, 0, JS_ATOD_ACCEPT_BIN_OCT, &tmp_mem);
-    try std.testing.expectEqual(@as(f64, 16), hex);
-    const bin = jsAtod("0b1010", &parsed_end, 0, JS_ATOD_ACCEPT_BIN_OCT, &tmp_mem);
-    try std.testing.expectEqual(@as(f64, 10), bin);
-    const oct = jsAtod("0o17", &parsed_end, 0, JS_ATOD_ACCEPT_BIN_OCT, &tmp_mem);
-    try std.testing.expectEqual(@as(f64, 15), oct);
+test "decimal fast path agrees with the correctly rounded reference" {
+    // Clinger, disguised Clinger, Eisel-Lemire, its bignum fallback (exact
+    // halfway cases), subnormal boundaries, and the 19/20-digit spill.
+    const cases = [_][]const u8{
+        "7",                                                       "12345",                   "3.14159",
+        "0.1",                                                     "1e-7",                    "2.718281828459045",
+        "123e25",                                                  "9007199254740993",        "9007199254740992.5",
+        "1.7976931348623157e308",                                  "1.7976931348623158e308",  "1.7976931348623159e308",
+        "4.9406564584124654e-324",                                 "2.4703282292062327e-324", "2.4703282292062328e-324",
+        "2.2250738585072011e-308",                                 "2.2250738585072012e-308", "8.98846567431158e307",
+        "1e23",                                                    "1.0000000000000002",      "0.30000000000000004",
+        "1234567890123456789",                                     "12345678901234567890",    "1234567890123456789012345678901234567890",
+        "1.00000000000000011102230246251565404236316680908203125", "1e-400",                  "1e400",
+        "0.000000000000000000000000000000000000001",               "5e42",                    "1e37",
+        "9007199254740991e38",                                     "123e30",
+    };
+    for (cases) |text| {
+        const expected = try std.fmt.parseFloat(f64, text);
+        const got = parseNumberExact(text, 10, .{}).?;
+        try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(got)));
+    }
+}
+
+test "parseNumberPrefix follows js_atof scan rules" {
+    // Stops at the first byte that cannot continue the number.
+    const a = parseNumberPrefix("12.5e3xyz", 10, .{});
+    try std.testing.expectEqual(@as(f64, 12500), a.value);
+    try std.testing.expectEqual(@as(usize, 6), a.len);
+    // Exponent marker without digits is not consumed.
+    const b = parseNumberPrefix("1e", 10, .{});
+    try std.testing.expectEqual(@as(f64, 1), b.value);
+    try std.testing.expectEqual(@as(usize, 1), b.len);
+    // int_only: the dot is not consumed.
+    const c = parseNumberPrefix("42.5", 10, .{ .int_only = true });
+    try std.testing.expectEqual(@as(f64, 42), c.value);
+    try std.testing.expectEqual(@as(usize, 2), c.len);
+    // Negative zero survives the fast path.
+    const z = parseNumberPrefix("-0.0", 10, .{});
+    try std.testing.expect(z.value == 0 and std.math.signbit(z.value));
+    // Prefix after a sign only with the parseInt flag.
+    try std.testing.expectEqual(@as(usize, 2), parseNumberPrefix("-0x10", 0, .{}).len);
+    try std.testing.expectEqual(@as(f64, -16), parseNumberPrefix("-0x10", 0, .{ .accept_prefix_after_sign = true }).value);
+    // Fraction only in radix 10 unless asked for.
+    try std.testing.expectEqual(@as(usize, 3), parseNumberPrefix("0x1.8", 0, .{}).len);
+    try std.testing.expectEqual(@as(f64, 1.5), parseNumberExact("0x1.8", 0, .{ .accept_radix_fraction = true }).?);
+    // Plain leading zero is a number, not a prefix.
+    try std.testing.expectEqual(@as(f64, 0), parseNumberExact("0", 0, .{}).?);
+    try std.testing.expectEqual(@as(f64, 0.5), parseNumberExact("0.5", 0, .{ .accept_bin_oct = true }).?);
+    try std.testing.expectEqual(@as(f64, 10), parseNumberExact("010", 0, .{ .accept_bin_oct = true }).?);
+    // Nothing to parse.
+    try std.testing.expectEqual(@as(usize, 0), parseNumberPrefix("-", 10, .{}).len);
+    try std.testing.expectEqual(@as(usize, 0), parseNumberPrefix(".", 10, .{}).len);
+    try std.testing.expectEqual(@as(usize, 0), parseNumberPrefix("", 10, .{}).len);
+    try std.testing.expectEqual(@as(usize, 0), parseNumberPrefix("0x", 0, .{}).len);
+    // Prefix grammars.
+    try std.testing.expectEqual(@as(f64, 10), parseNumberExact("0b1010", 0, .{ .accept_bin_oct = true }).?);
+    try std.testing.expectEqual(@as(f64, 15), parseNumberExact("0o17", 0, .{ .accept_bin_oct = true }).?);
+    try std.testing.expectEqual(@as(f64, 511), parseNumberExact("0777", 0, .{ .accept_legacy_octal = true }).?);
+    try std.testing.expectEqual(@as(f64, 89), parseNumberExact("089", 0, .{ .accept_legacy_octal = true }).?);
+    try std.testing.expectEqual(@as(f64, 1000.5), parseNumberExact("1_000.5", 10, .{ .accept_underscores = true }).?);
+    try std.testing.expect(parseNumberExact("1_000", 10, .{}) == null);
+}
+
+test "shortest decimal is Ryu-exact and round-trips" {
+    var buf: [64]u8 = undefined;
+    // Asymmetric interval on a power of two: 16 digits suffice (qjs prints 17).
+    const p = std.math.ldexp(@as(f64, 1), -1017);
+    try std.testing.expectEqualStrings("7.120236347223045e-307", try formatNumber(&buf, p));
+    try std.testing.expectEqual(p, parseNumberExact("7.120236347223045e-307", 10, .{}).?);
+    // Layout thresholds and classic cases.
+    try std.testing.expectEqualStrings("1e+21", try formatNumber(&buf, 1e21));
+    try std.testing.expectEqualStrings("100000000000000000000", try formatNumber(&buf, 1e20));
+    try std.testing.expectEqualStrings("1e-7", try formatNumber(&buf, 1e-7));
+    try std.testing.expectEqualStrings("0.000001", try formatNumber(&buf, 1e-6));
+    var tenth: f64 = 0.1;
+    _ = &tenth;
+    try std.testing.expectEqualStrings("0.30000000000000004", try formatNumber(&buf, tenth + 0.2));
+    try std.testing.expectEqualStrings("5e-324", try formatNumber(&buf, 5e-324));
+    try std.testing.expectEqualStrings("1.7976931348623157e+308", try formatNumber(&buf, std.math.floatMax(f64)));
+    try std.testing.expectEqualStrings("9007199254740992", try formatNumber(&buf, 9007199254740992));
+    try std.testing.expectEqualStrings("-2.5", try formatNumber(&buf, -2.5));
+    // Every printed double parses back to itself.
+    var prng = std.Random.DefaultPrng.init(7);
+    const r = prng.random();
+    for (0..20000) |_| {
+        const v: f64 = @bitCast(r.int(u64));
+        if (!std.math.isFinite(v)) continue;
+        const text = try formatNumber(&buf, v);
+        try std.testing.expectEqual(v, parseNumberExact(text, 10, .{}).?);
+    }
 }

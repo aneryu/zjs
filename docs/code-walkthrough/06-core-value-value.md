@@ -447,7 +447,7 @@
 
 Number/BigInt 解析与格式化辅助层。Number 输出通常借用调用方缓冲；BigInt 克隆或十进制输出可能分配。容量、语法过滤和大整数转浮点的边界见各函数，不能由名称推导完整规范保证。
 
-`parseAsciiIntI128` 是 `parseAsciiInt` 的 outlined 走步；`parseRadixPrefixedDigits` 是 `parseJsNumberTrimmed` 的 `0x`/`0o`/`0b` outlined 走步。两者都在清单里。
+`parseAsciiIntI128` 是 `parseAsciiInt` 的 outlined 走步；`parseJsNumberTrimmed` 的数字语法整个交给 `libs/number_format.parseNumberExact`。
 
 ### `formatFiniteNumber` (`src/core/value_format.zig:16`)
 
@@ -505,89 +505,68 @@ Number/BigInt 解析与格式化辅助层。Number 输出通常借用调用方�
 - **实现**：先 trimJsWhitespaceLatin1，再调用与 UTF-8 入口相同的 parseJsNumberTrimmed。
 - **所有权 / 错误 / 调用**：不把 Latin1 字节转换为 UTF-8；无分配，失败返回 NaN。
 
-### `parseJsNumberTrimmed` (`src/core/value_format.zig:82`)
+### `parseJsNumberTrimmed` (`src/core/value_format.zig:85`)
 
 - **签名**：`fn parseJsNumberTrimmed(trimmed: []const u8) f64`。
-- **作用**：解析已去除首尾空白的数值文本。
-- **实现**：空串为 0；含下划线或带符号 radix 前缀为 NaN；精确识别 Infinity/+Infinity/-Infinity；无符号 0x/0o/0b（大小写均可）使用 radix helper。其余交给 std.fmt.parseFloat，错误变 NaN；若得到无穷且符号后的首字符是 ASCII 字母，也变 NaN。
-- **所有权 / 错误 / 调用**：无分配。普通数字语法依赖标准库及这些过滤条件，本函数没有独立实现完整的 ECMAScript 数值字符串语法验证。
+- **作用**：去掉首尾空白后的 StringToNumber，对齐 qjs `JS_ToNumberHintFree` 字符串臂。
+- **实现**：空串为 0；`number_format.parseNumberExact(trimmed, 0, .{ .accept_bin_oct = true })`，没吃完整串为 NaN。符号后不认前缀（`-0x10` → NaN）、`Infinity` 精确匹配、`1e` / `0x1.8` / 下划线都由内核规则拒绝。
+- **所有权 / 错误 / 调用**：无分配。语法完全由 `textToFloat` 定义，本文件不再有第二套过滤条件。
 
-### `formatSimpleFiniteDecimal` (`src/core/value_format.zig:102`)
+### `formatSimpleFiniteDecimal` (`src/core/value_format.zig:90`)
 
 - **签名**：`fn formatSimpleFiniteDecimal(buffer: []u8, value: f64) ?[]const u8`。
 - **作用**：尝试写出整数或只有一位小数的简单十进制表示。
 - **实现**：拒绝零、非有限数及绝对值不在 [1e-6,1e21) 的数；要求 value×10 为绝对值≤2^53−1 的整数，且整数转回 f64 后除 10 等于原值。按符号、整数和非零小数位写出；整数分支先要求 sign_len+20 字节，是保守容量条件。
 - **所有权 / 错误 / 调用**：成功返回 buffer 子切片；不适用或容量不足返回 null，写入前完成容量检查。外层 fallback 并不因此具备小缓冲错误保护。
 
-### `trimJsWhitespace` (`src/core/value_format.zig:156`)
+### `trimJsWhitespace` (`src/core/value_format.zig:144`)
 
 - **签名**：`pub fn trimJsWhitespace(bytes: []const u8) []const u8`。
 - **作用**：按已列举的空白字节序列裁剪首尾。
 - **实现**：前向反复调用 prefix helper，再后向调用 suffix helper；覆盖 ASCII 09–0D/20、NBSP、U+1680、U+2000–200A、U+2028/2029、U+202F、U+205F、U+3000、U+FEFF 的 UTF-8 序列，也接受裸 A0。
 - **所有权 / 错误 / 调用**：返回借用子切片，不分配、不验证完整 UTF-8；内部非空白内容保持不变。
 
-### `trimJsWhitespaceLatin1` (`src/core/value_format.zig:174`)
+### `trimJsWhitespaceLatin1` (`src/core/value_format.zig:162`)
 
 - **签名**：`pub fn trimJsWhitespaceLatin1(bytes: []const u8) []const u8`。
 - **作用**：裁剪 Latin1 输入两端的空白字节。
 - **实现**：从两端逐字节检查 isJsWhitespaceLatin1Byte；只接受 09–0D、20、A0。
 - **所有权 / 错误 / 调用**：返回借用子切片；不进行 UTF-8 多字节解码，不分配。
 
-### `isJsWhitespaceLatin1Byte` (`src/core/value_format.zig:188`)
+### `isJsWhitespaceLatin1Byte` (`src/core/value_format.zig:176`)
 
 - **签名**：`inline fn isJsWhitespaceLatin1Byte(byte: u8) bool`。
 - **作用**：判断一个 Latin1 字节是否属于支持的空白集合。
 - **实现**：09–0D、20、A0 为 true，其他为 false。
 - **所有权 / 错误 / 调用**：纯值判断，供 Latin1 trim 两端循环使用。
 
-### `jsWhitespacePrefixLen` (`src/core/value_format.zig:195`)
+### `jsWhitespacePrefixLen` (`src/core/value_format.zig:183`)
 
 - **签名**：`fn jsWhitespacePrefixLen(bytes: []const u8) ?usize`。
 - **作用**：返回受支持空白前缀的字节宽度。
 - **实现**：先按首字节分派，ASCII/裸 A0 返回 1，C2 A0 返回 2，所列三字节 Unicode 空白返回 3。
 - **所有权 / 错误 / 调用**：空输入或不匹配返回 null；只做序列匹配，不是通用 UTF-8 解码器。
 
-### `jsWhitespaceSuffixLen` (`src/core/value_format.zig:213`)
+### `jsWhitespaceSuffixLen` (`src/core/value_format.zig:201`)
 
 - **签名**：`fn jsWhitespaceSuffixLen(bytes: []const u8) ?usize`。
 - **作用**：返回受支持空白后缀的字节宽度。
 - **实现**：从末尾检查同一空白集合；先匹配 C2 A0 再处理裸 A0，避免只剥掉 UTF-8 NBSP 的最后一个字节。
 - **所有权 / 错误 / 调用**：空输入或不匹配返回 null；不分配，也不验证整段编码。
 
-### `startsWith` (`src/core/value_format.zig:230`)
+### `startsWith` (`src/core/value_format.zig:218`)
 
 - **签名**：`fn startsWith(bytes: []const u8, prefix: []const u8) bool`。
 - **作用**：按字节检查前缀相等。
 - **实现**：先检查长度，再对开头切片使用 std.mem.eql。
 - **所有权 / 错误 / 调用**：借用输入，无分配；空 prefix 匹配任何输入。
 
-### `endsWith` (`src/core/value_format.zig:234`)
+### `endsWith` (`src/core/value_format.zig:222`)
 
 - **签名**：`fn endsWith(bytes: []const u8, suffix: []const u8) bool`。
 - **作用**：按字节检查后缀相等。
 - **实现**：先检查长度，再对末尾切片使用 std.mem.eql。
 - **所有权 / 错误 / 调用**：借用输入，无分配；空 suffix 匹配任何输入。
-
-### `parseRadixPrefixedDigits` (`src/core/value_format.zig:244`)
-
-- **签名**：`noinline fn parseRadixPrefixedDigits(digits: []const u8, radix: u8) f64`。
-- **作用**：解析去掉 radix 前缀后的数字。
-- **实现**：空串为 NaN；仅识别 0–9/a–f/A–F，非法字符或 digit≥radix 为 NaN。先以 u128 检查乘加溢出；未溢出时最后一次转 f64。首次溢出先转换此前整数，再从当前 digit 开始以 f64 乘加累计。
-- **所有权 / 错误 / 调用**：无分配；调用点传 2/8/16。超过 u128 后存在逐步浮点舍入，可溢出为 Infinity；不能把该分支描述成对任意长度整数做一次正确舍入。
-
-### `hasSignedRadixPrefix` (`src/core/value_format.zig:275`)
-
-- **签名**：`fn hasSignedRadixPrefix(bytes: []const u8) bool`。
-- **作用**：识别符号后紧跟 0x/0o/0b 的文本。
-- **实现**：要求长度≥3、首字节为 + 或 −、第二字节为 0，第三字节为大小写 x/o/b。
-- **所有权 / 错误 / 调用**：不检查后续数字是否存在或合法；外层对匹配结果返回 NaN。
-
-### `beginsWithAsciiAlphaAfterSign` (`src/core/value_format.zig:280`)
-
-- **签名**：`fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool`。
-- **作用**：检查可选符号后的首字符是否为 ASCII 字母。
-- **实现**：跳过一个 +/−，检查是否位于 a–z/A–Z；空串和仅符号为 false。
-- **所有权 / 错误 / 调用**：不验证整个单词；外层仅在 parseFloat 结果为无穷时使用，精确 Infinity 形式已提前处理。
 
 ## `src/core/value_string.zig`
 

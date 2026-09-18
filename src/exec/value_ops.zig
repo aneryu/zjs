@@ -497,12 +497,13 @@ pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
 
 pub const numberValue = core.number.numberValue;
 
+/// qjs `js_bigint_to_float64`: one correctly rounded conversion from the
+/// limbs, no decimal round trip.
 pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
+    if (value.as(.short_big_int)) |short| return @floatFromInt(short);
     var bigint = try cloneBigIntValue(rt, value);
     defer bigint.deinit();
-    const text = try bigint.formatBase10Alloc(rt.memory.allocator);
-    defer rt.memory.allocator.free(text);
-    return std.fmt.parseFloat(f64, text);
+    return bigint.toFloat64();
 }
 
 pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {

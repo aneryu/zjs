@@ -283,8 +283,8 @@ stringify：replacer/gap/propertyList；循环检测 `objectInStack`；简单无
 
 - **签名**：`fn parseNumber(self: *Self) !core.JSValue`。
 - **作用**：按 JSON 的严格数字文法读一个数，定成 int32 或 float64。
-- **实现**：按 JSON 严格数字文法扫描：可选 `-`、整数部分 `0 | [1-9][0-9]*`、可选小数部分（`.` 后至少一位）、可选指数（`e`/`E` 加可选符号、至少一位），任一处不满足即 `error.SyntaxError`。扫描完把码元拷成 ASCII 再定值：没有小数/指数时先试 `core.value_format.parseAsciiInt(i64, ...)`，落在 i32 范围且不是 `-0` 就返回 `int32`，否则 `float64`；其余交 `std.fmt.parseFloat`，失败为 `error.SyntaxError`。 关键调用：`core.value_format.parseAsciiInt`、`std.fmt.parseFloat`。
-- **所有权 / 错误 / 调用**：`ascii` 临时列表 `defer deinit`；返回的是立即数（int32 或 float64），不建 GC 对象。error：文法错误与 `parseFloat` 失败都是裸 `error.SyntaxError`，外加 `ensureTotalCapacity` 的 OOM。唯一调用方 `parseValueRecord` 的 `-` / 数字臂（566）。
+- **实现**：按 JSON 严格数字文法扫描：可选 `-`、整数部分 `0 | [1-9][0-9]*`、可选小数部分（`.` 后至少一位）、可选指数（`e`/`E` 加可选符号、至少一位），任一处不满足即 `error.SyntaxError`。扫描完把码元拷成 ASCII 再定值：没有小数/指数时先试 `core.value_format.parseAsciiInt(i64, ...)`，落在 i32 范围且不是 `-0` 就返回 `int32`，否则 `float64`；其余交 `number_format.parseNumberExact(text, 10, .{})`，null 为 `error.SyntaxError`。 关键调用：`core.value_format.parseAsciiInt`、`number_format.parseNumberExact`。
+- **所有权 / 错误 / 调用**：`ascii` 临时列表 `defer deinit`；返回的是立即数（int32 或 float64），不建 GC 对象。error：文法错误与内核拒绝都是裸 `error.SyntaxError`，外加 `ensureTotalCapacity` 的 OOM。唯一调用方 `parseValueRecord` 的 `-` / 数字臂（566）。
 
 ### `jsonHexDigit` (`src/exec/json_ops.zig:848`)
 
@@ -1283,17 +1283,17 @@ setter 先经 `captureDateValueMs`（getTime 记录）抓 `[[DateValue]]`，再 
 
 - **签名**：`fn toNumber(value: core.JSValue) ?f64`。
 - **作用**：Date 纯函数体内部用的非 VM ToNumber：只处理不会回调 JS 的原始值。
-- **实现**：symbol 与 bigint 返回 null，调用方据此抛 TypeError（对应 qjs `JS_ToFloat64` 的 "cannot convert bigint to number"）；数字直接取值，布尔 → 1/0，null → 0，undefined → NaN；字符串先经 `appendStringValueAscii` 写进 128 字节栈缓冲，去掉首尾空白后空串为 0，其余 `std.fmt.parseFloat`，失败为 NaN。 关键调用：`numberValue`、`appendStringValueAscii`、`std.fmt.parseFloat`。
+- **实现**：symbol 与 bigint 返回 null，调用方据此抛 TypeError（对应 qjs `JS_ToFloat64` 的 "cannot convert bigint to number"）；数字直接取值，布尔 → 1/0，null → 0，undefined → NaN；字符串先经 `appendStringValueAscii` 写进 128 字节栈缓冲，再 `core.value_format.parseJsNumber`（去 JS 空白、空串为 0、失败为 NaN）。 关键调用：`numberValue`、`appendStringValueAscii`、`core.value_format.parseJsNumber`。
 - **所有权 / 错误 / 调用**：128 字节的 `scratch` 在栈上、用完即弃，不分配。`null` 是「这个值不能在无 VM 的路径上取数」的哨兵（symbol / bigint），各调用点统一翻成 `error.TypeError`，对应 qjs `JS_ToFloat64` 的「cannot convert bigint to number」。字符串分支不回调 JS，也不处理非 ASCII——`appendStringValueAscii` 失败就整体判 NaN。调用方：`constructWithPrototype`（728）、`setDateFieldBody`（839）、`setYear`（854）、`setTime`（877）、`utc`（900）、`constructDateFromParts`（912）。
 
-### `appendStringValueAscii` (`src/exec/date_ops.zig:1793`)
+### `appendStringValueAscii` (`src/exec/date_ops.zig:1790`)
 
 - **签名**：`fn appendStringValueAscii(writer: *std.Io.Writer, value: core.JSValue) !void`。
 - **作用**：把字符串值按 ASCII 写进固定 writer，供无 VM 的 `toNumber` 解析数字文本。
 - **实现**：非字符串值静默返回（什么也不写）。latin1 直接 `writeAll` 整段；utf16 逐单元检查 `> 0x7f` 即 `error.TypeError`（非 ASCII 不可能是合法数字文本），否则窄化成字节写出。
 - **所有权 / 错误 / 调用**：只往调用方给的固定缓冲 writer 写，不分配。唯一调用方是 `toNumber` 的字符串分支：写满 128 字节缓冲或遇非 ASCII 都会失败，此时 `toNumber` 直接判 NaN。
 
-### `currentTimeMs` (`src/exec/date_ops.zig:1806`)
+### `currentTimeMs` (`src/exec/date_ops.zig:1803`)
 
 - **签名**：`fn currentTimeMs() f64`。
 - **作用**：取宿主当前时间（epoch 毫秒）。

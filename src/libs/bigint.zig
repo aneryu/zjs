@@ -315,6 +315,40 @@ pub const BigInt = struct {
         return self.limbs[0];
     }
 
+    /// Round to nearest, ties to even, ±Infinity when too large. Mirrors qjs
+    /// `js_bigint_to_float64` (quickjs.c:12258) on sign-magnitude limbs: the
+    /// top 64 bits carry a sticky bit for everything below, then one
+    /// rounding to 53 bits. No decimal detour, so exact for every size.
+    pub fn toFloat64(self: BigInt) f64 {
+        const n = self.limbs.len;
+        if (n == 0) return 0;
+        if (n == 1) {
+            const v: f64 = @floatFromInt(self.limbs[0]);
+            return if (self.negative) -v else v;
+        }
+        var sticky: Limb = 0;
+        for (self.limbs[0 .. n - 2]) |limb| sticky |= limb;
+        const a1 = self.limbs[n - 1];
+        const a0 = self.limbs[n - 2] | @intFromBool(sticky != 0);
+        const shift: u6 = @intCast(@clz(a1));
+        var mant: u64 = if (shift == 0) a1 else (a1 << shift) | (a0 >> @intCast(64 - @as(u7, shift)));
+        const low: u64 = if (shift == 0) a0 else a0 << shift;
+        mant |= @intFromBool(low != 0);
+        var e: i32 = @intCast(self.bitLengthAbs() - 1);
+        const sign: u64 = @intFromBool(self.negative);
+        if (e > 1023) return @bitCast((sign << 63) | (@as(u64, 0x7ff) << 52));
+        // 63 bits with sticky, then shr_rndn by 10 -> 53 bits (ties to even).
+        mant = (mant >> 1) | (mant & 1);
+        const addend: u64 = ((mant >> 10) & 1) + ((1 << 9) - 1);
+        mant = (mant + addend) >> 10;
+        if (mant >= (@as(u64, 1) << 53)) {
+            mant >>= 1;
+            e += 1;
+        }
+        mant &= (@as(u64, 1) << 52) - 1;
+        return @bitCast((sign << 63) | (@as(u64, @intCast(e + 1023)) << 52) | mant);
+    }
+
     pub fn bitLengthAbs(self: BigInt) usize {
         if (self.limbs.len == 0) return 0;
         const top = self.limbs[self.limbs.len - 1];
@@ -1863,4 +1897,25 @@ test "reciprocal two-by-one division is exactly the wide division" {
         const low = random.int(Limb);
         try Case.check(high, low, divisor);
     }
+}
+
+test "toFloat64 rounds to nearest even and overflows to infinity" {
+    const allocator = std.testing.allocator;
+    // 2^1024 - 2^970: exactly halfway between MAX_VALUE and 2^1024, ties to even -> Infinity.
+    var half = [_]Limb{0} ** 16;
+    half[15] = 0xFFFFFFFFFFFFFC00;
+    try std.testing.expect(std.math.isPositiveInf((BigInt{ .limbs = &half, .allocator = allocator }).toFloat64()));
+    try std.testing.expect(std.math.isNegativeInf((BigInt{ .limbs = &half, .negative = true, .allocator = allocator }).toFloat64()));
+    // One below the halfway point rounds down to MAX_VALUE.
+    var below = [_]Limb{0xFFFFFFFFFFFFFFFF} ** 16;
+    below[15] = 0xFFFFFFFFFFFFFBFF;
+    try std.testing.expectEqual(std.math.floatMax(f64), (BigInt{ .limbs = &below, .allocator = allocator }).toFloat64());
+    // (2^53 + 1) * 2^100 + 1: above the halfway point, rounds up.
+    var above = [_]Limb{ 1, (9007199254740993 << 36) & 0xFFFFFFFFFFFFFFFF, 9007199254740993 >> 28 };
+    const expected = @as(f64, 9007199254740994) * std.math.pow(f64, 2, 100);
+    try std.testing.expectEqual(expected, (BigInt{ .limbs = &above, .allocator = allocator }).toFloat64());
+    // Single limb is a plain int -> double conversion.
+    var one = [_]Limb{9007199254740993};
+    try std.testing.expectEqual(@as(f64, 9007199254740992), (BigInt{ .limbs = &one, .allocator = allocator }).toFloat64());
+    try std.testing.expectEqual(@as(f64, 0), (BigInt{ .allocator = allocator }).toFloat64());
 }

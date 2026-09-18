@@ -11130,14 +11130,8 @@ pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !Type
     if (name.len == 0) return .none;
     if (std.mem.eql(u8, name, "-0")) return .invalid;
 
-    const number: f64 = if (std.mem.eql(u8, name, "NaN"))
-        std.math.nan(f64)
-    else if (std.mem.eql(u8, name, "Infinity"))
-        std.math.inf(f64)
-    else if (std.mem.eql(u8, name, "-Infinity"))
-        -std.math.inf(f64)
-    else
-        std.fmt.parseFloat(f64, name) catch return .none;
+    // CanonicalNumericIndexString: ToString(ToNumber(name)) must give name back.
+    const number: f64 = value_format.parseJsNumber(name);
 
     var buf: [64]u8 = undefined;
     const printed = if (std.math.isNan(number))
@@ -11311,15 +11305,7 @@ fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
         if (unit > 0x7f) return std.math.nan(f64);
         bytes.appendAssumeCapacity(@intCast(unit));
     }
-    const trimmed = std.mem.trim(u8, bytes.items, " \t\r\n");
-    if (trimmed.len == 0) return 0;
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'x' or trimmed[1] == 'X')) {
-        const parsed = std.fmt.parseUnsigned(u64, trimmed[2..], 16) catch return std.math.nan(f64);
-        return @floatFromInt(parsed);
-    }
-    return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+    return value_format.parseJsNumber(bytes.items);
 }
 
 fn varRefCellFromValue(value: JSValue) ?*var_ref_mod.VarRef {

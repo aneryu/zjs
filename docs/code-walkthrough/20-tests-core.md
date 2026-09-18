@@ -698,42 +698,42 @@
 - **实现**：用 `rt.memory.alloc(core.Atom, 1)` 分配一格并填入 `core.atom.ids.length`，即这个 exotic 钩子恒报「只有一个 own key：`length`」；切片由调用方按 `rt.memory` 释放。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `![]core.Atom`，由测试 `try`/`expectError` 消费。
 
-### `PoisonAllocator.alloc` (`src/libs/bigint.zig:1259`)
+### `PoisonAllocator.alloc` (`src/libs/bigint.zig:1293`)
 
 - **签名**：`fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `PoisonAllocator.alloc`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：向 backing 取内存，成功后用 `@memset(ptr[0..len], 0xa5)` 把新分配整块涂成非零模式——basecase 乘法漏写或先读后写的限位会因此改变乘积。关键调用：`self.backing.rawAlloc`、`@memset`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.resize` (`src/libs/bigint.zig:1265`)
+### `PoisonAllocator.resize` (`src/libs/bigint.zig:1299`)
 
 - **签名**：`fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool`。
 - **作用**：测试夹具/探针 `PoisonAllocator.resize`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：不做涂写，原样转发 `self.backing.rawResize(buf, alignment, new_len, ra)`（原地扩缩不产生新的未初始化字节）。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.remap` (`src/libs/bigint.zig:1269`)
+### `PoisonAllocator.remap` (`src/libs/bigint.zig:1303`)
 
 - **签名**：`fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `PoisonAllocator.remap`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：原样转发 `self.backing.rawRemap(buf, alignment, new_len, ra)`，不涂写。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.free` (`src/libs/bigint.zig:1273`)
+### `PoisonAllocator.free` (`src/libs/bigint.zig:1307`)
 
 - **签名**：`fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void`。
 - **作用**：测试夹具/探针 `PoisonAllocator.free`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：原样转发 `self.backing.rawFree(buf, alignment, ra)`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.allocator` (`src/libs/bigint.zig:1277`)
+### `PoisonAllocator.allocator` (`src/libs/bigint.zig:1311`)
 
 - **签名**：`fn allocator(self: *PoisonAllocator) std.mem.Allocator`。
 - **作用**：测试夹具/探针 `PoisonAllocator.allocator`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `self` 和 alloc/resize/remap/free 四个函数组出 `std.mem.Allocator`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `referenceMul` (`src/libs/bigint.zig:1286`)
+### `referenceMul` (`src/libs/bigint.zig:1320`)
 
 - **签名**：`fn referenceMul(alloc: std.mem.Allocator, lhs: []const engine.libs.bigint.Limb, rhs: []const engine.libs.bigint.Limb) ![]engine.libs.bigint.Limb`。
 - **作用**：Deliberately zero-initialized schoolbook multiply, kept in the test rather than in the kernel: it is the thing the production path stopped doing, so it has to exist somewhere independent to compare against. Returns unnormalized limbs with trailing zeros stripped, matching what `mulAlloc` returns.。
@@ -761,56 +761,56 @@
 - **实现**：按 comptime 的 `want_inline` 走两条路：内联路径 `core.bigint.BigInt.createInlineUninitialized(rt, limbs.len)` 开一个未初始化内联 BigInt，`@memcpy(big.capacitySliceMut(), limbs)` 灌数据后 `big.publishInline(limbs.len, negative)` 发布；外部路径先用 `@constCast(limbs)` 拼一个借用式 `bigint.BigInt`（allocator 取 `rt.memory.allocator`），再交给 `core.bigint.BigInt.createFromBigInt(rt, owned)` 造出外部存储形态。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!*core.bigint.BigInt`，由测试 `try`/`expectError` 消费。
 
-### `DivFailAllocator.allocator` (`src/libs/bigint.zig:1323`)
+### `DivFailAllocator.allocator` (`src/libs/bigint.zig:1357`)
 
 - **签名**：`fn allocator(self: *DivFailAllocator) std.mem.Allocator`。
 - **作用**：测试夹具/探针 `DivFailAllocator.allocator`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `self` 和 alloc/resize/remap/free 四个函数组出 `std.mem.Allocator`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.alloc` (`src/libs/bigint.zig:1332`)
+### `DivFailAllocator.alloc` (`src/libs/bigint.zig:1366`)
 
 - **签名**：`fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `DivFailAllocator.alloc`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：两条拒绝路径优先于转发：`refuse_next_alloc` 置位时消费掉该标志、置 `induced` 并返回 null；否则按 `alloc_attempts` 编号，编号等于 `fail_alloc_index` 时同样置 `induced` 返回 null。都不命中才转发 backing，并给 `live` 加一。关键调用：`self.backing.rawAlloc`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.resize` (`src/libs/bigint.zig:1352`)
+### `DivFailAllocator.resize` (`src/libs/bigint.zig:1386`)
 
 - **签名**：`fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool`。
 - **作用**：测试夹具/探针 `DivFailAllocator.resize`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：`fail_shrink` 且 `new_len < memory.len` 时直接返回 false，其余转发 backing。关键调用：`self.backing.rawResize`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.remap` (`src/libs/bigint.zig:1358`)
+### `DivFailAllocator.remap` (`src/libs/bigint.zig:1392`)
 
 - **签名**：`fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `DivFailAllocator.remap`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：`fail_shrink` 且 `new_len < memory.len` 时返回 null，并顺手置 `refuse_next_alloc`，让标准分配器的 alloc-and-copy 回退也失败，从而真正走到 `normalize` 的错误路径；其余转发 backing。关键调用：`self.backing.rawRemap`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.free` (`src/libs/bigint.zig:1369`)
+### `DivFailAllocator.free` (`src/libs/bigint.zig:1403`)
 
 - **签名**：`fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void`。
 - **作用**：测试夹具/探针 `DivFailAllocator.free`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：先给 `live` 减一再转发 backing，`live` 归零即所有权已对称交还。关键调用：`self.backing.rawFree`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `expectDivisionUnderInjection` (`src/libs/bigint.zig:1376`)
+### `expectDivisionUnderInjection` (`src/libs/bigint.zig:1410`)
 
 - **签名**：`fn expectDivisionUnderInjection( inject: *DivFailAllocator, lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, expected_quotient: engine.libs.bigint.BigInt, expected_remainder: engine.libs.bigint.BigInt, ) !void`。
 - **作用**：测试夹具/探针 `expectDivisionUnderInjection`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `inject.allocator()` 拼两个借用 limb 切片的 `bigint.BigInt`，再 `bigint.divRemAlloc(alloc, lhs, rhs)`：成功臂（`defer` 各自 `deinit`）要求商与余数 `compare` 期望值均为 `.eq`——注入下侥幸成功也必须算对；失败臂只允许 `error.OutOfMemory`。两条路径之后都统一收尾：`inject.live` 必须回到 `0`（无悬挂分配），且 `lhs_limbs` / `rhs_limbs` 与输入逐 limb 相等（输入仍归调用方所有、不得被就地改写）。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `expectDivisionIdentity` (`src/libs/bigint.zig:1409`)
+### `expectDivisionIdentity` (`src/libs/bigint.zig:1443`)
 
 - **签名**：`fn expectDivisionIdentity( lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, ) !void`。
 - **作用**：Checks `q * b + r == a`, `abs(r) < abs(b)`, the remainder's sign, and that neither result carries a leading zero limb.。
 - **实现**：在 `std.testing.allocator` 上拼两个借用式 `BigInt`，取 `lhs.div(rhs)` 与 `lhs.rem(rhs)`（各 `defer deinit`），再 `mulAlloc(quotient, rhs)` + `addAlloc(product, remainder)` 还原出 `recovered`，断言 `recovered.compare(lhs) == .eq`（即 `q*b + r == a`）。随后另拼两个去符号的 `BigInt` 断言 `|r| < |b|`；余数非零时符号必须跟被除数一致，商非零时符号必须是 `lhs_negative != rhs_negative`；最后要求商与余数的最高 limb 都非零（无前导零 limb）。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `Case.check` (`src/libs/bigint.zig:1818`)
+### `Case.check` (`src/libs/bigint.zig:1852`)
 
 - **签名**：`fn check(high: Limb, low: Limb, divisor: Limb) !void`。
 - **作用**：测试夹具/探针 `Case.check`，给周围 `test` 块提供可注入行为或断言助手。
@@ -945,7 +945,7 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言错误 `error.OutOfMemory`。设置 runtime 内存上限以注入 OOM。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "M-cut Object handle conversion keeps the head at the handle address"` (`src/core/object.zig:11524`)
+### `test "M-cut Object handle conversion keeps the head at the handle address"` (`src/core/object.zig:11510`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「M-cut Object handle conversion keeps the head at the handle address」。
@@ -968,7 +968,7 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 7 处 `std.testing.expect*`。约 7 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "first named property allocates initial_prop_size slots"` (`src/core/object.zig:11541`)
+### `test "first named property allocates initial_prop_size slots"` (`src/core/object.zig:11527`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「first named property allocates initial_prop_size slots」。
@@ -3558,7 +3558,7 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 9 处 `std.testing.expect*`。约 9 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "basecase multiplication never reads an uninitialized result limb"` (`src/libs/bigint.zig:1442`)
+### `test "basecase multiplication never reads an uninitialized result limb"` (`src/libs/bigint.zig:1476`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：负向钉：basecase multiplication never reads an uninitialized result limb。
@@ -3607,49 +3607,49 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "single-limb division is exact and allocation-bounded"` (`src/libs/bigint.zig:1477`)
+### `test "single-limb division is exact and allocation-bounded"` (`src/libs/bigint.zig:1511`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「single-limb division is exact and allocation-bounded」。
 - **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "multi-limb division survives a failure at every allocation point"` (`src/libs/bigint.zig:1550`)
+### `test "multi-limb division survives a failure at every allocation point"` (`src/libs/bigint.zig:1584`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「multi-limb division survives a failure at every allocation point」。
 - **实现**：断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division handles every quotient-estimate correction"` (`src/libs/bigint.zig:1622`)
+### `test "normalized long division handles every quotient-estimate correction"` (`src/libs/bigint.zig:1656`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division handles every quotient-estimate correction」。
 - **实现**：冻结 8 条 `Vector{ a, b, event }` 语料（`one correction` ×2、`two corrections`、`three corrections`、`add-back` ×3、`clamped estimate`），每条对四种符号组合 `inline for` 调 `expectDivisionIdentity` 校验 `a = q*b + r` 恒等式；失败时先 `std.debug.print` 打出该向量的 event 名再回抛错误。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division covers every normalization shift"` (`src/libs/bigint.zig:1694`)
+### `test "normalized long division covers every normalization shift"` (`src/libs/bigint.zig:1728`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division covers every normalization shift」。
 - **实现**：用 `std.Random.DefaultPrng.init(0x604C3)` 枚举全部 64 个归一化移位：除数顶 limb 的最高位固定在 `63 - shift`，除数限数 nb ∈ 2..5、被除数限数 na ∈ nb..nb+3，`na == nb` 时把顶 limb 拉到 `maxInt` 以避开提前返回，每组对正负被除数各调一次 `expectDivisionIdentity`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division covers the operand relations"` (`src/libs/bigint.zig:1722`)
+### `test "normalized long division covers the operand relations"` (`src/libs/bigint.zig:1756`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division covers the operand relations」。
 - **实现**：固定三限除数 `{ 0xDEAD_BEEF_CAFE_BABE, 1, 0x4000_0000_0000_0000 }`，用 6 次 `expectDivisionIdentity` 覆盖操作数关系：lhs < rhs、lhs == rhs、商恰为 1（`cloneWithAllocator` + `addPositiveSmallInPlace(1)`）、整除（`bigint.mulAlloc`）、该商下的最大余数（`bigint.subAlloc` 减一，并再跑一次双负号）。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "normalized long division skips a known-zero leading digit"` (`src/libs/bigint.zig:1753`)
+### `test "normalized long division skips a known-zero leading digit"` (`src/libs/bigint.zig:1787`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「normalized long division skips a known-zero leading digit」。
 - **实现**：断言 5 处 `std.testing.expect*`。约 5 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
-### `test "reciprocal two-by-one division is exactly the wide division"` (`src/libs/bigint.zig:1809`)
+### `test "reciprocal two-by-one division is exactly the wide division"` (`src/libs/bigint.zig:1843`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「reciprocal two-by-one division is exactly the wide division」。

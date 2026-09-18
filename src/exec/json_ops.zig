@@ -839,7 +839,7 @@ fn JsonUnitParser(comptime T: type) type {
                     return core.JSValue.float64(@floatFromInt(int_value));
                 } else |_| {}
             }
-            const float_value = std.fmt.parseFloat(f64, text) catch return error.SyntaxError;
+            const float_value = number_format.parseNumberExact(text, 10, .{}) orelse return error.SyntaxError;
             return core.JSValue.float64(float_value);
         }
     };

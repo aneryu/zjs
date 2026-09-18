@@ -3,8 +3,8 @@
 //! Fixed-buffer Number paths borrow caller storage; BigInt clone/format paths
 //! return or temporarily allocate explicitly-owned library values. JSValue
 //! inputs remain borrowed throughout. The routines centralize QuickJS-compatible
-//! `ToNumber` whitespace/radix rules (`std.fmt.parseFloat`) and dtoa output
-//! (`js_dtoa` in `libs/number_format.zig`). This core conversion leaf may import core/libs,
+//! `ToNumber` whitespace rules and hand the digits to `libs/number_format`
+//! (`parseNumberPrefix` / `formatNumber`). This core conversion leaf may import core/libs,
 //! never parser/exec/runtime/binding.
 
 const dtoa = @import("../libs/number_format.zig");
@@ -79,24 +79,12 @@ pub fn parseJsNumberLatin1(bytes: []const u8) f64 {
     return parseJsNumberTrimmed(trimJsWhitespaceLatin1(bytes));
 }
 
+/// StringToNumber after whitespace trimming: qjs `JS_ToNumberHintFree`
+/// string arm (`js_atof` with `ATOD_ACCEPT_BIN_OCT`, then the whole string
+/// must have been consumed).
 fn parseJsNumberTrimmed(trimmed: []const u8) f64 {
     if (trimmed.len == 0) return 0;
-    if (std.mem.indexOfScalar(u8, trimmed, '_') != null) return std.math.nan(f64);
-    if (hasSignedRadixPrefix(trimmed)) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'x' or trimmed[1] == 'X')) {
-        return parseRadixPrefixedDigits(trimmed[2..], 16);
-    }
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'o' or trimmed[1] == 'O')) {
-        return parseRadixPrefixedDigits(trimmed[2..], 8);
-    }
-    if (trimmed.len >= 2 and trimmed[0] == '0' and (trimmed[1] == 'b' or trimmed[1] == 'B')) {
-        return parseRadixPrefixedDigits(trimmed[2..], 2);
-    }
-    const parsed = std.fmt.parseFloat(f64, trimmed) catch return std.math.nan(f64);
-    if (std.math.isInf(parsed) and beginsWithAsciiAlphaAfterSign(trimmed)) return std.math.nan(f64);
-    return parsed;
+    return dtoa.parseNumberExact(trimmed, 0, .{ .accept_bin_oct = true }) orelse std.math.nan(f64);
 }
 
 fn formatSimpleFiniteDecimal(buffer: []u8, value: f64) ?[]const u8 {
@@ -235,53 +223,6 @@ fn endsWith(bytes: []const u8, suffix: []const u8) bool {
     return bytes.len >= suffix.len and std.mem.eql(u8, bytes[bytes.len - suffix.len ..], suffix);
 }
 
-/// Digits of a 0x/0o/0b literal for ToNumber(string). Exact through u128
-/// (one correctly-rounded int->double conversion); wider literals keep
-/// accumulating in f64, mirroring qjs js_atod's accumulate-into-double
-/// behaviour instead of failing to NaN.
-/// One helper for 0x/0o/0b. Radix is a value so the three prefix sites
-/// share a single outlined walk instead of three comptime copies.
-noinline fn parseRadixPrefixedDigits(digits: []const u8, radix: u8) f64 {
-    if (digits.len == 0) return std.math.nan(f64);
-    const radix_wide: u128 = radix;
-    const radix_f: f64 = @floatFromInt(radix);
-    var wide: u128 = 0;
-    var overflowed = false;
-    var value: f64 = 0;
-    for (digits) |ch| {
-        const digit: u8 = switch (ch) {
-            '0'...'9' => ch - '0',
-            'a'...'f' => ch - 'a' + 10,
-            'A'...'F' => ch - 'A' + 10,
-            else => return std.math.nan(f64),
-        };
-        if (digit >= radix) return std.math.nan(f64);
-        if (!overflowed) {
-            const mul = @mulWithOverflow(wide, radix_wide);
-            const add = @addWithOverflow(mul[0], digit);
-            if (mul[1] == 0 and add[1] == 0) {
-                wide = add[0];
-                continue;
-            }
-            overflowed = true;
-            value = @floatFromInt(wide);
-        }
-        value = value * radix_f + @as(f64, @floatFromInt(digit));
-    }
-    if (!overflowed) return @floatFromInt(wide);
-    return value;
-}
-
-fn hasSignedRadixPrefix(bytes: []const u8) bool {
-    return bytes.len >= 3 and (bytes[0] == '+' or bytes[0] == '-') and bytes[1] == '0' and
-        (bytes[2] == 'x' or bytes[2] == 'X' or bytes[2] == 'o' or bytes[2] == 'O' or bytes[2] == 'b' or bytes[2] == 'B');
-}
-
-fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
-    const index: usize = if (bytes.len > 0 and (bytes[0] == '+' or bytes[0] == '-')) 1 else 0;
-    return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
-}
-
 test "parseAsciiInt shares one walk across host integer widths" {
     try std.testing.expectEqual(@as(usize, 7), try parseAsciiInt(usize, "7", 10));
     try std.testing.expectEqual(@as(i32, -3), try parseAsciiInt(i32, "-3", 10));
@@ -306,4 +247,11 @@ test "parseJsNumber keeps 0x 0o 0b prefixes exact and rejects bad digits" {
     try std.testing.expect(std.math.isNan(parseJsNumber("0xG")));
     try std.testing.expect(std.math.isNan(parseJsNumber("+0x1")));
     try std.testing.expect(std.math.isNan(parseJsNumber("0x1_0")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("0x1.8")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("1e")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("Infinityx")));
+    try std.testing.expect(std.math.isNan(parseJsNumber("inf")));
+    try std.testing.expectEqual(@as(f64, 1), parseJsNumber(" 1. "));
+    try std.testing.expectEqual(@as(f64, 0.5), parseJsNumber(".5"));
+    try std.testing.expectEqual(@as(f64, 10), parseJsNumber("010"));
 }

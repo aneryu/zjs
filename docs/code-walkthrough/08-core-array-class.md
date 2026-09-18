@@ -29,42 +29,35 @@ Array 的 dense 值、count、capacity、可见 length 在 `ObjectStorage.array`
 - **实现**：空串或多字节前导0返回null；每字节必须ASCII数字，用u64累积且每步超过max_array_index立即返回null。
 - **所有权 / 错误 / 调用**：0合法，负号/正号/空格/指数/小数均非法；由于每步限界，下一次乘10前累积量有限，不会因任意长输入而积累到u64溢出。
 
-### `canonicalNumericIndex` (`src/core/array.zig:55`)
-
-- **签名**：`pub fn canonicalNumericIndex(bytes: []const u8) ?f64`。
-- **作用**：以Zig浮点解析及格式回写检验数值字符串。
-- **实现**：特判-0为负零；否则parseFloat，使用64字节缓冲和{d}格式打印，只有逐字节等于原输入才返回数值；解析/打印失败或不同返回null。
-- **所有权 / 错误 / 调用**：不是直接实现ECMAScript NumberToString往返，不应声称是TypedArray完整CanonicalNumericIndexString。当前src搜索仅见此定义和测试使用；Object的TypedArray分类另有实现。
-
-### `isArrayValue` (`src/core/array.zig:72`)
+### `isArrayValue` (`src/core/array.zig:62`)
 
 - **签名**：`pub fn isArrayValue(value: JSValue) !bool`。
 - **作用**：不执行trap地沿Proxy target判断Array身份。
 - **实现**：非Object返回false；每轮Proxy检查depth>1000后递增，handler为空或target缺失报TypeError，target非Object返回false；遇非Proxy返回isArray。
 - **所有权 / 错误 / 调用**：按当前检查顺序最多可穿过1001层Proxy，下一层才StackOverflow；循环Proxy最终也触发该上限。不分配，不解包其他对象或调用代理trap。
 
-### `expectArray` (`src/core/array.zig:92`)
+### `expectArray` (`src/core/array.zig:82`)
 
 - **签名**：`pub fn expectArray(value: JSValue) !*Object`。
 - **作用**：要求输入为直接Array对象并借出指针。
 - **实现**：expectObject后检查isArray，否则TypeError。
 - **所有权 / 错误 / 调用**：没有ToObject装箱或Proxy解包；Array代理不能因isArrayValue为true而通过本函数。
 
-### `constructLiteralOwnedDenseFromShape` (`src/core/array.zig:131`)
+### `constructLiteralOwnedDenseFromShape` (`src/core/array.zig:121`)
 
 - **签名**：`pub fn constructLiteralOwnedDenseFromShape(rt: *JSRuntime, values: []const JSValue, initial_shape: *shape_mod.Shape) !JSValue`。
 - **作用**：从预备Shape构造包含全部输入元素的字面量数组。
 - **实现**：value_root_frames_enabled编译期为true时对输入slice constCast后注册.mutable根，再调用Work；否则直接Work。
 - **所有权 / 错误 / 调用**：Owned描述调用协议；当前不会逐值RC retain/release，也不清输入内存。输入须在构造期间有效，initial_shape未列入此根帧；单数字元素不会解释为数组长度。
 
-### `constructLiteralOwnedDenseFromShapeWork` (`src/core/array.zig:145`)
+### `constructLiteralOwnedDenseFromShapeWork` (`src/core/array.zig:135`)
 
 - **签名**：`inline fn constructLiteralOwnedDenseFromShapeWork(rt: *JSRuntime, values: []const JSValue, initial_shape: *shape_mod.Shape) !JSValue`。
 - **作用**：分配字面量Array并使用trusted dense填充。
 - **实现**：Object.createArrayFromInitialShape成功后设置错误destroy，调用initDenseArrayLiteralValuesOwnedTrusted，返回Object值。
 - **所有权 / 错误 / 调用**：依赖fresh Array、空dense、可写length及长度范围等trusted前提；不自行注册输出根，根与GC窗口须遵守构造callee协议。输入元素复制表示，没有逐项dup或消费时清零。
 
-### `constructLiteralWithPrototype` (`src/core/array.zig:152`)
+### `constructLiteralWithPrototype` (`src/core/array.zig:142`)
 
 - **签名**：`pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, prototype: ?*Object) !JSValue`。
 - **作用**：以给定原型构造借读输入元素的字面量数组。

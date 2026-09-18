@@ -13,6 +13,7 @@ pub fn namespace(comptime token: type) type {
         const sort_erased = @import("core/sort_erased.zig");
         const simple_token = @import("simple_token.zig");
         const unicode = @import("libs/unicode.zig");
+        const number_format = @import("libs/number_format.zig");
         const t = token;
 
         const Atom = atom_module.Atom;
@@ -815,7 +816,7 @@ pub fn namespace(comptime token: type) type {
                         return;
                     }
                 }
-                const value = parseNumber(self.allocator, lexeme, base) catch return error.InvalidNumber;
+                const value = parseNumberLiteral(lexeme) orelse return error.InvalidNumber;
                 self.emitInto(out, t.TOK_NUMBER, .{ .num = .{ .value = value } });
             }
 
@@ -1653,51 +1654,12 @@ pub fn namespace(comptime token: type) type {
             return @floatFromInt(value);
         }
 
-        fn parseNumber(allocator: std.mem.Allocator, lexeme: []const u8, base: u8) !f64 {
-            // qjs js_atof has no length cap: it strips `_` into a stack scratch
-            // and grows a heap buffer when that scratch is too small
-            // (quickjs.c:12876-12883). Parse the source slice directly when there
-            // are no separators; otherwise use an unbounded strip buffer.
-            var has_separator = false;
-            for (lexeme) |c| {
-                if (c == '_') {
-                    has_separator = true;
-                    break;
-                }
-            }
-            if (!has_separator) return parseNumberDigits(lexeme, base);
-
-            var stripped: std.ArrayList(u8) = .empty;
-            defer stripped.deinit(allocator);
-            try stripped.ensureTotalCapacity(allocator, lexeme.len);
-            for (lexeme) |c| {
-                if (c != '_') stripped.appendAssumeCapacity(c);
-            }
-            return parseNumberDigits(stripped.items, base);
-        }
-
-        fn parseNumberDigits(s: []const u8, base: u8) !f64 {
-            if (base == 10) return std.fmt.parseFloat(f64, s) catch error.InvalidNumber;
-            if (s.len < 3) return error.InvalidNumber;
-            const digits = s[2..];
-            if (std.fmt.parseUnsigned(u128, digits, base)) |value| {
-                return @floatFromInt(value);
-            } else |_| {
-                // Same parser as the u128 path; overflow accumulates in f64 the
-                // way qjs js_atod / value_format.parseRadixPrefixedDigits do.
-                var value: f64 = 0;
-                for (digits) |c| {
-                    const digit: u8 = switch (c) {
-                        '0'...'9' => c - '0',
-                        'a'...'f' => c - 'a' + 10,
-                        'A'...'F' => c - 'A' + 10,
-                        else => return error.InvalidNumber,
-                    };
-                    if (digit >= base) return error.InvalidNumber;
-                    value = value * @as(f64, @floatFromInt(base)) + @as(f64, @floatFromInt(digit));
-                }
-                return value;
-            }
+        /// qjs `js_parse_number` -> `js_atof` with `ATOD_ACCEPT_BIN_OCT |
+        /// ATOD_ACCEPT_UNDERSCORES`. The lexer has already fixed the extent of
+        /// the literal and validated separator placement; legacy octal and the
+        /// BigInt suffix are handled before reaching here.
+        fn parseNumberLiteral(lexeme: []const u8) ?f64 {
+            return number_format.parseNumberExact(lexeme, 0, .{ .accept_bin_oct = true, .accept_underscores = true });
         }
 
         fn keywordLookup(lexeme: []const u8) ?t.TokenKind {

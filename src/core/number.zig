@@ -7,7 +7,7 @@
 //! `src/exec/number_ops.zig`.
 
 const core = @import("root.zig");
-const unicode = @import("../libs/unicode.zig");
+const dtoa = @import("../libs/number_format.zig");
 const std = @import("std");
 
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
@@ -51,126 +51,20 @@ pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     return parseFloatLatin1Bytes(core.value_format.trimJsWhitespace(bytes.items));
 }
 
-pub fn parseIntLatin1Bytes(source: []const u8, initial_radix: i32) f64 {
-    var text = trimLeadingJsWhitespace(source);
-    var sign: f64 = 1;
-    if (text.len != 0 and (text[0] == '+' or text[0] == '-')) {
-        if (text[0] == '-') sign = -1;
-        text = text[1..];
-    }
-
-    var radix = initial_radix;
+/// qjs `js_parseInt`: radix check, skip whitespace, `js_atof` with
+/// `ATOD_INT_ONLY | ATOD_ACCEPT_PREFIX_AFTER_SIGN`. Digits beyond 2^53 are
+/// rounded once by the dtoa kernel, not per digit.
+pub fn parseIntLatin1Bytes(source: []const u8, radix: i32) f64 {
     if (radix != 0 and (radix < 2 or radix > 36)) return std.math.nan(f64);
-    if (radix == 0) {
-        radix = 10;
-        if (text.len >= 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
-            radix = 16;
-            text = text[2..];
-        }
-    } else if (radix == 16 and text.len >= 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
-        text = text[2..];
-    }
-
-    var wide: u128 = 0;
-    var overflowed = false;
-    var value: f64 = 0;
-    var consumed: usize = 0;
-    for (text) |ch| {
-        const digit: i32 = @intCast(unicode.asciiRadixDigitValueByte(ch) orelse break);
-        if (digit >= radix) break;
-        consumed += 1;
-        if (!overflowed) {
-            const mul = @mulWithOverflow(wide, @as(u128, @intCast(radix)));
-            const add = @addWithOverflow(mul[0], @as(u128, @intCast(digit)));
-            if (mul[1] == 0 and add[1] == 0) {
-                wide = add[0];
-                continue;
-            }
-            overflowed = true;
-            value = @floatFromInt(wide);
-        }
-        value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
-    }
-    if (consumed == 0) return std.math.nan(f64);
-    if (!overflowed) {
-        value = @floatFromInt(wide);
-    } else if (radix == 10) {
-        // Beyond 128 bits of decimal digits: delegate to the correctly-rounded
-        // decimal parser (qjs js_atod exactness) instead of per-digit rounding.
-        value = std.fmt.parseFloat(f64, text[0..consumed]) catch value;
-    }
-    const signed = value * sign;
-    if (signed == 0 and sign < 0) return -0.0;
-    return signed;
-}
-
-pub fn parseFloatLatin1Bytes(source: []const u8) f64 {
-    if (source.len != 0 and jsWhitespacePrefixLen(source) == null) {
-        if (parseSimpleDecimalFloat(source)) |number| return number;
-    }
     const text = trimLeadingJsWhitespace(source);
-    if (text.len == 0) return std.math.nan(f64);
-
-    var index: usize = 0;
-    if (text[index] == '+' or text[index] == '-') index += 1;
-
-    if (std.mem.startsWith(u8, text[index..], "Infinity")) {
-        return if (text[0] == '-') -std.math.inf(f64) else std.math.inf(f64);
-    }
-
-    var digits: usize = 0;
-    while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) digits += 1;
-    if (index < text.len and text[index] == '.') {
-        index += 1;
-        while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) digits += 1;
-    }
-    if (digits == 0) return std.math.nan(f64);
-
-    const exponent_start = index;
-    if (index < text.len and (text[index] == 'e' or text[index] == 'E')) {
-        index += 1;
-        if (index < text.len and (text[index] == '+' or text[index] == '-')) index += 1;
-        const exponent_digits_start = index;
-        while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) {}
-        if (index == exponent_digits_start) index = exponent_start;
-    }
-
-    if (parseSimpleDecimalFloat(text[0..index])) |number| return number;
-    return std.fmt.parseFloat(f64, text[0..index]) catch std.math.nan(f64);
+    return dtoa.parseNumberPrefix(text, @intCast(radix), .{ .int_only = true, .accept_prefix_after_sign = true }).value;
 }
 
-fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
-    var index: usize = 0;
-    var sign: f64 = 1;
-    if (index < text.len and (text[index] == '+' or text[index] == '-')) {
-        if (text[index] == '-') sign = -1;
-        index += 1;
-    }
-
-    var value: f64 = 0;
-    var digits: usize = 0;
-    while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) {
-        if (digits == 15) return null;
-        value = value * 10 + @as(f64, @floatFromInt(text[index] - '0'));
-        digits += 1;
-    }
-
-    if (index < text.len and text[index] == '.') {
-        index += 1;
-        var scale: f64 = 1;
-        while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) {
-            if (digits == 15) return null;
-            value = value * 10 + @as(f64, @floatFromInt(text[index] - '0'));
-            scale *= 10;
-            digits += 1;
-        }
-        value /= scale;
-    }
-
-    if (digits == 0 or index != text.len) return null;
-    const signed = value * sign;
-    if (signed == 0 and sign < 0) return -0.0;
-    return signed;
+/// qjs `js_parseFloat`: skip whitespace, `js_atof` in radix 10 with no
+/// flags (so `0x` is not a prefix and `Infinity` is accepted).
+pub fn parseFloatLatin1Bytes(source: []const u8) f64 {
+    const text = trimLeadingJsWhitespace(source);
+    return dtoa.parseNumberPrefix(text, 10, .{}).value;
 }
 
 pub fn numberValue(value: core.JSValue) ?f64 {

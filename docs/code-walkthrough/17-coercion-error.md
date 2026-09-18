@@ -375,49 +375,49 @@
 - **实现**：short 适配同上，否则 `createFromBigInt` 复制一份到堆。
 - **所有权 / 错误 / 调用**：与 `createBigIntOwned` 相反：**不消费**入参，`createFromBigInt` 复制 limbs，调用方仍要 `deinit` 自己那份 `bignum.BigInt`；返回的 GC BigInt（或 short 立即数）归 GC。错误只有 OOM。6 处调用，典型 `src/exec/vm_arith.zig:796`、`src/exec/atomics_ops.zig:1070`、`src/exec/builtin_glue.zig:88`。
 
-### `bigIntToNumber` (`src/exec/value_ops.zig:500`)
+### `bigIntToNumber` (`src/exec/value_ops.zig:502`)
 
 - **签名**：`pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64`。
 - **作用**：BigInt → double（ToNumeric 侧调用方用）。
-- **实现**：clone 出临时 BigInt，`formatBase10Alloc` 成十进制文本，再 `std.fmt.parseFloat`；临时 BigInt 与文本都在函数内释放。
-- **所有权 / 错误 / 调用**：两个局部量都在函数内释放：`cloneBigIntValue` 的 `bignum.BigInt`（`defer deinit()`）与 `formatBase10Alloc` 的十进制文本（`defer allocator.free`）。错误是 OOM 与 `std.fmt.parseFloat` 的 `error.InvalidCharacter`，都是裸哨兵。7 处调用，典型 `src/exec/builtin_glue.zig:61`、`src/exec/class_init_ops.zig:140`、`src/exec/reflect_ops.zig:102`。
+- **实现**：short bigint 直接 `@floatFromInt`；否则 clone 出临时 BigInt，`BigInt.toFloat64` 从 limb 一次就近偶舍入（qjs `js_bigint_to_float64`）；临时 BigInt 在函数内释放。
+- **所有权 / 错误 / 调用**：`cloneBigIntValue` 的 `bignum.BigInt` `defer deinit()`。错误只有 OOM。7 处调用，典型 `src/exec/builtin_glue.zig:61`、`src/exec/class_init_ops.zig:140`、`src/exec/reflect_ops.zig:102`。
 
-### `toIntegerOrInfinity` (`src/exec/value_ops.zig:508`)
+### `toIntegerOrInfinity` (`src/exec/value_ops.zig:509`)
 
 - **签名**：`pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64`。
 - **作用**：ToNumber 的 f64 形态（**不做截断**，取整由调用方负责）。
 - **实现**：已是数值直接返回；BigInt → TypeError（qjs `JS_ToNumberHintFree` quickjs.c:12955-12959）；bool → 1/0；null → 0；undefined → NaN；其余（字符串/对象）`appendValueString` 后 `parseJsNumber`。
 - **所有权 / 错误 / 调用**：返回 f64，不产生 JS 值；字符串/对象臂的 `std.ArrayList(u8)` `defer deinit()`。BigInt 返回裸 `error.TypeError` 哨兵，其余错误来自 `appendValueString`（`AppendStringError`）。7 处调用，典型 `src/root.zig:119`、`src/exec/string_builtin_ops.zig:878`、`src/exec/reflect_ops.zig:104`。
 
-### `toIndexUsize` (`src/exec/value_ops.zig:523`)
+### `toIndexUsize` (`src/exec/value_ops.zig:524`)
 
 - **签名**：`pub fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize`。
 - **作用**：ToIndex：非负整数下标，越界报 RangeError。
 - **实现**：`toIntegerOrInfinity` 后 NaN → 0，非有限 → RangeError，`@trunc` 为负 → RangeError，其余取整数部分。
 - **所有权 / 错误 / 调用**：自身不分配（临时缓冲在 `toIntegerOrInfinity` 内释放）；非有限或负数返回裸 `error.RangeError` 哨兵，BigInt 的 `error.TypeError` 透传，NaN 折成 0。调用方 `src/exec/array_ops.zig:1042`、`:1068`。
 
-### `toBigIntValue` (`src/exec/value_ops.zig:533`)
+### `toBigIntValue` (`src/exec/value_ops.zig:534`)
 
 - **签名**：`pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt`。
 - **作用**：ToBigInt：产出临时 `bignum.BigInt`。
 - **实现**：BigInt 直接 clone；Number → TypeError；bool → 1n/0n；字符串或对象先 `appendValueString`，`trimJsWhitespace`（qjs quickjs.c:14609 + 11230）后空串算 0n，否则 `parseAutoAlloc`——`error.BigIntTooLarge` 原样传出（qjs 从 `js_atof` 抛 RangeError，quickjs.c:12471），其他解析失败统一成 `error.SyntaxError`。其余值 TypeError。
 - **所有权 / 错误 / 调用**：返回的 BigInt 由调用方 `deinit`；临时缓冲在函数内释放。
 
-### `heapBigInt` (`src/exec/value_ops.zig:556`)
+### `heapBigInt` (`src/exec/value_ops.zig:557`)
 
 - **签名**：`inline fn heapBigInt(value: core.JSValue) ?*core.bigint.BigInt`。
 - **作用**：取值背后的堆 BigInt 指针。
 - **实现**：非 BigInt、或没有 ref header（short BigInt）都返回 null；否则 `@fieldParentPtr` 还原。
 - **所有权 / 错误 / 调用**：无所有权转移：`@fieldParentPtr` 取出的是**借用**的 `*core.bigint.BigInt`，不 retain、不建根，只在同一表达式里读长度/符号；short bigint 与非 BigInt 返回 `null`。无 error set。文件私有，唯一调用方是 `binaryBigInt` 的单分配乘法臂（`src/exec/value_ops.zig:710`、`:711`）。
 
-### `bigIntFromValueBorrowed` (`src/exec/value_ops.zig:562`)
+### `bigIntFromValueBorrowed` (`src/exec/value_ops.zig:563`)
 
 - **签名**：`pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt`。
 - **作用**：拿到可运算的 `bignum.BigInt` 视图：short 会新分配，堆 BigInt 只借 limbs。
 - **实现**：short BigInt → `fromIntAlloc`（**调用方要 deinit**）；堆 BigInt → `big.borrowedValue`（借用，不拷贝，不可 deinit）；其余 TypeError。
 - **所有权 / 错误 / 调用**：所有权取决于入参形态，`binaryBigInt` 用 `as(.short_big_int) != null` 判断该不该释放。
 
-### `isTruthy` (`src/exec/value_ops.zig:572`)
+### `isTruthy` (`src/exec/value_ops.zig:573`)
 
 - **签名**：`pub fn isTruthy(value: core.JSValue) bool`。
 - **作用**：ToBoolean：判断值的真假（`undefined`/`null`/`false`/`0`/`NaN`/空串为假）。
@@ -425,28 +425,28 @@
 - **实现**：转调 `core.value_semantics.toBoolean`。
 - **所有权 / 错误 / 调用**：无：转调 `core.value_semantics.toBoolean` 的只读谓词，不分配、无 error set。16 处调用，典型 `src/exec/vm_control.zig:85`、`src/exec/coercion_ops.zig:122`、`src/root.zig:123`。
 
-### `isFunctionObject` (`src/exec/value_ops.zig:576`)
+### `isFunctionObject` (`src/exec/value_ops.zig:577`)
 
 - **签名**：`pub fn isFunctionObject(value: core.JSValue) bool`。
 - **作用**：谓词：该值是否是可调用的函数对象。
 - **实现**：非对象/无 header → false；有 `proxyTarget()` 转 `proxyTargetIsFunction`；否则认这些 class：`c_function`、任意 bytecode function class、`bound_function`、`c_function_data`、async-resume class、`c_closure`。
 - **所有权 / 错误 / 调用**：无：只读 class_id 与 proxy target 的谓词，不分配、无 error set。调用方 `proxyTargetIsFunction`（同文件）与 `src/exec/reflect_ops.zig:217`（`value_ops.typeOf` 已删，`typeof` 走 `src/exec/vm_value.zig` 的同名 helper）。
 
-### `proxyTargetIsFunction` (`src/exec/value_ops.zig:589`)
+### `proxyTargetIsFunction` (`src/exec/value_ops.zig:590`)
 
 - **签名**：`fn proxyTargetIsFunction(value: core.JSValue) bool`。
 - **作用**：谓词：该值是 Proxy 且其 target 可调用。
 - **实现**：取 `proxyTarget()`，为空 false；target 是 function bytecode 或 `isFunctionObject` 则 true（两函数互相递归处理 proxy 套 proxy）。
 - **所有权 / 错误 / 调用**：无：读 proxy target 后回调 `isFunctionObject`（两者互相递归，沿代理链下降），不分配、无 error set；revoked/非代理走 `orelse false`。文件私有，唯一调用方是同文件的 `isFunctionObject`（`value_ops.typeOf` 已删）。
 
-### `atomNameEql` (`src/exec/value_ops.zig:616`)
+### `atomNameEql` (`src/exec/value_ops.zig:617`)
 
 - **签名**：`pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool`。
 - **作用**：atom 的名字是否等于给定字节串。
 - **实现**：`rt.atoms.name(atom_id)` 取不到名字直接 false，否则 `std.mem.eql`。
 - **所有权 / 错误 / 调用**：无：拿 atom 表里的**借用**名字切片与字面量比对，不分配、不 retain atom、无 error set；未知 atom 返回 false。4 处调用：`src/exec/property_ops.zig:33`、`:48`、`src/exec/call_runtime.zig:4704`、`src/js_context.zig:548`。
 
-### `appendRawString` (`src/exec/value_ops.zig:630`)
+### `appendRawString` (`src/exec/value_ops.zig:631`)
 
 - **签名**：`pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void`。
 - **作用**：把一个字符串 JSValue 的内容以 UTF-8 追加到调用方的字节缓冲，是引擎内 `JS_ToCStringLen2` 的等价出口（atom 驻留、数字解析、栈文本拼装、主机/FS 边界共用这一份编码）。
@@ -454,7 +454,7 @@
 - **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u8)` 追加，缓冲的分配/释放全归调用方，本函数不建根也不产生 JS 值。error set 是 `core.string.appendValueUtf8` 的 `RuntimeError`（OOM、编码类）裸哨兵。42 处调用，典型 `src/exec/error_stack_ops.zig:140`、`src/exec/exception_ops.zig:459`、`src/js_context.zig:824`。
 
 
-### `formatFiniteNumberAssumeCapacity` (`src/exec/value_ops.zig:634`)
+### `formatFiniteNumberAssumeCapacity` (`src/exec/value_ops.zig:635`)
 
 - **签名**：`pub fn formatFiniteNumberAssumeCapacity(buffer: []u8, value: f64) []const u8`。
 - **作用**：同上，但假定调用方缓冲足够大（不返回 error）。
@@ -462,21 +462,21 @@
 - **所有权 / 错误 / 调用**：无：转调 core 版本写进调用方的栈缓冲（容量不足是调用方的契约违约，不返回错误），不分配、无 error set。6 处调用：本文件 `primitiveToStringValueFast` 的 float 臂（`:365`）与 `src/exec/json_ops.zig` 五处（`:978`、`:1424`、`:1538`、`:2025`、`:2407`）。
 
 
-### `binaryBigInt` (`src/exec/value_ops.zig:638`)
+### `binaryBigInt` (`src/exec/value_ops.zig:639`)
 
 - **签名**：`fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue`。
 - **作用**：两个 BigInt 的二元运算。
 - **实现**：先试 `shortBigIntBinary` 的 short×short 快路径。`add` 且一侧是正 short 时试 `addPositiveShortToBigInt`（就地加小数）。`mul` 且两侧都是堆 BigInt 且结果压不回 short 时走 `createMulInline`：header+limbs 一次分配（qjs `js_bigint_new` 的形状，quickjs.c:11860）。通用路径 `bigIntFromValueBorrowed` 取两侧（short 侧是新分配，`defer` 释放），按 op 调 `mulAlloc`/`div`/`rem`/`addAlloc`/`subAlloc`/`pow`/`bitwise`/`shiftBigInt`；`shr`（无符号右移）对 BigInt 是 TypeError。`DivisionByZero` / `NegativeExponent` / `BigIntTooLarge` 原样上抛，交给 `runtimeErrorInfo` 渲染 qjs 的具体 RangeError 文案。
 - **所有权 / 错误 / 调用**：本文件所有权最密的一段。short×short 快臂零分配；`createMulInline` 一次分配直接产 GC BigInt；通用臂的 `bigIntFromValueBorrowed` 对 short 操作数返回 **owned** 副本、对堆 BigInt 返回**借用视图**，所以用 `lhs_is_owned`/`rhs_is_owned` 决定是否 `deinit`（借用视图 deinit 会毁掉堆对象的 limbs）；运算结果 `out` 是 owned，交给 `createBigIntOwned` 消费。`error.DivisionByZero` / `error.NegativeExponent` / `error.BigIntTooLarge` 故意原样上浮，好让 `runtimeErrorInfo` 渲染 qjs 的专用 RangeError 文案；BigInt 的 `shr` 是裸 `error.TypeError`。文件私有，唯一调用方 `binary`（`src/exec/value_ops.zig:25`）。
 
-### `addPositiveShortToBigInt` (`src/exec/value_ops.zig:722`)
+### `addPositiveShortToBigInt` (`src/exec/value_ops.zig:723`)
 
 - **签名**：`fn addPositiveShortToBigInt(rt: *core.JSRuntime, value: core.JSValue, addend: bignum.Limb) !?core.JSValue`。
 - **作用**：把一个正的 short BigInt 加进堆 BigInt 的快路径。
 - **实现**：非 BigInt、无 header、或堆值为负都返回 null（回退通用路径）；否则 clone 一份后 `addPositiveSmallInPlace`，再 `createBigIntOwned` 交出所有权。
 - **所有权 / 错误 / 调用**：返回的 JSValue 由调用方拥有；中途的 clone 由 `errdefer` 在失败时释放，成功时交给 `createBigIntOwned` 接管。
 
-### `shortBigIntBinary` (`src/exec/value_ops.zig:734`)
+### `shortBigIntBinary` (`src/exec/value_ops.zig:735`)
 
 - **签名**：`pub fn shortBigIntBinary(op: u8, lhs: i64, rhs: i64) ?core.JSValue`。
 - **作用**：short BigInt 的二元快路径，装不下返回 null。
@@ -484,7 +484,7 @@
 - **所有权 / 错误 / 调用**：无：纯 i64 运算派发，不分配、无 error set；溢出或放不进 short bigint 时返回 `null`，由调用方退回堆路径。调用方 `binaryBigInt`（`:682`）与 `src/exec/vm_arith.zig:49`
 、`:528`、`:649`。
 
-### `shortBigIntUnary` (`src/exec/value_ops.zig:746`)
+### `shortBigIntUnary` (`src/exec/value_ops.zig:747`)
 
 - **签名**：`pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue`。
 - **作用**：short BigInt 的一元快路径，装不下返回 null。
@@ -492,56 +492,56 @@
 - **所有权 / 错误 / 调用**：无：一元版的纯 i64 派发，不分配、无 error set，放不下返回 `null`。调用方 `unary`（`:249`）与 `src/exec/vm_arith.zig:256`、`:330`、`:389`、`:467` 四处。
 
 
-### `shortBigIntAdd` (`src/exec/value_ops.zig:756`)
+### `shortBigIntAdd` (`src/exec/value_ops.zig:757`)
 
 - **签名**：`fn shortBigIntAdd(lhs: i64, rhs: i64) ?core.JSValue`。
 - **作用**：i64 加法，溢出或装不进 short BigInt 就返回 null。
 - **实现**：`@addWithOverflow` 判溢出，再 `shortBigIntFits` 判范围。
 - **所有权 / 错误 / 调用**：无：`@addWithOverflow` 加 `shortBigIntFits` 双重检查的纯函数，不分配、无 error set，放不下返回 `null`。文件私有，调用方 `shortBigIntBinary`（`:777`）与 `shortBigIntUnary`（`:791`）。
 
-### `shortBigIntSub` (`src/exec/value_ops.zig:763`)
+### `shortBigIntSub` (`src/exec/value_ops.zig:764`)
 
 - **签名**：`fn shortBigIntSub(lhs: i64, rhs: i64) ?core.JSValue`。
 - **作用**：i64 减法，溢出或装不进 short BigInt 就返回 null。
 - **实现**：`@subWithOverflow` 判溢出，再 `shortBigIntFits` 判范围。
 - **所有权 / 错误 / 调用**：无：同 `shortBigIntAdd` 的减法版，不分配、无 error set。文件私有，调用方 `shortBigIntBinary`（`:778`）与 `shortBigIntUnary`（`:789`、`:790`，neg 复用为 `0 - value`）。
 
-### `shortBigIntMul` (`src/exec/value_ops.zig:770`)
+### `shortBigIntMul` (`src/exec/value_ops.zig:771`)
 
 - **签名**：`fn shortBigIntMul(lhs: i64, rhs: i64) ?core.JSValue`。
 - **作用**：i64 乘法，溢出或装不进 short BigInt 就返回 null。
 - **实现**：`@mulWithOverflow` 判溢出，再 `shortBigIntFits` 判范围。
 - **所有权 / 错误 / 调用**：无：`@mulWithOverflow` 加 `shortBigIntFits` 的纯函数，不分配、无 error set。文件私有，唯一调用方 `shortBigIntBinary`（`:779`）。
 
-### `binaryNumber` (`src/exec/value_ops.zig:777`)
+### `binaryNumber` (`src/exec/value_ops.zig:778`)
 
 - **签名**：`fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue`。
 - **作用**：数值二元运算（mul/div/mod/add/sub/pow）。
 - **实现**：两侧取数值，取不到就 `toIntegerOrInfinity`；`mod` 用 `@rem`，`pow` 用 `jsMathPow`。结果装箱按 qjs `js_add_slow` / `js_binary_arith_slow`：**两侧都是 int tag** 才 `numberToValue` 归一（溢出转 float），只要有一侧是 float 就直接 `float64`，不再重新 int32 化。
 - **所有权 / 错误 / 调用**：结果是立即数，不分配；非数值操作数经 `toIntegerOrInfinity` 走 ToString/ToNumber，其错误（BigInt 的裸 `error.TypeError`、`AppendStringError`）原样上浮。文件私有，唯一调用方 `binary`（`src/exec/value_ops.zig:46`、`:50`）。
 
-### `toInt32` (`src/exec/value_ops.zig:797`)
+### `toInt32` (`src/exec/value_ops.zig:798`)
 
 - **签名**：`fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32`。
 - **作用**：ECMA-262 ToInt32（7.1.6）：`binary` 里 `shl`/`sar`/`shr`/`and`/`or`/`xor` 六个位运算的两个操作数、以及 `unary` 的 `not` 与非 double 慢路径，都靠它折成 i32。
 - **实现**：`toIntegerOrInfinity` 之后：非有限或 NaN → 0；向零取整后对 2^32 取模，再 `@bitCast` 成 i32。
 - **所有权 / 错误 / 调用**：自身不分配（字符串缓冲在 `toIntegerOrInfinity` 内释放）；错误全部是 `toIntegerOrInfinity` 的透传（BigInt 裸 `error.TypeError`、OOM）。文件私有，调用方 `binary` 的位运算臂（`:30`、`:31`）与 `unary`（`:234`、`:293`）。
 
-### `stringAdd` (`src/exec/value_ops.zig:805`)
+### `stringAdd` (`src/exec/value_ops.zig:806`)
 
 - **签名**：`fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue`。
 - **作用**：`+` 的字符串臂。
 - **实现**：任一侧 Symbol → TypeError。字符串+int32 / int32+字符串走 `stringAddStringInt`（suffix / prefix），不命中回落。双字符串走 `stringAddStringsOwned`。其余把两侧 `appendValueString` 进同一缓冲再 `createStringValue`。
 - **所有权 / 错误 / 调用**：字符串×字符串臂把两个操作数的所有权交给 `stringAddStringsOwned`；混合臂用 `std.ArrayList(u8)` 局部缓冲（`defer deinit()`）再 `createStringValue` 新建 GC 字符串。Symbol 操作数返回裸 `error.TypeError` 哨兵。文件私有，唯一调用方 `binary` 的 add 前置分支（`src/exec/value_ops.zig:21`）。
 
-### `stringAddStringInt` (`src/exec/value_ops.zig:826`)
+### `stringAddStringInt` (`src/exec/value_ops.zig:827`)
 
 - **签名**：`fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value: i32, position: StringIntPosition) !?core.JSValue`。
 - **作用**：「字符串 ± 整数」的拼接快路径，处理不了返回 null。
 - **实现**：先在 value/tag 层面认 rope（避免 `stringObject` 触发 flatten）：空 rope 直接返回数字串，否则按 position 建平衡 rope 节点。非 rope：空串返回数字串；`borrowLatin1` 拿不到（UTF-16）返回 null；0..255 的整数用 `rt.smallIntString` 缓存的数字串，否则栈上 `formatInt32`，最后 `createLatin1Concat`。
 - **所有权 / 错误 / 调用**：不消费入参；返回的新字符串（或 rope 节点）由调用方拥有。返回 null 表示「这条快路径处理不了」，不是错误。
 
-### `addStringsOwned` (`src/exec/value_ops.zig:871`)
+### `addStringsOwned` (`src/exec/value_ops.zig:872`)
 
 - **签名**：`pub fn addStringsOwned(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue`。
 - **作用**：VM 的双字符串 `+` 入口：**消费**两个操作数，返回一个自有结果（对照 `JS_ConcatString`）。
@@ -549,21 +549,21 @@
 - **所有权 / 错误 / 调用**：名义上消费两个入参（tracing GC 下无实际释放动作），结果归 GC，调用方不释放；错误全部由 `stringAddStringsOwned` 产生（非字符串体的裸 `error.TypeError`、OOM / `error.StringTooLong`）。生产调用方只有寄存器驻留的 `op_add` 双字符串臂 `src/exec/tailcall_dispatch.zig:3291`，另有 3 处单测。
 
 
-### `appendAsciiSuffixOwned` (`src/exec/value_ops.zig:878`)
+### `appendAsciiSuffixOwned` (`src/exec/value_ops.zig:879`)
 
 - **签名**：`pub fn appendAsciiSuffixOwned(rt: *core.JSRuntime, value: core.JSValue, suffix: []const u8) !core.JSValue`。
 - **作用**：**消费**一个已知字符串并接上 ASCII 字面量后缀，只分配一次结果。
 - **实现**：`asStringBody` 取不到就 TypeError；否则 `core.string.String.createAsciiSuffix`，避免像 `JS_ConcatString3` 那样先把 suffix 物化成第二个 JSString。
 - **所有权 / 错误 / 调用**：名义上消费入参字符串值（对照 `JS_ConcatString3`，tracing GC 下没有实际释放动作），返回 `createAsciiSuffix` 新建的 GC 字符串。入参不是字符串体时返回裸 `error.TypeError`，其余是 OOM / `error.StringTooLong`。唯一调用方 `src/exec/string_ops.zig:1078`（给 RegExp flags 追加 `"y"`）。
 
-### `stringAddStringsOwned` (`src/exec/value_ops.zig:890`)
+### `stringAddStringsOwned` (`src/exec/value_ops.zig:891`)
 
 - **签名**：`fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue`。
 - **作用**：两个字符串值的拼接核心：**消费**两侧，按 rope / tail-buffer / 平铺三类形态选最省的走法。
 - **实现**：右侧非 rope 时：右为空返回左；左是 rope 且左为空返回右；左 rope 带 tail buffer 且右够短 → `appendTailBufferRope` 就地追加（必须排在下面的 QJS 短右合并之前，因为视图节点的 `right` 是未定义值）；左 rope 未线性化且两个短片段 → 把 `node.right` 与 b 合并后重建平衡 rope（QJS `ConcatString2` + `new_string_rope`）。左右都是平铺串时：左为空返回右；短右 + 中等长度左 → 左长度达到 `tail_buffer_seed_len` 就 `createTailBufferRope` 开 tail buffer（把 `s = s + x` 的二次项摊成一次拷贝），否则 `concatFlatStringBodiesOwned`。右侧是 rope 时对称处理左短片段。都不命中就 `createBalancedRopeOwned`，失败时它负责释放两侧。
 - **所有权 / 错误 / 调用**：消费两个字符串操作数（`JS_ConcatString` 契约）：空串分支直接把另一侧原样返回，rope 分支把入参或其子节点转交给新节点，最终的 `createBalancedRopeOwned` 在分配/再平衡失败时负责释放两侧，所以中途不需要 errdefer；tail-buffer 分支就地追加进已有缓冲，不产生新字符串体。非字符串体返回裸 `error.TypeError`，其余是 OOM 与 `error.StringTooLong`。调用方 `stringAdd`（`:854`）与 pub 包装 `addStringsOwned`（`:913`）。
 
-### `concatFlatStringBodiesOwned` (`src/exec/value_ops.zig:986`)
+### `concatFlatStringBodiesOwned` (`src/exec/value_ops.zig:987`)
 
 - **签名**：`fn concatFlatStringBodiesOwned( rt: *core.JSRuntime, a_string: *core.string.String, b_string: *core.string.String, ) !core.JSValue`。
 - **作用**：两个平铺 String 体的拼接；名字里的 `Owned` 指的是外层 `JS_ConcatString` 契约，它本身只读两个 String 体、不释放它们。
@@ -571,70 +571,70 @@
 - **实现**：长度相加溢出或超 `core.string.max_length` → `error.StringTooLong`。双 latin1：先试 `percentHexConcat` 的缓存串，否则 `createLatin1Concat` 直接分配+memcpy。双 utf16：`createUtf16Concat`。宽度混合才退回 `ArrayList(u16)` + `appendStringUtf16Units` + `createUtf16`。
 - **所有权 / 错误 / 调用**：入参是两个**借用**的 `*core.string.String` 体（不消费，调用方那侧的所有权由 `stringAddStringsOwned` 统一处理），输出是新建的 GC 字符串；混宽度臂的 `std.ArrayList(u16)` 由 `initCapacity` 分配并 `defer deinit()`。长度相加溢出或超 `core.string.max_length` 返回裸 `error.StringTooLong`（由 `runtimeErrorInfo` 渲染成 RangeError）。文件私有，调用方 `stringAddStringsOwned`（`:965`、`:991`、`:1009`）。
 
-### `percentHexConcat` (`src/exec/value_ops.zig:1024`)
+### `percentHexConcat` (`src/exec/value_ops.zig:1025`)
 
 - **签名**：`fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JSValue`。
 - **作用**：`"%" + hex` 这类 URI 编码碎片的缓存串快路径。
 - **实现**：`"%"` 加一个十六进制字符 → `rt.recentTwoUnitString('%', b[0])`；`"%X"` 再加一个十六进制字符 → `rt.percentHexString((high << 4) | low)`。其余返回 null。
 - **所有权 / 错误 / 调用**：命中时返回的是 runtime 缓存串的值，调用方按普通拥有值处理；未命中返回 null。
 
-### `upperHexValue` (`src/exec/value_ops.zig:1038`)
+### `upperHexValue` (`src/exec/value_ops.zig:1039`)
 
 - **签名**：`fn upperHexValue(byte: u8) ?u8`。
 - **作用**：ASCII 十六进制数字的取值（非十六进制返回 null）。
 - **实现**：转调 `unicode_lib.asciiUpperHexDigitValueByte`。
 - **所有权 / 错误 / 调用**：无：`unicode_lib.asciiUpperHexDigitValueByte` 的查表包装，不分配、无 error set。文件私有，唯一调用方 `percentHexConcat`（`:1066`、`:1071`、`:1072`）。
 
-### `stringObject` (`src/exec/value_ops.zig:1042`)
+### `stringObject` (`src/exec/value_ops.zig:1043`)
 
 - **签名**：`fn stringObject(value: core.JSValue) ?*core.string.String`。
 - **作用**：取值背后的 `String` 体。
 - **实现**：转调 `value.asStringBody()`（rope 会在这里物化，所以 rope 敏感的路径要先在 tag 层判断）。
 - **所有权 / 错误 / 调用**：返回**借用**的 `*core.string.String`，不 retain、不建根；注意 `asStringBody()` 会把 rope 物化，所以 `stringAddStringInt` 必须先在 value/tag 层判 rope 再调它。无 error set，非字符串返回 `null`。文件私有，调用方 `toNumberValue`（`:401`）与 `stringAddStringInt`（`:881`）。
 
-### `appendStringUtf16Units` (`src/exec/value_ops.zig:1046`)
+### `appendStringUtf16Units` (`src/exec/value_ops.zig:1047`)
 
 - **签名**：`fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: *const core.string.String) !void`。
 - **作用**：把一个 String body 按 UTF-16 代码单元展开进 `ArrayList(u16)`，供 `concatFlatStringBodiesOwned` 在两个操作数宽度不同（latin1 + utf16）、拼不出同宽快路径时统一成宽字符串。
 - **实现**：latin1 按字节逐个 `append` 成 u16；utf16 直接 `appendSlice`。
 - **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u16)` 追加（latin1 逐字节零扩展，utf16 整段 `appendSlice`），缓冲归调用方；错误只有 append 的 OOM。文件私有，唯一调用方 `concatFlatStringBodiesOwned` 的混宽度臂（`:1060`、`:1061`）。
 
-### `shiftBigInt` (`src/exec/value_ops.zig:1055`)
+### `shiftBigInt` (`src/exec/value_ops.zig:1056`)
 
 - **签名**：`fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.BigInt, direction: enum { left, right }) !bignum.BigInt`。
 - **作用**：BigInt 的 `<<` / `>>`，负移位量等价于反向移位。
 - **实现**：clone 出移位量取绝对值，`effective_right = (direction == .right) != negative_shift`。移位量超过一个 limb 时：有效右移饱和成 0 或 -1（按 lhs 符号，qjs `js_bigint_shr` 的 `d >= a->len` 臂），有效左移的非零值报 `error.BigIntTooLarge`（qjs `js_bigint_shl` → `js_bigint_new` quickjs.c:11592-11596），零值返回 0n。否则按方向调 `shl` / `shr`。
 - **所有权 / 错误 / 调用**：入参 `lhs`/`rhs` 借用，返回的 BigInt **新分配**由调用方处置（`binaryBigInt` 交给 `createBigIntOwned`）；超限返回 `error.BigIntTooLarge`。
 
-### `parseJsNumber` (`src/exec/value_ops.zig:1076`)
+### `parseJsNumber` (`src/exec/value_ops.zig:1077`)
 
 - **签名**：`fn parseJsNumber(bytes: []const u8) f64`。
 - **作用**：转发到 core 的 StringNumericLiteral 解析（ToNumber 的字符串分支）：`toNumberValue` 的 utf16 慢路径与 `toIntegerOrInfinity` 的通用路径先把值渲染成 UTF-8 缓冲，再交给它出 f64。
 - **实现**：转调 `core.value_format.parseJsNumber`。
 - **所有权 / 错误 / 调用**：无：`core.value_format.parseJsNumber` 的包装，只读借用字节，不分配、无 error set（解析失败即 NaN）。文件私有，调用方 `toNumberValue`（`:415`）与 `toIntegerOrInfinity`（`:557`）。
 
-### `valuesEqual` (`src/exec/value_ops.zig:1080`)
+### `valuesEqual` (`src/exec/value_ops.zig:1081`)
 
 - **签名**：`fn valuesEqual(a: core.JSValue, b: core.JSValue) bool`。
 - **作用**：`===` 的判定体（含 NaN≠NaN、字符串按内容比）。
 - **实现**：双 BigInt 走 `compareBigIntValues`；双数值取 f64 比较且 NaN 恒 false；int32、bool 各自同 tag 比较；null/undefined 用 `same`；双字符串同指针即真，否则 `compareStringValues(eq_only = true)`；其余落到 `a.same(b)` 的身份比较。
 - **所有权 / 错误 / 调用**：无堆分配：BigInt 走栈上 limb scratch 的 `compareBigIntValues`，字符串走 `core.string.compareStringValues`（不物化 rope），其余是 tag 比较。无 error set。文件私有，调用方 `strictEqual`（`:198`）与 `strictNotEqual`（`:202`）。
 
-### `compareBigIntValues` (`src/exec/value_ops.zig:1104`)
+### `compareBigIntValues` (`src/exec/value_ops.zig:1105`)
 
 - **签名**：`fn compareBigIntValues(a: core.JSValue, b: core.JSValue) ?std.math.Order`。
 - **作用**：两个 BigInt 值（short 或堆）的大小比较。
 - **实现**：各用一个 `[2]Limb` 栈上 scratch 经 `bigIntParts` 取出符号与 limbs，交给 `bignum.compareParts`；任一侧不是 BigInt 返回 null。
 - **所有权 / 错误 / 调用**：局部缓冲在**栈**上：两个 `[2]bignum.Limb` scratch 供 short bigint 展开，`bigIntParts` 返回的 limb 切片借用它们或堆 BigInt 的内部 limbs，都不得逃出本帧。无堆分配、无 error set，非 BigInt 返回 `null`。文件私有，调用方 `compareBigIntRelational`（`:94`）与 `valuesEqual`（`:1123`）。
 
-### `bigIntParts` (`src/exec/value_ops.zig:1117`)
+### `bigIntParts` (`src/exec/value_ops.zig:1118`)
 
 - **签名**：`fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts`。
 - **作用**：把 BigInt 值拆成 (符号, limbs) 视图，short BigInt 写进调用方给的 scratch。
 - **实现**：short：取绝对值后按 limb 位宽切片写进 scratch（0 得到空 limbs）；堆 BigInt：直接借 `big.negative()` / `big.limbs()`；其余返回 null。
 - **所有权 / 错误 / 调用**：返回的 `limbs` 是**借用**切片：short bigint 指向调用方传入的栈 `scratch`，堆 BigInt 直接指向对象内部 limbs（不 retain、不建根），生命周期都不超过调用方那一帧。不分配、无 error set。文件私有，唯一调用方 `compareBigIntValues`（`:1148`、`:1149`）。
 
-### `isHTMLDDA` (`src/exec/value_ops.zig:1140`)
+### `isHTMLDDA` (`src/exec/value_ops.zig:1141`)
 
 - **签名**：`pub fn isHTMLDDA(value: core.JSValue) bool`。
 - **作用**：判断值是否带 [[IsHTMLDDA]]（`document.all` 这类在 `typeof`/ToBoolean/松散相等里伪装成 undefined 的对象）。
@@ -642,35 +642,35 @@
 - **实现**：转调 `core.value_semantics.isHTMLDDA`（`document.all` 那类 [[IsHTMLDDA]] 值）。
 - **所有权 / 错误 / 调用**：无：`core.value_semantics.isHTMLDDA` 的只读谓词包装，不分配、无 error set。8 处调用，典型 `src/exec/vm_arith.zig:781`、`src/exec/vm_value.zig:188`、`:212`。
 
-### `compareStringValues` (`src/exec/value_ops.zig:1144`)
+### `compareStringValues` (`src/exec/value_ops.zig:1145`)
 
 - **签名**：`fn compareStringValues(a: core.JSValue, b: core.JSValue, eq_only: bool) ?i32`。
 - **作用**：两个字符串值的比较，`eq_only` 时只判等。
 - **实现**：转调 `core.string.compareStringValues`。
 - **所有权 / 错误 / 调用**：无：转调 `core.string.compareStringValues`，两个字符串值都是借用，不分配、无 error set；不可比（非字符串体）返回 `null`，由调用方转成 `error.TypeError` 或 false。文件私有，调用方 `compare`（`:59`）与 `valuesEqual`（`:1140`）。
 
-### `jsMathPow` (`src/exec/value_ops.zig:1148`)
+### `jsMathPow` (`src/exec/value_ops.zig:1149`)
 
 - **签名**：`fn jsMathPow(lhs: f64, rhs: f64) f64`。
 - **作用**：`**` / `Math.pow` 的 JS 语义幂。
 - **实现**：底数绝对值为 1 且指数非有限时返回 NaN（JS 与 C `pow` 的分歧点），其余 `std.math.pow`。
 - **所有权 / 错误 / 调用**：无：纯 f64 运算（`|lhs| == 1` 且指数非有限时按 spec 返回 NaN），不分配、无 error set。文件私有，唯一调用方 `binaryNumber` 的 pow 臂（`src/exec/value_ops.zig:827`）。
 
-### `valuesStrictEqual` (`src/exec/value_ops.zig:1155`)
+### `valuesStrictEqual` (`src/exec/value_ops.zig:1156`)
 
 - **签名**：`pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !bool`。
 - **作用**：VM 侧的严格相等，字符串比较可能要物化字节。
 - **实现**：双数值按 f64 比（NaN 恒 false）；bool 同 tag 比；null/undefined 用 `same`；双 BigInt 用 `sameValue`；双字符串同指针即真，否则各自 `appendRawString` 成 UTF-8 后 `std.mem.eql`；其余 `a.same(b)`。
 - **所有权 / 错误 / 调用**：两个临时字节缓冲在函数内释放；只有字符串分支会分配（可能 OOM）。
 
-### `cloneBigIntValue` (`src/exec/value_ops.zig:1182`)
+### `cloneBigIntValue` (`src/exec/value_ops.zig:1183`)
 
 - **签名**：`pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt`。
 - **作用**：把 BigInt 值复制成独立的 `bignum.BigInt`。
 - **实现**：转调 `core.value_format.cloneBigIntValue(rt.memory.allocator, value)`。
 - **所有权 / 错误 / 调用**：返回值由调用方 `deinit`。
 
-### `appendValueString` (`src/exec/value_ops.zig:1187`)
+### `appendValueString` (`src/exec/value_ops.zig:1188`)
 
 - **签名**：`pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void`。
 - **作用**：本文件对共享 ToString 的策略封装：把任意 JSValue 的 ToString 结果按 UTF-8 追加进缓冲，且 Symbol 不抛 TypeError 而是写出它的描述文本（`.symbol = .describe`），用于诊断/内部渲染而非可观察的 ToString。

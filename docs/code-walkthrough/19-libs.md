@@ -1,6 +1,6 @@
 # 19 — `src/libs/`：语言库（regexp / unicode / bigint / dtoa）
 
-本册覆盖 `src/libs/` 全部生产源码。这些模块是**移植/生成代码**：函数名常保留 QuickJS 上游拼写（`lre*`、`mpb*`、`jsDtoa*`、`jsAtod*`），语义权威仍是 ECMA-262。它们不依赖 `exec/` 或 `runtime/`，也不持有 `JSValue`；引擎上层用适配器把堆、字符串宽度、中断检查接进来。
+本册覆盖 `src/libs/` 全部生产源码。这些模块是**移植/生成代码**：函数名常保留 QuickJS 上游拼写（`lre*`、`mpb*`、`dtoa*`、`mulPow`），公开入口与两个转换内核用 Zig 名字（`floatToText` / `textToFloat`），语义权威仍是 ECMA-262。它们不依赖 `exec/` 或 `runtime/`，也不持有 `JSValue`；引擎上层用适配器把堆、字符串宽度、中断检查接进来。
 
 分册：
 
@@ -22,7 +22,7 @@ src/libs/root.zig
   unicode        → unicode.zig
                    └─ unicode_tables.bin            QuickJS RLE 表载体（@embedFile）
   regexp         → regexp.zig                       LRE 编译 + 执行
-  number_format  → number_format.zig                dtoa（atod 只做反函数）
+  number_format  → number_format.zig                dtoa 双向：floatToText / textToFloat
   bigint         → bigint.zig                       符号-幅度 64-bit limb 算术
 ```
 
@@ -33,10 +33,10 @@ src/libs/root.zig
 | `subsystem_name` | 架构依赖检查用的子系统名 `"libs"` |
 | `unicode` | Unicode 分类、大小写、规范化、`CharRange`、属性区间 |
 | `regexp` | ECMAScript 正则编译器与 QuickJS `libregexp.c` 风格回溯 VM |
-| `number_format` | binary64 十进制/任意 radix **格式化**（`jsDtoa`）。十进制 ToNumber 走 `std.fmt.parseFloat`；`jsAtod` 只是 dtoa 反函数 |
+| `number_format` | binary64 文本 ↔ 数值双向：格式化 `floatToText`（`js_dtoa`），解析 `textToFloat`（`js_atod` + `js_atof` 规则），ToNumber / parseInt / parseFloat / 字面量 / JSON 全部经 `parseNumberPrefix` / `parseNumberExact` |
 | `bigint` | 分配器拥有的 `BigInt`，上限 `JS_BIGINT_MAX_SIZE`（1M bit） |
 
-本文件没有 `fn`。消费点：`core/bigint.zig`（堆对象借 `libs.bigint.BigInt` 视图）、`exec/regexp_adapter.zig` / `exec/regexp_ops.zig`（编译执行）、`core/number.zig` / `core/value_format.zig`（dtoa）、parser/lexer（标识符与空白）。
+本文件没有 `fn`。消费点：`core/bigint.zig`（堆对象借 `libs.bigint.BigInt` 视图）、`exec/regexp_adapter.zig` / `exec/regexp_ops.zig`（编译执行）、`core/number.zig` / `core/value_format.zig` / `lexer.zig` / `exec/json_ops.zig`（双向转换）、parser/lexer（标识符与空白）。
 
 ## LRE vs `exec/regexp_ops`
 

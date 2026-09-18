@@ -438,52 +438,52 @@
 
 - **签名**：`pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !TypedArrayCanonicalIndex`。
 - **作用**：将 atom 分类为非 canonical、canonical 但非法索引或 u32 索引。
-- **实现**：先 arrayIndexFromAtom 命中直接 index；否则仅 string 且有非空名字继续，-0 为 invalid。解析 NaN/±Infinity 或浮点数，再按 JS 数字格式回印，文本不同为 none；canonical 但非有限/非整数/负数/超过 u32 为 invalid，其余 index。
+- **实现**：先 arrayIndexFromAtom 命中直接 index；否则仅 string 且有非空名字继续，-0 为 invalid。`value_format.parseJsNumber(name)` 做 ToNumber，再按 JS 数字格式回印，文本不同为 none（CanonicalNumericIndexString）；canonical 但非有限/非整数/负数/超过 u32 为 invalid，其余 index。
 - **所有权 / 错误 / 调用**：TypedArrayCanonicalIndex 的 invalid 与 none 不同：前者不能当普通命名属性。允许 u32 最大值作为数值候选，实际边界由 view 长度检查；当前函数无实际 error 返回分支。
 
-### `typedArrayBackedByResizableBuffer` (`src/core/object.zig:11156`)
+### `typedArrayBackedByResizableBuffer` (`src/core/object.zig:11150`)
 
 - **签名**：`pub fn typedArrayBackedByResizableBuffer(object: *Object) bool`。
 - **作用**：判断 view backing 是否声明 max_byte_length。
 - **实现**：先 isTypedArrayObject，缺 payload/backing false，否则 max_byte_length!=null。
 - **所有权 / 错误 / 调用**：不判断是否还能增长、已 detached 或当前越界；包含具备该字段的 shared backing。
 
-### `arrayBufferIsImmutable` (`src/core/object.zig:11163`)
+### `arrayBufferIsImmutable` (`src/core/object.zig:11157`)
 
 - **签名**：`pub fn arrayBufferIsImmutable(rt: *JSRuntime, object: *Object) bool`。
 - **作用**：读取 buffer immutable 标志。
 - **实现**：忽略 rt，委托 arrayBufferImmutable。
 - **所有权 / 错误 / 调用**：无 buffer payload 时底层返回 false，不做类型异常校验。
 
-### `markArrayBufferImmutable` (`src/core/object.zig:11168`)
+### `markArrayBufferImmutable` (`src/core/object.zig:11162`)
 
 - **签名**：`pub fn markArrayBufferImmutable(rt: *JSRuntime, object: *Object) !void`。
 - **作用**：设置 buffer immutable 标志。
 - **实现**：忽略 rt，通过 arrayBufferImmutableSlot 写 true。
 - **所有权 / 错误 / 调用**：要求 buffer payload 存在，不设置其他 flags 或改变 bytes；虽返回 !void，当前无实际 error 分支。
 
-### `typedArrayImmutableBuffer` (`src/core/object.zig:11173`)
+### `typedArrayImmutableBuffer` (`src/core/object.zig:11167`)
 
 - **签名**：`pub fn typedArrayImmutableBuffer(rt: *JSRuntime, object: *Object) !bool`。
 - **作用**：读取 view backing 的 immutable 标志。
 - **实现**：缺 typed-array payload/backing 报 TypeError，否则 backing.immutable；rt 未使用。
 - **所有权 / 错误 / 调用**：不同时校验 detached/范围/element_size。
 
-### `typedArrayRejectImmutableBuffer` (`src/core/object.zig:11180`)
+### `typedArrayRejectImmutableBuffer` (`src/core/object.zig:11174`)
 
 - **签名**：`pub fn typedArrayRejectImmutableBuffer(rt: *JSRuntime, object: *Object) !void`。
 - **作用**：拒绝指向 immutable backing 的 view 操作。
 - **实现**：typedArrayImmutableBuffer 为 true 则 TypeError，否则成功；查询错误也传播。
 - **所有权 / 错误 / 调用**：不修改对象，也不能替代其他 view 类型、边界或 detach 校验。
 
-### `isCompatible` (`src/core/object.zig:11184`)
+### `isCompatible` (`src/core/object.zig:11178`)
 
 - **签名**：`fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) bool`。
 - **作用**：判断 descriptor 与现有属性 flags/slot 是否兼容。
 - **实现**：当前 configurable 直接 true；否则拒绝 configurable=true、enumerable 改变。generic 到此 true；其余要求 accessor 分类相同，非 accessor 且不可写时拒绝 writable=true/显式不同 SameValue；accessor 显式 getter/setter 必须分别 SameValue。
 - **所有权 / 错误 / 调用**：不执行 getter 或 TDZ 检查；VarRef 比较读取 cell 值，auto-init 在不可写值比较分支视作 undefined，因此正常调用方须先物化。不是完整输入 descriptor 语法验证。
 
-### `mergeDescriptor` (`src/core/object.zig:11212`)
+### `mergeDescriptor` (`src/core/object.zig:11206`)
 
 - **签名**：`fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) descriptor.Descriptor`。
 - **作用**：把局部 descriptor 与当前属性内容合并成完整描述符。

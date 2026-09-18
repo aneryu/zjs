@@ -567,112 +567,112 @@ append 契约：容量不足 mint 新 cell（旧的交给 sweep）；值先写�
 - **实现**：generic 为 undefined data，data 直接取 desc.value，accessor 由 fromBorrowedValues(getter,setter) 构造。
 - **所有权 / 错误 / 调用**：不根据 value_present 保留旧值，不分配或执行 setter；输入应已按新建/合并协议准备。
 
-### `arrayLengthValue` (`src/core/object.zig:11265`)
+### `arrayLengthValue` (`src/core/object.zig:11259`)
 
 - **签名**：`fn arrayLengthValue(length: u32) JSValue`。
 - **作用**：把 u32 Array length 编码为 JS 数值。
 - **实现**：不超过 i32 最大值用 int32，否则用 float64。
 - **所有权 / 错误 / 调用**：不分配、不改变数组；所有 u32 长度均可由 f64 精确表示。
 
-### `arrayLengthFromValue` (`src/core/object.zig:11272`)
+### `arrayLengthFromValue` (`src/core/object.zig:11266`)
 
 - **签名**：`fn arrayLengthFromValue(rt: *JSRuntime, value: JSValue) !?u32`。
 - **作用**：将受支持值转为可接受的 u32 Array length。
 - **实现**：先 arrayLengthNumber；null、NaN、非有限、负数、超过 max_array_length 或非整数均返回 null，合法值转 u32。
 - **所有权 / 错误 / 调用**：不直接抛 InvalidLength，由调用方解释 null；分配/字符串扁平化错误传播。不是完整可执行用户转换代码的 ToNumber。
 
-### `arrayLengthNumber` (`src/core/object.zig:11281`)
+### `arrayLengthNumber` (`src/core/object.zig:11275`)
 
 - **签名**：`fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64`。
 - **作用**：执行内部有限类型集合的长度数值转换。
 - **实现**：int/float 原数值、bool 0/1、null 0；undefined/symbol/bigint 返回 null；字符串调用字符串 helper。Object 仅支持 string wrapper 的 data、number/boolean wrapper 的递归 primitive，其余 null。
 - **所有权 / 错误 / 调用**：不调用 valueOf、toString 或 Symbol.toPrimitive；不适用于独立替代完整 JS 类型转换。
 
-### `arrayLengthStringNumber` (`src/core/object.zig:11303`)
+### `arrayLengthStringNumber` (`src/core/object.zig:11297`)
 
 - **签名**：`fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64`。
 - **作用**：按内部 ASCII 路径解析长度字符串数值。
-- **实现**：取 String body（恒为扁平）；分配临时字节表，任一 code unit>127 返回 NaN；只 trim 空格/tab/CR/LF，空为 0，处理 ±Infinity，0x/0X 用 u64 十六进制解析，其余 parseFloat；解析失败 NaN。
-- **所有权 / 错误 / 调用**：不等于完整 ECMAScript StringNumericLiteral，Unicode 空白被拒绝，十六进制限制 u64。临时数组 defer 释放，分配/flatten 错误传播。
+- **实现**：取 String body（恒为扁平）；分配临时字节表，任一 code unit>127 返回 NaN；其余交 `value_format.parseJsNumber`（JS 空白、`0x/0o/0b`、`Infinity` 都按 StringToNumber）。
+- **所有权 / 错误 / 调用**：非 ASCII 空白仍被拒绝。临时数组 defer 释放，分配/flatten 错误传播。
 
-### `varRefCellFromValue` (`src/core/object.zig:11325`)
+### `varRefCellFromValue` (`src/core/object.zig:11311`)
 
 - **签名**：`fn varRefCellFromValue(value: JSValue) ?*var_ref_mod.VarRef`。
 - **作用**：从值中识别 VarRef cell。
 - **实现**：直接委托 VarRef.fromValue。
 - **所有权 / 错误 / 调用**：不读取 cell 内容或建立根，不创建绑定。
 
-### `appendAtom` (`src/core/object.zig:11329`)
+### `appendAtom` (`src/core/object.zig:11315`)
 
 - **签名**：`fn appendAtom(rt: *JSRuntime, keys: *[]atom.Atom, atom_id: atom.Atom) OwnKeysError!void`。
 - **作用**：为 key 数组追加一个 atom id。
 - **实现**：allocRuntime(len+1)，复制旧项并写新 atom，替换 keys slice 后释放非空旧数组。
 - **所有权 / 错误 / 调用**：每次精确重新分配，没有 capacity 增长策略；OOM 前旧 slice 保持有效。只复制 atom id，不建立持久根，调用方保护跨分配窗口的 atom。
 
-### `hasPropertyIndexKeys` (`src/core/object.zig:11344`)
+### `hasPropertyIndexKeys` (`src/core/object.zig:11330`)
 
 - **签名**：`fn hasPropertyIndexKeys(self: *const Object, rt: *JSRuntime) bool`。
 - **作用**：判断 shape 是否包含未由 dense extent 覆盖的 live 索引属性。
 - **实现**：遍历 shapeProps，跳过 deleted；arrayIndexFromAtom 成功且 !hasDenseArrayElement(index) 则 true，末尾 false。
 - **所有权 / 错误 / 调用**：不要求 enumerable，不检查 mapped binding 表或全部对象语义。
 
-### `indexKeyLessThan` (`src/core/object.zig:11353`)
+### `indexKeyLessThan` (`src/core/object.zig:11339`)
 
 - **签名**：`fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool`。
 - **作用**：按数值索引比较 IndexKey。
 - **实现**：返回 lhs.index<rhs.index，context 未用。
 - **所有权 / 错误 / 调用**：不比较 atom id，相等索引排序等价；去重由上层 ownKeys 另行处理。
 
-### `ownEntriesExpectObject` (`src/core/object.zig:11372`)
+### `ownEntriesExpectObject` (`src/core/object.zig:11358`)
 
 - **签名**：`fn ownEntriesExpectObject(value: JSValue) !*Object`。
 - **作用**：为内部 entries 构建器取得 Object 输入。
 - **实现**：要求 refHeader 非空且 value.isObject，否则 TypeError，再 Object.fromHeader。
 - **所有权 / 错误 / 调用**：不执行 ToObject，不自动装箱 primitive。
 
-### `entriesAtomToStringValue` (`src/core/object.zig:11378`)
+### `entriesAtomToStringValue` (`src/core/object.zig:11364`)
 
 - **签名**：`fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue`。
 - **作用**：将属性 atom 转换为字符串值。
 - **实现**：委托 rt.atoms.toStringValue(rt,atom_id)。
 - **所有权 / 错误 / 调用**：分配/转换错误传播，不在此筛选 symbol 或私有 key。
 
-### `entryArrayValue` (`src/core/object.zig:11382`)
+### `entryArrayValue` (`src/core/object.zig:11368`)
 
 - **签名**：`fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*Object) !JSValue`。
 - **作用**：构造 [key字符串,value] 两项数组。
 - **实现**：先激活列有 value、key 字符串槽与新数组槽的 rootValues 帧；createArray 后写入数组根槽并设置失败 destroy（errdefer 同时把根槽清回 undefined），atom 转字符串写入 key 根槽，再创建容量 2 的 array_storage cell，写两项并 adopt，标 indexed properties 后返回。
 - **所有权 / 错误 / 调用**：原型直接取参数，不自行解析 realm。新数组与 key 字符串都要跨 createArrayStorageSlice 这次分配，因此三者都在显式根帧内（此前 key_value 与新数组都是裸局部，无根，注释却声称有）。prototype 与调用方传入 value 的存活仍遵循外围协议。
 
-### `ownEntriesArray` (`src/core/object.zig:11410`)
+### `ownEntriesArray` (`src/core/object.zig:11396`)
 
 - **签名**：`pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, prototype: ?*Object) !JSValue`。
 - **作用**：为内部 bare-runtime 路径生成 keys/values/entries 数组。
 - **实现**：rootValues 包住输入、输出和当前元素；要求 Object 输入，ownKeys 后 defer free；创建带给定 prototype 的结果数组，错误时销毁并清输出根。遍历 key，跳过公开 symbol、缺 descriptor 和不可枚举项；keys 转字符串，values 用 getProperty，entries 构造二元数组，再逐项 defineOwnProperty 为 w/e/c 全 true。
 - **所有权 / 错误 / 调用**：不 ToObject 装箱；getProperty accessor 返回 getter 值而非执行 getter，完整 JS 可观察语义由上层适用路径决定。这里没有为 owned_keys 单独注册跨循环 atom-list 根；ownKeys 内部根在返回时已撤销。先收集 key，再逐项重读 descriptor，失败不返回部分结果。
 
-### `stringIteratorPrimitiveValue` (`src/core/object.zig:11462`)
+### `stringIteratorPrimitiveValue` (`src/core/object.zig:11448`)
 
 - **签名**：`fn stringIteratorPrimitiveValue(value: JSValue) !JSValue`。
 - **作用**：取 string 或 String wrapper 的内部值。
 - **实现**：string 输入直接返回；其他输入必须有 refHeader、为 Object 且 class_id 为 string，再取非空 objectData，否则 TypeError。
 - **所有权 / 错误 / 调用**：不调用 ToString/ToPrimitive，也不重新检查 wrapper 内部值是否确为 string；返回借用值，不独立分配或建立根。
 
-### `defineStringIteratorToStringTag` (`src/core/object.zig:11471`)
+### `defineStringIteratorToStringTag` (`src/core/object.zig:11457`)
 
 - **签名**：`fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []const u8) !void`。
 - **作用**：定义迭代器对象的 @@toStringTag 数据属性。
 - **实现**：查询预定义 symbol atom；缺失报 TypeError。以 createUtf8 分配 tag 字符串，defineOwnProperty 安装 writable=false、enumerable=false、configurable=true 的数据属性。
 - **所有权 / 错误 / 调用**：字符串创建及属性定义失败传播；本体没有单独注册临时字符串或 object 的 rootValues 帧。
 
-### `stringIteratorPrototype` (`src/core/object.zig:11477`)
+### `stringIteratorPrototype` (`src/core/object.zig:11463`)
 
 - **签名**：`fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8) !*Object`。
 - **作用**：每次新建 Iterator 基础对象和 String Iterator 专用原型。
 - **实现**：由 ctx.runtime 创建 null prototype 的 base，标记 Iterator；再创建继承 base 的 specific，标记 tag_name。nativeFunction(ctx,"next",0) 创建 next，验证为 Object 并设置 string.iterator_next native id/record；将 next 定义为可写、不可枚举、可配置属性。
 - **所有权 / 错误 / 调用**：不查询或复用 realm 原型缓存；next 构造明确使用传入 ctx，不能称为与 realm 无关。specific 建成前失败直接 destroy base；建成后关闭 base_raw_owned，仅对 specific 设置错误销毁，不能宣称所有分配均逐一立即回滚。本体没有单独显式根帧。
 
-### `stringIterator` (`src/core/object.zig:11496`)
+### `stringIterator` (`src/core/object.zig:11482`)
 
 - **签名**：`pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValue`。
 - **作用**：为 string/String wrapper 接收者创建 String Iterator 实例。

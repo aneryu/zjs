@@ -23,6 +23,21 @@
   Re-exports live on `src/root.zig` and `src/internal_root.zig`. The public
   `zjs.JSContext` / `zjs.native` spellings are unchanged.
 
+- **Numbers:** `libs/number_format` now converts in both directions with
+  one kernel each: `floatToText` (dtoa.c `js_dtoa`) and `textToFloat`
+  (`js_atod` with the `js_atof` scan rules folded in), exposed as
+  `parseNumberPrefix` / `parseNumberExact` with `ParseFlags`. ToNumber,
+  parseInt, parseFloat, source literals, JSON and the array-length / typed
+  array index paths all go through it; `std.fmt.parseFloat` is gone from
+  the engine. `textToFloat` gained a decimal fast path (u64 digits + SWAR,
+  Clinger, Eisel-Lemire, bignum fallback) and radix-10 shortest formatting
+  uses Ryu, both with comptime-generated tables. Fixes: plain `0…` literals
+  hit a missing `no_prefix` branch in the port; parseInt beyond 128 bits in
+  a non-power-of-two radix rounded per digit; BigInt → Number now rounds
+  once from the limbs (`BigInt.toFloat64`). Powers of two print the
+  genuinely shortest string (`2**-1017` → `7.120236347223045e-307`, as V8
+  does; QuickJS prints one digit more).
+
 - **Build:** trimmed `build/` after the profiles/perf-harness cut. `Ctx` and
   `Artifacts` keep only fields a helper reads; CLI / shard / smoke setup share
   helpers; `runArtifactOnCpus` lives next to `gateRunCpus` so tests no longer

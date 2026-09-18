@@ -52,16 +52,6 @@ pub fn arrayIndexFromName(bytes: []const u8) ?u32 {
     return @intCast(n);
 }
 
-pub fn canonicalNumericIndex(bytes: []const u8) ?f64 {
-    if (std.mem.eql(u8, bytes, "-0")) return -0.0;
-    if (std.fmt.parseFloat(f64, bytes)) |value| {
-        var buf: [64]u8 = undefined;
-        const printed = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return null;
-        if (std.mem.eql(u8, printed, bytes)) return value;
-    } else |_| {}
-    return null;
-}
-
 const objectFromValue = value_semantics.objectFromValue;
 const expectObject = value_semantics.expectObject;
 
@@ -192,5 +182,4 @@ test "array index detection handles QuickJS boundaries" {
     try std.testing.expect(!isArrayIndexName("4294967295"));
     try std.testing.expect(!isArrayIndexName("01"));
     try std.testing.expect(!isArrayIndexName("-1"));
-    try std.testing.expect(canonicalNumericIndex("-0") != null);
 }
