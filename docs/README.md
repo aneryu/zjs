@@ -55,6 +55,8 @@ when needed.
   Stack Bytecode VM Status chapter (VM mechanisms, the §8 PMU governance
   gate); evolution scope lives in the
   [Engine Evolution Plan](engine-evolution-plan.md).
+- [源码逐函数讲解](code-walkthrough/README.md): Chinese function-level
+  walkthrough of `src/` and the build/test entry points.
 - [Tracing GC Design](tracing-gc-design.md): project-specific target
   architecture, safety contracts, and staged migration from RC; the legacy
   collector remains documented in [Cycle Collector Invariants](gc-invariants.md).

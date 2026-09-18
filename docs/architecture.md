@@ -2,7 +2,8 @@
 
 This is a map of the tree as it exists now. QuickJS remains the semantic
 reference. Validation commands live in [GUIDE.md](../GUIDE.md) Part B.6; this
-page does not repeat them.
+page does not repeat them. Function-level Chinese walkthrough of every
+`src/` function: [code-walkthrough/README.md](code-walkthrough/README.md).
 
 Start from the layer you are changing. Do not read `parser.zig`, `object.zig`,
 or `bytecode.zig` from the first line to the last — those files are large
@@ -118,8 +119,10 @@ Normative contract: [compiler-contract.md](compiler-contract.md).
 ## Bytecode carrier — `src/bytecode.zig`
 
 Compile-time `FunctionDef` / `Bytecode` and the GC-managed
-`FunctionBytecode` that the VM runs. Opcode order matches QuickJS, plus four
-explicit-resource opcodes at the tail. Some pipeline namespaces
+`FunctionBytecode` that the VM runs. Logical opcodes are declared in
+`src/opcode_logical.zig` (form-keyed rows plus `ext0` carrier sub-codes);
+QuickJS ordering is the historical starting point, not the current
+contract. Some pipeline namespaces
 (`pipeline_stack_size`, finalize, pc2line) still live in this file; they are
 not separate `stack_size.zig` sources.
 
@@ -297,11 +300,13 @@ provide only the root storage and keep its stack address valid for that scope.
 
 ### 4. Property Access
 
-There is currently no inline cache:
-
-- `src/core/ic.zig` does not exist;
-- `FunctionBytecode` has no site/slot table;
-- `zjs_enable_ic` does not exist.
+Property access has a per-site cache (W1, 2026-09): `FunctionBytecode`
+carries a `PropSiteCache` table (`src/bytecode.zig`, `PropSiteCache`) that
+`get_field`/`put_field` sites fill through `captureFieldSite` /
+`capturePutSite` in `src/exec/vm_property_field.zig`; the embedding
+`PropertySite` in `src/binding/property_site.zig` reuses the same cache.
+There is still no `src/core/ic.zig`, no `zjs_enable_ic` option, and no call
+inline cache.
 
 `src/exec/property_direct.zig` (renamed from the historical
 `property_ic.zig` on 2026-08-19) holds non-cached direct
@@ -386,8 +391,8 @@ Not implemented:
 
 - register / accumulator bytecode;
 - baseline JIT;
-- call or property inline cache (still true on `main`; no longer
-  forbidden — Phase 0.5 feedback slots are approved and unlocked,
+- call inline cache (property sites are cached since W1, see §4 above;
+  Phase 0.5 feedback slots are approved and unlocked,
   [engine-evolution-plan.md](engine-evolution-plan.md) §3.4);
 - JIT GC stack maps;
 - moving nursery;
