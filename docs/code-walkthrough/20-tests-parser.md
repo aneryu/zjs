@@ -835,7 +835,7 @@
 
 - **签名**：`pub fn init(self: *Window, rt: *core.JSRuntime, shape: *const Shape) !void`。
 - **作用**：测试夹具/探针 `phase_ownership.Window.init`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。入口先 `rt.runObjectCycleRemoval()` 收一轮再 `Baseline.capture` 取基线（TGC S3-c：窗口内的 major 会回收 atom 条目，先收后量）；随后建 `Bytecode`（置 `artifact_live`）/`QjsLexer`（置 `lexer_live`）/`ParseState.initWithRuntime`（置 `state_live`），断言根上 `top_level_functions_as_children` 为假后置 `is_eval`/`is_global_var`，再按 `shape.tier == .nested_function_bytecode` 决定是否打开 `top_level_functions_as_children` + `top_level_lexical_as_global_ref`，跑 `parseDirectives` + `parseProgramStatements` + `emitReturnUndefined` 并断言停在 `TOK_EOF`。关键调用：`rt.runObjectCycleRemoval`、`Baseline.capture`、`engine.bytecode.Bytecode.init`、`self.deinit`、`QjsLexer.init`、`ParseState.initWithRuntime`、`parser_core.parseDirectives`、`parser_core.parseProgramStatements`。
+- **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。入口先 `rt.runObjectCycleRemoval()` 收一轮再 `Baseline.capture` 取基线（TGC S3-c：窗口内的 major 会回收 atom 条目，先收后量）；随后建 `Bytecode`（置 `artifact_live`）/`QjsLexer`（置 `lexer_live`）/`ParseState.initWithRuntime`（置 `state_live`），断言根上 `root_mode`（原 `root_mode` 旗标，现为 `State.root_mode: RootMode = .canonical | .raw_bytecode`） 为假后置 `is_eval`/`is_global_var`，再按 `shape.tier == .nested_function_bytecode` 决定是否打开 `root_mode` + `top_level_lexical_as_global_ref`，跑 `parseDirectives` + `parseProgramStatements` + `emitReturnUndefined` 并断言停在 `TOK_EOF`。关键调用：`rt.runObjectCycleRemoval`、`Baseline.capture`、`engine.bytecode.Bytecode.init`、`self.deinit`、`QjsLexer.init`、`ParseState.initWithRuntime`、`parser_core.parseDirectives`、`parser_core.parseProgramStatements`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime（本文件不走共享 harness）。失败路径靠 `errdefer` 对称释放。返回 `!void`，由测试 `try`/`expectError` 消费。
 
 ### `phase_ownership.Window.deinit` (`src/tests/parser.zig:13670`)
@@ -2804,7 +2804,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「parameter pre-scan balances regexp and template delimiters like QuickJS」。
-- **实现**：不走 `parseStatement` 助手，手工 `internAtom` + `Bytecode.init` + `QjsLexer.init` + `ParseState.initWithRuntime`，打开 `state.top_level_functions_as_children` 后直接调 `parser_core.parseProgramStatements`；源文的参数默认值里塞了 `/[)=}]/` 正则与 `` `x${/[}]/.test("}")}` `` 模板。断言 3 处 `std.testing.expect*`：`child_list.len == 2`，且两个子函数的 `has_parameter_expressions` 都为真。
+- **实现**：不走 `parseStatement` 助手，手工 `internAtom` + `Bytecode.init` + `QjsLexer.init` + `ParseState.initWithRuntime`，打开 `state.root_mode` 后直接调 `parser_core.parseProgramStatements`；源文的参数默认值里塞了 `/[)=}]/` 正则与 `` `x${/[}]/.test("}")}` `` 模板。断言 3 处 `std.testing.expect*`：`child_list.len == 2`，且两个子函数的 `has_parameter_expressions` 都为真。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ### `test "parameter initializer direct eval emits active global-declaration carriers"` (`src/tests/parser.zig:6191`)

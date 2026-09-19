@@ -39,10 +39,6 @@ const ParseHarness = struct {
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
         errdefer h.lex.deinit();
         h.state = try P.ParseState.init(&h.lex, &h.function);
-        // Scope events (enter_scope/leave_scope) belong to the un-migrated
-        // scope group; the parse harness runs without phase-1 temp scope
-        // markers so statement snippets stay inside the migrated surface.
-        h.state.emit_phase1_temp = false;
         try h.state.beginBuilderEmissionForTest();
     }
 
@@ -92,7 +88,7 @@ const ExecHarness = struct {
         // assignment, so the providers may register here.
         try h.state.activateCompileRoots();
         h.state.function_def.is_global_var = true;
-        h.state.top_level_functions_as_children = true;
+        h.state.root_mode = .canonical;
         try h.state.beginProgramEmission();
         h.installed_short_opcode = false;
     }
@@ -208,7 +204,7 @@ fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarn
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try h.state.finalizeEvalReturn();
     if (before_finalize) |hook| try hook(h);
 
@@ -650,7 +646,7 @@ test "compiler.s2g1: conditional expression" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -676,7 +672,7 @@ test "compiler.s2g1: logical or" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -701,7 +697,7 @@ test "compiler.s2g1: logical and chain" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -733,7 +729,7 @@ test "compiler.s2g1: coalesce" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -759,7 +755,7 @@ test "compiler.s2g1: coalesce chain" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -795,7 +791,7 @@ test "compiler.s2g1: optional chain field" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -828,7 +824,7 @@ test "compiler.s2g1: optional chain element" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -859,19 +855,21 @@ test "compiler.s2g1: if else empty" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.goto, .size = 5, .label = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 11), b.code_len);
+    try std.testing.expectEqual(@as(u32, 17), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 11);
-    try expectLabel(b, 1, 1, 11);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectLabel(b, 0, 1, 14);
+    try expectLabel(b, 1, 1, 14);
+    try std.testing.expectEqual(@as(i64, 14), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -883,10 +881,11 @@ test "compiler.s2g1: if else expression bodies" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.push_false, .size = 1 },
@@ -894,13 +893,14 @@ test "compiler.s2g1: if else expression bodies" {
         .{ .op = qop.goto, .size = 5, .label = 1 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 15), b.code_len);
+    try std.testing.expectEqual(@as(u32, 21), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 13);
-    try expectLabel(b, 1, 1, 15);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 6, 13 });
+    try expectLabel(b, 0, 1, 16);
+    try expectLabel(b, 1, 1, 18);
+    try std.testing.expectEqual(@as(i64, 18), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 9, 16 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -911,17 +911,19 @@ test "compiler.s2g1: if without else" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 6), b.code_len);
+    try std.testing.expectEqual(@as(u32, 12), b.code_len);
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
-    try expectLabel(b, 0, 1, 6);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try expectLabel(b, 0, 1, 9);
+    try std.testing.expectEqual(@as(i64, 9), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -933,18 +935,21 @@ test "compiler.s2g1: labeled break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 11), b.code_len);
+    try std.testing.expectEqual(@as(u32, 20), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 1, 11);
-    try expectLabel(b, 1, 1, 11);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 1, 17);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
@@ -957,7 +962,7 @@ test "compiler.s2g1: labeled statement without break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{});
@@ -979,7 +984,7 @@ test "compiler.s2g1: optional chain atom ownership" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
@@ -995,7 +1000,7 @@ test "compiler.s2g2: while" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1022,7 +1027,7 @@ test "compiler.s2g2: while continue" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1050,7 +1055,7 @@ test "compiler.s2g2: labeled while continue" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1080,7 +1085,7 @@ test "compiler.s2g2: do while" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1105,22 +1110,25 @@ test "compiler.s2g2: classic for empty head" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 11), b.code_len);
+    try std.testing.expectEqual(@as(u32, 20), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 0);
-    try expectLabel(b, 1, 1, 11);
-    try expectLabel(b, 2, 0, 6);
-    try expectLabel(b, 3, 0, 11);
+    try expectLabel(b, 0, 1, 3);
+    try expectLabel(b, 1, 1, 17);
+    try expectLabel(b, 2, 0, 12);
+    try expectLabel(b, 3, 0, 17);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 17), b.last_opcode_pos);
     // The classic-for test-entry marker and the synthetic true literal both
     // precede the first opcode; Stage 3 deduplicates them only when their
     // line/column points are identical.
@@ -1135,23 +1143,26 @@ test "compiler.s2g2: classic for test break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 16), b.code_len);
+    try std.testing.expectEqual(@as(u32, 25), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 0);
-    try expectLabel(b, 1, 1, 16);
-    try expectLabel(b, 2, 0, 11);
-    try expectLabel(b, 3, 1, 16);
+    try expectLabel(b, 0, 1, 3);
+    try expectLabel(b, 1, 1, 22);
+    try expectLabel(b, 2, 0, 17);
+    try expectLabel(b, 3, 1, 22);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1163,32 +1174,36 @@ test "compiler.s2g2: for in" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
-        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.scope_put_var, .size = 7 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_in_start, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_in_next, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 28), b.code_len);
+    try std.testing.expectEqual(@as(u32, 44), b.code_len);
     try std.testing.expectEqual(@as(u32, 6), b.label_len);
-    try expectLabel(b, 0, 1, 13);
-    try expectLabel(b, 1, 1, 5);
-    try expectLabel(b, 2, 1, 20);
-    try expectLabel(b, 3, 1, 20);
-    try expectLabel(b, 4, 0, 20);
-    try expectLabel(b, 5, 0, 28);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 1, 8);
+    try expectLabel(b, 2, 1, 30);
+    try expectLabel(b, 3, 1, 33);
+    try expectLabel(b, 4, 0, 33);
+    try expectLabel(b, 5, 0, 41);
     try std.testing.expect(b.label_slots[1].flags.backward_target);
-    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(i64, 41), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1200,34 +1215,39 @@ test "compiler.s2g2: for in break cleanup" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
-        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.scope_put_var, .size = 7 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_in_start, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 5 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_in_next, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 34), b.code_len);
+    try std.testing.expectEqual(@as(u32, 53), b.code_len);
     try std.testing.expectEqual(@as(u32, 6), b.label_len);
-    try expectLabel(b, 0, 1, 13);
-    try expectLabel(b, 1, 1, 5);
-    try expectLabel(b, 2, 1, 20);
-    try expectLabel(b, 3, 1, 26);
-    try expectLabel(b, 4, 0, 26);
-    try expectLabel(b, 5, 1, 34);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 1, 8);
+    try expectLabel(b, 2, 1, 30);
+    try expectLabel(b, 3, 1, 42);
+    try expectLabel(b, 4, 0, 42);
+    try expectLabel(b, 5, 1, 50);
     try std.testing.expect(b.label_slots[1].flags.backward_target);
-    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(i64, 50), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1239,33 +1259,37 @@ test "compiler.s2g2: for of" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
-        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.scope_put_var, .size = 7 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_of_start, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_of_next, .size = 2 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.iterator_close, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 45), b.code_len);
     try std.testing.expectEqual(@as(u32, 6), b.label_len);
-    try expectLabel(b, 0, 1, 13);
-    try expectLabel(b, 1, 1, 5);
-    try expectLabel(b, 2, 1, 20);
-    try expectLabel(b, 3, 1, 20);
-    try expectLabel(b, 4, 0, 20);
-    try expectLabel(b, 5, 0, 29);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 1, 8);
+    try expectLabel(b, 2, 1, 30);
+    try expectLabel(b, 3, 1, 33);
+    try expectLabel(b, 4, 0, 33);
+    try expectLabel(b, 5, 0, 42);
     try std.testing.expect(b.label_slots[1].flags.backward_target);
-    try std.testing.expectEqual(@as(u8, 0), b.code[21]);
-    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0), b.code[34]);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(i64, 42), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1277,35 +1301,40 @@ test "compiler.s2g2: for of break cleanup" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
-        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.scope_put_var, .size = 7 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_of_start, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.iterator_close, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 5 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.for_of_next, .size = 2 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.iterator_close, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 35), b.code_len);
+    try std.testing.expectEqual(@as(u32, 54), b.code_len);
     try std.testing.expectEqual(@as(u32, 6), b.label_len);
-    try expectLabel(b, 0, 1, 13);
-    try expectLabel(b, 1, 1, 5);
-    try expectLabel(b, 2, 1, 20);
-    try expectLabel(b, 3, 1, 26);
-    try expectLabel(b, 4, 0, 26);
-    try expectLabel(b, 5, 1, 35);
+    try expectLabel(b, 0, 1, 20);
+    try expectLabel(b, 1, 1, 8);
+    try expectLabel(b, 2, 1, 30);
+    try expectLabel(b, 3, 1, 42);
+    try expectLabel(b, 4, 0, 42);
+    try expectLabel(b, 5, 1, 51);
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u8, 0), b.code[27]);
-    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
+    try std.testing.expectEqual(@as(i64, 51), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1317,11 +1346,12 @@ test "compiler.s2g2: switch single case" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.strict_eq, .size = 1 },
@@ -1329,13 +1359,14 @@ test "compiler.s2g2: switch single case" {
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 12), b.code_len);
+    try std.testing.expectEqual(@as(u32, 18), b.code_len);
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
-    try expectLabel(b, 0, 0, 11);
-    try expectLabel(b, 1, 1, 11);
-    try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{9});
+    try expectLabel(b, 0, 0, 14);
+    try expectLabel(b, 1, 1, 14);
+    try std.testing.expectEqual(@as(i64, 15), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{12});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1346,32 +1377,31 @@ test "compiler.s2g2: switch break default" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.strict_eq, .size = 1 },
-        // The unmatched-case dispatch operand names the DEFAULT identity: the
-        // epilogue moved its reference there (`retargetLabelRefs`), exactly as
-        // legacy's `patchJumpTarget` writes the default body's PC into it.
         .{ .op = qop.if_false, .size = 5, .label = 2 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 17), b.code_len);
+    try std.testing.expectEqual(@as(u32, 23), b.code_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_len);
-    try expectLabel(b, 0, 1, 16);
+    try expectLabel(b, 0, 1, 19);
+    try expectLabel(b, 1, 0, 17);
+    try expectLabel(b, 2, 1, 17);
     // The retargeted no-match identity keeps no reference and aliases the
     // default body it merged into.
-    try expectLabel(b, 1, 0, 14);
-    try expectLabel(b, 2, 1, 14);
-    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{14});
+    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{17});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1382,11 +1412,12 @@ test "compiler.s2g2: switch case fallthrough" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.strict_eq, .size = 1 },
@@ -1401,15 +1432,16 @@ test "compiler.s2g2: switch case fallthrough" {
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 27), b.code_len);
+    try std.testing.expectEqual(@as(u32, 33), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 0, 26);
-    try expectLabel(b, 1, 1, 16);
-    try expectLabel(b, 2, 1, 24);
-    try expectLabel(b, 3, 1, 26);
-    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 9, 24 });
+    try expectLabel(b, 0, 0, 29);
+    try expectLabel(b, 1, 1, 19);
+    try expectLabel(b, 2, 1, 27);
+    try expectLabel(b, 3, 1, 29);
+    try std.testing.expectEqual(@as(i64, 30), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{ 12, 27 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1420,27 +1452,25 @@ test "compiler.s2g2: switch default only" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
-        // A leading `default` still emits the dispatch continuation goto; the
-        // epilogue then retargets it onto the default body, so it becomes the
-        // jump-to-next-instruction that legacy's `patchJumpTarget` produces and
-        // `resolve_labels` folds away.
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 9), b.code_len);
+    try std.testing.expectEqual(@as(u32, 15), b.code_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_len);
-    try expectLabel(b, 0, 0, 8);
-    try expectLabel(b, 1, 0, 6);
-    try expectLabel(b, 2, 1, 6);
-    try std.testing.expectEqual(@as(i64, 8), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{6});
+    try expectLabel(b, 0, 0, 11);
+    try expectLabel(b, 1, 0, 9);
+    try expectLabel(b, 2, 1, 9);
+    try std.testing.expectEqual(@as(i64, 12), b.last_opcode_pos);
+    try expectSourceOffsets(b, &.{9});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1451,11 +1481,12 @@ test "compiler.s2g2: switch break suppresses fallthrough" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.strict_eq, .size = 1 },
@@ -1466,13 +1497,14 @@ test "compiler.s2g2: switch break suppresses fallthrough" {
         .{ .op = qop.strict_eq, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 2 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 23), b.code_len);
+    try std.testing.expectEqual(@as(u32, 29), b.code_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_len);
-    try expectLabel(b, 0, 1, 22);
-    try expectLabel(b, 1, 1, 14);
-    try expectLabel(b, 2, 1, 22);
-    try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
+    try expectLabel(b, 0, 1, 25);
+    try expectLabel(b, 1, 1, 17);
+    try expectLabel(b, 2, 1, 25);
+    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1484,13 +1516,15 @@ test "compiler.s2g3: try finally live tail" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
@@ -1498,17 +1532,19 @@ test "compiler.s2g3: try finally live tail" {
         .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
         .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.ret, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 29), b.code_len);
+    try std.testing.expectEqual(@as(u32, 41), b.code_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_len);
-    try expectLabel(b, 0, 1, 20);
-    try expectLabel(b, 1, 2, 26);
-    try expectLabel(b, 2, 1, 29);
+    try expectLabel(b, 0, 1, 26);
+    try expectLabel(b, 1, 2, 32);
+    try expectLabel(b, 2, 1, 41);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 5, 26 });
+    try expectSourceOffsets(b, &.{ 8, 35 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1519,22 +1555,30 @@ test "compiler.s2g3: try catch optional binding live tails" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.@"catch", .size = 5, .label = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
@@ -1544,14 +1588,14 @@ test "compiler.s2g3: try catch optional binding live tails" {
         .{ .op = qop.throw, .size = 1 },
         .{ .op = qop.ret, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 48), b.code_len);
+    try std.testing.expectEqual(@as(u32, 72), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 20);
-    try expectLabel(b, 1, 3, 47);
-    try expectLabel(b, 2, 2, 48);
-    try expectLabel(b, 3, 1, 41);
+    try expectLabel(b, 0, 1, 26);
+    try expectLabel(b, 1, 3, 71);
+    try expectLabel(b, 2, 2, 72);
+    try expectLabel(b, 3, 1, 65);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 5, 26 });
+    try expectSourceOffsets(b, &.{ 8, 41 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1562,15 +1606,26 @@ test "compiler.s2g3: try catch binding after throw" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.throw, .size = 1 },
-        .{ .op = qop.put_var, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.scope_put_var, .size = 7 },
         .{ .op = qop.@"catch", .size = 5, .label = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
@@ -1580,15 +1635,15 @@ test "compiler.s2g3: try catch binding after throw" {
         .{ .op = qop.throw, .size = 1 },
         .{ .op = qop.ret, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 35), b.code_len);
+    try std.testing.expectEqual(@as(u32, 70), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 7);
-    try expectLabel(b, 1, 2, 34);
-    try expectLabel(b, 2, 1, 35);
-    try expectLabel(b, 3, 1, 28);
-    try std.testing.expectEqual(@as(u32, 0), b.atom_len);
+    try expectLabel(b, 0, 1, 26);
+    try expectLabel(b, 1, 3, 69);
+    try expectLabel(b, 2, 2, 70);
+    try expectLabel(b, 3, 1, 63);
+    try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{6});
+    try expectSourceOffsets(b, &.{9});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1601,28 +1656,37 @@ test "compiler.s2g3: return through finally" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.nip_catch, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
         .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
         .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.ret, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 22), b.code_len);
+    try std.testing.expectEqual(@as(u32, 47), b.code_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_len);
-    try expectLabel(b, 0, 1, 13);
-    try expectLabel(b, 1, 2, 19);
-    try expectLabel(b, 2, 0, 22);
+    try expectLabel(b, 0, 1, 32);
+    try expectLabel(b, 1, 3, 38);
+    try expectLabel(b, 2, 1, 47);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{ 5, 19 });
+    try expectSourceOffsets(b, &.{ 8, 41 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1633,37 +1697,50 @@ test "compiler.s2g3: break through finally inside loop" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.@"catch", .size = 5, .label = 4 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 5 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 5 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 6 },
         .{ .op = qop.gosub, .size = 5, .label = 5 },
         .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.ret, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
     });
-    try std.testing.expectEqual(@as(u32, 38), b.code_len);
+    try std.testing.expectEqual(@as(u32, 75), b.code_len);
     try std.testing.expectEqual(@as(u32, 7), b.label_len);
     try expectLabel(b, 0, 1, 0);
-    try expectLabel(b, 1, 1, 38);
-    try expectLabel(b, 2, 0, 33);
-    try expectLabel(b, 3, 1, 38);
-    try expectLabel(b, 4, 1, 24);
-    try expectLabel(b, 5, 2, 30);
-    try expectLabel(b, 6, 0, 33);
+    try expectLabel(b, 1, 1, 75);
+    try expectLabel(b, 2, 0, 70);
+    try expectLabel(b, 3, 1, 75);
+    try expectLabel(b, 4, 1, 52);
+    try expectLabel(b, 5, 3, 58);
+    try expectLabel(b, 6, 1, 67);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
-    try expectSourceOffsets(b, &.{30});
+    try expectSourceOffsets(b, &.{61});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 }
@@ -1674,7 +1751,7 @@ test "compiler.s2g3: epilogue after plain statement" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
@@ -1697,7 +1774,7 @@ test "compiler.s2g3: epilogue after terminal" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
@@ -1719,7 +1796,7 @@ test "compiler.s2g3: epilogue after loop merge" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
@@ -1750,7 +1827,7 @@ test "compiler.s2g3: plain return dead epilogue" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try std.testing.expectEqual(@as(u32, 1), b.code_len);
@@ -1775,7 +1852,7 @@ test "compiler.s2g3: return with value" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1796,26 +1873,29 @@ test "compiler.s2g4: classic for splices update after body" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 13), b.code_len);
+    try std.testing.expectEqual(@as(u32, 22), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 0);
-    try expectLabel(b, 1, 1, 13);
+    try expectLabel(b, 0, 1, 3);
+    try expectLabel(b, 1, 1, 19);
+    try expectLabel(b, 2, 0, 12);
+    try expectLabel(b, 3, 0, 19);
     // continue label binds BEFORE the spliced update block.
-    try expectLabel(b, 2, 0, 6);
-    try expectLabel(b, 3, 0, 13);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 19), b.last_opcode_pos);
     // Legacy moves only the update's code/atoms; its detached source slots at
     // 6 and 7 are intentionally absent from the final parser ledger.
     try expectSourceOffsets(b, &.{});
@@ -1829,34 +1909,36 @@ test "compiler.s2g4: classic for shifts detached conditional labels" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
-        // Detached jump operands keep their original function-global LabelIds.
         .{ .op = qop.if_false, .size = 5, .label = 2 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 25), b.code_len);
+    try std.testing.expectEqual(@as(u32, 34), b.code_len);
     try std.testing.expectEqual(@as(u32, 6), b.label_len);
-    try expectLabel(b, 0, 1, 0);
-    try expectLabel(b, 1, 1, 25);
+    try expectLabel(b, 0, 1, 3);
+    try expectLabel(b, 1, 1, 31);
+    try expectLabel(b, 2, 1, 24);
+    try expectLabel(b, 3, 1, 25);
+    try expectLabel(b, 4, 0, 12);
+    try expectLabel(b, 5, 0, 31);
     // Both conditional-expression binds move by the splice base of six bytes.
-    try expectLabel(b, 2, 1, 18);
-    try expectLabel(b, 3, 1, 19);
     // continue label binds BEFORE the spliced conditional update block.
-    try expectLabel(b, 4, 0, 6);
-    try expectLabel(b, 5, 0, 25);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 31), b.last_opcode_pos);
     // Every marker inside the detached conditional update is discarded by
     // the legacy truncate+splice contract; the loop-edge marker remains.
     try expectSourceOffsets(b, &.{});
@@ -1870,27 +1952,29 @@ test "compiler.s2g4: classic for splices update after break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
-        // The detached update is spliced after the body's break goto.
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try std.testing.expectEqual(@as(u32, 18), b.code_len);
+    try std.testing.expectEqual(@as(u32, 27), b.code_len);
     try std.testing.expectEqual(@as(u32, 4), b.label_len);
-    try expectLabel(b, 0, 1, 0);
-    try expectLabel(b, 1, 1, 18);
-    try expectLabel(b, 2, 0, 11);
-    try expectLabel(b, 3, 1, 18);
+    try expectLabel(b, 0, 1, 3);
+    try expectLabel(b, 1, 1, 24);
+    try expectLabel(b, 2, 0, 17);
+    try expectLabel(b, 3, 1, 24);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 24), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1904,7 +1988,7 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1935,7 +2019,7 @@ test "compiler.s2g4: compound field assignment reemits getter" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1966,7 +2050,7 @@ test "compiler.s2g4: plain array element assignment rewinds getter" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1996,7 +2080,7 @@ test "compiler.s2g4: postfix field update preserves old value" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2025,7 +2109,7 @@ test "compiler.s2g4: prefix array element update preserves new value" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2056,48 +2140,49 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
-        // Empty class body contributes an empty detached runtime segment.
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
-        // Anonymous class expressions retain QuickJS's parser-only backpatch marker.
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 26), b.code_len);
+    try std.testing.expectEqual(@as(u32, 38), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 0), b.code[14]);
-    try std.testing.expectEqual(@as(u32, 12), std.mem.readInt(u32, b.code[21..25], .little));
-    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u8, 0), b.code[20]);
+    try std.testing.expectEqual(@as(u32, 18), std.mem.readInt(u32, b.code[33..37], .little));
+    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 1), h.state.function_def.child_list.len);
     try std.testing.expectEqual(empty_atom, h.state.function_def.child_list[0].func_name);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
     const ctor = h.childBuilder(0);
     try expectV2Stream(ctor, &.{
         .{ .op = qop.check_ctor, .size = 1 },
         .{ .op = qop.enter_scope, .size = 3 },
-        .{ .op = qop.scope_get_var, .size = 7, .atom = fields_atom },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.call_method, .size = 4 },
-        // emitClassFieldInitCall binds its skip target at the shared drop.
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
@@ -2121,14 +2206,16 @@ test "compiler.s2g4: class declaration stores local binding" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = class_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
@@ -2136,19 +2223,20 @@ test "compiler.s2g4: class declaration stores local binding" {
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
-        // Statement-entry parsing uses a containing local, so the declaration tail is set_loc + drop.
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_loc, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 30), b.code_len);
+    try std.testing.expectEqual(@as(u32, 42), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(class_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, b.code[2..4], .little));
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 0), b.code[14]);
-    try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, b.code[27..29], .little));
-    try std.testing.expectEqual(@as(i64, 29), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, b.code[8..10], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u8, 0), b.code[20]);
+    try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, b.code[39..41], .little));
+    try std.testing.expectEqual(@as(i64, 41), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2159,7 +2247,7 @@ test "compiler.s2g4: class declaration stores local binding" {
     try expectV2Stream(ctor, &.{
         .{ .op = qop.check_ctor, .size = 1 },
         .{ .op = qop.enter_scope, .size = 3 },
-        .{ .op = qop.scope_get_var, .size = 7, .atom = fields_atom },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
@@ -2188,34 +2276,37 @@ test "compiler.s2g4: named class method splices runtime definition" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
-        // parseClass splices the method closure and definition after define_class setup.
-        .{ .op = qop.fclosure8, .size = 2 },
-        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
-        .{ .op = qop.define_method, .size = 6, .atom = method_atom },
+        .{ .op = qop.fclosure, .size = 5 },
+        .{ .op = qop.set_name, .size = 5 },
+        .{ .op = qop.define_method, .size = 6 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 39), b.code_len);
+    try std.testing.expectEqual(@as(u32, 54), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 3), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
     try std.testing.expectEqual(method_atom, b.atom_operands[2]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[31]);
-    try std.testing.expectEqual(@as(i64, 38), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 0), b.code[40]);
+    try std.testing.expectEqual(@as(i64, 53), b.last_opcode_pos);
     // Runtime method markers at 19/21 belong to the detached class segment;
     // legacy moves the instructions and atoms but not those source slots.
     try expectSourceOffsets(b, &.{0});
@@ -2223,26 +2314,27 @@ test "compiler.s2g4: named class method splices runtime definition" {
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 2), h.state.function_def.child_list.len);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
     const method = h.childBuilder(0);
     try expectV2Stream(method, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 3), method.code_len);
+    try std.testing.expectEqual(@as(u32, 6), method.code_len);
     try std.testing.expectEqual(@as(u32, 0), method.label_len);
     try std.testing.expectEqual(@as(u32, 0), method.atom_len);
-    try std.testing.expectEqual(@as(i64, 2), method.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 5), method.last_opcode_pos);
     try expectRelocIntegrity(method);
     try expectSourceOrder(method);
 
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
     const ctor = h.childBuilder(1);
     try expectV2Stream(ctor, &.{
         .{ .op = qop.check_ctor, .size = 1 },
         .{ .op = qop.enter_scope, .size = 3 },
-        .{ .op = qop.scope_get_var, .size = 7, .atom = fields_atom },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
@@ -2269,56 +2361,57 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
     const empty_atom = try h.rt.atoms.internString("");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
-        // The explicit constructor closure was rolled back; push_const names its cpool slot directly.
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
-        // The detached class-body runtime segment is empty after constructor rollback.
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 26), b.code_len);
+    try std.testing.expectEqual(@as(u32, 38), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 1), h.state.function_def.child_list.len);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
     const ctor = h.childBuilder(0);
     try expectV2Stream(ctor, &.{
-        // parseFunctionParamsAndBody emits check_ctor before the explicit body.
         .{ .op = qop.check_ctor, .size = 1 },
-        .{ .op = qop.get_var, .size = 3 },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
-        .{ .op = qop.get_var, .size = 3 },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.call_method, .size = 4 },
-        // emitClassFieldInitCall binds the skip target at this drop.
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 22), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 33), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 18);
-    try std.testing.expectEqual(@as(u32, 0), ctor.atom_len);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[15..17], .little));
-    try std.testing.expectEqual(@as(i64, 21), ctor.last_opcode_pos);
+    try expectLabel(ctor, 0, 1, 26);
+    try std.testing.expectEqual(@as(u32, 2), ctor.atom_len);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[23..25], .little));
+    try std.testing.expectEqual(@as(i64, 32), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2332,28 +2425,31 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
-        // Heritage null is already on the stack, so the base-class undefined is absent.
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 26), b.code_len);
+    try std.testing.expectEqual(@as(u32, 38), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 1), b.code[14]);
-    try std.testing.expectEqual(@as(i64, 25), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u8, 1), b.code[20]);
+    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2361,11 +2457,10 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     try std.testing.expectEqual(@as(usize, 1), h.state.function_def.child_list.len);
     const ctor = h.childBuilder(0);
     try expectV2Stream(ctor, &.{
-        // Default derived constructors use init_ctor instead of the base check_ctor entry.
         .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.init_ctor, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
-        .{ .op = qop.scope_get_var, .size = 7, .atom = fields_atom },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc_check, .size = 3 },
@@ -2397,49 +2492,50 @@ test "compiler.s2g4: instance field uses dormant brand prologue" {
     const field_atom = try h.rt.atoms.internString("x");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
-        // The parent runtime segment is empty; install the fields child directly.
-        .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.define_class, .size = 6 },
+        .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 28), b.code_len);
+    try std.testing.expectEqual(@as(u32, 43), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 0), b.code[16]);
-    try std.testing.expectEqual(@as(i64, 27), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[22..26], .little));
+    try std.testing.expectEqual(@as(i64, 42), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 2), h.state.function_def.child_list.len);
     try std.testing.expectEqual(fields_atom, h.state.function_def.child_list[0].func_name);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
     const fields = h.childBuilder(0);
     try expectV2Stream(fields, &.{
-        // createClassFieldsInitFunction starts with a dormant, patchable brand test.
         .{ .op = qop.push_false, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.push_this, .size = 1 },
-        .{ .op = qop.scope_get_var, .size = 7, .atom = home_atom },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.add_brand, .size = 1 },
-        // The dormant-prologue skip target binds before the field initializer.
         .{ .op = qop.push_this, .size = 1 },
         .{ .op = qop.null, .size = 1 },
-        .{ .op = qop.define_field, .size = 5, .atom = field_atom },
+        .{ .op = qop.define_field, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
@@ -2464,18 +2560,20 @@ test "compiler.s2g4: private method patches instance brand prologue" {
     const home_atom = try h.rt.atoms.internString("<home_object>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
-    try std.testing.expectEqual(@as(u32, 3), b.atom_len);
+    try std.testing.expectEqual(@as(u32, 4), b.atom_len);
     const private_atom = b.atom_operands[2];
     try std.testing.expectEqualStrings("#m", h.rt.atoms.name(private_atom).?);
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
         .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
-        .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         // emitClassPrivateBrands brands the prototype before spliced private code runs.
@@ -2484,46 +2582,50 @@ test "compiler.s2g4: private method patches instance brand prologue" {
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.add_brand, .size = 1 },
         // parseClassElement's deferred private-method sequence.
-        .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.set_name, .size = 5, .atom = private_atom },
-        .{ .op = qop.put_var_init, .size = 3 },
+        .{ .op = qop.scope_put_var_init, .size = 7, .atom = private_atom },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 48), b.code_len);
+    try std.testing.expectEqual(@as(u32, 70), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     // The root ledger covers define_class, the anonymous-method placeholder,
-    // and the explicit private-symbol display name.
+    // the explicit private-symbol display name and the scoped store of it.
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
     try std.testing.expectEqual(private_atom, b.atom_operands[2]);
-    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 1), b.code[16]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[26]);
-    try std.testing.expectEqual(@as(i64, 47), b.last_opcode_pos);
+    try std.testing.expectEqual(private_atom, b.atom_operands[3]);
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[22..26], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[35..39], .little));
+    try std.testing.expectEqual(@as(i64, 69), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 3), h.state.function_def.child_list.len);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
     const method = h.childBuilder(0);
     try expectV2Stream(method, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 1), method.code_len);
+    try std.testing.expectEqual(@as(u32, 4), method.code_len);
     try std.testing.expectEqual(@as(u32, 0), method.label_len);
     try std.testing.expectEqual(@as(u32, 0), method.atom_len);
-    try std.testing.expectEqual(@as(i64, 0), method.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 3), method.last_opcode_pos);
     try expectRelocIntegrity(method);
     try expectSourceOrder(method);
 
     try std.testing.expectEqual(fields_atom, h.state.function_def.child_list[1].func_name);
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
-    try std.testing.expectEqual(@as(i32, 2), h.state.function_def.child_list[2].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 2), h.state.function_def.child_list[2].parent_cpool_idx);
     const fields = h.childBuilder(1);
     try expectV2Stream(fields, &.{
         // markPrivateBrandNeeded patches the dormant first opcode in place.
@@ -2553,75 +2655,78 @@ test "compiler.s2g4: static block nests closure in static initializer" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
-        // emitClassStaticInitCall invokes the separate static-init child immediately.
         .{ .op = qop.dup, .size = 1 },
-        .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 35), b.code_len);
+    try std.testing.expectEqual(@as(u32, 50), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 0), b.code[22]);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 34), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[34..36], .little));
+    try std.testing.expectEqual(@as(i64, 49), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 2), h.state.function_def.child_list.len);
     try std.testing.expectEqual(fields_atom, h.state.function_def.child_list[0].func_name);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
     const static_init = h.childBuilder(0);
     try expectV2Stream(static_init, &.{
-        // Static initializers deliberately have no instance-brand prologue.
-        .{ .op = qop.fclosure8, .size = 2 },
-        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
-        .{ .op = qop.get_var, .size = 3 },
+        .{ .op = qop.fclosure, .size = 5 },
+        .{ .op = qop.set_name, .size = 5 },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.swap, .size = 1 },
         .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 17), static_init.code_len);
+    try std.testing.expectEqual(@as(u32, 24), static_init.code_len);
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
-    try std.testing.expectEqual(@as(u32, 1), static_init.atom_len);
+    try std.testing.expectEqual(@as(u32, 2), static_init.atom_len);
     try std.testing.expectEqual(core.atom.null_atom, static_init.atom_operands[0]);
-    try std.testing.expectEqual(@as(u8, 0), static_init.code[1]);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[12..14], .little));
-    try std.testing.expectEqual(@as(i64, 16), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, static_init.code[1..5], .little));
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[19..21], .little));
+    try std.testing.expectEqual(@as(i64, 23), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 
     try std.testing.expectEqual(@as(usize, 1), h.state.function_def.child_list[0].child_list.len);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].child_list[0].parent_cpool_idx);
     const block = h.grandchildBuilder(0, 0);
     try expectV2Stream(block, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 3), block.code_len);
+    try std.testing.expectEqual(@as(u32, 6), block.code_len);
     try std.testing.expectEqual(@as(u32, 0), block.label_len);
     try std.testing.expectEqual(@as(u32, 0), block.atom_len);
-    try std.testing.expectEqual(@as(i64, 2), block.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 5), block.last_opcode_pos);
     try expectRelocIntegrity(block);
     try expectSourceOrder(block);
 }
@@ -2636,56 +2741,58 @@ test "compiler.s2g4: static field emits through static initializer" {
     const field_atom = try h.rt.atoms.internString("x");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
-        // The static-field child is installed as the class's immediate static-init call.
         .{ .op = qop.dup, .size = 1 },
-        .{ .op = qop.fclosure8, .size = 2 },
+        .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_home_object, .size = 1 },
         .{ .op = qop.call_method, .size = 4 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 35), b.code_len);
+    try std.testing.expectEqual(@as(u32, 50), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 0), b.code[22]);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 34), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[34..36], .little));
+    try std.testing.expectEqual(@as(i64, 49), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 2), h.state.function_def.child_list.len);
     try std.testing.expectEqual(fields_atom, h.state.function_def.child_list[0].func_name);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
     const static_init = h.childBuilder(0);
     try expectV2Stream(static_init, &.{
-        // Static initializer children omit the instance-brand prologue entirely.
-        .{ .op = qop.get_var, .size = 3 },
+        .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.null, .size = 1 },
-        .{ .op = qop.define_field, .size = 5, .atom = field_atom },
+        .{ .op = qop.define_field, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 11), static_init.code_len);
+    try std.testing.expectEqual(@as(u32, 15), static_init.code_len);
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
-    try std.testing.expectEqual(@as(u32, 1), static_init.atom_len);
-    try std.testing.expectEqual(field_atom, static_init.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 10), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 2), static_init.atom_len);
+    try std.testing.expectEqual(field_atom, static_init.atom_operands[1]);
+    try std.testing.expectEqual(@as(i64, 14), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 }
@@ -2698,50 +2805,54 @@ test "compiler.s2g4: computed method splices key and closure" {
     const empty_atom = try h.rt.atoms.internString("");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
-        // parseClassComputedName and parseClassElementFunction move together in the segment.
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.to_propkey, .size = 1 },
-        .{ .op = qop.fclosure8, .size = 2 },
-        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
+        .{ .op = qop.fclosure, .size = 5 },
+        .{ .op = qop.set_name, .size = 5 },
         .{ .op = qop.define_method_computed, .size = 2 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 37), b.code_len);
+    try std.testing.expectEqual(@as(u32, 52), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
-    try std.testing.expectEqual(@as(u8, 0), b.code[22]);
-    try std.testing.expectEqual(@as(u8, 0), b.code[29]);
-    try std.testing.expectEqual(@as(i64, 36), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
+    try std.testing.expectEqual(@as(u8, 0), b.code[38]);
+    try std.testing.expectEqual(@as(i64, 51), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 2), h.state.function_def.child_list.len);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
     const method = h.childBuilder(0);
     try expectV2Stream(method, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 1), method.code_len);
+    try std.testing.expectEqual(@as(u32, 4), method.code_len);
     try std.testing.expectEqual(@as(u32, 0), method.label_len);
     try std.testing.expectEqual(@as(u32, 0), method.atom_len);
-    try std.testing.expectEqual(@as(i64, 0), method.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 3), method.last_opcode_pos);
     try expectRelocIntegrity(method);
     try expectSourceOrder(method);
 }
@@ -2755,51 +2866,54 @@ test "compiler.s2g4: getter child keeps return terminal" {
     const getter_atom = try h.rt.atoms.internString("g");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.set_loc_uninitialized, .size = 3 },
         .{ .op = qop.push_const, .size = 5 },
-        .{ .op = qop.define_class, .size = 6, .atom = empty_atom },
+        .{ .op = qop.define_class, .size = 6 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.put_loc_check_init, .size = 3 },
-        // The accessor closure and define_method flag travel in the detached segment.
-        .{ .op = qop.fclosure8, .size = 2 },
-        .{ .op = qop.set_name, .size = 5, .atom = core.atom.null_atom },
-        .{ .op = qop.define_method, .size = 6, .atom = getter_atom },
+        .{ .op = qop.fclosure, .size = 5 },
+        .{ .op = qop.set_name, .size = 5 },
+        .{ .op = qop.define_method, .size = 6 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 39), b.code_len);
+    try std.testing.expectEqual(@as(u32, 54), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 3), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(core.atom.null_atom, b.atom_operands[1]);
     try std.testing.expectEqual(getter_atom, b.atom_operands[2]);
-    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[5..9], .little));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
-    try std.testing.expectEqual(@as(u8, 1), b.code[31]);
-    try std.testing.expectEqual(@as(i64, 38), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(u8, 1), b.code[40]);
+    try std.testing.expectEqual(@as(i64, 53), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
 
     try std.testing.expectEqual(@as(usize, 2), h.state.function_def.child_list.len);
-    try std.testing.expectEqual(@as(i32, 0), h.state.function_def.child_list[0].parent_cpool_idx);
-    try std.testing.expectEqual(@as(i32, 1), h.state.function_def.child_list[1].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 0), h.state.function_def.child_list[0].parent_cpool_idx);
+    try std.testing.expectEqual(@as(?u16, 1), h.state.function_def.child_list[1].parent_cpool_idx);
     const getter = h.childBuilder(0);
     try expectV2Stream(getter, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
-        // Keep the explicit return terminal; no return_undef is appended.
         .{ .op = qop.@"return", .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 2), getter.code_len);
+    try std.testing.expectEqual(@as(u32, 5), getter.code_len);
     try std.testing.expectEqual(@as(u32, 0), getter.label_len);
     try std.testing.expectEqual(@as(u32, 0), getter.atom_len);
-    try std.testing.expectEqual(@as(i64, 1), getter.last_opcode_pos);
+    try std.testing.expectEqual(@as(i64, 4), getter.last_opcode_pos);
     try expectRelocIntegrity(getter);
     try expectSourceOrder(getter);
 }
@@ -2815,21 +2929,23 @@ test "compiler.s3: parsed dead code after break is dropped" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const input = h.builder();
     try expectV2Stream(input, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try expectLabel(input, 0, 1, 0);
-    try expectLabel(input, 1, 1, 18);
-    try expectLabel(input, 2, 0, 13);
-    try expectLabel(input, 3, 1, 18);
 
     var product = try resolve_variables.run(&h.function, &h.state.function_def);
     defer product.deinitUncommitted();
@@ -2854,20 +2970,23 @@ test "compiler.s3: parsed dead-only loop labels stay dead" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const input = h.builder();
     try expectV2Stream(input, &.{
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.push_true, .size = 1 },
         .{ .op = qop.if_false, .size = 5, .label = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.goto, .size = 5, .label = 0 },
+        .{ .op = qop.leave_scope, .size = 3 },
     });
-    try expectLabel(input, 0, 1, 0);
-    try expectLabel(input, 1, 1, 21);
-    try expectLabel(input, 2, 1, 16);
-    try expectLabel(input, 3, 1, 21);
 
     var product = try resolve_variables.run(&h.function, &h.state.function_def);
     defer product.deinitUncommitted();
@@ -2895,9 +3014,34 @@ test "compiler.s3: parsed return through finally keeps live gosub" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const input = h.builder();
+    // Raw stream: scope markers still present, and the block's fall-through
+    // tail (drop/undefined/gosub/drop/goto) is not yet pruned.
+    try expectV2Stream(input, &.{
+        .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.nip_catch, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.throw, .size = 1 },
+        .{ .op = qop.enter_scope, .size = 3 },
+        .{ .op = qop.null, .size = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.ret, .size = 1 },
+    });
+    // Resolved: markers gone, the dead tail after `return` pruned, the live
+    // gosub from the return path kept.
     const expected = [_]ExpectedInsn{
         .{ .op = qop.@"catch", .size = 5, .label = 0 },
         .{ .op = qop.undefined, .size = 1 },
@@ -2910,10 +3054,6 @@ test "compiler.s3: parsed return through finally keeps live gosub" {
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.ret, .size = 1 },
     };
-    try expectV2Stream(input, &expected);
-    try expectLabel(input, 0, 1, 13);
-    try expectLabel(input, 1, 2, 19);
-    try expectLabel(input, 2, 0, 22);
 
     var product = try resolve_variables.run(&h.function, &h.state.function_def);
     defer product.deinitUncommitted();
@@ -2934,22 +3074,26 @@ test "compiler.s3: parsed empty finally removes gosub" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
 
     const input = h.builder();
     try expectV2Stream(input, &.{
         .{ .op = qop.@"catch", .size = 5, .label = 0 },
+        .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.undefined, .size = 1 },
         .{ .op = qop.nip_catch, .size = 1 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
         .{ .op = qop.@"return", .size = 1 },
+        .{ .op = qop.leave_scope, .size = 3 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.undefined, .size = 1 },
+        .{ .op = qop.gosub, .size = 5, .label = 1 },
+        .{ .op = qop.drop, .size = 1 },
+        .{ .op = qop.goto, .size = 5, .label = 2 },
         .{ .op = qop.gosub, .size = 5, .label = 1 },
         .{ .op = qop.throw, .size = 1 },
         .{ .op = qop.ret, .size = 1 },
     });
-    try expectLabel(input, 0, 1, 13);
-    try expectLabel(input, 1, 2, 19);
-    try expectLabel(input, 2, 0, 20);
 
     var product = try resolve_variables.run(&h.function, &h.state.function_def);
     defer product.deinitUncommitted();
@@ -3016,7 +3160,7 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try h.state.finalizeEvalReturn();
 
     const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
@@ -3360,7 +3504,7 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.TOK_EOF, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try h.state.finalizeEvalReturn();
     try std.testing.expect(h.state.function_def.child_list.len >= 1);
 
@@ -3590,7 +3734,7 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
     defer state.deinit(rt);
     try state.activateCompileRoots();
     state.function_def.is_global_var = true;
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try state.beginProgramEmission();
     try P.parseProgramStatements(
         &state,
@@ -3638,7 +3782,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
     var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
     var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
     state.function_def.is_global_var = true;
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try state.beginProgramEmission();
 
     {
@@ -3649,7 +3793,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
             &state,
             P.DeclMask{ .func = true, .func_with_label = true, .other = true },
         );
-        try std.testing.expectEqual(parser_mod.token.TOK_EOF, state.token.val);
+        try std.testing.expectEqual(parser_mod.token.Kind.eof, state.token.val);
         try state.finalizeEvalReturn();
 
         const parser_builder = state.function_def.builder.?;

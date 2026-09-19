@@ -91,7 +91,6 @@ fn expectAuditPrintMatchesFmt(
 }
 
 test "gc_audit_print leftover formats match debug.print digits" {
-
     try expectAuditPrintMatchesFmt(
         "gc: {s} AUDIT: {s}\n",
         .{ "ADDRESS INDEX", "OutOfMemory" },

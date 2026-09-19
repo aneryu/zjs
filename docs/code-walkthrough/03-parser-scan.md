@@ -443,12 +443,12 @@
 
 - **签名**：`fn identifierLikeAtom(s: *State) Atom`。
 - **作用**：取当前这个「像标识符」的 token 对应的 atom：`TOK_IDENT` 取 payload 里的 atom，关键字取 `tok.keywordAtom(kind)`。
-- **实现**：一个三元：`TOK_IDENT` 取 `token.payload.ident.atom`，否则按关键字 kind 查 `tok.keywordAtom(kind)`。返回的是借用的 id（源码处标了 `borrowed-atom`）：TGC S3-c 之后 token 不再持 atom 的引用计数，`advance()` 只换掉 token payload，这个 id 由整场编译的 `CompileAtomScope` 根列表钉住，跨 `advance()` 仍然有效；源码注释原先写的「valid only until advance(); retain via identifierLikeAtomOwned」是 rc 时代的遗留，已改成「借用 id，由 CompileAtomScope 作根」；`identifierLikeAtomOwned` 今天只是本函数的同义转发，名字留给那些把 id 交进更长寿表的调用点。
+- **实现**：一个三元：`TOK_IDENT` 取 `token.payload.ident.atom`，否则按关键字 kind 查 `tok.keywordAtom(kind)`。返回的是借用的 id（源码处标了 `borrowed-atom`）：TGC S3-c 之后 token 不再持 atom 的引用计数，`advance()` 只换掉 token payload，这个 id 由整场编译的 `CompileAtomScope` 根列表钉住，跨 `advance()` 仍然有效；源码注释原先写的「valid only until advance(); retain via identifierLikeAtom」是 rc 时代的遗留，已改成「借用 id，由 CompileAtomScope 作根」；`identifierLikeAtom` 今天只是本函数的同义转发，名字留给那些把 id 交进更长寿表的调用点。
 - **所有权 / 错误 / 调用**：返回的是**借用**的 atom id：`TOK_IDENT` 取 `token.payload.ident.atom`，否则取 `tok.keywordAtom(kind)` 的预定义 id。TGC S3-c 后这个 id 没有引用计数，`advance` 释放的只是 token payload，不碰 atom；编译期 intern 的 id 由 `CompileAtomScope`（`src/core/atom.zig:2448`，注册成 GC RootProvider）钉到编译结束，所以取走的 id 在整场编译内有效——源码 `src/parser.zig:7101` 那行「valid only until advance()」是 S3-c 之前的遗留注释。无 error。12 处调用方，如 label(`src/parser.zig:2337`)、对象属性(6366)、`import`/`export` 名(9531/9945)。
 
-### `identifierLikeAtomOwned` (`src/parser.zig:6892`)
+### `identifierLikeAtom` (`src/parser.zig:6892`)
 
-- **签名**：`fn identifierLikeAtomOwned(s: *State) Atom`。
+- **签名**：`fn identifierLikeAtom(s: *State) Atom`。
 - **作用**：与 `identifierLikeAtom` 取同一个 atom，用在需要标注「调用方要负责其寿命」的位置。
 - **实现**：
 函数体只有一行，直接转发 `identifierLikeAtom`：当前 atom 表实现下不需要额外 retain。

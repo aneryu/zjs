@@ -415,11 +415,10 @@ commit history carries them.
   `putLValue` frees the descriptor atom then **binds** the aux label before
   the mode shuffle (qjs put_lvalue) — the bind is the provenance boundary.
   Fails closed if the label is missing.
-- Reachability: `emit_phase1_temp` defaults to `true` in production
-  (`ParseState` and `compiler/test_entry.zig`); only the
-  `compiler/tests.zig` harness turns it off. The `scope_get_var` case of
-  `getLValue` therefore runs in production, and its `with`-scope branch emits
-  `scope_make_ref` with a real aux `LabelId`.
+- Reachability: the parser always emits phase-1 temp opcodes (the legacy
+  `emit_phase1_temp = false` emitter mode was retired on 2026-09-20). The
+  `scope_get_var` case of `getLValue` therefore runs in production, and its
+  `with`-scope branch emits `scope_make_ref` with a real aux `LabelId`.
 
 ### 4.19 speculative LHS emission — `getLValue`
 
@@ -518,7 +517,7 @@ exact under rollback/detach/splice).
 The S0.5 audit opened eight findings. Six are closed and folded into the
 inventory above: F-1 (generator/async resume, §4.24), F-2 (logical
 assignment `&&=`/`||=`/`??=`, now a plain `LabelId` skip-assign lowering in
-`emitLogicalAssignLValue`), F-3 (aux-label reachability, §4.18), F-4 (`with`
+`parseLogicalAssignment`), F-3 (aux-label reachability, §4.18), F-4 (`with`
 and module import/export — `parseWith` emits directly; `parseImport` /
 `parseExport` reach bytecode only through shared emitters), F-7
 (optional-call chains, `prepareCallReference` / `emitPreparedCall`), and F-8

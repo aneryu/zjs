@@ -99,7 +99,6 @@ pub const OpcodeProfile = struct {
         for (self.nanos) |value| total +|= value;
         return total;
     }
-
 };
 
 pub fn setOpcodeNameProvider(provider: ?OpcodeNameProvider) void {

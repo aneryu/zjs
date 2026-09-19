@@ -756,9 +756,9 @@ pub const vm_helpers = struct {
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
         var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
-        state.top_level_functions_as_children = true;
+        state.root_mode = .canonical;
         try parser_core.parseExpr(&state);
-        try state.builderEmitOp(op.@"return");
+        try parser_core.Emitter.op(&state, op.@"return");
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
 
@@ -776,7 +776,7 @@ pub const vm_helpers = struct {
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
         var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
-        state.top_level_functions_as_children = true;
+        state.root_mode = .canonical;
         state.top_level_lexical_as_global_ref = true;
         state.function_def.is_eval = true;
         state.function_def.is_global_var = true;
@@ -786,7 +786,7 @@ pub const vm_helpers = struct {
         // direct-eval placement. Mirror compileQjsProgram's script setup.
         try state.beginProgramEmission();
         try state.enableReturnCompletion();
-        while (state.token.val != engine.parser.token.TOK_EOF) {
+        while (state.token.val != .eof) {
             try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         }
         try state.finalizeEvalReturn();

@@ -1,6 +1,6 @@
 # 03 — parser 作用域、闭包、标签、模块
 
-`defineVar` 是声明语义的唯一入口。闭包在非 phase-1 路径由 `ensureClosureVar` 物化；生产路径把发现留给 `resolve_variables`。模块 import/export 写 `bytecode.module.Record`。
+`defineVar` 是声明语义的唯一入口。闭包捕获（`resolve_scope_var` 的父链行走、按需的 `arguments` / 自身绑定 / 箭头 `this` 局部）全部留给 `resolve_variables`；2026-09-20 legacy 发射器模式（`emit_phase1_temp = false`）退役后，`closure.zig` 只剩 `hasVisibleCurrentBinding` / `scopeChainContains` / `findClosureVarIndex` 三个只读查询，解析期不再发明任何闭包行。模块 import/export 写 `bytecode.module.Record`。
 
 
 ### `ParseState.pushScopeIdentity` (`src/parser.zig:1422`)
@@ -275,22 +275,22 @@
 
 - **签名**：`fn pushLabelFrame(s: *State, atom_id: Atom, allow_continue: bool) Error!usize`。
 - **作用**：为带标签的语句压一个 `LabelFrame`，并预分配它的 break / continue 标签。
-- **实现**：标签分配顺序与 qjs `push_break_entry` 一致：`allow_continue` 为真时先 `emitterNewLabel` 建 continue 标签，再建 break 标签（不允许 continue 的语句只有 break 标签）。然后向 `label_frames` 追加一个 `LabelFrame`，同时记下 `catch_marker_depth`（当前 catch 标记深度）、`control_frame_depth`（此刻的 continue 帧数）与 `break_frame_depth`（break 帧数），供跨帧 `break`/`continue` 计算要清理多少层。返回新帧下标。
-- **所有权 / 错误 / 调用**：新帧用 `s.function.memory.allocator` 追加进 `s.label_frames`，`LabelFrame` 自带 `break_fixups` / `continue_fixups` 两条 list，**必须**由 `popLabelFrame` 释放（直接 `pop()` 会泄漏这两条 list）；两个 LabelId 只是 Builder 的句柄，归 Builder，`atom_id` 借用不 retain。错误：`emitterNewLabel` 的 builder 三元组 + append 的 `error.OutOfMemory`；标签先建后 append，append 失败不回收标签——零引用的死标签由 `resolve_labels_v2` 丢弃。调用方 5 处：`parseStatementOrDeclSlow`（`src/parser.zig:8977`）、`parseDoOrWhileStatement`（`src/parser.zig:9299`）、`parseForStatement`（`src/parser.zig:9489`），另有 `parseSwitchStatement:9576` 与 `parseForInOf:10977`。
+- **实现**：标签分配顺序与 qjs `push_break_entry` 一致：`allow_continue` 为真时先 `Emitter.newLabel` 建 continue 标签，再建 break 标签（不允许 continue 的语句只有 break 标签）。然后向 `label_frames` 追加一个 `LabelFrame`，同时记下 `catch_marker_depth`（当前 catch 标记深度）、`control_frame_depth`（此刻的 continue 帧数）与 `break_frame_depth`（break 帧数），供跨帧 `break`/`continue` 计算要清理多少层。返回新帧下标。
+- **所有权 / 错误 / 调用**：新帧用 `s.function.memory.allocator` 追加进 `s.label_frames`，`LabelFrame` 自带 `break_fixups` / `continue_fixups` 两条 list，**必须**由 `popLabelFrame` 释放（直接 `pop()` 会泄漏这两条 list）；两个 LabelId 只是 Builder 的句柄，归 Builder，`atom_id` 借用不 retain。错误：`Emitter.newLabel` 的 builder 三元组 + append 的 `error.OutOfMemory`；标签先建后 append，append 失败不回收标签——零引用的死标签由 `resolve_labels_v2` 丢弃。调用方 5 处：`parseStatementOrDeclSlow`（`src/parser.zig:8977`）、`parseDoOrWhileStatement`（`src/parser.zig:9299`）、`parseForStatement`（`src/parser.zig:9489`），另有 `parseSwitchStatement:9576` 与 `parseForInOf:10977`。
 
 ### `ParseState.patchLabelBreaks` (`src/parser.zig:2284`)
 
 - **签名**：`fn patchLabelBreaks(s: *State, frame_index: usize) Error!void`。
 - **作用**：把标签帧的 break 汇合标签绑定到当前位置。
-- **实现**：帧里有 `break_label` 就 `emitterBindLabel` 绑到当前位置，没有则什么也不做。对照 qjs `emit_label(label_break)`：汇合标签无条件绑定，哪怕零引用——死标签留给 `resolve_labels_v2` 丢弃。
-- **所有权 / 错误 / 调用**：不分配、不转移所有权（只读一次帧里的 `break_label`）。唯一错误来自 `emitterBindLabel` 经 `mapBuilderError`：重复绑定或外来标签这类 Builder fail-closed 会变成 `Error.ParserInvariant`，其余是 `OutOfMemory` / `BytecodeOverflow`。调用方 5 处：`parseStatementOrDeclSlow`（`src/parser.zig:8996`）、`parseDoOrWhileStatement`（`src/parser.zig:9322`）、`parseForStatement`（`src/parser.zig:9510`）等。
+- **实现**：帧里有 `break_label` 就 `Emitter.bind` 绑到当前位置，没有则什么也不做。对照 qjs `emit_label(label_break)`：汇合标签无条件绑定，哪怕零引用——死标签留给 `resolve_labels_v2` 丢弃。
+- **所有权 / 错误 / 调用**：不分配、不转移所有权（只读一次帧里的 `break_label`）。唯一错误来自 `Emitter.bind` 经 `mapBuilderError`：重复绑定或外来标签这类 Builder fail-closed 会变成 `Error.ParserInvariant`，其余是 `OutOfMemory` / `BytecodeOverflow`。调用方 5 处：`parseStatementOrDeclSlow`（`src/parser.zig:8996`）、`parseDoOrWhileStatement`（`src/parser.zig:9322`）、`parseForStatement`（`src/parser.zig:9510`）等。
 
 ### `ParseState.patchLabelContinues` (`src/parser.zig:2292`)
 
 - **签名**：`fn patchLabelContinues(s: *State, frame_index: usize) Error!void`。
 - **作用**：把标签帧的 continue 汇合标签绑定到当前位置。
 - **实现**：与 `patchLabelBreaks` 同形，绑的是帧里的 `continue_label`（`allow_continue` 为假时该字段是 null，直接跳过）。同样对照 qjs `emit_label(label_cont)` 的无条件绑定。
-- **所有权 / 错误 / 调用**：与 `patchLabelBreaks` 完全同族——不分配，错误只有 `emitterBindLabel` 经 `mapBuilderError` 的 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方 3 处，都在带 continue 目标的循环收尾：`parseDoOrWhileStatement`（`src/parser.zig:9306`）、`parseForStatement`（`src/parser.zig:9499`）、`parseForInOf`（`src/parser.zig:11033`）。
+- **所有权 / 错误 / 调用**：与 `patchLabelBreaks` 完全同族——不分配，错误只有 `Emitter.bind` 经 `mapBuilderError` 的 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方 3 处，都在带 continue 目标的循环收尾：`parseDoOrWhileStatement`（`src/parser.zig:9306`）、`parseForStatement`（`src/parser.zig:9499`）、`parseForInOf`（`src/parser.zig:11033`）。
 
 ### `ParseState.popLabelFrame` (`src/parser.zig:2300`)
 
@@ -320,9 +320,9 @@
 - **实现**：包成 `FinallyControlTarget{ .kind = .@"continue", .label_atom = atom_id }` 交给 `emitControlThroughFinally`。
 - **所有权 / 错误 / 调用**：同 `emitLabelledBreak`，不分配、atom 借用；额外一条自 `resolveFinallyControlTarget`：标签帧不允许 continue 或没有 continue 帧时报 `continue must target a loop label` 的 `error.UnexpectedToken`。唯一调用方 `parseBreakOrContinueStatement`（`src/parser.zig:9541`）。
 
-### `ParseState.labelStartAtomOwned` (`src/parser.zig:2323`)
+### `ParseState.labelStartAtom` (`src/parser.zig:2323`)
 
-- **签名**：`fn labelStartAtomOwned(s: *State) ?Atom`。
+- **签名**：`fn labelStartAtom(s: *State) ?Atom`。
 - **作用**：当前位置若是 `label:` 形式就返回标签 atom，否则 null。
 - **实现**：三道闸：当前 token 不是「像标识符」的（`isIdentifierLikeToken`）返回 null；`peekNextKind()` 不是 `':'` 返回 null（那是普通表达式起始而非标签）；是 `TOK_IDENT` 且带转义、而该名字在当前上下文里是保留字（`escapedIdentifierIsReservedWordForCurrentContext`）也返回 null。都过了返回 `identifierLikeAtom(s)`——那是一个借用的 atom id，TGC S3-c 之后 `advance` 只换 token payload 不碰 atom，id 由整场编译的 `CompileAtomScope` 钉住，所以调用方可以把它存进 label 帧一直用到语句结束。
 - **所有权 / 错误 / 调用**：返回的是**借用**的 atom id（来自 `identifierLikeAtom`），调用方不释放——名字要存进 label 帧并活到语句结束，靠的是 `CompileAtomScope` 在整场编译内钉住该 id，不是 token；函数名里的 "Owned" 是 rc 时代遗留。前瞻用的 `peekNextKind` 自己释放 peek token 并回滚游标。不分配、无 error。唯一调用方 `src/parser.zig:8959`。
@@ -332,7 +332,7 @@
 - **签名**：`fn isReservedLabelIdentifier(s: *State, atom_id: Atom) bool`。
 - **作用**：这个名字在当前上下文里是否被保留、不能当标签（module/async/static block 里的 `await`，generator 或 strict 里的 `yield`）。
 - **实现**：一条五项析取，全部用 `atomNameEquals` 比名字：`await` 在 module（`lex.is_module`）、async 函数（`in_async`）、class static block（`in_class_static_block`）三种上下文里保留；`yield` 在 generator（`in_generator`）或 strict（`is_strict` 或 `curFunc().is_strict_mode`）下保留。
-- **所有权 / 错误 / 调用**：无分配、无 error：五条上下文判定，名字比较走 `atomNameEquals`（借 atom 表字节）。唯一调用方 `src/parser.zig:8962`，紧跟在 `labelStartAtomOwned` 之后。
+- **所有权 / 错误 / 调用**：无分配、无 error：五条上下文判定，名字比较走 `atomNameEquals`（借 atom 表字节）。唯一调用方 `src/parser.zig:8962`，紧跟在 `labelStartAtom` 之后。
 
 ### `ParseState.deinitCurrentControlFrames` (`src/parser.zig:2340`)
 
@@ -369,92 +369,12 @@
 - **实现**：一行 `shrinkRetainingCapacity(len)`（rc 时代那个空体的尾部遍历已删）。
 - **所有权 / 错误 / 调用**：不逐项 unpin；保留底层容量，len 必须是有效的恢复水位。
 
-### `ensureImplicitArgumentsLocal` (`src/parser.zig:3007`)
-
-- **签名**：`fn ensureImplicitArgumentsLocal(fd: *function_def_mod.FunctionDef) Error!?u16`。
-- **作用**：给需要 `arguments` 的函数按需物化那条隐式绑定，返回它的 var 下标（不需要或轮不到时返回 null）。
-- **实现**：四道闸：`fd.parent == null`（顶层脚本）、`func_type == .arrow`、`func_type == .class_static_init` 这三类没有自己的 `arguments`，返回 null；`fd.arguments_var_idx >= 0` 说明已建过，直接返回旧下标；函数里已有同名形参或 var（`findArg` / `findVar`）时返回 null——用户绑定优先，不再造伪绑定。四闸都过才 `fd.ensureArgumentsBinding()` 建槽。对照 qjs `add_arguments_var` 走 `add_var`：`arguments` 是普通 scope/var/arg 查找之后的特殊回退项，不进词法作用域链表。
-- **所有权 / 错误 / 调用**：无 `self`，只读写传入的 `fd`：命中已有绑定时只返回下标；否则 `fd.ensureArgumentsBinding()` 在 `FunctionDef` 上追加 var 行，失败收敛成 `error.OutOfMemory`（唯一 error）。返回的是 `vars` 下标而不是所有权。调用方 2 处，都是 `ensureClosureVar`：当前函数分支 `src/parser.zig:3127`、父函数分支 3247。
-
-### `isDynamicEnvironmentCaptureAtom` (`src/parser.zig:3021`)
-
-- **签名**：`fn isDynamicEnvironmentCaptureAtom(atom_id: Atom) bool`。
-- **作用**：该 atom 是否是动态环境伪绑定（`with_object` / `var_object` / `arg_var_object`）。
-- **实现**：三项 atom id 相等比较：`with_object`、`var_object`、`arg_var_object`。这三个名字是解析器给 `with` 语句对象和 direct-eval 变量对象造的伪绑定，闭包与作用域判定要把它们与用户绑定区别对待。
-- **所有权 / 错误 / 调用**：无：三次预定义 id 比较（`with_object` / `var_object` / `arg_var_object`），无 `State`、不分配、无 error。唯一调用方：`ensureClosureVar` 的父层 closure 扫描 `src/parser.zig:3262`。
-
-### `ensureClosureVar` (`src/parser.zig:3027`)
-
-- **签名**：`fn ensureClosureVar(self: *State, atom_id: Atom) Error!void`。
-- **作用**：在非 phase-1 路径上按需物化闭包捕获。
-- **实现**：
-`emit_to_function_def==false` 或 `emit_phase1_temp` 时直接返回：phase-1 只发 name+scope，绑定发现留给 `resolve_variables`。
-
-非 temp 路径：
-1. `arguments`：当前作用域看不见显式绑定则 `ensureParameterArgumentsLocals` 或 `ensureImplicitArgumentsLocal`（参数默认值环境 vs 函数体）。
-2. `findVar`/`findArg` 命中：扁平查找；若是具名函数表达式自身、且当前作用域链看不见该绑定，则 `ensureFuncExprSelfBinding`（`function rec(){ { let rec; } return rec; }`）。
-3. 已有同名 `closure_var` 则返回。
-4. 具名函数表达式自身再物化一次 self-binding。
-5. `ensureArrowSpecialCapture` 处理箭头的 `this` / `new.target`。
-6. 再 `emit_phase1_temp` 则返回（不在解析期发明普通闭包行）。
-7. 沿 `cur_func_stack` 向外：参数环境优先捕获父函数的 arguments 单元格；`findVisibleParentVarCapturingWith` 顺带把可见 `with_object` 链起来；形参、隐式 arguments、父闭包行（含动态环境捕获 atom）分别 `ensureClosureChain`。
-- **所有权 / 错误 / 调用**：自己不分配，但会让被调方在各 `FunctionDef` 上长出行：`ensureParameterArgumentsLocals` / `ensureImplicitArgumentsLocal` / `ensureFuncExprSelfBinding` / `ensureClosureChain`（逐层 `addClosureVar`），这些行归对应的 `FunctionDef`。atom 全程是借用 id。错误两类：上述分配的 `error.OutOfMemory`，以及 `findVisibleParentVarCapturingWith` / `ensureClosureChain` 的 `Error.ParserInvariant`（vars 下标越界、closure 链断裂）。调用方 3 处：变量引用 `src/parser.zig:3007`、4364、绑定发射 12739。
-
-### `ensureArrowSpecialCapture` (`src/parser.zig:3221`)
-
-- **签名**：`fn ensureArrowSpecialCapture(self: *State, atom_id: Atom) Error!bool`。
-- **作用**：箭头函数里引用 `this` / `new.target` 时，在最近的非箭头父函数上物化对应的隐藏本地，并经闭包链把它引到当前箭头。
-- **实现**：对照 qjs 的建模：箭头的词法 `this` 与 `new.target` 就是按需创建的普通闭包变量——在最近的非箭头 FunctionDef 上物化隐藏本地后，用与用户绑定完全相同的 ref 链把它带穿层层嵌套的箭头。当前函数不是 `.arrow`、或 atom 既不是 `atom_this` 也不是 `atom_new_target` 时直接返回 false。否则沿 `cur_func_stack` 由内向外跳过所有箭头，找到第一个非箭头父函数：`this` 走 `parent.ensureThisBinding()`；`new.target` 先查 `parent.new_target_allowed`，不允许就返回 false，允许则走 `parent.ensureNewTargetBinding()`。拿到 var 下标后按源行的 `is_lexical` / `is_const` / `var_kind` 组一条 `.local` 闭包源交给 `ensureClosureChain` 逐层补齐，返回 true。整条栈都是箭头（没有非箭头父函数）时返回 false。
-- **所有权 / 错误 / 调用**：`parent.ensureThisBinding()` / `ensureNewTargetBinding()` 在父 `FunctionDef` 上追加行，失败就地收敛成 `error.OutOfMemory`；随后 `ensureClosureChain` 的错误（OOM 或 `Error.ParserInvariant`）原样上抛。返回 bool 表示是否已经处理掉这次捕获。唯一调用方 `ensureClosureVar`(`src/parser.zig:3158`)。
-
-### `findVisibleParentVarCapturingWith` (`src/parser.zig:3252`)
-
-- **签名**：`fn findVisibleParentVarCapturingWith( self: *State, parent_index: usize, parent: *function_def_mod.FunctionDef, atom_id: Atom, visible_scope_level: i32, ) Error!?i32`。
-- **作用**：在父函数里找从子函数可见的同名绑定，顺带把沿途可见的 `with_object` 也捕获进闭包链。
-- **实现**：外层从 `visible_scope_level` 沿 `parent.scopes[].parent` 上行，内层沿该作用域的 `first` / `scope_next` 链走（遇到 `vd.scope_level != scope_idx` 即退出本层；var 下标越过 `parent.vars.len` 报 `Error.ParserInvariant`）。链上命中 `var_name == atom_id` 立即返回该下标。命中之前每遇到一行 `with_object` 伪绑定（且本次找的不是 `with_object` 自己），就先 `ensureClosureChain` 把这个 `with` 对象捕获进闭包链——被 `with` 罩住的名字在运行时必须先查 with 对象，所以捕获不能漏。作用域链走完后，从 `parent.vars` 尾部倒扫找 `var_kind == .function_name` 的行。最后一条回退是嵌套引用外层具名函数表达式自己的名字：`parent.is_named_func_expr` 且名字相符时用 `parent.ensureFuncExprSelfBinding()` 在 eager var 原先占据的那个回退位置物化自绑定（对照 `resolve_scope_var` 的 enclosing-function 分支，quickjs.c:33151-33155），从而保持捕获顺序不变。全都没有则返回 null。
-- **所有权 / 错误 / 调用**：名为 find，实则**有副作用**：扫到 `with_object` 行时会调 `ensureClosureChain` 让 with 环境一并被捕获（会在各层 `FunctionDef` 上分配 closure 行）。特有 error：`vars` 下标越界时 `Error.ParserInvariant`；其余是 `ensureClosureChain` / `parent.ensureFuncExprSelfBinding` 的 `error.OutOfMemory`。返回的是父函数的 `vars` 下标，不是所有权。唯一调用方 `ensureClosureVar`(`src/parser.zig:3202`)。
-
-### `ensureClosureChain` (`src/parser.zig:3300`)
-
-- **签名**：`fn ensureClosureChain(self: *State, source_index: usize, source_value: function_def_mod.ClosureVar.Init) Error!void`。
-- **作用**：把一个绑定从持有它的函数一路 ref 到当前函数，沿途每层补齐 `closure_var` 行。
-- **实现**：先按 `source.closureType()` 把源函数里对应的 `vars[var_idx]` 或 `args[var_idx]` 标上 `is_captured`（下标越界则跳过，不报错）。然后从 `source_index + 1` 起逐层向内直到当前函数：第一层直接用 source 那条 `ClosureVar`，之后每层构造一条 `.ref` 行，`var_idx` 指向上一层刚确定的行下标（`parent_ref_idx` 为空说明链断了，报 `Error.ParserInvariant`），`is_lexical` / `is_const` / `var_kind` / `var_name` 一律沿用 source。每层先线性找是否已有等价行：复用判定只看绑定身份（`closureType()` 与 `var_idx` 都相同），对照 qjs `get_closure_var` 只按绑定身份判等——同名但来自不同环境的行必须各自保留，「取第一个匹配」才能模拟遮蔽。有就复用其下标，没有就 `child.addClosureVar` 追加。
-- **所有权 / 错误 / 调用**：从源函数到当前函数逐层 `child.addClosureVar`，行分配在各自 `FunctionDef` 的 memory 上（OOM 上抛），同时把源 `vars`/`args` 标 `is_captured`；`var_name` 借用。特有 ICE：中间层拿不到上一层的 `parent_ref_idx` 时返回 `Error.ParserInvariant`。9 处调用方全在捕获逻辑内部：`ensureClosureVar`(`src/parser.zig:3192`-3274 共 7 处)、`ensureArrowSpecialCapture`(3310)、`findVisibleParentVarCapturingWith`(3340)。
-
 ### `findClosureVarIndex` (`src/parser.zig:3344`)
 
 - **签名**：`fn findClosureVarIndex(fd: *const function_def_mod.FunctionDef, atom_id: Atom) ?u16`。
 - **作用**：在给定 FunctionDef 的 `closure_var` 里找第一个同名行。
 - **实现**：线性扫 `fd.closure_var`，返回第一条 `var_name == atom_id` 的下标，只比名字不看类型。取第一个匹配是有意的：`ensureClosureChain` 保证行的追加顺序就是遮蔽顺序。
 - **所有权 / 错误 / 调用**：无 `State`、无分配、无 error：线性扫 `fd.closure_var` 比 `var_name`。唯一调用方 `src/parser.zig:11753`（eval 的父函数绑定可见性判定）。
-
-### `findGlobalClosureVarIndex` (`src/parser.zig:3351`)
-
-- **签名**：`fn findGlobalClosureVarIndex(fd: *const function_def_mod.FunctionDef, atom_id: Atom) ?u16`。
-- **作用**：在 `closure_var` 里找同名且闭包类型属于全局/模块那一组（`global` / `global_ref` / `global_decl` / `module_decl` / `module_import`）的行。
-- **实现**：线性扫 `fd.closure_var`：名字不符直接跳过；名字相符时再看 `closureType()` 是否落在 `.global` / `.global_ref` / `.global_decl` / `.module_decl` / `.module_import` 这五种里，命中返回下标，否则继续找——同名但属于普通局部捕获的行不能拿来当全局引用。
-- **所有权 / 错误 / 调用**：同上，只是只接受 global/global_ref/global_decl/module_decl/module_import 这几类 closure 行。无分配、无 error。唯一调用方 `ensureGlobalClosureVarIndex`(`src/parser.zig:3435`)。
-
-### `ensureGlobalClosureVarIndex` (`src/parser.zig:3362`)
-
-- **签名**：`fn ensureGlobalClosureVarIndex(self: *State, atom_id: Atom) Error!u16`。
-- **作用**：取（必要时新建）当前函数里指向某个全局 / 模块名的闭包行下标——全局变量读写指令的 u16 操作数就是它。
-- **实现**：先 `findGlobalClosureVarIndex` 复用已有行。没有时追加一条 `.global` 闭包行（非 lexical、非 const、`var_kind = .normal`、`var_idx = 0`，因为全局引用按名字解析、不指向任何本地槽），分配失败转 `Error.OutOfMemory`；返回下标为负或超过 `maxInt(u16)`（放不进指令操作数）时报 `Error.ParserInvariant`。
-- **所有权 / 错误 / 调用**：未命中时 `fd.addClosureVar` 追加一行 global closure（`FunctionDef` 内存，失败收敛成 `Error.OutOfMemory`）；返回下标超 `u16` 时报 `Error.ParserInvariant`。`atom_id` 借用。调用方：`emitGlobalVarOp`(`src/parser.zig:3449`)、`emitGlobalVarOpNoSource`(3456)。
-
-### `emitGlobalVarOp` (`src/parser.zig:3377`)
-
-- **签名**：`fn emitGlobalVarOp(self: *State, op_id: u8, atom_id: Atom) Error!void`。
-- **作用**：把一个按名字的全局变量访问发射成「闭包行下标」形式：先给该名字要到一行全局 closure var，再发 `op <u16 idx>`。
-- **实现**：`ensureGlobalClosureVarIndex(atom_id)` 拿到（或按需建出）该名字的全局闭包行下标，再 `Emitter.opU16(self, op_id, ref_idx)`。非 temp 的全局 var 降级与 temp 形态共用同一套 op + u16 闭包行下标编码。
-- **所有权 / 错误 / 调用**：先经 `ensureGlobalClosureVarIndex` 可能新增一行 closure（OOM / `ParserInvariant`），再发 `op + u16`（builder 错误经 `mapBuilderError` 收成 OOM / BytecodeOverflow / ParserInvariant）。不分配长期对象。parser 内调用方三处：`src/parser.zig:3018`、12744、12746；`src/bytecode.zig:8501`/8528 的同名函数是另一份实现，不是本函数的调用方。
-
-### `emitGlobalVarOpNoSource` (`src/parser.zig:3384`)
-
-- **签名**：`fn emitGlobalVarOpNoSource(self: *State, op_id: u8, atom_id: Atom) Error!void`。
-- **作用**：同 `emitGlobalVarOp`，但用在编译器自己合成、不该出现在 source map 里的位置。
-- **实现**：同样先 `ensureGlobalClosureVarIndex`，只是改走 `Emitter.opU16NoSource`——不为这条指令记 source 偏移。
-- **所有权 / 错误 / 调用**：与 `emitGlobalVarOp` 同一套（可能新增 closure 行 + builder 三元错误），只是不写源码位置记录。唯一调用方 `src/parser.zig:3020`。
 
 ### `scopeChainContains` (`src/parser.zig:3389`)
 
@@ -475,14 +395,14 @@
 - **签名**：`fn pushBreakFrame(s: *State) Error!void`。
 - **作用**：为一个循环压一整组 break + continue 帧。
 - **实现**：往 break / continue 两侧的并行数组各推一行：`break_frame_lens` / `continue_frame_lens` 记下当前 fixup 水位（弹帧时据此回收本帧的跳转），`continue_frame_break_frame_indices` 记下配对的 break 帧下标，两侧的 `*_catch_marker_depths` 记下 `active_catch_marker_depth`，`break_frame_cleanup_drops` / `break_frame_cross_cleanup_drops` / `continue_frame_cleanup_drops` 三个清理计数一律推 0。最后按 qjs `push_break_entry` 的顺序分配标签：先 continue 标签，后 break 标签（顺序影响标签编号，进而影响 resolve 后的布局）。
-- **所有权 / 错误 / 调用**：八条并行数组全部用 `s.function.memory.allocator` 追加（内存归 fd），另有两个 LabelId 分别追加进 `continue_frame_labels` / `break_frame_labels`、LabelId 本身归 Builder；配对的释放点是 `popBreakFrameAndPatch`（`src/parser.zig:8121`，它把两侧数组同步弹回并绑定 break 标签），异常退出时由 `deinitCurrentControlFrames` 整体回收。错误：各 append 的 `error.OutOfMemory` 与 `emitterNewLabel` 的 builder 三元组；没有 errdefer——中途失败会留下长度不齐的并行数组，但那条解析路径已经在往上抛，不会再有人消费。调用方 3 处：`parseDoOrWhileStatement`（`src/parser.zig:9298`）、`parseForStatement`（`src/parser.zig:9488`）、`parseForInOf`（`src/parser.zig:10971`）。
+- **所有权 / 错误 / 调用**：八条并行数组全部用 `s.function.memory.allocator` 追加（内存归 fd），另有两个 LabelId 分别追加进 `continue_frame_labels` / `break_frame_labels`、LabelId 本身归 Builder；配对的释放点是 `popBreakFrameAndPatch`（`src/parser.zig:8121`，它把两侧数组同步弹回并绑定 break 标签），异常退出时由 `deinitCurrentControlFrames` 整体回收。错误：各 append 的 `error.OutOfMemory` 与 `Emitter.newLabel` 的 builder 三元组；没有 errdefer——中途失败会留下长度不齐的并行数组，但那条解析路径已经在往上抛，不会再有人消费。调用方 3 处：`parseDoOrWhileStatement`（`src/parser.zig:9298`）、`parseForStatement`（`src/parser.zig:9488`）、`parseForInOf`（`src/parser.zig:10971`）。
 
 ### `pushBreakOnlyFrame` (`src/parser.zig:7482`)
 
 - **签名**：`fn pushBreakOnlyFrame(s: *State) Error!void`。
 - **作用**：只压 break 一侧的帧与标签（没有 continue 目标的结构，如 switch / 带标签的普通语句）。
 - **实现**：只推 break 一侧：`break_frame_lens` 记 fixup 水位、`break_frame_catch_marker_depths` 记当前 catch marker 深度、`break_frame_cleanup_drops` 与 `break_frame_cross_cleanup_drops` 推 0，再分配一个 break 标签。continue 侧的所有并行数组一律不动——switch 与带标签的普通语句没有 continue 目标，推了反而会让 `continue` 错误地命中它们。
-- **所有权 / 错误 / 调用**：同族但只推 break 侧四条数组 + 一个标签，内存归 fd；配对释放点是 `popBreakOnlyFrameAndPatch`（`src/parser.zig:8138`）。错误只有 append 的 `error.OutOfMemory` 与 `emitterNewLabel` 的 builder 三元组。唯一调用方 `parseSwitchStatement`（`src/parser.zig:9572`）。
+- **所有权 / 错误 / 调用**：同族但只推 break 侧四条数组 + 一个标签，内存归 fd；配对释放点是 `popBreakOnlyFrameAndPatch`（`src/parser.zig:8138`）。错误只有 append 的 `error.OutOfMemory` 与 `Emitter.newLabel` 的 builder 三元组。唯一调用方 `parseSwitchStatement`（`src/parser.zig:9572`）。
 
 ### `pushControlBlock` (`src/parser.zig:7494`)
 
@@ -621,8 +541,8 @@
 
 - **签名**：`fn emitResolvedControlJump( s: *State, target: FinallyControlTarget, resolved: ResolvedFinallyControlTarget, ) Error!void`。
 - **作用**：发出 break / continue 的那条实际跳转，落点是目标帧预先分配好的汇合标签。
-- **实现**：先定标签：`resolved.label_frame_index` 非空时取该标签帧的 `break_label` / `continue_label`；否则按 `resolved.depth` 去 `break_frame_labels` / `continue_frame_labels` 取第 `depth - 1` 项（depth 为 0 或越界时得到 null）。标签为 null 说明帧记账与标签数组失配，报 `Error.ParserInvariant`；拿到则 `emitterJumpNoSource(s, opcode.op.goto, label_id)` 发一条不带 source 的跳转。v2 下跳转直接以 LabelId 出生（对应 qjs 的 `emit_goto(label_break/label_cont)`），没有操作数偏移回填表。
-- **所有权 / 错误 / 调用**：不分配；`LabelId` 只是从帧或并行数组里读出的 Builder 句柄，谁都不拥有它。自有错误一条 `Error.ParserInvariant`——取到 null 说明帧记账与 `break_frame_labels` / `continue_frame_labels` 失配（depth 为 0 或越界）；发射错误经 `emitterJumpNoSource` → `mapBuilderError`。唯一调用方 `emitControlBlocksUntil`（`src/parser.zig:10456`）。
+- **实现**：先定标签：`resolved.label_frame_index` 非空时取该标签帧的 `break_label` / `continue_label`；否则按 `resolved.depth` 去 `break_frame_labels` / `continue_frame_labels` 取第 `depth - 1` 项（depth 为 0 或越界时得到 null）。标签为 null 说明帧记账与标签数组失配，报 `Error.ParserInvariant`；拿到则 `Emitter.jumpNoSource(s, opcode.op.goto, label_id)` 发一条不带 source 的跳转。v2 下跳转直接以 LabelId 出生（对应 qjs 的 `emit_goto(label_break/label_cont)`），没有操作数偏移回填表。
+- **所有权 / 错误 / 调用**：不分配；`LabelId` 只是从帧或并行数组里读出的 Builder 句柄，谁都不拥有它。自有错误一条 `Error.ParserInvariant`——取到 null 说明帧记账与 `break_frame_labels` / `continue_frame_labels` 失配（depth 为 0 或越界）；发射错误经 `Emitter.jumpNoSource` → `mapBuilderError`。唯一调用方 `emitControlBlocksUntil`（`src/parser.zig:10456`）。
 
 ### `emitCrossedControlBlockCleanup` (`src/parser.zig:9952`)
 
@@ -642,7 +562,7 @@
 
 - **签名**：`fn emitControlThroughFinally(s: *State, target: FinallyControlTarget) Error!void`。
 - **作用**：发出一次完整的 `break` / `continue`：沿途穿过的 finally 逐个 gosub 执行，跨过的作用域、catch marker 与栈项逐层清理，最后跳到目标帧的汇合标签。
-- **实现**：先 `resolveFinallyControlTarget` 定出目标帧深度、catch marker 深度与清理数，再用 `block_cursor`（从 `s.top_break` 起）、`scope_cursor`、`catch_marker_depth` 三个游标向外走。外层循环由内向外遍历 `return_finally_frames`：`controlTargetCrossesFinallyFrame` 判定不跨出的帧直接跳过；要跨出时先 `emitControlBlocksUntil` 走到该帧的 `block_boundary`（途中若已命中目标环境并发出跳转就直接返回），随后 `closeScopes` 退到帧的 `scope_level`、`emitCatchMarkerDropsFromDepth` 退到帧的 catch marker 深度，接着按 qjs `emit_break` / `emit_return`（quickjs.c:28373-28377、28447-28449）的形状发 `undefined` 占位保持栈深、用 `emitterJumpNoSource(op.gosub, finally_label)` 进 finalizer、回来再发 `drop` 丢掉被跨过的 finalizer 完成值。所有 finally 处理完后再 `emitControlBlocksUntil(..., boundary = null)` 走完剩下的环境；仍然没命中目标说明记账与环境链失配，报 `Error.ParserInvariant`。
+- **实现**：先 `resolveFinallyControlTarget` 定出目标帧深度、catch marker 深度与清理数，再用 `block_cursor`（从 `s.top_break` 起）、`scope_cursor`、`catch_marker_depth` 三个游标向外走。外层循环由内向外遍历 `return_finally_frames`：`controlTargetCrossesFinallyFrame` 判定不跨出的帧直接跳过；要跨出时先 `emitControlBlocksUntil` 走到该帧的 `block_boundary`（途中若已命中目标环境并发出跳转就直接返回），随后 `closeScopes` 退到帧的 `scope_level`、`emitCatchMarkerDropsFromDepth` 退到帧的 catch marker 深度，接着按 qjs `emit_break` / `emit_return`（quickjs.c:28373-28377、28447-28449）的形状发 `undefined` 占位保持栈深、用 `Emitter.jumpNoSource(op.gosub, finally_label)` 进 finalizer、回来再发 `drop` 丢掉被跨过的 finalizer 完成值。所有 finally 处理完后再 `emitControlBlocksUntil(..., boundary = null)` 走完剩下的环境；仍然没命中目标说明记账与环境链失配，报 `Error.ParserInvariant`。
 - **所有权 / 错误 / 调用**：不分配，三个游标都在本函数栈上；`return_finally_frames` / `top_break` 链只读，帧的所有权归各自的 `parse*`。错误三类：`resolveFinallyControlTarget` 的语法错（未定义标签、`continue` 打在非循环标签，均为 `error.UnexpectedToken`）、记账与环境链失配的 `Error.ParserInvariant`（含最后兜底的那条 return）、发射经 `mapBuilderError` 的三元组。调用方 4 处：`emitLabelledBreak`（`src/parser.zig:2326`）、`emitLabelledContinue`（`src/parser.zig:2330`）、`emitUnlabelledBreak`（`src/parser.zig:7894`）、`emitUnlabelledContinue`（`src/parser.zig:7899`）。
 
 ### `needVarReference` (`src/parser.zig:10054`)
@@ -707,9 +627,9 @@
 - **实现**：非 static 时只比 `atom_module.ids.constructor`；static 时再并上 `atom_module.ids.prototype`。两者都是 atom id 的恒等比较，不查名字字符串。
 - **所有权 / 错误 / 调用**：无：比预定义 id `constructor`（静态时再加 `prototype`），无分配、无 error。调用方 3 处：公共字段名检查 `src/parser.zig:13932`、13942、13946。
 
-### `classNameAtomOwned` (`src/parser.zig:13599`)
+### `classNameAtom` (`src/parser.zig:13599`)
 
-- **签名**：`fn classNameAtomOwned(s: *State) ?Atom`。
+- **签名**：`fn classNameAtom(s: *State) ?Atom`。
 - **作用**：取当前 class 声明名字的 atom，不能当类名时返回 null。
 - **实现**：`TOK_IDENT` 时取 `token.payload.ident.atom`，但若 `escapedIdentifierIsReservedClassName` 判定这个带转义的写法其实是保留字则返回 null；`TOK_AWAIT` 且 `canUseAwaitAsIdentifier` 成立时返回 `tok.keywordAtom(kind)`（sloppy 非 async 上下文里 `await` 可以当类名）；其余 kind 返回 null。源码注释已写明本函数交出的是借用 id，由 `CompileAtomScope` 作根、调用方不释放。
 - **所有权 / 错误 / 调用**：返回的是一个**借用**的 atom id，不是 retain，调用方不释放——`parseClass` 两处调用点都只是把它存进 `class_name` 就继续解析，parser 里没有任何配对的释放。函数上方原先那句 `Return one owned retain for the current class name. The caller frees.` 是 rc 时代的遗留（已改实）：`TOK_IDENT` 分支直接交出 `s.token.payload.ident.atom`，`TOK_AWAIT` 分支交出 `tok.keywordAtom(kind)` 这个预定义 id，两条路径都不调用任何 retain。TGC S3-c 之后 `lexer.releaseTokenPayload` 只释放 token 的字节缓冲、不再释放 atom（见 src/lexer.zig:127-140 的注释「the token's id is an ordinary borrow now」），id 的存活改由整场编译的 `CompileAtomScope` 根提供者保证，sweep 在编译结束后才回收。所以这个 id 在 `advance()` 之后仍然有效，跨整个 `parseClass` 都可用；`advance()` 释放的是 token payload，不是 atom。
@@ -737,15 +657,15 @@
 ### `enterStaticBlockFunction` (`src/parser.zig:13687`)
 
 - **签名**：`fn enterStaticBlockFunction(s: *State, init_fd: *function_def_mod.FunctionDef) Error!StaticBlockContext`。
-- **作用**：在 `enterFieldInitFunction` 之上再保存 static block 特有的四项，并设 `in_class_static_block = true`、`is_static = false`。
-- **实现**：先 `enterFieldInitFunction(s, init_fd)` 取走那十项通用现场（同时压入子函数、强制 strict 等），再额外留底四项 static block 独有的状态：`pending_function_name`、`pending_function_is_decl`、`in_class_static_block`、`is_static`。随后把前两项清成 null / false（静态块里的函数不继承外面待定的函数名），`in_class_static_block = true`（`await` 在此成为保留字），`is_static = false`（块体内部的成员判定不再算静态位置）。
-- **所有权 / 错误 / 调用**：分配与失败面全部来自内嵌的 `enterFieldInitFunction`（`pushFunction` 的 `error.OutOfMemory`）；自己只多存 4 个字段进 `StaticBlockContext`。配对的还原是 `leaveStaticBlockFunction`(`src/parser.zig:14169`)，它再转调 `leaveFieldInitFunction`。唯一调用方：static block 解析 `src/parser.zig:14569`。
+- **作用**：在 `enterFieldInitFunction` 之上再保存 `is_static`，并设 `ctx.in_class_static_block = true`、`is_static = false`。
+- **实现**：先 `enterFieldInitFunction(s, init_fd)` 取走那十项通用现场（同时压入子函数、强制 strict 等），（`FieldInitContext.ctx` 已整体带走 `FunctionContext`，含 `in_class_static_block`），再额外留底 `is_static`。以前还要留底并清零 `pending_function_name` / `pending_function_is_decl`；它们现在是 `parseFunctionParamsAndBody` 的 `FunctionEntry` 参数，静态块传 `.{}`。`in_class_static_block = true`（`await` 在此成为保留字），`is_static = false`（块体内部的成员判定不再算静态位置）。
+- **所有权 / 错误 / 调用**：分配与失败面全部来自内嵌的 `enterFieldInitFunction`（`pushFunction` 的 `error.OutOfMemory`）；自己只多存 `is_static` 进 `StaticBlockContext`。配对的还原是 `leaveStaticBlockFunction`(`src/parser.zig:14169`)，它再转调 `leaveFieldInitFunction`。唯一调用方：static block 解析 `src/parser.zig:14569`。
 
 ### `leaveStaticBlockFunction` (`src/parser.zig:13702`)
 
 - **签名**：`fn leaveStaticBlockFunction(s: *State, saved: StaticBlockContext) void`。
 - **作用**：离开 class static block 子函数，恢复外层解析现场。
-- **实现**：`leaveFieldInitFunction(s, saved.field_init)`，再写回 `pending_function_name` / `pending_function_is_decl` / `in_class_static_block` / `is_static`。
+- **实现**：`leaveFieldInitFunction(s, saved.field_init)`（内含整个 `ctx` 的写回），再写回 `is_static`。
 - **所有权 / 错误 / 调用**：不分配。与 `enterStaticBlockFunction` 成对。
 
 ### `emitFieldInitializer` (`src/parser.zig:13720`)
@@ -979,9 +899,9 @@
 - **实现**：`kind == TOK_IDENT or kind == TOK_STRING or tok.isKeyword(kind)` 三选一。关键字也放行，因为 `export { default as x }` / `import { class as C }` 这类位置上的名字是 ModuleExportName、不受保留字限制。
 - **所有权 / 错误 / 调用**：无 `State`、无分配、无 error：`TOK_IDENT` / `TOK_STRING` / 任意关键字都可以当模块导入导出名。调用方 4 处：`src/parser.zig:15247`、15513、15529、15580。
 
-### `moduleImportNameAtomOwned` (`src/parser.zig:14924`)
+### `moduleImportNameAtom` (`src/parser.zig:14924`)
 
-- **签名**：`fn moduleImportNameAtomOwned(s: *State) Error!Atom`。
+- **签名**：`fn moduleImportNameAtom(s: *State) Error!Atom`。
 - **作用**：取 import/export 名字位置上的 atom。
 - **实现**：一个 switch：`TOK_IDENT` 取 `s.token.payload.ident.atom`；`TOK_NULL...TOK_AWAIT` 这段关键字区间取 `tok.keywordAtom(kind)` 的预定义 id；其余（即字符串形式的 ModuleExportName）交 `moduleStringAtom(s)` 新 intern 一个。
 - **所有权 / 错误 / 调用**：三条路径返回的都是借用的 atom id，调用方不释放——`parseImport` / `parseExport` 的各个调用点都只把它交给 `addModuleExportName` / `addModuleImportBinding` 之类。函数上方原先那句「owned retain / 标识符的 atom 只活到 `advance()`」是 rc 时代的遗留（已改实）：TGC S3-c 之后 `lexer.releaseTokenPayload` 不再释放 atom（src/lexer.zig:127-140），标识符那份 id 与新 intern 的那份一样，都由整场编译的 `CompileAtomScope` 根列表钉住，`advance()` 之后仍然有效。失败：`moduleStringAtom` 可返回 `error.OutOfMemory` 或字符串不合法时的 `SyntaxError`。
@@ -1008,6 +928,7 @@
 
 ### `parseExport` (`src/parser.zig:14959`)
 
+- **结构（2026-09-19 拆分后）**：TS 形态与 `var`/`let`/`const` 留在分派器；`parseExportDefault` / `parseExportList` / `parseExportStar` 各一形态；函数与类的四种 export 形态共用 `parseExportedFunction` / `parseExportedClass`，匿名默认值经 `bindDefaultExportValue`。
 - **签名**：`fn parseExport(s: *State) Error!void`。
 - **作用**：下降解析 `Export` 产生式并按需发射 phase-1 字节码。
 - **实现**：
@@ -1021,9 +942,9 @@
 `validateModuleLocalExports` 在程序结束后检查本地导出是否都有绑定。
 - **所有权 / 错误 / 调用**：`export { ... }` 分支在 fd 的 allocator 上建 `export_specs: ArrayList(ModuleExportSpec)`，由 `defer freeModuleExportSpecs` 释放（同样只 `deinit` 数组本体；`local_name_live` / `export_name_live` 那对写而不读的标志已删）；导出名是借用 atom——标识符取 token 的 id，字符串名经 `moduleStringAtom` → `internString` 新 intern，两者都不 retain，最终存进 `ensureModule()` 的 `Record`（归 `FunctionBytecode`）。错误：重名导出、非良构（含孤立代理）字符串名、缺 `from` 等是 `error.UnexpectedToken`；`parseClass` 有名却返回 null 是 `Error.ParserInvariant`；`record.add*` 与 intern 是 `error.OutOfMemory`；发射走 builder 三元组。唯一调用方 `parseExportStatement`（`src/parser.zig:9219`）。
 
-### `exportDefaultFunctionNameOwned` (`src/parser.zig:15147`)
+### `exportDefaultFunctionName` (`src/parser.zig:15147`)
 
-- **签名**：`fn exportDefaultFunctionNameOwned(s: *State) ?Atom`。
+- **签名**：`fn exportDefaultFunctionName(s: *State) ?Atom`。
 - **作用**：前瞻 `function` 之后是否有声明名字（含 `function*`），匿名时返回 null。
 - **实现**：`takeLexerCursorSnapshot` 之后立刻 `defer restoreLexerCursorSnapshot`——恢复必须在可失败的扫描之前就武装好：`nextInto()` 会在失败之前把 `pos` 推过已经读到的 token（标识符 atom 是最后才 intern 的），若失败时恢复尚未生效，调用方会从 token 中间继续解析，`export function f()` 会从 `(` 接着读并报出假的 SyntaxError，而不是让分配失败原样上抛。扫描本身：取第一个 token，是 `'*'`（`export default function*`）就再取一个，两种情形下只要落点是 `TOK_IDENT` 就返回它的 atom，否则（匿名声明）返回 null；两个扫描 token 都由本函数 `defer freeToken` 释放。扫描 token 在返回前就被释放，但 TGC S3-c 之后 `freeToken` 只还 token 的字节缓冲、不动 atom，id 由整场编译的 `CompileAtomScope` 钉住，所以交出去的是借用 id、调用方不释放（函数头原先那段「必须在这里取一份 owned retain，否则只是碰巧命中 atom 表 LIFO 空闲链」的论证是 rc 时代的遗留，已改实）。
 - **所有权 / 错误 / 调用**：返回的是一个**借用**的 atom id，不是 retain，调用方不释放：`parseExport` 的四个调用点（15474 / 15487 / 15616 / 15636）都只把它交给 `addModuleExportName`。函数上方那段「the retain must be taken here … the caller frees」是 rc 时代的推理，实现里并没有任何 retain 调用——`return second.payload.ident.atom` 之后紧跟着的 `defer s.lex.freeToken(&second)` 在 TGC S3-c 之后只释放 token 的字节缓冲，不再释放 atom（src/lexer.zig:127-140：「the token's id is an ordinary borrow now -- the compile scope roots it and the sweep retires it」）。真正保证这个 id 在扫描 token 被释放、游标回滚、随后整段 `parseFunctionDecl` 重新解析之后仍然有效的，是 `CompileAtomScope`：`internDynamic` 等入口都会 `noteCompileScope`，把 id 记进编译期根列表，sweep 只在编译结束、scope `deinit` 之后才回收。因此注释里担心的「借用 id 只是碰巧命中 atom 表 LIFO 空闲链」并不成立。本函数自身除两个扫描 token 外不分配；失败只在 `nextInto` 上，一律吞成 null。
@@ -1031,8 +952,8 @@
 
 - **签名**：`fn hasExportDefaultClassName(s: *State) bool`。
 - **作用**：前瞻 `export default class` 后面有没有声明名字，据此决定这个类是具名声明还是匿名默认导出。
-- **实现**：与 `exportDefaultFunctionNameOwned` 同一套顺序契约：`takeLexerCursorSnapshot` 之后立刻 `defer restoreLexerCursorSnapshot`，把游标恢复武装在可失败的 `nextInto` 之前；取一个 scratch token（失败吞成 false）、`defer freeToken`，只判断 `name.val == tok.TOK_IDENT`。它不交出 atom——真正的类名由随后的 `parseClass(s, true)` 返回。
-- **所有权 / 错误 / 调用**：前瞻 token 由 `defer s.lex.freeToken` 释放，游标由 `takeLexerCursorSnapshot` / `defer restoreLexerCursorSnapshot` 回滚，且恢复必须在可失败的 `nextInto` 之前武装（注释指明与 `exportDefaultFunctionNameOwned` 同一契约）。无 error：`nextInto` 的失败（含 OOM）吞成 false。唯一调用方 `export default class`(`src/parser.zig:15462`)。
+- **实现**：与 `exportDefaultFunctionName` 同一套顺序契约：`takeLexerCursorSnapshot` 之后立刻 `defer restoreLexerCursorSnapshot`，把游标恢复武装在可失败的 `nextInto` 之前；取一个 scratch token（失败吞成 false）、`defer freeToken`，只判断 `name.val == tok.TOK_IDENT`。它不交出 atom——真正的类名由随后的 `parseClass(s, true)` 返回。
+- **所有权 / 错误 / 调用**：前瞻 token 由 `defer s.lex.freeToken` 释放，游标由 `takeLexerCursorSnapshot` / `defer restoreLexerCursorSnapshot` 回滚，且恢复必须在可失败的 `nextInto` 之前武装（注释指明与 `exportDefaultFunctionName` 同一契约）。无 error：`nextInto` 的失败（含 OOM）吞成 false。唯一调用方 `export default class`(`src/parser.zig:15462`)。
 
 ### `parseFromClause` (`src/parser.zig:15186`)
 

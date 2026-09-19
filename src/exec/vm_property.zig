@@ -224,4 +224,3 @@ pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: 
 }
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
-

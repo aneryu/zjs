@@ -4,7 +4,7 @@
 
 ## `test_entry.zig`
 
-`RootKind`：script / module。`Options.emit_phase1_temp` 默认 true（生产 parser 也默认开）；S2-G1 语句片段测试会关。
+`RootKind`：script / module。（`Options.emit_phase1_temp` 已于 2026-09-20 随 legacy 发射器模式退役。）
 
 `Program` 持有 Bytecode、name_atom、Lexer、ParseState。按值返回，所以 `deinit` 要先把 `state.lex` / `state.function` 修回自身字段地址。
 
@@ -40,14 +40,14 @@
 
 - **签名**：`pub fn parseAndCompileV2TestProgram( rt: *core.JSRuntime, testing_allocator: std.mem.Allocator, name: []const u8, source: []const u8, options: Options, ) !Program`。
 - **作用**：intern 名、建 Bytecode/lexer/ParseState、配根、可选 TS、beginProgramEmission、parseProgramStatements。**不**跑 resolve/finalize。
-- **实现**：errdefer 各级 deinit。`emit_phase1_temp` 来自 options。
+- **实现**：errdefer 各级 deinit。
 - **所有权 / 错误 / 调用**：parser 与需要看 phase-1 流的测试。lexer 用 testing_allocator。
 
 ---
 
 ## `tests.zig` harness
 
-`ParseHarness`：无 realm 的解析夹具，`emit_phase1_temp = false`，只 `beginBuilderEmissionForTest`，用来断言迁移面内的语句片段。`ExecHarness`：带 Context、standard_globals、canonical root、compile roots、`is_global_var`，跑完整 parse→finalize→VM。
+`ParseHarness`：无 realm 的解析夹具，只 `beginBuilderEmissionForTest`（2026-09-20 起与生产同为 canonical phase-1 流：期望里带 enter/leave_scope、scope_get_var/scope_put_var、宽 `fclosure`），用来断言迁移面内的语句片段。`ExecHarness`：带 Context、standard_globals、canonical root、compile roots、`is_global_var`，跑完整 parse→finalize→VM。
 
 ### `ParseHarness.init` (`src/compiler/tests.zig:35`)
 

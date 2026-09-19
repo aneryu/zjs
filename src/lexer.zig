@@ -104,7 +104,7 @@ pub fn namespace(comptime token: type) type {
                 self.pos = start + 1;
                 self.line = tok.line_num;
                 self.col = tok.col_num + 1;
-                tok.val = @as(t.TokenKind, byte);
+                tok.val = @enumFromInt(byte);
                 tok.len = 1;
                 tok.payload = .none;
             }
@@ -197,7 +197,7 @@ pub fn namespace(comptime token: type) type {
                 self.mark();
 
                 if (self.pos >= self.source.len) {
-                    self.emitInto(out, t.TOK_EOF, .{ .none = {} });
+                    self.emitInto(out, .eof, .{ .none = {} });
                     return;
                 }
 
@@ -599,7 +599,7 @@ pub fn namespace(comptime token: type) type {
                 }
 
                 const a = try self.atoms.internString(lexeme);
-                self.emitInto(out, t.TOK_IDENT, .{ .ident = .{
+                self.emitInto(out, .ident, .{ .ident = .{
                     .atom = a,
                     .has_escape = has_escape,
                     .is_reserved = false,
@@ -677,7 +677,7 @@ pub fn namespace(comptime token: type) type {
                 }
 
                 const a = try self.atoms.internString(decoded.items);
-                self.emitInto(out, t.TOK_PRIVATE_NAME, .{ .ident = .{
+                self.emitInto(out, .private_name, .{ .ident = .{
                     .atom = a,
                     .has_escape = has_escape,
                     .is_reserved = false,
@@ -691,14 +691,14 @@ pub fn namespace(comptime token: type) type {
                     self.bump();
                     self.bump();
                     self.bump();
-                    self.emitInto(out, t.TOK_ELLIPSIS, .{ .none = {} });
+                    self.emitInto(out, .ellipsis, .{ .none = {} });
                     return;
                 }
                 if (isDecimalDigit(self.peekAt(1))) {
                     return self.lexNumber(out, true);
                 }
                 self.bump();
-                self.emitInto(out, '.', .{ .none = {} });
+                self.emitInto(out, .dot, .{ .none = {} });
             }
 
             fn lexNumber(self: *LexerImpl, out: *t.Token, leading_dot: bool) Error!void {
@@ -775,7 +775,7 @@ pub fn namespace(comptime token: type) type {
                 const lexeme = self.source[start..self.pos];
                 if (is_bigint) {
                     if (base == 10 and decimalBigIntHasInvalidLeadingZero(lexeme)) return error.InvalidNumber;
-                    self.emitInto(out, t.TOK_NUMBER, .{ .num = .{
+                    self.emitInto(out, .number, .{ .num = .{
                         .value = 0,
                         .is_bigint = true,
                         .bigint_text = lexeme[0 .. lexeme.len - 1],
@@ -784,12 +784,12 @@ pub fn namespace(comptime token: type) type {
                 }
                 if (base == 10) {
                     if (try legacyOrNonOctalDecimalValue(self, lexeme)) |value| {
-                        self.emitInto(out, t.TOK_NUMBER, .{ .num = .{ .value = value } });
+                        self.emitInto(out, .number, .{ .num = .{ .value = value } });
                         return;
                     }
                 }
                 const value = parseNumberLiteral(lexeme) orelse return error.InvalidNumber;
-                self.emitInto(out, t.TOK_NUMBER, .{ .num = .{ .value = value } });
+                self.emitInto(out, .number, .{ .num = .{ .value = value } });
             }
 
             // ---- strings -----------------------------------------------------
@@ -802,7 +802,7 @@ pub fn namespace(comptime token: type) type {
                     if (c == quote) {
                         const bytes = @constCast(self.source[content_start..self.pos]);
                         self.bump();
-                        self.emitInto(out, t.TOK_STRING, .{ .str = .{
+                        self.emitInto(out, .string, .{ .str = .{
                             .bytes = bytes,
                             .contains_escape = false,
                             .contains_legacy_escape = false,
@@ -827,7 +827,7 @@ pub fn namespace(comptime token: type) type {
                     if (c == quote) {
                         self.bump();
                         const owned = try self.allocator.dupe(u8, buf.items);
-                        self.emitInto(out, t.TOK_STRING, .{ .str = .{
+                        self.emitInto(out, .string, .{ .str = .{
                             .bytes = owned,
                             .contains_escape = contains_escape,
                             .contains_legacy_escape = contains_legacy_escape,
@@ -1056,7 +1056,7 @@ pub fn namespace(comptime token: type) type {
                         else
                             .tail;
                         const owned = try self.allocator.dupe(u8, buf.items);
-                        self.emitInto(out, t.TOK_TEMPLATE, .{ .str = .{
+                        self.emitInto(out, .template, .{ .str = .{
                             .bytes = owned,
                             .raw_bytes = raw,
                             .cooked_invalid = cooked_invalid,
@@ -1075,7 +1075,7 @@ pub fn namespace(comptime token: type) type {
                         else
                             .middle;
                         const owned = try self.allocator.dupe(u8, buf.items);
-                        self.emitInto(out, t.TOK_TEMPLATE, .{ .str = .{
+                        self.emitInto(out, .template, .{ .str = .{
                             .bytes = owned,
                             .raw_bytes = raw,
                             .cooked_invalid = cooked_invalid,
@@ -1177,7 +1177,7 @@ pub fn namespace(comptime token: type) type {
                         self.bump();
                     } else break;
                 }
-                self.emitInto(out, t.TOK_REGEXP, .{ .regexp = .{
+                self.emitInto(out, .regexp, .{ .regexp = .{
                     .pattern = self.source[pat_start..pat_end],
                     .flags = self.source[flags_start..self.pos],
                 } });
@@ -1203,7 +1203,7 @@ pub fn namespace(comptime token: type) type {
                     '?' => return self.lexQuestion(out),
                     '~', '(', ')', '[', ']', '{', '}', ',', ';', ':' => {
                         self.bump();
-                        self.emitInto(out, @as(t.TokenKind, c), .{ .none = {} });
+                        self.emitInto(out, @enumFromInt(c), .{ .none = {} });
                     },
                     else => {
                         self.bump();
@@ -1217,16 +1217,16 @@ pub fn namespace(comptime token: type) type {
                 if (self.pos < self.source.len) {
                     if (self.peek() == '+') {
                         self.bump();
-                        self.emitInto(out, t.TOK_INC, .{ .none = {} });
+                        self.emitInto(out, .inc, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_PLUS_ASSIGN, .{ .none = {} });
+                        self.emitInto(out, .plus_assign, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '+', .{ .none = {} });
+                self.emitInto(out, .plus, .{ .none = {} });
             }
 
             fn lexMinus(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1234,16 +1234,16 @@ pub fn namespace(comptime token: type) type {
                 if (self.pos < self.source.len) {
                     if (self.peek() == '-') {
                         self.bump();
-                        self.emitInto(out, t.TOK_DEC, .{ .none = {} });
+                        self.emitInto(out, .dec, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_MINUS_ASSIGN, .{ .none = {} });
+                        self.emitInto(out, .minus_assign, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '-', .{ .none = {} });
+                self.emitInto(out, .minus, .{ .none = {} });
             }
 
             fn lexStar(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1253,39 +1253,39 @@ pub fn namespace(comptime token: type) type {
                         self.bump();
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_POW_ASSIGN, .{ .none = {} });
+                            self.emitInto(out, .pow_assign, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_POW, .{ .none = {} });
+                        self.emitInto(out, .pow, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_MUL_ASSIGN, .{ .none = {} });
+                        self.emitInto(out, .mul_assign, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '*', .{ .none = {} });
+                self.emitInto(out, .star, .{ .none = {} });
             }
 
             fn lexSlash(self: *LexerImpl, out: *t.Token) Error!void {
                 self.bump();
                 if (self.pos < self.source.len and self.peek() == '=') {
                     self.bump();
-                    self.emitInto(out, t.TOK_DIV_ASSIGN, .{ .none = {} });
+                    self.emitInto(out, .div_assign, .{ .none = {} });
                     return;
                 }
-                self.emitInto(out, '/', .{ .none = {} });
+                self.emitInto(out, .slash, .{ .none = {} });
             }
 
             fn lexPercent(self: *LexerImpl, out: *t.Token) Error!void {
                 self.bump();
                 if (self.pos < self.source.len and self.peek() == '=') {
                     self.bump();
-                    self.emitInto(out, t.TOK_MOD_ASSIGN, .{ .none = {} });
+                    self.emitInto(out, .mod_assign, .{ .none = {} });
                     return;
                 }
-                self.emitInto(out, '%', .{ .none = {} });
+                self.emitInto(out, .percent, .{ .none = {} });
             }
 
             fn lexEquals(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1295,19 +1295,19 @@ pub fn namespace(comptime token: type) type {
                         self.bump();
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_STRICT_EQ, .{ .none = {} });
+                            self.emitInto(out, .strict_eq, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_EQ, .{ .none = {} });
+                        self.emitInto(out, .eq, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '>') {
                         self.bump();
-                        self.emitInto(out, t.TOK_ARROW, .{ .none = {} });
+                        self.emitInto(out, .arrow, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '=', .{ .none = {} });
+                self.emitInto(out, .assign, .{ .none = {} });
             }
 
             fn lexBang(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1316,13 +1316,13 @@ pub fn namespace(comptime token: type) type {
                     self.bump();
                     if (self.pos < self.source.len and self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_STRICT_NEQ, .{ .none = {} });
+                        self.emitInto(out, .strict_neq, .{ .none = {} });
                         return;
                     }
-                    self.emitInto(out, t.TOK_NEQ, .{ .none = {} });
+                    self.emitInto(out, .neq, .{ .none = {} });
                     return;
                 }
-                self.emitInto(out, '!', .{ .none = {} });
+                self.emitInto(out, .bang, .{ .none = {} });
             }
 
             fn lexLt(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1330,21 +1330,21 @@ pub fn namespace(comptime token: type) type {
                 if (self.pos < self.source.len) {
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_LTE, .{ .none = {} });
+                        self.emitInto(out, .lte, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '<') {
                         self.bump();
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_SHL_ASSIGN, .{ .none = {} });
+                            self.emitInto(out, .shl_assign, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_SHL, .{ .none = {} });
+                        self.emitInto(out, .shl, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '<', .{ .none = {} });
+                self.emitInto(out, .lt, .{ .none = {} });
             }
 
             fn lexGt(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1352,7 +1352,7 @@ pub fn namespace(comptime token: type) type {
                 if (self.pos < self.source.len) {
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_GTE, .{ .none = {} });
+                        self.emitInto(out, .gte, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '>') {
@@ -1361,22 +1361,22 @@ pub fn namespace(comptime token: type) type {
                             self.bump();
                             if (self.pos < self.source.len and self.peek() == '=') {
                                 self.bump();
-                                self.emitInto(out, t.TOK_SHR_ASSIGN, .{ .none = {} });
+                                self.emitInto(out, .shr_assign, .{ .none = {} });
                                 return;
                             }
-                            self.emitInto(out, t.TOK_SHR, .{ .none = {} });
+                            self.emitInto(out, .shr, .{ .none = {} });
                             return;
                         }
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_SAR_ASSIGN, .{ .none = {} });
+                            self.emitInto(out, .sar_assign, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_SAR, .{ .none = {} });
+                        self.emitInto(out, .sar, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '>', .{ .none = {} });
+                self.emitInto(out, .gt, .{ .none = {} });
             }
 
             fn lexAmp(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1386,19 +1386,19 @@ pub fn namespace(comptime token: type) type {
                         self.bump();
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_LAND_ASSIGN, .{ .none = {} });
+                            self.emitInto(out, .land_assign, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_LAND, .{ .none = {} });
+                        self.emitInto(out, .land, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_AND_ASSIGN, .{ .none = {} });
+                        self.emitInto(out, .and_assign, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '&', .{ .none = {} });
+                self.emitInto(out, .amp, .{ .none = {} });
             }
 
             fn lexPipe(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1408,29 +1408,29 @@ pub fn namespace(comptime token: type) type {
                         self.bump();
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_LOR_ASSIGN, .{ .none = {} });
+                            self.emitInto(out, .lor_assign, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_LOR, .{ .none = {} });
+                        self.emitInto(out, .lor, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '=') {
                         self.bump();
-                        self.emitInto(out, t.TOK_OR_ASSIGN, .{ .none = {} });
+                        self.emitInto(out, .or_assign, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '|', .{ .none = {} });
+                self.emitInto(out, .pipe, .{ .none = {} });
             }
 
             fn lexCaret(self: *LexerImpl, out: *t.Token) Error!void {
                 self.bump();
                 if (self.pos < self.source.len and self.peek() == '=') {
                     self.bump();
-                    self.emitInto(out, t.TOK_XOR_ASSIGN, .{ .none = {} });
+                    self.emitInto(out, .xor_assign, .{ .none = {} });
                     return;
                 }
-                self.emitInto(out, '^', .{ .none = {} });
+                self.emitInto(out, .caret, .{ .none = {} });
             }
 
             fn lexQuestion(self: *LexerImpl, out: *t.Token) Error!void {
@@ -1440,19 +1440,19 @@ pub fn namespace(comptime token: type) type {
                         self.bump();
                         if (self.pos < self.source.len and self.peek() == '=') {
                             self.bump();
-                            self.emitInto(out, t.TOK_DOUBLE_QUESTION_MARK_ASSIGN, .{ .none = {} });
+                            self.emitInto(out, .double_question_mark_assign, .{ .none = {} });
                             return;
                         }
-                        self.emitInto(out, t.TOK_DOUBLE_QUESTION_MARK, .{ .none = {} });
+                        self.emitInto(out, .double_question_mark, .{ .none = {} });
                         return;
                     }
                     if (self.peek() == '.' and !isDecimalDigit(self.peekAt(1))) {
                         self.bump();
-                        self.emitInto(out, t.TOK_QUESTION_MARK_DOT, .{ .none = {} });
+                        self.emitInto(out, .question_mark_dot, .{ .none = {} });
                         return;
                     }
                 }
-                self.emitInto(out, '?', .{ .none = {} });
+                self.emitInto(out, .question, .{ .none = {} });
             }
 
             // ---- utf-8 -------------------------------------------------------
@@ -1638,70 +1638,70 @@ pub fn namespace(comptime token: type) type {
             if (lexeme.len < 2 or lexeme.len > 10) return null;
             return switch (lexeme.len) {
                 2 => switch (lexeme[0]) {
-                    'd' => if (eq(lexeme, "do")) t.TOK_DO else null,
-                    'i' => if (eq(lexeme, "if")) t.TOK_IF else if (eq(lexeme, "in")) t.TOK_IN else null,
+                    'd' => if (eq(lexeme, "do")) .kw_do else null,
+                    'i' => if (eq(lexeme, "if")) .kw_if else if (eq(lexeme, "in")) .kw_in else null,
                     // QuickJS keeps `of` as an ordinary identifier in normal
                     // lexing. TOK_OF exists only for parser lookahead.
                     else => null,
                 },
                 3 => switch (lexeme[0]) {
-                    'f' => if (eq(lexeme, "for")) t.TOK_FOR else null,
-                    'l' => if (eq(lexeme, "let")) t.TOK_LET else null,
-                    'n' => if (eq(lexeme, "new")) t.TOK_NEW else null,
-                    't' => if (eq(lexeme, "try")) t.TOK_TRY else null,
-                    'v' => if (eq(lexeme, "var")) t.TOK_VAR else null,
+                    'f' => if (eq(lexeme, "for")) .kw_for else null,
+                    'l' => if (eq(lexeme, "let")) .kw_let else null,
+                    'n' => if (eq(lexeme, "new")) .kw_new else null,
+                    't' => if (eq(lexeme, "try")) .kw_try else null,
+                    'v' => if (eq(lexeme, "var")) .kw_var else null,
                     else => null,
                 },
                 4 => switch (lexeme[0]) {
-                    'c' => if (eq(lexeme, "case")) t.TOK_CASE else null,
-                    'e' => if (eq(lexeme, "else")) t.TOK_ELSE else if (eq(lexeme, "enum")) t.TOK_ENUM else null,
-                    'n' => if (eq(lexeme, "null")) t.TOK_NULL else null,
-                    't' => if (eq(lexeme, "this")) t.TOK_THIS else if (eq(lexeme, "true")) t.TOK_TRUE else null,
-                    'v' => if (eq(lexeme, "void")) t.TOK_VOID else null,
-                    'w' => if (eq(lexeme, "with")) t.TOK_WITH else null,
+                    'c' => if (eq(lexeme, "case")) .kw_case else null,
+                    'e' => if (eq(lexeme, "else")) .kw_else else if (eq(lexeme, "enum")) .kw_enum else null,
+                    'n' => if (eq(lexeme, "null")) .kw_null else null,
+                    't' => if (eq(lexeme, "this")) .kw_this else if (eq(lexeme, "true")) .kw_true else null,
+                    'v' => if (eq(lexeme, "void")) .kw_void else null,
+                    'w' => if (eq(lexeme, "with")) .kw_with else null,
                     else => null,
                 },
                 5 => switch (lexeme[0]) {
-                    'a' => if (eq(lexeme, "async")) t.TOK_ASYNC else if (eq(lexeme, "await")) t.TOK_AWAIT else null,
-                    'b' => if (eq(lexeme, "break")) t.TOK_BREAK else null,
-                    'c' => if (eq(lexeme, "catch")) t.TOK_CATCH else if (eq(lexeme, "class")) t.TOK_CLASS else if (eq(lexeme, "const")) t.TOK_CONST else null,
-                    'f' => if (eq(lexeme, "false")) t.TOK_FALSE else null,
-                    's' => if (eq(lexeme, "super")) t.TOK_SUPER else null,
-                    't' => if (eq(lexeme, "throw")) t.TOK_THROW else null,
-                    'w' => if (eq(lexeme, "while")) t.TOK_WHILE else null,
-                    'y' => if (eq(lexeme, "yield")) t.TOK_YIELD else null,
+                    'a' => if (eq(lexeme, "async")) .kw_async else if (eq(lexeme, "await")) .kw_await else null,
+                    'b' => if (eq(lexeme, "break")) .kw_break else null,
+                    'c' => if (eq(lexeme, "catch")) .kw_catch else if (eq(lexeme, "class")) .kw_class else if (eq(lexeme, "const")) .kw_const else null,
+                    'f' => if (eq(lexeme, "false")) .kw_false else null,
+                    's' => if (eq(lexeme, "super")) .kw_super else null,
+                    't' => if (eq(lexeme, "throw")) .kw_throw else null,
+                    'w' => if (eq(lexeme, "while")) .kw_while else null,
+                    'y' => if (eq(lexeme, "yield")) .kw_yield else null,
                     else => null,
                 },
                 6 => switch (lexeme[0]) {
-                    'd' => if (eq(lexeme, "delete")) t.TOK_DELETE else null,
-                    'e' => if (eq(lexeme, "export")) t.TOK_EXPORT else null,
-                    'i' => if (eq(lexeme, "import")) t.TOK_IMPORT else null,
-                    'p' => if (eq(lexeme, "public")) t.TOK_PUBLIC else null,
-                    'r' => if (eq(lexeme, "return")) t.TOK_RETURN else null,
-                    's' => if (eq(lexeme, "static")) t.TOK_STATIC else if (eq(lexeme, "switch")) t.TOK_SWITCH else null,
-                    't' => if (eq(lexeme, "typeof")) t.TOK_TYPEOF else null,
+                    'd' => if (eq(lexeme, "delete")) .kw_delete else null,
+                    'e' => if (eq(lexeme, "export")) .kw_export else null,
+                    'i' => if (eq(lexeme, "import")) .kw_import else null,
+                    'p' => if (eq(lexeme, "public")) .kw_public else null,
+                    'r' => if (eq(lexeme, "return")) .kw_return else null,
+                    's' => if (eq(lexeme, "static")) .kw_static else if (eq(lexeme, "switch")) .kw_switch else null,
+                    't' => if (eq(lexeme, "typeof")) .kw_typeof else null,
                     else => null,
                 },
                 7 => switch (lexeme[0]) {
-                    'd' => if (eq(lexeme, "default")) t.TOK_DEFAULT else null,
-                    'e' => if (eq(lexeme, "extends")) t.TOK_EXTENDS else null,
-                    'f' => if (eq(lexeme, "finally")) t.TOK_FINALLY else null,
-                    'p' => if (eq(lexeme, "package")) t.TOK_PACKAGE else if (eq(lexeme, "private")) t.TOK_PRIVATE else null,
+                    'd' => if (eq(lexeme, "default")) .kw_default else null,
+                    'e' => if (eq(lexeme, "extends")) .kw_extends else null,
+                    'f' => if (eq(lexeme, "finally")) .kw_finally else null,
+                    'p' => if (eq(lexeme, "package")) .kw_package else if (eq(lexeme, "private")) .kw_private else null,
                     else => null,
                 },
                 8 => switch (lexeme[0]) {
-                    'c' => if (eq(lexeme, "continue")) t.TOK_CONTINUE else null,
-                    'd' => if (eq(lexeme, "debugger")) t.TOK_DEBUGGER else null,
-                    'f' => if (eq(lexeme, "function")) t.TOK_FUNCTION else null,
+                    'c' => if (eq(lexeme, "continue")) .kw_continue else null,
+                    'd' => if (eq(lexeme, "debugger")) .kw_debugger else null,
+                    'f' => if (eq(lexeme, "function")) .kw_function else null,
                     else => null,
                 },
                 9 => switch (lexeme[0]) {
-                    'i' => if (eq(lexeme, "interface")) t.TOK_INTERFACE else null,
-                    'p' => if (eq(lexeme, "protected")) t.TOK_PROTECTED else null,
+                    'i' => if (eq(lexeme, "interface")) .kw_interface else null,
+                    'p' => if (eq(lexeme, "protected")) .kw_protected else null,
                     else => null,
                 },
                 10 => switch (lexeme[0]) {
-                    'i' => if (eq(lexeme, "implements")) t.TOK_IMPLEMENTS else if (eq(lexeme, "instanceof")) t.TOK_INSTANCEOF else null,
+                    'i' => if (eq(lexeme, "implements")) .kw_implements else if (eq(lexeme, "instanceof")) .kw_instanceof else null,
                     else => null,
                 },
                 else => null,
@@ -1716,11 +1716,11 @@ pub fn namespace(comptime token: type) type {
         /// (let, static, yield in non-strict, of) are contextual.
         fn isReservedKeyword(val: t.TokenKind, is_strict: bool) bool {
             return switch (val) {
-                t.TOK_NULL, t.TOK_FALSE, t.TOK_TRUE, t.TOK_IF, t.TOK_ELSE, t.TOK_RETURN, t.TOK_VAR, t.TOK_THIS, t.TOK_DELETE, t.TOK_VOID, t.TOK_TYPEOF, t.TOK_NEW, t.TOK_IN, t.TOK_INSTANCEOF, t.TOK_DO, t.TOK_WHILE, t.TOK_FOR, t.TOK_BREAK, t.TOK_CONTINUE, t.TOK_SWITCH, t.TOK_CASE, t.TOK_DEFAULT, t.TOK_THROW, t.TOK_TRY, t.TOK_CATCH, t.TOK_FINALLY, t.TOK_FUNCTION, t.TOK_DEBUGGER, t.TOK_WITH, t.TOK_CLASS, t.TOK_CONST, t.TOK_ENUM, t.TOK_EXPORT, t.TOK_EXTENDS, t.TOK_IMPORT, t.TOK_SUPER => true,
+                .kw_null, .kw_false, .kw_true, .kw_if, .kw_else, .kw_return, .kw_var, .kw_this, .kw_delete, .kw_void, .kw_typeof, .kw_new, .kw_in, .kw_instanceof, .kw_do, .kw_while, .kw_for, .kw_break, .kw_continue, .kw_switch, .kw_case, .kw_default, .kw_throw, .kw_try, .kw_catch, .kw_finally, .kw_function, .kw_debugger, .kw_with, .kw_class, .kw_const, .kw_enum, .kw_export, .kw_extends, .kw_import, .kw_super => true,
                 // FutureReservedWord only in strict mode.
-                t.TOK_IMPLEMENTS, t.TOK_INTERFACE, t.TOK_LET, t.TOK_PACKAGE, t.TOK_PRIVATE, t.TOK_PROTECTED, t.TOK_PUBLIC, t.TOK_STATIC, t.TOK_YIELD => is_strict,
+                .kw_implements, .kw_interface, .kw_let, .kw_package, .kw_private, .kw_protected, .kw_public, .kw_static, .kw_yield => is_strict,
                 // Contextual.
-                t.TOK_AWAIT, t.TOK_OF => false,
+                .kw_await, .kw_of => false,
                 else => false,
             };
         }

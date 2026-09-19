@@ -2,6 +2,144 @@
 
 ## Unreleased
 
+- **Compiler/Parser:** the legacy emitter mode is retired. `ParseState`
+  no longer has `emit_phase1_temp`: the parser always emits the phase-1
+  temp stream (`enter_scope` / `leave_scope` markers, `scope_get_var` /
+  `scope_put_var` families, wide `fclosure`) and leaves closure capture
+  to `resolve_variables`. Deleted with it: `ensureClosureVar` and the
+  whole parse-time parent walk (`ensureClosureChain`,
+  `findVisibleParentVarCapturingWith`, `ensureArrowSpecialCapture`,
+  `ensureImplicitArgumentsLocal`, the global closure-var index),
+  `emitGlobalVarOp[NoSource]`, `emitFClosure8`, and the
+  `test_entry.Options.emit_phase1_temp` knob. `closure.zig` keeps only
+  the read-only visibility queries. The `ParseHarness` expectations in
+  `compiler/tests.zig` (62 tests) now assert the canonical stream the
+  production parser emits. Bytecode fingerprint identical over 54k files.
+- **Compiler/Parser:** `FunctionDef`'s "index or none" fields are
+  optionals instead of `i32` with `-1`: the demand-created locals
+  (`this_var_idx`, `new_target_var_idx`, `this_active_func_var_idx`,
+  `home_object_var_idx`, `func_var_idx`, `arguments_var_idx`,
+  `arguments_arg_idx`, `var_object_idx`, `arg_var_object_idx`) are `?u16`
+  and the `ensure*Binding` helpers return `u16`; a child's
+  `parent_cpool_idx` is `?u16`; `VarDef.func_pool_idx` is `?u32`. The
+  write-only `FunctionDef.eval_ret_idx` is gone. The QuickJS scope-chain
+  sentinels (`scope_next`, `scope_first`, `body_scope`, `scopes[].first`)
+  keep their `-1` / `ARG_SCOPE_END` encoding because the finalized
+  bytecode format shares it.
+
+- **Parser:** the parse root's mode is explicit: `State.root_mode` is
+  `.canonical` (production: the root is a `FunctionDef`, every function is
+  a child, constants go to the FunctionDef pool) or `.raw_bytecode` (the
+  parser-level test tier that emits into the root `Bytecode` carrier and
+  inlines top-level function bodies). It replaces the
+  `top_level_functions_as_children` context flag, which also silently
+  chose the constant pool.
+
+- **Parser:** `State` is no longer the home of declaration bookkeeping and
+  closure capture: `defineVar` and the `define_var` / `add_scope_var` /
+  `add_var` rules, the lexical and function-scope lookups and the
+  declaration-conflict index moved to `src/parser/declarations.zig`;
+  `ensureClosureVar` and the demand-created special locals moved to
+  `src/parser/closure.zig` (whose parent-walk half only runs for the
+  legacy emitter used by the compiler test harness). Callers spell
+  `declarations.defineVar(s, ...)`; `State.ScopeVarOptions` /
+  `DefineVarType` / `DefinedVar` remain as aliases. `parse_state.zig`
+  drops from 3503 to about 2230 lines and `State` from 166 to 121 methods.
+
+- **Compiler:** the flat `find_var` pass that follows a lexical-chain miss
+  (`resolve_variables`, the parent walk in `resolveBindingTopologyAfterCurrentMiss`)
+  no longer scans every var of the function per reference: `FunctionDef`
+  keeps a lazily built newest-scope-0-row-per-name index (`findFunctionVar`,
+  the role of qjs `var_htab`) once a function has 32 or more vars. Pinned
+  to one core, compiling babylon / typescript / babel bundles takes 12%,
+  11% and 10% fewer cycles; bytecode is byte-identical.
+
+- **Parser:** the largest grammar functions are split into named steps
+  with no bytecode change: `parseFunctionParamsAndBody` (533 lines) is now
+  a 30-line sequence over `childFunctionContext` / `createChildFunction` /
+  `planFunctionDeclaration` / `parseFunctionHead` /
+  `parseFunctionBodyAndCheck` / `finishChildFunction`, with the implicit
+  terminating return shared with arrows (`emitFallthroughReturn`);
+  `parseExport` dispatches to one function per export form and the four
+  function/class arms share `parseExportedFunction` / `parseExportedClass`;
+  `parseUnary` hands prefix update, `yield` and `await` to their own
+  functions; `parseClassElement` is modifiers → method prefix → accessor /
+  private / computed / named element / static block. Small folds: class
+  field initializers no longer branch on `static`, `peekNextKind` is
+  `peekNext().kind`, `PeekedToken.isBefore` replaces
+  `peekNextKindNoLineTerminator`.
+
+- **Parser:** the eight class-scoped `State` fields (`in_class`,
+  `class_has_extends`, `is_static`, `class_constructor_cpool_idx`, the
+  fields/static-init child indices and the private-brand flags) are one
+  `State.class: ClassContext` value that `parseClass` saves, replaces with
+  a fresh one and restores as a whole, the same shape as `State.ctx`.
+
+- **Parser:** speculative scans take the next token as a return value
+  (`s.lex.next()`) instead of a `var t: Token = undefined` out-parameter
+  (30 sites); parse time over the 153 MB jetstream3 corpus is unchanged.
+  `nextInto` stays for the parser's own token slot.
+
+- **Parser:** `BlockEnv` says what it means: `has_break_target` /
+  `has_continue_target` bools replace the `label_break` / `label_cont`
+  0-or-minus-one ints that were only ever tested for sign, `label_name` is
+  `?Atom` instead of a `null_atom` sentinel, and the write-only
+  `label_finally` field is gone. `State.eval_ret_idx` is `?u16` instead of
+  an `i32` with `-1` meaning "not eval".
+
+- **Parser:** the parser error set is a superset of the Builder's
+  (`InvalidBytecode` joined `ParserInvariant` on the internal-compiler-error
+  arm), so the 67 `catch |err| return mapBuilderError(err)` sites are plain
+  `try` and the mapper is gone. The 42 `catch return error.OutOfMemory`
+  sites that rewrote every callee error into OOM are `try` as well; the
+  three callees with wider error sets (fresh template arrays, base-10
+  BigInt formatting) map their impossible arms to `ParserInvariant`
+  explicitly instead of to OOM.
+
+- **Parser:** `ParseFunctionKind` answers its own questions (`isAsync`,
+  `isGenerator`, `isConstructor`, `isFunctionKeywordForm`, `hasHomeObject`,
+  `hasPrototype`, `bytecodeKind`, `withGenerator`) instead of repeated
+  two-term comparisons and per-site switches. The unused
+  `parser.Parser.FunctionKind` mirror enum is removed; the bytecode
+  `FunctionKind` is the only one.
+
+- **Parser:** the "bool flag + `errdefer`" pairs became guard values that
+  know whether they are still open: `State.openScope()` / `OpenScope`,
+  `emitter.ProtectedRegion` (try block / catch body), `OpenUsingBlock`
+  (explicit-resource-management frames), `ChildFunction` (child
+  `FunctionDef` hand-off in `parseFunctionParamsAndBody` /
+  `parseArrowFunction`), an idempotent `leaveControlBoundary`; control
+  blocks use a plain `defer popControlBlock`. Bytecode is byte-identical
+  over the fingerprint corpus.
+
+- **Parser:** the function-scoped grammar flags (`in_async`, `in_generator`,
+  `allow_super`, `new_target_allowed`, `in_class_static_block`, the
+  namespace trio, …) live in one `State.ctx: FunctionContext` value that a
+  function boundary saves, derives from the function kind and restores as
+  a whole; the `pending_function_*` / `parsing_method_params` entry markers
+  are a `FunctionEntry` parameter of `parseFunctionParamsAndBody` and the
+  comptime-masked `FunctionEntryContext` is gone. Positional `bool`
+  parameters became options structs (`ScopeVarOptions`,
+  `ControlBlockOptions`, `FieldInitOptions`, `DestructuringOptions`, …) and
+  out-parameters became returned structs (`peekNext()`, parameter
+  scanning). Bytecode is byte-identical over the fingerprint corpus.
+
+- **Parser:** token kinds are an `enum(i16)` (`parser.token.Kind`) instead
+  of bare `i16` `TOK_*` constants; the QuickJS numbering is unchanged.
+  Keywords are `.kw_<name>`, punctuators are named (`.lparen`, `.assign`,
+  `.semicolon`, …), and `isPunct` / `expectPunct` are gone in favour of
+  `peekKind() == .x` / `expectToken(.x)`. Embedders that spelled
+  `parser.token.TOK_EOF` use `parser.token.Kind.eof`.
+
+- **Parser:** `src/parser.zig` is split into `src/parser/` modules
+  (`parse_state`, `identifiers`, `lookahead`, `emitter`, `expressions`,
+  `statements`, `functions`, `classes`, `modules`, `typescript`); the root
+  keeps the token table, lexer, `compile`, and the `Parser` re-exports, so
+  `parser.compile` / `parser.Parser.<name>` spellings are unchanged. Same
+  day: the emitter facade, boilerplate, and duplicated function/arrow/class
+  paths were consolidated (about 560 lines). Bytecode is byte-identical
+  over the fingerprint corpus for all of it.
+
 - **Parser:** TypeScript is the grammar; JavaScript is parsed as its subset.
   The lexer-side type-range eraser (`enableTypeScript`, `SourceKind`,
   `findUnsupportedTypeScriptSyntax`) is gone; type syntax is consumed by an

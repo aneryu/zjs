@@ -604,20 +604,22 @@ const Resolver = struct {
             binding,
         )) {
             const fd = self.ctx.function_def orelse return error.NoFunctionDef;
-            if (!rules.scopeUsesArgumentEnvironmentOnly(fd, scope_level) and fd.var_object_idx >= 0) {
-                const label_index = try self.ensureDynamicEnvLabel(&label_done);
-                try self.emitDynamicEnvProbe(
-                    atom_id,
-                    .{ .local = @intCast(fd.var_object_idx) },
-                    kind,
-                    label_index,
-                );
+            if (!rules.scopeUsesArgumentEnvironmentOnly(fd, scope_level)) {
+                if (fd.var_object_idx) |var_object_local| {
+                    const label_index = try self.ensureDynamicEnvLabel(&label_done);
+                    try self.emitDynamicEnvProbe(
+                        atom_id,
+                        .{ .local = var_object_local },
+                        kind,
+                        label_index,
+                    );
+                }
             }
-            if (fd.arg_var_object_idx >= 0) {
+            if (fd.arg_var_object_idx) |arg_var_object_local| {
                 const label_index = try self.ensureDynamicEnvLabel(&label_done);
                 try self.emitDynamicEnvProbe(
                     atom_id,
-                    .{ .local = @intCast(fd.arg_var_object_idx) },
+                    .{ .local = arg_var_object_local },
                     kind,
                     label_index,
                 );
@@ -858,15 +860,16 @@ const Resolver = struct {
         const fd = self.ctx.function_def orelse return error.NoFunctionDef;
 
         for (fd.args, 0..) |arg, arg_idx| {
-            if (arg.func_pool_idx < 0) continue;
+            const pool_idx = arg.func_pool_idx orelse continue;
             if (arg_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-            try self.emitWideU32(op.fclosure, @intCast(arg.func_pool_idx));
+            try self.emitWideU32(op.fclosure, pool_idx);
             try self.emitWideU16(op.put_arg, @intCast(arg_idx));
         }
         for (fd.vars, 0..) |vd, var_idx| {
-            if (vd.scope_level != 0 or vd.func_pool_idx < 0) continue;
+            if (vd.scope_level != 0) continue;
+            const pool_idx = vd.func_pool_idx orelse continue;
             if (var_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-            try self.emitWideU32(op.fclosure, @intCast(vd.func_pool_idx));
+            try self.emitWideU32(op.fclosure, pool_idx);
             try self.emitWideU16(op.put_loc, @intCast(var_idx));
         }
 
@@ -3510,13 +3513,13 @@ test "compiler.resolve_variables: dynamic environment probe uses product label" 
 
     const dynamic_name = try harness.rt.atoms.internString("qcp1-s3-dynamic-name");
     _ = try harness.fd.appendScope(-1);
-    harness.fd.var_object_idx = try harness.fd.addScopeVar(
+    harness.fd.var_object_idx = @intCast(try harness.fd.addScopeVar(
         core.atom.ids.var_object,
         .normal,
         0,
         false,
         false,
-    );
+    ));
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
         dynamic_name,

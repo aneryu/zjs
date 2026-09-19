@@ -1789,12 +1789,8 @@ const Resolver = struct {
         return opcode.decode.form_row[op_id].size;
     }
 
-    fn specialObjectSize(comptime layout: LayoutMode, slot: i32) Error!u32 {
-        return 2 + putShortCodeSize(
-            layout,
-            op.put_loc,
-            try checkedSlotIndex(slot),
-        );
+    fn specialObjectSize(comptime layout: LayoutMode, slot: u16) Error!u32 {
+        return 2 + putShortCodeSize(layout, op.put_loc, slot);
     }
 
     /// Exact byte count emitted by emitFunctionPrologue.  Keeping this beside
@@ -1804,40 +1800,31 @@ const Resolver = struct {
     fn functionPrologueSize(self: *const Resolver, comptime layout: LayoutMode) Error!u32 {
         const fd = self.fd orelse return 0;
         var size: u32 = 0;
-        if (fd.home_object_var_idx >= 0)
-            size += try specialObjectSize(layout, fd.home_object_var_idx);
-        if (fd.this_active_func_var_idx >= 0)
-            size += try specialObjectSize(layout, fd.this_active_func_var_idx);
-        if (fd.new_target_var_idx >= 0)
-            size += try specialObjectSize(layout, fd.new_target_var_idx);
-        if (fd.this_var_idx >= 0) {
-            const idx = try checkedSlotIndex(fd.this_var_idx);
+        if (fd.home_object_var_idx) |slot|
+            size += try specialObjectSize(layout, slot);
+        if (fd.this_active_func_var_idx) |slot|
+            size += try specialObjectSize(layout, slot);
+        if (fd.new_target_var_idx) |slot|
+            size += try specialObjectSize(layout, slot);
+        if (fd.this_var_idx) |idx| {
             size += if (fd.is_derived_class_constructor)
                 3
             else
                 1 + putShortCodeSize(layout, op.put_loc, idx);
         }
-        if (fd.arguments_var_idx >= 0) {
+        if (fd.arguments_var_idx) |arguments_slot| {
             size += 2;
-            if (fd.arguments_arg_idx >= 0) {
-                size += putShortCodeSize(
-                    layout,
-                    op.set_loc,
-                    try checkedSlotIndex(fd.arguments_arg_idx),
-                );
+            if (fd.arguments_arg_idx) |alias_slot| {
+                size += putShortCodeSize(layout, op.set_loc, alias_slot);
             }
-            size += putShortCodeSize(
-                layout,
-                op.put_loc,
-                try checkedSlotIndex(fd.arguments_var_idx),
-            );
+            size += putShortCodeSize(layout, op.put_loc, arguments_slot);
         }
-        if (fd.func_var_idx >= 0)
-            size += try specialObjectSize(layout, fd.func_var_idx);
-        if (fd.var_object_idx >= 0)
-            size += try specialObjectSize(layout, fd.var_object_idx);
-        if (fd.arg_var_object_idx >= 0)
-            size += try specialObjectSize(layout, fd.arg_var_object_idx);
+        if (fd.func_var_idx) |slot|
+            size += try specialObjectSize(layout, slot);
+        if (fd.var_object_idx) |slot|
+            size += try specialObjectSize(layout, slot);
+        if (fd.arg_var_object_idx) |slot|
+            size += try specialObjectSize(layout, slot);
         return size;
     }
 
@@ -1984,11 +1971,11 @@ const Resolver = struct {
         self: *Resolver,
         comptime layout: LayoutMode,
         subtype: u8,
-        slot: i32,
+        slot: u16,
     ) Error!void {
         try self.appendByte(op.special_object);
         try self.appendByte(subtype);
-        try self.putShortCode(layout, op.put_loc, try checkedSlotIndex(slot));
+        try self.putShortCode(layout, op.put_loc, slot);
     }
 
     /// qjs:34833-34896, following legacy emitFunctionPrologue. Argument
@@ -1996,14 +1983,13 @@ const Resolver = struct {
     fn emitFunctionPrologue(self: *Resolver, comptime layout: LayoutMode) Error!void {
         const fd = self.fd orelse return;
         const special = opcode.special_object_subtype;
-        if (fd.home_object_var_idx >= 0)
-            try self.emitSpecialObject(layout, special.home_object, fd.home_object_var_idx);
-        if (fd.this_active_func_var_idx >= 0)
-            try self.emitSpecialObject(layout, special.current_function, fd.this_active_func_var_idx);
-        if (fd.new_target_var_idx >= 0)
-            try self.emitSpecialObject(layout, special.new_target, fd.new_target_var_idx);
-        if (fd.this_var_idx >= 0) {
-            const idx = try checkedSlotIndex(fd.this_var_idx);
+        if (fd.home_object_var_idx) |slot|
+            try self.emitSpecialObject(layout, special.home_object, slot);
+        if (fd.this_active_func_var_idx) |slot|
+            try self.emitSpecialObject(layout, special.current_function, slot);
+        if (fd.new_target_var_idx) |slot|
+            try self.emitSpecialObject(layout, special.new_target, slot);
+        if (fd.this_var_idx) |idx| {
             if (fd.is_derived_class_constructor) {
                 // This opcode has no short form in zjs.
                 try self.appendByte(op.set_loc_uninitialized);
@@ -2015,30 +2001,22 @@ const Resolver = struct {
                 try self.putShortCode(layout, op.put_loc, idx);
             }
         }
-        if (fd.arguments_var_idx >= 0) {
+        if (fd.arguments_var_idx) |arguments_slot| {
             try self.appendByte(op.special_object);
             try self.appendByte(if (fd.is_strict_mode or !fd.has_simple_parameter_list)
                 special.arguments
             else
                 special.mapped_arguments);
-            if (fd.arguments_arg_idx >= 0)
-                try self.putShortCode(
-                    layout,
-                    op.set_loc,
-                    try checkedSlotIndex(fd.arguments_arg_idx),
-                );
-            try self.putShortCode(
-                layout,
-                op.put_loc,
-                try checkedSlotIndex(fd.arguments_var_idx),
-            );
+            if (fd.arguments_arg_idx) |alias_slot|
+                try self.putShortCode(layout, op.set_loc, alias_slot);
+            try self.putShortCode(layout, op.put_loc, arguments_slot);
         }
-        if (fd.func_var_idx >= 0)
-            try self.emitSpecialObject(layout, special.current_function, fd.func_var_idx);
-        if (fd.var_object_idx >= 0)
-            try self.emitSpecialObject(layout, special.var_object, fd.var_object_idx);
-        if (fd.arg_var_object_idx >= 0)
-            try self.emitSpecialObject(layout, special.var_object, fd.arg_var_object_idx);
+        if (fd.func_var_idx) |slot|
+            try self.emitSpecialObject(layout, special.current_function, slot);
+        if (fd.var_object_idx) |slot|
+            try self.emitSpecialObject(layout, special.var_object, slot);
+        if (fd.arg_var_object_idx) |slot|
+            try self.emitSpecialObject(layout, special.var_object, slot);
     }
 
     // Baseline for the derived jump selection, kept as the assertion's
@@ -4907,18 +4885,18 @@ test "compiler.resolve_labels: shared with probes resolve operand-relative done 
 
     const name = try harness.rt.atoms.internString("qcp1-s4-with-probe");
     _ = try harness.fd.appendScope(-1);
-    harness.fd.var_object_idx = try harness.fd.appendVar(.{
+    harness.fd.var_object_idx = @intCast(try harness.fd.appendVar(.{
         .var_name = core.atom.ids.var_object,
         .scope_level = 0,
         .scope_next = 0,
         .var_kind = .normal,
-    });
-    harness.fd.arg_var_object_idx = try harness.fd.appendVar(.{
+    }));
+    harness.fd.arg_var_object_idx = @intCast(try harness.fd.appendVar(.{
         .var_name = core.atom.ids.arg_var_object,
         .scope_level = 0,
         .scope_next = 0,
         .var_kind = .normal,
-    });
+    }));
     _ = try harness.fd.addClosureVar(.{
         .closure_type = .global,
         .is_lexical = false,
@@ -4969,20 +4947,20 @@ test "compiler.resolve_labels: strict this and arguments prologue is exact" {
     defer harness.deinit();
 
     _ = try harness.fd.appendScope(-1);
-    harness.fd.this_var_idx = try harness.fd.addScopeVar(
+    harness.fd.this_var_idx = @intCast(try harness.fd.addScopeVar(
         core.atom.ids.this_,
         .normal,
         0,
         false,
         false,
-    );
-    harness.fd.arguments_var_idx = try harness.fd.addScopeVar(
+    ));
+    harness.fd.arguments_var_idx = @intCast(try harness.fd.addScopeVar(
         core.atom.ids.arguments,
         .normal,
         0,
         false,
         false,
-    );
+    ));
     harness.fd.is_strict_mode = true;
     try harness.input().emitOp(op.object);
 

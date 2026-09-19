@@ -195,7 +195,7 @@
 | `src/libs/unicode.zig` | 147 | [19-unicode.md](19-unicode.md) |
 | `src/native.zig` | 63 | [01-public-api-native.md](01-public-api-native.md) |
 | `src/opcode_logical.zig` | 7 | [05-bytecode-opcodes.md](05-bytecode-opcodes.md) |
-| `src/parser.zig` | 622 | [03-parser-emit.md](03-parser-emit.md), [03-parser-scan.md](03-parser-scan.md), [03-parser-scope.md](03-parser-scope.md), [03-parser-syntax-fn.md](03-parser-syntax-fn.md), [03-parser-syntax-stmt.md](03-parser-syntax-stmt.md), [03-parser-syntax.md](03-parser-syntax.md), [03-parser-ts.md](03-parser-ts.md), [03-parser.md](03-parser.md) |
+| `src/parser.zig` + `src/parser/*.zig`（2026-09-19 拆分） | 622 | [03-parser-emit.md](03-parser-emit.md), [03-parser-scan.md](03-parser-scan.md), [03-parser-scope.md](03-parser-scope.md), [03-parser-syntax-fn.md](03-parser-syntax-fn.md), [03-parser-syntax-stmt.md](03-parser-syntax-stmt.md), [03-parser-syntax.md](03-parser-syntax.md), [03-parser-ts.md](03-parser-ts.md), [03-parser.md](03-parser.md) |
 | `src/platform_clock.zig` | 4 | [01-public-api-companions.md](01-public-api-companions.md) |
 | `src/root.zig` | 91 | [01-public-api-root.md](01-public-api-root.md) |
 | `src/simple_token.zig` | 17 | [02-lexer-simple-token.md](02-lexer-simple-token.md) |

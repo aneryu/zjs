@@ -1,6 +1,10 @@
-# 03 — `src/parser.zig`：语法、作用域、发射
+# 03 — `src/parser.zig` 与 `src/parser/`：语法、作用域、发射
 
-本册覆盖 `src/parser.zig`（约 16600 行、清单 649 个函数）。词法主体在 `src/lexer.zig`（02 册）；本文件在词法之后做 **递归下降 + 作用域 + phase-1 字节码发射**，再交给 `src/compiler/` 做变量/标签解析与 short layout。
+本册覆盖 parser。2026-09-19 起 parser 拆成根文件加十个模块：`src/parser.zig`（token 表、lexer 实例化、`compile()`、`Parser` 再导出）与 `src/parser/` 下的 `parse_state.zig`（`State` 与共享类型）、`declarations.zig`（`defineVar` 与声明规则、词法/函数作用域查找、声明冲突索引）、`closure.zig`（解析期闭包捕获，父走访半段仅 legacy 发射器可达）、`identifiers.zig`、`lookahead.zig`、`emitter.zig`、`expressions.zig`、`statements.zig`、`functions.zig`、`classes.zig`、`modules.zig`、`typescript.zig`。模块间以限定名互调（如 `expressions.parseExpr(s)`），`State` 方法保持 `s.xxx()`；只有被别的模块引用的项才 `pub`。本册各分册的函数级说明按原分组对应到这些模块，文内标注的行号是拆分前的。
+
+同日「更像 Zig」整理后，分册里描述的几种「布尔标志 + `errdefer`」配对已改成自带开闭状态的守卫值：`s.openScope()` → `OpenScope`（`close` 发 leave 标记并弹出，`pop` 只弹身份；二者幂等）、`emitter.openProtectedRegion()` → `OpenProtectedRegion`（try 块 / catch 体的 catch 标记 + return-finally 帧，`leave`）、`statements.openUsingBlock()` → `OpenUsingBlock`（using 帧，`finalize` / `unwind`）；三者都以 `open*` 构造、类型名 `Open*`。`State` 上原来的 17 个 `builder*` 原始发射方法搬进 emitter.zig 成为 `Emitter` 之下的私有 sink 层，语法层只见 `Emitter`、`functions.ChildFunction`（子 `FunctionDef` 从 create → makeCurrent → pop → adopt 的所有权接力，一条 `errdefer child.discard(s)`）、`ControlFrames.left`（`leaveControlBoundary` 幂等）；控制块（`pushControlBlock`）改为无条件 `defer popControlBlock`。函数级语法旗标收进 `State.ctx: FunctionContext`，函数入口数据是 `parseFunctionParamsAndBody` 的 `FunctionEntry` 参数。类级状态（`in_class`/`class_has_extends`/`is_static`/`class_*`）同样收进 `State.class: ClassContext`，`parseClass` 整体保存、整体换新、整体恢复。Builder 的错误集已是 parser `Error` 的子集，`mapBuilderError` 不再存在；`catch return error.OutOfMemory` 的吞错写法已改为 `try`。`BlockEnv` 的 `label_break`/`label_cont` 改为 `has_break_target`/`has_continue_target`，`label_name` 是 `?Atom`；`eval_ret_idx` 是 `?u16`。前瞻扫描用 `s.lex.next()` 取返回值而不是 out-param。
+
+同日再拆大函数（字节码不变）：`parseFunctionParamsAndBody` 只剩 30 行主干，步骤是 `recordFunctionFeatures` → `childFunctionContext` → `createChildFunction` → `planFunctionDeclaration`（声明提升 / Annex B 计划）→ `parseFunctionHead` → `parseFunctionBody`（含 `emitFallthroughReturn`，箭头共用）→ `finishChildFunction`；`parseExport` 分派到 `parseExportDefault` / `parseExportList` / `parseExportStar`，函数与类的四种 export 形态共用 `parseExportedFunction` / `parseExportedClass` / `bindDefaultExportValue`；`parseUnary` 把 `parsePrefixUpdate` / `parseYieldExpression` / `parseAwaitExpression` 拆出；`parseClassElement` = `parseClassElementModifiers` → `parseClassMethodPrefix` → `parseClassAccessor` / `parseClassPrivateElement` / 计算名 / `parseClassNamedElement` / 静态块；`parseFunctionParameters` 用 `ParameterListState` 承载列表状态，`parseNamedParameter` / `parsePatternParameter` / `parseRestParameter` 各管一种形态；`parseForInOf` 的三种迭代目标进 `ForInOfTarget`（`parseForInOfUsingTarget` / `parseForInOfDeclarationTarget` / `parseForInOfExpressionTarget`）。分册里这些函数的「实现」段描述的是拆分前的单体。分册正文里的旧写法请按此对照。词法主体在 `src/lexer.zig`（02 册）；parser 在词法之后做 **递归下降 + 作用域 + phase-1 字节码发射**，再交给 `src/compiler/` 做变量/标签解析与 short layout。
 
 文法是 TypeScript 的，JavaScript 按其子集解析，没有 source-kind 开关。类型语法由不发射字节码的 `tsParse*` / `tsSkip*` 函数族消费（03-parser-ts.md），所以 JS 输入的字节码逐位不变；不是类型检查器。
 
@@ -51,7 +55,7 @@
 
 ### `token`（`src/parser.zig:52`）
 
-QuickJS `TOK_*` 的 Zig 镜像：`Kind = i16`。字面量从 `TOK_NUMBER = -128` 起；赋值算子块顺序钉死 `OP_mul + (op - TOK_MUL_ASSIGN)`；关键字 `TOK_NULL..TOK_AWAIT` 与 `quickjs-atom.h` 逐行对齐。单字符标点就是 ASCII。`Payload` 是 `none` / `num` / `str` / `ident` / `regexp` 联合体。`TokenImpl` 有 `val, line_num, col_num, ptr, len, payload`。
+QuickJS `TOK_*` 的 Zig 镜像：`Kind = enum(i16)`，数值不变、名字改成 Zig 标签——`TOK_NUMBER` → `.number`，关键字 `TOK_IF` → `.kw_if`，单字符标点有名字（`.lparen` / `.rbrace` / `.assign` / `.semicolon` …，值仍是 ASCII，lexer 用 `@enumFromInt(c)` 发），`'\n'` 哨兵是 `.newline`。本册其它分册里出现的 `TOK_X` 一律读作 `.x` / `.kw_x`。数值从 `.number = -128` 起；赋值算子块顺序钉死 `OP_mul + (op - mul_assign)`；关键字 `.kw_null..kw_await` 与 `quickjs-atom.h` 逐行对齐，`isKeyword` / `keywordAtom` 用 `@intFromEnum` 做区间与偏移。`Payload` 是 `none` / `num` / `str` / `ident` / `regexp` 联合体。`TokenImpl` 有 `val, line_num, col_num, ptr, len, payload`。
 
 `pub const lexer = @import("lexer.zig").namespace(token)`：词法器按这套 Kind 吐 token。
 
@@ -84,7 +88,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 | `scope_level` / `is_strict` / `is_eval` | 词法作用域与模式 |
 | `eval_ret_idx` | `<ret>` 局部下标；-1 非 completion |
 | `cur_func_stack` / `discarded_func_head` | 嵌套函数与投机回滚 |
-| `emit_to_function_def` / `emit_phase1_temp` | 写 FunctionDef vs 根壳；发 temp opcode |
+| `emit_to_function_def` | 写 FunctionDef vs 根壳（`emit_phase1_temp` 已于 2026-09-20 退役：temp opcode 总是发） |
 | `break_*` / `continue_*` / `label_frames` | 控制流 |
 | `class_private_*` | 当前类的 `#` 元素 |
 | `atom_scope` / `compile_value_roots_registered` | TGC 编译期根 |
@@ -130,7 +134,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **签名**：`pub fn isKeyword(val: Kind) bool`。
 - **作用**：判断 token 种类是否落在 QuickJS 关键字块。
 - **实现**：
-`TOK_NULL..TOK_AWAIT`（-85..-40）闭区间即为关键字。单字符标点走 ASCII 正值，不在此列。
+`.kw_null..kw_await`（-85..-40）闭区间即为关键字（`@intFromEnum` 比较）。单字符标点走 ASCII 正值，不在此列。
 - **所有权 / 错误 / 调用**：无：两个常量的区间比较，不分配、无 error set。调用方跨文件：`lexer.zig:616`（识别关键字后填 ident atom），parser 内 8 处（`keywordAtom` 自己的 `assert`（`src/parser.zig:185`）、`tokenKindLabel`（`:2106`）、`parseNewCalleeMemberAccess`（`:5820`）、`parseMemberChain`（`:5876`/`:5931`/`:5939`）、`parseObjectPropertyName`（`:6929`）、`tokenCanBeExportName`（`:15410`）），另有 `src/tests/parser.zig` 的全关键字对账。
 
 ### `token.keywordAtom` (`src/parser.zig:184`)

@@ -12,6 +12,7 @@ const op = zjs.bytecode.opcode.op;
 const t = zjs.parser.token;
 const QjsLexer = zjs.parser.Lexer;
 const parser_core = zjs.parser.Parser;
+const Emitter = parser_core.Emitter;
 const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.parser.Parser.ParseState;
@@ -78,52 +79,52 @@ test "F1.5: every keyword token maps to its predefined atom" {
     defer env.deinit();
 
     const cases = .{
-        .{ "null", t.TOK_NULL, "null" },
-        .{ "false", t.TOK_FALSE, "false" },
-        .{ "true", t.TOK_TRUE, "true" },
-        .{ "if", t.TOK_IF, "if" },
-        .{ "else", t.TOK_ELSE, "else" },
-        .{ "return", t.TOK_RETURN, "return" },
-        .{ "var", t.TOK_VAR, "var" },
-        .{ "this", t.TOK_THIS, "this" },
-        .{ "delete", t.TOK_DELETE, "delete" },
-        .{ "void", t.TOK_VOID, "void" },
-        .{ "typeof", t.TOK_TYPEOF, "typeof" },
-        .{ "new", t.TOK_NEW, "new" },
-        .{ "in", t.TOK_IN, "in" },
-        .{ "instanceof", t.TOK_INSTANCEOF, "instanceof" },
-        .{ "do", t.TOK_DO, "do" },
-        .{ "while", t.TOK_WHILE, "while" },
-        .{ "for", t.TOK_FOR, "for" },
-        .{ "break", t.TOK_BREAK, "break" },
-        .{ "continue", t.TOK_CONTINUE, "continue" },
-        .{ "switch", t.TOK_SWITCH, "switch" },
-        .{ "case", t.TOK_CASE, "case" },
-        .{ "default", t.TOK_DEFAULT, "default" },
-        .{ "throw", t.TOK_THROW, "throw" },
-        .{ "try", t.TOK_TRY, "try" },
-        .{ "catch", t.TOK_CATCH, "catch" },
-        .{ "finally", t.TOK_FINALLY, "finally" },
-        .{ "function", t.TOK_FUNCTION, "function" },
-        .{ "debugger", t.TOK_DEBUGGER, "debugger" },
-        .{ "with", t.TOK_WITH, "with" },
-        .{ "class", t.TOK_CLASS, "class" },
-        .{ "const", t.TOK_CONST, "const" },
-        .{ "enum", t.TOK_ENUM, "enum" },
-        .{ "export", t.TOK_EXPORT, "export" },
-        .{ "extends", t.TOK_EXTENDS, "extends" },
-        .{ "import", t.TOK_IMPORT, "import" },
-        .{ "super", t.TOK_SUPER, "super" },
-        .{ "implements", t.TOK_IMPLEMENTS, "implements" },
-        .{ "interface", t.TOK_INTERFACE, "interface" },
-        .{ "let", t.TOK_LET, "let" },
-        .{ "package", t.TOK_PACKAGE, "package" },
-        .{ "private", t.TOK_PRIVATE, "private" },
-        .{ "protected", t.TOK_PROTECTED, "protected" },
-        .{ "public", t.TOK_PUBLIC, "public" },
-        .{ "static", t.TOK_STATIC, "static" },
-        .{ "yield", t.TOK_YIELD, "yield" },
-        .{ "await", t.TOK_AWAIT, "await" },
+        .{ "null", .kw_null, "null" },
+        .{ "false", .kw_false, "false" },
+        .{ "true", .kw_true, "true" },
+        .{ "if", .kw_if, "if" },
+        .{ "else", .kw_else, "else" },
+        .{ "return", .kw_return, "return" },
+        .{ "var", .kw_var, "var" },
+        .{ "this", .kw_this, "this" },
+        .{ "delete", .kw_delete, "delete" },
+        .{ "void", .kw_void, "void" },
+        .{ "typeof", .kw_typeof, "typeof" },
+        .{ "new", .kw_new, "new" },
+        .{ "in", .kw_in, "in" },
+        .{ "instanceof", .kw_instanceof, "instanceof" },
+        .{ "do", .kw_do, "do" },
+        .{ "while", .kw_while, "while" },
+        .{ "for", .kw_for, "for" },
+        .{ "break", .kw_break, "break" },
+        .{ "continue", .kw_continue, "continue" },
+        .{ "switch", .kw_switch, "switch" },
+        .{ "case", .kw_case, "case" },
+        .{ "default", .kw_default, "default" },
+        .{ "throw", .kw_throw, "throw" },
+        .{ "try", .kw_try, "try" },
+        .{ "catch", .kw_catch, "catch" },
+        .{ "finally", .kw_finally, "finally" },
+        .{ "function", .kw_function, "function" },
+        .{ "debugger", .kw_debugger, "debugger" },
+        .{ "with", .kw_with, "with" },
+        .{ "class", .kw_class, "class" },
+        .{ "const", .kw_const, "const" },
+        .{ "enum", .kw_enum, "enum" },
+        .{ "export", .kw_export, "export" },
+        .{ "extends", .kw_extends, "extends" },
+        .{ "import", .kw_import, "import" },
+        .{ "super", .kw_super, "super" },
+        .{ "implements", .kw_implements, "implements" },
+        .{ "interface", .kw_interface, "interface" },
+        .{ "let", .kw_let, "let" },
+        .{ "package", .kw_package, "package" },
+        .{ "private", .kw_private, "private" },
+        .{ "protected", .kw_protected, "protected" },
+        .{ "public", .kw_public, "public" },
+        .{ "static", .kw_static, "static" },
+        .{ "yield", .kw_yield, "yield" },
+        .{ "await", .kw_await, "await" },
     };
 
     inline for (cases) |c| {
@@ -146,7 +147,7 @@ test "F1: of remains an identifier in ordinary lexing" {
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
 
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqual(t.Kind.ident, tok.val);
     const name = env.rt.atoms.name(tok.payload.ident.atom).?;
     try std.testing.expectEqualStrings("of", name);
 }
@@ -157,7 +158,7 @@ test "F1: freeToken releases its identifier atom owner" {
 
     var lx = env.lexer("lexer_token_owned_probe_s5");
     var tok = try lx.next();
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqual(t.Kind.ident, tok.val);
     try std.testing.expect(env.rt.atoms.name(tok.payload.ident.atom) != null);
 
     lx.freeToken(&tok);
@@ -189,11 +190,11 @@ test "F1: punctuators use raw ASCII for single-character tokens" {
     inline for ("(){};,:") |ch| {
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(@as(t.TokenKind, ch), tok.val);
+        try std.testing.expectEqual(@as(t.TokenKind, @enumFromInt(ch)), tok.val);
     }
     var eof = try lx.next();
     defer freeToken(&lx, &eof);
-    try std.testing.expectEqual(t.TOK_EOF, eof.val);
+    try std.testing.expectEqual(t.Kind.eof, eof.val);
 }
 
 test "F1: multi-character operator sequences land on TOK_* values" {
@@ -202,29 +203,29 @@ test "F1: multi-character operator sequences land on TOK_* values" {
 
     const Case = struct { src: []const u8, val: t.TokenKind };
     const cases = [_]Case{
-        .{ .src = "===", .val = t.TOK_STRICT_EQ },
-        .{ .src = "!==", .val = t.TOK_STRICT_NEQ },
-        .{ .src = "==", .val = t.TOK_EQ },
-        .{ .src = "!=", .val = t.TOK_NEQ },
-        .{ .src = "<=", .val = t.TOK_LTE },
-        .{ .src = ">=", .val = t.TOK_GTE },
-        .{ .src = "<<", .val = t.TOK_SHL },
-        .{ .src = ">>", .val = t.TOK_SAR },
-        .{ .src = ">>>", .val = t.TOK_SHR },
-        .{ .src = ">>>=", .val = t.TOK_SHR_ASSIGN },
-        .{ .src = "**", .val = t.TOK_POW },
-        .{ .src = "**=", .val = t.TOK_POW_ASSIGN },
-        .{ .src = "&&", .val = t.TOK_LAND },
-        .{ .src = "||", .val = t.TOK_LOR },
-        .{ .src = "??", .val = t.TOK_DOUBLE_QUESTION_MARK },
-        .{ .src = "??=", .val = t.TOK_DOUBLE_QUESTION_MARK_ASSIGN },
-        .{ .src = "?.", .val = t.TOK_QUESTION_MARK_DOT },
-        .{ .src = "...", .val = t.TOK_ELLIPSIS },
-        .{ .src = "=>", .val = t.TOK_ARROW },
-        .{ .src = "++", .val = t.TOK_INC },
-        .{ .src = "--", .val = t.TOK_DEC },
-        .{ .src = "+=", .val = t.TOK_PLUS_ASSIGN },
-        .{ .src = "-=", .val = t.TOK_MINUS_ASSIGN },
+        .{ .src = "===", .val = .strict_eq },
+        .{ .src = "!==", .val = .strict_neq },
+        .{ .src = "==", .val = .eq },
+        .{ .src = "!=", .val = .neq },
+        .{ .src = "<=", .val = .lte },
+        .{ .src = ">=", .val = .gte },
+        .{ .src = "<<", .val = .shl },
+        .{ .src = ">>", .val = .sar },
+        .{ .src = ">>>", .val = .shr },
+        .{ .src = ">>>=", .val = .shr_assign },
+        .{ .src = "**", .val = .pow },
+        .{ .src = "**=", .val = .pow_assign },
+        .{ .src = "&&", .val = .land },
+        .{ .src = "||", .val = .lor },
+        .{ .src = "??", .val = .double_question_mark },
+        .{ .src = "??=", .val = .double_question_mark_assign },
+        .{ .src = "?.", .val = .question_mark_dot },
+        .{ .src = "...", .val = .ellipsis },
+        .{ .src = "=>", .val = .arrow },
+        .{ .src = "++", .val = .inc },
+        .{ .src = "--", .val = .dec },
+        .{ .src = "+=", .val = .plus_assign },
+        .{ .src = "-=", .val = .minus_assign },
     };
     for (cases) |c| {
         var lx = env.lexer(c.src);
@@ -257,7 +258,7 @@ test "F1.2: numeric literals (decimal, hex, octal, binary, exponent, separators)
         var lx = env.lexer(c.src);
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+        try std.testing.expectEqual(t.Kind.number, tok.val);
         try std.testing.expect(!tok.payload.num.is_bigint);
         try std.testing.expectApproxEqAbs(c.expected, tok.payload.num.value, 1e-9);
     }
@@ -312,7 +313,7 @@ test "F1.2: numeric literals have no 128-byte length cap" {
         var lx = env.lexer(c.src);
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+        try std.testing.expectEqual(t.Kind.number, tok.val);
         try std.testing.expect(!tok.payload.num.is_bigint);
         if (std.math.isInf(c.expected)) {
             try std.testing.expect(std.math.isPositiveInf(tok.payload.num.value));
@@ -329,7 +330,7 @@ test "F1.2: bigint suffix records is_bigint and source text" {
     var lx = env.lexer("9007199254740993n");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+    try std.testing.expectEqual(t.Kind.number, tok.val);
     try std.testing.expect(tok.payload.num.is_bigint);
     try std.testing.expectEqualStrings("9007199254740993", tok.payload.num.bigint_text);
 }
@@ -341,7 +342,7 @@ test "F1.2: string escapes (basic, hex, unicode short and braced, surrogate pair
     var lx = env.lexer("\"a\\nb\\tc\\x41\\u0041\\u{1F600}\"");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_STRING, tok.val);
+    try std.testing.expectEqual(t.Kind.string, tok.val);
     // a\nb\tcAA<U+1F600>  — last cp encodes to F0 9F 98 80
     const want = "a\nb\tcAA\xF0\x9F\x98\x80";
     try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
@@ -355,7 +356,7 @@ test "M3.1 F4: string lexer preserves lone surrogate escapes as code units" {
     var lx = env.lexer("\"\\uD800\"");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_STRING, tok.val);
+    try std.testing.expectEqual(t.Kind.string, tok.val);
     try std.testing.expectEqualStrings("\xED\xA0\x80", tok.payload.str.bytes);
 }
 
@@ -366,7 +367,7 @@ test "F1.2: line continuation in string and \\0 NUL escape" {
     var lx = env.lexer("'foo\\\nbar\\0z'");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_STRING, tok.val);
+    try std.testing.expectEqual(t.Kind.string, tok.val);
     const want = "foobar\x00z";
     try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
 }
@@ -408,14 +409,14 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
     var lx = env.lexer("`a${1}b${2}c`");
     var head = try lx.next();
     defer freeToken(&lx, &head);
-    try std.testing.expectEqual(t.TOK_TEMPLATE, head.val);
+    try std.testing.expectEqual(t.Kind.template, head.val);
     try std.testing.expectEqual(t.TemplatePart.head, head.payload.str.template.?);
     try std.testing.expectEqualStrings("a", head.payload.str.bytes);
 
     // Substitution: parser would consume `1` and `}`. Skip the number here.
     var num1 = try lx.next();
     defer freeToken(&lx, &num1);
-    try std.testing.expectEqual(t.TOK_NUMBER, num1.val);
+    try std.testing.expectEqual(t.Kind.number, num1.val);
 
     // After the parser sees the closing `}`, it asks for the next part.
     var middle = try lx.nextTemplatePart();
@@ -425,7 +426,7 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
 
     var num2 = try lx.next();
     defer freeToken(&lx, &num2);
-    try std.testing.expectEqual(t.TOK_NUMBER, num2.val);
+    try std.testing.expectEqual(t.Kind.number, num2.val);
 
     var tail = try lx.nextTemplatePart();
     defer freeToken(&lx, &tail);
@@ -477,7 +478,7 @@ test "F1.2: regex literal exposes pattern and flags" {
     var lx = env.lexer("/a[bc]\\/d/gi");
     var tok = try lx.rescanRegexp(0);
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
+    try std.testing.expectEqual(t.Kind.regexp, tok.val);
     try std.testing.expectEqualStrings("a[bc]\\/d", tok.payload.regexp.pattern);
     try std.testing.expectEqualStrings("gi", tok.payload.regexp.flags);
 }
@@ -489,11 +490,11 @@ test "F1.2: regex literal may begin with equals after slash rescan" {
     var lx = env.lexer("/=/g");
     var div_assign = try lx.next();
     defer freeToken(&lx, &div_assign);
-    try std.testing.expectEqual(t.TOK_DIV_ASSIGN, div_assign.val);
+    try std.testing.expectEqual(t.Kind.div_assign, div_assign.val);
 
     var tok = try lx.rescanRegexp(lx.mark_pos);
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
+    try std.testing.expectEqual(t.Kind.regexp, tok.val);
     try std.testing.expectEqualStrings("=", tok.payload.regexp.pattern);
     try std.testing.expectEqualStrings("g", tok.payload.regexp.flags);
 }
@@ -507,7 +508,7 @@ test "F1.3: private name keeps the # prefix in the atom" {
     var lx = env.lexer("#secret");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_PRIVATE_NAME, tok.val);
+    try std.testing.expectEqual(t.Kind.private_name, tok.val);
     try std.testing.expectEqualStrings("#secret", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
 
@@ -518,7 +519,7 @@ test "F1.3: unicode escape inside identifier is decoded into the atom" {
     var lx = env.lexer("\\u0061sync");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqual(t.Kind.ident, tok.val);
     try std.testing.expect(tok.payload.ident.has_escape);
     try std.testing.expectEqualStrings("async", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
@@ -530,7 +531,7 @@ test "F1.3: escaped keyword spelling is treated as identifier (per spec)" {
     var lx = env.lexer("\\u0069f"); // \u0069f = "if"
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_IDENT, tok.val); // not TOK_IF
+    try std.testing.expectEqual(t.Kind.ident, tok.val); // not TOK_IF
     try std.testing.expectEqualStrings("if", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
 
@@ -541,7 +542,7 @@ test "F1.3: raw Unicode identifier start accepts ID_Start and rejects emoji" {
     var good = env.lexer("\xCF\x80");
     var good_tok = try good.next();
     defer freeToken(&good, &good_tok);
-    try std.testing.expectEqual(t.TOK_IDENT, good_tok.val);
+    try std.testing.expectEqual(t.Kind.ident, good_tok.val);
     try std.testing.expectEqualStrings("\xCF\x80", env.rt.atoms.name(good_tok.payload.ident.atom).?);
 
     var bad = env.lexer("\xF0\x9F\x98\x80");
@@ -598,12 +599,12 @@ test "F1: end-to-end lex of a small program" {
     );
 
     const expected = [_]t.TokenKind{
-        t.TOK_CONST,    t.TOK_IDENT, '=',          t.TOK_NUMBER, ';',
-        t.TOK_FUNCTION, t.TOK_IDENT, '(',          t.TOK_IDENT,  ',',
-        t.TOK_IDENT,    ')',         '{',          t.TOK_RETURN, t.TOK_IDENT,
-        '+',            t.TOK_IDENT, ';',          '}',          t.TOK_LET,
-        t.TOK_IDENT,    '=',         t.TOK_STRING, '+',          t.TOK_TEMPLATE,
-        ';',            t.TOK_EOF,
+        .kw_const,    .ident,  .assign,    .number,    .semicolon,
+        .kw_function, .ident,  .lparen,    .ident,     .comma,
+        .ident,       .rparen, .lbrace,    .kw_return, .ident,
+        .plus,        .ident,  .semicolon, .rbrace,    .kw_let,
+        .ident,       .assign, .string,    .plus,      .template,
+        .semicolon,   .eof,
     };
     for (expected) |want| {
         var tok = try lx.next();
@@ -620,21 +621,21 @@ test "F1: HTML comments are stripped in script mode but rejected in module mode"
         var lx = env.lexer("a <!-- comment\nb");
         var a = try lx.next();
         defer freeToken(&lx, &a);
-        try std.testing.expectEqual(t.TOK_IDENT, a.val);
+        try std.testing.expectEqual(t.Kind.ident, a.val);
         var b = try lx.next();
         defer freeToken(&lx, &b);
-        try std.testing.expectEqual(t.TOK_IDENT, b.val);
+        try std.testing.expectEqual(t.Kind.ident, b.val);
     }
     {
         var lx = env.lexer("a <!-- comment\nb");
         lx.is_module = true;
         var a = try lx.next();
         defer freeToken(&lx, &a);
-        try std.testing.expectEqual(t.TOK_IDENT, a.val);
+        try std.testing.expectEqual(t.Kind.ident, a.val);
         // In module mode `<` is a punctuator, so the next token is `<`.
         var lt = try lx.next();
         defer freeToken(&lx, &lt);
-        try std.testing.expectEqual(@as(t.TokenKind, '<'), lt.val);
+        try std.testing.expectEqual(t.Kind.lt, lt.val);
     }
 }
 
@@ -645,7 +646,7 @@ test "F1: hashbang at start of file is skipped, but not later" {
     var lx = env.lexer("#!/usr/bin/env zjs\n42");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+    try std.testing.expectEqual(t.Kind.number, tok.val);
 }
 
 test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
@@ -655,52 +656,52 @@ test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
     // Walk every keyword TOK_* and verify the keywordAtom() result
     // resolves to the expected predefined-atom string.
     const expected = [_]struct { val: t.TokenKind, name: []const u8 }{
-        .{ .val = t.TOK_NULL, .name = "null" },
-        .{ .val = t.TOK_FALSE, .name = "false" },
-        .{ .val = t.TOK_TRUE, .name = "true" },
-        .{ .val = t.TOK_IF, .name = "if" },
-        .{ .val = t.TOK_ELSE, .name = "else" },
-        .{ .val = t.TOK_RETURN, .name = "return" },
-        .{ .val = t.TOK_VAR, .name = "var" },
-        .{ .val = t.TOK_THIS, .name = "this" },
-        .{ .val = t.TOK_DELETE, .name = "delete" },
-        .{ .val = t.TOK_VOID, .name = "void" },
-        .{ .val = t.TOK_TYPEOF, .name = "typeof" },
-        .{ .val = t.TOK_NEW, .name = "new" },
-        .{ .val = t.TOK_IN, .name = "in" },
-        .{ .val = t.TOK_INSTANCEOF, .name = "instanceof" },
-        .{ .val = t.TOK_DO, .name = "do" },
-        .{ .val = t.TOK_WHILE, .name = "while" },
-        .{ .val = t.TOK_FOR, .name = "for" },
-        .{ .val = t.TOK_BREAK, .name = "break" },
-        .{ .val = t.TOK_CONTINUE, .name = "continue" },
-        .{ .val = t.TOK_SWITCH, .name = "switch" },
-        .{ .val = t.TOK_CASE, .name = "case" },
-        .{ .val = t.TOK_DEFAULT, .name = "default" },
-        .{ .val = t.TOK_THROW, .name = "throw" },
-        .{ .val = t.TOK_TRY, .name = "try" },
-        .{ .val = t.TOK_CATCH, .name = "catch" },
-        .{ .val = t.TOK_FINALLY, .name = "finally" },
-        .{ .val = t.TOK_FUNCTION, .name = "function" },
-        .{ .val = t.TOK_DEBUGGER, .name = "debugger" },
-        .{ .val = t.TOK_WITH, .name = "with" },
-        .{ .val = t.TOK_CLASS, .name = "class" },
-        .{ .val = t.TOK_CONST, .name = "const" },
-        .{ .val = t.TOK_ENUM, .name = "enum" },
-        .{ .val = t.TOK_EXPORT, .name = "export" },
-        .{ .val = t.TOK_EXTENDS, .name = "extends" },
-        .{ .val = t.TOK_IMPORT, .name = "import" },
-        .{ .val = t.TOK_SUPER, .name = "super" },
-        .{ .val = t.TOK_IMPLEMENTS, .name = "implements" },
-        .{ .val = t.TOK_INTERFACE, .name = "interface" },
-        .{ .val = t.TOK_LET, .name = "let" },
-        .{ .val = t.TOK_PACKAGE, .name = "package" },
-        .{ .val = t.TOK_PRIVATE, .name = "private" },
-        .{ .val = t.TOK_PROTECTED, .name = "protected" },
-        .{ .val = t.TOK_PUBLIC, .name = "public" },
-        .{ .val = t.TOK_STATIC, .name = "static" },
-        .{ .val = t.TOK_YIELD, .name = "yield" },
-        .{ .val = t.TOK_AWAIT, .name = "await" },
+        .{ .val = .kw_null, .name = "null" },
+        .{ .val = .kw_false, .name = "false" },
+        .{ .val = .kw_true, .name = "true" },
+        .{ .val = .kw_if, .name = "if" },
+        .{ .val = .kw_else, .name = "else" },
+        .{ .val = .kw_return, .name = "return" },
+        .{ .val = .kw_var, .name = "var" },
+        .{ .val = .kw_this, .name = "this" },
+        .{ .val = .kw_delete, .name = "delete" },
+        .{ .val = .kw_void, .name = "void" },
+        .{ .val = .kw_typeof, .name = "typeof" },
+        .{ .val = .kw_new, .name = "new" },
+        .{ .val = .kw_in, .name = "in" },
+        .{ .val = .kw_instanceof, .name = "instanceof" },
+        .{ .val = .kw_do, .name = "do" },
+        .{ .val = .kw_while, .name = "while" },
+        .{ .val = .kw_for, .name = "for" },
+        .{ .val = .kw_break, .name = "break" },
+        .{ .val = .kw_continue, .name = "continue" },
+        .{ .val = .kw_switch, .name = "switch" },
+        .{ .val = .kw_case, .name = "case" },
+        .{ .val = .kw_default, .name = "default" },
+        .{ .val = .kw_throw, .name = "throw" },
+        .{ .val = .kw_try, .name = "try" },
+        .{ .val = .kw_catch, .name = "catch" },
+        .{ .val = .kw_finally, .name = "finally" },
+        .{ .val = .kw_function, .name = "function" },
+        .{ .val = .kw_debugger, .name = "debugger" },
+        .{ .val = .kw_with, .name = "with" },
+        .{ .val = .kw_class, .name = "class" },
+        .{ .val = .kw_const, .name = "const" },
+        .{ .val = .kw_enum, .name = "enum" },
+        .{ .val = .kw_export, .name = "export" },
+        .{ .val = .kw_extends, .name = "extends" },
+        .{ .val = .kw_import, .name = "import" },
+        .{ .val = .kw_super, .name = "super" },
+        .{ .val = .kw_implements, .name = "implements" },
+        .{ .val = .kw_interface, .name = "interface" },
+        .{ .val = .kw_let, .name = "let" },
+        .{ .val = .kw_package, .name = "package" },
+        .{ .val = .kw_private, .name = "private" },
+        .{ .val = .kw_protected, .name = "protected" },
+        .{ .val = .kw_public, .name = "public" },
+        .{ .val = .kw_static, .name = "static" },
+        .{ .val = .kw_yield, .name = "yield" },
+        .{ .val = .kw_await, .name = "await" },
     };
     for (expected) |e| {
         const ka = t.keywordAtom(e.val);
@@ -754,8 +755,7 @@ fn restoreFinalizedFragmentView(function: *engine.bytecode.Bytecode) !void {
 
 /// Helper: parse `src` as an expression, run the F10 pipeline, and
 /// return the produced final-form bytecode for byte-sequence
-/// comparison. The parser's default is `emit_phase1_temp = true`, so
-/// raw parser output contains scope_get_var/scope_put_var and other
+/// comparison. Raw parser output contains scope_get_var/scope_put_var and other
 /// Phase 1 temp opcodes; `pipeline.finalize.runWithFunctionDef`
 /// lowers them to the final shapes the tests assert against
 /// (including get_loc/put_loc for vars in `function_def.vars`).
@@ -781,7 +781,7 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try parser_core.parseExpr(&state);
     try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -849,7 +849,7 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try state.beginProgramEmission();
     try parser_core.parseDirectives(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -867,7 +867,7 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
@@ -5019,7 +5019,7 @@ test "F6: identifier arrow lookahead preserves trivia and line terminators" {
         defer lx.deinit();
         var ident = try lx.next();
         defer lx.freeToken(&ident);
-        try std.testing.expectEqual(t.TOK_IDENT, ident.val);
+        try std.testing.expectEqual(t.Kind.ident, ident.val);
         try std.testing.expectEqual(case[1], lx.simpleNextIsArrowNoLineTerminator());
     }
 
@@ -5055,7 +5055,7 @@ test "F6: parenthesized arrow lookahead skips only context-free source" {
         defer lx.deinit();
         var open = try lx.next();
         defer lx.freeToken(&open);
-        try std.testing.expectEqual(@as(t.TokenKind, '('), open.val);
+        try std.testing.expectEqual(t.Kind.lparen, open.val);
         try std.testing.expectEqual(@as(?bool, case[1]), lx.simpleCurrentParenIsArrowHead());
     }
 
@@ -5069,7 +5069,7 @@ test "F6: parenthesized arrow lookahead skips only context-free source" {
         defer lx.deinit();
         var open = try lx.next();
         defer lx.freeToken(&open);
-        try std.testing.expectEqual(@as(t.TokenKind, '('), open.val);
+        try std.testing.expectEqual(t.Kind.lparen, open.val);
         try std.testing.expectEqual(@as(?bool, null), lx.simpleCurrentParenIsArrowHead());
     }
 
@@ -5924,7 +5924,7 @@ test "F7: private name in uses scope temp before resolver" {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C { #x; m(o) { return #x in o; } }");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -5960,7 +5960,7 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     );
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     // QuickJS does not blanket-copy every ancestor <var> object during
@@ -5973,10 +5973,10 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
     const outer_fd = state.function_def.child_list[0];
-    try std.testing.expect(outer_fd.var_object_idx >= 0);
+    try std.testing.expect(outer_fd.var_object_idx != null);
     try std.testing.expectEqual(@as(usize, 1), outer_fd.child_list.len);
     const middle_fd = outer_fd.child_list[0];
-    try std.testing.expect(middle_fd.var_object_idx >= 0);
+    try std.testing.expect(middle_fd.var_object_idx != null);
     try std.testing.expectEqual(@as(usize, 1), middle_fd.child_list.len);
 
     // W1c3 moves closure-name owners out of finalized FunctionDefs. Inspect
@@ -5988,7 +5988,7 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
 
     var middle_var_capture_idx: ?u16 = null;
     for (middle.closureVar(), 0..) |cv, idx| {
-        if (cv.var_name == atom.ids.var_object and cv.closureType() == .local and cv.var_idx == @as(u16, @intCast(outer_fd.var_object_idx))) {
+        if (cv.var_name == atom.ids.var_object and cv.closureType() == .local and cv.var_idx == outer_fd.var_object_idx.?) {
             middle_var_capture_idx = @intCast(idx);
             break;
         }
@@ -6002,7 +6002,7 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     try std.testing.expectEqual(@as(usize, 2), object_capture_count);
     try std.testing.expectEqual(atom.ids.var_object, inner.closureVar()[0].var_name);
     try std.testing.expectEqual(function_def_mod.ClosureType.local, inner.closureVar()[0].closureType());
-    try std.testing.expectEqual(@as(u16, @intCast(middle_fd.var_object_idx)), inner.closureVar()[0].var_idx);
+    try std.testing.expectEqual(middle_fd.var_object_idx.?, inner.closureVar()[0].var_idx);
     try std.testing.expectEqual(atom.ids.var_object, inner.closureVar()[1].var_name);
     try std.testing.expectEqual(function_def_mod.ClosureType.ref, inner.closureVar()[1].closureType());
     try std.testing.expectEqual(outer_ref_idx, inner.closureVar()[1].var_idx);
@@ -6022,7 +6022,7 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     );
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
@@ -6031,18 +6031,18 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     try std.testing.expectEqual(@as(usize, 3), state.function_def.child_list.len);
     const defaults = state.function_def.child_list[0];
     try std.testing.expect(defaults.has_parameter_expressions);
-    try std.testing.expect(defaults.var_object_idx >= 0);
-    try std.testing.expect(defaults.arg_var_object_idx >= 0);
+    try std.testing.expect(defaults.var_object_idx != null);
+    try std.testing.expect(defaults.arg_var_object_idx != null);
 
     const pattern = state.function_def.child_list[1];
     try std.testing.expect(pattern.has_parameter_expressions);
-    try std.testing.expect(pattern.var_object_idx >= 0);
-    try std.testing.expect(pattern.arg_var_object_idx >= 0);
+    try std.testing.expect(pattern.var_object_idx != null);
+    try std.testing.expect(pattern.arg_var_object_idx != null);
 
     const rest = state.function_def.child_list[2];
     try std.testing.expect(!rest.has_parameter_expressions);
-    try std.testing.expect(rest.var_object_idx >= 0);
-    try std.testing.expectEqual(@as(i32, -1), rest.arg_var_object_idx);
+    try std.testing.expect(rest.var_object_idx != null);
+    try std.testing.expectEqual(@as(?u16, null), rest.arg_var_object_idx);
 
     const eval_name = try env.rt.internAtom("eval-test");
     var eval_function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, eval_name);
@@ -6057,8 +6057,8 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
 
     try std.testing.expect(eval_state.function_def.is_eval);
     try std.testing.expect(eval_state.function_def.has_eval_call);
-    try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.var_object_idx);
-    try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.arg_var_object_idx);
+    try std.testing.expectEqual(@as(?u16, null), eval_state.function_def.var_object_idx);
+    try std.testing.expectEqual(@as(?u16, null), eval_state.function_def.arg_var_object_idx);
 }
 
 test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
@@ -6074,7 +6074,7 @@ test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
     );
     var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
     defer state.deinit(env.rt);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -7072,7 +7072,7 @@ test "M-SCOPE event producers: structural body scopes stay identity-only, namesp
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     var saw_body = false;
@@ -7244,7 +7244,7 @@ test "M-SCOPE negative contract: return cleanup and throw synthesize no scope le
         var state = try ParseState.init(&lex, &function);
         defer state.deinit(env.rt);
         test_entry.configureScriptRoot(&state);
-        state.top_level_functions_as_children = true;
+        state.root_mode = .canonical;
         try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
         const child = state.function_def.child_list[0];
@@ -7341,7 +7341,7 @@ test "F10.1a FunctionDef: function vars retain parser origins without entering l
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
@@ -7377,7 +7377,7 @@ test "F10.1a FunctionDef: every parsed function body has identity except class f
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     var arrow: ?*function_def_mod.FunctionDef = null;
@@ -7539,7 +7539,7 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
         const atom_name = try std.fmt.bufPrint(&atom_buffer, "declaration_index_atom_{d}", .{index});
         slot.* = try env.rt.internAtom(atom_name);
         initialized_atoms += 1;
-        _ = try state.defineVar(slot.*, .const_);
+        _ = try parser_core.declarations.defineVar(&state, slot.*, .const_);
     }
 
     const linked_collision = try env.rt.internAtom("linked_collision");
@@ -7552,7 +7552,7 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
     );
     try std.testing.expectError(
         error.UnexpectedToken,
-        state.defineVar(linked_collision, .const_),
+        parser_core.declarations.defineVar(&state, linked_collision, .const_),
     );
 
     const origin_collision = try env.rt.internAtom("origin_collision");
@@ -7566,7 +7566,7 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
     });
     try std.testing.expectError(
         error.UnexpectedToken,
-        state.defineVar(origin_collision, .const_),
+        parser_core.declarations.defineVar(&state, origin_collision, .const_),
     );
 }
 
@@ -7596,11 +7596,12 @@ fn runParserDeclarationIndexOomRetry(
         initialized_atoms += 1;
     }
     for (declaration_atoms[0 .. declaration_index_padding_count - 1]) |atom_id| {
-        _ = try state.defineVar(atom_id, .const_);
+        _ = try parser_core.declarations.defineVar(&state, atom_id, .const_);
     }
 
     failing.fail_index = failing.alloc_index + fail_offset;
-    const first_result = state.defineVar(
+    const first_result = parser_core.declarations.defineVar(
+        &state,
         declaration_atoms[declaration_index_padding_count - 1],
         .const_,
     );
@@ -7616,7 +7617,8 @@ fn runParserDeclarationIndexOomRetry(
             @as(usize, declaration_index_padding_count - 1),
             state.function_def.vars.len,
         );
-        _ = try state.defineVar(
+        _ = try parser_core.declarations.defineVar(
+            &state,
             declaration_atoms[declaration_index_padding_count - 1],
             .const_,
         );
@@ -9392,7 +9394,7 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "(function() { 42 })");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
 
     try parser_core.parseExpr(&state);
 
@@ -9403,7 +9405,7 @@ test "F10.1c Nested function: bytecode dual-buffering" {
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
     const child = state.function_def.child_list[0];
-    try std.testing.expect(child.parent_cpool_idx >= 0);
+    try std.testing.expect(child.parent_cpool_idx != null);
     try expectOpcode(fdPhase1Code(child), op.push_i32);
     try expectOpcode(fdPhase1Code(child), op.return_undef);
 
@@ -13027,13 +13029,13 @@ test "FunctionDef builder emit and deinit releases it" {
     try std.testing.expect(state.function_def.builder != null);
 
     const b = state.activeBuilder();
-    const label = try state.builderNewLabel();
-    try state.builderEmitJump(qop.goto, label); // marker + 5-byte jump
-    try state.builderEmitOp(qop.add); // marker + 1-byte op
+    const label = try Emitter.newLabel(&state);
+    try Emitter.jump(&state, qop.goto, label); // marker + 5-byte jump
+    try Emitter.op(&state, qop.add); // marker + 1-byte op
     const atom_id = try env.rt.internAtom("s2p_probe");
-    try state.builderEmitAtomOpOwned(qop.get_var, atom_id);
-    try state.builderBindLabel(label);
-    try state.builderAddSourceMarker(3, 7);
+    try Emitter.opAtom(&state, qop.get_var, atom_id);
+    try Emitter.bind(&state, label);
+    try Emitter.addSourceMarker(&state, 3, 7);
 
     try std.testing.expectEqual(@as(u32, 11), b.code_len); // 5 + 1 + 5
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
@@ -13565,7 +13567,7 @@ pub const phase_ownership = struct {
             // runtime-owned constants.
             self.state = try ParseState.initWithRuntime(rt, &self.lex, &self.function);
             self.state_live = true;
-            try std.testing.expect(!self.state.top_level_functions_as_children);
+            try std.testing.expect(self.state.root_mode == .raw_bytecode);
             self.state.function_def.is_eval = true;
             self.state.function_def.is_global_var = true;
             // Tier 1 leaves the root childless so `resolve_variables` and
@@ -13574,13 +13576,13 @@ pub const phase_ownership = struct {
             // becomes a child FunctionDef that finalization later materializes
             // into a published FunctionBytecode.
             if (shape.tier == .nested_function_bytecode) {
-                self.state.top_level_functions_as_children = true;
+                self.state.root_mode = .canonical;
                 self.state.top_level_lexical_as_global_ref = true;
             }
             try parser_core.parseDirectives(&self.state);
             try parser_core.parseProgramStatements(&self.state, .{ .func = true, .func_with_label = true, .other = true });
             try self.state.emitReturnUndefined();
-            try std.testing.expectEqual(t.TOK_EOF, self.state.token.val);
+            try std.testing.expectEqual(t.Kind.eof, self.state.token.val);
         }
 
         pub fn deinit(self: *Window) void {

@@ -86,11 +86,29 @@ match.
 `object.zig` is the large object-model file. For property behavior start at
 `shape.zig` and `property.zig`, then the call site in `src/exec/`.
 
-## Parser — `src/parser.zig`
+## Parser — `src/parser.zig` and `src/parser/`
 
-`parser.compile` is the compile wrapper. The QuickJS-aligned parser/emitter
-lives in this one file because QuickJS’s `ParseState` is also a single
-compilation unit. The grammar is TypeScript’s and JavaScript is parsed as its
+`src/parser.zig` owns the token table, the lexer instantiation, the compile
+wrapper (`parser.compile`), and the `Parser` re-export namespace. The
+QuickJS-aligned recursive descent and emitter live in `src/parser/`, one
+module per grammar area, every function taking the shared `*State`:
+
+| Module | Role |
+| --- | --- |
+| `parse_state.zig` | `State` (token, scope, emission methods) and the shared types |
+| `declarations.zig` | `defineVar` and the `define_var` / `add_scope_var` rules, lexical and function-scope lookups, the declaration-conflict index |
+| `closure.zig` | read-only binding-visibility queries the emitter consults (`hasVisibleCurrentBinding`, `findClosureVarIndex`); closure capture itself lives in `resolve_variables` |
+| `identifiers.zig` | identifier / keyword / atom predicates |
+| `lookahead.zig` | snapshots, balanced scans, arrow-head probes |
+| `emitter.zig` | `Emitter` facade, control frames, break/continue/return/finally, using cleanup |
+| `expressions.zig` | `js_parse_expr` family, lvalues, calls, member chains, literals |
+| `statements.zig` | `js_parse_statement_or_decl`, variables, loops, switch, try |
+| `functions.zig` | functions, arrows, parameters, destructuring, child FunctionDef lifecycle |
+| `classes.zig` | class tail, elements, private names, field initializers |
+| `modules.zig` | import/export and the module record |
+| `typescript.zig` | emission-free type grammar, tsc ambiguity probes, enum/namespace lowering |
+
+The grammar is TypeScript’s and JavaScript is parsed as its
 subset: there is no source-kind switch. Type syntax is consumed by the
 emission-free `tsParse*` family, so JavaScript input produces byte-identical
 bytecode; `enum`, `namespace`, parameter properties and `import x = A.B` are

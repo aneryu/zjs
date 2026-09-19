@@ -299,7 +299,6 @@ pub const minor_crossing_young_floor: usize = minor_young_threshold / 16;
 /// and only the workload knows that. `gc_generation.noteMinorYield` measures it
 /// (see `low_yield_limit`); this constant only decides how much room the young
 /// set gets before the question is asked.
-
 /// Time budget for one incremental marking increment at a poll. §1.3's major
 /// pause target is 2 ms p99; 1 ms per increment leaves room for the begin and
 /// remark slices, which carry fixed whole-heap work until Phase 3.

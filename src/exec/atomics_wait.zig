@@ -7,7 +7,6 @@
 //! in `call_runtime.zig`. The install-time name->id mapping (`methodId`) lives
 //! in `exec/atomics_ops.zig`, beside the Atomics function-list entries.
 
-
 pub const StaticMethod = enum(u32) {
     add = 1,
     @"and" = 2,

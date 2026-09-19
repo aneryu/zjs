@@ -3,41 +3,39 @@
 `parseFunctionParamsAndBody` 是所有函数形态的汇合点。解构 pattern 与 class 元素也在本册。
 
 
-### `FunctionEntryContext.save` (`src/parser.zig:6927`)
+### `FunctionEntry` (`src/parser/functions.zig`)
 
-- **签名**：`inline fn save(s: *State, comptime fields: FunctionEntryFields) FunctionEntryContext`。
-- **作用**：保存一组 FunctionEntry 字段，供嵌套函数解析后 restore。
-- **实现**：
-按 `FunctionEntryFields` 位拷贝 `pending_function_name` / `is_decl` / `export_default` 等到栈上结构，嵌套解析后 `restore`。
-- **所有权 / 错误 / 调用**：不分配：把 `State` 上九个进入函数体前要保存的标量（`pending_function_*`、`in_generator`/`in_async`/`is_strict`/`allow_super`/`parsing_method_params` 等）按 comptime 的 `fields` 掩码抄进一个按值返回的结构体——没被掩码选中的字段留在 `undefined`，所以这个值**只能配同一个 `fields` 的 `restore` 用**。`pending_function_name` 存的是 atom id，不 retain（编译期 atom 由 `CompileAtomScope` 作根）。无 error set。六个调用方，每个都紧跟一条 `defer saved_entry.restore(...)`：`emitObjectMethodFunction`（`src/parser.zig:7177`）、`parseFunctionDecl`（`:11141`）、`parseFunctionExpr`（`:11201`）、`parseAnonymousDefaultFunctionDecl`（`:11239`）、`parseArrowFunction`（`:12187`）、`parseClassElementFunction`（`:14460`）。
+- **签名**：`pub const FunctionEntry = struct { name: ?Atom = null, is_decl: bool = false, export_default: bool = false, is_method: bool = false }`。
+- **作用**：识别出函数产生式的包装器交给 `parseFunctionParamsAndBody` 的入口参数，对应 qjs `js_parse_function_decl2` 的 `func_name` / `func_type` 实参。
+- **实现**：纯值，无方法。`name` 是借用的 atom（声明名、具名表达式名、`export default` 的 `default`），`is_decl` 决定子函数是 `.statement` 还是 `.expr` 并触发声明载体计划，`export_default` 把载体名换成 `*default*`，`is_method` 对应 qjs `JS_PARSE_FUNC_METHOD`（home object、重复参数门、强制作为子函数）。
+- **所有权 / 错误 / 调用**：以前这四项是 `State` 上的 `pending_function_*` / `parsing_method_params` 字段，由各包装器写入、`parseFunctionParamsAndBody` 进门消费再清零、退出前回填；改成参数后没有任何跨函数泄漏面。调用方：`parseFunctionDecl` / `parseFunctionExpr` / `parseAnonymousDefaultFunctionDecl` / `parseObjectMethodFunction` / `parseClassElementFunction` / 静态块（`.{}`）。
 
-### `FunctionEntryContext.restore` (`src/parser.zig:6941`)
+### `FunctionContext` (`src/parser/parse_state.zig`)
 
-- **签名**：`inline fn restore(saved: FunctionEntryContext, s: *State, comptime fields: FunctionEntryFields) void`。
-- **作用**：把 `save` 记下的 FunctionEntry 字段写回 ParseState。
-- **实现**：
-把 `save` 的字段写回 ParseState，保证内层函数不会泄漏 pending 名字到外层。
-- **所有权 / 错误 / 调用**：不分配、无 error set：按同一个 comptime 掩码把九个标量写回 `State`，被覆盖的旧值不需要释放（都是标量或借用的 atom id）。它总是以 `defer` 形式出现，所以错误路径也会恢复。顺序上有一处已被源码注释固定（`src/parser.zig:11143`）：这条 `defer` 必须在更早注册的 name_atom 持有者 `defer` **之前**恢复字段。六个调用点与 `save` 一一对应（`:7178`/`:11142`/`:11202`/`:11240`/`:12188`/`:14461`）。
+- **签名**：`pub const FunctionContext = struct { in_generator, in_async, in_constructor, is_outer_constructor_block, allow_super, allow_super_call, new_target_allowed, in_class_static_block, in_parameter_initializer, reject_await_in_parameter_initializer, function_expr_name_binding: ?Atom, root_mode, in_namespace, namespace_export, current_namespace_atom: ?Atom }`，挂在 `State.ctx`。
+- **作用**：「当前在什么函数里」的整套语法上下文。函数边界整体保存、按 `func_kind` 整体派生、退出整体恢复，取代了以前散在 `State` 上的十五个标量与每处三行的 `saved_x` / `defer` 对。
+- **实现**：`parseFunctionParamsAndBody` 做 `const outer = s.ctx; defer s.ctx = outer;` 后用一个结构体字面量派生子上下文（箭头与静态块继承外层 super / new.target 能力，静态块还继承 yield / await 语法；具名函数表达式在此绑定自名；`is_method` 强制 `root_mode`（原 `root_mode` 旗标，现为 `State.root_mode: RootMode = .canonical | .raw_bytecode`））。`parseArrowFunction` 复制外层后只清 `in_constructor` 与 namespace 三项（箭头对外层透明）。`enterFieldInitFunction` 把整个 `ctx` 存进 `FieldInitContext`。`is_strict` 不在其中：它与 `lex.is_strict_mode` 配对，仍由 `FunctionFrame` 在 `frame.restore` 的时点恢复。
+- **所有权 / 错误 / 调用**：全是标量与借用 atom，整体复制无所有权；`defer` 形式保证错误路径同样恢复。函数内部更细的作用域（参数默认值、namespace 体、类元素）仍各自保存单个字段，因为它们的范围比函数边界窄。
 
 ### `parseFunctionDecl` (`src/parser.zig:10612`)
 
 - **签名**：`fn parseFunctionDecl(s: *State, func_kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void`。
 - **作用**：解析**函数声明**（含 `async`、生成器与类构造器形态）：名字是必需的，解析完把参数与函数体交给 `parseFunctionParamsAndBody`。
-- **实现**：进门先按 `func_kind` 准备 TS 参数属性容器：类构造器（`.class_constructor` / `.derived_class_constructor`）开一个空 `ArrayList(Atom)`，其余置 `null`，`defer` 负责销毁并恢复外层的 `current_parameter_properties`。吃掉 `function` 后看 `*` 定 `is_generator`。名字必须有：`TOK_IDENT`，或 `canUseAwaitAsIdentifier` 下的 `await`，或非严格模式下的 `yield`；都不是就 `failUnexpectedToken`。名字 atom 在 `advance` 之前取走（qjs 也在 `next_token` 释放 token 前 retain，`quickjs.c:36551-36556`），`setLastDeclaredAtom` 记账；模块顶层若该名字已有绑定，直接报重复声明。随后把 `in_generator` / `in_async` 置成本函数的形态并 `defer` 还原，由 `is_generator` 与 `func_kind` 合成 `actual_kind`（`async` + `*` → `.async_generator`）。最后经 `FunctionEntryContext.save` 保存 / 恢复 `pending_function_name`、`pending_function_is_decl` 两个字段，置上名字与「是声明」标志，进入 `parseFunctionParamsAndBody`（qjs `js_parse_function_decl`，`quickjs.c:36388`）。
+- **实现**：进门先按 `func_kind` 准备 TS 参数属性容器：类构造器（`.class_constructor` / `.derived_class_constructor`）开一个空 `ArrayList(Atom)`，其余置 `null`，`defer` 负责销毁并恢复外层的 `current_parameter_properties`。吃掉 `function` 后看 `*` 定 `is_generator`。名字必须有：`TOK_IDENT`，或 `canUseAwaitAsIdentifier` 下的 `await`，或非严格模式下的 `yield`；都不是就 `failUnexpectedToken`。名字 atom 在 `advance` 之前取走（qjs 也在 `next_token` 释放 token 前 retain，`quickjs.c:36551-36556`），`setLastDeclaredAtom` 记账；模块顶层若该名字已有绑定，直接报重复声明。随后把 `in_generator` / `in_async` 置成本函数的形态并 `defer` 还原，由 `is_generator` 与 `func_kind` 合成 `actual_kind`（`async` + `*` → `.async_generator`）。最后以 `FunctionEntry{ .name = name_atom, .is_decl = true }` 进入 `parseFunctionParamsAndBody`（qjs `js_parse_function_decl`，`quickjs.c:36388`）。
 - **所有权 / 错误 / 调用**：失败走 `parser_core.Error`（含 `SyntaxError` / `OutOfMemory` / `ParserInvariant` / `StackOverflow` 等）；`compile` 再把它收成 `Result.syntax_error` 或 ICE。 典型被调用方：`parseFunctionParamsAndBody`。
 
 ### `parseFunctionExpr` (`src/parser.zig:10683`)
 
 - **签名**：`fn parseFunctionExpr(s: *State, func_kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void`。
 - **作用**：解析**函数表达式**：名字可选，并在此处执行具名函数表达式对名字的额外限制。
-- **实现**：骨架与 `parseFunctionDecl` 相同（吃 `function`、看 `*`、置 `in_generator` / `in_async` 并 defer 还原、合成 `actual_kind`、经 `FunctionEntryContext` 传 `pending_function_name` 给 `parseFunctionParamsAndBody`），差别全在名字上：名字**可选**，`has_name` 认 `TOK_IDENT`、非 async 且非模块下的 `await`、非严格模式下的 `yield`；取到名字后有三道检查——生成器里叫 `yield`、async 生成器里叫 `await`、严格模式（含所在函数已是严格）下叫 `eval` / `arguments`，都 `failUnexpectedToken`。最终 `pending_function_is_decl = false`，所以下游按具名函数表达式处理（名字只在函数自身作用域里可见）。
+- **实现**：骨架与 `parseFunctionDecl` 相同（吃 `function`、看 `*`、`func_kind.withGenerator(is_generator)` 合成实际 kind、以 `FunctionEntry{ .name = owned_name }` 调 `parseFunctionParamsAndBody`），差别全在名字上：名字**可选**，`has_name` 认 `TOK_IDENT`、非 async 且非模块下的 `await`、非严格模式下的 `yield`；取到名字后有三道检查——生成器里叫 `yield`、async 生成器里叫 `await`、严格模式（含所在函数已是严格）下叫 `eval` / `arguments`，都 `failUnexpectedToken`。最终 `pending_function_is_decl = false`，所以下游按具名函数表达式处理（名字只在函数自身作用域里可见）。
 - **所有权 / 错误 / 调用**：失败走 `parser_core.Error`（含 `SyntaxError` / `OutOfMemory` / `ParserInvariant` / `StackOverflow` 等）；`compile` 再把它收成 `Result.syntax_error` 或 ICE。 典型被调用方：`parseFunctionParamsAndBody`。
 
 ### `parseAnonymousDefaultFunctionDecl` (`src/parser.zig:10746`)
 
 - **签名**：`fn parseAnonymousDefaultFunctionDecl( s: *State, func_kind: ParseFunctionKind, source_start: FunctionSourceStart, ) Error!void`。
 - **作用**：解析匿名的 `export default function`：它仍是声明，外部载体名 `*default*`（`atom_star_default`），推断出的函数名是 `default`。
-- **实现**：吃掉 `function`，看 `*` 定 `is_generator`，按 `func_kind` 置 `in_generator` / `in_async` 并 `defer` 还原，再合成 `actual_kind`（`.async` + `*` → `.async_generator`）。与 `parseFunctionDecl` 的差别只在名字：不解析标识符，直接 `pending_function_name = atom_default`（推断名 `default`）、`pending_function_is_decl = true`、并多置一个 `pending_function_export_default = true`（`FunctionEntryContext` 的 `fields` 也因此多带这一位）。下游 `parseFunctionParamsAndBody`（`src/parser.zig:11684`）看到这个标志后，把声明绑定的名字换成模块载体 `atom_star_default`（`*default*`，`:15168`）而不是 `default`。两个调用方都在 `export default` 语句里：`:15480`（`.normal`）与 `:15491`（`.async`），它们随后 `addModuleExportName(s, atom_default, atom_star_default)` 把导出名接上。
+- **实现**：吃掉 `function`，看 `*` 定 `is_generator`，`func_kind.withGenerator` 合成实际 kind（`.async` + `*` → `.async_generator`）。与 `parseFunctionDecl` 的差别只在名字：不解析标识符，直接传 `FunctionEntry{ .name = atom_default, .is_decl = true, .export_default = true }`（推断名 `default`，载体名 `*default*`）。下游 `parseFunctionParamsAndBody`（`src/parser.zig:11684`）看到这个标志后，把声明绑定的名字换成模块载体 `atom_star_default`（`*default*`，`:15168`）而不是 `default`。两个调用方都在 `export default` 语句里：`:15480`（`.normal`）与 `:15491`（`.async`），它们随后 `addModuleExportName(s, atom_default, atom_star_default)` 把导出名接上。
 - **所有权 / 错误 / 调用**：失败走 `parser_core.Error`（含 `SyntaxError` / `OutOfMemory` / `ParserInvariant` / `StackOverflow` 等）；`compile` 再把它收成 `Result.syntax_error` 或 ICE。 典型被调用方：`parseFunctionParamsAndBody`。
 
 ### `appendOwnedParserAtom` (`src/parser.zig:10780`)
@@ -66,6 +64,7 @@
 
 ### `parseFunctionParameters` (`src/parser.zig:10823`)
 
+- **结构（2026-09-19 拆分后）**：列表状态在 `ParameterListState`；`parseNamedParameter`（名字、可选标记、默认值）/ `parsePatternParameter`（`{}`/`[]`，两臂合并）/ `parseRestParameter`（`...name` 与 `...pattern`）各管一种形态，主循环只做分派与逗号。
 - **签名**：`fn parseFunctionParameters( s: *State, func_kind: ParseFunctionKind, capture_child: bool, ) Error!FunctionParameters`。
 - **作用**：解析形参列表（或方法 / setter 的单参数），含 rest、默认值、解构与 TypeScript 参数属性，并记录严格模式检查需要的重名与非法名信息。
 - **实现**：
@@ -74,7 +73,8 @@
 
 ### `parseFunctionParamsAndBody` (`src/parser.zig:11052`)
 
-- **签名**：`fn parseFunctionParamsAndBody(s: *State, func_kind: ParseFunctionKind, source_start: ?FunctionSourceStart) Error!void`。
+- **结构（2026-09-19 拆分后）**：`recordFunctionFeatures` 记特性位 → `childFunctionContext` 按 kind 派生 `FunctionContext` → `createChildFunction`（子 `FunctionDef` 与旗标，`ChildFunction` 接力所有权）→ 声明时 `planFunctionDeclaration`（提升 / Annex B / 全局载体，返回 `FunctionDeclPlan`）→ `makeCurrent` → `parseFunctionHead`（check_ctor、参数、initial_yield）→ `parseFunctionBody`（控制边界、函数体块、严格模式与重复参数检查、`emitFallthroughReturn`）→ `finishChildFunction`（弹出、cpool、声明载体、fclosure / set_name）。主干 30 行；下文「实现」段描述的是拆分前的单体，语义不变。
+- **签名**：`fn parseFunctionParamsAndBody(s: *State, func_kind: ParseFunctionKind, source_start: ?FunctionSourceStart, entry: FunctionEntry) Error!void`。
 - **作用**：所有函数形态（声明 / 表达式 / 方法 / 构造器 / static block）共用的下降：建子 `FunctionDef`、解析参数与函数体、收尾发 `fclosure`。
 - **实现**：
 所有函数形态（声明/表达式/方法/构造器/static block）的共用下降。约 620 行，分四段：
@@ -83,7 +83,7 @@
 2. **子 FunctionDef**：`memory.create` + `FunctionDef.init`，填 `func_type`/`func_kind`/`has_prototype`/`has_this_binding`。声明计划 `FunctionDeclPlan` 处理：顶层 global var、Annex B.3.3 if/块级函数的 var 副本、词法冲突、`arguments` 参数阻断、switch CaseBlock、重复提升。然后 `pushFunction`，scope 回到 0。
 3. **体**：构造器入口 `check_ctor`；基类构造器立刻 `emitClassFieldInitCall`。`parseFunctionParameters`；生成器 `initial_yield`。`enterControlBoundary` 切断外层 break/continue。`parseFunctionBodyBlock`（指令 prologue + 体）。严格模式再拒绝非简单参数的 `"use strict"`、非法函数名/参数名、方法/箭头/构造器的重复参数。
 4. **收尾**：`isLiveCode` 决定隐式 return（async/generator → `undefined; return_async`；派生构造器 → `scope_get_var_checkthis this; return`；否则 `return_undef`）。pop 子函数，`appendCpool` + `addChild`。表达式发 `fclosure`（匿名再 `set_name null` 占位）；声明按 plan 在源位置或 enter_scope 初始化，Annex B 再 `put_loc` / `emitGlobalScopePutVar` / eval var object。namespace 导出则 `put_field`。失败 `discardCurrentFunction`。
-- **所有权 / 错误 / 调用**：核心是子 `FunctionDef` 的所有权接力，由两个布尔守着三段 errdefer：`memory.create` 之后到 `pushFunction` 之前归本函数（`child_owned_before_push` → `discardFunctionDef`）；入栈后归 `cur_func_stack`（`child_pushed` → `discardCurrentFunction`，并回滚 emit 目标 / `scope_level` / `is_eval` / `return_depth` / strict 等九个已保存的标量）；`popFunction` 取回后到 `parent_fd.addChild` 之前又短暂归本函数（`child_moved`），交出后就只属于父 `FunctionDef`。其余父状态（`in_constructor`、`allow_super(_call)`、`new_target_allowed`、`in_class_static_block`、`function_expr_name_binding`、`in_parameter_initializer`、return-finally 边界）全用 `defer` 还原，`enterControlBoundary` 的帧则由 `control_boundary_active` 配 `errdefer` 兜底。`parameters` 的 `simple_names` 缓冲用 `defer parameters.deinit(s)`。错误：早期错误直接 `Error.SyntaxError`（同作用域重复词法声明）或经 `failWithMessage` / `failExpectedDescription` 折成 `error.UnexpectedToken` 并留 pending 诊断，计划与索引对不上则 `Error.ParserInvariant`（ICE 出口），其余是 `OutOfMemory`。六个调用方：`emitObjectMethodFunction`（`:7186`）、`parseFunctionDecl`（`:11146`）、`parseFunctionExpr`（`:11205`）、`parseAnonymousDefaultFunctionDecl`（`:11244`）、`parseClassElementFunction`（`:14470`）、类 static block（`:14572`，传 `.class_static_block` 且 `source_start = null`）。
+- **所有权 / 错误 / 调用**：核心是子 `FunctionDef` 的所有权接力，由 `ChildFunction` 一个值的 `stage`（created → current → popped → adopted）守着，一条 `errdefer child.discard(s)` 按阶段各自回滚（`discardFunctionDef`；`discardCurrentFunction` 并还原父 `FunctionFrame`；`discardFunctionDef`；无事），`adopt` 交出后就只属于父 `FunctionDef`。其余父状态（`in_constructor`、`allow_super(_call)`、`new_target_allowed`、`in_class_static_block`、`function_expr_name_binding`、`in_parameter_initializer`、return-finally 边界）全用 `defer` 还原，`enterControlBoundary` 的帧由 `ControlFrames.left` 让 `leaveControlBoundary` 幂等，`errdefer` 直接兜底。`parameters` 的 `simple_names` 缓冲用 `defer parameters.deinit(s)`。错误：早期错误直接 `Error.SyntaxError`（同作用域重复词法声明）或经 `failWithMessage` / `failExpectedDescription` 折成 `error.UnexpectedToken` 并留 pending 诊断，计划与索引对不上则 `Error.ParserInvariant`（ICE 出口），其余是 `OutOfMemory`。六个调用方：`parseObjectMethodFunction`（`:7186`）、`parseFunctionDecl`（`:11146`）、`parseFunctionExpr`（`:11205`）、`parseAnonymousDefaultFunctionDecl`（`:11244`）、`parseClassElementFunction`（`:14470`）、类 static block（`:14572`，传 `.class_static_block` 且 `source_start = null`）。
 
 ### `parseArrowFunction` (`src/parser.zig:11676`)
 
@@ -91,7 +91,7 @@
 - **作用**：覆盖文法确认之后真正解析箭头函数：建 `.arrow` 子 `FunctionDef`，解析参数与块体或表达式体，`this` / `arguments` / `super` 一律沿闭包链捕获。
 - **实现**：
 cover grammar 已确认是箭头后进入。创建 `func_type = .arrow` 的子 FunctionDef：`has_prototype = false`，`has_this_binding` / `has_arguments_binding` 保持 `FunctionDef` 的默认 `false`（`src/bytecode.zig:5183-5184`），`new_target_allowed` / `super_allowed` / `super_call_allowed` / `arguments_allowed` 全部照抄外层。形参**不走** `parseFunctionParameters`，而是本函数自带一套循环：要么单个裸标识符（直接 `appendArg`），要么 `scanParameterList` 预扫 + `expectToken('(')` 后按 ident / 解构 / rest 逐个处理，用 `appendArrowParamBindingName` 查重。参数表沿用外层的 Await 文法参数（`params_in_async = is_async or was_async or is_module or in_class_static_block`），过 `=>` 之后才切成箭头自己的 `in_async`；`=>` 前有换行直接 `failUnexpectedToken`。体两种：`{` 走 `parseFunctionBodyBlock`，收尾按 `isLiveCode` 补 `undefined; return_async`（async）或 `return_undef`；表达式体走 `beginFunctionBody` + `parseAssignExpr2`（刻意比 qjs 严：ConciseBody 继承 `body_flags.in_accepted` 的 no-`in` 限制）后直接发 `return_async` / `return`。`this`/`new.target`/`arguments`/`super` 在名字解析时由 `State.ensureArrowSpecialCapture`（`src/parser.zig:3292`）沿闭包链捕获。收尾 `appendCpool` + `addChild` + `emitFClosure`，并且因为箭头语法上恒为匿名，**总是**补一条 `set_name null` 占位（不像普通函数表达式那样只在匿名时补）。
-- **所有权 / 错误 / 调用**：子 `FunctionDef` 的所有权接力与 `parseFunctionParamsAndBody` 同形：`child_owned_before_push`（create 后 → `discardFunctionDef`）→ `child_pushed`（入栈后 → `discardCurrentFunction` 并回滚十个已保存的标量）→ `child_moved`（`popFunction` 后 → `addChild` 交给父 `FunctionDef`）。`param_names` 这份 `ArrayList(Atom)` 由 `defer deinitOwnedParserAtoms` 释放，里面只是借用的 atom id。`in_constructor`、`current_parameter_properties`（箭头里置 `null`，所以 TS 参数属性不会漏进箭头）、`in_parameter_initializer`、`in_async` / `reject_await_in_parameter_initializer`、`in_class_static_block`、`new_target_allowed`、`FunctionEntryContext` 的两个 pending 字段都靠 `defer` 还原；控制边界由 `control_boundary_active` 配 `errdefer` 兜底，表达式体路径另有 `errdefer s.popScopeIdentity()`。错误全部经 `failUnexpectedToken` / `failWithMessage` / `rejectInvalidStrictParameterName` 折成 `error.UnexpectedToken`，外加 `OutOfMemory`。
+- **所有权 / 错误 / 调用**：子 `FunctionDef` 的所有权接力与 `parseFunctionParamsAndBody` 同形：`ChildFunction.create` → `makeCurrent` → `pop` → `adopt`，一条 `errdefer child.discard(s)` 按阶段回滚。`param_names` 这份 `ArrayList(Atom)` 由 `defer deinitOwnedParserAtoms` 释放，里面只是借用的 atom id。`in_constructor`、`current_parameter_properties`（箭头里置 `null`，所以 TS 参数属性不会漏进箭头）、`in_parameter_initializer`、`in_async` / `reject_await_in_parameter_initializer`、`in_class_static_block`、`new_target_allowed` 等整个 `FunctionContext` 靠一条 `defer s.ctx = outer` 还原；控制边界由幂等的 `leaveControlBoundary` 配 `errdefer` 兜底，表达式体路径另有 `errdefer s.popScopeIdentity()`。错误全部经 `failUnexpectedToken` / `failWithMessage` / `rejectInvalidStrictParameterName` 折成 `error.UnexpectedToken`，外加 `OutOfMemory`。
 
 ### `PatternTarget.depth` (`src/parser.zig:12097`)
 
@@ -191,7 +191,7 @@ cover grammar 已确认是箭头后进入。创建 `func_type = .arrow` 的子 F
 
 - **签名**：`fn parseDestructuringElement( s: *State, mode: PatternMode, has_value: bool, allow_outer_initializer: bool, initializer_flags: ParseFlags, ) Error!bool`。
 - **作用**：解析一个解构目标（数组或对象 pattern），必要时连带它的外层 `= 默认值`，返回是否确实存在默认值。
-- **实现**：先记 `.destructuring` feature，`scanPatternTopology` 把 pattern 拓扑一次扫清（同时得到 pattern 之后紧跟的 token）；`has_initializer` = 允许外层初始化器且后面是 `=`。既没有待解构的值又没有初始化器时报 `"destructuring declaration requires an initializer"`。有初始化器时先搭跳转骨架：新建 `parse_label`，有值就 `dup; undefined; strict_eq; if_true → parse_label`（值为 `undefined` 才去求默认值），无值则无条件 `goto parse_label`；再建 `assign_label` 并用 `emitterBindLabelRaw` 绑在此处，无值时补一个 `dup`。接着按当前 token 分派 pattern 主体：`[` → `parseArrayPatternBody`，`{` → `parseObjectPatternBody`（带上 `topology.has_top_level_rest`），其他 token 说明调用方判断有误，`Error.ParserInvariant`。有初始化器时收尾：`goto done`、绑 `parse_label`、有值先 `drop` 掉那个 `undefined`、`expectToken('=')`、`parseAssignExpr2` 求默认值、`goto assign_label` 回到 pattern 主体、绑 `done`。这个「默认值字节码发在 pattern 之后、运行时却先到达」的布局既保住了源码子结点顺序，也不需要额外临时槽。
+- **实现**：先记 `.destructuring` feature，`scanPatternTopology` 把 pattern 拓扑一次扫清（同时得到 pattern 之后紧跟的 token）；`has_initializer` = 允许外层初始化器且后面是 `=`。既没有待解构的值又没有初始化器时报 `"destructuring declaration requires an initializer"`。有初始化器时先搭跳转骨架：新建 `parse_label`，有值就 `dup; undefined; strict_eq; if_true → parse_label`（值为 `undefined` 才去求默认值），无值则无条件 `goto parse_label`；再建 `assign_label` 并用 `Emitter.bindRaw` 绑在此处，无值时补一个 `dup`。接着按当前 token 分派 pattern 主体：`[` → `parseArrayPatternBody`，`{` → `parseObjectPatternBody`（带上 `topology.has_top_level_rest`），其他 token 说明调用方判断有误，`Error.ParserInvariant`。有初始化器时收尾：`goto done`、绑 `parse_label`、有值先 `drop` 掉那个 `undefined`、`expectToken('=')`、`parseAssignExpr2` 求默认值、`goto assign_label` 回到 pattern 主体、绑 `done`。这个「默认值字节码发在 pattern 之后、运行时却先到达」的布局既保住了源码子结点顺序，也不需要额外临时槽。
 - **所有权 / 错误 / 调用**：不分配堆内存；产出的三个 `LabelId`（`parse_label` / `assign_label` / `done`）归 Builder 记账，全部在本函数内绑定，失败时整个 `FunctionDef` 被上层丢弃，没有局部回滚。返回值 `bool` 就是「是否消费了外层 `=`」，调用方据此决定形参的 `defined_arg_count`。错误：缺初始化器经 `failWithMessage`、缺 `=` 经 `expectToken`（都是 `error.UnexpectedToken`），当前 token 不是 `[`/`{` 是 `Error.ParserInvariant`（调用方本该先判定过），其余来自 label/emit 的 `OutOfMemory`。八个调用点：`parseDestructuringAssignment`（`src/parser.zig:4129`）、`parseVarDecl` 系（`:9808`）、`for` 头与 `for-in/of`（`:10676` / `:10821` / `:10890`）、pattern 体递归（`:12982` / `:13062`）、以及形参解构 `parseParameterDestructuring`（`:13475`）。
 
 ### `appendArrowParamBindingName` (`src/parser.zig:12703`)
@@ -294,12 +294,13 @@ cover grammar 已确认是箭头后进入。创建 `func_type = .arrow` 的子 F
 
 ### `parseClassElement` (`src/parser.zig:13231`)
 
+- **结构（2026-09-19 拆分后）**：`parseClassElementModifiers`（static / TS 修饰符）→ `parseClassMethodPrefix`（`async` / `*`）→ 按首 token 分派：`parseClassAccessor`（get/set 的 private / 计算 / 具名三臂）、`parseClassPrivateElement`（`#x` 字段与方法）、`parseClassComputedElement`、`parseClassNamedElement`（方法 / 构造器 / 字段）、`parseClassStaticBlock`。
 - **签名**：`fn parseClassElement(s: *State) Error!void`。
 - **作用**：解析一个类元素（字段/方法/访问器/static block/私有名）。
 - **实现**：
 保存/恢复 `is_static`、`in_constructor`。`static` 仅当后面不是 `;`/`}`/`(`/`=` 时当修饰符（否则它是名字）。
 
-然后 `async` / `*` 设 method_kind。`get`/`set`：私有访问器登记 `#` 名并 `parseClassElementFunction`，`set_home_object` 后 `scope_put_var_init`（setter 用 `<set>` 伴生 atom）；计算名走 `emitClassComputedMethod`；普通名 `define_method` getter/setter 旗。禁止 `get constructor`、static `prototype`。
+然后 `async` / `*` 设 method_kind。`get`/`set`：私有访问器登记 `#` 名并 `parseClassElementFunction`，`set_home_object` 后 `scope_put_var_init`（setter 用 `<set>` 伴生 atom）；计算名走 `parseClassComputedMethod`；普通名 `define_method` getter/setter 旗。禁止 `get constructor`、static `prototype`。
 
 `#name`：字段或方法（`(`）。`#constructor` 非法。方法 `registerClassPrivateElement` + 函数 + brand；字段进 fields_init 函数。
 
@@ -308,13 +309,14 @@ cover grammar 已确认是箭头后进入。创建 `func_type = .arrow` 的子 F
 
 ### `parseClass` (`src/parser.zig:14280`)
 
+- **结构（2026-09-19 拆分后）**：主干只解析名字与类型参数，然后 `parseClassTail`（继承、两层内部作用域、类体、合成初始化函数、构造器 cpool；在类上下文下解析并还原外层上下文，返回 `ParsedClass`），最后按声明 / 表达式调 `emitClassDeclaration` / `emitClassExpression` 发 define_class 序列。
 - **签名**：`fn parseClass(s: *State, is_decl: bool) Error!?Atom`。
 - **作用**：解析类声明或类表达式的整个 ClassTail：作用域、heritage、私有名预扫、类体、`define_class` 与各类初始化调用。
 - **实现**：
 对照 `js_parse_class`（`quickjs.c:24667`）。`class` 关键字后可选/必选名字。整个 ClassTail 词法严格（禁八进制字面量/转义）。先 `pushScope` 再 `parseClassHeritage`（`extends` 在名字绑定之前求值，故 heritage 里的类名是 TDZ）。再 `defineVar(.const_)` 内部名。`collectClassPrivateBoundNames` 预扫 `#` 名。第二个 scope 放 `<class_fields_init>` const。
 
-`parseClassBodyAfterOpen` 的运行时字节码 `emitterDetachTail` 挪到 `define_class` 之后（对齐 qjs 把 body 推迟）。无构造器则 `appendDefaultClassConstructor`。弹出两个 scope 的 identity，发射 `define_class`、private brand、splice 运行时段、初始化内部名与 fields_init、static init 调用，再 `leave_scope` 两层。声明在 ClassTail 之后才 `defineVar(.let_)` 外层绑定（computed key 期间外层仍 TDZ）。表达式返回 null 名字；声明返回 owned 名字 atom。
-- **所有权 / 错误 / 调用**：全局回滚点是开头那个大 `errdefer`：按 `class_private_scope_pushed` / `class_outer_scope_pushed` 弹回 scope identity，把 `class_private_elements` / `class_private_bound_names` 截回进入时的长度，并还原 `class_fields_init_child_index`、`class_static_init_child_index`、两个 brand 标志与 `is_static` / `is_strict` / `lex.is_strict_mode`（成功路径则在中段手工还原同一组字段并把两个 pushed 标志清掉，`errdefer` 便不再重复弹栈）。`runtime_seg` 这段从 Builder 尾部摘下来的字节码由 `defer s.activeBuilder().discardSegment(&runtime_seg)` 兜底，正常路径被 `emitterSpliceSegment` 消费掉。返回值是**移交给调用方的类名 atom**：声明路径在 `return` 前把局部 `class_name` 置 `null` 以示交出，表达式路径返回 `null`。错误：模块顶层重名经 `failExpectedDescription`，缺名字 / 缺 `{` 经 fail 族，内部不变量（声明却没有名字、缺 `class_fields_init` 槽、marker 偏移倒挂）是 `Error.ParserInvariant`，字节码偏移溢出是 `Error.BytecodeOverflow`。五个调用点：类表达式（`src/parser.zig:6308`）、类声明语句（`:9128`）、`export`（`:15463` / `:15466`）、`export default`（`:15624`）。
+`parseClassBodyAfterOpen` 的运行时字节码 `Emitter.detachTail` 挪到 `define_class` 之后（对齐 qjs 把 body 推迟）。无构造器则 `appendDefaultClassConstructor`。弹出两个 scope 的 identity，发射 `define_class`、private brand、splice 运行时段、初始化内部名与 fields_init、static init 调用，再 `leave_scope` 两层。声明在 ClassTail 之后才 `defineVar(.let_)` 外层绑定（computed key 期间外层仍 TDZ）。表达式返回 null 名字；声明返回 owned 名字 atom。
+- **所有权 / 错误 / 调用**：两层 scope 各是一个 `OpenScope`，在各自 `openScope` 处 `errdefer scope.pop(s)`（正常路径也用 `pop`：类作用域不发 leave 标记）；其余回滚点是开头那个大 `errdefer`：把 `class_private_elements` / `class_private_bound_names` 截回进入时的长度，并还原 `class_fields_init_child_index`、`class_static_init_child_index`、两个 brand 标志与 `is_static` / `is_strict` / `lex.is_strict_mode`（成功路径则在中段手工还原同一组字段并把两个 pushed 标志清掉，`errdefer` 便不再重复弹栈）。`runtime_seg` 这段从 Builder 尾部摘下来的字节码由 `defer s.activeBuilder().discardSegment(&runtime_seg)` 兜底，正常路径被 `Emitter.spliceSegment` 消费掉。返回值是**移交给调用方的类名 atom**：声明路径在 `return` 前把局部 `class_name` 置 `null` 以示交出，表达式路径返回 `null`。错误：模块顶层重名经 `failExpectedDescription`，缺名字 / 缺 `{` 经 fail 族，内部不变量（声明却没有名字、缺 `class_fields_init` 槽、marker 偏移倒挂）是 `Error.ParserInvariant`，字节码偏移溢出是 `Error.BytecodeOverflow`。五个调用点：类表达式（`src/parser.zig:6308`）、类声明语句（`:9128`）、`export`（`:15463` / `:15466`）、`export default`（`:15624`）。
 
 ## 覆盖核对
 

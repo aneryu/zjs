@@ -1174,11 +1174,12 @@ test "FunctionDef final scope proof reseals late arguments links and rejects cyc
     // a complete proof boundary restored for later sibling/parent resolution.
     try fd.ensureArgumentsArgumentBinding();
     try fd.validateFinalScopeLinks();
-    try std.testing.expect(fd.arguments_arg_idx > parameter_idx);
-    try std.testing.expectEqual(fd.arguments_arg_idx, fd.scopes[1].first);
+    const arguments_arg_idx = fd.arguments_arg_idx.?;
+    try std.testing.expect(arguments_arg_idx > parameter_idx);
+    try std.testing.expectEqual(@as(i32, arguments_arg_idx), fd.scopes[1].first);
     try std.testing.expectEqual(
         parameter_idx,
-        fd.vars[@intCast(fd.arguments_arg_idx)].scope_next,
+        fd.vars[arguments_arg_idx].scope_next,
     );
     try std.testing.expectEqual(
         bytecode.function_bytecode.arg_scope_end,
@@ -1187,7 +1188,7 @@ test "FunctionDef final scope proof reseals late arguments links and rejects cyc
 
     // Even the idempotent early-return arm validates first; a synthetic caller
     // cannot smuggle a cyclic chain into the trusted production specialization.
-    fd.vars[@intCast(fd.arguments_arg_idx)].scope_next = fd.arguments_arg_idx;
+    fd.vars[arguments_arg_idx].scope_next = arguments_arg_idx;
     try std.testing.expectError(error.InvalidScope, fd.validateFinalScopeLinks());
     try std.testing.expectError(error.InvalidScope, fd.ensureArgumentsArgumentBinding());
 }
@@ -2567,7 +2568,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
     fd.use_short_opcodes = true;
     _ = try fd.appendScope(-1);
     fd.is_named_func_expr = true;
-    try std.testing.expectEqual(@as(i32, 0), try fd.ensureFuncExprSelfBinding());
+    try std.testing.expectEqual(@as(u16, 0), try fd.ensureFuncExprSelfBinding());
     // qjs add_func_var uses add_var: the special fallback is not linked into
     // the ordinary lexical scope list.
     try std.testing.expectEqual(@as(i32, -1), fd.scopes[0].first);

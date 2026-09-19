@@ -2061,7 +2061,6 @@ fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
     return @intFromFloat(integer);
 }
 
-
 fn isTrimCodeUnit(unit: u16) bool {
     return unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);
 }

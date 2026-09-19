@@ -42,7 +42,7 @@
 
 顺序：`parseArrowAssignment` → `parseDestructuringAssignment` → 记下直接 ident 作为 `direct_lhs_atom` → `parseCondExpr`。若不是 `=` / 复合赋值 / 逻辑赋值则返回。`??` 表达式不能当赋值目标。
 
-消费运算符后 `getLValue`：逻辑赋值遇到 Annex-B 运行时非法调用目标是早期 SyntaxError；普通 `=` 则跳过 RHS 可达路径、解析不可达 RHS 以保持语法状态，再 `emitInvalidAssignmentTarget`。逻辑赋值走 `emitLogicalAssignLValue`。否则递归解析 RHS，复合运算在运算符源位置 `emitterOpAt`，直接 ident 且 `owns_name` 时 `setObjectName`，最后 `putLValue(..., .keep_top)`。
+消费运算符后 `getLValue`：逻辑赋值遇到 Annex-B 运行时非法调用目标是早期 SyntaxError；普通 `=` 则跳过 RHS 可达路径、解析不可达 RHS 以保持语法状态，再 `emitInvalidAssignmentTarget`。逻辑赋值走 `parseLogicalAssignment`。否则递归解析 RHS，复合运算在运算符源位置 `Emitter.opAt`，直接 ident 且 `owns_name` 时 `setObjectName`，最后 `putLValue(..., .keep_top)`。
 - **所有权 / 错误 / 调用**：`lvalue` 是唯一需要配对的资源（`defer lvalue.deinit(s)`，`.field` / `.scope_var` 等臂带 `owns_name` 的 atom）；`assign_expr_depth` 用 `defer` 减回，`last_coalesce_expr_depth` 只清不存。`direct_lhs_atom` 刻意用**本地 owner** 而不是复用下游操作数里的那份（源码注释：qjs 靠发出的 getter 钉住 `name0`，这里不依赖那个生命周期），它只用于匿名函数命名，且要求 `lvalue.owns_name` 且名字一致才 `setObjectName`。`??` 直接作赋值目标返回 `Error.InvalidAssignmentTarget`；Annex-B 的运行时非法调用目标则**不**报早期错误，而是发一段跳过 RHS、栈平衡的不可达尾巴再 `emitInvalidAssignmentTarget`——但逻辑赋值（`&&=` / `||=` / `??=`）不享受这条豁免，仍是早期 `InvalidAssignmentTarget`。`pub` 出口，除 RHS 递归自调用外，主要由 `parseExpr2` 与各初始化器位置调用。
 
 ### `parseDestructuringAssignment` (`src/parser.zig:3922`)
@@ -63,7 +63,7 @@
 
 - **签名**：`pub fn parseCoalesceExpr(s: *State, flags: ParseFlags) Error!void`。
 - **作用**：解析 `??` 链并发出「左值非空就短路」的跳转。
-- **实现**：先 `parseLogicalAndOr(TOK_LOR, flags)`；没有 `??` 就结束。有则记下 `last_coalesce_expr_depth = assign_expr_depth`（供 `??` 与 `||` / `&&` 无括号混用的报错判定），新建一个共用出口标签后循环：每个 `??` 发 `dup; is_undefined_or_null; if_false → 出口; drop`，右操作数用 `parseExprBinary(8, forceResultNeeded(flags))` 解析——只到二元第 8 级，因此链里不可能直接吞进未加括号的 `||` / `&&`。循环结束 `emitterBindLabel` 绑出口（qjs `js_parse_coalesce_expr`，`quickjs.c:27254`）。
+- **实现**：先 `parseLogicalAndOr(TOK_LOR, flags)`；没有 `??` 就结束。有则记下 `last_coalesce_expr_depth = assign_expr_depth`（供 `??` 与 `||` / `&&` 无括号混用的报错判定），新建一个共用出口标签后循环：每个 `??` 发 `dup; is_undefined_or_null; if_false → 出口; drop`，右操作数用 `parseExprBinary(8, forceResultNeeded(flags))` 解析——只到二元第 8 级，因此链里不可能直接吞进未加括号的 `||` / `&&`。循环结束 `Emitter.bind` 绑出口（qjs `js_parse_coalesce_expr`，`quickjs.c:27254`）。
 - **所有权 / 错误 / 调用**：不分配；唯一写进 `State` 的是 `last_coalesce_expr_depth`——它**只置不清**，由 `parseAssignExpr2` 在进入新的一层赋值深度时清掉，并据此把 `a ?? b = c` 判成 `Error.InvalidAssignmentTarget`。出口标签是整条 `??` 链共用的一个 `LabelId`，循环里每轮都往它上面挂一条 `if_false`，最后统一绑定。`dup` / `drop` 成对，链净压一个值。错误来自子解析器与 emit。`pub` 出口，唯一调用方 `parseCondExpr`。
 
 ### `parseLogicalAndOr` (`src/parser.zig:4503`)
@@ -82,6 +82,7 @@
 
 ### `parseUnary` (`src/parser.zig:4595`)
 
+- **结构（2026-09-19 拆分后）**：前缀 `++`/`--` 在 `parsePrefixUpdate`，`yield` 在 `parseYieldExpression`，`await` 在 `parseAwaitExpression`；本函数只剩一元运算符与 `**` 尾。
 - **签名**：`pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void`。
 - **作用**：解析一元与前缀表达式：`+` `-` `~` `!` `void` `typeof` `delete`、前缀 `++` / `--`、右结合 `**`，以及上下文相关的 `yield` 与 `await`。
 - **实现**：
@@ -102,19 +103,19 @@ class static block 里 `await`/`yield` 直接 unexpected。`yield`：参数默�
 
 - **签名**：`pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void`。
 - **作用**：解析左值表达式后面可能跟的后缀 `++` / `--`。
-- **实现**：先 `parseLhsExpr`；后面不是 `TOK_INC` / `TOK_DEC` 就直接返回。ASI 闸：`s.lex.got_lf` 为真（算子与操作数之间隔了行终结符）同样返回，把 `++` 留给下一条语句（qjs `quickjs.c:26206`）。否则 `getLValue(s, true)` 取可写引用（`defer lvalue.deinit`），记下算子行列，按 token 选 `post_inc` / `post_dec`，`advance` 吃掉算子。lvalue 带 `invalid_call` 标记时（`f()++` 这类）只发 `emitInvalidAssignmentTarget`，把 ReferenceError 留到运行时再抛。正常路径 `emitterOpAt` 把更新指令钉在算子位置，再 `putLValue(&lvalue, .keep_second)` 写回并把**旧值**留在栈上。
+- **实现**：先 `parseLhsExpr`；后面不是 `TOK_INC` / `TOK_DEC` 就直接返回。ASI 闸：`s.lex.got_lf` 为真（算子与操作数之间隔了行终结符）同样返回，把 `++` 留给下一条语句（qjs `quickjs.c:26206`）。否则 `getLValue(s, true)` 取可写引用（`defer lvalue.deinit`），记下算子行列，按 token 选 `post_inc` / `post_dec`，`advance` 吃掉算子。lvalue 带 `invalid_call` 标记时（`f()++` 这类）只发 `emitInvalidAssignmentTarget`，把 ReferenceError 留到运行时再抛。正常路径 `Emitter.opAt` 把更新指令钉在算子位置，再 `putLValue(&lvalue, .keep_second)` 写回并把**旧值**留在栈上。
 - **所有权 / 错误 / 调用**：不分配；`lvalue` 用 `defer lvalue.deinit(s)` 配对。栈约定与前缀形态不同：`putLValue(.keep_second)` 保证留在栈上的是**自增前的旧值**。没有自有的 fail 分支——`f()++` 不报早期错误而是发 `emitInvalidAssignmentTarget` 把 ReferenceError 推到运行时（Annex-B）。`got_lf` 那条 ASI 闸不报错，只是把 `++` 让给下一条语句。`pub` 出口，调用方是 `parseUnary` 的三处（`src/parser.zig:4924` 非生成器 `yield`、`:4983` 可当标识符的 `await`、`:4999` 一般路径）。
 
 ### `parseLhsExpr` (`src/parser.zig:5411`)
 
 - **签名**：`pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void`。
 - **作用**：解析左值表达式：主表达式加上任意多的成员访问、调用与 `new`，并在这里收口可选链、展开 `super(...)`。
-- **实现**：先取头（`new` 走 `parseNewExpr`，否则 `parsePrimary`）并记下 `last_was_super`，再由 `parseMemberChain` 吃掉后续的 `.x` / `[x]` / `(...)` / `?.`，可选链出口标签经 `optional_chain_label` 回传。链上出现过 `?.` 时在这里收口：记下当前 `code_len` 作为 getter 末尾，`emitterBindParserLabelRaw` 绑出口（raw：保留最后一条 getter 的 provenance），再把紧邻的尾码换成可选链版本——6 字节的 `get_field` → `get_field_opt_chain`、1 字节的 `get_array_el` → `get_array_el_opt_chain`，都对不上就 `invalidateLastOpcode`；这一步让 `delete a?.b` / `a?.b()` 仍能从真正的最后一条 getter 取身份，不必靠字节签名恢复。最后是 `super(...)`：仅当 `was_super`、没有可选链、下一个是 `(` 时进入；`allow_super_call` 为假 `failUnexpectedToken`；`this_active_func_var_idx` / `new_target_var_idx` / `this_var_idx` 任一为负说明 super 是跨函数捕获来的，转 `emitCapturedSuperConstructorCall` 并返回。常规路径 `discardTrailingGetSuper` 撤掉刚发的取 super 尾码，重发 `get_loc <active_func>; get_super; get_loc <new_target>`，`parseCallArgs` 之后按形态发 `call_constructor <argc>` 或 `apply 1`（都钉在 `super` 的源位置），然后 `dup` + `put_loc_check_init <this>` 完成 `this` 的 TDZ 初始化、`emitClassFieldInitCall` 跑字段初始化器；派生构造器里若登记了 TS 参数属性，再逐个发 `this.<name> = <param>`。
+- **实现**：先取头（`new` 走 `parseNewExpr`，否则 `parsePrimary`）并记下 `last_was_super`，再由 `parseMemberChain` 吃掉后续的 `.x` / `[x]` / `(...)` / `?.`，可选链出口标签经 `optional_chain_label` 回传。链上出现过 `?.` 时在这里收口：记下当前 `code_len` 作为 getter 末尾，`Emitter.bindParserRaw` 绑出口（raw：保留最后一条 getter 的 provenance），再把紧邻的尾码换成可选链版本——6 字节的 `get_field` → `get_field_opt_chain`、1 字节的 `get_array_el` → `get_array_el_opt_chain`，都对不上就 `invalidateLastOpcode`；这一步让 `delete a?.b` / `a?.b()` 仍能从真正的最后一条 getter 取身份，不必靠字节签名恢复。最后是 `super(...)`：仅当 `was_super`、没有可选链、下一个是 `(` 时进入；`allow_super_call` 为假 `failUnexpectedToken`；`this_active_func_var_idx` / `new_target_var_idx` / `this_var_idx` 任一为负说明 super 是跨函数捕获来的，转 `parseCapturedSuperConstructorCall` 并返回。常规路径 `discardTrailingGetSuper` 撤掉刚发的取 super 尾码，重发 `get_loc <active_func>; get_super; get_loc <new_target>`，`parseCallArgs` 之后按形态发 `call_constructor <argc>` 或 `apply 1`（都钉在 `super` 的源位置），然后 `dup` + `put_loc_check_init <this>` 完成 `this` 的 TDZ 初始化、`emitClassFieldInitCall` 跑字段初始化器；派生构造器里若登记了 TS 参数属性，再逐个发 `this.<name> = <param>`。
 - **所有权 / 错误 / 调用**：不分配；`optional_chain_label` 是 `parseMemberChain` 通过出参交回来的**必须绑定一次**的标签身份，本函数是它唯一的绑定点。可选链收口与 `discardTrailingGetSuper` 都会**就地改写或截断已发出的字节码**（前者把尾码换成 `*_opt_chain`，后者撤掉刚发的 `get_super`），这是本函数最容易踩的不变量：改写只在 `last_opcode_pos` 与 `code_len` 恰好对齐尾指令时进行，否则 `invalidateLastOpcode` 放弃。`s.last_was_super` 是一次性标志，用完置 `false`。TS 参数属性读的是 `current_parameter_properties` 里借来的 atom。唯一自有错误是 `super()` 出现在 `allow_super_call` 为假处的 `failUnexpectedToken`。`pub` 出口，调用方有 `parsePostfixExpr`（`src/parser.zig:5580`）、`parseForInOf` 的左端（`:10898`）、`parsePatternTarget` 的 assignment 臂（`:12706`）、`parseClassHeritage`（`:13693`）。
 
-### `emitCapturedSuperConstructorCall` (`src/parser.zig:5480`)
+### `parseCapturedSuperConstructorCall` (`src/parser.zig:5480`)
 
-- **签名**：`fn emitCapturedSuperConstructorCall(s: *State, flags: ParseFlags, loc: ?SourceLoc) Error!void`。
+- **签名**：`fn parseCapturedSuperConstructorCall(s: *State, flags: ParseFlags, loc: ?SourceLoc) Error!void`。
 - **作用**：在 `this` / `new.target` / `<this_active_func>` 不是当前函数局部槽时（典型是构造器里的箭头函数）发射 `super(...)`，三个隐式绑定全部走 phase-1 的 `scope_get_var`，由 `resolve_variables` 解析成闭包捕获。
 - **实现**：先 `discardTrailingGetSuper` 撤掉成员链已经发出的那条 `get_super`，再按 `<this_active_func>` → `get_super` → `<new.target>` 的顺序重建调用前缀。`parseCallArgs` 返回 `.direct` 时发 `call_constructor argc`，`.applied`（带 spread）时发 `apply 1`；两种都在有 `loc` 时用带行列的 `opU16At` 变体。随后 `dup` 结果并 `scope_put_var_init <this>` 完成 this 绑定，接着 `emitClassFieldInitCall` 跑实例字段初始化。最后若身处带 `extends` 的构造器且有 TypeScript 参数属性（`current_parameter_properties`），逐个发 `this.x = x`。
 - **所有权 / 错误 / 调用**：不分配、不持有资源，纯发射；`loc` 是可选的行列标量，`null` 时用不带源事件的 `opU16` 变体。与 `parseLhsExpr` 里的常规 super 路径相比，差别只有「三个隐式绑定用 `scope_get_var`/`scope_put_var_init` 而不是 `get_loc`/`put_loc_check_init`」——也就是把解析推迟给 `resolve_variables`，让箭头函数拿到闭包捕获。已发出的字节码不可回滚，失败时整个 `FunctionDef` 被上层丢弃。错误全部来自 `parseCallArgs` 与 emit 路径。两个调用方：`parseLhsExpr`（`src/parser.zig:5650`）与 `parseMemberChain` 里的 `super(` 臂（`:5994`）。
@@ -124,7 +125,7 @@ class static block 里 `await`/`yield` 直接 unexpected。`yield`：参数默�
 - **签名**：`fn emitClassFieldInitCall(s: *State) Error!void`。
 - **作用**：在 `super()` 返回之后调用词法里的 `<class_fields_init>` 闭包，把实例字段装到新的 `this` 上。
 - **实现**：对照 `emit_class_field_init`（`quickjs.c:25184-25207`）：`scope_get_var <class_fields_init>` 取出闭包后 `dup` 一份做条件，`if_false` 跳到新建的 `skip_call` 标签（没有字段时该槽是 undefined）；不跳则 `scope_get_var <this>` + `swap` 把接收者摆到位，`call_method 0` 调用。标签绑在共用的收尾处，两条路径都以一条 `drop` 结束，栈高度一致。两个名字都保持 phase-1 的 scope 操作数，于是直接构造器解析成局部、含 `super()` 的箭头函数解析成闭包捕获。
-- **所有权 / 错误 / 调用**：不分配；`skip_call` 是栈上的 `Label`，建出来后必定被 `bind` 一次。栈平衡是本函数的硬约定：进来时压一个闭包值，两条路径（调用过 / 跳过）都汇合到同一条 `drop`，净效应为零。发出的码不可回滚。无自有错误分支。四个调用方：`parseLhsExpr` 的常规 `super()`（`src/parser.zig:5665`）、`emitCapturedSuperConstructorCall`（`:5709`）、`parseMemberChain` 的 `super(` 臂（`:6008`）、以及基类构造器进入体之前的那次（`parseFunctionParamsAndBody`，`:11932`）。
+- **所有权 / 错误 / 调用**：不分配；`skip_call` 是栈上的 `Label`，建出来后必定被 `bind` 一次。栈平衡是本函数的硬约定：进来时压一个闭包值，两条路径（调用过 / 跳过）都汇合到同一条 `drop`，净效应为零。发出的码不可回滚。无自有错误分支。四个调用方：`parseLhsExpr` 的常规 `super()`（`src/parser.zig:5665`）、`parseCapturedSuperConstructorCall`（`:5709`）、`parseMemberChain` 的 `super(` 臂（`:6008`）、以及基类构造器进入体之前的那次（`parseFunctionParamsAndBody`，`:11932`）。
 
 ### `parseNewExpr` (`src/parser.zig:5536`)
 
@@ -145,7 +146,7 @@ class static block 里 `await`/`yield` 直接 unexpected。`yield`：参数默�
 - **签名**：`fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?OptionalChainLabel) Error!void`。
 - **作用**：循环吃掉左值后面的 `.x` / `[x]` / 调用 / 标签模板 / `?.`，其中 super 属性、私有名与可选链各有专门的发射形态。
 - **实现**：
-LHS 的 `.` / `[]` / 调用 / 模板标签 / `?.` 循环。`?.` 发 `optional_chain_test` 跳到共享出口标签。`super.x` / `super[x]` 先 `discardTrailingGetSuper` + `emitSuperThisAndHomeObject` + `get_super`，再用 `get_super_value` 取值（不是 `get_field`/`get_array_el`）。私有名走 `scope_get_private_field`，且要求在类体内且该名字已绑定。调用走 `prepareCallReference` + `parseCallArgs` + `emitPreparedCall`；`super(...)` 例外：直接 `get_loc <this_active_func>` + `get_super` + `get_loc <new_target>` 后发 `call_constructor`（有 spread 则 `apply`），再 `dup` + `put_loc_check_init <this>` + `emitClassFieldInitCall`；三个槽位有一个没分配就退到 `emitCapturedSuperConstructorCall`。标签模板走 `parseTaggedTemplateInvocation`（`?.` 链里禁止）。`new` 不在这里（`parseLhsExpr` 先分流）。
+LHS 的 `.` / `[]` / 调用 / 模板标签 / `?.` 循环。`?.` 发 `optional_chain_test` 跳到共享出口标签。`super.x` / `super[x]` 先 `discardTrailingGetSuper` + `emitSuperThisAndHomeObject` + `get_super`，再用 `get_super_value` 取值（不是 `get_field`/`get_array_el`）。私有名走 `scope_get_private_field`，且要求在类体内且该名字已绑定。调用走 `prepareCallReference` + `parseCallArgs` + `emitPreparedCall`；`super(...)` 例外：直接 `get_loc <this_active_func>` + `get_super` + `get_loc <new_target>` 后发 `call_constructor`（有 spread 则 `apply`），再 `dup` + `put_loc_check_init <this>` + `emitClassFieldInitCall`；三个槽位有一个没分配就退到 `parseCapturedSuperConstructorCall`。标签模板走 `parseTaggedTemplateInvocation`（`?.` 链里禁止）。`new` 不在这里（`parseLhsExpr` 先分流）。
 - **所有权 / 错误 / 调用**：不分配堆内存。两个跨轮次的状态要点：(1) `s.last_was_super` 在每个访问臂开头**先取走再置 `false`**，保证 `super.x.y` 里只有第一段是 super 形态；(2) `optional_chain_label` 是出参，第一次遇到 `?.` 时由 `emitOptionalChainTest` 建出身份、之后各段共用，但**绑定不在本函数**——交回 `parseLhsExpr` 收口，所以中途 `return` 的错误路径会留下一个未绑定的标签身份（错误路径整个 `FunctionDef` 会被丢弃，所以不构成泄漏）。属性名 atom 全是 token 借用的，写进操作数后才 `advance`。super 形态会 `discardTrailingGetSuper` **截断已发出的尾码**再重发。错误面：`.` / `?.` 后面不是可接受的属性名、`super?.`、类外私有名、未绑定私有名、`super()` 在 `allow_super_call` 为假处、可选链里的标签模板，全是 `failUnexpectedToken`。唯一调用方 `parseLhsExpr`（`src/parser.zig:5623`）。
 
 ### `parseTaggedTemplateInvocation` (`src/parser.zig:5818`)
@@ -161,7 +162,7 @@ LHS 的 `.` / `[]` / 调用 / 模板标签 / `?.` 循环。`?.` 发 `optional_ch
 - **签名**：`fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape`。
 - **作用**：解析 `(arg0, arg1, ...)` 实参表（自己吃掉 `(` 与 `)`），返回 `CallArgsShape` 告诉调用方用直接调用还是 `apply`。
 - **实现**：无 spread 时逐个 `parseAssignExpr2` 计数，返回 `.direct = argc`（参数留在栈顶）；一旦出现 `...`，改成 QuickJS 的 `apply` 降法——在栈上攒一个实参数组并返回 `.applied`，最终的 `apply <is_new>` 与栈整理（普通调用 `undefined; swap`、方法/`new` 用 `perm3`）由调用方负责。参数 `flags` 未使用。
-- **所有权 / 错误 / 调用**：不分配堆内存；返回的 `CallArgsShape` 是纯值，但它**同时描述了栈上的形状**，调用方必须按约定收尾：`.direct` 时 argc 个实参在栈顶，`.applied` 时栈顶是一个实参数组（spread 路径内部用 `array_from` + `push_i32` 维护一个索引，收尾 `drop` 掉索引只留数组）。实参一律用 `ParseFlags.default`（`in_accepted = true`），因此 for-init 的 no-`in` 限制在实参位置被重置；传进来的 `flags` 实际未使用（首行 `_ = flags;`）。错误来自 `expectPunct` 与 `parseAssignExpr2`。六个调用点：`parseLhsExpr`（`src/parser.zig:5658`）、`emitCapturedSuperConstructorCall`（`:5690`）、`parseNewExpr`（`:5783`）、`parseMemberChain` 的三处（`:5922` 可选调用、`:6001` super()、`:6012` 普通调用）。
+- **所有权 / 错误 / 调用**：不分配堆内存；返回的 `CallArgsShape` 是纯值，但它**同时描述了栈上的形状**，调用方必须按约定收尾：`.direct` 时 argc 个实参在栈顶，`.applied` 时栈顶是一个实参数组（spread 路径内部用 `array_from` + `push_i32` 维护一个索引，收尾 `drop` 掉索引只留数组）。实参一律用 `ParseFlags.default`（`in_accepted = true`），因此 for-init 的 no-`in` 限制在实参位置被重置；传进来的 `flags` 实际未使用（首行 `_ = flags;`）。错误来自 `expectPunct` 与 `parseAssignExpr2`。六个调用点：`parseLhsExpr`（`src/parser.zig:5658`）、`parseCapturedSuperConstructorCall`（`:5690`）、`parseNewExpr`（`:5783`）、`parseMemberChain` 的三处（`:5922` 可选调用、`:6001` super()、`:6012` 普通调用）。
 
 ### `parseRegExpLiteral` (`src/parser.zig:5986`)
 
@@ -226,8 +227,8 @@ LHS 的 `.` / `[]` / 调用 / 模板标签 / `?.` 循环。`?.` 发 `optional_ch
 
 - **签名**：`fn parseObjectAccessorProperty( s: *State, flags: ParseFlags, func_kind: ParseFunctionKind, define_flags: u8, source_start: FunctionSourceStart, capacity_hint: *ObjectLiteralCapacityHint, ) Error!void`。
 - **作用**：解析对象字面量里的 `get` / `set` 访问器属性。
-- **实现**：计算名 `[expr]` 分支作废容量提示、解析键表达式、要求紧跟 `(`，然后 `emitObjectMethodFunction` + `define_method_computed`（flags 带 `| 4`）。静态名分支用 `parseObjectPropertyName` 取名（取不到就 unexpected）、记进容量提示，同样要求 `(`，最后发 `define_method`（同样 `| 4`）。
-- **所有权 / 错误 / 调用**：不分配；`define_flags` 是调用方算好的位（getter=1 / setter=2），本函数只在其上或一个 `| 4`（enumerable 标志）。`capacity_hint` 是调用方的累积状态：计算名臂 `invalidate()`，静态名臂把名字记进去。`source_start` 是标量，透传给 `emitObjectMethodFunction` 供 `toString` 截源。方法体的子 `FunctionDef` 全部由 `emitObjectMethodFunction` → `parseFunctionParamsAndBody` 记账。错误：取不到属性名、访问器名后不是 `(`，都是 fail 族。唯一调用方 `parseObjectProperty` 的 `get`/`set` 臂（`src/parser.zig:6839`）。
+- **实现**：计算名 `[expr]` 分支作废容量提示、解析键表达式、要求紧跟 `(`，然后 `parseObjectMethodFunction` + `define_method_computed`（flags 带 `| 4`）。静态名分支用 `parseObjectPropertyName` 取名（取不到就 unexpected）、记进容量提示，同样要求 `(`，最后发 `define_method`（同样 `| 4`）。
+- **所有权 / 错误 / 调用**：不分配；`define_flags` 是调用方算好的位（getter=1 / setter=2），本函数只在其上或一个 `| 4`（enumerable 标志）。`capacity_hint` 是调用方的累积状态：计算名臂 `invalidate()`，静态名臂把名字记进去。`source_start` 是标量，透传给 `parseObjectMethodFunction` 供 `toString` 截源。方法体的子 `FunctionDef` 全部由 `parseObjectMethodFunction` → `parseFunctionParamsAndBody` 记账。错误：取不到属性名、访问器名后不是 `(`，都是 fail 族。唯一调用方 `parseObjectProperty` 的 `get`/`set` 臂（`src/parser.zig:6839`）。
 
 ### `parseObjectPropertyName` (`src/parser.zig:6703`)
 

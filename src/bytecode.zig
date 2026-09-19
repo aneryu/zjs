@@ -3027,7 +3027,7 @@ pub const function_bytecode = struct {
         /// Constant-pool entry for the function declaration hoisted into this
         /// binding.  As in QuickJS, duplicate body declarations overwrite this
         /// one slot, so the prologue emits only the last initializer.
-        func_pool_idx: i32 = -1,
+        func_pool_idx: ?u32 = null,
         is_lexical: bool = false,
         is_const: bool = false,
         is_captured: bool = false,
@@ -4850,7 +4850,8 @@ pub const function_def = struct {
         atoms: *atom.AtomTable,
         parent: ?*FunctionDefImpl = null,
         discard_next: ?*FunctionDefImpl = null,
-        parent_cpool_idx: i32 = -1,
+        /// This child's slot in the parent's constant pool once appended.
+        parent_cpool_idx: ?u16 = null,
         parent_scope_level: i32 = 0,
         parent_parameter_environment_only: bool = false,
 
@@ -4908,6 +4909,13 @@ pub const function_def = struct {
         vars: []VarDef = &.{},
         vars_capacity: usize = 0,
         vars_htab: []u32 = &.{},
+        /// Newest scope-0 (function-level) row per name: the flat `find_var`
+        /// pass that follows a lexical-chain miss (qjs `var_htab`). Built on
+        /// demand once the function has enough rows for the linear scan to
+        /// matter, and brought up to date on demand: rows are append-only and
+        /// a row never changes scope, so catching up is exact.
+        function_var_index: std.AutoHashMapUnmanaged(u32, u16) = .empty,
+        function_var_indexed_len: usize = 0,
         var_count: i32 = 0,
         args: []VarDef = &.{},
         args_capacity: usize = 0,
@@ -4923,16 +4931,15 @@ pub const function_def = struct {
         /// structural proof, not finalization_state, advances it to proven.
         /// Parsing and standalone resolver calls never retain a cached proof.
         scope_link_cache: ScopeLinkCache = .disabled,
-        var_object_idx: i32 = -1,
-        arg_var_object_idx: i32 = -1,
-        arguments_var_idx: i32 = -1,
-        arguments_arg_idx: i32 = -1,
-        func_var_idx: i32 = -1,
-        eval_ret_idx: i32 = -1,
-        this_var_idx: i32 = -1,
-        new_target_var_idx: i32 = -1,
-        this_active_func_var_idx: i32 = -1,
-        home_object_var_idx: i32 = -1,
+        var_object_idx: ?u16 = null,
+        arg_var_object_idx: ?u16 = null,
+        arguments_var_idx: ?u16 = null,
+        arguments_arg_idx: ?u16 = null,
+        func_var_idx: ?u16 = null,
+        this_var_idx: ?u16 = null,
+        new_target_var_idx: ?u16 = null,
+        this_active_func_var_idx: ?u16 = null,
+        home_object_var_idx: ?u16 = null,
 
         // Scopes
         scope_level: i32 = 0,
@@ -5230,98 +5237,98 @@ pub const function_def = struct {
         /// `func_var_idx`. QuickJS marks the binding const only when the
         /// defining function is strict; sloppy writes are discarded during
         /// scope resolution instead of reaching the runtime cell.
-        pub fn ensureFuncExprSelfBinding(self: *FunctionDefImpl) !i32 {
-            if (self.func_var_idx < 0) {
-                // add_func_var uses add_var, not add_scope_var: the binding is
-                // a special fallback after ordinary scopes/vars/arguments and
-                // must not participate in the lexical scope linked list.
-                self.func_var_idx = try self.appendVar(.{
-                    .var_name = self.func_name,
-                    .scope_level = 0,
-                    // qjs add_var zero-initializes scope_next. These special
-                    // fallbacks are intentionally outside scopes[].first.
-                    .scope_next = 0,
-                    .is_const = self.is_strict_mode,
-                    .var_kind = .function_name,
-                });
-            }
-            return self.func_var_idx;
+        pub fn ensureFuncExprSelfBinding(self: *FunctionDefImpl) !u16 {
+            if (self.func_var_idx) |idx| return idx;
+            // add_func_var uses add_var, not add_scope_var: the binding is
+            // a special fallback after ordinary scopes/vars/arguments and
+            // must not participate in the lexical scope linked list.
+            const idx: u16 = @intCast(try self.appendVar(.{
+                .var_name = self.func_name,
+                .scope_level = 0,
+                // qjs add_var zero-initializes scope_next. These special
+                // fallbacks are intentionally outside scopes[].first.
+                .scope_next = 0,
+                .is_const = self.is_strict_mode,
+                .var_kind = .function_name,
+            }));
+            self.func_var_idx = idx;
+            return idx;
         }
 
         /// QuickJS pseudo bindings are appended with `add_var`, after the
         /// ordinary scope graph has been built. They are deliberately absent
         /// from `scopes[].first`: `resolve_pseudo_var` reaches them only after
         /// ordinary current-scope lookup has failed.
-        pub fn ensureThisBinding(self: *FunctionDefImpl) !i32 {
-            if (self.this_var_idx < 0) {
-                self.this_var_idx = try self.appendVar(.{
-                    .var_name = atom.ids.this_,
-                    .scope_level = 0,
-                    .scope_next = 0,
-                    .is_lexical = self.is_derived_class_constructor,
-                    .var_kind = .normal,
-                });
-                if (self.is_derived_class_constructor) {
-                    // resolve_labels owns the single TDZ initialization in
-                    // the function prologue.
-                    self.vars[@intCast(self.this_var_idx)].tdz_emitted_at_decl = true;
-                }
+        pub fn ensureThisBinding(self: *FunctionDefImpl) !u16 {
+            if (self.this_var_idx) |idx| return idx;
+            const idx: u16 = @intCast(try self.appendVar(.{
+                .var_name = atom.ids.this_,
+                .scope_level = 0,
+                .scope_next = 0,
+                .is_lexical = self.is_derived_class_constructor,
+                .var_kind = .normal,
+            }));
+            if (self.is_derived_class_constructor) {
+                // resolve_labels owns the single TDZ initialization in
+                // the function prologue.
+                self.vars[idx].tdz_emitted_at_decl = true;
             }
-            return self.this_var_idx;
+            self.this_var_idx = idx;
+            return idx;
         }
 
-        pub fn ensureNewTargetBinding(self: *FunctionDefImpl) !i32 {
-            if (self.new_target_var_idx < 0) {
-                self.new_target_var_idx = try self.appendVar(.{
-                    .var_name = atom.ids.new_target,
-                    .scope_level = 0,
-                    .scope_next = 0,
-                    .var_kind = .normal,
-                });
-            }
-            return self.new_target_var_idx;
+        pub fn ensureNewTargetBinding(self: *FunctionDefImpl) !u16 {
+            if (self.new_target_var_idx) |idx| return idx;
+            const idx: u16 = @intCast(try self.appendVar(.{
+                .var_name = atom.ids.new_target,
+                .scope_level = 0,
+                .scope_next = 0,
+                .var_kind = .normal,
+            }));
+            self.new_target_var_idx = idx;
+            return idx;
         }
 
-        pub fn ensureThisActiveFunctionBinding(self: *FunctionDefImpl) !i32 {
-            if (self.this_active_func_var_idx < 0) {
-                self.this_active_func_var_idx = try self.appendVar(.{
-                    .var_name = atom.ids.this_active_func,
-                    .scope_level = 0,
-                    .scope_next = 0,
-                    .var_kind = .normal,
-                });
-            }
-            return self.this_active_func_var_idx;
+        pub fn ensureThisActiveFunctionBinding(self: *FunctionDefImpl) !u16 {
+            if (self.this_active_func_var_idx) |idx| return idx;
+            const idx: u16 = @intCast(try self.appendVar(.{
+                .var_name = atom.ids.this_active_func,
+                .scope_level = 0,
+                .scope_next = 0,
+                .var_kind = .normal,
+            }));
+            self.this_active_func_var_idx = idx;
+            return idx;
         }
 
-        pub fn ensureHomeObjectBinding(self: *FunctionDefImpl) !i32 {
-            if (self.home_object_var_idx < 0) {
-                self.home_object_var_idx = try self.appendVar(.{
-                    .var_name = atom.ids.home_object,
-                    .scope_level = 0,
-                    .scope_next = 0,
-                    .var_kind = .normal,
-                });
-            }
+        pub fn ensureHomeObjectBinding(self: *FunctionDefImpl) !u16 {
             // QuickJS publishes need_home_object when either the explicit
             // parser bit or the resolved home-object pseudo local is present.
             self.need_home_object = true;
-            return self.home_object_var_idx;
+            if (self.home_object_var_idx) |idx| return idx;
+            const idx: u16 = @intCast(try self.appendVar(.{
+                .var_name = atom.ids.home_object,
+                .scope_level = 0,
+                .scope_next = 0,
+                .var_kind = .normal,
+            }));
+            self.home_object_var_idx = idx;
+            return idx;
         }
 
         /// Mirror qjs add_arguments_var: the field, rather than a name scan,
         /// owns the identity. An explicit parameter named `arguments` does
         /// not suppress this pseudo binding when direct eval requires it.
-        pub fn ensureArgumentsBinding(self: *FunctionDefImpl) !i32 {
-            if (self.arguments_var_idx < 0) {
-                self.arguments_var_idx = try self.appendVar(.{
-                    .var_name = atom.ids.arguments,
-                    .scope_level = 0,
-                    .scope_next = 0,
-                    .var_kind = .normal,
-                });
-            }
-            return self.arguments_var_idx;
+        pub fn ensureArgumentsBinding(self: *FunctionDefImpl) !u16 {
+            if (self.arguments_var_idx) |idx| return idx;
+            const idx: u16 = @intCast(try self.appendVar(.{
+                .var_name = atom.ids.arguments,
+                .scope_level = 0,
+                .scope_next = 0,
+                .var_kind = .normal,
+            }));
+            self.arguments_var_idx = idx;
+            return idx;
         }
 
         /// Mirror qjs add_arguments_arg. This is the sole pseudo binding that
@@ -5334,7 +5341,7 @@ pub const function_def = struct {
             // input before following it, and leave a freshly proven topology
             // before any caller can resume a trusted production walk.
             try self.validateFinalScopeLinks();
-            if (self.arguments_arg_idx >= 0) return;
+            if (self.arguments_arg_idx != null) return;
             const argument_scope_level: i32 = 1;
             if (@as(usize, @intCast(argument_scope_level)) >= self.scopes.len) {
                 return error.InvalidScope;
@@ -5357,7 +5364,7 @@ pub const function_def = struct {
                 .var_kind = .normal,
             });
             self.scopes[@intCast(argument_scope_level)].first = idx;
-            self.arguments_arg_idx = idx;
+            self.arguments_arg_idx = @intCast(idx);
             try self.validateFinalScopeLinks();
         }
 
@@ -5370,8 +5377,7 @@ pub const function_def = struct {
         /// share the function arguments binding, while `var arguments`
         /// deliberately shadows it with a separate body binding.
         pub fn hasExplicitArgumentsVar(self: *const FunctionDefImpl) bool {
-            if (self.arguments_var_idx < 0) return false;
-            const idx: usize = @intCast(self.arguments_var_idx);
+            const idx: usize = self.arguments_var_idx orelse return false;
             if (idx >= self.vars.len) return false;
             return self.vars[idx].scope_next != 0;
         }
@@ -5497,6 +5503,42 @@ pub const function_def = struct {
             try self.captureBinding(&self.args[idx]);
         }
 
+        const function_var_index_threshold: usize = 32;
+
+        /// The newest function-level (`scope_level == 0`) var named `name`:
+        /// QuickJS's `find_var` after the finalized lexical chain missed.
+        /// Small functions scan; large ones consult `function_var_index`.
+        pub fn findFunctionVar(self: *FunctionDefImpl, name: atom.Atom) ?u16 {
+            if (self.vars.len < function_var_index_threshold) return self.scanFunctionVar(name);
+            if (self.function_var_indexed_len < self.vars.len) {
+                self.catchUpFunctionVarIndex() catch return self.scanFunctionVar(name);
+            }
+            return self.function_var_index.get(name.raw());
+        }
+
+        fn scanFunctionVar(self: *const FunctionDefImpl, name: atom.Atom) ?u16 {
+            var i = self.vars.len;
+            while (i > 0) {
+                i -= 1;
+                const vd = &self.vars[i];
+                if (vd.var_name == name and vd.scope_level == 0) return @intCast(i);
+            }
+            return null;
+        }
+
+        fn catchUpFunctionVarIndex(self: *FunctionDefImpl) !void {
+            // The account's facade, not the operation allocator: FunctionDefs
+            // outlive the parser's arena redirect and must free where they
+            // allocated.
+            const allocator = self.memory.accountedAllocator();
+            try self.function_var_index.ensureUnusedCapacity(allocator, @intCast(self.vars.len - self.function_var_indexed_len));
+            for (self.vars[self.function_var_indexed_len..], self.function_var_indexed_len..) |vd, i| {
+                // Later rows overwrite earlier ones: newest wins, as in the scan.
+                if (vd.scope_level == 0) self.function_var_index.putAssumeCapacity(vd.var_name.raw(), @intCast(i));
+            }
+            self.function_var_indexed_len = self.vars.len;
+        }
+
         /// Find a var by name, searching newest-first. Returns the var
         /// index or `-1` if not found. Mirrors the htab-free path of
         /// `find_var` (`quickjs.c:23378`).
@@ -5620,6 +5662,8 @@ pub const function_def = struct {
 
             freeGrowableNamedSlice(VarDef, self.memory, &self.vars, &self.vars_capacity);
             if (self.vars_htab.len != 0) self.memory.free(u32, self.vars_htab);
+            self.function_var_index.deinit(self.memory.accountedAllocator());
+            self.function_var_indexed_len = 0;
 
             freeGrowableNamedSlice(VarDef, self.memory, &self.args, &self.args_capacity);
 
@@ -5681,6 +5725,32 @@ pub const function_def = struct {
 
     pub const FunctionDef = FunctionDefImpl;
 
+    test "findFunctionVar returns the newest scope-0 row through the lazy index" {
+        const rt = try runtime.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
+        var fd = FunctionDefImpl.init(&rt.memory, &rt.atoms, try rt.internAtom("var-index"));
+        defer fd.deinit(rt);
+        _ = try fd.appendScope(-1);
+        const target = try rt.internAtom("target");
+        const other = try rt.internAtom("other");
+        // Below the index threshold: the linear scan answers.
+        _ = try fd.appendVar(.{ .var_name = target, .scope_level = 0 });
+        try std.testing.expectEqual(@as(?u16, 0), fd.findFunctionVar(target));
+        try std.testing.expectEqual(@as(?u16, null), fd.findFunctionVar(other));
+        // Grow past the threshold; a block-scoped row with the name must
+        // not shadow the function-level one, a newer function-level row must.
+        var i: usize = 0;
+        while (i < FunctionDefImpl.function_var_index_threshold) : (i += 1) {
+            _ = try fd.appendVar(.{ .var_name = other, .scope_level = 1 });
+        }
+        try std.testing.expectEqual(@as(?u16, 0), fd.findFunctionVar(target));
+        try std.testing.expectEqual(@as(?u16, null), fd.findFunctionVar(other));
+        const newest = try fd.appendVar(.{ .var_name = target, .scope_level = 0 });
+        try std.testing.expectEqual(@as(?u16, @intCast(newest)), fd.findFunctionVar(target));
+        const other_fn = try fd.appendVar(.{ .var_name = other, .scope_level = 0 });
+        try std.testing.expectEqual(@as(?u16, @intCast(other_fn)), fd.findFunctionVar(other));
+    }
+
     test "scope proof cache invalidates variable scope and late arguments mutations" {
         const rt = try runtime.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
@@ -5729,8 +5799,8 @@ pub const function_def = struct {
         // Revoking the traversal lease restores defensive standalone calls,
         // including callers that directly mutate the public fixture fields.
         fd.scope_link_cache = .disabled;
-        const alias = @as(usize, @intCast(fd.arguments_arg_idx));
-        fd.vars[alias].scope_next = fd.arguments_arg_idx;
+        const alias: usize = fd.arguments_arg_idx.?;
+        fd.vars[alias].scope_next = @intCast(alias);
         try std.testing.expectError(error.InvalidScope, fd.proveAncestorScopeLinks());
     }
 };
@@ -6378,14 +6448,11 @@ pub const binding_rules = struct {
         }
     };
 
-    fn fclosureEncodingSize(cpool_idx: i32) error{InvalidBytecode}!usize {
-        if (cpool_idx < 0) return error.InvalidBytecode;
-        return if (@as(u32, @intCast(cpool_idx)) <= std.math.maxInt(u8)) 2 else 5;
+    fn fclosureEncodingSize(cpool_idx: u32) usize {
+        return if (cpool_idx <= std.math.maxInt(u8)) 2 else 5;
     }
 
-    fn emitFClosure(output: []u8, out_idx: *usize, cpool_idx: i32) error{InvalidBytecode}!void {
-        if (cpool_idx < 0) return error.InvalidBytecode;
-        const idx: u32 = @intCast(cpool_idx);
+    fn emitFClosure(output: []u8, out_idx: *usize, idx: u32) error{InvalidBytecode}!void {
         if (idx <= std.math.maxInt(u8)) {
             if (out_idx.* + 2 > output.len) return error.InvalidBytecode;
             output[out_idx.*] = opcode.op.fclosure8;
@@ -7060,7 +7127,7 @@ pub const binding_rules = struct {
     }
 
     fn varNeedsScopeFunctionInit(vd: function_def_mod.VarDef) bool {
-        return vd.is_lexical and vd.func_pool_idx >= 0 and
+        return vd.is_lexical and vd.func_pool_idx != null and
             (vd.var_kind == .function_decl or vd.var_kind == .new_function_decl);
     }
 
@@ -7076,9 +7143,9 @@ pub const binding_rules = struct {
         while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
             const vd = fd.vars[@intCast(idx)];
             if (vd.scope_level != scope) break;
-            if (idx != fd.arguments_arg_idx) {
+            if (fd.arguments_arg_idx == null or idx != fd.arguments_arg_idx.?) {
                 if (varNeedsScopeFunctionInit(vd)) {
-                    total += try fclosureEncodingSize(vd.func_pool_idx) +
+                    total += fclosureEncodingSize(vd.func_pool_idx.?) +
                         selectLocForm(ctx, opcode.op.put_loc, @intCast(idx)).size;
                 } else if (varNeedsTdzRearm(vd)) {
                     total += 3;
@@ -7099,9 +7166,9 @@ pub const binding_rules = struct {
             const vd = fd.vars[@intCast(idx)];
             if (vd.scope_level != scope) break;
             const loc_idx: u16 = @intCast(idx);
-            if (idx != fd.arguments_arg_idx) {
+            if (fd.arguments_arg_idx == null or idx != fd.arguments_arg_idx.?) {
                 if (varNeedsScopeFunctionInit(vd)) {
-                    try emitFClosure(output, out_idx, vd.func_pool_idx);
+                    try emitFClosure(output, out_idx, vd.func_pool_idx.?);
                     writeSelectedLocForm(output, out_idx, selectLocForm(ctx, opcode.op.put_loc, loc_idx), loc_idx);
                 } else if (varNeedsTdzRearm(vd)) {
                     output[out_idx.*] = opcode.op.set_loc_uninitialized;
@@ -7216,8 +7283,7 @@ pub const binding_rules = struct {
     /// lazily materialized function-name slot for a default initializer.
     fn lookupCurrentFunctionName(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
         const fd = ctx.function_def orelse return null;
-        if (fd.func_var_idx < 0) return null;
-        const idx: usize = @intCast(fd.func_var_idx);
+        const idx: usize = fd.func_var_idx orelse return null;
         if (idx >= fd.vars.len) return null;
         const vd = fd.vars[idx];
         if (vd.var_name != atom_id or vd.var_kind != .function_name) return null;
@@ -7227,7 +7293,7 @@ pub const binding_rules = struct {
     fn lookupCurrentPseudoBinding(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
         const fd = ctx.function_def orelse return null;
         if (!fd.has_this_binding) return null;
-        const idx_i32 = if (atom_id == atom.ids.home_object)
+        const maybe_idx: ?u16 = if (atom_id == atom.ids.home_object)
             fd.home_object_var_idx
         else if (atom_id == atom.ids.this_active_func)
             fd.this_active_func_var_idx
@@ -7237,8 +7303,8 @@ pub const binding_rules = struct {
             fd.this_var_idx
         else
             return null;
-        if (idx_i32 < 0 or @as(usize, @intCast(idx_i32)) >= fd.vars.len) return null;
-        const idx: u16 = @intCast(idx_i32);
+        const idx = maybe_idx orelse return null;
+        if (idx >= fd.vars.len) return null;
         if (fd.vars[idx].var_name != atom_id) return null;
         return idx;
     }
@@ -7287,14 +7353,7 @@ pub const binding_rules = struct {
         if (idx == function_bytecode.arg_scope_end) {
             return .{ .argument_environment_only = true };
         }
-        var flat_i: usize = fd.vars.len;
-        while (flat_i > 0) {
-            flat_i -= 1;
-            const vd = &fd.vars[flat_i];
-            if (vd.var_name == atom_id and vd.scope_level == 0) {
-                return .{ .local = @intCast(flat_i) };
-            }
-        }
+        if (fd.findFunctionVar(atom_id)) |flat_idx| return .{ .local = flat_idx };
         return .{};
     }
 
@@ -7354,8 +7413,8 @@ pub const binding_rules = struct {
             if (lookupArg(ctx, atom_id)) |arg_idx| return .{ .arg = arg_idx };
         }
         if (lookupCurrentPseudoBinding(ctx, atom_id)) |idx| return .{ .local = idx };
-        if (atom_id == atom.ids.arguments and fd.arguments_var_idx >= 0) {
-            return .{ .local = @intCast(fd.arguments_var_idx) };
+        if (atom_id == atom.ids.arguments) {
+            if (fd.arguments_var_idx) |idx| return .{ .local = idx };
         }
         if (lookupCurrentFunctionName(ctx, atom_id)) |idx| return .{ .local = idx };
         return null;
@@ -7395,7 +7454,7 @@ pub const binding_rules = struct {
 
     fn functionHasDynamicEnvObjects(ctx: *const JSContext) bool {
         const fd = ctx.function_def orelse return false;
-        if (fd.var_object_idx >= 0 or fd.arg_var_object_idx >= 0) return true;
+        if (fd.var_object_idx != null or fd.arg_var_object_idx != null) return true;
         for (fd.vars) |vd| {
             if (vd.var_name == atom.ids.with_object) return true;
         }
@@ -7665,13 +7724,15 @@ pub const binding_rules = struct {
         // A variable object may acquire any free name from a later direct eval;
         // probe eligibility therefore depends on environment order, not on the
         // current eval unit's hoisted-name list.
-        if (!scopeUsesArgumentEnvironmentOnly(fd, scope_level) and fd.var_object_idx >= 0) {
-            plan.count += 1;
-            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.var_object_idx) }) + probe_size;
+        if (!scopeUsesArgumentEnvironmentOnly(fd, scope_level)) {
+            if (fd.var_object_idx) |idx| {
+                plan.count += 1;
+                plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = idx }) + probe_size;
+            }
         }
-        if (fd.arg_var_object_idx >= 0) {
+        if (fd.arg_var_object_idx) |idx| {
             plan.count += 1;
-            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = @intCast(fd.arg_var_object_idx) }) + probe_size;
+            plan.prefix_size += evalVarObjectProbeAccessorSize(ctx, .{ .local = idx }) + probe_size;
         }
         var closure_iter = ClosureDynamicEnvProbeIterator.init(ctx, atom_id);
         while (closure_iter.next()) |idx| {
@@ -8512,21 +8573,8 @@ pub const binding_rules = struct {
         return .{ .argument_environment_only = var_idx == function_bytecode.arg_scope_end };
     }
 
-    fn threadParentEvalObject(
-        target: *function_def_mod.FunctionDef,
-        parent: *function_def_mod.FunctionDef,
-        local_idx_i32: i32,
-    ) Error!u16 {
-        if (local_idx_i32 < 0 or local_idx_i32 > std.math.maxInt(u16)) return error.InvalidBytecode;
-        return threadParentLocalSource(target, parent, @intCast(local_idx_i32));
-    }
-
     fn ensureParentArgumentsBinding(parent: *function_def_mod.FunctionDef) Error!u16 {
-        _ = parent.ensureArgumentsBinding() catch return error.OutOfMemory;
-        if (parent.arguments_var_idx < 0 or parent.arguments_var_idx > std.math.maxInt(u16)) {
-            return error.InvalidBytecode;
-        }
-        return @intCast(parent.arguments_var_idx);
+        return parent.ensureArgumentsBinding() catch return error.OutOfMemory;
     }
 
     fn ensureCurrentPseudoBinding(
@@ -8534,7 +8582,7 @@ pub const binding_rules = struct {
         atom_id: atom.Atom,
     ) Error!?u16 {
         if (!fd.has_this_binding) return null;
-        const idx_i32 = if (atom_id == atom.ids.home_object)
+        return if (atom_id == atom.ids.home_object)
             fd.ensureHomeObjectBinding() catch return error.OutOfMemory
         else if (atom_id == atom.ids.this_active_func)
             fd.ensureThisActiveFunctionBinding() catch return error.OutOfMemory
@@ -8543,9 +8591,7 @@ pub const binding_rules = struct {
         else if (atom_id == atom.ids.this_)
             fd.ensureThisBinding() catch return error.OutOfMemory
         else
-            return null;
-        if (idx_i32 < 0 or idx_i32 > std.math.maxInt(u16)) return error.InvalidBytecode;
-        return @intCast(idx_i32);
+            null;
     }
 
     /// Select the same current-function closure identity as the lowering half:
@@ -8598,9 +8644,7 @@ pub const binding_rules = struct {
             return .{ .local = @intCast(idx_i32) };
         }
         if (fd.is_named_func_expr and atom_id == fd.func_name) {
-            const idx_i32 = fd.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
-            if (idx_i32 < 0 or idx_i32 > std.math.maxInt(u16)) return error.InvalidBytecode;
-            return .{ .local = @intCast(idx_i32) };
+            return .{ .local = fd.ensureFuncExprSelfBinding() catch return error.OutOfMemory };
         }
 
         // Fixed prefixes/imports and already-threaded child demands are final
@@ -8652,11 +8696,11 @@ pub const binding_rules = struct {
                     parent.arguments_arg_idx
                 else
                     parent.arguments_var_idx;
-                if (parameter_arguments_idx >= 0) {
+                if (parameter_arguments_idx) |parameter_arguments_local| {
                     return .{ .closure = try threadParentLocalSource(
                         fd,
                         parent,
-                        @intCast(parameter_arguments_idx),
+                        parameter_arguments_local,
                     ) };
                 }
             }
@@ -8668,17 +8712,8 @@ pub const binding_rules = struct {
                 // `scope_next` stores a block declaration origin.  They must
                 // not be linked into scope.first merely to make descendants
                 // discover them.
-                var function_var_idx = parent.vars.len;
-                while (function_var_idx > 0) {
-                    function_var_idx -= 1;
-                    const vd = &parent.vars[function_var_idx];
-                    if (vd.var_name == atom_id and vd.scope_level == 0) {
-                        return .{ .closure = try threadParentLocalSource(
-                            fd,
-                            parent,
-                            @intCast(function_var_idx),
-                        ) };
-                    }
+                if (parent.findFunctionVar(atom_id)) |function_var_idx| {
+                    return .{ .closure = try threadParentLocalSource(fd, parent, function_var_idx) };
                 }
                 const arg_idx_i32 = parent.findArg(atom_id);
                 if (arg_idx_i32 >= 0) {
@@ -8697,22 +8732,19 @@ pub const binding_rules = struct {
             }
 
             if (parent.is_named_func_expr and atom_id == parent.func_name) {
-                const local_idx_i32 = parent.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
-                if (local_idx_i32 < 0 or local_idx_i32 > std.math.maxInt(u16)) return error.InvalidBytecode;
+                const local_idx = parent.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
                 return .{ .closure = try threadParentLocalSource(
                     fd,
                     parent,
-                    @intCast(local_idx_i32),
+                    local_idx,
                 ) };
             }
 
             if (!isPseudoBindingAtom(atom_id)) {
-                if (!argument_environment_only and parent.var_object_idx >= 0) {
-                    _ = try threadParentEvalObject(fd, parent, parent.var_object_idx);
+                if (!argument_environment_only) {
+                    if (parent.var_object_idx) |idx| _ = try threadParentLocalSource(fd, parent, idx);
                 }
-                if (parent.arg_var_object_idx >= 0) {
-                    _ = try threadParentEvalObject(fd, parent, parent.arg_var_object_idx);
-                }
+                if (parent.arg_var_object_idx) |idx| _ = try threadParentLocalSource(fd, parent, idx);
             }
 
             if (parent.is_eval) {
@@ -9989,21 +10021,21 @@ pub const pipeline_finalize = struct {
         if (!fd.has_eval_call) return;
 
         if (!fd.is_eval and !fd.is_strict_mode) {
-            if (fd.var_object_idx < 0) {
-                fd.var_object_idx = fd.appendVar(.{
+            if (fd.var_object_idx == null) {
+                fd.var_object_idx = @intCast(fd.appendVar(.{
                     .var_name = atom.ids.var_object,
                     .scope_level = 0,
                     .scope_next = 0,
                     .var_kind = .normal,
-                }) catch return error.OutOfMemory;
+                }) catch return error.OutOfMemory);
             }
-            if (fd.has_parameter_expressions and fd.arg_var_object_idx < 0) {
-                fd.arg_var_object_idx = fd.appendVar(.{
+            if (fd.has_parameter_expressions and fd.arg_var_object_idx == null) {
+                fd.arg_var_object_idx = @intCast(fd.appendVar(.{
                     .var_name = atom.ids.arg_var_object,
                     .scope_level = 0,
                     .scope_next = 0,
                     .var_kind = .normal,
-                }) catch return error.OutOfMemory;
+                }) catch return error.OutOfMemory);
             }
         }
 
@@ -10571,7 +10603,7 @@ pub const pipeline_finalize = struct {
             // prologue, emitted from this exact QuickJS identity field. Keep
             // the general final-code scan for synthetic and legacy callers.
             const materializes_arguments_object = if (comptime arguments_object_from_function_def)
-                def.arguments_var_idx >= 0
+                def.arguments_var_idx != null
             else
                 bytecode_function.codeMaterializesArgumentsObject(function.code);
             function.flags.materializes_arguments_object = materializes_arguments_object;
@@ -10773,10 +10805,8 @@ pub const pipeline_finalize = struct {
                 const child = current.child_list[frames.items[frame_index].next_child];
                 frames.items[frame_index].next_child += 1;
                 try validateRuntimeIdentity(child, rt);
-                const cpool_idx = child.parent_cpool_idx;
-                if (cpool_idx < 0 or @as(usize, @intCast(cpool_idx)) >= current.cpool.len) {
-                    return error.InvalidBytecode;
-                }
+                const cpool_idx = child.parent_cpool_idx orelse return error.InvalidBytecode;
+                if (cpool_idx >= current.cpool.len) return error.InvalidBytecode;
                 try prepareCurrentBeforeChildren(child, null);
                 try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = child });
                 child.scope_link_cache = .unproven;
@@ -10788,8 +10818,7 @@ pub const pipeline_finalize = struct {
             if (frames.items.len == 0) break;
 
             const parent = frames.items[frames.items.len - 1].function_def;
-            const cpool_idx = current.parent_cpool_idx;
-            const idx: usize = @intCast(cpool_idx);
+            const idx: usize = current.parent_cpool_idx orelse return error.InvalidBytecode;
             const fb_slice = try createFunctionBytecodeAfterChildren(current, compile_context, disasm_enabled);
             const fb = &fb_slice[0];
             const value = JSValue.functionBytecode(&fb.header);

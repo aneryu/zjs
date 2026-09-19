@@ -2109,7 +2109,6 @@ fn tailBufferText(rt: *JSRuntime, allocator: std.mem.Allocator, value: JSValue) 
     return out.toOwnedSlice(allocator);
 }
 
-
 test "strings choose QuickJS-style 8-bit or 16-bit storage" {
     const rt = try JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

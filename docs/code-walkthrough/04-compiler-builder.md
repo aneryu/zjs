@@ -104,13 +104,13 @@ Parser 只往 `Builder` 写：紧凑临时字节码 + 与消费者成比例的�
 - **签名**：`pub fn emitJump(self: *Builder, op_id: u8, label: LabelId) Error!void`。
 - **作用**：发一条跳转格式指令，操作数是 `LabelId`，并把头插 RelocEntry、`ref_count += 1`。
 - **实现**：外标签 fail-closed。先 `reserveCode(5)` 再 reserve reloc。写 `op_id` + LE u32 下标。reloc `kind=.jump32`，`next = slot.first_reloc`（头插 → 递减下标）。已绑定则 `backward_target = true`。更新 `last_opcode_pos` 与 `code_len`。
-- **所有权 / 错误 / 调用**：容量失败时尚未写入。parser `emitterJump` 包装。S4 才把 LabelId 改成相对位移。
+- **所有权 / 错误 / 调用**：容量失败时尚未写入。parser `Emitter.jump` 包装。S4 才把 LabelId 改成相对位移。
 
 ### `Builder.bindLabel` (`src/compiler/builder.zig:383`)
 
 - **签名**：`pub fn bindLabel(self: *Builder, label: LabelId) Error!void`。
 - **作用**：把标签钉在当前 `code_len`（即将发出的下一条指令处）。
-- **实现**：外标签或已 bound → `InvalidBytecode`。`bound_offset = code_len`，`flags.bound = true`。不改 `last_opcode_pos`（那是 `emitterBindLabel` 包装层 / `invalidateLastOpcode` 的事）。
+- **实现**：外标签或已 bound → `InvalidBytecode`。`bound_offset = code_len`，`flags.bound = true`。不改 `last_opcode_pos`（那是 `Emitter.bind` 包装层 / `invalidateLastOpcode` 的事）。
 - **所有权 / 错误 / 调用**：双绑 fail-closed。零 ref 也要绑——死标签由 resolve 丢掉。
 
 ### `Builder.bindLabelMatchBarrier` (`src/compiler/builder.zig:395`)
@@ -125,7 +125,7 @@ Parser 只往 `Builder` 写：紧凑临时字节码 + 与消费者成比例的�
 - **签名**：`pub fn retargetLabelRefs(self: *Builder, from: LabelId, to: LabelId) Error!void`。
 - **作用**：把 `from` 上所有待引用挪到已绑定的 `to`。身份版 `patchJumpTarget`（qjs switch dispatch 回写 PC）。操作数始终是 LabelId。
 - **实现**：`from` 必须未绑定、`to` 必须已绑定、二者不同。先走完整条链校验操作数确实写着 `from` 且 `ref_count == 链长`。再写操作数为 `to`，若 `to.bound_offset < operand` 则标 backward。两条递减链归并成一条递减链（不能拼接，否则 rollback 的「第一个低于 mark 的项」会坏）。`from` 的 ref/reloc 清零，但 **绑定到 `to` 的同一偏移**（每个身份必须结束 bound）。
-- **所有权 / 错误 / 调用**：半移动的链不可恢复，所以先校验后突变。生产上经 parser 的 `emitterRetargetLabel` 门面（`src/parser.zig:7671`）进来，两个调用点：`parseSwitchStatement` 的未命中→default 收尾（`:9728`）与 `parseForInOf` 里非法调用目标把入口 goto 改指赋值块（`:10911`）。
+- **所有权 / 错误 / 调用**：半移动的链不可恢复，所以先校验后突变。生产上经 parser 的 `Emitter.retargetLabel` 门面（`src/parser.zig:7671`）进来，两个调用点：`parseSwitchStatement` 的未命中→default 收尾（`:9728`）与 `parseForInOf` 里非法调用目标把入口 goto 改指赋值块（`:10911`）。
 
 ### `Builder.firstUnboundLabel` (`src/compiler/builder.zig:496`)
 
@@ -153,14 +153,14 @@ Parser 只往 `Builder` 写：紧凑临时字节码 + 与消费者成比例的�
 - **签名**：`pub fn emitOpU16(self: *Builder, op_id: u8, val: u16) Error!void`。
 - **作用**：opcode + LE u16（槽索引、scope 等）。
 - **实现**：3 字节。
-- **所有权 / 错误 / 调用**：不涉及 atom；三字节写进 `code` 缓冲（归 `self.memory`），失败只来自 `reserveCode`，且失败时未写任何字节。S3 仍可能原样拷这些宽形式，S4 short 再压窄。parser 侧入口是 `State.builderEmitOpU16` 与 `emitterOpU16`，`enter_scope` 也走它。
+- **所有权 / 错误 / 调用**：不涉及 atom；三字节写进 `code` 缓冲（归 `self.memory`），失败只来自 `reserveCode`，且失败时未写任何字节。S3 仍可能原样拷这些宽形式，S4 short 再压窄。parser 侧入口是 `State.builderEmitOpU16` 与 `Emitter.opU16`，`enter_scope` 也走它。
 
 ### `Builder.emitCallOp` (`src/compiler/builder.zig:540`)
 
 - **签名**：`pub fn emitCallOp(self: *Builder, op_id: u8, argc: u16) Error!void`。
 - **作用**：可变 arity 调用：`argc:u16` + 占位 `cache_idx:u8`。
 - **实现**：4 字节，index 字节写 0。S4 写真正的 call-site 索引。
-- **所有权 / 错误 / 调用**：不涉及 atom；四字节（op + argc:u16 + cache_idx 占位）与最终形式等宽，避免 S4 再插字节，占位字节由 `resolve_labels` 覆盖。错误只来自 `reserveCode`。两个生产调用点：`emitterCallOp`（`src/parser.zig:7568`）与类字段初始化调用的手写发射（`:15060`）。
+- **所有权 / 错误 / 调用**：不涉及 atom；四字节（op + argc:u16 + cache_idx 占位）与最终形式等宽，避免 S4 再插字节，占位字节由 `resolve_labels` 覆盖。错误只来自 `reserveCode`。两个生产调用点：`Emitter.callOp`（`src/parser.zig:7568`）与类字段初始化调用的手写发射（`:15060`）。
 
 ### `Builder.emitOpU32` (`src/compiler/builder.zig:553`)
 
@@ -202,7 +202,7 @@ Parser 只往 `Builder` 写：紧凑临时字节码 + 与消费者成比例的�
 - **签名**：`pub fn emitScopeRefOpOwned( self: *Builder, op_id: u8, atom_id: core.atom.Atom, label: LabelId, scope: u16, ) Error!void`。
 - **作用**：`scope_make_ref`：op + atom(4) + LabelId(4) + scope(2)，11 字节。辅标签 reloc `kind=.aux32` 在 opcode+5。qjs `update_label(fd, label, 1)`。
 - **实现**：外标签 **先** fail-closed（注释写「消费 atom retain」——当前实现在校验失败时尚未写入 ledger，调用方仍须把非法标签当错误路径处理）。三路 reserve 后写字节，头插 aux reloc，已绑定则 backward。
-- **所有权 / 错误 / 调用**：**三份资源一次性预留**（code 11 字节、一条 RelocEntry、一格 atom 账本），任一失败即整条不发出；但与其它 owned-atom sink 一样，atom 的 retain 视为已被消费。非法 `label` 在三次 reserve 之前就 fail-closed。reloc 的 `kind` 是 `.aux32`、`operand_offset = opcode_offset + 5`，`ref_count += 1`（对齐 qjs `update_label(fd, label, 1)`），目标已绑定时标 `backward_target`。唯一生产调用点 `emitterScopeRefOp`（`src/parser.zig:7535`），用于 `getLValue` 的 with-scope 分支；`putLValue` 随后把这个 aux 身份 `bindLabel`。
+- **所有权 / 错误 / 调用**：**三份资源一次性预留**（code 11 字节、一条 RelocEntry、一格 atom 账本），任一失败即整条不发出；但与其它 owned-atom sink 一样，atom 的 retain 视为已被消费。非法 `label` 在三次 reserve 之前就 fail-closed。reloc 的 `kind` 是 `.aux32`、`operand_offset = opcode_offset + 5`，`ref_count += 1`（对齐 qjs `update_label(fd, label, 1)`），目标已绑定时标 `backward_target`。唯一生产调用点 `Emitter.scopeRefOp`（`src/parser.zig:7535`），用于 `getLValue` 的 with-scope 分支；`putLValue` 随后把这个 aux 身份 `bindLabel`。
 
 ### `Builder.takeLastAtomOwned` (`src/compiler/builder.zig:746`)
 
@@ -286,7 +286,7 @@ Parser 只往 `Builder` 写：紧凑临时字节码 + 与消费者成比例的�
 - **签名**：`pub fn invalidateLastOpcode(self: *Builder) void`。
 - **作用**：控制流汇合：忘掉 last opcode，禁止 peephole 跨 join（qjs 在 label 处 `last_opcode_pos = -1`）。
 - **实现**：`last_opcode_pos = -1`。
-- **所有权 / 错误 / 调用**：一行赋值，不分配、无 error set、不改任何长度。它是「禁止 peephole 跨控制流汇合」的唯一开关，所以所有会制造汇合的地方都要调：`spliceSegment` 成功路径（`src/compiler/builder.zig:1339`）、parser 的 `emitterBindLabel` 与逗号表达式收尾等十余处（`src/parser.zig:3520` / `:3694` / `:3703` / `:3770` …）。
+- **所有权 / 错误 / 调用**：一行赋值，不分配、无 error set、不改任何长度。它是「禁止 peephole 跨控制流汇合」的唯一开关，所以所有会制造汇合的地方都要调：`spliceSegment` 成功路径（`src/compiler/builder.zig:1339`）、parser 的 `Emitter.bind` 与逗号表达式收尾等十余处（`src/parser.zig:3520` / `:3694` / `:3703` / `:3770` …）。
 
 ### `Builder.freeSegmentBackings` (`src/compiler/builder.zig:1286`)
 

@@ -11,8 +11,6 @@ pub const RootKind = enum { script, module };
 
 pub const Options = struct {
     root: RootKind = .script,
-    /// Phase-1 temp scope markers. The parser scope-event tests need them on.
-    emit_phase1_temp: bool = true,
 };
 
 pub const Program = struct {
@@ -42,7 +40,7 @@ pub const Program = struct {
 pub fn configureScriptRoot(state: *Parser.ParseState) void {
     state.function_def.is_eval = true;
     state.function_def.is_global_var = true;
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     state.top_level_lexical_as_global_ref = true;
 }
 
@@ -52,7 +50,7 @@ pub fn configureModuleRoot(state: *Parser.ParseState) void {
     state.function_def.is_global_var = true;
     state.function_def.is_strict_mode = true;
     state.is_strict = true;
-    state.top_level_functions_as_children = true;
+    state.root_mode = .canonical;
     state.top_level_lexical_as_module_ref = true;
 }
 
@@ -78,7 +76,6 @@ pub fn parseAndCompileV2TestProgram(
         .script => configureScriptRoot(&state),
         .module => configureModuleRoot(&state),
     }
-    state.emit_phase1_temp = options.emit_phase1_temp;
 
     try state.beginProgramEmission();
     try Parser.parseProgramStatements(
